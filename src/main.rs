@@ -95,7 +95,9 @@ enum Commands {
     },
 }
 
-/// Schema-pack operations (offline compiler half of ADR 081 Slice 2).
+/// Schema-pack operations (ADR 081 Slice 2: offline compiler + the Postgres
+/// registry). `compile`/`show` are local file operations; `admit`/`list`/
+/// `install` route over ACP to the daemon's Postgres-backed registry.
 #[derive(Subcommand)]
 enum SchemaAction {
     /// Compile a portable schema-pack source (JSON) into a native-triple blob.
@@ -110,6 +112,88 @@ enum SchemaAction {
     Show {
         /// Path to a compiled `.akhschema` blob.
         blob: PathBuf,
+    },
+    /// Admit a compiled schema pack to the shared registry (ADR 081 decision
+    /// 8: admission always requires an explicit human confirm — pass `--yes`).
+    /// The non-LLM operator path: no engine, no model, just this command.
+    Admit {
+        /// Path to a compiled `.akhschema` blob (from `akh schema compile`).
+        blob: PathBuf,
+        /// Confirm admission. Without this flag the command only prints the
+        /// pack summary and refuses to admit — the human-confirm gate.
+        #[arg(long)]
+        yes: bool,
+        /// Attribute the admission to this identity instead of
+        /// `$USER`/`$LOGNAME`.
+        #[arg(long)]
+        confirmed_by: Option<String>,
+    },
+    /// List schema packs admitted to the shared registry.
+    List,
+    /// Install (fetch + bulk-insert-as-microtheory) a registry pack into a
+    /// workspace, and record it as active for that workspace so later wakes
+    /// converge it automatically.
+    Install {
+        /// `name` or `name@version` (defaults to the most recently admitted
+        /// version of `name` when no `@version` is given).
+        pack: String,
+        /// Workspace to install into (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Non-LLM schema-coverage report (ADR 081 Slice 9): what fraction of a
+    /// workspace's live KG is typed-core vs. frontier vs. schema bookkeeping.
+    /// No data is rewritten — legacy triples are grandfathered as frontier by
+    /// classification, not migration; run this anytime to see whether the
+    /// typed core is crystallizing.
+    Coverage {
+        /// Workspace to report on (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Number of frontier predicates to list, ranked by occurrence count.
+        #[arg(long, default_value_t = 20)]
+        top: u64,
+    },
+    /// List pending frontier→core promotion proposals (ADR 081 Slice 5).
+    /// Read-only, engine-local — does not require Postgres.
+    Proposals {
+        /// Workspace to list proposals for (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Promote a pending proposal to the shared registry (ADR 081 decision
+    /// 8: admission always requires an explicit human confirm — pass
+    /// `--yes`). Mints a small schema pack extending the proposed type (or a
+    /// standalone type when none was proposed), admits it, and installs +
+    /// activates it into the workspace — or, for an `alias_of` proposal,
+    /// records an alias edge instead of minting anything new.
+    Promote {
+        /// The proposal id (the frontier predicate name — see `akh schema
+        /// proposals`).
+        id: String,
+        /// Workspace to promote into (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Confirm promotion. Without this flag the command only prints the
+        /// proposal and refuses to promote — the human-confirm gate.
+        #[arg(long)]
+        yes: bool,
+        /// Attribute the promotion to this identity instead of
+        /// `$USER`/`$LOGNAME`.
+        #[arg(long)]
+        confirmed_by: Option<String>,
+    },
+    /// Reject a pending proposal so it never re-surfaces on a later
+    /// promotion pass.
+    Reject {
+        /// The proposal id (the frontier predicate name).
+        id: String,
+        /// Workspace the proposal belongs to (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Optional free-text reason, recorded with the rejection.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -1013,7 +1097,7 @@ fn main() -> Result<()> {
 
         // ── Schema packs (ADR 081) ──────────────────────────────────────
         Commands::Schema { action } => {
-            dispatch_schema(action)?;
+            dispatch_schema(&cli.workspace, action)?;
         }
 
         // ── Wiki (Akhipedia) ─────────────────────────────────────────────
@@ -1023,8 +1107,22 @@ fn main() -> Result<()> {
     }
 }
 
-/// Dispatch `akh schema` subcommands. Local file operations; no Engine, no ACP.
-fn dispatch_schema(action: SchemaAction) -> Result<()> {
+/// Encode bytes as lowercase hex (used to carry a schema-pack blob over the
+/// ACP JSON wire — base64 is behind an optional feature this binary doesn't
+/// otherwise need, and pack blobs are small).
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Dispatch `akh schema` subcommands. `compile`/`show` are local file
+/// operations (no Engine, no ACP); `admit`/`list`/`install` route over ACP to
+/// the daemon's Postgres-backed registry (ADR 081 decision 9) — the same
+/// pattern as `akh akh {snapshot,wake}` and `akh migrate`.
+fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
     use akh_medu::schema::{CompiledSchemaPack, compile};
 
     match action {
@@ -1081,6 +1179,157 @@ fn dispatch_schema(action: SchemaAction) -> Result<()> {
             for t in &pack.triples {
                 println!("    ({}, {}, {})", t.subject, t.predicate, t.object);
             }
+        }
+        SchemaAction::Admit {
+            blob,
+            yes,
+            confirmed_by,
+        } => {
+            let bytes = std::fs::read(&blob).into_diagnostic()?;
+            // Decode locally first so a corrupt/incompatible blob is caught
+            // before ever reaching the daemon, and so the summary the human
+            // confirms against is read straight from the artifact.
+            let pack = CompiledSchemaPack::from_blob(&bytes)?;
+            println!("Schema pack {}@{} ({})", pack.name, pack.version, pack.scope);
+            println!("  microtheory: {}", pack.microtheory_label());
+            println!("  types: {}", pack.types.join(", "));
+            if !pack.relations.is_empty() {
+                println!("  relations: {}", pack.relations.join(", "));
+            }
+            if !pack.assumes.is_empty() {
+                println!(
+                    "  assumes (verified against the registry at admit time): {}",
+                    pack.assumes.join(", ")
+                );
+            }
+            let blob_checksum = akh_medu::schema::compile::checksum_hex(&bytes);
+            println!("  blob checksum (blake3): {blob_checksum}");
+
+            if !yes {
+                println!();
+                println!(
+                    "Not admitted. Review the pack above, then re-run with --yes to confirm \
+                     admission to the shared registry (ADR 081 decision 8: admission always \
+                     requires an explicit human confirm)."
+                );
+                return Ok(());
+            }
+
+            let confirmed_by = confirmed_by
+                .or_else(|| std::env::var("USER").ok())
+                .or_else(|| std::env::var("LOGNAME").ok())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let params = serde_json::json!({
+                "name": pack.name,
+                "version": pack.version,
+                "scope": pack.scope.to_string(),
+                "source_url": pack.source_url,
+                "checksum": blob_checksum,
+                "confirmed_by": confirmed_by,
+                "blob_hex": hex_encode(&bytes),
+            });
+            let result = acp_call("_akh/schema/admit", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::List => {
+            let result = acp_call("_akh/schema/list", serde_json::json!({}))?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Install { pack, workspace } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let (name, version) = match pack.split_once('@') {
+                Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                None => (pack, None),
+            };
+            let params = serde_json::json!({
+                "workspace": ws,
+                "name": name,
+                "version": version,
+            });
+            let result = acp_call("_akh/schema/install", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Coverage { workspace, top } => {
+            // Data-plane op (per-workspace read of the live KG, not the
+            // server-wide registry) — routed like `_akh/workspace/status`,
+            // with the `workspace` params field selecting the `-w` akh
+            // (defaults to the bound daemon workspace when omitted; we pass
+            // `--workspace`/`cli.workspace` explicitly so `akh -w foo schema
+            // coverage` targets the right akh from a multi-akh daemon).
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws, "top_n": top });
+            let result = acp_call("_akh/schema/coverage", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Proposals { workspace } => {
+            // Data-plane op (per-workspace read), same shape as `Coverage`.
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws });
+            let result = acp_call("_akh/schema/proposals", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Promote {
+            id,
+            workspace,
+            yes,
+            confirmed_by,
+        } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            // Print the pending proposal first, so the human confirming
+            // promotion sees exactly what they are about to admit — same
+            // shape as `Admit`'s local-decode-then-print step.
+            let proposals = acp_call(
+                "_akh/schema/proposals",
+                serde_json::json!({ "workspace": ws }),
+            )?;
+            let found = proposals
+                .get("proposals")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()));
+            match found {
+                Some(p) => println!("{}", serde_json::to_string_pretty(p).into_diagnostic()?),
+                None => println!(
+                    "No pending proposal \"{id}\" (it may already be confirmed/rejected, or \
+                     hasn't recurred enough yet — run the promotion pass, then \
+                     `akh schema proposals`)."
+                ),
+            }
+
+            if !yes {
+                println!();
+                println!(
+                    "Not promoted. Review the proposal above, then re-run with --yes to confirm \
+                     promotion to the shared registry (ADR 081 decision 8: admission always \
+                     requires an explicit human confirm)."
+                );
+                return Ok(());
+            }
+
+            let confirmed_by = confirmed_by
+                .or_else(|| std::env::var("USER").ok())
+                .or_else(|| std::env::var("LOGNAME").ok())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let params = serde_json::json!({
+                "workspace": ws,
+                "id": id,
+                "confirmed_by": confirmed_by,
+            });
+            let result = acp_call("_akh/schema/promote", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Reject {
+            id,
+            workspace,
+            reason,
+        } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws, "id": id, "reason": reason });
+            let result = acp_call("_akh/schema/reject", params)?;
+            print_acp(&result)?;
         }
     }
     Ok(())

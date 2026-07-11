@@ -10,8 +10,8 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect, TransactionTrait,
+    ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -173,6 +173,19 @@ pub async fn load_workspace_seed_packs(
 }
 
 /// Upsert the single `akh_state` row for an Akh.
+///
+/// **Clobber guard (ADR 091 / ADR 081 slice 4):** `harvest_watermark` and
+/// `librarian_watermark` are deliberately ABSENT from `update_columns` below.
+/// A full-state snapshot upsert runs on every sleep tick / relocation and
+/// would otherwise overwrite them with whatever stale value the caller's
+/// in-memory `akh_state::Model` happens to carry — resetting progress and
+/// causing the sleep-cycle harvest phase / daily-Librarian pass to re-walk
+/// (and re-mint episodes / re-extract triples for) turns they already
+/// processed. Each column must be written ONLY by its dedicated setter
+/// ([`set_harvest_watermark`] / [`set_librarian_watermark`]), so on conflict
+/// both are left untouched; the values in `model` only matter for the
+/// first-ever insert of a row (see those setters' docs for how callers keep
+/// them correct).
 pub async fn upsert_akh_state(db: &DatabaseConnection, model: akh_state::Model) -> StoreResult<()> {
     use akh_state::Column;
     akh_state::Entity::insert(model.into_active_model())
@@ -188,11 +201,143 @@ pub async fn upsert_akh_state(db: &DatabaseConnection, model: akh_state::Model) 
                     Column::Psyche,
                     Column::Extra,
                     Column::UpdatedAt,
+                    // NOTE: Column::HarvestWatermark / Column::LibrarianWatermark
+                    // intentionally omitted — see the clobber-guard doc comment above.
                 ])
                 .to_owned(),
         )
         .exec(db)
         .await?;
+    Ok(())
+}
+
+/// Read the sleep-cycle harvest watermark for an Akh (ADR 091). `0` if no
+/// `akh_state` row exists yet (nothing harvested).
+pub async fn get_harvest_watermark(db: &DatabaseConnection, akh_id: Uuid) -> StoreResult<i64> {
+    Ok(akh_state::Entity::find_by_id(akh_id)
+        .select_only()
+        .column(akh_state::Column::HarvestWatermark)
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .unwrap_or(0))
+}
+
+/// Advance the sleep-cycle harvest watermark for an Akh (ADR 091).
+///
+/// A targeted `UPDATE` of just `harvest_watermark` (+ `updated_at`) — never
+/// routes through [`upsert_akh_state`], so it can never be clobbered by (and
+/// never clobbers) the rest of the snapshot state. If no `akh_state` row exists
+/// yet, inserts a minimal default row carrying only this watermark; the next
+/// full snapshot upsert fills in the rest of the columns without touching this
+/// one (see the clobber-guard note on [`upsert_akh_state`]).
+pub async fn set_harvest_watermark(db: &DatabaseConnection, akh_id: Uuid, seq: i64) -> StoreResult<()> {
+    use akh_state::Column;
+    let now = chrono::Utc::now();
+    let existing = akh_state::Entity::find_by_id(akh_id).one(db).await?;
+    match existing {
+        Some(row) => {
+            let mut active = row.into_active_model();
+            active.harvest_watermark = ActiveValue::Set(seq);
+            active.updated_at = ActiveValue::Set(now);
+            akh_state::Entity::update(active)
+                .filter(Column::AkhId.eq(akh_id))
+                .exec(db)
+                .await?;
+        }
+        None => {
+            // No row yet: insert a minimal default carrying only the watermark.
+            // A later full snapshot upsert fills in the rest via `update_columns`
+            // (which excludes `harvest_watermark`, so this value survives).
+            let model = akh_state::Model {
+                akh_id,
+                watermark: 0,
+                allocator_next: 0,
+                cycle_count: 0,
+                session_start_cycle: 0,
+                sleep_phase: "Wake".to_owned(),
+                last_sleep_cycle: 0,
+                psyche: None,
+                extra: None,
+                harvest_watermark: seq,
+                librarian_watermark: 0,
+                updated_at: now,
+            };
+            akh_state::Entity::insert(model.into_active_model())
+                .on_conflict(
+                    OnConflict::column(Column::AkhId)
+                        .update_columns([Column::HarvestWatermark, Column::UpdatedAt])
+                        .to_owned(),
+                )
+                .exec(db)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Read the daily-Librarian watermark for an Akh (ADR 081 slice 4). `0` if no
+/// `akh_state` row exists yet (nothing extracted). Independent of
+/// [`get_harvest_watermark`] — see the field doc on
+/// [`akh_state::Model::librarian_watermark`].
+pub async fn get_librarian_watermark(db: &DatabaseConnection, akh_id: Uuid) -> StoreResult<i64> {
+    Ok(akh_state::Entity::find_by_id(akh_id)
+        .select_only()
+        .column(akh_state::Column::LibrarianWatermark)
+        .into_tuple::<i64>()
+        .one(db)
+        .await?
+        .unwrap_or(0))
+}
+
+/// Advance the daily-Librarian watermark for an Akh (ADR 081 slice 4).
+///
+/// A targeted `UPDATE` of just `librarian_watermark` (+ `updated_at`) — never
+/// routes through [`upsert_akh_state`], mirroring [`set_harvest_watermark`]'s
+/// clobber-guard pattern exactly (see that function's doc). If no `akh_state`
+/// row exists yet, inserts a minimal default row carrying only this watermark.
+pub async fn set_librarian_watermark(db: &DatabaseConnection, akh_id: Uuid, seq: i64) -> StoreResult<()> {
+    use akh_state::Column;
+    let now = chrono::Utc::now();
+    let existing = akh_state::Entity::find_by_id(akh_id).one(db).await?;
+    match existing {
+        Some(row) => {
+            let mut active = row.into_active_model();
+            active.librarian_watermark = ActiveValue::Set(seq);
+            active.updated_at = ActiveValue::Set(now);
+            akh_state::Entity::update(active)
+                .filter(Column::AkhId.eq(akh_id))
+                .exec(db)
+                .await?;
+        }
+        None => {
+            // No row yet: insert a minimal default carrying only the watermark.
+            // A later full snapshot upsert fills in the rest via `update_columns`
+            // (which excludes `librarian_watermark`, so this value survives).
+            let model = akh_state::Model {
+                akh_id,
+                watermark: 0,
+                allocator_next: 0,
+                cycle_count: 0,
+                session_start_cycle: 0,
+                sleep_phase: "Wake".to_owned(),
+                last_sleep_cycle: 0,
+                psyche: None,
+                extra: None,
+                harvest_watermark: 0,
+                librarian_watermark: seq,
+                updated_at: now,
+            };
+            akh_state::Entity::insert(model.into_active_model())
+                .on_conflict(
+                    OnConflict::column(Column::AkhId)
+                        .update_columns([Column::LibrarianWatermark, Column::UpdatedAt])
+                        .to_owned(),
+                )
+                .exec(db)
+                .await?;
+        }
+    }
     Ok(())
 }
 

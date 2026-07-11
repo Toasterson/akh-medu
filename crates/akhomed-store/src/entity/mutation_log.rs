@@ -18,7 +18,11 @@ pub struct Model {
     pub workspace_id: Uuid,
 
     /// Mutation kind: `assert` | `retract` | `microtheory_load` |
-    /// `microtheory_unload` | `compartment_create` | `compartment_destroy`.
+    /// `microtheory_unload` | `compartment_create` | `compartment_destroy` |
+    /// `turn`. `turn` (ADR 091) is raw transcript-capture staging, not a KG
+    /// mutation — wake-replay explicitly skips it (see the main crate's
+    /// `snapshot.rs::apply_mutation`); the sleep-cycle harvest phase reads
+    /// `kind='turn'` rows to mint `episode:turn:*` indices.
     pub kind: String,
 
     /// Kind-specific payload.

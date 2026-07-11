@@ -62,6 +62,48 @@ fn env_usize(key: &str) -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
+/// `SystemTime::now()` rendered as an RFC3339 UTC timestamp
+/// (`YYYY-MM-DDTHH:MM:SS.nnnnnnnnnZ`), std-only (no `chrono`).
+///
+/// The main crate's `chrono` dependency is optional (gated behind the
+/// `calendar` feature — see `Cargo.toml`), so unconditionally-compiled code
+/// like the turn-capture hook (ADR 091) cannot name it. Everywhere else in the
+/// crate that needs a timestamp outside a `chrono`-gated feature uses
+/// `SystemTime` directly (see `agent/contact.rs`, `agent/dialogue.rs`, etc.);
+/// this just also renders it as RFC3339 for the turn-record JSON payload's
+/// `ts` field.
+fn rfc3339_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let nanos = now.subsec_nanos();
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mm = (secs_of_day % 3600) / 60;
+    let ss = secs_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{nanos:09}Z")
+}
+
+/// Days-since-epoch → civil (year, month, day), Howard Hinnant's
+/// `civil_from_days` algorithm (public-domain; proleptic Gregorian, valid
+/// across the full `i64` range). `days` is `0` for 1970-01-01.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
 /// Why an agentic turn's tool loop ended without the model volunteering a final
 /// answer. Each maps to a short clause the forced-synthesis nudge explains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +206,27 @@ impl RoundBudget {
     }
 }
 
+/// Result of [`Agent::execute_tool_call`] running one requested tool call
+/// through the ADR 089 organ passes: what actually executed (which may
+/// differ from the model's request after M2 name repair or task A/B argument
+/// repair), whether it succeeded, and how to narrate + trace it.
+struct ToolCallOutcome {
+    /// The tool name actually executed (post-M2 repair, if any).
+    exec_name: String,
+    /// The arguments actually executed (post task-A/B repair, if any).
+    exec_args: Value,
+    success: bool,
+    result: String,
+    /// Bracketed narration prefix summarizing whichever organ passes fired,
+    /// e.g. `"[repaired: fetch_ledgr → fetch_ledger] [repaired args: 1 arg(s) renamed] "`.
+    /// Empty when nothing fired.
+    note_prefix: String,
+    /// `{tool, ok}` plus `repaired_from` (M2 fired) / `param_repaired: true`
+    /// (task A fired) when applicable — the compact per-call trace entry
+    /// accumulated into `tool_trace` for the ADR 091 turn-capture hook.
+    trace: Value,
+}
+
 impl Agent {
     /// Run one LLM-driven agentic turn, **streaming** its narration to `sink`.
     ///
@@ -221,16 +284,33 @@ impl Agent {
         backend.prepare(agent_id, self.psyche.as_ref());
 
         let mut tools = ollama_tool_catalog(&self.tool_registry);
-        // Optional cap on the tool catalog (AKH_AGENT_MAX_TOOLS). The full catalog
-        // is several thousand tokens — too large for a small-context in-process
-        // model (e.g. Candle Gemma on a constrained host), where it dominates
-        // prefill cost. `0` runs the akh tool-free (pure chat). A precursor to the
-        // Phase 44 budget-driven tool selection.
-        if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
+        // ADR 089 task A/B: the FULL pre-retrieval-scoping catalog, captured
+        // before M1 (below) narrows `tools` to what's actually offered this
+        // round. Task A's param-repair-retry and task B's value grounding
+        // both need to look up a tool's schema even when M1 scoped it out of
+        // this round's offered set (the model can still emit a name it
+        // remembers from earlier context or training).
+        let full_catalog = tools.clone();
+        // ADR 089 M1 (opt-in): retrieval-scope the catalog to the top-K tools
+        // *relevant to this request* (scored over name + description) instead of
+        // offering everything. This is the organ's answer to both the prefill
+        // cost of a several-thousand-token catalog and small models degenerating
+        // past ~14 tools — the model sees the K tools most likely to matter, and
+        // permission gating still applies at dispatch.
+        if let Some(k) = std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            && k < tools.len()
+        {
+            tracing::debug!(k, from = tools.len(), "retrieval-scoping tool catalog (AKH_AGENT_TOOL_RETRIEVAL)");
+            tools = super::organ::retrieve_scoped(&tools, user_prompt, k, Some(engine));
+        } else if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             && cap < tools.len()
         {
+            // Legacy blind cap (AKH_AGENT_MAX_TOOLS): kept for A/B comparison
+            // against retrieval scoping. `0` runs the akh tool-free (pure chat).
             tracing::debug!(cap, from = tools.len(), "capping tool catalog (AKH_AGENT_MAX_TOOLS)");
             tools.truncate(cap);
         }
@@ -310,6 +390,18 @@ impl Agent {
             }
         };
 
+        // Compact tool trace for the ADR 091 turn-capture hook: {tool, ok} per
+        // call, accumulated across every round of this turn (not just the
+        // final one) — never raw arguments/results, so a chatty tool loop
+        // doesn't bloat the WAL payload.
+        let mut tool_trace: Vec<Value> = Vec::new();
+
+        // Registry membership snapshot for the ADR 089 M2 repair gate below: an
+        // emitted name outside this set is a guaranteed `unknown tool` failure,
+        // which is exactly (and only) when the organ's repair pass may fire.
+        let known_tools: std::collections::HashSet<String> =
+            self.tool_registry.list().into_iter().map(|s| s.name).collect();
+
         // Govern the tool loop with a frontier-style budget — a model-scaled
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
         // a flat round count. The loop yields *why* it stopped so the turn can end
@@ -368,6 +460,10 @@ impl Agent {
                 let answer = turn.content.trim();
                 if !answer.is_empty() {
                     self.conversation_state_mut().record_agent_turn(answer);
+                    // ADR 091: capture the completed turn to the WAL (raw
+                    // staging; a no-op if no sink is installed or capture is
+                    // opted out).
+                    self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
                     // Streaming already emitted the answer as deltas; only the
                     // non-streaming fallback still needs to emit it.
                     if used_fallback {
@@ -401,39 +497,187 @@ impl Agent {
             // Execute each requested tool; the call (args) and its result form one
             // collapsible step the TUI folds under "▸ N steps".
             for tc in &turn.tool_calls {
-                let input = tool_input_from_args(&tc.arguments);
-                let (success, result) = match self.tool_registry.execute(&tc.name, input, engine) {
-                    Ok(o) => (o.success, o.result),
-                    Err(e) => (false, format!("tool error: {e}")),
-                };
-
+                let outcome =
+                    self.execute_tool_call(engine, tc, &known_tools, &full_catalog, user_prompt);
                 sink.emit(&AkhMessage::tool_result(
-                    tc.name.clone(),
-                    success,
-                    format!("({}) → {}", preview_args(&tc.arguments), result),
+                    outcome.exec_name.clone(),
+                    outcome.success,
+                    format!(
+                        "{}({}) → {}",
+                        outcome.note_prefix,
+                        preview_args(&outcome.exec_args),
+                        outcome.result
+                    ),
                 ));
-                conversation.push(json!({"role": "tool", "content": result}));
+                tool_trace.push(outcome.trace);
+                conversation.push(json!({"role": "tool", "content": outcome.result}));
             }
         };
 
         // Budget exhausted — force one tool-free synthesis ("reflect and answer")
         // so the turn returns the best answer it can from what it gathered, rather
         // than the old bare "(stopped after N rounds)" cutoff.
-        self.force_final_answer(backend.as_ref(), agent_id, &mut conversation, sink, stop);
+        self.force_final_answer(
+            backend.as_ref(),
+            engine,
+            agent_id,
+            user_prompt,
+            &mut conversation,
+            sink,
+            stop,
+            &tool_trace,
+        );
         Some(())
+    }
+
+    /// Execute one model-requested tool call, running it through every ADR 089
+    /// organ pass before/around the registry's `execute()`, and return
+    /// everything the caller needs to narrate + trace it. Factored out of
+    /// [`Self::run_agentic_turn`]'s dispatch loop because task A's retry path
+    /// (repair → re-execute → re-repair-values) made the loop body too deep to
+    /// read inline.
+    ///
+    /// Pass order per call:
+    /// 1. **M2** — if `tc.name` isn't in `known_tools`, try
+    ///    [`organ::repair_unknown_call`] against `full_catalog` (the schemas
+    ///    actually available to ground against).
+    /// 2. **Task B** (opt-in) — [`organ::ground_call_values`] on the
+    ///    (possibly M2-repaired) args, before the first `execute()`.
+    /// 3. `execute()`. On `Err(AgentError::ToolExecution { .. })` — the
+    ///    *only* structurally-repairable channel (see the ADR 089 task A
+    ///    scout report on `execute()`'s failure shapes; a permission denial
+    ///    surfaces as `Ok(ToolOutput{success:false})` and is never retried
+    ///    here) — **task A**: [`organ::repair_known_call_args`] against only
+    ///    this tool's own schema, task B again on the repaired args, then one
+    ///    retry `execute()`.
+    fn execute_tool_call(
+        &self,
+        engine: &Engine,
+        tc: &super::ollama::ToolCall,
+        known_tools: &std::collections::HashSet<String>,
+        full_catalog: &[Value],
+        user_prompt: &str,
+    ) -> ToolCallOutcome {
+        // M2: repair a name the registry doesn't recognize against the
+        // offered catalog. Never touches a name it already knows.
+        let m2 = if known_tools.contains(&tc.name) {
+            None
+        } else {
+            super::organ::repair_unknown_call(&tc.name, &tc.arguments, full_catalog)
+        };
+        if let Some(r) = &m2 {
+            tracing::info!(from = %tc.name, to = %r.name, note = %r.note, "organ repaired unknown tool call");
+        }
+        let (exec_name, mut exec_args) = match &m2 {
+            Some(r) => (r.name.clone(), r.arguments.clone()),
+            None => (tc.name.clone(), tc.arguments.clone()),
+        };
+
+        // Task B (opt-in): ground argument values before the first execute
+        // attempt, after any M2 name repair.
+        let b_pre = super::organ::ground_call_values(&exec_name, &exec_args, user_prompt, full_catalog);
+        if let Some(g) = &b_pre {
+            exec_args = g.arguments.clone();
+        }
+
+        let input = tool_input_from_args(&exec_args);
+        let mut param_repaired = false;
+        let mut a_note: Option<String> = None;
+        let (success, result) = match self.tool_registry.execute(&exec_name, input, engine) {
+            Ok(o) => (o.success, o.result),
+            Err(e) => {
+                // Task A: retry once, but only against the structurally
+                // repairable channel, and only when not opted out. An
+                // `Ask`-gated tool is also excluded: the retry re-runs the
+                // permission gate, so it would prompt the user a second time
+                // (and double-log the audit ledger) for one logical call —
+                // the first approved failure stands instead.
+                let opted_out = std::env::var("AKH_AGENT_PARAM_REPAIR").is_ok_and(|v| v == "0");
+                let repairable = matches!(e, super::error::AgentError::ToolExecution { .. });
+                let retry = if opted_out || !repairable || self.tool_registry.would_ask(&exec_name) {
+                    None
+                } else {
+                    super::organ::repair_known_call_args(&exec_name, &exec_args, full_catalog)
+                };
+                match retry {
+                    Some(repaired) => {
+                        let mut retry_args = repaired.arguments;
+                        let mut retry_note = repaired.note;
+                        if let Some(g) =
+                            super::organ::ground_call_values(&exec_name, &retry_args, user_prompt, full_catalog)
+                        {
+                            retry_args = g.arguments;
+                            retry_note = format!("{retry_note}; {}", g.note);
+                        }
+                        let retry_input = tool_input_from_args(&retry_args);
+                        match self.tool_registry.execute(&exec_name, retry_input, engine) {
+                            Ok(o) => {
+                                tracing::info!(
+                                    tool = %exec_name,
+                                    note = %retry_note,
+                                    "ADR 089 task A: retried tool call after param repair"
+                                );
+                                exec_args = retry_args;
+                                param_repaired = true;
+                                a_note = Some(retry_note);
+                                (o.success, o.result)
+                            }
+                            Err(e2) => (false, format!("tool error: {e2}")),
+                        }
+                    }
+                    None => (false, format!("tool error: {e}")),
+                }
+            }
+        };
+
+        let mut note_prefix = String::new();
+        if let Some(r) = &m2 {
+            note_prefix.push_str(&format!("[repaired: {}] ", r.note));
+        }
+        if let Some(g) = &b_pre {
+            note_prefix.push_str(&format!("[grounded: {}] ", g.note));
+        }
+        if let Some(note) = &a_note {
+            note_prefix.push_str(&format!("[repaired args: {note}] "));
+        }
+
+        let mut trace = json!({"tool": exec_name.clone(), "ok": success});
+        if m2.is_some() {
+            trace["repaired_from"] = json!(tc.name.clone());
+        }
+        if param_repaired {
+            trace["param_repaired"] = json!(true);
+        }
+
+        ToolCallOutcome {
+            exec_name,
+            exec_args,
+            success,
+            result,
+            note_prefix,
+            trace,
+        }
     }
 
     /// Final synthesis step when the [`RoundBudget`] is exhausted: nudge the model
     /// to answer *now* with no tools, using what it already gathered, and emit the
     /// result. Mirrors how frontier harnesses convert a hit budget into a
     /// best-effort answer instead of a dead end.
+    ///
+    /// `user_prompt`/`tool_trace` are threaded through purely so the ADR 091
+    /// turn-capture hook fires here too — this is a turn-end site exactly like
+    /// the normal-completion path in [`Self::run_agentic_turn`].
+    #[allow(clippy::too_many_arguments)]
     fn force_final_answer(
         &mut self,
         backend: &dyn super::chat_backend::ChatBackend,
+        engine: &Engine,
         agent_id: &str,
+        user_prompt: &str,
         conversation: &mut Vec<Value>,
         sink: &dyn MessageSink,
         stop: TurnStop,
+        tool_trace: &[Value],
     ) {
         conversation.push(json!({
             "role": "user",
@@ -481,9 +725,66 @@ impl Agent {
             return;
         }
         self.conversation_state_mut().record_agent_turn(answer);
+        // ADR 091: same capture hook as the normal-completion turn-end site.
+        self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
         if used_fallback {
             sink.emit(&AkhMessage::narrative(answer, "acp"));
         }
+    }
+
+    /// Whether transcript capture (ADR 091) is enabled for this turn.
+    ///
+    /// `AKH_TRANSCRIPT_CAPTURE` overrides the per-akh config: `"0"` forces it
+    /// off, `"1"` forces it on; unset (or any other value) falls back to
+    /// [`Agent::capture_transcripts`](super::Agent). Capture is default-on
+    /// (a sovereign akh's own memory), with this as its opt-out.
+    fn transcript_capture_enabled(&self) -> bool {
+        match std::env::var("AKH_TRANSCRIPT_CAPTURE").ok().as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => self.capture_transcripts,
+        }
+    }
+
+    /// Build and record one ADR-091 turn capture on the WAL
+    /// (`Engine::record_turn`) — a no-op if capture is opted out (see
+    /// [`Self::transcript_capture_enabled`]) or no `MutationSink` is installed
+    /// (in-memory/local-only engines).
+    ///
+    /// Called from every turn-end site in [`Self::run_agentic_turn`] (normal
+    /// completion and [`Self::force_final_answer`]), so every surface that
+    /// drives the agentic loop (daemon, TUI, MCP) captures identically.
+    ///
+    /// **The payload schema is LOCKED** — Wave 2's sleep-cycle harvest phase
+    /// parses it verbatim (ADR 091 / the transcript-capture plan):
+    /// `{v, ts, workspace, model, user_prompt, agent_answer, tools: [{tool, ok}]}`.
+    fn emit_turn_wal(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        answer: &str,
+        tools: &[Value],
+    ) {
+        if !self.transcript_capture_enabled() {
+            return;
+        }
+        // Cheap, in-scope model name: the Ollama-backed path's model manager
+        // names the pinned model directly. Other backings (e.g. Candle, set
+        // via `chat_backend`) don't expose a model name through the
+        // `ChatBackend` trait today, so this is `None` for them rather than
+        // plumbing new state through the trait for this slice.
+        let model = self.model_manager.as_deref().map(|m| m.model());
+        let payload = json!({
+            "v": 1,
+            "ts": rfc3339_now(),
+            "workspace": agent_id,
+            "model": model,
+            "user_prompt": user_prompt,
+            "agent_answer": answer,
+            "tools": tools,
+        });
+        engine.record_turn(payload);
     }
 }
 
@@ -575,6 +876,7 @@ fn preview_args(args: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentConfig;
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolOutput, ToolSignature};
     use crate::agent::tool_manifest::{
@@ -693,5 +995,349 @@ mod tests {
         let p = preview_args(&big);
         assert!(p.ends_with('…'));
         assert!(p.chars().count() <= ARG_PREVIEW_LEN + 1);
+    }
+
+    // --- ADR 091: transcript→episodic capture (write-side first slice) ---
+
+    #[test]
+    fn rfc3339_now_has_known_shape_and_matches_a_reference_instant() {
+        // Format shape, independent of "now".
+        let s = rfc3339_now();
+        assert_eq!(s.len(), "2026-07-10T00:00:00.000000000Z".len());
+        assert!(s.ends_with('Z'));
+        assert_eq!(s.as_bytes()[4], b'-');
+        assert_eq!(s.as_bytes()[7], b'-');
+        assert_eq!(s.as_bytes()[10], b'T');
+
+        // civil_from_days against known reference instants (cross-checked
+        // against `datetime.utcfromtimestamp` — the algorithm is Howard
+        // Hinnant's well-known `civil_from_days`).
+        assert_eq!(civil_from_days(0), (1970, 1, 1)); // unix epoch
+        assert_eq!(civil_from_days(1_700_000_000 / 86_400), (2023, 11, 14));
+    }
+
+    fn test_engine() -> std::sync::Arc<Engine> {
+        std::sync::Arc::new(
+            Engine::new(crate::engine::EngineConfig::default())
+                .expect("engine construction should succeed"),
+        )
+    }
+
+    /// A [`MutationSink`](crate::mutation::MutationSink) that records every
+    /// mutation it receives, for asserting on the built payload without a live
+    /// WAL/Postgres.
+    struct RecordingSink {
+        records: std::sync::Mutex<Vec<(crate::mutation::MutationKind, Value)>>,
+    }
+
+    impl crate::mutation::MutationSink for RecordingSink {
+        fn record(&self, mutation: crate::mutation::MutationRecord) {
+            self.records.lock().unwrap().push((mutation.kind, mutation.payload));
+        }
+    }
+
+    // All three ADR-091 behaviors below (gate precedence, payload shape,
+    // opt-out no-op) are asserted in ONE test function rather than split
+    // across several `#[test]`s. `AKH_TRANSCRIPT_CAPTURE` is process-global
+    // state and cargo runs tests in parallel threads within one binary, so
+    // several tests each mutating the same fixed (schema-locked, cannot be
+    // renamed) env var would race each other; sequencing them here is the
+    // simplest race-free option without pulling in a `serial_test` dependency.
+    #[test]
+    fn transcript_capture_gate_and_emit_turn_wal() {
+        // SAFETY: edition-2024 requires explicit unsafe for env mutation;
+        // this test owns AKH_TRANSCRIPT_CAPTURE for its duration and clears
+        // it before returning (including via the early assertions below).
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+
+        // --- 1. Gate precedence: env overrides the config field. ---
+        let mut agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        agent.capture_transcripts = true;
+        assert!(agent.transcript_capture_enabled(), "unset env falls back to the config field (on)");
+        agent.capture_transcripts = false;
+        assert!(!agent.transcript_capture_enabled(), "unset env falls back to the config field (off)");
+
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
+        }
+        agent.capture_transcripts = true;
+        assert!(!agent.transcript_capture_enabled(), "env=0 forces off regardless of the field");
+
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "1");
+        }
+        agent.capture_transcripts = false;
+        assert!(agent.transcript_capture_enabled(), "env=1 forces on regardless of the field");
+
+        // --- 2. `emit_turn_wal` builds the locked payload shape when enabled. ---
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+        let engine = test_engine();
+        let sink = std::sync::Arc::new(RecordingSink {
+            records: std::sync::Mutex::new(Vec::new()),
+        });
+        engine
+            .set_mutation_sink(sink.clone())
+            .map_err(|_| ())
+            .expect("sink not yet installed on a fresh engine");
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.capture_transcripts = true;
+        // Agent::new itself asserts predicate-init triples through the sink
+        // (unrelated `assert` mutations); drop those so the count below only
+        // reflects `emit_turn_wal`'s own record.
+        sink.records.lock().unwrap().clear();
+
+        let tools = vec![json!({"tool": "kg_query", "ok": true})];
+        agent.emit_turn_wal(&engine, "tecton", "capital of France?", "Paris.", &tools);
+
+        {
+            let records = sink.records.lock().unwrap();
+            assert_eq!(records.len(), 1, "exactly one turn mutation recorded");
+            let (kind, payload) = &records[0];
+            assert_eq!(*kind, crate::mutation::MutationKind::Turn);
+            assert_eq!(kind.as_str(), "turn");
+
+            // LOCKED schema (Wave 2's sleep-cycle harvest phase parses this
+            // verbatim): {v, ts, workspace, model, user_prompt, agent_answer, tools}.
+            assert_eq!(payload["v"], 1);
+            assert!(payload["ts"].as_str().is_some_and(|s| s.ends_with('Z')));
+            assert_eq!(payload["workspace"], "tecton");
+            assert_eq!(payload["model"], Value::Null); // no model manager attached in this test
+            assert_eq!(payload["user_prompt"], "capital of France?");
+            assert_eq!(payload["agent_answer"], "Paris.");
+            assert_eq!(payload["tools"], json!([{"tool": "kg_query", "ok": true}]));
+            // No stray keys.
+            assert_eq!(
+                payload.as_object().unwrap().len(),
+                7,
+                "payload must carry exactly the locked field set"
+            );
+        }
+
+        // --- 3. Opt-out (env="0") writes nothing, even with the field on. ---
+        unsafe {
+            std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
+        }
+        agent.capture_transcripts = true; // env override wins anyway
+        agent.emit_turn_wal(&engine, "tecton", "hi", "hello", &[]);
+        assert_eq!(
+            sink.records.lock().unwrap().len(),
+            1,
+            "opted-out capture writes nothing beyond step 2's single record"
+        );
+
+        unsafe {
+            std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+    }
+
+    // --- ADR 089 task A: param-repair-and-retry ---
+
+    /// A tool requiring an integer `party_size` param, which counts its own
+    /// invocations (via a shared atomic the test retains a handle to) so
+    /// tests can assert *how many times* `execute()` actually ran — the
+    /// "retries exactly once, never twice" requirement isn't observable from
+    /// the outcome alone. Rejects a `party_size` over 8 with a normal
+    /// `Ok(ToolOutput::err(..))` business failure (not a structural error),
+    /// so a test can drive the retried call into a *second* failure and
+    /// confirm no third attempt follows.
+    struct FlakyBookTool {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Tool for FlakyBookTool {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: "flaky_book".into(),
+                description: "Book a table for a party".into(),
+                parameters: vec![],
+            }
+        }
+        fn execute(&self, _e: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = input.get_i64("party_size").ok_or_else(|| {
+                crate::agent::error::AgentError::ToolExecution {
+                    tool_name: "flaky_book".into(),
+                    message: "missing required parameter: party_size".into(),
+                }
+            })?;
+            if n > 8 {
+                return Ok(ToolOutput::err("too many guests"));
+            }
+            Ok(ToolOutput::ok(format!("booked for {n}")))
+        }
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "flaky_book".into(),
+                description: "Book a table for a party".into(),
+                parameters: vec![ToolParamSchema {
+                    name: "party_size".into(),
+                    description: "how many guests".into(),
+                    required: true,
+                    param_type: "integer".into(),
+                    schema: None,
+                }],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: String::new(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+    }
+
+    /// Build an `(Agent, known_tools, full_catalog, calls)` fixture with one
+    /// `FlakyBookTool` registered, for the task-A tests below. `calls` is the
+    /// same `Arc<AtomicUsize>` the registered tool increments, so the test
+    /// can read the invocation count without downcasting through the
+    /// registry's `dyn Tool` (the trait carries no `Any` supertrait).
+    fn flaky_book_fixture() -> (
+        Agent,
+        std::collections::HashSet<String>,
+        Vec<Value>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let mut agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent
+            .tool_registry
+            .register(Box::new(FlakyBookTool { calls: calls.clone() }));
+        let known_tools: std::collections::HashSet<String> =
+            agent.tool_registry.list().into_iter().map(|s| s.name).collect();
+        let full_catalog = ollama_tool_catalog(&agent.tool_registry);
+        (agent, known_tools, full_catalog, calls)
+    }
+
+    // One test function (not several): AKH_AGENT_PARAM_REPAIR is
+    // process-global and cargo runs tests in parallel threads within one
+    // binary, so parallel tests each mutating it would race (same rationale
+    // as `transcript_capture_gate_and_emit_turn_wal` above).
+    #[test]
+    fn param_repair_retry_fires_once_and_respects_opt_out() {
+        unsafe {
+            std::env::remove_var("AKH_AGENT_PARAM_REPAIR");
+        }
+        let engine = test_engine();
+
+        // --- 1. Default ON: a near-miss param name + stringified value
+        //        repairs and the retry succeeds. Exactly 2 executions. ---
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "4"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(outcome.success, "repaired retry should succeed: {}", outcome.result);
+            assert_eq!(outcome.exec_args["party_size"], json!(4));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "exactly one retry, not zero or several"
+            );
+            assert_eq!(outcome.trace["param_repaired"], json!(true));
+            assert!(outcome.note_prefix.contains("repaired args"));
+        }
+
+        // --- 2. Retry itself fails (business rule, not structural) — still
+        //        only 2 executions total, never a third attempt. ---
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "9"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(!outcome.success);
+            assert_eq!(outcome.result, "too many guests");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "must not retry a second time after the retry itself fails"
+            );
+            assert_eq!(outcome.trace["param_repaired"], json!(true));
+        }
+
+        // --- 3. Opt-out: exactly 1 execution, no repair. ---
+        unsafe {
+            std::env::set_var("AKH_AGENT_PARAM_REPAIR", "0");
+        }
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "4"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(!outcome.success);
+            assert!(outcome.result.starts_with("tool error:"));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "opted-out: no retry attempt at all"
+            );
+            assert!(outcome.trace.get("param_repaired").is_none());
+        }
+
+        unsafe {
+            std::env::remove_var("AKH_AGENT_PARAM_REPAIR");
+        }
+    }
+
+    // --- ADR 089 task B: value grounding inside the dispatch path ---
+
+    #[test]
+    fn value_grounding_changes_a_miscopied_numeric_arg_only_when_enabled() {
+        unsafe {
+            std::env::remove_var("AKH_AGENT_VALUE_GROUND");
+        }
+        let engine = test_engine();
+
+        // --- Default OFF: the mis-copied value survives untouched, and the
+        //     call executes successfully with the wrong number. ---
+        {
+            let (agent, known_tools, full_catalog, _calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_size": 5}), // request says 4; arg says 5
+            };
+            let outcome =
+                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            assert!(outcome.success);
+            assert_eq!(outcome.exec_args["party_size"], json!(5), "untouched while grounding is off");
+            assert!(!outcome.note_prefix.contains("grounded"));
+        }
+
+        // --- Enabled: the mis-copied value is snapped to the request's own
+        //     number before execute() ever runs. ---
+        unsafe {
+            std::env::set_var("AKH_AGENT_VALUE_GROUND", "1");
+        }
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_size": 5}),
+            };
+            let outcome =
+                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            assert!(outcome.success);
+            assert_eq!(outcome.exec_args["party_size"], json!(4), "grounded to the request's own value");
+            assert!(outcome.note_prefix.contains("grounded"));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "grounding fixed it before the first execute — no retry needed"
+            );
+        }
+
+        unsafe {
+            std::env::remove_var("AKH_AGENT_VALUE_GROUND");
+        }
     }
 }

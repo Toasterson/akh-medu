@@ -165,6 +165,10 @@ impl Tool for GlobTool {
             source: ToolSource::Native,
         }
     }
+
+    fn locus(&self) -> Option<crate::backend::ExecLocus> {
+        Some(self.fs.locus())
+    }
 }
 
 impl GlobTool {

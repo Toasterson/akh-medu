@@ -112,6 +112,148 @@ pub fn score_output(raw_output: &str, example: &Example) -> EvalOutcome {
     }
 }
 
+/// Score one raw model output against `example` under an explicit
+/// [`TargetFormat`] (Phase 51 P2). `TargetFormat::Json` is byte-identical to
+/// [`score_output`]; `TargetFormat::Grug` parses the flat pipe format via
+/// [`crate::format::parse_call`] and validates the resulting call the same way.
+pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format::TargetFormat) -> EvalOutcome {
+    match fmt {
+        crate::format::TargetFormat::Json => score_output(raw_output, example),
+        crate::format::TargetFormat::Grug => {
+            let Some(call) = crate::format::parse_call(raw_output, fmt, &example.tools) else {
+                return EvalOutcome {
+                    parsed_json: false,
+                    schema: None,
+                    arg_correctness: None,
+                };
+            };
+            let schema_result = validate_call(&call, example);
+            let schema_ok = schema_result.as_ref().ok().cloned();
+            let arg_result = schema_ok
+                .as_ref()
+                .map(|c| check_arg_correctness(c, &example.expected_call, example.expected_schema()));
+            EvalOutcome {
+                parsed_json: true,
+                schema: Some(schema_result),
+                arg_correctness: arg_result,
+            }
+        }
+    }
+}
+
+/// Which symbolic post-process(es) to apply to a parsed call before scoring
+/// (Phase 51 P3a/P3b). `Grounded` composes the full last-mile stack:
+/// M2 name-repair *then* value-grounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Post {
+    Raw,
+    Repaired,
+    Grounded,
+}
+
+/// Apply the selected post-process to a parsed `call` for `example`.
+pub(crate) fn apply_post(call: ToolCall, example: &Example, post: Post) -> ToolCall {
+    match post {
+        Post::Raw => call,
+        Post::Repaired => crate::repair::repair_call(&call, &example.tools).0,
+        Post::Grounded => {
+            let (repaired, _) = crate::repair::repair_call(&call, &example.tools);
+            crate::ground::ground_values(&repaired, &example.user_request, &example.tools).0
+        }
+    }
+}
+
+/// Score one raw output under `fmt`, applying `post` to the parsed call before
+/// validating. Parsing failure is `parsed=false`; otherwise the post-processed
+/// call is validated + argument-checked, so the raw-vs-post delta is exactly
+/// what the symbolic layer recovers.
+pub(crate) fn score_output_post_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+    post: Post,
+) -> EvalOutcome {
+    let Some(call) = crate::format::parse_call(raw_output, fmt, &example.tools) else {
+        return EvalOutcome {
+            parsed_json: false,
+            schema: None,
+            arg_correctness: None,
+        };
+    };
+    let call = apply_post(call, example, post);
+    let schema_result = validate_call(&call, example);
+    let schema_ok = schema_result.as_ref().ok().cloned();
+    let arg_result = schema_ok
+        .as_ref()
+        .map(|c| check_arg_correctness(c, &example.expected_call, example.expected_schema()));
+    EvalOutcome {
+        parsed_json: true,
+        schema: Some(schema_result),
+        arg_correctness: arg_result,
+    }
+}
+
+/// Score one raw model output under `fmt`, then apply the **KG-backed repair
+/// pass** ([`crate::repair::repair_call`]) before validating (Phase 51 P3b, ADR
+/// 089) — grounds tool + param *names* against the offered schemas.
+pub fn score_output_repaired_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
+    score_output_post_fmt(raw_output, example, fmt, Post::Repaired)
+}
+
+/// Score one raw model output under `fmt` with the **full last-mile stack**:
+/// M2 name-repair *then* value-grounding ([`crate::ground::ground_values`],
+/// Phase 51 P3a) — snaps mis-copied argument *values* to the request's own
+/// value inventory. The repaired-vs-grounded delta is what value-grounding adds
+/// on top of name-repair.
+pub fn score_output_grounded_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
+    score_output_post_fmt(raw_output, example, fmt, Post::Grounded)
+}
+
+/// Validate an already-parsed [`ToolCall`] against the schemas offered in
+/// `example` — the format-agnostic half of [`validate_schema`], shared by the
+/// Grug scoring path.
+fn validate_call(call: &ToolCall, example: &Example) -> Result<ToolCall, Vec<SchemaViolation>> {
+    let name = call.name.clone();
+    let Some(schema) = example.tools.iter().find(|t| t.name == name) else {
+        return Err(vec![SchemaViolation::UnknownTool { name }]);
+    };
+
+    let mut violations = Vec::new();
+    let args_map = call.arguments_map();
+
+    for required in schema.required_params() {
+        if !args_map.contains_key(&required.name) {
+            violations.push(SchemaViolation::MissingRequired {
+                param: required.name.clone(),
+            });
+        }
+    }
+    for (arg_name, arg_value) in &args_map {
+        match schema.param(arg_name) {
+            None => violations.push(SchemaViolation::UnknownArg { param: arg_name.clone() }),
+            Some(spec) => {
+                if !spec.ty.matches(arg_value) {
+                    violations.push(SchemaViolation::WrongType { param: arg_name.clone() });
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(ToolCall::new(name, call.arguments.clone()))
+    } else {
+        Err(violations)
+    }
+}
+
 /// Parse `value` as a tool call shape and validate it against the tool
 /// schemas offered in `example`.
 fn validate_schema(value: &Value, example: &Example) -> Result<ToolCall, Vec<SchemaViolation>> {
@@ -247,20 +389,102 @@ pub struct EvalReport {
     pub valid_json_rate: f64,
     pub schema_adherence_rate: f64,
     pub arg_correct_rate: f64,
+    /// **Micro-averaged per-argument-value accuracy** (Phase 51 P3a metric
+    /// lens): of every expected `(param → value)` slot across the batch, the
+    /// fraction the model produced with an equal value. Unlike
+    /// `arg_correct_rate` — whole-call exact match, where a *single* wrong value
+    /// fails an entire multi-param call — this measures value fidelity at the
+    /// slot level, so a model that gets 4 of 5 args right on every call scores
+    /// ~0.8 here but 0.0 on `arg_correct_rate`. Populated only by the
+    /// `from_outputs*` constructors (which see the ground-truth values); a
+    /// report built via [`EvalReport::from_outcomes`] alone leaves this `0.0`.
+    pub arg_value_accuracy: f64,
     pub n: usize,
+}
+
+/// Micro count of `(hits, total)` over expected argument-value slots for
+/// [`EvalReport::arg_value_accuracy`]. `total` counts every expected param on
+/// every example; `hits` counts those the model emitted with a value equal
+/// (under [`values_equal_normalized`]) to ground truth. `post` selects the
+/// symbolic post-process applied to the parsed call first.
+fn arg_value_hits_fmt(
+    pairs: &[(String, Example)],
+    fmt: crate::format::TargetFormat,
+    post: Post,
+) -> (usize, usize) {
+    let (mut hits, mut total) = (0usize, 0usize);
+    for (raw, ex) in pairs {
+        let call = crate::format::parse_call(raw, fmt, &ex.tools).map(|c| apply_post(c, ex, post));
+        let want = ex.expected_call.arguments_map();
+        let schema = ex.expected_schema();
+        let got = call.as_ref().map(|c| c.arguments_map());
+        for (k, wv) in &want {
+            total += 1;
+            let ty = schema.and_then(|s| s.param(k)).map(|p| &p.ty);
+            if let Some(gv) = got.as_ref().and_then(|g| g.get(k)) {
+                if values_equal_normalized(gv, wv, ty) {
+                    hits += 1;
+                }
+            }
+        }
+    }
+    (hits, total)
 }
 
 impl EvalReport {
     /// Score and aggregate a batch in one call.
     pub fn from_outputs(pairs: &[(String, Example)]) -> Self {
-        let outcomes: Vec<EvalOutcome> = pairs
-            .iter()
-            .map(|(raw, ex)| score_output(raw, ex))
-            .collect();
-        Self::from_outcomes(&outcomes)
+        Self::from_outputs_fmt(pairs, crate::format::TargetFormat::Json)
     }
 
-    /// Aggregate already-scored outcomes.
+    /// Score and aggregate a batch under an explicit [`TargetFormat`] (Phase 51 P2).
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<EvalOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
+            .collect();
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Raw);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
+    }
+
+    /// Score and aggregate a batch with the KG-backed repair pass applied
+    /// (Phase 51 P3b): outputs are grounded/repaired against the offered
+    /// schemas before validation. Compare to [`EvalReport::from_outputs_fmt`]
+    /// for the raw-vs-repaired lift.
+    pub fn from_outputs_repaired_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<EvalOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_output_repaired_fmt(raw, ex, fmt))
+            .collect();
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Repaired);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
+    }
+
+    /// Score and aggregate a batch with the **full last-mile stack** (Phase 51
+    /// P3a): M2 name-repair *then* value-grounding
+    /// ([`crate::ground::ground_values`]). Compare to
+    /// [`EvalReport::from_outputs_repaired_fmt`] for the value-grounding lift on
+    /// top of name-repair.
+    pub fn from_outputs_grounded_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<EvalOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_output_grounded_fmt(raw, ex, fmt))
+            .collect();
+        let (hits, total) = arg_value_hits_fmt(pairs, fmt, Post::Grounded);
+        Self::from_outcomes(&outcomes).with_value_accuracy(hits, total)
+    }
+
+    /// Fill in [`EvalReport::arg_value_accuracy`] from a `(hits, total)` slot
+    /// count (`0.0` for an empty denominator). Kept separate from
+    /// [`EvalReport::from_outcomes`] because per-value accuracy needs the
+    /// ground-truth values, which `EvalOutcome` alone does not carry.
+    fn with_value_accuracy(mut self, hits: usize, total: usize) -> Self {
+        self.arg_value_accuracy = if total == 0 { 0.0 } else { hits as f64 / total as f64 };
+        self
+    }
+
+    /// Aggregate already-scored outcomes. Leaves `arg_value_accuracy` at `0.0`
+    /// (it requires the ground-truth values — see [`EvalReport::with_value_accuracy`]).
     pub fn from_outcomes(outcomes: &[EvalOutcome]) -> Self {
         let n = outcomes.len();
         if n == 0 {
@@ -268,6 +492,7 @@ impl EvalReport {
                 valid_json_rate: 0.0,
                 schema_adherence_rate: 0.0,
                 arg_correct_rate: 0.0,
+                arg_value_accuracy: 0.0,
                 n: 0,
             };
         }
@@ -278,7 +503,110 @@ impl EvalReport {
             valid_json_rate: valid_json as f64 / n as f64,
             schema_adherence_rate: schema_valid as f64 / n as f64,
             arg_correct_rate: arg_correct as f64 / n as f64,
+            arg_value_accuracy: 0.0,
             n,
+        }
+    }
+}
+
+/// The gap-token confusion outcome for one output (Phase 51 P3c, ADR 089
+/// mechanism 3): did the model abstain, and should it have? Derived from the
+/// example's ground truth ([`Example::is_abstention`]) and the parsed output
+/// shape ([`crate::format::parse_output`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbstentionOutcome {
+    /// Ground truth: no offered tool fits, the model *should* emit the gap token.
+    pub expected_abstain: bool,
+    /// The model emitted the gap token.
+    pub emitted_abstain: bool,
+    /// The output was a recognised shape (a call or an abstain) rather than
+    /// garbage — a should-call example that came out unparseable is a call
+    /// failure, not a false abstention, and this flag keeps the two distinct.
+    pub parseable: bool,
+}
+
+impl AbstentionOutcome {
+    /// The abstain decision matched ground truth.
+    pub fn correct(&self) -> bool {
+        self.expected_abstain == self.emitted_abstain
+    }
+}
+
+/// Score one raw output for the **abstention** decision under `fmt`.
+pub fn score_abstention_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> AbstentionOutcome {
+    let parsed = crate::format::parse_output(raw_output, fmt, &example.tools);
+    AbstentionOutcome {
+        expected_abstain: example.is_abstention(),
+        emitted_abstain: matches!(parsed, crate::format::ParsedOutput::Abstain),
+        parseable: !matches!(parsed, crate::format::ParsedOutput::Unparseable),
+    }
+}
+
+/// The gap-token confusion matrix over a mixed batch of should-call and
+/// should-abstain examples (Phase 51 P3c). The two headline metrics test ADR
+/// 089's claim that abstention is an in-distribution classification the weights
+/// *can* learn:
+///
+/// - **`abstain_recall`** — of the should-abstain examples, the fraction where
+///   the model correctly emitted the gap token. High = the model learned to
+///   recognise "no tool fits".
+/// - **`false_abstention_rate`** — of the should-call examples, the fraction
+///   where the model *wrongly* emitted the gap token. Low = abstention did not
+///   cannibalise real tool-calling (the failure mode that would make the
+///   mechanism useless).
+///
+/// `abstain_precision` (of the times it abstained, how often it was right) is
+/// included as a secondary diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbstentionReport {
+    pub abstain_recall: f64,
+    pub false_abstention_rate: f64,
+    pub abstain_precision: f64,
+    pub n_abstain: usize,
+    pub n_call: usize,
+}
+
+impl AbstentionReport {
+    /// Score and aggregate a mixed batch of `(raw_output, example)` pairs under
+    /// `fmt`. Examples are classified by their own ground truth, so the caller
+    /// just concatenates a should-call batch and a should-abstain batch.
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+        let outcomes: Vec<AbstentionOutcome> = pairs
+            .iter()
+            .map(|(raw, ex)| score_abstention_fmt(raw, ex, fmt))
+            .collect();
+        Self::from_outcomes(&outcomes)
+    }
+
+    /// Aggregate already-scored abstention outcomes into the confusion-matrix
+    /// rates. Empty groups yield `0.0` for their dependent rate (no division by
+    /// zero); with no abstentions emitted at all, precision is `0.0`.
+    pub fn from_outcomes(outcomes: &[AbstentionOutcome]) -> Self {
+        let n_abstain = outcomes.iter().filter(|o| o.expected_abstain).count();
+        let n_call = outcomes.iter().filter(|o| !o.expected_abstain).count();
+
+        let true_abstain = outcomes
+            .iter()
+            .filter(|o| o.expected_abstain && o.emitted_abstain)
+            .count();
+        let false_abstain = outcomes
+            .iter()
+            .filter(|o| !o.expected_abstain && o.emitted_abstain)
+            .count();
+        let emitted_abstain = true_abstain + false_abstain;
+
+        let ratio = |num: usize, den: usize| if den == 0 { 0.0 } else { num as f64 / den as f64 };
+
+        Self {
+            abstain_recall: ratio(true_abstain, n_abstain),
+            false_abstention_rate: ratio(false_abstain, n_call),
+            abstain_precision: ratio(true_abstain, emitted_abstain),
+            n_abstain,
+            n_call,
         }
     }
 }
@@ -310,9 +638,14 @@ impl DiversityReport {
     /// denominator (the offered-tools union across the batch), not for
     /// correctness — this is deliberately independent of `EvalReport`.
     pub fn from_outputs(pairs: &[(String, Example)]) -> Self {
+        Self::from_outputs_fmt(pairs, crate::format::TargetFormat::Json)
+    }
+
+    /// Diversity alarm under an explicit [`TargetFormat`] (Phase 51 P2).
+    pub fn from_outputs_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
-            .map(|(raw, ex)| score_output(raw, ex))
+            .map(|(raw, ex)| score_output_fmt(raw, ex, fmt))
             .collect();
 
         let universe_size: usize = {
@@ -394,4 +727,104 @@ fn normalize_call_key(call: &ToolCall) -> String {
         .collect();
     pairs.sort();
     format!("{}({})", call.name, pairs.join(","))
+}
+
+#[cfg(test)]
+mod value_accuracy_tests {
+    use super::*;
+    use crate::format::TargetFormat;
+    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+
+    fn two_param_example() -> Example {
+        let tool = ToolSchema::new(
+            "book_table",
+            "d",
+            vec![
+                ParamSpec::new("guest", ParamType::String, true),
+                ParamSpec::new("party_size", ParamType::Integer, true),
+            ],
+        );
+        Example {
+            tools: vec![tool],
+            user_request: "r".into(),
+            expected_call: ToolCall::new("book_table", serde_json::json!({"guest": "Ada", "party_size": 4})),
+            mock_response: String::new(),
+        }
+    }
+
+    /// A call with one value right and one wrong scores 0.5 on per-value
+    /// accuracy but 0.0 on whole-call exact match — the whole point of the
+    /// finer lens.
+    #[test]
+    fn per_value_accuracy_is_finer_than_whole_call() {
+        let ex = two_param_example();
+        // guest right ("Ada"), party_size wrong (9 vs 4).
+        let raw = "call book_table | guest Ada | party_size 9";
+        let report = EvalReport::from_outputs_fmt(&[(raw.to_string(), ex)], TargetFormat::Grug);
+        assert_eq!(report.arg_correct_rate, 0.0, "one wrong value fails the whole call");
+        assert!((report.arg_value_accuracy - 0.5).abs() < 1e-9, "1 of 2 values correct = 0.5, got {}", report.arg_value_accuracy);
+    }
+
+    #[test]
+    fn a_fully_correct_call_scores_1_on_both() {
+        let ex = two_param_example();
+        let raw = "call book_table | guest Ada | party_size 4";
+        let report = EvalReport::from_outputs_fmt(&[(raw.to_string(), ex)], TargetFormat::Grug);
+        assert_eq!(report.arg_correct_rate, 1.0);
+        assert!((report.arg_value_accuracy - 1.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod abstention_tests {
+    use super::*;
+    use crate::format::{render_call, TargetFormat};
+    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+
+    fn tool(name: &str) -> ToolSchema {
+        ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)])
+    }
+
+    /// A should-call example and a should-abstain example, scored together,
+    /// yield a correct confusion matrix: a right call + a right gap = perfect
+    /// recall, zero false-abstention.
+    #[test]
+    fn confusion_matrix_counts_both_directions() {
+        let fmt = TargetFormat::Grug;
+        let call_ex = Example {
+            tools: vec![tool("book_table")],
+            user_request: "r".into(),
+            expected_call: ToolCall::new("book_table", serde_json::json!({"q": "x"})),
+            mock_response: String::new(),
+        };
+        let abstain_ex = Example {
+            tools: vec![tool("get_weather")],
+            user_request: "r".into(),
+            expected_call: ToolCall::gap(),
+            mock_response: String::new(),
+        };
+
+        // Model gets both right.
+        let good = vec![
+            (render_call(&call_ex.expected_call, fmt), call_ex.clone()),
+            (render_call(&ToolCall::gap(), fmt), abstain_ex.clone()),
+        ];
+        let r = AbstentionReport::from_outputs_fmt(&good, fmt);
+        assert_eq!(r.n_call, 1);
+        assert_eq!(r.n_abstain, 1);
+        assert_eq!(r.abstain_recall, 1.0);
+        assert_eq!(r.false_abstention_rate, 0.0);
+        assert_eq!(r.abstain_precision, 1.0);
+
+        // Model wrongly abstains on the call and wrongly calls on the abstain:
+        // zero recall, full false-abstention, zero precision.
+        let bad = vec![
+            (render_call(&ToolCall::gap(), fmt), call_ex),
+            (render_call(&ToolCall::new("get_weather", serde_json::json!({"q": "y"})), fmt), abstain_ex),
+        ];
+        let r = AbstentionReport::from_outputs_fmt(&bad, fmt);
+        assert_eq!(r.abstain_recall, 0.0);
+        assert_eq!(r.false_abstention_rate, 1.0);
+        assert_eq!(r.abstain_precision, 0.0);
+    }
 }

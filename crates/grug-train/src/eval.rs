@@ -35,8 +35,11 @@ use grug_data::schema::Example;
 use grug_data::{Dataset, DiversityReport, EvalAxis, EvalReport};
 use serde::Serialize;
 
+use grug_data::constrain::ToolCallGrammar;
+
 use crate::error::{GrugError, GrugResult};
-use crate::generate::{generate, GenerateConfig};
+use crate::generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
+use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
 use crate::train::format_prompt;
 use crate::transformer::TinyTransformer;
@@ -140,6 +143,366 @@ fn generate_outputs<B: Backend, V: Vocab>(
             (raw, example.clone())
         })
         .collect()
+}
+
+/// Two-axis eval under an explicit [`TargetFormat`] (Phase 51 P2): the prompt
+/// is rendered with `format_prompt_fmt` and outputs scored with
+/// `Dataset::score_axis_fmt`, so a JSON-vs-Grug A/B is a pure format swap on an
+/// otherwise-identical harness. Plain greedy decoding (`generate`).
+pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: grug_data::EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect();
+        Dataset::score_axis_fmt(which, &outputs, fmt)
+    };
+    (
+        axis(holdout.phrasing_examples(), grug_data::EvalAxis::HeldOutPhrasing),
+        axis(holdout.whole_tool_examples(), grug_data::EvalAxis::WholeToolHoldout),
+    )
+}
+
+/// Two-axis eval that generates once and scores each axis **both raw and
+/// KG-repaired** (Phase 51 P3b): returns `((raw_b, raw_a), (repaired_b,
+/// repaired_a))`. The raw→repaired delta is what the symbolic grounding/repair
+/// layer (`grug_data::repair`) recovers on top of the neural proposal.
+pub fn run_two_axis_eval_raw_and_repaired_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> (
+    (grug_data::AxisReport, grug_data::AxisReport),
+    (grug_data::AxisReport, grug_data::AxisReport),
+) {
+    let outputs = |examples: &[Example]| -> Vec<(String, Example)> {
+        examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect()
+    };
+    let b_out = outputs(holdout.phrasing_examples());
+    let a_out = outputs(holdout.whole_tool_examples());
+    (
+        (
+            Dataset::score_axis_fmt(grug_data::EvalAxis::HeldOutPhrasing, &b_out, fmt),
+            Dataset::score_axis_fmt(grug_data::EvalAxis::WholeToolHoldout, &a_out, fmt),
+        ),
+        (
+            Dataset::score_axis_repaired_fmt(grug_data::EvalAxis::HeldOutPhrasing, &b_out, fmt),
+            Dataset::score_axis_repaired_fmt(grug_data::EvalAxis::WholeToolHoldout, &a_out, fmt),
+        ),
+    )
+}
+
+/// Greedy-generate on every example under schema-constrained decoding
+/// (Phase 51 P1a-4 Step A): the [`generate_outputs`] counterpart that builds a
+/// per-example [`ToolCallGrammar`] over the offered tools and calls
+/// [`generate_constrained`]. `pieces` is the tokenizer's per-id byte table
+/// ([`Vocab::token_pieces`]), built once by the caller.
+fn generate_outputs_constrained<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    examples: &[Example],
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> Vec<(String, Example)> {
+    examples
+        .iter()
+        .map(|example| {
+            let prompt = format_prompt(example);
+            let grammar = ToolCallGrammar::new(&example.tools);
+            let raw = generate_constrained(model, tokenizer, &prompt, &grammar, pieces, gen_config, device);
+            (raw, example.clone())
+        })
+        .collect()
+}
+
+/// Run one two-axis eval pass under **schema-constrained decoding** and return
+/// the `(axis_b_phrasing, axis_a_whole_tool)` `AxisReport` pair. The
+/// unconstrained counterpart is [`run_two_axis_eval`]; running both on the same
+/// frozen holdout is the Phase 51 P1a-4 Step A experiment (does forcing valid,
+/// schema-consistent parameter names lift schema-adherence — especially the
+/// zero-shot whole-tool axis — and how far does argument-correctness follow?).
+pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let phrasing_outputs = generate_outputs_constrained(model, tokenizer, pieces, &holdout.phrasing, gen_config, device);
+    let whole_tool_outputs =
+        generate_outputs_constrained(model, tokenizer, pieces, &holdout.whole_tool, gen_config, device);
+
+    (
+        Dataset::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_outputs),
+        Dataset::score_axis(EvalAxis::WholeToolHoldout, &whole_tool_outputs),
+    )
+}
+
+/// Two-axis eval for the [`PointerTransformer`] under **plain greedy** decoding
+/// (Phase 51 P1a-4 Step B): the [`run_two_axis_eval`] counterpart that decodes
+/// from the pointer-generator's mixed distribution (`generate_ptr`). Comparing
+/// this to the non-pointer baseline (plain greedy: axis-B arg 0.78 / axis-A
+/// schema 0.03) isolates the copy mechanism's contribution.
+pub fn run_two_axis_eval_ptr<B: Backend, V: Vocab>(
+    model: &PointerTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| (generate_ptr(model, tokenizer, &format_prompt(ex), gen_config, device), ex.clone()))
+            .collect();
+        Dataset::score_axis(which, &outputs)
+    };
+    (
+        axis(&holdout.phrasing, EvalAxis::HeldOutPhrasing),
+        axis(&holdout.whole_tool, EvalAxis::WholeToolHoldout),
+    )
+}
+
+/// Two-axis eval for the [`PointerTransformer`] under **schema-constrained**
+/// decoding (Phase 51 P1a-4 Step B): pointer copy mechanism *and* the Step A
+/// grammar mask together (`generate_ptr_constrained`).
+pub fn run_two_axis_eval_ptr_constrained<B: Backend, V: Vocab>(
+    model: &PointerTransformer<B>,
+    tokenizer: &V,
+    pieces: &[Option<Vec<u8>>],
+    holdout: &FrozenTwoAxisHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+) -> (grug_data::AxisReport, grug_data::AxisReport) {
+    let axis = |examples: &[Example], which: EvalAxis| {
+        let outputs: Vec<(String, Example)> = examples
+            .iter()
+            .map(|ex| {
+                let grammar = ToolCallGrammar::new(&ex.tools);
+                let raw = generate_ptr_constrained(
+                    model,
+                    tokenizer,
+                    &format_prompt(ex),
+                    &grammar,
+                    pieces,
+                    gen_config,
+                    device,
+                );
+                (raw, ex.clone())
+            })
+            .collect();
+        Dataset::score_axis(which, &outputs)
+    };
+    (
+        axis(&holdout.phrasing, EvalAxis::HeldOutPhrasing),
+        axis(&holdout.whole_tool, EvalAxis::WholeToolHoldout),
+    )
+}
+
+/// Both halves of the Phase 51 P3c abstention eval, drawn once and frozen for
+/// the whole run (like [`FrozenTwoAxisHoldout`]):
+///
+/// - `call`: should-**call** examples (TRAIN tools × HOLDOUT phrasings, axis-B
+///   shape) — used to measure the **false-abstention rate** (does gap-token
+///   supervision make the model wrongly abstain on requests a tool *does* cover?).
+/// - `abstain`: should-**abstain** examples ([`Dataset::abstention_examples`]) —
+///   used to measure **abstain recall** (did the model learn to emit gap when no
+///   offered tool fits?).
+///
+/// Scoring both together yields the full [`grug_data::AbstentionReport`]
+/// confusion matrix.
+pub struct FrozenAbstentionHoldout {
+    call: Vec<Example>,
+    abstain: Vec<Example>,
+}
+
+impl FrozenAbstentionHoldout {
+    /// Draw `n_call` should-call and `n_abstain` should-abstain frozen examples.
+    pub fn new(dataset: &Dataset, n_call: usize, n_abstain: usize) -> GrugResult<Self> {
+        Ok(Self {
+            call: dataset.holdout_phrasing_examples(n_call)?,
+            abstain: dataset.abstention_examples(n_abstain)?,
+        })
+    }
+
+    pub fn call_examples(&self) -> &[Example] {
+        &self.call
+    }
+
+    pub fn abstain_examples(&self) -> &[Example] {
+        &self.abstain
+    }
+}
+
+/// Run one abstention eval pass (Phase 51 P3c): greedy-generate on both the
+/// should-call and should-abstain frozen batches under `fmt`, then score the
+/// combined confusion matrix. The two headline rates are `abstain_recall` (on
+/// the abstain batch) and `false_abstention_rate` (on the call batch).
+pub fn run_abstention_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenAbstentionHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> grug_data::AbstentionReport {
+    let mut pairs: Vec<(String, Example)> = Vec::with_capacity(holdout.call.len() + holdout.abstain.len());
+    for ex in holdout.call.iter().chain(holdout.abstain.iter()) {
+        let prompt = crate::train::format_prompt_fmt(ex, fmt);
+        let raw = generate(model, tokenizer, &prompt, gen_config, device);
+        pairs.push((raw, ex.clone()));
+    }
+    grug_data::AbstentionReport::from_outputs_fmt(&pairs, fmt)
+}
+
+/// The frozen eval set for retrieval-scoped operation (Phase 51 P3a, ADR 089
+/// mechanism 1), drawn once:
+///
+/// - `scoped`: in-registry requests offered the retriever's top-k (registry
+///   tools × held-out phrasings) — a mix of call labels (retrieval surfaced the
+///   target) and gap labels (retrieval miss).
+/// - `novelty`: genuine out-of-registry requests offered the registry's closest
+///   confusables — all gap labels (the hard abstention test).
+/// - `recall_at_k`: the model-independent retrieval recall@k over the registry,
+///   computed once at construction — mechanism 1's premise check.
+pub struct FrozenRetrievalHoldout {
+    scoped: Vec<Example>,
+    novelty: Vec<Example>,
+    recall_at_k: f64,
+}
+
+impl FrozenRetrievalHoldout {
+    /// Draw the retrieval-scoped holdout: `n_scoped` in-registry call/gap
+    /// examples, `n_novelty` genuine-novelty abstentions, and a recall probe of
+    /// `n_recall` `(request, target)` pairs — all frozen for the run.
+    pub fn new(
+        dataset: &Dataset,
+        k: usize,
+        n_scoped: usize,
+        n_novelty: usize,
+        n_recall: usize,
+    ) -> GrugResult<Self> {
+        let retriever = dataset.registry_retriever();
+        let recall_pairs = dataset.retrieval_recall_pairs(n_recall)?;
+        let recall_at_k = grug_data::retrieval_recall_at_k(&retriever, &recall_pairs, k);
+        Ok(Self {
+            scoped: dataset.retrieval_holdout_examples(k, n_scoped)?,
+            novelty: dataset.retrieval_abstention_examples(k, n_novelty)?,
+            recall_at_k,
+        })
+    }
+
+    /// The model-independent retrieval recall@k (mechanism 1 premise).
+    pub fn recall_at_k(&self) -> f64 {
+        self.recall_at_k
+    }
+}
+
+/// The three-part result of a retrieval-scoped eval (mechanism 1):
+///
+/// - `recall_at_k`: does retrieval surface the target into the offered set?
+///   (model-independent premise).
+/// - `call`: registry-wide call reliability — schema/arg-correct over the
+///   *call-labelled* scoped examples (offered set genuinely covered the request).
+/// - `abstention`: the gap confusion matrix over *all* scoped + novelty examples
+///   (recall on should-abstain = retrieval misses + genuine novelty;
+///   false-abstention on should-call).
+#[derive(Debug, Clone, Copy)]
+pub struct RetrievalEval {
+    pub recall_at_k: f64,
+    pub call: grug_data::EvalReport,
+    /// Registry-wide call reliability **after the M2 KG-repair pass** (ADR 089
+    /// mechanism 2, `grug_data::repair`) grounds each proposal against the
+    /// *retrieved* offered set — the full-stack number: M1-retrieve → propose →
+    /// M2-repair. The `call` → `call_repaired` delta is what the symbolic
+    /// grounding recovers on top of the neural proposal, now measured under the
+    /// realistic retrieval-selected offered set (8 request-keyed confusables)
+    /// rather than P3b's easy-2 distractors.
+    pub call_repaired: grug_data::EvalReport,
+    /// Registry-wide call reliability after the **full last-mile stack**: M2
+    /// name-repair *then* value-grounding ([`grug_data::ground_values`], Phase 51
+    /// P3a) — snaps mis-copied argument *values* to the request's own value
+    /// inventory. The `call_repaired` → `call_grounded` delta is what value
+    /// grounding adds on top of name-repair.
+    pub call_grounded: grug_data::EvalReport,
+    pub abstention: grug_data::AbstentionReport,
+    pub n_call: usize,
+    pub n_abstain: usize,
+}
+
+/// Run one retrieval-scoped eval pass (mechanism 1): greedy-generate on the
+/// scoped + novelty holdouts under `fmt`, then score registry-wide call
+/// reliability (call-labelled subset, **raw and M2-repaired**) and the gap
+/// confusion matrix (all).
+pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    holdout: &FrozenRetrievalHoldout,
+    gen_config: GenerateConfig,
+    device: &B::Device,
+    fmt: grug_data::TargetFormat,
+) -> RetrievalEval {
+    let gen_pairs = |examples: &[Example]| -> Vec<(String, Example)> {
+        examples
+            .iter()
+            .map(|ex| {
+                let prompt = crate::train::format_prompt_fmt(ex, fmt);
+                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+            })
+            .collect()
+    };
+    let scoped = gen_pairs(&holdout.scoped);
+    let novelty = gen_pairs(&holdout.novelty);
+
+    // Registry-wide call reliability: only the scoped examples whose label is a
+    // concrete call (retrieval covered the request).
+    let call_pairs: Vec<(String, Example)> =
+        scoped.iter().filter(|(_, ex)| !ex.is_abstention()).cloned().collect();
+    let call = grug_data::EvalReport::from_outputs_fmt(&call_pairs, fmt);
+    // Full-stack (M1→propose→M2): repair each proposal against the retrieved
+    // offered set before scoring.
+    let call_repaired = grug_data::EvalReport::from_outputs_repaired_fmt(&call_pairs, fmt);
+    // Full last-mile stack: M2 repair then value-grounding against the request.
+    let call_grounded = grug_data::EvalReport::from_outputs_grounded_fmt(&call_pairs, fmt);
+
+    // Abstention confusion matrix over everything (scoped call+gap ∪ novelty
+    // gap). Repair is a call-grounding pass and never rewrites a gap output into
+    // a call (or vice versa — `parse_output` detects abstention before the call
+    // parse), so the abstention matrix is unaffected and scored once, raw.
+    let mut all = scoped.clone();
+    all.extend(novelty.iter().cloned());
+    let abstention = grug_data::AbstentionReport::from_outputs_fmt(&all, fmt);
+
+    RetrievalEval {
+        recall_at_k: holdout.recall_at_k,
+        call,
+        call_repaired,
+        call_grounded,
+        abstention,
+        n_call: call_pairs.len(),
+        n_abstain: all.len() - call_pairs.len(),
+    }
 }
 
 fn append_row<R: Serialize>(row: &R, path: &Path) -> GrugResult<()> {

@@ -279,6 +279,12 @@ pub struct Agent {
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
+    /// Whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091, `kind="turn"`). Default-on (capture is the
+    /// akh's own memory); per-workspace opt-out via `AkhConfig::capture_transcripts`
+    /// / the `AKH_TRANSCRIPT_CAPTURE` env override (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub(crate) capture_transcripts: bool,
 }
 
 impl Agent {
@@ -287,9 +293,10 @@ impl Agent {
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
+        backend_override: Option<Arc<dyn crate::backend::Backend>>,
         #[cfg(feature = "delegation")]
         delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
-    ) {
+    ) -> AgentResult<()> {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
@@ -314,11 +321,10 @@ impl Agent {
         // One shared Backend (ADR 082) binds the executor-facing tools —
         // file_io/edit/glob/grep/shell_exec — to a single target, so a file
         // write and a shell command are guaranteed coherent. Phase 48a: the
-        // in-process backend only (unconfined, honestly Critical); 48b/48c
-        // swap in privilege-dropped / remote executors here.
-        let backend: std::sync::Arc<dyn crate::backend::Backend> = std::sync::Arc::new(
-            crate::backend::InProcessBackend::new(fs.clone()),
-        );
+        // in-process backend by default; 48c: `Agent::with_backend` lets a
+        // caller swap in a privilege-dropped / remote executor here.
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = backend_override
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::InProcessBackend::new(fs.clone())));
         registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
         // Claude-Code-parity coding tools, sharing the same sandbox so reads
         // and writes stay confined to the akh's roots.
@@ -392,6 +398,25 @@ impl Agent {
         registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
         #[cfg(not(feature = "delegation"))]
         registry.register(Box::new(tools::DelegateTool::new_noop()));
+
+        // Structured task tool (ADR 081 slice 6): the KG-backed, LLM-driven
+        // task store — distinct from the ephemeral `task_list` checklist
+        // registered above. One `Tool` per verb (create/update/complete/list).
+        let task_predicates = super::tasks::TaskPredicates::init(engine)?;
+        registry.register(Box::new(tools::StructuredTaskCreateTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskUpdateTool::new(
+            task_predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskCompleteTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskListTool::new(task_predicates)));
+
+        Ok(())
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -690,6 +715,18 @@ impl Agent {
     /// Initializes well-known predicates, registers built-in tools, and
     /// optionally restores goals from the KG.
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
+        Self::with_backend(engine, config, None)
+    }
+
+    /// Build an agent whose executor-facing tools (file_io/edit/glob/grep/shell_exec)
+    /// run through a caller-supplied [`Backend`](crate::backend::Backend) instead of
+    /// the default in-process one (ADR 082 / Phase 48c). Passing `None` reproduces
+    /// [`Agent::new`] byte-for-byte.
+    pub fn with_backend(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
@@ -707,9 +744,10 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            backend,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
@@ -836,6 +874,7 @@ impl Agent {
             context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.
@@ -1904,6 +1943,16 @@ impl Agent {
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
     pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
         self.context_manager = Some(manager);
+    }
+
+    /// Set whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091). Default `true` (capture is the akh's own
+    /// memory); wired from `AkhConfig::capture_transcripts` at agent
+    /// construction. The `AKH_TRANSCRIPT_CAPTURE` env var overrides this at
+    /// the emit site regardless of what was set here (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub fn set_capture_transcripts(&mut self, enabled: bool) {
+        self.capture_transcripts = enabled;
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3597,9 +3646,10 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            None,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
@@ -3906,6 +3956,7 @@ impl Agent {
             context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.
@@ -4000,5 +4051,41 @@ impl std::fmt::Debug for Agent {
             .field("constraint_checker", &self.constraint_checker)
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod backend_seam_tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::vsa::Dimension;
+
+    fn test_engine() -> Arc<Engine> {
+        Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .expect("engine construction should succeed"),
+        )
+    }
+
+    /// `Agent::with_backend(engine, config, None)` must construct exactly like
+    /// `Agent::new` (ADR 082 / Phase 48c seam): `None` selects the same
+    /// in-process `Backend` `register_builtin_tools` builds when no override is
+    /// given. This doesn't drive a swapped-in backend end-to-end (that's the
+    /// Phase 50 W3 runner's job against the real `RemoteBackend`); it just
+    /// proves the new constructor's `None` path is a drop-in for `Agent::new`.
+    #[test]
+    fn with_backend_none_matches_new() {
+        let agent = Agent::with_backend(test_engine(), AgentConfig::default(), None)
+            .expect("Agent::with_backend(.., None) should construct like Agent::new");
+
+        // Sanity: the executor-facing tools registered by register_builtin_tools
+        // are present, proving the in-process default backend path still ran.
+        assert!(
+            agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
+            "shell_exec tool should be registered via the default in-process backend"
+        );
     }
 }

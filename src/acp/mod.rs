@@ -635,6 +635,8 @@ fn dispatch_akh(
                 // Phase 29 capability-exposure groups (plan
                 // docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039).
                 "microtheory", "psyche", "argue", "explain", "trust",
+                // ADR 081 Slice 9 — schema-coverage report.
+                "schema",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -679,6 +681,12 @@ fn dispatch_akh(
                 "_akh/evidence/assess",
                 // Phase 29i — source trust.
                 "_akh/trust",
+                // ADR 081 Slice 9 — schema-coverage report.
+                "_akh/schema/coverage",
+                // ADR 081 Slice 5 — frontier→core promotion proposals
+                // (`promote` is control-plane — see `CONTROL_METHODS`).
+                "_akh/schema/proposals",
+                "_akh/schema/reject",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -1210,6 +1218,44 @@ fn dispatch_akh(
                 "Loaded"
             };
             Ok(serde_json::json!({ "id": id, "state": state }))
+        }
+
+        // ── schema group (ADR 081 Slice 9 — migration: grandfather +
+        //    schema-coverage report). Pure engine read (`&self`), no agent
+        //    lock: classifies the live triple set into typed-core / frontier
+        //    / schema-infra without touching data (see
+        //    `crate::schema::coverage` module docs). ─────────────────────
+        "schema/coverage" => {
+            let top_n = params
+                .get("top_n")
+                .and_then(serde_json::Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(crate::schema::coverage::DEFAULT_TOP_FRONTIER);
+            let report = crate::schema::coverage_report_top_n(engine, top_n);
+            serde_json::to_value(&report).map_err(|e| e.to_string())
+        }
+
+        // ── schema promotion group (ADR 081 Slice 5 — frontier→core
+        //    promotion + human-confirm + aliasing). `proposals`/`reject` are
+        //    engine-only data-plane reads/writes; `promote` needs the
+        //    Postgres registry and is control-plane (`_akh/schema/promote`,
+        //    `akhomed.rs::schema_promote`). ──────────────────────────────
+        "schema/proposals" => {
+            let proposals = crate::agent::promotion::list_pending_proposals(engine)
+                .map_err(|e| format!("list proposals failed: {e}"))?;
+            serde_json::to_value(serde_json::json!({ "proposals": proposals }))
+                .map_err(|e| e.to_string())
+        }
+
+        "schema/reject" => {
+            let id = params
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: id".to_string())?;
+            let reason = params.get("reason").and_then(serde_json::Value::as_str);
+            crate::agent::promotion::reject_proposal(engine, id, reason)
+                .map_err(|e| format!("reject failed: {e}"))?;
+            Ok(serde_json::json!({ "id": id, "status": "rejected" }))
         }
 
         // ── skillpack lifecycle (Phase 29b). `_akh/skills` (list) already

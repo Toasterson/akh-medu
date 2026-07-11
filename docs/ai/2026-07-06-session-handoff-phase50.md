@@ -1,6 +1,23 @@
 # Session handoff — Phase 50 fleet run (2026-07-05 → 07-06)
 
-**Purpose:** resume point after context compaction. Everything below is current as of develop `9eb6d15`.
+**Purpose:** resume point after context compaction.
+
+---
+
+## UPDATE 2026-07-07 (session 2) — W3 runner LIVE, pipeline validated end-to-end
+
+develop advanced `9eb6d15` → **`df270cb`** (+ user's own `4a1df0b` phase51 commit interleaved). New this session:
+- **48f audit execution-envelope** (`8938356`) — `ExecLocus` on every `Backend` + `ExecEnvelope` stamped on each `ToolInvocation` audit record (backward-compat: JSON + bincode legacy). `df270cb` fixes a bincode round-trip bug (`skip_serializing_if` is incompatible with positional bincode).
+- **`Agent::with_backend` seam** (`4239f6c`) — inject a caller-supplied executor `Backend`; `Agent::new` delegates `None` byte-identically.
+- **W3 runner** (`650571a`, `examples/phase50_w3_runner.rs`) — drives a cloud model through the 48c executor against live exec1, runs the illumos-e2e corpus (setup→`run_agentic_turn`→verify), deterministic + manpage-grounding grade, emits `harness_core::RunRecord`. `--dry-run` validates plumbing without cloud spend.
+- **★ RemoteBackend multi-KB write bug fixed** (in `650571a`) — exec1's `openssl 1.0.2u` truncates `base64 -d` of a single unwrapped line past ~500 B; W2b only probed 300 B so missed it. Fixed by MIME-wrapping at 76 cols. Real task scripts are multi-KB — this would have silently corrupted every setup.sh.
+- **★ FIRST REAL RESULT**: glm-5.2, through the executor against live illumos, autonomously diagnosed + fixed a maintenance-stuck SMF service — **deterministic PASS, score 1.000, 79.5s, 11 requests**. The whole Phase-50 thesis (VM → executor → agentic akh → deterministic grade → RunRecord) is validated end-to-end.
+- **★ FIRST REAL LEADERBOARD PUBLISHED** (`30c8326`): all 3 models ran the full 15-task illumos-e2e corpus through the executor vs live exec1 → **each 8/15 (53.3%, mean 0.533)**. The 53.3% is a **substrate cap** (guest has no cc/cargo → 6 c-\*/rust-\* compile tasks fail uniformly; rbac-03 = real shared miss; 8/9 on toolchain-free tasks). Inter-model signal = **manpage grounding** (deepseek least/parametric, qwen most). `benchmarks/results/2026-07-07-illumos-e2e-*` + `NOTES.md` + regenerated `LEADERBOARD.md`; site is gitignored (regen `bench-tool site`). Runs are sequential (shared guest); launch script `/tmp/w3-run.sh <model> <slug>`, `OLLAMA_API_KEY` from env-file `OLLAMA_CLOUD_KEY`. Design doc: `docs/ai/2026-07-07-phase50-w3-runner-design.md`.
+- **Next for a fair full-15 v2**: provision `gcc`+`rust` on exec1 (DNS+egress work) or stand up the `builder` VM, then re-run the 3 models.
+- **★ W6 fleet-orchestration ALSO built + published** (`4bec9e1` merge, results `432e8ff`): `benchmarks/illumos-orchestration/tasks/relay-group-3svc` (3 independent broken SMF services) + `examples/phase50_w6_orchestration.rs` (orchestrator decomposes → N worker akhs parallel, own RemoteBackend, shared Engine/ledger; vs single-akh control). All 6 arms pass; **speedup MODEL-DEPENDENT: deepseek 1.63×, qwen 1.47×, glm 0.87× (regressed)** — caveat: single-trial, high cloud-latency variance. `benchmarks/results/2026-07-07-fleet-orchestration-*` + `NOTES.md`. Design doc `docs/ai/2026-07-07-phase50-w6-orchestration-design.md`. Run script `/tmp/w6-sweep.sh`. Delegation subsystem targets EXTERNAL claude subprocesses (no in-process orchestrator existed) → W6 is a bench-local star-topology fan-out. Found illumos `startd/duration=child` maintenance-escalation quirk (may affect illumos-e2e/smf-01 too).
+- exec1 keys restored to `tests/vm/.keys/` (from worktree `agent-a7eae87aa87ddccbd`); a temp copy at `/tmp/akh-exec_ed25519`.
+
+Still open after this: 48b LocalDrop (needs akhomed on illumos — builder VM), W4 advisory, W6 orchestration bench, Terminal-Bench adapter. Push still blocked (locked signing key; all commits unsigned).
 
 ---
 
@@ -62,8 +79,9 @@ Teardown: `vmctl down --name pg --destroy` (keep exec1) / `vmctl down --name exe
 | **W1** OpenIndiana VM substrate + live exec1 | ✅ boot cracked, reproducible; pg/builder provisioning-content deferred |
 | **W2b** 48c validated vs live illumos | ✅ 15/15, fixed OI-no-`base64` write bug |
 | **W5** public benchmark legs | ✅ 9 real rows (see §4) |
-| **48f** ADR-082 §7 audit envelope | ❌ unbuilt — **blocks W3-runner manpage grounding** |
-| **W3 runner** (snapshot-restore + drive akh + grade) | ❌ next wave |
+| **48f** ADR-082 §7 audit envelope | ✅ (2026-07-07) `8938356`+`df270cb` — full ExecLocus layer + ExecEnvelope on ToolInvocation |
+| **Agent::with_backend seam** | ✅ (2026-07-07) `4239f6c` — binds RemoteBackend to an akh's executor tools |
+| **W3 runner** (drive akh + grade) | ✅ (2026-07-07) `650571a` `examples/phase50_w3_runner.rs` — proven live, glm-5.2 solved smf-01 |
 | **48b LocalDrop** (RBAC drop in exec1) | ❌ needs akhomed built for illumos |
 | **W4** advisory mode / **W6** orchestration bench / Terminal-Bench adapter | ❌ |
 

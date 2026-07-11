@@ -69,6 +69,23 @@ impl ValueType {
             ValueType::Link => "onto:value/link",
         }
     }
+
+    /// The inverse of [`Self::entity_label`] — resolve a KG entity label back
+    /// to the [`ValueType`] it names. `None` for anything not one of the
+    /// canonical `onto:value/*` labels (used by [`super::shape`] when reading
+    /// a property's declared value type back out of the graph).
+    pub fn from_entity_label(label: &str) -> Option<Self> {
+        match label {
+            "onto:value/text" => Some(ValueType::Text),
+            "onto:value/list" => Some(ValueType::List),
+            "onto:value/number" => Some(ValueType::Number),
+            "onto:value/date" => Some(ValueType::Date),
+            "onto:value/datetime" => Some(ValueType::Datetime),
+            "onto:value/checkbox" => Some(ValueType::Checkbox),
+            "onto:value/link" => Some(ValueType::Link),
+            _ => None,
+        }
+    }
 }
 
 /// Pack-level metadata (becomes the registry-row identity fields).
@@ -379,5 +396,21 @@ mod tests {
     fn value_type_labels_are_canonical() {
         assert_eq!(ValueType::Text.entity_label(), "onto:value/text");
         assert_eq!(ValueType::Datetime.entity_label(), "onto:value/datetime");
+    }
+
+    #[test]
+    fn value_type_labels_round_trip() {
+        for vt in [
+            ValueType::Text,
+            ValueType::List,
+            ValueType::Number,
+            ValueType::Date,
+            ValueType::Datetime,
+            ValueType::Checkbox,
+            ValueType::Link,
+        ] {
+            assert_eq!(ValueType::from_entity_label(vt.entity_label()), Some(vt));
+        }
+        assert_eq!(ValueType::from_entity_label("onto:value/nonsense"), None);
     }
 }

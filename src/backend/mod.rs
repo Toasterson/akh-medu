@@ -204,6 +204,36 @@ pub struct Posture {
     pub confinement: Confinement,
 }
 
+/// Where a backend's exec verbs land — the locus half of the ADR 082 §7
+/// audit envelope ("the audit ledger is a correlation index, not a duplicate,
+/// over the native OS audit"). `backend`/`host`/`os_user` are the fields a
+/// human or the Phase-50 benchmark grader joins against the native audit
+/// trail (illumos `auditreduce`, sshd logs, …) to answer "who/where actually
+/// ran this"; `correlation_id` is the stable per-backend-instance handle that
+/// makes the join precise instead of fuzzy timestamp matching.
+///
+/// Owned (not `Copy`) because `host`/`os_user`/`correlation_id` are runtime
+/// strings, not `'static` data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecLocus {
+    /// Which `Backend` impl produced this locus — `"in-process"` or
+    /// `"remote"` today; a future `LocalDrop` (48b) or additional remote
+    /// transport would add its own tag.
+    pub backend: &'static str,
+    /// The host the exec actually ran on. `None` means localhost/unknown
+    /// (the in-process backend has no reliable way to name itself without a
+    /// new dependency — see [`InProcessBackend::locus`]).
+    pub host: Option<String>,
+    /// The OS principal the exec ran as.
+    pub os_user: Option<String>,
+    /// A stable identifier for this backend *instance* (not this one exec
+    /// call) that the native OS audit trail can be joined against — in
+    /// production this is the value that would populate the SSH certificate
+    /// key-id (ADR 082 §7), so a correlation-index query can walk straight
+    /// from an akh-medu audit entry to the matching sshd/auditreduce record.
+    pub correlation_id: Option<String>,
+}
+
 /// The unified file + exec surface the executor-facing tools operate through
 /// (ADR 082).
 ///
@@ -219,6 +249,12 @@ pub trait Backend: Filesystem {
     /// The backend's posture self-report (ADR 082 §8). Callers must treat an
     /// [`Confinement::Unconfined`] report as Critical-danger territory.
     fn handshake(&self) -> Posture;
+
+    /// The identity/locus envelope for this backend instance (ADR 082 §7,
+    /// Phase 48f) — who and where would run any exec issued through it. Cheap
+    /// and connection-free: callers (the audit ledger, `ToolRegistry::execute`)
+    /// may call this on every tool invocation without an extra round trip.
+    fn locus(&self) -> ExecLocus;
 }
 
 /// The in-process backend: today's behavior, verbatim (ADR 082 §10 "default =
@@ -356,6 +392,39 @@ impl Backend for InProcessBackend {
             confinement: Confinement::Unconfined,
         }
     }
+
+    /// `backend = "in-process"`; `host`/`os_user` come from the environment
+    /// (`HOSTNAME`/`/etc/hostname`, `USER`/`LOGNAME`) rather than a `libc`
+    /// call — this crate takes no new dependency just to name the box it is
+    /// already running on. `correlation_id` is process-stable
+    /// (`inproc-<pid>`): every tool call this akhomed process makes
+    /// in-process shares one id, which is all a correlation-index join needs
+    /// since there is no separate remote session to distinguish.
+    fn locus(&self) -> ExecLocus {
+        ExecLocus {
+            backend: "in-process",
+            host: local_hostname(),
+            os_user: std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok(),
+            correlation_id: Some(format!("inproc-{}", std::process::id())),
+        }
+    }
+}
+
+/// Best-effort local hostname: `HOSTNAME` env var first (cheap, no syscall),
+/// falling back to reading `/etc/hostname` (Linux/illumos convention). `None`
+/// if neither is available — callers must treat that as "unknown", not an
+/// error; naming the box is a nicety for the audit envelope, not a
+/// requirement for it to function.
+fn local_hostname() -> Option<String> {
+    if let Ok(name) = std::env::var("HOSTNAME") {
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(test)]
@@ -491,5 +560,23 @@ mod tests {
                 confinement: Confinement::Unconfined
             }
         );
+    }
+
+    #[test]
+    fn locus_reports_in_process_with_a_stable_correlation_id() {
+        let backend = InProcessBackend::exec_only();
+        let locus = backend.locus();
+        assert_eq!(locus.backend, "in-process");
+        assert!(
+            locus
+                .correlation_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("inproc-") && id != "inproc-"),
+            "expected a non-empty inproc-<pid> id, got {:?}",
+            locus.correlation_id
+        );
+        // Calling twice on the same process must agree — it's a process-
+        // stable id, not a fresh one per call.
+        assert_eq!(locus.correlation_id, backend.locus().correlation_id);
     }
 }

@@ -45,13 +45,14 @@ use rand::{Rng, SeedableRng};
 use crate::catalog::{ToolCatalog, param};
 use crate::phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 use crate::schema::{ParamType, ToolSchema};
+use crate::semantic::{describe_tool, glossed_phrase, SignalMode};
 
 /// Default number of NL phrasing templates generated per procedural tool.
 /// Within the plan's "6-10 templates" target; `9` splits cleanly under the
 /// default ~30% holdout fraction (3 holdout / 6 train).
 pub const DEFAULT_TEMPLATES_PER_TOOL: usize = 9;
 
-const VERBS: &[&str] = &[
+pub(crate) const VERBS: &[&str] = &[
     "get", "fetch", "list", "create", "update", "delete", "archive", "restore", "search",
     "schedule", "cancel", "start", "stop", "pause", "resume", "sync", "export", "import",
     "validate", "check", "reset", "rotate", "merge", "split", "clone", "publish", "unpublish",
@@ -60,7 +61,7 @@ const VERBS: &[&str] = &[
     "encrypt", "decrypt", "index", "reindex", "compile", "deploy",
 ];
 
-const NOUNS: &[&str] = &[
+pub(crate) const NOUNS: &[&str] = &[
     "ledger", "beacon", "manifest", "cluster", "shard", "widget", "module", "profile",
     "session", "invoice", "ticket", "snapshot", "pipeline", "endpoint", "artifact", "record",
     "workspace", "channel", "queue", "policy", "template", "dataset", "credential", "webhook",
@@ -156,7 +157,7 @@ fn fuzz_param_type_and_suffix(rng: &mut StdRng) -> (ParamType, &'static str) {
 
 /// Build one procedural tool's [`ToolSchema`], with 1-5 params, a
 /// required/optional mix, and varied types.
-fn build_tool_schema(rng: &mut StdRng, name: String) -> ToolSchema {
+fn build_tool_schema(rng: &mut StdRng, name: String, mode: SignalMode) -> ToolSchema {
     let n_params = rng.gen_range(1..=5);
     let mut params = Vec::with_capacity(n_params);
     let mut used_param_names = std::collections::HashSet::new();
@@ -177,9 +178,7 @@ fn build_tool_schema(rng: &mut StdRng, name: String) -> ToolSchema {
         params.push(param(&pname, ty, required));
     }
 
-    let description = format!(
-        "Procedurally generated tool `{name}` with {n_params} parameter(s)."
-    );
+    let description = describe_tool(&name, n_params, mode);
     ToolSchema::new(name, description, params)
 }
 
@@ -322,20 +321,6 @@ fn append_param_list_from(parts: &mut Vec<TemplatePart>, param_names: &[String])
     }
 }
 
-/// Build a natural-language "verb phrase" for a tool's name, e.g.
-/// `fetch_ledger` -> `"fetch the ledger"`. Deliberately simple string
-/// splitting (not NLP) — good enough for template variety, not for realism
-/// beyond what a data-generation harness needs.
-fn verb_phrase_for(tool_name: &str) -> String {
-    let (verb, rest) = tool_name.split_once('_').unwrap_or((tool_name, ""));
-    let noun = rest.replace('_', " ");
-    if noun.is_empty() {
-        verb.to_string()
-    } else {
-        format!("{verb} the {noun}")
-    }
-}
-
 /// Build `n_templates` phrasing templates for `tool`, cycling through
 /// [`SHAPES`] (with a per-tool rotation offset so consecutive tools don't
 /// share the exact same shape-order) so template bodies vary in sentence
@@ -346,9 +331,9 @@ fn verb_phrase_for(tool_name: &str) -> String {
 /// guarantee holds for every required arg regardless of which template is
 /// drawn — this is the load-bearing invariant checked by the
 /// `arg_value_copyable_across_generated_examples` test.
-fn build_templates(tool: &ToolSchema, n_templates: usize, rotation: usize) -> Vec<PhrasingTemplate> {
+fn build_templates(tool: &ToolSchema, n_templates: usize, rotation: usize, mode: SignalMode) -> Vec<PhrasingTemplate> {
     let param_names: Vec<String> = tool.params.iter().map(|p| p.name.clone()).collect();
-    let verb_phrase = verb_phrase_for(&tool.name);
+    let verb_phrase = glossed_phrase(&tool.name, mode);
 
     (0..n_templates)
         .map(|i| {
@@ -374,6 +359,21 @@ pub fn build_catalog(seed: u64, n_tools: usize) -> ToolCatalog {
 /// (exposed for tests that want to probe the minimum bank size, and for
 /// callers that want a denser/thinner phrasing bank than the default).
 pub fn build_catalog_with_templates(seed: u64, n_tools: usize, templates_per_tool: usize) -> ToolCatalog {
+    build_catalog_signal(seed, n_tools, templates_per_tool, SignalMode::Name)
+}
+
+/// Like [`build_catalog_with_templates`], but under an explicit [`SignalMode`]
+/// (Phase 51 P3d): `SignalMode::Name` reproduces the current corpus
+/// byte-identically (the RNG streams and param shapes are untouched — only the
+/// description string and the request verb-phrase change), while `Description`
+/// (D1) and `Paraphrase` (D2) move the retrieval signal off the tool name via
+/// the [`crate::semantic`] gloss lexicon.
+pub fn build_catalog_signal(
+    seed: u64,
+    n_tools: usize,
+    templates_per_tool: usize,
+    mode: SignalMode,
+) -> ToolCatalog {
     assert!(n_tools > 0, "procedural catalog needs at least 1 tool");
     assert!(
         templates_per_tool >= 2,
@@ -391,8 +391,8 @@ pub fn build_catalog_with_templates(seed: u64, n_tools: usize, templates_per_too
 
     for i in 0..n_tools {
         let name = namer.next_tool_name();
-        let schema = build_tool_schema(&mut shape_rng, name);
-        let templates = build_templates(&schema, templates_per_tool, i);
+        let schema = build_tool_schema(&mut shape_rng, name, mode);
+        let templates = build_templates(&schema, templates_per_tool, i, mode);
         let bank = PhrasingBank::new_default(schema.name.clone(), templates)
             .expect("build_templates always returns >= 2 templates");
         phrasings.insert(bank);

@@ -112,6 +112,18 @@ pub struct DaemonConfig {
     /// injects missing predicate symbols and links orphaned entities to drive
     /// the entity:relation ratio toward the healthy 2–3:1 target.
     pub relation_enrichment_interval: Duration,
+    /// Daily-Librarian pass interval (default: 24 h).
+    ///
+    /// ADR 081 slice 4 (`agent::librarian`): LLM extraction of typed triples
+    /// from captured transcript turns against the in-force schema. Distinct
+    /// from `knowledge_elicitation_interval` (Phase 32, which *generates*
+    /// speculative concept knowledge) — this pass *extracts* grounded facts
+    /// from the akh's own captured material. The ticker fires on this
+    /// interval regardless, but the task itself is off unless
+    /// `AKH_LIBRARIAN=1` is set (real per-tick LLM cost, unlike the
+    /// always-on harvest phase's pure KG bookkeeping) and a Postgres store is
+    /// configured (turn material lives only in the WAL).
+    pub librarian_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -138,6 +150,7 @@ impl Default for DaemonConfig {
             kg_compaction_interval: Duration::from_secs(1800), // 30 min
             delegation_interval: Duration::from_secs(10),
             relation_enrichment_interval: Duration::from_secs(3600), // 60 min
+            librarian_interval: Duration::from_secs(86400), // 24 hours
             max_cycles: 0,
         }
     }
@@ -174,6 +187,12 @@ pub struct AgentDaemon {
     /// constructed without explicit autonomy runs only always-on infra tasks
     /// (session persistence + user-trigger evaluation).
     autonomy: AutonomyConfig,
+    /// Postgres backing store + this akh's stable id, for the ADR 091
+    /// sleep-cycle transcript-harvest phase. `None` in local-only mode (no
+    /// `[postgres]` section configured) — harvest is then a no-op, matching
+    /// every other store-backed background task's local-only degradation.
+    #[cfg(feature = "postgres")]
+    db: Option<(akhomed_store::DatabaseConnection, akhomed_store::uuid::Uuid)>,
 }
 
 impl AgentDaemon {
@@ -188,6 +207,8 @@ impl AgentDaemon {
             shutdown: None,
             status: None,
             autonomy: AutonomyConfig::default(),
+            #[cfg(feature = "postgres")]
+            db: None,
         }
     }
 
@@ -231,6 +252,19 @@ impl AgentDaemon {
     /// Attach a shared status for real-time monitoring.
     pub fn with_status(mut self, status: Arc<tokio::sync::Mutex<DaemonStatus>>) -> Self {
         self.status = Some(status);
+        self
+    }
+
+    /// Attach the Postgres backing store + this akh's stable id, enabling the
+    /// ADR 091 sleep-cycle transcript-harvest phase. Omit (local-only mode) to
+    /// leave harvest a no-op.
+    #[cfg(feature = "postgres")]
+    pub fn with_db(
+        mut self,
+        db: akhomed_store::DatabaseConnection,
+        akh_id: akhomed_store::uuid::Uuid,
+    ) -> Self {
+        self.db = Some((db, akh_id));
         self
     }
 
@@ -288,6 +322,7 @@ impl AgentDaemon {
         let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
         let mut delegation_tick = interval(self.config.delegation_interval);
         let mut relation_enrichment_tick = interval(self.config.relation_enrichment_interval);
+        let mut librarian_tick = interval(self.config.librarian_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -424,6 +459,16 @@ impl AgentDaemon {
                     if self.task_enabled("relation_enrichment") {
                         tokio::task::block_in_place(|| self.run_relation_enrichment());
                     }
+                }
+                _ = librarian_tick.tick() => {
+                    // ADR 081 slice 4: gated on AKH_LIBRARIAN=1 *inside*
+                    // run_librarian_task (env-gated, like `openclaw_sync`'s
+                    // OPENCLAW_API_KEY check) rather than `task_enabled(..)`,
+                    // since this is an opt-in LLM-cost pass, not a
+                    // per-workspace autonomy toggle. No-op without the
+                    // `postgres` feature (turn material lives only in the WAL).
+                    #[cfg(feature = "postgres")]
+                    tokio::task::block_in_place(|| self.run_librarian_task());
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -866,6 +911,29 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
+
+                // ADR 091: transcript-harvest phase, still inside the agent
+                // lock (this whole method already runs inside the caller's
+                // `block_in_place`) so the store calls' internal `block_on`
+                // never blocks a live async task on this thread.
+                #[cfg(feature = "postgres")]
+                if let Some((db, akh_id)) = self.db.as_ref() {
+                    match super::harvest::harvest_daily_log(
+                        db,
+                        &agent.engine,
+                        agent.predicates(),
+                        *akh_id,
+                    ) {
+                        Ok(hm) => tracing::info!(
+                            turns_harvested = hm.turns_harvested,
+                            episodes_minted = hm.episodes_minted,
+                            last_seq = hm.last_seq,
+                            "daemon: transcript harvest complete"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "daemon: transcript harvest failed"),
+                    }
+                }
+
                 drop(guard); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()
@@ -874,6 +942,62 @@ impl AgentDaemon {
                 }
             }
             Err(e) => tracing::debug!(error = %e, "daemon: sleep cycle skipped"),
+        }
+    }
+
+    /// ADR 081 slice 4 — daily Librarian pass: LLM extraction of typed
+    /// triples from captured transcript turns against the in-force schema.
+    ///
+    /// Off by default (`AKH_LIBRARIAN=1` opts in) — unlike the always-on
+    /// harvest phase's pure KG bookkeeping, this is a real per-tick LLM cost
+    /// (ADR 081 decision 10: gpt-oss 120B). No-op without a configured
+    /// Postgres store, matching every other store-backed background task's
+    /// local-only degradation (turn material lives only in the WAL).
+    #[cfg(feature = "postgres")]
+    fn run_librarian_task(&self) {
+        if std::env::var("AKH_LIBRARIAN").as_deref() != Ok("1") {
+            return;
+        }
+        let Some((db, akh_id)) = self.db.as_ref() else {
+            tracing::debug!("daemon: librarian pass skipped — no Postgres store configured");
+            return;
+        };
+
+        let engine = {
+            let agent = self.lock_agent();
+            agent.engine.clone()
+        };
+
+        let model = super::librarian::OllamaLibrarianModel::from_env();
+        let config = super::librarian::LibrarianConfig::default();
+
+        // No notes supplied yet — the Note carrier (ADR 081 P1) has no
+        // durable "all notes since X" catalog query today, so this daemon
+        // wiring covers the turn-WAL half of slice 4 only; a caller with a
+        // note catalog can call `run_librarian_pass_over_wal` directly with
+        // its own `notes` slice.
+        match super::librarian::run_librarian_pass_over_wal(db, &engine, &model, *akh_id, &[], &config) {
+            Ok(report) => {
+                if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:librarian] {} source(s): +{} typed, +{} frontier triple(s)",
+                            report.sources_processed,
+                            report.typed_triples_asserted,
+                            report.frontier_triples_asserted,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    sources_processed = report.sources_processed,
+                    sources_skipped_empty = report.sources_skipped_empty,
+                    typed = report.typed_triples_asserted,
+                    frontier = report.frontier_triples_asserted,
+                    last_seq = report.last_seq,
+                    "daemon: librarian pass complete",
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "daemon: librarian pass failed"),
         }
     }
 
@@ -1668,6 +1792,7 @@ mod tests {
             config.relation_enrichment_interval,
             Duration::from_secs(3600)
         );
+        assert_eq!(config.librarian_interval, Duration::from_secs(86400));
         assert_eq!(config.max_cycles, 0);
     }
 }

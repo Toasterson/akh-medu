@@ -26,6 +26,7 @@ use akh_medu::client::DaemonStatus;
 use akh_medu::config::AkhomedConfig;
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::paths::AkhPaths;
+use akh_medu::schema::SchemaRegistry as _;
 use akh_medu::seeds::SeedRegistry;
 use akh_medu::vsa::Dimension;
 use akh_medu::workspace::WorkspaceManager;
@@ -198,6 +199,57 @@ impl DaemonPauseHandle {
         Self {
             paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cycle_done: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+/// ADR 091 decision 5: pages a captured turn's raw body back out of the WAL
+/// at recall time. `Engine::turn_body` is a synchronous seam (the recall path
+/// stays sync/testable — see `src/mutation.rs::TurnBodyReader`); this is the
+/// one real, Postgres-backed implementation, installed alongside the
+/// `MutationSink` in `ServerState::wire_wal`.
+///
+/// Bridges the async DB hop with the runtime `Handle` captured at
+/// construction time (`wire_wal` always runs inside the daemon's tokio
+/// runtime, so `Handle::current()` there is infallible). `turn_body` may be
+/// called either from a `block_in_place` context (the agentic turn's recall
+/// path already runs under one — see `agentic_chat.rs`) or, conceivably, from
+/// a plain sync context with no runtime entered at all. `Handle::try_current()`
+/// distinguishes the two: if it succeeds we are on a thread that already has
+/// a runtime context entered, so a bare `handle.block_on` would panic — wrap
+/// it in `tokio::task::block_in_place` (safe to nest). If it fails, no
+/// runtime is entered on this thread and `handle.block_on` is used directly.
+struct PgTurnBodyReader {
+    pool: Arc<akhomed_store::DatabaseConnection>,
+    akh_id: akhomed_store::uuid::Uuid,
+    handle: tokio::runtime::Handle,
+}
+
+impl akh_medu::mutation::TurnBodyReader for PgTurnBodyReader {
+    fn turn_body(&self, seq: i64) -> Option<String> {
+        let fut = akhomed_store::load_turn_by_seq(&self.pool, self.akh_id, seq);
+        let result = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.handle.block_on(fut))
+        } else {
+            self.handle.block_on(fut)
+        };
+        match result {
+            Ok(Some(payload)) => {
+                let user_prompt = payload
+                    .get("user_prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let agent_answer = payload
+                    .get("agent_answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Some(format!("User: {user_prompt}\nAkh: {agent_answer}"))
+            }
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(seq, error = %e, "turn body lookup failed; recall falls back to summary");
+                None
+            }
         }
     }
 }
@@ -418,6 +470,23 @@ impl ServerState {
         {
             tracing::warn!(workspace = %name, "mutation sink already installed; skipping WAL wiring");
             return;
+        }
+
+        // ADR 091 decision 5: install the WAL body-paging reader alongside the
+        // sink so `recall_episodes` can page a harvested turn's raw text back
+        // out of Postgres. Best-effort/independent of the sink install above —
+        // a reader failing to install just means recall keeps using the
+        // has_summary/label fallback (see `set_turn_body_reader`'s doc comment).
+        let turn_body_reader = Arc::new(PgTurnBodyReader {
+            pool: Arc::clone(pool),
+            akh_id,
+            handle: tokio::runtime::Handle::current(),
+        });
+        if engine
+            .set_turn_body_reader(turn_body_reader as Arc<dyn akh_medu::mutation::TurnBodyReader>)
+            .is_err()
+        {
+            tracing::warn!(workspace = %name, "turn body reader already installed; skipping");
         }
 
         let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -884,6 +953,256 @@ impl ServerState {
         Ok(serde_json::json!({ "migrated": true }))
     }
 
+    /// Admit a compiled schema pack to the Postgres registry (`_akh/schema/admit`,
+    /// ADR 081 decision 9). The CLI already ran the human-confirm gate
+    /// (`--yes`) and decoded the blob locally to build these params; this
+    /// just persists the row via [`akh_medu::schema::registry_pg::PgSchemaRegistry`]
+    /// (which re-checks duplicate-admission + the cross-pack type-collision
+    /// guard against the live registry — never trust the client alone).
+    async fn schema_admit(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        let get_str = |key: &str| -> Result<String, String> {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| format!("missing required param: {key}"))
+        };
+        let name = get_str("name")?;
+        let version = get_str("version")?;
+        let checksum = get_str("checksum")?;
+        let confirmed_by = get_str("confirmed_by")?;
+        let blob_hex = get_str("blob_hex")?;
+        let scope = params
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("shared");
+        let source_url = params
+            .get("source_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+
+        let blob = hex_decode(&blob_hex)?;
+        let row = akh_medu::schema::RegistryRow {
+            name: name.clone(),
+            version: version.clone(),
+            scope: akh_medu::schema::registry_pg::scope_from_string(scope),
+            source_url,
+            checksum,
+            confirmed_by,
+            blob,
+        };
+        let registry = akh_medu::schema::registry_pg::PgSchemaRegistry::new(pool);
+        registry
+            .admit(row)
+            .map_err(|e| format!("admit failed: {e}"))?;
+        tracing::info!(pack = %format!("{name}@{version}"), "schema pack admitted to the registry");
+        Ok(serde_json::json!({ "admitted": true, "name": name, "version": version }))
+    }
+
+    /// List schema packs admitted to the Postgres registry (`_akh/schema/list`).
+    async fn schema_list(&self) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        let registry = akh_medu::schema::registry_pg::PgSchemaRegistry::new(pool);
+        let packs = registry.list().map_err(|e| format!("list failed: {e}"))?;
+        Ok(serde_json::json!({
+            "packs": packs
+                .into_iter()
+                .map(|(name, version)| serde_json::json!({ "name": name, "version": version }))
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Fetch a registry pack (by `name`, or `name`+`version`) and install +
+    /// activate it into a workspace's effective schema (`_akh/schema/install`).
+    /// Records the activation so a later wake converges it automatically
+    /// ([`akh_medu::snapshot::wake`]).
+    async fn schema_install(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let name = params
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: name".to_string())?;
+        let version = params.get("version").and_then(serde_json::Value::as_str);
+
+        let row = match version {
+            Some(v) => akhomed_store::get_pack(pool, name, v)
+                .await
+                .map_err(|e| e.to_string())?,
+            None => akhomed_store::latest_pack(pool, name)
+                .await
+                .map_err(|e| e.to_string())?,
+        };
+        let Some(row) = row else {
+            return Err(format!(
+                "no admitted schema pack found for \"{name}{}\"",
+                version.map(|v| format!("@{v}")).unwrap_or_default()
+            ));
+        };
+        let registry_row = akh_medu::schema::RegistryRow {
+            name: row.name,
+            version: row.version,
+            scope: akh_medu::schema::registry_pg::scope_from_string(&row.scope),
+            source_url: row.source_url,
+            checksum: row.checksum,
+            confirmed_by: row.confirmed_by,
+            blob: row.blob,
+        };
+        let pack = registry_row
+            .decode()
+            .map_err(|e| format!("decode failed: {e}"))?;
+
+        let engine = self.get_engine(ws).await?;
+        let report = akh_medu::schema::install_pack(&engine, &pack)
+            .map_err(|e| format!("install failed: {e}"))?;
+
+        let importer_label = akh_medu::schema::install::effective_schema_label(ws);
+        let importer = engine
+            .resolve_or_create_entity(&importer_label)
+            .map_err(|e| format!("importer entity failed: {e}"))?;
+        akh_medu::schema::activate_pack(&engine, importer, &pack)
+            .map_err(|e| format!("activate failed: {e}"))?;
+
+        let workspace_id = akh_medu::wal::workspace_id_for(ws);
+        let akh_id = akh_medu::wal::akh_id_for(ws);
+        akhomed_store::record_pack_activation(
+            pool,
+            workspace_id,
+            &pack.microtheory_label(),
+            akh_id,
+            akhomed_store::chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| format!("recording activation failed: {e}"))?;
+
+        tracing::info!(
+            workspace = %ws,
+            pack = %format!("{}@{}", pack.name, pack.version),
+            triples_applied = report.triples_applied,
+            already_installed = report.already_installed,
+            "schema pack installed and activated"
+        );
+        Ok(serde_json::json!({
+            "installed": pack.name,
+            "version": pack.version,
+            "workspace": ws,
+            "already_installed": report.already_installed,
+            "triples_applied": report.triples_applied,
+            "microtheory": pack.microtheory_label(),
+        }))
+    }
+
+    /// Report the in-force schema for a workspace's engine — every declared
+    /// type with its effective (inherited-included) property shape, and
+    /// every declared relation (`_akh/schema/digest`, ADR 081 Slice 3
+    /// work-item 4: the `get_graph_schema`-style digest). Does not require
+    /// Postgres (unlike `schema/admit|list|install`) — it introspects
+    /// whatever the workspace's already-loaded engine has installed.
+    async fn schema_digest(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let engine = self.get_engine(ws).await?;
+        let digest = akh_medu::schema::digest(&engine).map_err(|e| format!("digest failed: {e}"))?;
+        serde_json::to_value(&digest).map_err(|e| format!("digest serialization failed: {e}"))
+    }
+
+    /// Promote a pending frontier→core promotion proposal (`_akh/schema/promote`,
+    /// ADR 081 Slice 5). The CLI already ran the human-confirm gate
+    /// (`--yes`); this compiles+admits+installs+activates the promotion
+    /// pack (or records an alias triple for an `alias_of` proposal) — see
+    /// `akh_medu::agent::promotion::promote_proposal` for the full decision
+    /// (new-subtype-vs-standalone-type fallback, one-pack-per-proposal
+    /// naming). Needs both the workspace's engine (to read/apply the
+    /// proposal) and Postgres (to admit the new pack), so — unlike
+    /// `schema/proposals`/`schema/reject` — this is control-plane.
+    async fn schema_promote(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let id = params
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: id".to_string())?;
+        let confirmed_by = params
+            .get("confirmed_by")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+
+        let engine = self.get_engine(ws).await?;
+        let registry = akh_medu::schema::registry_pg::PgSchemaRegistry::new(pool);
+
+        let importer_label = akh_medu::schema::install::effective_schema_label(ws);
+        let importer = engine
+            .resolve_or_create_entity(&importer_label)
+            .map_err(|e| format!("importer entity failed: {e}"))?;
+
+        let outcome = akh_medu::agent::promotion::promote_proposal(
+            &engine,
+            &registry,
+            id,
+            confirmed_by,
+            importer,
+        )
+        .map_err(|e| format!("promotion failed: {e}"))?;
+
+        // A `Promoted` outcome installed a new pack — record its activation
+        // so a later wake converges it automatically (`schema_install`'s
+        // exact precedent). An `Aliased` outcome installed no pack, so
+        // there is nothing to record.
+        if let akh_medu::agent::promotion::PromotionOutcome::Promoted {
+            microtheory_label, ..
+        } = &outcome
+        {
+            let workspace_id = akh_medu::wal::workspace_id_for(ws);
+            let akh_id = akh_medu::wal::akh_id_for(ws);
+            akhomed_store::record_pack_activation(
+                pool,
+                workspace_id,
+                microtheory_label,
+                akh_id,
+                akhomed_store::chrono::Utc::now(),
+            )
+            .await
+            .map_err(|e| format!("recording activation failed: {e}"))?;
+        }
+
+        tracing::info!(
+            workspace = %ws,
+            proposal = %id,
+            "promotion proposal confirmed"
+        );
+        serde_json::to_value(&outcome).map_err(|e| format!("outcome serialization failed: {e}"))
+    }
+
     /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
     ///
     /// Order: stop snapshot tickers, take one final snapshot per loaded
@@ -1163,16 +1482,24 @@ impl ServerState {
             }
         }
 
-        // Phase 44b/c/h/i: assemble each turn through a curating context manager,
-        // guarded by `SafetyEnforced` so eviction can never drop a safety-pinned
-        // span. `AKH_CONTEXT_STRATEGY` selects the strategy (default `compacting`):
-        //   compacting — history + KG + recall within the model's real budget,
-        //                with budget-driven section + tool degradation (44b/c/d/e/g);
+        // Phase 44b/c/h/i (extended ADR 081 slice 7): assemble each turn through
+        // a curating context manager, guarded by `SafetyEnforced` so eviction can
+        // never drop a safety-pinned span. `AKH_CONTEXT_STRATEGY` selects the
+        // strategy (default `compacting`):
+        //   compacting — history + KG + recall + schema digest + active-note
+        //                frontmatter within the model's real budget, with
+        //                budget-driven section + tool degradation (44b/c/d/e/g);
         //   passive    — lean context; the longer thread is carried by background
         //                consolidation + recall, not verbatim history (44h);
         //   virtual    — MemGPT tiers (core/recall/archival) + the self-edit tools
-        //                core_memory_append/replace + archival_search (44i).
+        //                core_memory_append/replace, archival_search, query_graph
+        //                (44i; the latter two extended in ADR 081 slice 7).
         // The lib default stays pass-through (tests / embedded).
+        //
+        // This `virtual`-strategy branch is also today's **tier-gating
+        // mechanism** (ADR 081 slice 7 decision 4): small/append-only models run
+        // `compacting`/`passive` and get no self-edit tools at all; only capable
+        // models selected onto `virtual` get the self-edit + archival/query tools.
         {
             use akh_medu::agent::context::{
                 CompactingManager, ContextManager, PassiveManager, SafetyEnforced,
@@ -1191,7 +1518,12 @@ impl ServerState {
                     agent.register_tool(Box::new(
                         akh_medu::agent::tools::CoreMemoryReplaceTool::new(name),
                     ));
-                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool));
+                    // No persistent note store is wired to the daemon yet (`Note`
+                    // shipped as a carrier type only — ADR 081 work-item P1), so
+                    // archival_search stays KG-only here; `ArchivalSearchTool::with_notes`
+                    // is ready for whichever slice adds a durable note catalog.
+                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool::new()));
+                    agent.register_tool(Box::new(akh_medu::agent::tools::QueryGraphTool));
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
                 _ => Box::new(SafetyEnforced::new(CompactingManager)),
@@ -1199,6 +1531,12 @@ impl ServerState {
             tracing::info!(workspace = %name, %strategy, "context manager attached");
             agent.set_context_manager(manager);
         }
+
+        // ADR 091: per-akh transcript-capture opt-out (default on). The
+        // `AKH_TRANSCRIPT_CAPTURE` env override is applied at the emit site
+        // (`agentic_chat::Agent::transcript_capture_enabled`), not here — this
+        // only wires the config-file default.
+        agent.set_capture_transcripts(akh_config.capture_transcripts);
 
         // Extract the snapshot Arc before moving agent into Mutex so it can be
         // registered without ever re-acquiring the agent lock.
@@ -1341,6 +1679,7 @@ impl ServerState {
             .map(|c| c.autonomy.clone())
             .unwrap_or_default();
 
+        let pool = self.pg_pool();
         let handle = tokio::task::spawn(async move {
             run_daemon_task(
                 shared_agent,
@@ -1350,6 +1689,7 @@ impl ServerState {
                 autonomy,
                 daemon_ws_name,
                 task_handle,
+                pool,
             )
             .await;
         });
@@ -1450,6 +1790,22 @@ fn membership_needs_pg(op: &str) -> String {
     )
 }
 
+/// Decode a lowercase-hex string back into bytes — the counterpart of the
+/// `akh` CLI's `hex_encode`, used to carry a schema-pack blob over the ACP
+/// JSON wire (`_akh/schema/admit`'s `blob_hex` param; see ADR 081 decision 9).
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err(format!("odd-length hex string ({} chars)", s.len()));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|e| format!("invalid hex byte at offset {i}: {e}"))
+        })
+        .collect()
+}
+
 /// Background daemon task: delegates to [`AgentDaemon`] for the full set of
 /// background learning tasks (goal generation, OODA cycles, equivalence
 /// learning, reflection, consolidation, schema discovery, rule inference,
@@ -1462,6 +1818,9 @@ async fn run_daemon_task(
     autonomy: akh_medu::akh_config::AutonomyConfig,
     ws_name: String,
     pause_handle: DaemonPauseHandle,
+    // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
+    // `None` in local-only mode — harvest is then a no-op.
+    pool: Option<Arc<akhomed_store::DatabaseConnection>>,
 ) {
     use akh_medu::agent::AgentDaemon;
 
@@ -1470,6 +1829,10 @@ async fn run_daemon_task(
         .with_shutdown(shutdown_rx)
         .with_status(Arc::clone(&status))
         .with_pause_handles(pause_handle.paused, pause_handle.cycle_done);
+    if let Some(pool) = pool {
+        let akh_id = akh_medu::wal::akh_id_for(&ws_name);
+        daemon = daemon.with_db((*pool).clone(), akh_id);
+    }
 
     if let Err(e) = daemon.run().await {
         tracing::error!(error = %e, ws = %ws_name, "daemon task failed");
@@ -1826,6 +2189,13 @@ impl akh_medu::acp::ServerControl for ServerState {
 
                 // ── migrate (run akhomed-store migrations on demand) ──────
                 "migrate" => self.run_migrations_op().await,
+
+                // ── schema group (ADR 081 decision 9: Postgres registry) ──
+                "schema/admit" => self.schema_admit(params).await,
+                "schema/list" => self.schema_list().await,
+                "schema/install" => self.schema_install(params).await,
+                "schema/digest" => self.schema_digest(params).await,
+                "schema/promote" => self.schema_promote(params).await,
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
@@ -2251,6 +2621,7 @@ async fn main() {
                     let pause_handle = DaemonPauseHandle::new();
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
+                    let pool = state.pg_pool();
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
                             shared_agent,
@@ -2260,6 +2631,7 @@ async fn main() {
                             autonomy,
                             daemon_ws,
                             task_handle,
+                            pool,
                         )
                         .await;
                     });

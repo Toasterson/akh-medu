@@ -6,8 +6,9 @@
 
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
-    MutationRow, PoolOptions, append_mutations, connect, ensure_akh, join_workspace,
-    leave_workspace, list_members, release_akh_lock, run_migrations, run_migrations_locked,
+    MutationRow, PoolOptions, append_mutations, connect, ensure_akh, get_harvest_watermark,
+    join_workspace, leave_workspace, list_members, load_turn_by_seq, load_turns_since,
+    release_akh_lock, run_migrations, run_migrations_locked, set_harvest_watermark,
     touch_last_seen, try_acquire_akh_lock,
 };
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
@@ -185,4 +186,113 @@ async fn concurrent_locked_migrators_do_not_race() {
 
     // Cleanup (FORCE terminates the migrators' now-idle pooled connections).
     admin.execute_unprepared(&drop).await.expect("drop throwaway db");
+}
+
+/// ADR 091: a `kind='turn'` WAL row lands via `append_mutations` and is
+/// readable back through `load_turns_since` / `load_turn_by_seq`.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn turn_rows_land_and_are_readable() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&PoolOptions::new(url)).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    let akh = Uuid::new_v4();
+    let workspace = Uuid::new_v4();
+    ensure_akh(&db, akh, "turn-row-test-akh", None).await.unwrap();
+
+    // Nothing captured yet.
+    assert!(load_turns_since(&db, akh, 0, 100).await.unwrap().is_empty());
+
+    let payload = serde_json::json!({
+        "v": 1,
+        "ts": "2026-07-10T00:00:00.000000000Z",
+        "workspace": "turn-row-test-akh",
+        "model": "glm-5.2",
+        "user_prompt": "what is the capital of France?",
+        "agent_answer": "Paris.",
+        "tools": [],
+    });
+    let rows = vec![MutationRow {
+        kind: "turn".into(),
+        payload: payload.clone(),
+    }];
+    assert_eq!(append_mutations(&db, akh, workspace, &rows).await.unwrap(), 1);
+
+    let turns = load_turns_since(&db, akh, 0, 100).await.unwrap();
+    assert_eq!(turns.len(), 1, "one turn row visible");
+    assert_eq!(turns[0].payload, payload);
+
+    let by_seq = load_turn_by_seq(&db, akh, turns[0].seq).await.unwrap();
+    assert_eq!(by_seq, Some(payload));
+
+    // `after_seq` at-or-past the row's seq excludes it.
+    assert!(load_turns_since(&db, akh, turns[0].seq, 100).await.unwrap().is_empty());
+
+    // A non-`turn` seq (or one that doesn't exist) is `None`.
+    assert_eq!(load_turn_by_seq(&db, akh, turns[0].seq + 999_999).await.unwrap(), None);
+}
+
+/// ADR 091: the harvest watermark round-trips through get/set, and a full
+/// `akh_state` snapshot `upsert` never clobbers a value `set_harvest_watermark`
+/// already wrote (the clobber-guard this slice depends on).
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn harvest_watermark_roundtrips_and_survives_state_upsert() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&PoolOptions::new(url)).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    let akh = Uuid::new_v4();
+    ensure_akh(&db, akh, "watermark-test-akh", None).await.unwrap();
+
+    // 0 with no akh_state row at all.
+    assert_eq!(get_harvest_watermark(&db, akh).await.unwrap(), 0);
+
+    // Setting with no row yet inserts a minimal default row.
+    set_harvest_watermark(&db, akh, 7).await.unwrap();
+    assert_eq!(get_harvest_watermark(&db, akh).await.unwrap(), 7);
+
+    // Advancing again updates in place.
+    set_harvest_watermark(&db, akh, 42).await.unwrap();
+    assert_eq!(get_harvest_watermark(&db, akh).await.unwrap(), 42);
+
+    // A full-state snapshot upsert (as `persist_snapshot` performs every sleep
+    // tick) with a stale `harvest_watermark` value in the in-memory model must
+    // NOT clobber the 42 already durable — `update_columns` excludes the
+    // column, so only the dedicated setter can move it.
+    let stale_state = akhomed_store::entity::akh_state::Model {
+        akh_id: akh,
+        watermark: 100,
+        allocator_next: 5,
+        cycle_count: 3,
+        session_start_cycle: 0,
+        sleep_phase: "Wake".into(),
+        last_sleep_cycle: 1,
+        psyche: None,
+        extra: None,
+        harvest_watermark: 0, // stale/wrong on purpose
+        librarian_watermark: 0,
+        updated_at: akhomed_store::chrono::Utc::now(),
+    };
+    akhomed_store::snapshots::upsert_akh_state(&db, stale_state).await.unwrap();
+
+    assert_eq!(
+        get_harvest_watermark(&db, akh).await.unwrap(),
+        42,
+        "snapshot upsert must not clobber the harvest watermark"
+    );
+    // The columns the upsert IS responsible for did land.
+    let state = akhomed_store::snapshots::load_akh_state(&db, akh)
+        .await
+        .unwrap()
+        .expect("akh_state row exists");
+    assert_eq!(state.watermark, 100);
+    assert_eq!(state.cycle_count, 3);
 }

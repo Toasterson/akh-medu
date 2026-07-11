@@ -45,6 +45,13 @@ pub enum MutationKind {
     CompartmentCreate,
     /// A compartment was destroyed.
     CompartmentDestroy,
+    /// A completed agentic conversation turn (ADR 091: transcript→episodic
+    /// capture). Raw staging, not a KG mutation — never replayed through
+    /// `Engine::add_triple` on wake (see the `"turn"` skip arm in the main
+    /// crate's `snapshot.rs::apply_mutation`); the KG facts derived from a
+    /// turn (if any) get their own `assert` rows. A dropped turn is silent
+    /// memory loss, so it is protected on overflow just like `Assert`.
+    Turn,
 }
 
 impl MutationKind {
@@ -57,14 +64,17 @@ impl MutationKind {
             MutationKind::MicrotheoryUnload => "microtheory_unload",
             MutationKind::CompartmentCreate => "compartment_create",
             MutationKind::CompartmentDestroy => "compartment_destroy",
+            MutationKind::Turn => "turn",
         }
     }
 
     /// Whether this kind carries knowledge that should be preserved over the
-    /// buffer-overflow drop policy. Asserts are protected; everything else is
-    /// reconstructable or less critical and is dropped first under pressure.
+    /// buffer-overflow drop policy. Asserts and turns are protected;
+    /// everything else is reconstructable or less critical and is dropped
+    /// first under pressure. A dropped turn is silent memory loss (ADR 091),
+    /// same severity class as a dropped assert.
     pub fn is_protected_on_overflow(self) -> bool {
-        matches!(self, MutationKind::Assert)
+        matches!(self, MutationKind::Assert | MutationKind::Turn)
     }
 }
 
@@ -93,6 +103,22 @@ impl MutationSink for CountingSink {
     }
 }
 
+/// Pages a captured turn's body back out of the WAL at recall time (ADR 091
+/// decision 5: "a minted episode is a lightweight index; the body stays in
+/// the WAL"). Mirrors [`MutationSink`]'s shape — a tiny synchronous seam the
+/// engine can call from the recall path without knowing about SeaORM or
+/// tokio. The daemon binary installs the real, Postgres-backed implementation
+/// (bridging its async DB hop with `block_on`/`block_in_place`); in-memory or
+/// local-only engines simply never install one, and [`crate::engine::Engine::turn_body`]
+/// returns `None`.
+pub trait TurnBodyReader: Send + Sync {
+    /// Look up the raw turn body for a given WAL `seq`. Returns `None` if the
+    /// row does not exist, is not a `kind="turn"` row, or the lookup failed
+    /// (best-effort: recall must fall back to the existing summary/label path,
+    /// never error, on a missing body).
+    fn turn_body(&self, seq: i64) -> Option<String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,13 +130,23 @@ mod tests {
         assert_eq!(MutationKind::Retract.as_str(), "retract");
         assert_eq!(MutationKind::MicrotheoryLoad.as_str(), "microtheory_load");
         assert_eq!(MutationKind::CompartmentDestroy.as_str(), "compartment_destroy");
+        assert_eq!(MutationKind::Turn.as_str(), "turn");
     }
 
     #[test]
-    fn only_assert_is_protected() {
+    fn assert_and_turn_are_protected() {
         assert!(MutationKind::Assert.is_protected_on_overflow());
+        assert!(MutationKind::Turn.is_protected_on_overflow());
         assert!(!MutationKind::Retract.is_protected_on_overflow());
         assert!(!MutationKind::MicrotheoryLoad.is_protected_on_overflow());
+    }
+
+    #[test]
+    fn turn_kind_round_trips_through_as_str() {
+        // `as_str` is the exact string stored in `mutation_log.kind`; the
+        // sleep-cycle harvest phase and wake-replay skip both match on it
+        // literally ("turn"), so a rename here is a breaking schema change.
+        assert_eq!(MutationKind::Turn.as_str(), "turn");
     }
 
     #[test]

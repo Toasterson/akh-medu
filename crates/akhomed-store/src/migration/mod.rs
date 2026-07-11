@@ -12,6 +12,9 @@ mod m20260618_000002_create_workspaces;
 mod m20260620_000001_cognitive_tables;
 mod m20260620_000002_mutation_log_hypertable;
 mod m20260621_000001_akh_config;
+mod m20260710_000001_harvest_watermark;
+mod m20260711_000001_schema_registry;
+mod m20260711_000002_librarian_watermark;
 
 pub struct Migrator;
 
@@ -24,6 +27,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260620_000001_cognitive_tables::Migration),
             Box::new(m20260620_000002_mutation_log_hypertable::Migration),
             Box::new(m20260621_000001_akh_config::Migration),
+            Box::new(m20260710_000001_harvest_watermark::Migration),
+            Box::new(m20260711_000001_schema_registry::Migration),
+            Box::new(m20260711_000002_librarian_watermark::Migration),
         ]
     }
 }

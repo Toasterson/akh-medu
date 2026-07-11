@@ -160,6 +160,11 @@ libloading = { version = "0.8", optional = true }
 # lean `akh` client binary never compiles SeaORM/sqlx.
 akhomed-store = { path = "crates/akhomed-store", optional = true }
 
+# Phase 51 / ADR 089: the organ's tool-call passes (retrieval-scoped catalog +
+# KG-repair of near-miss calls) at the live agent boundary. Pure Rust, no ML
+# dependency — the tested lab implementation, reused rather than reimplemented.
+grug-data = { path = "crates/grug-data" }
+
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
@@ -256,6 +261,12 @@ remote-executor = ["dep:russh", "dep:base64", "tokio"]
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+# Phase 50 / W3 runner (examples/phase50_w3_runner.rs): links the RunRecord
+# schema + hashing/storage helpers. `chrono` is pulled in separately here
+# (rather than relying on the optional main-crate feature that also gates
+# it) because examples only see [dev-dependencies] unconditionally.
+harness-core = { path = "benchmarks/harness-core" }
+chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
 name = "akh"
@@ -300,3 +311,22 @@ harness = false
 # registry consume this patched candle-core transparently.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core" }
+# illumos portability fix: hnsw_rs (always-on, item-memory ANN backend) pulls
+# mmap-rs unconditionally, which in turn depends on the `sysctl` crate for
+# every `cfg(unix)` target even though `sysctl` implements a `sys` backend
+# only for linux/android/macos/ios/tvos/visionos/freebsd — it has no illumos
+# module and fails to compile there (E0432/E0433: `mod sys` "configured
+# out"). Nothing mmap-rs does on illumos (which falls through to its generic
+# os_impl::unix) ever calls into sysctl; the one reference is a dead
+# `#[cfg(unix)] Error::Sysctl` variant. This vendored fork narrows that one
+# cfg (and the matching Cargo.toml dependency table) to exclude illumos —
+# byte-identical behavior on every other platform. See vendor/mmap-rs/src/error.rs.
+mmap-rs = { path = "vendor/mmap-rs" }
+# illumos portability fix: the `libc` crate's solarish (illumos/solaris)
+# bindings are missing CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID even
+# though illumos's own <sys/time_impl.h> defines them and clock_gettime(3c)
+# accepts them at runtime (verified on OpenIndiana 2026.04) — cpu-time (a
+# transitive dep of hnsw_rs, which is always-on) fails to compile without
+# them. This vendored fork adds only those two constants to
+# src/unix/solarish/mod.rs; every other platform's bindings are untouched.
+libc = { path = "vendor/libc" }

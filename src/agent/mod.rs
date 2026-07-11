@@ -19,6 +19,7 @@ pub mod channel;
 pub mod counterfactual;
 pub mod agentic_chat;
 pub mod chat_backend;
+pub mod organ;
 pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
@@ -56,14 +57,18 @@ pub mod operator_channel;
 #[cfg(feature = "oxifed")]
 pub mod oxifed;
 pub mod goal_generation;
+#[cfg(feature = "postgres")]
+pub mod harvest;
 pub mod idle;
 pub mod journal_ingest;
+pub mod librarian;
 pub mod library_learn;
 pub mod mcts;
 pub mod memory;
 pub mod memory_sync;
 pub mod metacognition;
 pub mod model_manager;
+pub mod promotion;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
@@ -87,6 +92,7 @@ pub mod source_reliability;
 pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
+pub mod tasks;
 pub mod temporal_experience;
 pub mod tool;
 pub mod trajectory;
@@ -126,6 +132,8 @@ pub use multi_agent::{
 pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
+#[cfg(feature = "postgres")]
+pub use harvest::{HarvestMetrics, harvest_daily_log, mint_turn_episode};
 pub use decomposition::{
     DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
     TaskNode, TaskNodeKind, TaskTree,
@@ -215,7 +223,7 @@ pub use event_calculus::{
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
     GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
-    PimResult, Recurrence,
+    PimResult, Recurrence, Weekdays,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use plan_monitor::{DeviationSeverity, PlanMonitor, plan_from_mcts, post_action_update};

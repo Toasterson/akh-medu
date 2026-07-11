@@ -23,6 +23,15 @@ use super::{SchemaError, SchemaResult};
 /// Marker predicate: `(mt-symbol, akh:schema-installed, name@version)`.
 const INSTALLED_PREDICATE: &str = "akh:schema-installed";
 
+/// The deterministic label for a workspace's effective-schema import context
+/// — the target of every `ctx:specializes` activation edge installed for
+/// that workspace (ADR 081 decision 6: an akh's effective schema is the
+/// import stack rooted here). One label per workspace, so activating a
+/// second pack simply adds another edge from the same importer entity.
+pub fn effective_schema_label(workspace: &str) -> String {
+    format!("mt:akh/{workspace}-effective")
+}
+
 /// Report after installing a compiled schema pack.
 #[derive(Debug, Clone)]
 pub struct InstallReport {

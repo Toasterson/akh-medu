@@ -106,6 +106,37 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
+    /// The reserved sentinel tool name marking an **abstention** target: "none
+    /// of the offered tools cover this request" (Phase 51 P3c, ADR 089
+    /// mechanism 3). This is never a real tool name — the procedural catalog
+    /// emits `verb_noun` names, and the built-in catalog has none matching —
+    /// so a [`ToolCall`] with this name is unambiguously the gap signal, not a
+    /// call to a tool literally called `__gap__`.
+    ///
+    /// Representing abstention as a reserved-name `ToolCall` (rather than a new
+    /// `Example.expected` enum) is deliberate: the entire tokenize → batch →
+    /// train → generate pipeline is written against `Example.expected_call:
+    /// ToolCall`, so a gap example flows through all of it unchanged, and
+    /// existing *call* examples stay byte-identical. The wire rendering (a bare
+    /// `gap` / `{"gap":true}`) lives in [`crate::format`]; the typed
+    /// constructor/predicate here keep the sentinel from leaking as a magic
+    /// string.
+    pub const GAP_TOOL_NAME: &'static str = "__gap__";
+
+    /// Build the abstention (gap) sentinel call — the target a model should
+    /// emit when no offered tool fits the request. Arguments are empty.
+    pub fn gap() -> Self {
+        Self {
+            name: Self::GAP_TOOL_NAME.to_string(),
+            arguments: serde_json::Value::Object(Default::default()),
+        }
+    }
+
+    /// Is this the abstention (gap) sentinel rather than a real tool call?
+    pub fn is_gap(&self) -> bool {
+        self.name == Self::GAP_TOOL_NAME
+    }
+
     /// Build a call, coercing a non-object `arguments` into an empty object.
     /// (Generator code always passes a `serde_json::Map`-backed `Value`, so
     /// this is a defensive normalization rather than the common path.)
@@ -155,9 +186,16 @@ impl Example {
     }
 
     /// The schema for this example's expected tool, if it is among the
-    /// offered `tools` (it always should be, by construction).
+    /// offered `tools` (it always should be, by construction — except for an
+    /// abstention example, whose gap target is deliberately *not* offered).
     pub fn expected_schema(&self) -> Option<&ToolSchema> {
         self.tools.iter().find(|t| t.name == self.expected_call.name)
+    }
+
+    /// Is the ground truth for this example an **abstention** (no offered tool
+    /// fits → emit the gap token), rather than a concrete call? (Phase 51 P3c.)
+    pub fn is_abstention(&self) -> bool {
+        self.expected_call.is_gap()
     }
 
     /// Render `expected_call` as a `{"name": ..., "arguments": {...}}` raw

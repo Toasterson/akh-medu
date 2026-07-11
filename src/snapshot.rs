@@ -460,6 +460,15 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     } = data;
 
     let watermark = ops::current_watermark(db, akh_id).await?;
+    // ADR 091: `harvest_watermark` is excluded from `upsert_akh_state`'s
+    // `update_columns`, so this value only matters the first time a row is
+    // inserted for this Akh. Reading it back here (0 if no row exists yet)
+    // keeps that first-insert value correct without ever clobbering a value
+    // the dedicated `set_harvest_watermark` setter already wrote.
+    let harvest_watermark = ops::get_harvest_watermark(db, akh_id).await?;
+    // Same read-back-before-insert reasoning as `harvest_watermark` above,
+    // now for the ADR 081 slice 4 daily-Librarian watermark.
+    let librarian_watermark = ops::get_librarian_watermark(db, akh_id).await?;
 
     ops::replace_symbols(db, akh_id, symbols).await?;
     ops::replace_workspace_facts(db, workspace_id, facts).await?;
@@ -488,6 +497,8 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         last_sleep_cycle,
         psyche,
         extra,
+        harvest_watermark,
+        librarian_watermark,
         updated_at: chrono::Utc::now(),
     };
     ops::upsert_akh_state(db, state).await?;
@@ -581,6 +592,10 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
 /// simply not written and `Agent::resume` falls back to defaults / KG rebuild.
 /// The only hard requirement is the `akh_state` row ([`SnapshotError::NotFound`]
 /// otherwise).
+///
+/// After the KG restore + WAL replay, also runs schema-pack lazy convergence
+/// (ADR 081 decision 9 — [`crate::schema::registry_pg::converge_workspace`]):
+/// installs every schema pack recorded active for `workspace_id`, idempotently.
 pub async fn wake(
     data_dir: &Path,
     akh_id: Uuid,
@@ -703,7 +718,25 @@ pub async fn wake(
         "woke akh from postgres snapshot"
     );
 
-    // 7. Flush the reconstructed KG snapshot back to local redb so a plain
+    // 7. Lazy schema-pack convergence (ADR 081 decision 9): install every
+    //    schema pack recorded as active for this workspace. Idempotent —
+    //    reinstalling an already-installed pack@version is a no-op
+    //    (`schema::install_pack`) — and always safe, because schema-pack
+    //    types are immutable+additive. Best-effort: a failure here is logged
+    //    and does not fail the wake (the akh still comes up; it just may be
+    //    missing a pack's types until the next wake or an explicit install).
+    let packs_converged =
+        crate::schema::registry_pg::converge_workspace(&engine, db, workspace_id).await;
+    if packs_converged > 0 {
+        tracing::info!(
+            akh = %akh_id,
+            %workspace_id,
+            packs_converged,
+            "wake: converged active schema packs"
+        );
+    }
+
+    // 8. Flush the reconstructed KG snapshot back to local redb so a plain
     //    restart (without Postgres) recovers too.
     engine
         .persist()
@@ -1095,7 +1128,8 @@ fn fact_to_triple(row: &fact::Model) -> Option<Triple> {
 
 /// Apply one replayed WAL mutation. Returns whether it was applied (unknown
 /// kinds and malformed payloads are skipped). Microtheory/compartment replay is
-/// deferred (38d).
+/// deferred (38d). `kind="turn"` rows (ADR 091) are explicitly skipped — raw
+/// transcript-capture staging, never a KG mutation.
 fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
     let ids = |p: &serde_json::Value| -> Option<(SymbolId, SymbolId, SymbolId)> {
         Some((
@@ -1124,6 +1158,14 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
             };
             engine.remove_triple(s, p, o).is_ok()
         }
+        // ADR 091 decision 3: `turn` rows are raw transcript-capture staging,
+        // never KG mutations — the KG facts derived from a turn (if any) get
+        // their own `assert` rows. Explicitly skip rather than falling through
+        // to the catch-all, so the intent is visible at the call site. `false`
+        // just means "not counted in `replayed`" here (see the caller at
+        // `wake`, ~line 690-696) — it is NOT treated as an error or an unknown
+        // kind; wake proceeds normally with `turn` rows present.
+        "turn" => false,
         _ => false,
     }
 }
@@ -1458,5 +1500,36 @@ mod tests {
             let (s, g) = symbol_kind_parts(&kind);
             assert_eq!(symbol_kind_from(&s, g), kind, "kind {kind:?} must round-trip");
         }
+    }
+
+    #[test]
+    fn apply_mutation_skips_turn_rows_without_error() {
+        // ADR 091 decision 3: `turn` rows are raw transcript staging, never
+        // replayed into the KG. `apply_mutation` must return `false` (not
+        // counted as "replayed") without the caller treating it as an error —
+        // wake proceeds normally with `turn` rows present in the tail.
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let m = akhomed_store::TailMutation {
+            kind: "turn".to_string(),
+            payload: serde_json::json!({
+                "v": 1,
+                "ts": "2026-07-10T00:00:00Z",
+                "workspace": "test-akh",
+                "model": null,
+                "user_prompt": "hi",
+                "agent_answer": "hello",
+                "tools": [],
+            }),
+        };
+        assert!(!apply_mutation(&engine, &m), "turn rows are not KG mutations");
+
+        // An unrelated malformed/unknown kind also returns false — same
+        // non-error signal — so the explicit "turn" arm is a documentation /
+        // intent improvement, not a behavior change vs the prior catch-all.
+        let unknown = akhomed_store::TailMutation {
+            kind: "totally_unknown".to_string(),
+            payload: serde_json::json!({}),
+        };
+        assert!(!apply_mutation(&engine, &unknown));
     }
 }

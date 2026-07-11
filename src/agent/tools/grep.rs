@@ -373,6 +373,10 @@ impl Tool for GrepTool {
             source: ToolSource::Native,
         }
     }
+
+    fn locus(&self) -> Option<crate::backend::ExecLocus> {
+        Some(self.fs.locus())
+    }
 }
 
 #[cfg(test)]
