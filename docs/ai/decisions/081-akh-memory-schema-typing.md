@@ -1,6 +1,6 @@
 # ADR 081: Akh Memory & Schema-Typing — permissive notes + projected immutable typed core
 
-- **Status:** Accepted (design) — not yet implemented
+- **Status:** Implemented (2026-07-11) — all work items landed (P1, P2, S0-structural, slices 1–9): Note carrier, mechanical + Librarian projection, PG registry + admit/install/converge, is-a shapes + digest, task tool, context tiering, promotion + human-confirm + aliasing, TripleIdentity diff-supersede + TMS + DS conflict, grandfather classification + coverage report. Full lib suite + live-PG integration green. **Still open:** the S0 *empirical* bet (live small-model schema.org emission — structural seams shipped with deterministic fakes instead), cross-akh promotion consensus signal (no cross-akh telemetry channel yet), Heka vector search for archival (substring fallback documented), re-assert-under-alias + alias-aware coverage classification.
 - **Date:** 2026-06-30
 - **Plan:** [docs/ai/plans/2026-06-30-akh-memory-schema.md](../plans/2026-06-30-akh-memory-schema.md)
 - **Work breakdown:** [docs/ai/plans/2026-06-30-akh-memory-schema-issues.md](../plans/2026-06-30-akh-memory-schema-issues.md)
