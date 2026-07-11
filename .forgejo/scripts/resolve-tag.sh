@@ -33,6 +33,9 @@ for var in SOLSTICE_REF_NAME SOLSTICE_TAG SOLSTICE_REF; do
 done
 
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+	# Solstice checks out by bare SHA with --no-tags, so the local repo has no
+	# tag refs. Fetch them (cheap, refs only) before asking git describe.
+	git fetch --tags --force --quiet origin 2>/dev/null || true
 	t=$(git describe --tags --exact-match 2>/dev/null || true)
 	case "$t" in
 		v*) printf '%s' "$t"; exit 0 ;;
