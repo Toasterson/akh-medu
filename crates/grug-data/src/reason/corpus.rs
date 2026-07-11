@@ -224,6 +224,53 @@ impl ReasonDataset {
             .collect())
     }
 
+    /// [`ReasonDataset::train_examples`] with an abstention mix: each example
+    /// is a broken-chain gap example with probability `abstain_frac`
+    /// (P3c's lesson, carried over: abstention is an in-distribution
+    /// classification the weights can only learn if the training stream
+    /// contains it — a stream without gap examples pins abstention
+    /// precision/recall at 0 forever). Same seed salt as `train_examples`,
+    /// so the two methods produce *different* streams for the same seed —
+    /// callers pick one, they are not interleavable views of each other.
+    pub fn train_examples_with_abstention(
+        &self,
+        n: usize,
+        arm: TraceArm,
+        abstain_frac: f64,
+    ) -> GrugResult<Vec<ReasonExample>> {
+        let mut rng = StdRng::seed_from_u64(self.config.seed ^ TRAIN_SEED_SALT);
+        Ok((0..n)
+            .map(|_| {
+                let depth = *self
+                    .config
+                    .train_depths
+                    .choose(&mut rng)
+                    .expect("validated non-empty at construction");
+                let ty = Self::pick_type(&mut rng);
+                let subject = self.train_subject(&mut rng, ty);
+                if rng.gen_bool(abstain_frac.clamp(0.0, 1.0)) {
+                    build_abstention_example(
+                        &mut rng,
+                        &self.kg,
+                        subject,
+                        depth,
+                        self.config.distractor_factor,
+                        arm,
+                    )
+                } else {
+                    build_answer_example(
+                        &mut rng,
+                        &self.kg,
+                        subject,
+                        depth,
+                        self.config.distractor_factor,
+                        arm,
+                    )
+                }
+            })
+            .collect())
+    }
+
     /// Axis-B (in-distribution): TRAIN depths, HOLDOUT subject combinations.
     /// Always a full [`TraceArm::Trace`] target -- eval scores whatever the
     /// model emits via [`super::replay_trace`], not by string match against
@@ -298,6 +345,7 @@ impl ReasonDataset {
                     subject,
                     depth,
                     self.config.distractor_factor,
+                    TraceArm::Trace,
                 )
             })
             .collect())
@@ -352,14 +400,15 @@ fn build_answer_example(
 }
 
 /// Build an abstention example: a fresh full-depth chain, then redact one
-/// hop's fact from the prompt so the trace must stop at a `check ... | gap`.
-/// Always renders a [`TraceArm::Trace`] target (see [`ReasonDataset::abstention_examples`]).
+/// hop's fact from the prompt so the trace must stop at a `check ... | gap`
+/// (or, under [`TraceArm::AnswerOnly`], the bare `call answer | value gap`).
 fn build_abstention_example(
     rng: &mut StdRng,
     kg: &SyntheticKg,
     subject: EntityId,
     depth: usize,
     distractor_factor: usize,
+    arm: TraceArm,
 ) -> ReasonExample {
     let path = random_path(rng, subject.ty, depth);
     let full_chain = kg
@@ -383,7 +432,12 @@ fn build_abstention_example(
     prompt_facts.shuffle(rng);
 
     let prompt = render_prompt(&prompt_facts, &query, subject);
-    let target = render_trace_abstention(subject, &revealed, broken.relation, broken.subject);
+    let target = match arm {
+        TraceArm::Trace => {
+            render_trace_abstention(subject, &revealed, broken.relation, broken.subject)
+        }
+        TraceArm::AnswerOnly => render_answer_only(GAP_VALUE),
+    };
 
     ReasonExample {
         prompt,
@@ -396,7 +450,7 @@ fn build_abstention_example(
         query_relation: query,
         prompt_facts,
         broken_hop: Some(k),
-        arm: TraceArm::Trace,
+        arm,
     }
 }
 
@@ -626,6 +680,32 @@ mod tests {
                 ex.target
             );
             assert!(ex.target.starts_with("call answer | value "));
+        }
+    }
+
+    #[test]
+    fn train_with_abstention_mixes_gap_examples_under_both_arms() {
+        let dataset = ReasonDataset::new(tiny_config()).unwrap();
+        for arm in [TraceArm::Trace, TraceArm::AnswerOnly] {
+            let examples = dataset
+                .train_examples_with_abstention(400, arm, 0.2)
+                .unwrap();
+            let n_abstain = examples.iter().filter(|e| e.is_abstention).count();
+            assert!(
+                (40..=140).contains(&n_abstain),
+                "expected ~20% abstention (arm {arm:?}), got {n_abstain}/400"
+            );
+            for ex in examples.iter().filter(|e| e.is_abstention) {
+                assert_eq!(ex.gold_answer, GAP_VALUE);
+                assert!(ex.target.contains(GAP_VALUE));
+                if arm == TraceArm::AnswerOnly {
+                    assert!(
+                        !ex.target.contains("step"),
+                        "answer-only abstention target must be bare: {:?}",
+                        ex.target
+                    );
+                }
+            }
         }
     }
 

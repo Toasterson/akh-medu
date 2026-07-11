@@ -102,6 +102,12 @@ struct Args {
     #[arg(long, default_value_t = 128)]
     holdout_examples: usize,
 
+    /// Fraction of the TRAINING stream that is broken-chain abstention
+    /// examples (P3c's lesson: gap emission is only learnable if the stream
+    /// contains it; 0.0 reproduces the abstention-free stream).
+    #[arg(long, default_value_t = 0.2)]
+    abstain_frac: f64,
+
     #[arg(long, default_value_t = 500)]
     eval_every: usize,
 
@@ -170,8 +176,15 @@ fn main() {
         args.train_examples, args.seed
     );
     let train_examples = dataset
-        .train_examples(args.train_examples, arm)
+        .train_examples_with_abstention(args.train_examples, arm, args.abstain_frac)
         .expect("generator produces train examples");
+    let n_abstain = train_examples.iter().filter(|e| e.is_abstention).count();
+    println!(
+        "train_reason: training stream: {} examples, {} abstention ({:.1}%)",
+        train_examples.len(),
+        n_abstain,
+        100.0 * n_abstain as f64 / train_examples.len().max(1) as f64
+    );
 
     // Frozen holdouts, drawn once before training (per the plan): axis-B
     // n=128, axis-A n=128 (depths 5,6), abstention n=128 by default.
