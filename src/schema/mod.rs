@@ -39,6 +39,7 @@
 
 pub mod compile;
 pub mod install;
+pub mod project;
 pub mod source;
 
 use miette::Diagnostic;
@@ -46,6 +47,7 @@ use thiserror::Error;
 
 pub use compile::{CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, compile};
 pub use install::{InstallReport, activate_pack, install_pack};
+pub use project::{ProjectionReport, TypeOutcome, TypedNoteView, note_of_entity, project_note, typed_view};
 pub use source::{PackScope, SchemaPackSource, ValueType, parse_source};
 
 /// Errors from schema-pack parsing, compilation, and installation.
@@ -197,6 +199,18 @@ pub enum SchemaError {
         help("Check that the engine is writable; the pack blob decoded cleanly, so this is an engine-side failure.")
     )]
     Install { pack: String, message: String },
+
+    #[error("failed to project note \"{note_id}\" into the typed KG: {message}")]
+    #[diagnostic(
+        code(akh::schema::projection),
+        help(
+            "Projection never blocks on typing problems by design (ADR 081 decision 7 — \
+             unknown types/keys land in frontier instead). This error means a genuine \
+             engine-side failure (symbol allocation, constraint violation, or the note was \
+             never projected when reading a typed_view back) — check the message for which."
+        )
+    )]
+    Projection { note_id: String, message: String },
 
     #[error("io error on {path}: {source}")]
     #[diagnostic(
