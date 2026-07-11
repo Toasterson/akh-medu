@@ -466,6 +466,9 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     // keeps that first-insert value correct without ever clobbering a value
     // the dedicated `set_harvest_watermark` setter already wrote.
     let harvest_watermark = ops::get_harvest_watermark(db, akh_id).await?;
+    // Same read-back-before-insert reasoning as `harvest_watermark` above,
+    // now for the ADR 081 slice 4 daily-Librarian watermark.
+    let librarian_watermark = ops::get_librarian_watermark(db, akh_id).await?;
 
     ops::replace_symbols(db, akh_id, symbols).await?;
     ops::replace_workspace_facts(db, workspace_id, facts).await?;
@@ -495,6 +498,7 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         psyche,
         extra,
         harvest_watermark,
+        librarian_watermark,
         updated_at: chrono::Utc::now(),
     };
     ops::upsert_akh_state(db, state).await?;

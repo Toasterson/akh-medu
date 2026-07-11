@@ -32,7 +32,10 @@ pub use mutations::{
     MutationRow, TurnRow, append_mutations, ensure_akh, load_turn_by_seq, load_turns_since,
 };
 pub use pool::{PoolOptions, connect};
-pub use snapshots::{TailMutation, get_harvest_watermark, set_harvest_watermark};
+pub use snapshots::{
+    TailMutation, get_harvest_watermark, get_librarian_watermark, set_harvest_watermark,
+    set_librarian_watermark,
+};
 
 // Re-export the connection type, the `sea_orm` crate, and `uuid` so downstream
 // crates (the `akhomed` daemon, its tests) can name the pool, run raw queries,

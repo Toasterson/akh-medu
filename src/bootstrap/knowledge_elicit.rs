@@ -307,20 +307,25 @@ fn build_prompt(pass: ElicitPass, domain: &str, concepts: &[String], round: u8) 
 // ---------------------------------------------------------------------------
 
 /// A raw JSON triple object from the LLM.
-#[cfg(any(test, feature = "candle-backend"))]
+///
+/// `pub(crate)` (rather than the original `#[cfg(any(test, feature =
+/// "candle-backend"))]`-only visibility): `agent::librarian` (ADR 081 slice 4)
+/// reuses this lenient parser for its own LLM extraction seam rather than
+/// duplicating it — see that module's `parse_candidate_triples`. The parser
+/// has no candle dependency (pure string scanning), so widening its
+/// visibility does not pull in anything new.
 #[derive(Debug)]
-struct RawJsonTriple {
-    s: String,
-    p: String,
-    o: String,
+pub(crate) struct RawJsonTriple {
+    pub(crate) s: String,
+    pub(crate) p: String,
+    pub(crate) o: String,
 }
 
 /// Parse the LLM output into raw triple objects.
 ///
 /// Lenient: handles trailing commas, partial arrays (truncated generation),
 /// and extra whitespace.  Returns whatever valid objects were found.
-#[cfg(any(test, feature = "candle-backend"))]
-fn parse_json_triples(text: &str) -> Vec<RawJsonTriple> {
+pub(crate) fn parse_json_triples(text: &str) -> Vec<RawJsonTriple> {
     // Find the outermost `[` to locate the array start.
     let start = match text.find('[') {
         Some(i) => i,
@@ -339,7 +344,6 @@ fn parse_json_triples(text: &str) -> Vec<RawJsonTriple> {
 }
 
 /// Locate the `]` that closes the opening `[` at position 0, respecting nesting.
-#[cfg(any(test, feature = "candle-backend"))]
 fn find_matching_bracket(s: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut in_string = false;
@@ -375,7 +379,6 @@ fn find_matching_bracket(s: &str) -> Option<usize> {
 }
 
 /// Extract individual `{...}` objects from an array string, parsing `s`/`p`/`o` keys.
-#[cfg(any(test, feature = "candle-backend"))]
 fn parse_objects_from_array(array: &str) -> Vec<RawJsonTriple> {
     let mut triples = Vec::new();
     let mut i = 0;
@@ -404,7 +407,6 @@ fn parse_objects_from_array(array: &str) -> Vec<RawJsonTriple> {
 }
 
 /// Extract `s`, `p`, `o` string values from a JSON object literal `{...}`.
-#[cfg(any(test, feature = "candle-backend"))]
 fn extract_spo(obj: &str) -> Option<RawJsonTriple> {
     let s = extract_string_field(obj, "\"s\"")?;
     let p = extract_string_field(obj, "\"p\"")?;
@@ -416,7 +418,6 @@ fn extract_spo(obj: &str) -> Option<RawJsonTriple> {
 }
 
 /// Find the value for a JSON key like `"s"` in a flat object literal.
-#[cfg(any(test, feature = "candle-backend"))]
 fn extract_string_field(obj: &str, key: &str) -> Option<String> {
     let key_pos = obj.find(key)?;
     let after_key = &obj[key_pos + key.len()..];

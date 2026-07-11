@@ -815,6 +815,30 @@ pub enum DerivationKind {
         /// `sqlite_memory` | `vector_export`.
         kind: String,
     },
+
+    // --- ADR 081 slice 4: Daily Librarian projection --------------------------
+
+    /// A typed triple extracted by the daily Librarian pass (ADR 081 slice 4,
+    /// `agent::librarian`) against the akh's in-force schema.
+    ///
+    /// Distinct from `KnowledgeElicitation` (Phase 32): that pass *generates*
+    /// speculative concept knowledge from a model's world knowledge, whereas
+    /// this pass *extracts* grounded facts from material the akh itself
+    /// captured (transcript turns / note bodies) — the Librarian never
+    /// invents a source, it only structures one that already exists.
+    LibrarianExtraction {
+        /// Identifier for the extraction model (an Ollama model tag, e.g.
+        /// `"gpt-oss:120b"`, or `"fake"` for the deterministic test double).
+        model_id: String,
+        /// The captured material this triple was extracted from
+        /// (`"turn:{seq}"` for a transcript turn, `"note:{id}"` for a note body).
+        source_id: String,
+        /// The installed schema type name this triple validated against, when
+        /// it landed in the typed core. `None` for a frontier triple (the
+        /// predicate did not match any installed type/property — asserted via
+        /// `note:frontier/{predicate}` instead, never dropped).
+        schema_type: Option<String>,
+    },
 }
 
 impl DerivationKind {
@@ -926,6 +950,7 @@ impl DerivationKind {
             Self::Perceived { .. } => 102,
             Self::RelationEnrichment { .. } => 103,
             Self::OpenClawImport { .. } => 104,
+            Self::LibrarianExtraction { .. } => 105,
         }
     }
 }
