@@ -263,16 +263,26 @@ impl Agent {
         backend.prepare(agent_id, self.psyche.as_ref());
 
         let mut tools = ollama_tool_catalog(&self.tool_registry);
-        // Optional cap on the tool catalog (AKH_AGENT_MAX_TOOLS). The full catalog
-        // is several thousand tokens — too large for a small-context in-process
-        // model (e.g. Candle Gemma on a constrained host), where it dominates
-        // prefill cost. `0` runs the akh tool-free (pure chat). A precursor to the
-        // Phase 44 budget-driven tool selection.
-        if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
+        // ADR 089 M1 (opt-in): retrieval-scope the catalog to the top-K tools
+        // *relevant to this request* (scored over name + description) instead of
+        // offering everything. This is the organ's answer to both the prefill
+        // cost of a several-thousand-token catalog and small models degenerating
+        // past ~14 tools — the model sees the K tools most likely to matter, and
+        // permission gating still applies at dispatch.
+        if let Some(k) = std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            && k < tools.len()
+        {
+            tracing::debug!(k, from = tools.len(), "retrieval-scoping tool catalog (AKH_AGENT_TOOL_RETRIEVAL)");
+            tools = super::organ::retrieve_scoped(&tools, user_prompt, k);
+        } else if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             && cap < tools.len()
         {
+            // Legacy blind cap (AKH_AGENT_MAX_TOOLS): kept for A/B comparison
+            // against retrieval scoping. `0` runs the akh tool-free (pure chat).
             tracing::debug!(cap, from = tools.len(), "capping tool catalog (AKH_AGENT_MAX_TOOLS)");
             tools.truncate(cap);
         }
@@ -357,6 +367,12 @@ impl Agent {
         // final one) — never raw arguments/results, so a chatty tool loop
         // doesn't bloat the WAL payload.
         let mut tool_trace: Vec<Value> = Vec::new();
+
+        // Registry membership snapshot for the ADR 089 M2 repair gate below: an
+        // emitted name outside this set is a guaranteed `unknown tool` failure,
+        // which is exactly (and only) when the organ's repair pass may fire.
+        let known_tools: std::collections::HashSet<String> =
+            self.tool_registry.list().into_iter().map(|s| s.name).collect();
 
         // Govern the tool loop with a frontier-style budget — a model-scaled
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
@@ -453,18 +469,42 @@ impl Agent {
             // Execute each requested tool; the call (args) and its result form one
             // collapsible step the TUI folds under "▸ N steps".
             for tc in &turn.tool_calls {
-                let input = tool_input_from_args(&tc.arguments);
-                let (success, result) = match self.tool_registry.execute(&tc.name, input, engine) {
+                // ADR 089 M2: a name the registry doesn't know is today a
+                // guaranteed failure — first try grounding the call against the
+                // schemas the model was actually offered (threshold-gated; a
+                // hallucinated name is rejected and the error surfaces normally).
+                let repaired = if known_tools.contains(&tc.name) {
+                    None
+                } else {
+                    super::organ::repair_unknown_call(&tc.name, &tc.arguments, &tools)
+                };
+                let (exec_name, exec_args) = match &repaired {
+                    Some(r) => {
+                        tracing::info!(from = %tc.name, to = %r.name, note = %r.note, "organ repaired unknown tool call");
+                        (r.name.clone(), r.arguments.clone())
+                    }
+                    None => (tc.name.clone(), tc.arguments.clone()),
+                };
+
+                let input = tool_input_from_args(&exec_args);
+                let (success, result) = match self.tool_registry.execute(&exec_name, input, engine) {
                     Ok(o) => (o.success, o.result),
                     Err(e) => (false, format!("tool error: {e}")),
                 };
 
+                let repair_prefix = repaired
+                    .as_ref()
+                    .map(|r| format!("[repaired: {}] ", r.note))
+                    .unwrap_or_default();
                 sink.emit(&AkhMessage::tool_result(
-                    tc.name.clone(),
+                    exec_name.clone(),
                     success,
-                    format!("({}) → {}", preview_args(&tc.arguments), result),
+                    format!("{repair_prefix}({}) → {}", preview_args(&exec_args), result),
                 ));
-                tool_trace.push(json!({"tool": tc.name.clone(), "ok": success}));
+                tool_trace.push(match &repaired {
+                    Some(_) => json!({"tool": exec_name.clone(), "ok": success, "repaired_from": tc.name.clone()}),
+                    None => json!({"tool": exec_name.clone(), "ok": success}),
+                });
                 conversation.push(json!({"role": "tool", "content": result}));
             }
         };
