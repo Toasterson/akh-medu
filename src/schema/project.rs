@@ -28,11 +28,29 @@
 //! `library::note::Note`) does not introduce a module cycle — both live in
 //! one crate.
 //!
+//! **Slice 3 update** (`docs/ai/plans/2026-06-30-akh-memory-schema-issues.md`
+//! work-item 3): a property no longer has to be declared *directly* on the
+//! note's exact type to count as typed — [`super::shape::effective_properties`]
+//! walks the installed `is-a` chain upward (e.g. `Person`'s `name`, inherited
+//! from `Thing`), so inherited properties project as typed too. Each typed
+//! property's direct-vs-inherited provenance is preserved on
+//! [`ProjectionReport::typed_properties`]. Property-shape validation
+//! ([`super::shape::check_value_shape`] + required-property completeness) is
+//! also applied here: a value whose runtime [`crate::schema::source::ValueType`]
+//! does not match the property's declared shape lands in frontier instead of
+//! typed, and a missing required property is reported — both are advisory
+//! ([`ProjectionReport::shape_violations`]), never blocking the write (ADR
+//! 081 decision 7).
+//!
 //! **Deliberately out of scope for this slice** (see the issue list):
-//! - `is-a` chain walking for inherited properties (work-item 3 — subtyping
-//!   + property shapes). A property must be declared *directly* on the
-//!   note's exact type to count as "typed"; inherited properties (e.g.
-//!   `Person`'s `name`, inherited from `Thing`) land in frontier today.
+//! - Relation-valued frontmatter properties. Notes today only project
+//!   `(note-entity, property, value-entity)` triples where the value is a
+//!   literal-ish frontmatter value (text/number/date/list/link/checkbox) —
+//!   there is no notion yet of a frontmatter key naming a *relation*
+//!   (`RelationDef` with `arg1_type`/`arg2_type`) rather than a property.
+//!   Declared relation arity/arg-type validation is therefore not exercised
+//!   here; it applies once notes gain a way to author relation triples
+//!   (work-item 5+ territory).
 //! - Diff-based supersede on a changed note (work-item 8). Re-projecting an
 //!   *unchanged* note is idempotent at the triple level (the KG's
 //!   `(subject, predicate, object)` dedup in [`crate::graph::index`] already
@@ -40,7 +58,7 @@
 //!   *changed* note today simply adds the new triples; no TMS retraction of
 //!   the old ones happens yet.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use crate::engine::Engine;
 use crate::graph::Triple;
@@ -48,7 +66,8 @@ use crate::library::note::{Note, NoteId, FrontmatterValue};
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
-use super::compile::{PRED_IS_A, PRED_PROPERTY, TYPE_MARKER};
+use super::compile::PRED_IS_A;
+use super::shape::{self, EffectivePropertySet, ShapeViolation};
 use super::{SchemaError, SchemaResult};
 
 /// `note-entity --links-to--> target-entity`, one per wikilink.
@@ -106,6 +125,21 @@ impl TypeOutcome {
     }
 }
 
+/// One frontmatter key that projected as a typed property (Slice 3): which
+/// type it is declared on, and whether that declaration is direct (on the
+/// note's exact type) or inherited via the `is-a` chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedPropertyProjection {
+    /// The frontmatter key / property name.
+    pub key: String,
+    /// The type this property is declared directly on (the note's exact
+    /// type when [`Self::direct`] is `true`, an ancestor otherwise).
+    pub declared_on: String,
+    /// Whether the property is declared directly on the note's exact type
+    /// (not inherited via `is-a`).
+    pub direct: bool,
+}
+
 /// Result of mechanically projecting one [`Note`] into the typed KG.
 #[derive(Debug, Clone)]
 pub struct ProjectionReport {
@@ -113,10 +147,22 @@ pub struct ProjectionReport {
     /// The `note:{id}` KG entity the note projected onto.
     pub note_entity: SymbolId,
     pub type_outcome: TypeOutcome,
-    /// Frontmatter keys that matched a property the declared type carries.
+    /// Frontmatter keys that matched a property the declared type carries
+    /// (own or inherited) *and* passed shape validation. Equal to
+    /// `typed_properties.len()`.
     pub typed_property_count: usize,
-    /// Frontmatter keys that did not (unknown type, unknown key, or both).
+    /// Frontmatter keys that did not (unknown type, unknown key, or a shape
+    /// violation demoted an otherwise-matching key to frontier).
     pub frontier_property_count: usize,
+    /// Per-key detail for every typed property, including the
+    /// direct-vs-inherited distinction (Slice 3; feeds the coverage report,
+    /// work-item 9).
+    pub typed_properties: Vec<TypedPropertyProjection>,
+    /// Property-shape violations detected during projection (Slice 3): a
+    /// type mismatch demotes the value to frontier instead of typed; a
+    /// missing required property is reported without demoting anything.
+    /// Never blocks the write (ADR 081 decision 7) — advisory only.
+    pub shape_violations: Vec<ShapeViolation>,
     /// Wikilinks projected as `links-to` triples.
     pub wikilink_count: usize,
     /// `None` when the engine has no provenance ledger configured
@@ -169,19 +215,27 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         }
     };
 
-    let declared_properties = if let TypeOutcome::Typed { type_symbol, .. } = &type_outcome {
+    let effective = if let TypeOutcome::Typed { type_symbol, .. } = &type_outcome {
         engine
             .add_triple(&Triple::new(note_entity, is_a, *type_symbol))
             .map_err(|e| projection_err(&note.id, format!("type triple: {e}")))?;
         sources.push(*type_symbol);
-        declared_properties_of(engine, *type_symbol)
+        // Slice 3: walk the is-a chain for the effective (own + inherited)
+        // property set. A subtype cycle is a schema-authoring bug, not a
+        // note-write problem — degrade to "no declared properties" (every
+        // key lands in frontier) instead of failing the write (ADR 081
+        // decision 7).
+        shape::effective_properties(engine, *type_symbol)
+            .unwrap_or_else(|_| EffectivePropertySet::empty(engine.resolve_label(*type_symbol)))
     } else {
-        HashSet::new()
+        EffectivePropertySet::default()
     };
 
-    // --- Frontmatter properties: typed vs. frontier. ---
+    // --- Frontmatter properties: typed vs. frontier, shape-validated. ---
     let mut typed_property_count = 0usize;
     let mut frontier_property_count = 0usize;
+    let mut typed_properties = Vec::new();
+    let mut shape_violations = Vec::new();
     for (key, value) in note.frontmatter.iter() {
         // The `type` key itself is framing metadata, already captured by the
         // `is-a` triple above when the type is known. When the type is
@@ -196,23 +250,54 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
             .map_err(|e| projection_err(&note.id, format!("value entity '{key}': {e}")))?;
         sources.push(value_entity);
 
-        if declared_properties.contains(key) {
-            let predicate = engine
-                .resolve_or_create_relation(key)
-                .map_err(|e| projection_err(&note.id, format!("property predicate '{key}': {e}")))?;
-            engine
-                .add_triple(&Triple::new(note_entity, predicate, value_entity))
-                .map_err(|e| projection_err(&note.id, format!("property triple '{key}': {e}")))?;
-            typed_property_count += 1;
-        } else {
-            let frontier_label = format!("{FRONTIER_PREFIX}{key}");
-            let predicate = engine
-                .resolve_or_create_relation(&frontier_label)
-                .map_err(|e| projection_err(&note.id, format!("frontier predicate '{key}': {e}")))?;
-            engine
-                .add_triple(&Triple::new(note_entity, predicate, value_entity))
-                .map_err(|e| projection_err(&note.id, format!("frontier triple '{key}': {e}")))?;
-            frontier_property_count += 1;
+        let property = effective.get(key);
+        let violation = property.and_then(|p| shape::check_value_shape(p, value));
+        let has_violation = violation.is_some();
+        if let Some(v) = violation {
+            shape_violations.push(v);
+        }
+
+        match property {
+            Some(property) if !has_violation => {
+                let predicate = engine
+                    .resolve_or_create_relation(key)
+                    .map_err(|e| projection_err(&note.id, format!("property predicate '{key}': {e}")))?;
+                engine
+                    .add_triple(&Triple::new(note_entity, predicate, value_entity))
+                    .map_err(|e| projection_err(&note.id, format!("property triple '{key}': {e}")))?;
+                typed_property_count += 1;
+                typed_properties.push(TypedPropertyProjection {
+                    key: key.to_string(),
+                    declared_on: property.declared_on.clone(),
+                    direct: property.direct,
+                });
+            }
+            _ => {
+                // Unknown key, or a shape violation demoted a known
+                // property — either way the value is still written, just
+                // marked frontier instead of typed (ADR 081 decision 7).
+                let frontier_label = format!("{FRONTIER_PREFIX}{key}");
+                let predicate = engine
+                    .resolve_or_create_relation(&frontier_label)
+                    .map_err(|e| projection_err(&note.id, format!("frontier predicate '{key}': {e}")))?;
+                engine
+                    .add_triple(&Triple::new(note_entity, predicate, value_entity))
+                    .map_err(|e| projection_err(&note.id, format!("frontier triple '{key}': {e}")))?;
+                frontier_property_count += 1;
+            }
+        }
+    }
+
+    // --- Required-property completeness (Slice 3): advisory only, never
+    // blocks the write. ---
+    if matches!(type_outcome, TypeOutcome::Typed { .. }) {
+        for prop in effective.required() {
+            if note.frontmatter.get(&prop.name).is_none() {
+                shape_violations.push(ShapeViolation::MissingRequired {
+                    property: prop.name.clone(),
+                    declared_on: prop.declared_on.clone(),
+                });
+            }
         }
     }
 
@@ -252,6 +337,8 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         type_outcome,
         typed_property_count,
         frontier_property_count,
+        typed_properties,
+        shape_violations,
         wikilink_count,
         provenance_id,
     })
@@ -292,29 +379,7 @@ fn value_label(value: &FrontmatterValue) -> String {
 /// both are equally "not an installed type" from a projection's point of view.
 fn resolve_installed_type(engine: &Engine, type_name: &str) -> Option<SymbolId> {
     let type_symbol = engine.resolve_symbol(type_name).ok()?;
-    let is_a = engine.resolve_symbol(PRED_IS_A).ok()?;
-    let type_marker = engine.resolve_symbol(TYPE_MARKER).ok()?;
-    engine
-        .knowledge_graph()
-        .objects_of(type_symbol, is_a)
-        .contains(&type_marker)
-        .then_some(type_symbol)
-}
-
-/// The set of property labels the schema declares *directly* on `type_symbol`
-/// (`(type_symbol, onto:property, p)`). Deliberately does not walk the
-/// `is-a` chain — inherited properties are work-item 3 (subtyping + property
-/// shapes), not this slice.
-fn declared_properties_of(engine: &Engine, type_symbol: SymbolId) -> HashSet<String> {
-    let Ok(property_pred) = engine.resolve_symbol(PRED_PROPERTY) else {
-        return HashSet::new();
-    };
-    engine
-        .knowledge_graph()
-        .objects_of(type_symbol, property_pred)
-        .into_iter()
-        .map(|s| engine.resolve_label(s))
-        .collect()
+    shape::is_installed_type(engine, type_symbol).then_some(type_symbol)
 }
 
 // ---------------------------------------------------------------------------
@@ -590,5 +655,176 @@ mod tests {
             typed_view(&engine, &never_projected),
             Err(SchemaError::Projection { .. })
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 3: is-a subtyping + property-shape validation, exercised at
+    // the note-projection level (unit coverage of the chain walk itself
+    // lives in `schema::shape`; this proves the acceptance criteria in
+    // `docs/ai/plans/2026-06-30-akh-memory-schema-issues.md` work-item 3
+    // end-to-end through `project_note`).
+    // -----------------------------------------------------------------
+
+    /// A second, independently-installed pack that extends `SEED_PACK`'s
+    /// `Person` via `is_a` — proves the chain walk crosses pack boundaries
+    /// (ADR 081 decision 5: type names are global).
+    const EMPLOYEE_PACK: &str = r#"{
+        "pack": {"name": "hr-test", "version": "0.1.0"},
+        "assumes": ["Person"],
+        "types": [
+            {"name": "Employee", "is_a": "Person", "properties": [
+                {"name": "employer", "value_type": "text", "required": true}]}
+        ]
+    }"#;
+
+    fn install_employee(engine: &crate::engine::Engine) {
+        let pack = compile(EMPLOYEE_PACK).unwrap();
+        install_pack(engine, &pack).unwrap();
+    }
+
+    #[test]
+    fn inherited_property_projects_as_typed_for_a_subtype_note() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        install_employee(&engine);
+
+        let mut fm = Frontmatter::new();
+        fm.insert("type", FrontmatterValue::Text("Employee".into()));
+        fm.insert("email", FrontmatterValue::Text("jane@example.org".into())); // Person's, inherited
+        fm.insert("employer", FrontmatterValue::Text("Acme".into())); // Employee's own
+        let note = Note::new(sample_document("doc-employee-1"), "no links").with_frontmatter(fm);
+
+        let report = project_note(&engine, &note).unwrap();
+
+        assert!(report.type_outcome.is_typed());
+        assert_eq!(report.typed_property_count, 2, "email (inherited) + employer (own)");
+        assert_eq!(report.frontier_property_count, 0);
+        assert!(report.shape_violations.is_empty());
+
+        let email = report
+            .typed_properties
+            .iter()
+            .find(|p| p.key == "email")
+            .expect("email must project as typed, not frontier — it is inherited from Person");
+        assert!(!email.direct, "email is inherited, not declared directly on Employee");
+        assert_eq!(email.declared_on, "Person");
+
+        let employer = report
+            .typed_properties
+            .iter()
+            .find(|p| p.key == "employer")
+            .unwrap();
+        assert!(employer.direct);
+        assert_eq!(employer.declared_on, "Employee");
+
+        // Read-back confirms the inherited property landed as typed, not
+        // frontier, in the KG itself.
+        let view = typed_view(&engine, &note.id).unwrap();
+        assert_eq!(view.type_name.as_deref(), Some("Employee"));
+        assert_eq!(
+            view.typed_properties.get("email"),
+            Some(&vec!["jane@example.org".to_string()])
+        );
+        assert!(view.frontier_properties.is_empty());
+    }
+
+    #[test]
+    fn missing_required_property_surfaces_diagnostic_but_does_not_block_the_write() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        install_employee(&engine);
+
+        let mut fm = Frontmatter::new();
+        fm.insert("type", FrontmatterValue::Text("Employee".into()));
+        // `employer` is required by Employee's shape but omitted here.
+        let note = Note::new(sample_document("doc-employee-2"), "").with_frontmatter(fm);
+
+        let report = project_note(&engine, &note).unwrap();
+
+        // The write is never blocked (ADR 081 decision 7): the note still
+        // projects onto its declared type.
+        assert!(report.type_outcome.is_typed());
+
+        assert_eq!(report.shape_violations.len(), 1);
+        let violation = &report.shape_violations[0];
+        assert!(matches!(
+            violation,
+            ShapeViolation::MissingRequired { property, declared_on }
+                if property == "employer" && declared_on == "Employee"
+        ));
+
+        // The violation carries a rich miette diagnostic (help text), per
+        // CLAUDE.md's "use miette's diagnostic pattern" convention.
+        use miette::Diagnostic as _;
+        let help = violation.help().expect("missing-required carries help text").to_string();
+        assert!(help.contains("employer"));
+    }
+
+    #[test]
+    fn completing_the_required_property_validates_cleanly() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        install_employee(&engine);
+
+        let mut fm = Frontmatter::new();
+        fm.insert("type", FrontmatterValue::Text("Employee".into()));
+        fm.insert("employer", FrontmatterValue::Text("Acme".into()));
+        let note = Note::new(sample_document("doc-employee-3"), "").with_frontmatter(fm);
+
+        let report = project_note(&engine, &note).unwrap();
+
+        assert!(report.type_outcome.is_typed());
+        assert!(report.shape_violations.is_empty());
+        assert_eq!(report.typed_property_count, 1);
+        assert!(report.typed_properties.iter().any(|p| p.key == "employer"));
+    }
+
+    #[test]
+    fn value_type_mismatch_demotes_to_frontier_and_is_reported() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+
+        let mut fm = Frontmatter::new();
+        fm.insert("type", FrontmatterValue::Text("Person".into()));
+        // `email` is declared `text`; a Number is a shape violation.
+        fm.insert("email", FrontmatterValue::Number(42.0));
+        let note = Note::new(sample_document("doc-mismatch-1"), "").with_frontmatter(fm);
+
+        let report = project_note(&engine, &note).unwrap();
+
+        assert!(report.type_outcome.is_typed());
+        assert_eq!(report.typed_property_count, 0);
+        assert_eq!(report.frontier_property_count, 1, "the mismatched value lands in frontier");
+        assert!(!report.typed_properties.iter().any(|p| p.key == "email"));
+
+        assert_eq!(report.shape_violations.len(), 1);
+        assert!(matches!(
+            &report.shape_violations[0],
+            ShapeViolation::TypeMismatch { property, expected, got, .. }
+                if property == "email"
+                    && *expected == crate::schema::source::ValueType::Text
+                    && *got == crate::schema::source::ValueType::Number
+        ));
+
+        // The value was still written — just under the frontier predicate.
+        let view = typed_view(&engine, &note.id).unwrap();
+        assert_eq!(view.frontier_properties.get("email"), Some(&vec!["42".to_string()]));
+        assert!(view.typed_properties.get("email").is_none());
+    }
+
+    #[test]
+    fn additive_extension_leaves_the_ancestor_types_projection_unaffected() {
+        // ADR 081 decision 5: adding Employee must never change how a
+        // Person note (Employee's ancestor) itself projects.
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        install_employee(&engine);
+
+        let note = person_note(); // typed "Person", not "Employee"
+        let report = project_note(&engine, &note).unwrap();
+
+        assert!(report.type_outcome.is_typed());
+        assert_eq!(report.typed_property_count, 2, "email + birthDate, exactly as before Employee existed");
+        assert!(!report.typed_properties.iter().any(|p| p.key == "employer"));
     }
 }
