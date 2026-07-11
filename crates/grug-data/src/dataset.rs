@@ -37,6 +37,14 @@ pub struct Dataset {
     train_catalog: ToolCatalog,
     holdout_catalog: ToolCatalog,
     distractors: DistractorConfig,
+    /// Which retrieval-signal tier this dataset's catalog was generated under
+    /// (Phase 51 P3d). Determines what the registry retriever keys on:
+    /// `Name` → the tool name (byte-identical to the P3a behavior);
+    /// `Description`/`Paraphrase` → the tool **description**, because under
+    /// those tiers the name is absent from requests and a name-keyed retriever
+    /// would collapse (recall 0.002, P3d-1) and mislabel nearly every
+    /// retrieval-scoped example as gap.
+    signal_mode: crate::semantic::SignalMode,
 }
 
 /// XOR salt distinguishing the whole-tool holdout RNG stream (axis A) from
@@ -108,6 +116,7 @@ impl Dataset {
             train_catalog,
             holdout_catalog,
             distractors,
+            signal_mode: crate::semantic::SignalMode::Name,
         })
     }
 
@@ -176,7 +185,9 @@ impl Dataset {
     ) -> GrugResult<Self> {
         let catalog = ToolCatalog::procedural_signal(seed, n_tools, mode);
         let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
-        Self::with_catalog_and_distractors(seed, catalog, holdout_count, distractors)
+        let mut ds = Self::with_catalog_and_distractors(seed, catalog, holdout_count, distractors)?;
+        ds.signal_mode = mode;
+        Ok(ds)
     }
 
     /// Like [`Dataset::new_sized`], but with an explicit
@@ -295,8 +306,24 @@ impl Dataset {
 
     /// Build a [`Retriever`](crate::retriever::Retriever) over this dataset's
     /// registry (mechanism 1). Indices it returns index [`Dataset::registry`].
+    ///
+    /// **Mode-aware (Phase 51 P3d):** under [`SignalMode::Name`] it keys on the
+    /// tool *name* — byte-identical to the P3a behavior. Under
+    /// `Description`/`Paraphrase` it keys on the tool **description**, because
+    /// those corpora carry no name tokens in the request: a name-keyed
+    /// retriever would collapse (recall 0.002, P3d-1) and mislabel nearly
+    /// every retrieval-scoped example as gap. This mirrors the real organ,
+    /// where the router matches the request against capability *descriptions*,
+    /// not identifier strings.
     pub fn registry_retriever(&self) -> crate::retriever::Retriever {
-        crate::retriever::Retriever::new(self.registry())
+        match self.signal_mode {
+            crate::semantic::SignalMode::Name => crate::retriever::Retriever::new(self.registry()),
+            crate::semantic::SignalMode::Description | crate::semantic::SignalMode::Paraphrase => {
+                let descriptions: Vec<&str> =
+                    self.registry().iter().map(|t| t.description.as_str()).collect();
+                crate::retriever::Retriever::new_over(&descriptions)
+            }
+        }
     }
 
     /// Re-scope a base example to the retrieval-selected offered set (ADR 089
@@ -629,6 +656,63 @@ mod retrieval_tests {
         }
         // Retrieval is good on this data, so the vast majority are calls.
         assert!(calls as f64 / examples.len() as f64 > 0.8, "expected mostly calls, got {calls}/200");
+    }
+
+    /// P3d-3: under D1 (description signal, name absent from requests) the
+    /// mode-aware registry retriever keys on descriptions, so the retrieval
+    /// streams stay call-dominant — the property the D1 retrain depends on.
+    /// (A name-keyed retriever here would collapse to ~0 recall and label
+    /// nearly everything gap; that this stays >0.8 calls is the wiring proof.)
+    #[test]
+    fn d1_retrieval_streams_stay_call_dominant_via_description_keyed_retriever() {
+        let dataset = Dataset::new_sized_signal(
+            42,
+            400,
+            0.15,
+            DistractorConfig::easy_with_count(2),
+            crate::semantic::SignalMode::Description,
+        )
+        .unwrap();
+        let k = 8;
+        // Model-independent premise first: recall@k over the D1 registry.
+        let retriever = dataset.registry_retriever();
+        let pairs = dataset.retrieval_recall_pairs(150).unwrap();
+        let recall = retrieval_recall_at_k(&retriever, &pairs, k);
+        assert!(recall > 0.9, "D1 description-keyed recall@{k} should be high, got {recall}");
+
+        let examples = dataset.retrieval_train_examples(k, 200).unwrap();
+        let calls = examples.iter().filter(|e| !e.is_abstention()).count();
+        assert!(
+            calls as f64 / examples.len() as f64 > 0.8,
+            "D1 retrieval train stream should stay call-dominant, got {calls}/200"
+        );
+        // And the D1 *phrasing* genuinely carries no name tokens (spot-check).
+        // Tokens that arrive via argument VALUES are exempt — a fuzzed string
+        // value like "the release notes" legitimately contains "release" for a
+        // `publish_release` tool; that is content, not a phrasing leak.
+        for ex in examples.iter().take(20).filter(|e| !e.is_abstention()) {
+            let req = ex.user_request.to_ascii_lowercase();
+            let value_text = ex
+                .expected_call
+                .arguments_map()
+                .values()
+                .map(|v| v.to_string().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for tok in ex.expected_call.name.split('_') {
+                let tok = tok.to_ascii_lowercase();
+                let in_values = value_text
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|w| w == tok);
+                if in_values {
+                    continue;
+                }
+                let leaked = req
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|w| w == tok);
+                assert!(!leaked, "D1 phrasing leaked name token {tok:?}: {:?}", ex.user_request);
+            }
+        }
     }
 
     /// Genuine-novelty abstention: an out-of-registry request, offered the

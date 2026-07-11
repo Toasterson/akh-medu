@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use grug_data::{Dataset, DistractorConfig, TargetFormat};
+use grug_data::{Dataset, DistractorConfig, SignalMode, TargetFormat};
 use grug_train::eval::{run_retrieval_eval_fmt, FrozenRetrievalHoldout};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{init_training, to_eval_model};
@@ -56,6 +56,10 @@ struct Args {
     eval_max_new_tokens: usize,
     #[arg(long, default_value_t = 2)]
     distractor_count: usize,
+    /// Retrieval-signal tier (Phase 51 P3d) — must match the checkpoint's
+    /// training corpus (`name`/`d0`, `description`/`d1`, `paraphrase`/`d2`).
+    #[arg(long, default_value = "name")]
+    signal_mode: String,
 }
 
 fn main() {
@@ -74,9 +78,11 @@ fn main() {
         Default::default()
     };
 
+    let signal_mode = SignalMode::parse_label(&args.signal_mode)
+        .expect("--signal-mode must be name|d0|description|d1|paraphrase|d2");
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode),
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
@@ -89,7 +95,7 @@ fn main() {
     let (model, _optim, step) =
         checkpoint::load_checkpoint(&args.resume, model, optim, &device).expect("checkpoint loads");
     let model = to_eval_model(&model);
-    println!("eval_registry_repair: FORMAT={fmt:?} checkpoint step {step} | registry={} out_of_registry={}",
+    println!("eval_registry_repair: FORMAT={fmt:?} SIGNAL={signal_mode:?} checkpoint step {step} | registry={} out_of_registry={}",
         dataset.registry().len(), dataset.holdout_tools().len());
 
     let holdout = FrozenRetrievalHoldout::new(
@@ -132,6 +138,7 @@ fn main() {
     let summary = serde_json::json!({
         "checkpoint_step": step,
         "format": args.format,
+        "signal_mode": args.signal_mode,
         "retrieval_k": args.retrieval_k,
         "recall_at_k": r.recall_at_k,
         "n_call": r.n_call,

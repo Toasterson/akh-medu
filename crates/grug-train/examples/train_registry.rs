@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
-use grug_data::{Dataset, DistractorConfig, TargetFormat};
+use grug_data::{Dataset, DistractorConfig, SignalMode, TargetFormat};
 use grug_train::eval::{run_retrieval_eval_fmt, FrozenRetrievalHoldout};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{build_batch_fmt, init_training, to_eval_model, train_step};
@@ -89,6 +89,11 @@ struct Args {
     artifacts_dir: PathBuf,
     #[arg(long)]
     resume: Option<PathBuf>,
+    /// Retrieval-signal tier (Phase 51 P3d): `name`/`d0` (P3a behavior),
+    /// `description`/`d1` (glossed, name-free requests; description-keyed
+    /// retriever), `paraphrase`/`d2` (surface-disjoint request vs description).
+    #[arg(long, default_value = "name")]
+    signal_mode: String,
 }
 
 fn main() {
@@ -108,17 +113,21 @@ fn main() {
         Default::default()
     };
 
+    let signal_mode = SignalMode::parse_label(&args.signal_mode)
+        .expect("--signal-mode must be name|d0|description|d1|paraphrase|d2");
+
     // `distractor_count` only seeds the base generator; the offered set is
     // replaced by the retriever's top-K, so the effective offered size is K.
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode),
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
     println!(
-        "train_registry: FORMAT={:?} | registry(train)={} out_of_registry(holdout)={} retrieval_k={} novelty_frac={}",
+        "train_registry: FORMAT={:?} SIGNAL={:?} | registry(train)={} out_of_registry(holdout)={} retrieval_k={} novelty_frac={}",
         fmt,
+        signal_mode,
         dataset.registry().len(),
         dataset.holdout_tools().len(),
         args.retrieval_k,
