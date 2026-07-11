@@ -201,7 +201,14 @@ static DATETIME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?").expect("valid regex"));
 
 /// Infer and parse a single frontmatter value from its textual form.
-fn parse_value(raw: &str) -> FrontmatterValue {
+///
+/// `pub(crate)` (not just module-private) because [`crate::agent::promotion`]
+/// (ADR 081 Slice 5) reuses this exact inference to check whether a frontier
+/// predicate's observed object *labels* (plain KG entity strings, not
+/// frontmatter text) share a consistent [`crate::schema::source::ValueType`]
+/// shape — the same textual heuristics that already drive frontmatter typing,
+/// applied to the same kind of raw string.
+pub(crate) fn parse_value(raw: &str) -> FrontmatterValue {
     let trimmed = raw.trim();
 
     if let Some(inner) = trimmed.strip_prefix("[[").and_then(|s| s.strip_suffix("]]")) {

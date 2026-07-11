@@ -154,6 +154,47 @@ enum SchemaAction {
         #[arg(long, default_value_t = 20)]
         top: u64,
     },
+    /// List pending frontier→core promotion proposals (ADR 081 Slice 5).
+    /// Read-only, engine-local — does not require Postgres.
+    Proposals {
+        /// Workspace to list proposals for (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// Promote a pending proposal to the shared registry (ADR 081 decision
+    /// 8: admission always requires an explicit human confirm — pass
+    /// `--yes`). Mints a small schema pack extending the proposed type (or a
+    /// standalone type when none was proposed), admits it, and installs +
+    /// activates it into the workspace — or, for an `alias_of` proposal,
+    /// records an alias edge instead of minting anything new.
+    Promote {
+        /// The proposal id (the frontier predicate name — see `akh schema
+        /// proposals`).
+        id: String,
+        /// Workspace to promote into (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Confirm promotion. Without this flag the command only prints the
+        /// proposal and refuses to promote — the human-confirm gate.
+        #[arg(long)]
+        yes: bool,
+        /// Attribute the promotion to this identity instead of
+        /// `$USER`/`$LOGNAME`.
+        #[arg(long)]
+        confirmed_by: Option<String>,
+    },
+    /// Reject a pending proposal so it never re-surfaces on a later
+    /// promotion pass.
+    Reject {
+        /// The proposal id (the frontier predicate name).
+        id: String,
+        /// Workspace the proposal belongs to (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Optional free-text reason, recorded with the rejection.
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 /// Relocation / lifecycle ops: snapshot, wake, sleep, or relocate an akh
@@ -1219,6 +1260,75 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             let ws = workspace.unwrap_or_else(|| current_ws.to_string());
             let params = serde_json::json!({ "workspace": ws, "top_n": top });
             let result = acp_call("_akh/schema/coverage", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Proposals { workspace } => {
+            // Data-plane op (per-workspace read), same shape as `Coverage`.
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws });
+            let result = acp_call("_akh/schema/proposals", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Promote {
+            id,
+            workspace,
+            yes,
+            confirmed_by,
+        } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            // Print the pending proposal first, so the human confirming
+            // promotion sees exactly what they are about to admit — same
+            // shape as `Admit`'s local-decode-then-print step.
+            let proposals = acp_call(
+                "_akh/schema/proposals",
+                serde_json::json!({ "workspace": ws }),
+            )?;
+            let found = proposals
+                .get("proposals")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|p| p.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str()));
+            match found {
+                Some(p) => println!("{}", serde_json::to_string_pretty(p).into_diagnostic()?),
+                None => println!(
+                    "No pending proposal \"{id}\" (it may already be confirmed/rejected, or \
+                     hasn't recurred enough yet — run the promotion pass, then \
+                     `akh schema proposals`)."
+                ),
+            }
+
+            if !yes {
+                println!();
+                println!(
+                    "Not promoted. Review the proposal above, then re-run with --yes to confirm \
+                     promotion to the shared registry (ADR 081 decision 8: admission always \
+                     requires an explicit human confirm)."
+                );
+                return Ok(());
+            }
+
+            let confirmed_by = confirmed_by
+                .or_else(|| std::env::var("USER").ok())
+                .or_else(|| std::env::var("LOGNAME").ok())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let params = serde_json::json!({
+                "workspace": ws,
+                "id": id,
+                "confirmed_by": confirmed_by,
+            });
+            let result = acp_call("_akh/schema/promote", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Reject {
+            id,
+            workspace,
+            reason,
+        } => {
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws, "id": id, "reason": reason });
+            let result = acp_call("_akh/schema/reject", params)?;
             print_acp(&result)?;
         }
     }

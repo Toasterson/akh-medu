@@ -1127,6 +1127,82 @@ impl ServerState {
         serde_json::to_value(&digest).map_err(|e| format!("digest serialization failed: {e}"))
     }
 
+    /// Promote a pending frontier→core promotion proposal (`_akh/schema/promote`,
+    /// ADR 081 Slice 5). The CLI already ran the human-confirm gate
+    /// (`--yes`); this compiles+admits+installs+activates the promotion
+    /// pack (or records an alias triple for an `alias_of` proposal) — see
+    /// `akh_medu::agent::promotion::promote_proposal` for the full decision
+    /// (new-subtype-vs-standalone-type fallback, one-pack-per-proposal
+    /// naming). Needs both the workspace's engine (to read/apply the
+    /// proposal) and Postgres (to admit the new pack), so — unlike
+    /// `schema/proposals`/`schema/reject` — this is control-plane.
+    async fn schema_promote(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let id = params
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: id".to_string())?;
+        let confirmed_by = params
+            .get("confirmed_by")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+
+        let engine = self.get_engine(ws).await?;
+        let registry = akh_medu::schema::registry_pg::PgSchemaRegistry::new(pool);
+
+        let importer_label = akh_medu::schema::install::effective_schema_label(ws);
+        let importer = engine
+            .resolve_or_create_entity(&importer_label)
+            .map_err(|e| format!("importer entity failed: {e}"))?;
+
+        let outcome = akh_medu::agent::promotion::promote_proposal(
+            &engine,
+            &registry,
+            id,
+            confirmed_by,
+            importer,
+        )
+        .map_err(|e| format!("promotion failed: {e}"))?;
+
+        // A `Promoted` outcome installed a new pack — record its activation
+        // so a later wake converges it automatically (`schema_install`'s
+        // exact precedent). An `Aliased` outcome installed no pack, so
+        // there is nothing to record.
+        if let akh_medu::agent::promotion::PromotionOutcome::Promoted {
+            microtheory_label, ..
+        } = &outcome
+        {
+            let workspace_id = akh_medu::wal::workspace_id_for(ws);
+            let akh_id = akh_medu::wal::akh_id_for(ws);
+            akhomed_store::record_pack_activation(
+                pool,
+                workspace_id,
+                microtheory_label,
+                akh_id,
+                akhomed_store::chrono::Utc::now(),
+            )
+            .await
+            .map_err(|e| format!("recording activation failed: {e}"))?;
+        }
+
+        tracing::info!(
+            workspace = %ws,
+            proposal = %id,
+            "promotion proposal confirmed"
+        );
+        serde_json::to_value(&outcome).map_err(|e| format!("outcome serialization failed: {e}"))
+    }
+
     /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
     ///
     /// Order: stop snapshot tickers, take one final snapshot per loaded
@@ -2119,6 +2195,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "schema/list" => self.schema_list().await,
                 "schema/install" => self.schema_install(params).await,
                 "schema/digest" => self.schema_digest(params).await,
+                "schema/promote" => self.schema_promote(params).await,
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
