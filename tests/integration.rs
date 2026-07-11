@@ -898,7 +898,7 @@ fn goal_status_transitions() {
 fn tool_registry_crud() {
     let mut agent = test_agent();
 
-    // Should have 38 built-in tools:
+    // Should have 42 built-in tools:
     //   5 core + 4 external + 2 autonomous + 5 ingest + 1 library + 1 doc
     //   + 3 code (code_gen, compile_feedback, pattern_mine)
     //   + 4 agent (agent_list, agent_spawn, agent_message, agent_retire)
@@ -907,8 +907,10 @@ fn tool_registry_crud() {
     //   + 5 Claude-Code-parity (edit, glob, grep, web_search, task_list)
     //   + 3 typed writers (memory_write, skill_author, identity_awaken; ADR 076)
     //   + 1 inference_config (Phase 47)
+    //   + 4 structured tasks (structured_task_create/update/complete/list;
+    //     ADR 081 slice 6)
     let tools = agent.list_tools();
-    assert_eq!(tools.len(), 38);
+    assert_eq!(tools.len(), 42);
 
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     // Core tools.
@@ -993,8 +995,8 @@ fn tool_registry_crud() {
     }
 
     agent.register_tool(Box::new(CustomTool));
-    // 38 built-in tools + 1 custom.
-    assert_eq!(agent.list_tools().len(), 39);
+    // 42 built-in tools + 1 custom.
+    assert_eq!(agent.list_tools().len(), 43);
 }
 
 #[test]
