@@ -141,6 +141,19 @@ enum SchemaAction {
         #[arg(long)]
         workspace: Option<String>,
     },
+    /// Non-LLM schema-coverage report (ADR 081 Slice 9): what fraction of a
+    /// workspace's live KG is typed-core vs. frontier vs. schema bookkeeping.
+    /// No data is rewritten — legacy triples are grandfathered as frontier by
+    /// classification, not migration; run this anytime to see whether the
+    /// typed core is crystallizing.
+    Coverage {
+        /// Workspace to report on (defaults to --workspace).
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Number of frontier predicates to list, ranked by occurrence count.
+        #[arg(long, default_value_t = 20)]
+        top: u64,
+    },
 }
 
 /// Relocation / lifecycle ops: snapshot, wake, sleep, or relocate an akh
@@ -1194,6 +1207,18 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
                 "version": version,
             });
             let result = acp_call("_akh/schema/install", params)?;
+            print_acp(&result)?;
+        }
+        SchemaAction::Coverage { workspace, top } => {
+            // Data-plane op (per-workspace read of the live KG, not the
+            // server-wide registry) — routed like `_akh/workspace/status`,
+            // with the `workspace` params field selecting the `-w` akh
+            // (defaults to the bound daemon workspace when omitted; we pass
+            // `--workspace`/`cli.workspace` explicitly so `akh -w foo schema
+            // coverage` targets the right akh from a multi-akh daemon).
+            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let params = serde_json::json!({ "workspace": ws, "top_n": top });
+            let result = acp_call("_akh/schema/coverage", params)?;
             print_acp(&result)?;
         }
     }

@@ -38,6 +38,7 @@
 //! `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
 
 pub mod compile;
+pub mod coverage;
 pub mod install;
 pub mod project;
 #[cfg(feature = "postgres")]
@@ -49,6 +50,10 @@ use thiserror::Error;
 
 pub use compile::{
     CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
+};
+pub use coverage::{
+    CompartmentBreakdown, CoverageReport, SchemaView, TripleClass, classify_triple,
+    coverage_report, coverage_report_top_n,
 };
 pub use install::{InstallReport, activate_pack, install_pack};
 pub use project::{ProjectionReport, TypeOutcome, TypedNoteView, note_of_entity, project_note, typed_view};
