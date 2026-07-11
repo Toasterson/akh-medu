@@ -26,7 +26,7 @@ use burn::module::Module;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, Optimizer};
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder};
-use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GrugError, GrugResult};
@@ -157,6 +157,57 @@ pub fn load_checkpoint<B: AutodiffBackend>(
     Ok((model, optim, meta.step))
 }
 
+/// Load only a checkpoint's model weights, skipping `optim.mpk` entirely.
+///
+/// The GWT workspace-emergence probes (`docs/ai/research/2026-07-09-global-workspace-language-models.md`
+/// §7, `examples/probe_lens.rs` / `examples/probe_swap.rs`) are inference-only
+/// -- they never call `.backward()` -- so there is no need to reconstruct the
+/// Adam optimizer state (which [`load_checkpoint`] requires purely because it
+/// is generic over the *training* resumption path). This is `load_checkpoint`
+/// minus the `optim` half: same `meta.json` schema-version validation, same
+/// `model` recorder, but `model` may be built directly on a plain (non-autodiff)
+/// [`Backend`] rather than requiring [`AutodiffBackend`] -- one fewer generic
+/// parameter to satisfy at the probe call site.
+///
+/// `model` should be freshly initialized with the *same architecture config*
+/// the checkpoint was saved from, exactly as [`load_checkpoint`] requires.
+pub fn load_model_only<B: Backend>(
+    dir: impl AsRef<Path>,
+    model: TinyTransformer<B>,
+    device: &B::Device,
+) -> GrugResult<(TinyTransformer<B>, usize)> {
+    let dir = dir.as_ref();
+    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+
+    let meta_str = std::fs::read_to_string(meta_path(dir)).map_err(|e| GrugError::CheckpointReadFailed {
+        path: dir.display().to_string(),
+        message: format!("reading meta.json: {e}"),
+    })?;
+    let meta: CheckpointMeta =
+        serde_json::from_str(&meta_str).map_err(|e| GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!("parsing meta.json: {e}"),
+        })?;
+    if meta.schema_version != SCHEMA_VERSION {
+        return Err(GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!(
+                "checkpoint schema_version {} does not match this build's {SCHEMA_VERSION}",
+                meta.schema_version
+            ),
+        });
+    }
+
+    let model = model
+        .load_file(model_path(dir), &recorder, device)
+        .map_err(|e| GrugError::CheckpointReadFailed {
+            path: dir.display().to_string(),
+            message: format!("loading model: {e}"),
+        })?;
+
+    Ok((model, meta.step))
+}
+
 /// [`save_checkpoint`] for a [`PointerTransformer`] (Phase 51 P1a-4 Step B).
 /// Same on-disk layout (`model`/`optim`/`meta.json`); a separate function
 /// rather than a generic one to keep the proven `TinyTransformer` path
@@ -285,6 +336,49 @@ mod tests {
         assert_eq!(original_param_count, loaded_param_count);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// [`load_model_only`] reads back the same weights [`save_checkpoint`]
+    /// wrote, on a plain (non-autodiff) backend, without ever touching
+    /// `optim.mpk` -- the probe harness's load path.
+    #[test]
+    fn load_model_only_restores_step_and_weights_without_optimizer() {
+        use crate::CpuBackend;
+
+        let device = Default::default();
+        let (model, optim) = init_training::<CpuAutodiffBackend>(&tiny_model_config(), &device);
+
+        let dir = std::env::temp_dir().join(format!("grug_train_ckpt_model_only_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        save_checkpoint(&dir, 7, &model, &optim).unwrap();
+
+        // Deliberately no optimizer built at all -- a plain inference backend,
+        // matching how the GWT probes load checkpoints.
+        let fresh_model = tiny_model_config().init::<CpuBackend>(&device);
+        let (loaded_model, step) = load_model_only(&dir, fresh_model, &device).unwrap();
+
+        assert_eq!(step, 7);
+        let original_param_count = burn::module::Module::num_params(&model);
+        let loaded_param_count = burn::module::Module::num_params(&loaded_model);
+        assert_eq!(original_param_count, loaded_param_count);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_model_only_rejects_missing_checkpoint_directory() {
+        use crate::CpuBackend;
+
+        let device = Default::default();
+        let model = tiny_model_config().init::<CpuBackend>(&device);
+        let missing_dir = std::env::temp_dir().join("grug_train_ckpt_model_only_test_definitely_missing_dir_xyz");
+        let _ = std::fs::remove_dir_all(&missing_dir);
+
+        match load_model_only(&missing_dir, model, &device) {
+            Err(GrugError::CheckpointReadFailed { .. }) => {}
+            other => panic!("expected CheckpointReadFailed, got: {}", other.is_ok()),
+        }
     }
 
     #[test]

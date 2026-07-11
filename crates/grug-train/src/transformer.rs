@@ -334,6 +334,87 @@ impl<B: Backend> TinyTransformer<B> {
         self.lm_head.forward(hidden)
     }
 
+    /// Every intermediate hidden state the trunk produces, pre-`ln_final`:
+    /// `n_layers + 1` entries -- `layers[0]` is the token+position embedding
+    /// sum (before any [`DecoderBlock`] runs), and `layers[i]` for `i in
+    /// 1..=n_layers` is the residual stream immediately after block `i - 1`.
+    /// None of these have `ln_final` applied (that is [`TinyTransformer::lens_logits`]'s
+    /// job) -- this is the raw per-layer residual stream the GWT logit-lens
+    /// probe (`docs/ai/research/2026-07-09-global-workspace-language-models.md`
+    /// §7.1) reads.
+    ///
+    /// This duplicates [`TinyTransformer::hidden`]'s embedding + block-loop
+    /// logic rather than calling it, precisely so `hidden`'s behavior (and its
+    /// callers' compiled code) stays byte-identical -- this method is a pure
+    /// addition, not a refactor of the forward path.
+    pub fn hidden_layers(&self, input_ids: Tensor<B, 2, Int>) -> Vec<Tensor<B, 3>> {
+        let [batch_size, seq_len] = input_ids.dims();
+        assert!(
+            seq_len <= self.max_seq_len,
+            "sequence length {seq_len} exceeds configured max_seq_len {}",
+            self.max_seq_len
+        );
+        let device = input_ids.device();
+
+        let tokens = self.token_embedding.forward(input_ids);
+
+        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
+            .unsqueeze::<2>()
+            .repeat_dim(0, batch_size);
+        let positions = self.position_embedding.forward(positions);
+
+        let mut hidden = tokens + positions;
+
+        let mut layers = Vec::with_capacity(self.blocks.len() + 1);
+        layers.push(hidden.clone());
+
+        let causal_mask = generate_autoregressive_mask::<B>(batch_size, seq_len, &device);
+        for block in &self.blocks {
+            hidden = block.forward(hidden, causal_mask.clone());
+            layers.push(hidden.clone());
+        }
+
+        layers
+    }
+
+    /// The logit lens (GWT probe §7.1): apply the model's *own* final norm and
+    /// unembedding to an intermediate hidden state `h` (e.g. one entry of
+    /// [`TinyTransformer::hidden_layers`]), rather than only ever to the final
+    /// post-block state. `lens_logits(h) == lm_head(ln_final(h))`; calling it on
+    /// `hidden_layers(x)[n_layers]` (the last, post-final-block entry)
+    /// reproduces [`TinyTransformer::forward`] exactly, since `forward` is
+    /// `vocab_logits(hidden(x))` and `hidden` is `ln_final` applied to that same
+    /// state.
+    pub fn lens_logits(&self, h: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.vocab_logits(self.ln_final.forward(h))
+    }
+
+    /// Resume the trunk from an (possibly patched) intermediate hidden state
+    /// `h` -- run `blocks[from_block..]` on it, then `ln_final`, matching
+    /// exactly the tail of [`TinyTransformer::hidden`]'s block loop that would
+    /// have executed after block `from_block - 1`. The causal mask is
+    /// regenerated from `h`'s own `[batch, seq, _]` dims (not carried over from
+    /// wherever `h` came from), since a caller may have spliced/patched rows
+    /// without changing shape.
+    ///
+    /// # Invariant
+    /// For every `k in 0..=n_layers`: `hidden_from(hidden_layers(x)[k], k) ==
+    /// hidden(x)`. At `k == 0` this replays the full block stack (identical to
+    /// `hidden`); at `k == n_layers` `blocks[n_layers..]` is empty, so this is
+    /// just `ln_final(h)` -- exactly what `hidden` applies to the post-block
+    /// state.
+    pub fn hidden_from(&self, h: Tensor<B, 3>, from_block: usize) -> Tensor<B, 3> {
+        let [batch_size, seq_len, _] = h.dims();
+        let device = h.device();
+        let causal_mask = generate_autoregressive_mask::<B>(batch_size, seq_len, &device);
+
+        let mut hidden = h;
+        for block in self.blocks.iter().skip(from_block) {
+            hidden = block.forward(hidden, causal_mask.clone());
+        }
+        self.ln_final.forward(hidden)
+    }
+
     /// Approximate learnable parameter count (sum of `Param` tensor sizes).
     /// Used for reporting, not part of the forward path.
     pub fn num_params(&self) -> usize
@@ -403,6 +484,100 @@ mod tests {
         // every hyperparameter tweak.
         assert!(n > 100_000, "spike model suspiciously small: {n} params");
         assert!(n < 20_000_000, "spike model larger than the P0 target: {n} params");
+    }
+
+    /// GWT probe hook (§7.1): `hidden_layers` returns exactly `n_layers + 1`
+    /// entries -- the pre-block embedding sum plus one per decoder block.
+    #[test]
+    fn hidden_layers_has_n_layers_plus_one_entries() {
+        let device = Default::default();
+        let config = tiny_config();
+        let model = config.init::<CpuBackend>(&device);
+
+        let batch_size = 2;
+        let seq_len = 6;
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| i % 260).collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [batch_size, seq_len]), &device);
+
+        let layers = model.hidden_layers(input);
+        assert_eq!(layers.len(), config.n_layers + 1);
+        for h in &layers {
+            assert_eq!(h.dims(), [batch_size, seq_len, config.d_model]);
+        }
+    }
+
+    fn tensor_to_vec<const D: usize>(t: Tensor<CpuBackend, D>) -> Vec<f32> {
+        t.into_data().to_vec::<f32>().unwrap()
+    }
+
+    fn assert_close(a: &[f32], b: &[f32], tol: f32, msg: &str) {
+        assert_eq!(a.len(), b.len(), "{msg}: length mismatch");
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (x - y).abs() < tol,
+                "{msg}: element {i} differs: {x} vs {y} (tol {tol})"
+            );
+        }
+    }
+
+    /// GWT probe hook (§7.1a): the logit lens applied to the *last*
+    /// `hidden_layers` entry (post-final-block, pre-`ln_final`) must reproduce
+    /// `forward()` exactly, since `forward` is defined as
+    /// `vocab_logits(hidden(x))` and `hidden` is `ln_final` applied to that same
+    /// post-block state.
+    #[test]
+    fn lens_logits_on_last_layer_matches_forward() {
+        let device = Default::default();
+        let config = tiny_config();
+        let model = config.init::<CpuBackend>(&device);
+
+        let batch_size = 2;
+        let seq_len = 5;
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| (i * 7) % 260).collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids.clone(), [batch_size, seq_len]), &device);
+
+        let forward_out = model.forward(input.clone());
+        let layers = model.hidden_layers(input);
+        let last = layers.last().cloned().expect("at least one layer");
+        let lens_out = model.lens_logits(last);
+
+        assert_eq!(forward_out.dims(), lens_out.dims());
+        assert_close(
+            &tensor_to_vec(forward_out),
+            &tensor_to_vec(lens_out),
+            1e-5,
+            "lens_logits(hidden_layers(x)[n_layers]) vs forward(x)",
+        );
+    }
+
+    /// GWT probe hook (§7.1b): `hidden_from(hidden_layers(x)[k], k) ==
+    /// hidden(x)` for `k == 0` (replay the whole stack) and a middle `k`
+    /// (resume partway through) -- the round-trip invariant the probe examples
+    /// depend on.
+    #[test]
+    fn hidden_from_reproduces_hidden_at_every_layer() {
+        let device = Default::default();
+        let config = tiny_config(); // 2 layers
+        let model = config.init::<CpuBackend>(&device);
+
+        let batch_size = 2;
+        let seq_len = 7;
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| (i * 3 + 1) % 260).collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids.clone(), [batch_size, seq_len]), &device);
+
+        let expected = tensor_to_vec(model.hidden(input.clone()));
+        let layers = model.hidden_layers(input);
+        assert_eq!(layers.len(), config.n_layers + 1);
+
+        for (k, h_k) in layers.into_iter().enumerate() {
+            let resumed = model.hidden_from(h_k, k);
+            assert_close(
+                &tensor_to_vec(resumed),
+                &expected,
+                1e-5,
+                &format!("hidden_from(hidden_layers(x)[{k}], {k}) vs hidden(x)"),
+            );
+        }
     }
 
     #[test]

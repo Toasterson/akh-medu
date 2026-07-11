@@ -37,7 +37,7 @@ pub mod train;
 pub mod transformer;
 
 pub use bpe::BpeTokenizer;
-pub use checkpoint::{load_checkpoint, save_checkpoint};
+pub use checkpoint::{load_checkpoint, load_model_only, save_checkpoint};
 pub use error::{GrugError, GrugResult};
 pub use eval::{
     run_abstention_eval_fmt, run_eval, run_eval_and_log, run_retrieval_eval_fmt, run_two_axis_eval,
