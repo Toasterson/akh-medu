@@ -28,13 +28,8 @@ src/
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
-<<<<<<< HEAD
-├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
-├── graph/              10 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o), identity (ADR 081 P2: stable content-addressed TripleIdentity — blake3 over labels + compartment, cross-akh stable; engine-side index + `triple_by_identity`)
-=======
-├── grammar/            23 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e), aggregation rules (Phase 33a)
-├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
->>>>>>> worktree-agent-afc140329d3be72b5
+├── grammar/            21 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e), aggregation rules (Phase 33a)
+├── graph/              11 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o), identity (ADR 081 P2: stable content-addressed TripleIdentity — blake3 over labels + compartment, cross-akh stable; engine-side index + `triple_by_identity`)
 ├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU); seshat/ submodule for MCP client to Seshat service
 crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), MCP server (rmcp), ONNX embedding worker, optional Candle LLM synthesis, seshat-ingest CLI
