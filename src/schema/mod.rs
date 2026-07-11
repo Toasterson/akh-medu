@@ -38,6 +38,7 @@
 //! `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
 
 pub mod compile;
+pub mod conflict;
 pub mod coverage;
 pub mod digest;
 pub mod install;
@@ -53,6 +54,10 @@ use thiserror::Error;
 pub use compile::{
     CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
 };
+pub use conflict::{
+    AssertionConflict, ResolvedAssertion, SourcedAssertion, assert_with_source,
+    conflicting_assertions, resolve_conflict,
+};
 pub use coverage::{
     CompartmentBreakdown, CoverageReport, SchemaView, TripleClass, classify_triple,
     coverage_report, coverage_report_top_n,
@@ -60,8 +65,9 @@ pub use coverage::{
 pub use digest::{PropertyDigest, RelationDigest, SchemaDigest, digest};
 pub use install::{InstallReport, activate_pack, install_pack};
 pub use project::{
-    ProjectionReport, TypeOutcome, TypedNoteView, TypedPropertyProjection, note_of_entity,
-    project_note, typed_view,
+    MANIFEST_COMPARTMENT, PRED_PROJECTION_ASSERTED, ProjectionDiff, ProjectionReport, TypeOutcome,
+    TypedNoteView, TypedPropertyProjection, note_of_entity, project_note, reproject_note,
+    typed_view,
 };
 #[cfg(feature = "postgres")]
 pub use registry_pg::PgSchemaRegistry;

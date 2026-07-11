@@ -51,17 +51,20 @@
 //!   Declared relation arity/arg-type validation is therefore not exercised
 //!   here; it applies once notes gain a way to author relation triples
 //!   (work-item 5+ territory).
-//! - Diff-based supersede on a changed note (work-item 8). Re-projecting an
-//!   *unchanged* note is idempotent at the triple level (the KG's
-//!   `(subject, predicate, object)` dedup in [`crate::graph::index`] already
-//!   gives us this for free — see the module tests). Re-projecting a
-//!   *changed* note today simply adds the new triples; no TMS retraction of
-//!   the old ones happens yet.
+//!
+//! **Slice 8 update** (work-item 8, "Evolution: diff-supersede + TMS +
+//! multi-akh DS conflict"): [`reproject_note`] closes the gap the paragraph
+//! above used to describe. Re-projecting an *unchanged* note stays
+//! triple-level idempotent (unchanged); re-projecting a *changed* note now
+//! diffs the new triple set against a durable per-note **projection
+//! manifest** and retracts exactly the triples that dropped out — see
+//! [`reproject_note`]'s doc comment for the manifest shape and why.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::engine::Engine;
 use crate::graph::Triple;
+use crate::graph::identity::TripleIdentity;
 use crate::library::note::{Note, NoteId, FrontmatterValue};
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
@@ -171,6 +174,41 @@ pub struct ProjectionReport {
     /// `agent::harvest::mint_turn_episode`'s `let _ = engine.store_provenance(..)`
     /// tolerance, made visible here as `None` instead of silently dropped).
     pub provenance_id: Option<ProvenanceId>,
+    /// The exact `(subject, predicate, object)` triples this projection pass
+    /// asserted: the `is-a` triple (if typed), one triple per frontmatter key
+    /// (typed or frontier), and one `links-to` triple per wikilink. Asserting
+    /// an unchanged triple again is a no-op at the KG level (idempotent
+    /// dedup), so this list is the projector's *full current intent*, not
+    /// just what changed this call — [`reproject_note`] diffs it against the
+    /// prior manifest to find out what changed.
+    pub asserted_triples: Vec<Triple>,
+    /// Diff-based supersede counts (ADR 081 decision 12, work-item 8).
+    /// `None` for a plain [`project_note`] call — no manifest diffing is
+    /// performed, so there is nothing to report. `Some` when this report was
+    /// produced by [`reproject_note`].
+    pub diff: Option<ProjectionDiff>,
+}
+
+/// How a [`reproject_note`] call's new triple set compared to the note's
+/// prior projection manifest (work-item 8 acceptance: "editing a fact
+/// retracts only the changed triple(s); unchanged triples keep their
+/// original provenance/confidence").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectionDiff {
+    /// Triples newly asserted this pass (present now, absent from the prior
+    /// manifest).
+    pub added: usize,
+    /// Triples unchanged since the prior projection (present in both the new
+    /// set and the prior manifest) — untouched, no provenance/confidence
+    /// churn.
+    pub retained: usize,
+    /// Triples retracted this pass (present in the prior manifest, absent
+    /// from the new set) — removed via [`Engine::remove_triple`]'s TMS
+    /// cascade, so `TruthMaintenanceSystem::was_retracted` sees them and
+    /// Phase 44g recall hygiene filters them out, while the retraction
+    /// itself is preserved as a [`DerivationKind::NoteReprojection`]
+    /// provenance record (history is never deleted, only marked superseded).
+    pub retracted: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +236,7 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         .map_err(|e| projection_err(&note.id, format!("is-a relation: {e}")))?;
 
     let mut sources = vec![note_entity];
+    let mut asserted_triples = Vec::new();
 
     // --- Decide the type outcome first: it gates which frontmatter keys
     // count as "typed" vs. "frontier". ---
@@ -216,9 +255,11 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
     };
 
     let effective = if let TypeOutcome::Typed { type_symbol, .. } = &type_outcome {
+        let type_triple = Triple::new(note_entity, is_a, *type_symbol);
         engine
-            .add_triple(&Triple::new(note_entity, is_a, *type_symbol))
+            .add_triple(&type_triple)
             .map_err(|e| projection_err(&note.id, format!("type triple: {e}")))?;
+        asserted_triples.push(type_triple);
         sources.push(*type_symbol);
         // Slice 3: walk the is-a chain for the effective (own + inherited)
         // property set. A subtype cycle is a schema-authoring bug, not a
@@ -262,9 +303,11 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
                 let predicate = engine
                     .resolve_or_create_relation(key)
                     .map_err(|e| projection_err(&note.id, format!("property predicate '{key}': {e}")))?;
+                let property_triple = Triple::new(note_entity, predicate, value_entity);
                 engine
-                    .add_triple(&Triple::new(note_entity, predicate, value_entity))
+                    .add_triple(&property_triple)
                     .map_err(|e| projection_err(&note.id, format!("property triple '{key}': {e}")))?;
+                asserted_triples.push(property_triple);
                 typed_property_count += 1;
                 typed_properties.push(TypedPropertyProjection {
                     key: key.to_string(),
@@ -280,9 +323,11 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
                 let predicate = engine
                     .resolve_or_create_relation(&frontier_label)
                     .map_err(|e| projection_err(&note.id, format!("frontier predicate '{key}': {e}")))?;
+                let frontier_triple = Triple::new(note_entity, predicate, value_entity);
                 engine
-                    .add_triple(&Triple::new(note_entity, predicate, value_entity))
+                    .add_triple(&frontier_triple)
                     .map_err(|e| projection_err(&note.id, format!("frontier triple '{key}': {e}")))?;
+                asserted_triples.push(frontier_triple);
                 frontier_property_count += 1;
             }
         }
@@ -310,9 +355,11 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         let target = engine
             .resolve_or_create_entity(&link.target)
             .map_err(|e| projection_err(&note.id, format!("wikilink target '{}': {e}", link.target)))?;
+        let link_triple = Triple::new(note_entity, links_to, target);
         engine
-            .add_triple(&Triple::new(note_entity, links_to, target))
+            .add_triple(&link_triple)
             .map_err(|e| projection_err(&note.id, format!("wikilink triple '{}': {e}", link.target)))?;
+        asserted_triples.push(link_triple);
         sources.push(target);
         wikilink_count += 1;
     }
@@ -341,7 +388,215 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         shape_violations,
         wikilink_count,
         provenance_id,
+        asserted_triples,
+        diff: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Slice 8: diff-based supersede (projection manifest + reproject_note)
+// ---------------------------------------------------------------------------
+
+/// Compartment the per-note projection manifest lives in.
+///
+/// Deliberately reuses [`super::coverage`]'s `"mt:schema/"`
+/// schema-pack-compartment prefix (`is_schema_pack_compartment`), even
+/// though a manifest is not a schema *pack* — the manifest is schema-system
+/// bookkeeping about a note's *last projection*, exactly the same category
+/// of "not data about the world" the coverage report already carves out as
+/// [`super::coverage::TripleClass::SchemaInfra`]. Piggy-backing on the
+/// existing prefix check means the coverage report classifies manifest
+/// triples correctly for free, with no changes to `schema::coverage`.
+pub const MANIFEST_COMPARTMENT: &str = "mt:schema/projection-manifest";
+
+/// `(note-manifest-entity, projection:asserted, {triple-identity entity})` —
+/// the manifest predicate. One triple per [`TripleIdentity`] the note's last
+/// successful [`reproject_note`] (or first [`project_note`]) call asserted.
+pub const PRED_PROJECTION_ASSERTED: &str = "projection:asserted";
+
+/// Label prefix for the per-identity marker entity a manifest triple points
+/// at. `{prefix}{identity.to_hex()}` — one KG entity per unique
+/// [`TripleIdentity`] ever seen by any manifest, shared across notes (the
+/// hex is content-addressed, so this is naturally deduplicated).
+const IDENTITY_LABEL_PREFIX: &str = "triple-identity:";
+
+fn manifest_entity_label(note_id: &NoteId) -> String {
+    format!("note-manifest:{}", note_id.as_str())
+}
+
+fn identity_entity_label(identity: &TripleIdentity) -> String {
+    format!("{IDENTITY_LABEL_PREFIX}{}", identity.to_hex())
+}
+
+/// Resolve (creating if absent) the manifest entity for `note_id`, and read
+/// back the set of [`TripleIdentity`] hashes its current manifest triples
+/// record. Empty for a note that has never been projected.
+fn read_manifest(engine: &Engine, note_id: &NoteId) -> SchemaResult<(SymbolId, HashSet<TripleIdentity>)> {
+    let manifest_entity = engine
+        .resolve_or_create_entity(&manifest_entity_label(note_id))
+        .map_err(|e| projection_err(note_id, format!("manifest entity: {e}")))?;
+    let asserted_pred = engine
+        .resolve_or_create_relation(PRED_PROJECTION_ASSERTED)
+        .map_err(|e| projection_err(note_id, format!("manifest predicate: {e}")))?;
+
+    let identities = engine
+        .triples_from(manifest_entity)
+        .into_iter()
+        .filter(|t| t.predicate == asserted_pred)
+        .filter_map(|t| {
+            engine
+                .resolve_label(t.object)
+                .strip_prefix(IDENTITY_LABEL_PREFIX)
+                .and_then(|hex| TripleIdentity::from_hex(hex).ok())
+        })
+        .collect();
+
+    Ok((manifest_entity, identities))
+}
+
+/// Overwrite the manifest to match `new_identities`: assert a marker triple
+/// for every newly-added identity, retract the marker for every identity
+/// that dropped out. `prior` is the set [`read_manifest`] returned earlier in
+/// the same call — passed in rather than re-read so the diff is computed
+/// against a single consistent snapshot.
+fn write_manifest(
+    engine: &Engine,
+    note_id: &NoteId,
+    manifest_entity: SymbolId,
+    prior: &HashSet<TripleIdentity>,
+    new_identities: &HashSet<TripleIdentity>,
+) -> SchemaResult<()> {
+    let asserted_pred = engine
+        .resolve_or_create_relation(PRED_PROJECTION_ASSERTED)
+        .map_err(|e| projection_err(note_id, format!("manifest predicate: {e}")))?;
+
+    for identity in new_identities.difference(prior) {
+        let marker = engine
+            .resolve_or_create_entity(&identity_entity_label(identity))
+            .map_err(|e| projection_err(note_id, format!("manifest marker: {e}")))?;
+        engine
+            .add_triple(
+                &Triple::new(manifest_entity, asserted_pred, marker)
+                    .with_compartment(MANIFEST_COMPARTMENT.to_string()),
+            )
+            .map_err(|e| projection_err(note_id, format!("manifest assert: {e}")))?;
+    }
+
+    for identity in prior.difference(new_identities) {
+        let marker = engine
+            .resolve_or_create_entity(&identity_entity_label(identity))
+            .map_err(|e| projection_err(note_id, format!("manifest marker: {e}")))?;
+        let _ = engine.remove_triple(manifest_entity, asserted_pred, marker);
+    }
+
+    Ok(())
+}
+
+/// Re-project a [`Note`] into the typed KG, diffing the new triple set
+/// against the note's prior **projection manifest** and retracting exactly
+/// what changed (ADR 081 decision 12, work-item 8).
+///
+/// ## Why a manifest, and why KG-native triples
+///
+/// Diffing needs an answer to "what did the *last* projection of this note
+/// assert?" — [`project_note`] itself is write-only (it only ever calls
+/// [`Engine::add_triple`]), so without a separate record there is no way to
+/// tell "this triple is still correct, leave it" from "this triple's
+/// frontmatter key was deleted, retract it": both look identical from the
+/// KG's point of view (the triple is simply present).
+///
+/// The manifest is `(note-manifest:{id}, projection:asserted,
+/// {triple-identity:{hex}})` triples — plain KG data, not an
+/// engine-side cache:
+/// - **Survives snapshot/wake for free.** Phase 38's snapshot/restore
+///   machinery (`Engine::all_triples` / `Engine::restore_triples`) already
+///   captures and reloads every KG triple; the manifest needs no bespoke
+///   (de)serialization or a new Postgres table to persist across a
+///   relocate/wake cycle.
+/// - **Auditable.** The manifest is queryable with the same tools as any
+///   other fact (`engine.triples_from(manifest_entity)`), satisfying the
+///   acceptance criterion "the prior note version + the change are
+///   auditable" without a separate history table.
+/// - **A separate subject, not `note_entity` itself.** Manifest triples hang
+///   off a dedicated `note-manifest:{id}` entity rather than `note_entity`
+///   so [`typed_view`]'s classification (which walks
+///   `engine.triples_from(note_entity)` and buckets anything it does not
+///   recognize as a typed property) is never touched by bookkeeping data.
+///
+/// ## The diff
+///
+/// 1. Read the prior manifest (before this call changes anything).
+/// 2. Run [`project_note`] unchanged — it asserts the note's *current*
+///    intended triple set (idempotent dedup handles unchanged triples; see
+///    [`ProjectionReport::asserted_triples`] for the exact list this pass
+///    intended, independent of whatever else happens to already be in the
+///    KG).
+/// 3. Diff `asserted_triples`' [`TripleIdentity`] set against the prior
+///    manifest: identities in both are **retained** (untouched — no
+///    provenance/confidence churn, since `add_triple`'s dedup path only
+///    raises confidence to a max and never overwrites an existing
+///    `provenance_id` with `None`); identities only in the new set are
+///    **added** (already asserted by step 2); identities only in the prior
+///    manifest are **retracted**.
+/// 4. Retract each dropped identity via [`Engine::remove_triple`] — the
+///    existing Phase 9c TMS cascade marks the triple's object
+///    `was_retracted` (Phase 44g recall hygiene already filters on that),
+///    while a [`DerivationKind::NoteReprojection`] provenance record is
+///    stored *before* the retraction so the "who/what superseded this" audit
+///    trail survives even though the TMS's own support-set bookkeeping does
+///    not retain retracted entries.
+/// 5. Overwrite the manifest to the new identity set.
+pub fn reproject_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionReport> {
+    let (manifest_entity, prior_identities) = read_manifest(engine, &note.id)?;
+
+    let mut report = project_note(engine, note)?;
+
+    let new_identities: HashSet<TripleIdentity> = report
+        .asserted_triples
+        .iter()
+        .map(|t| engine.triple_identity(t))
+        .collect();
+
+    let added = new_identities.difference(&prior_identities).count();
+    let retained = new_identities.intersection(&prior_identities).count();
+
+    let mut retracted = 0usize;
+    for identity in prior_identities.difference(&new_identities) {
+        let Some(stale) = engine.triple_by_identity(identity) else {
+            // Already gone (removed by something else, or never resolvable
+            // any more) — nothing to retract, nothing to record.
+            continue;
+        };
+
+        // Supersede provenance recorded *before* removal (work-item 8, item
+        // 4): a durable "who/what superseded this fact" audit trail that
+        // outlives the TMS's own support-set bookkeeping.
+        let mut prov = ProvenanceRecord::new(
+            stale.object,
+            DerivationKind::NoteReprojection {
+                note_id: note.id.to_string(),
+                reason: "note re-projection: frontmatter/body no longer asserts this fact".into(),
+            },
+        )
+        .with_sources(vec![manifest_entity, stale.subject, stale.predicate])
+        .with_confidence(0.0);
+        let _ = engine.store_provenance(&mut prov);
+
+        // TMS-cascaded removal: marks `was_retracted` for Phase 44g recall
+        // hygiene, logs to the WAL, and syncs the SPARQL store — the same
+        // path any other fact retraction takes.
+        let _ = engine.remove_triple(stale.subject, stale.predicate, stale.object);
+        retracted += 1;
+    }
+
+    write_manifest(engine, &note.id, manifest_entity, &prior_identities, &new_identities)?;
+
+    report.diff = Some(ProjectionDiff {
+        added,
+        retained,
+        retracted,
+    });
+    Ok(report)
 }
 
 fn projection_err(note_id: &NoteId, message: impl std::fmt::Display) -> SchemaError {
@@ -826,5 +1081,182 @@ mod tests {
         assert!(report.type_outcome.is_typed());
         assert_eq!(report.typed_property_count, 2, "email + birthDate, exactly as before Employee existed");
         assert!(!report.typed_properties.iter().any(|p| p.key == "employer"));
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 8: diff-based supersede (`reproject_note`) —
+    // `docs/ai/plans/2026-06-30-akh-memory-schema-issues.md` work-item 8.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn first_reprojection_reports_everything_as_added() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let note = person_note();
+
+        let report = reproject_note(&engine, &note).unwrap();
+
+        let diff = report.diff.expect("reproject_note always sets diff");
+        assert_eq!(diff.retracted, 0);
+        assert_eq!(diff.retained, 0);
+        assert_eq!(diff.added, report.asserted_triples.len());
+        assert!(diff.added > 0);
+    }
+
+    #[test]
+    fn reprojecting_an_unchanged_note_retains_everything_and_retracts_nothing() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let note = person_note();
+
+        let first = reproject_note(&engine, &note).unwrap();
+        let first_diff = first.diff.unwrap();
+
+        let second = reproject_note(&engine, &note).unwrap();
+        let second_diff = second.diff.unwrap();
+
+        assert_eq!(second_diff.added, 0);
+        assert_eq!(second_diff.retracted, 0);
+        assert_eq!(second_diff.retained, first_diff.added, "everything from pass 1 is retained in pass 2");
+    }
+
+    #[test]
+    fn editing_a_typed_property_retracts_only_the_changed_triple() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let mut note = person_note();
+
+        let first = reproject_note(&engine, &note).unwrap();
+        assert!(first.type_outcome.is_typed());
+
+        // The birthDate triple, present before the edit — used below to
+        // prove it is untouched (acceptance: "unchanged triples keep their
+        // original provenance/confidence").
+        let birth_date_triple = first
+            .asserted_triples
+            .iter()
+            .find(|t| engine.resolve_label(t.predicate) == "birthDate")
+            .cloned()
+            .expect("birthDate triple was asserted");
+        let old_email_triple = first
+            .asserted_triples
+            .iter()
+            .find(|t| engine.resolve_label(t.predicate) == "email")
+            .cloned()
+            .expect("email triple was asserted");
+
+        // Edit just the email value — same NoteId (set_frontmatter preserves
+        // identity, mirroring an in-place note edit), one changed field.
+        let mut fm = note.frontmatter.clone();
+        fm.insert("email", FrontmatterValue::Text("jane.doe@example.org".into()));
+        note.set_frontmatter(fm);
+
+        let second = reproject_note(&engine, &note).unwrap();
+        let diff = second.diff.unwrap();
+
+        assert_eq!(diff.added, 1, "only the new email value is newly added");
+        assert_eq!(diff.retracted, 1, "only the old email value is retracted");
+        // birthDate + is-a + favoriteColor + wikilink all retained unchanged.
+        assert_eq!(diff.retained, first.asserted_triples.len() - 1);
+
+        // The old email triple is gone from the live KG and marked
+        // superseded — discoverable via `was_retracted`, the exact primitive
+        // Phase 44g recall hygiene already filters recall on.
+        assert!(!engine.has_triple(old_email_triple.subject, old_email_triple.predicate, old_email_triple.object));
+        assert!(
+            engine.tms().was_retracted(old_email_triple.object),
+            "retracted triple's object must be discoverable via TruthMaintenanceSystem::was_retracted"
+        );
+
+        // The new email value is live.
+        let view = typed_view(&engine, &note.id).unwrap();
+        assert_eq!(
+            view.typed_properties.get("email"),
+            Some(&vec!["jane.doe@example.org".to_string()])
+        );
+
+        // birthDate — untouched — keeps its exact confidence (no churn).
+        assert!(engine.has_triple(birth_date_triple.subject, birth_date_triple.predicate, birth_date_triple.object));
+        let live_birth_date = engine
+            .triples_from(birth_date_triple.subject)
+            .into_iter()
+            .find(|t| t.predicate == birth_date_triple.predicate && t.object == birth_date_triple.object)
+            .expect("birthDate triple still live");
+        assert!((live_birth_date.confidence - birth_date_triple.confidence).abs() < 1e-6);
+
+        // A NoteReprojection provenance record documents who/what
+        // superseded the old email fact — the audit trail work-item 8 asks
+        // for, surviving independently of the TMS's own bookkeeping.
+        let prov = engine.provenance_of(old_email_triple.object).unwrap();
+        assert!(prov.iter().any(|p| matches!(
+            &p.kind,
+            DerivationKind::NoteReprojection { note_id, .. } if note_id == note.id.as_str()
+        )));
+    }
+
+    #[test]
+    fn removing_a_frontier_key_retracts_its_triple() {
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let mut note = person_note(); // carries `favoriteColor` (frontier)
+
+        let first = reproject_note(&engine, &note).unwrap();
+        let frontier_triple = first
+            .asserted_triples
+            .iter()
+            .find(|t| engine.resolve_label(t.predicate) == format!("{FRONTIER_PREFIX}favoriteColor"))
+            .cloned()
+            .expect("favoriteColor frontier triple was asserted");
+
+        // Remove the key entirely (`Frontmatter` has no `remove` — rebuild
+        // without it).
+        let mut fm = Frontmatter::new();
+        for (key, value) in note.frontmatter.iter() {
+            if key != "favoriteColor" {
+                fm.insert(key, value.clone());
+            }
+        }
+        note.set_frontmatter(fm);
+
+        let second = reproject_note(&engine, &note).unwrap();
+        let diff = second.diff.unwrap();
+
+        assert_eq!(diff.added, 0);
+        assert_eq!(diff.retracted, 1);
+        assert!(!engine.has_triple(frontier_triple.subject, frontier_triple.predicate, frontier_triple.object));
+        assert!(engine.tms().was_retracted(frontier_triple.object));
+
+        let view = typed_view(&engine, &note.id).unwrap();
+        assert!(view.frontier_properties.get("favoriteColor").is_none());
+    }
+
+    #[test]
+    fn manifest_is_ordinary_kg_data_and_survives_a_bulk_restore_round_trip() {
+        // Proof that the manifest needs no bespoke (de)serialization: it is
+        // plain KG triples, so the same bulk-restore path Phase 38c's wake
+        // uses (`Engine::restore_triples`, exercised the same way
+        // `engine::tests::identity_index_rebuilds_after_bulk_restore` proves
+        // the identity index survives it) round-trips it correctly.
+        let (_dir, engine) = test_engine();
+        install_seed(&engine);
+        let note = person_note();
+
+        let first = reproject_note(&engine, &note).unwrap();
+        let asserted_before = first.asserted_triples.len();
+
+        // Simulate the wake bulk-load path: re-load every live triple
+        // (including the manifest's own bookkeeping triples) via the same
+        // bypass-add_triple path Phase 38c's wake uses.
+        let all = engine.all_triples();
+        engine.restore_triples(&all).unwrap();
+
+        // Re-projecting again must still see the manifest correctly: an
+        // unchanged note retains everything and adds/retracts nothing, which
+        // is only possible if the manifest triples survived the round trip.
+        let second = reproject_note(&engine, &note).unwrap();
+        let diff = second.diff.unwrap();
+        assert_eq!(diff.added, 0, "manifest content survived the bulk-restore round trip");
+        assert_eq!(diff.retracted, 0);
+        assert_eq!(diff.retained, asserted_before);
     }
 }

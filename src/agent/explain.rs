@@ -1214,6 +1214,12 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "Librarian-extracted frontier triple (model: {model_id}, source: {source_id})"
             ),
         },
+        DerivationKind::NoteReprojection { note_id, reason } => {
+            format!("retracted by re-projecting note {note_id}: {reason}")
+        }
+        DerivationKind::SourceAttributed { source, .. } => {
+            format!("source-attributed assertion (source symbol {})", source.get())
+        }
     }
 }
 

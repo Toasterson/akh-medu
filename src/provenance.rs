@@ -839,6 +839,36 @@ pub enum DerivationKind {
         /// `note:frontier/{predicate}` instead, never dropped).
         schema_type: Option<String>,
     },
+
+    // --- ADR 081 slice 8: diff-supersede + multi-akh DS conflict --------------
+
+    /// A previously-projected triple was retracted because re-projecting its
+    /// source note no longer asserts it (`schema::project::reproject_note`,
+    /// ADR 081 decision 12, work-item 8: "diff-based supersede... retract
+    /// only changed triples via the TMS, preserving history"). Recorded
+    /// *before* the retraction so the ledger keeps a durable "who/what
+    /// superseded this fact" audit trail even after the TMS marks the
+    /// triple's object `was_retracted`.
+    NoteReprojection {
+        /// The note whose re-projection caused the retraction.
+        note_id: String,
+        /// Why: what changed (frontmatter key removed/edited, body no longer
+        /// links, etc.) — free text for the audit trail, not machine-parsed.
+        reason: String,
+    },
+
+    /// A triple was asserted with an explicit source attribution, so
+    /// multiple sources' (dis)agreement about the same `(subject,
+    /// predicate)` can later be detected and resolved as a Dempster-Shafer
+    /// belief interval instead of last-writer-wins
+    /// (`schema::conflict::conflicting_assertions`, ADR 081 decision 12).
+    /// `source` names who/what is asserting the fact — an akh identity, a
+    /// note entity, a Librarian run marker, etc.
+    SourceAttributed {
+        subject: SymbolId,
+        predicate: SymbolId,
+        source: SymbolId,
+    },
 }
 
 impl DerivationKind {
@@ -951,6 +981,8 @@ impl DerivationKind {
             Self::RelationEnrichment { .. } => 103,
             Self::OpenClawImport { .. } => 104,
             Self::LibrarianExtraction { .. } => 105,
+            Self::NoteReprojection { .. } => 106,
+            Self::SourceAttributed { .. } => 107,
         }
     }
 }
