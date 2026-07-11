@@ -29,6 +29,7 @@
 use serde_json::{Map, Value};
 
 use crate::schema::{ParamType, ToolCall, ToolSchema};
+use crate::similarity::normalized_similarity;
 
 /// Minimum normalized name similarity for an emitted argument to be grounded
 /// onto a schema parameter (below this it is treated as unknown and dropped).
@@ -150,36 +151,6 @@ fn coerce_value(v: &Value, ty: Option<&ParamType>) -> (Value, bool) {
         _ => None,
     }
     .unwrap_or_else(|| (v.clone(), false))
-}
-
-/// Normalized name similarity in `[0, 1]`: `1 - levenshtein / max(len)`.
-/// `1.0` = identical, `0.0` = maximally different.
-fn normalized_similarity(a: &str, b: &str) -> f64 {
-    if a == b {
-        return 1.0;
-    }
-    let max = a.chars().count().max(b.chars().count());
-    if max == 0 {
-        return 1.0;
-    }
-    1.0 - levenshtein(a, b) as f64 / max as f64
-}
-
-/// Classic Levenshtein edit distance (character-level).
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut cur = vec![0usize; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        cur[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[b.len()]
 }
 
 #[cfg(test)]

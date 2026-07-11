@@ -42,6 +42,7 @@ pub mod procedural;
 pub mod retriever;
 pub mod schema;
 pub mod semantic;
+pub mod similarity;
 
 pub use catalog::ToolCatalog;
 pub use constrain::{GrammarState, ToolCallGrammar};
@@ -66,3 +67,4 @@ pub use procedural::{
 };
 pub use semantic::{describe_tool, glossed_phrase, SignalMode};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+pub use similarity::{levenshtein, normalized_similarity, normalized_similarity_ci};

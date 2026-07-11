@@ -206,6 +206,27 @@ impl RoundBudget {
     }
 }
 
+/// Result of [`Agent::execute_tool_call`] running one requested tool call
+/// through the ADR 089 organ passes: what actually executed (which may
+/// differ from the model's request after M2 name repair or task A/B argument
+/// repair), whether it succeeded, and how to narrate + trace it.
+struct ToolCallOutcome {
+    /// The tool name actually executed (post-M2 repair, if any).
+    exec_name: String,
+    /// The arguments actually executed (post task-A/B repair, if any).
+    exec_args: Value,
+    success: bool,
+    result: String,
+    /// Bracketed narration prefix summarizing whichever organ passes fired,
+    /// e.g. `"[repaired: fetch_ledgr → fetch_ledger] [repaired args: 1 arg(s) renamed] "`.
+    /// Empty when nothing fired.
+    note_prefix: String,
+    /// `{tool, ok}` plus `repaired_from` (M2 fired) / `param_repaired: true`
+    /// (task A fired) when applicable — the compact per-call trace entry
+    /// accumulated into `tool_trace` for the ADR 091 turn-capture hook.
+    trace: Value,
+}
+
 impl Agent {
     /// Run one LLM-driven agentic turn, **streaming** its narration to `sink`.
     ///
@@ -263,6 +284,13 @@ impl Agent {
         backend.prepare(agent_id, self.psyche.as_ref());
 
         let mut tools = ollama_tool_catalog(&self.tool_registry);
+        // ADR 089 task A/B: the FULL pre-retrieval-scoping catalog, captured
+        // before M1 (below) narrows `tools` to what's actually offered this
+        // round. Task A's param-repair-retry and task B's value grounding
+        // both need to look up a tool's schema even when M1 scoped it out of
+        // this round's offered set (the model can still emit a name it
+        // remembers from earlier context or training).
+        let full_catalog = tools.clone();
         // ADR 089 M1 (opt-in): retrieval-scope the catalog to the top-K tools
         // *relevant to this request* (scored over name + description) instead of
         // offering everything. This is the organ's answer to both the prefill
@@ -275,7 +303,7 @@ impl Agent {
             && k < tools.len()
         {
             tracing::debug!(k, from = tools.len(), "retrieval-scoping tool catalog (AKH_AGENT_TOOL_RETRIEVAL)");
-            tools = super::organ::retrieve_scoped(&tools, user_prompt, k);
+            tools = super::organ::retrieve_scoped(&tools, user_prompt, k, Some(engine));
         } else if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -469,43 +497,20 @@ impl Agent {
             // Execute each requested tool; the call (args) and its result form one
             // collapsible step the TUI folds under "▸ N steps".
             for tc in &turn.tool_calls {
-                // ADR 089 M2: a name the registry doesn't know is today a
-                // guaranteed failure — first try grounding the call against the
-                // schemas the model was actually offered (threshold-gated; a
-                // hallucinated name is rejected and the error surfaces normally).
-                let repaired = if known_tools.contains(&tc.name) {
-                    None
-                } else {
-                    super::organ::repair_unknown_call(&tc.name, &tc.arguments, &tools)
-                };
-                let (exec_name, exec_args) = match &repaired {
-                    Some(r) => {
-                        tracing::info!(from = %tc.name, to = %r.name, note = %r.note, "organ repaired unknown tool call");
-                        (r.name.clone(), r.arguments.clone())
-                    }
-                    None => (tc.name.clone(), tc.arguments.clone()),
-                };
-
-                let input = tool_input_from_args(&exec_args);
-                let (success, result) = match self.tool_registry.execute(&exec_name, input, engine) {
-                    Ok(o) => (o.success, o.result),
-                    Err(e) => (false, format!("tool error: {e}")),
-                };
-
-                let repair_prefix = repaired
-                    .as_ref()
-                    .map(|r| format!("[repaired: {}] ", r.note))
-                    .unwrap_or_default();
+                let outcome =
+                    self.execute_tool_call(engine, tc, &known_tools, &full_catalog, user_prompt);
                 sink.emit(&AkhMessage::tool_result(
-                    exec_name.clone(),
-                    success,
-                    format!("{repair_prefix}({}) → {}", preview_args(&exec_args), result),
+                    outcome.exec_name.clone(),
+                    outcome.success,
+                    format!(
+                        "{}({}) → {}",
+                        outcome.note_prefix,
+                        preview_args(&outcome.exec_args),
+                        outcome.result
+                    ),
                 ));
-                tool_trace.push(match &repaired {
-                    Some(_) => json!({"tool": exec_name.clone(), "ok": success, "repaired_from": tc.name.clone()}),
-                    None => json!({"tool": exec_name.clone(), "ok": success}),
-                });
-                conversation.push(json!({"role": "tool", "content": result}));
+                tool_trace.push(outcome.trace);
+                conversation.push(json!({"role": "tool", "content": outcome.result}));
             }
         };
 
@@ -523,6 +528,131 @@ impl Agent {
             &tool_trace,
         );
         Some(())
+    }
+
+    /// Execute one model-requested tool call, running it through every ADR 089
+    /// organ pass before/around the registry's `execute()`, and return
+    /// everything the caller needs to narrate + trace it. Factored out of
+    /// [`Self::run_agentic_turn`]'s dispatch loop because task A's retry path
+    /// (repair → re-execute → re-repair-values) made the loop body too deep to
+    /// read inline.
+    ///
+    /// Pass order per call:
+    /// 1. **M2** — if `tc.name` isn't in `known_tools`, try
+    ///    [`organ::repair_unknown_call`] against `full_catalog` (the schemas
+    ///    actually available to ground against).
+    /// 2. **Task B** (opt-in) — [`organ::ground_call_values`] on the
+    ///    (possibly M2-repaired) args, before the first `execute()`.
+    /// 3. `execute()`. On `Err(AgentError::ToolExecution { .. })` — the
+    ///    *only* structurally-repairable channel (see the ADR 089 task A
+    ///    scout report on `execute()`'s failure shapes; a permission denial
+    ///    surfaces as `Ok(ToolOutput{success:false})` and is never retried
+    ///    here) — **task A**: [`organ::repair_known_call_args`] against only
+    ///    this tool's own schema, task B again on the repaired args, then one
+    ///    retry `execute()`.
+    fn execute_tool_call(
+        &self,
+        engine: &Engine,
+        tc: &super::ollama::ToolCall,
+        known_tools: &std::collections::HashSet<String>,
+        full_catalog: &[Value],
+        user_prompt: &str,
+    ) -> ToolCallOutcome {
+        // M2: repair a name the registry doesn't recognize against the
+        // offered catalog. Never touches a name it already knows.
+        let m2 = if known_tools.contains(&tc.name) {
+            None
+        } else {
+            super::organ::repair_unknown_call(&tc.name, &tc.arguments, full_catalog)
+        };
+        if let Some(r) = &m2 {
+            tracing::info!(from = %tc.name, to = %r.name, note = %r.note, "organ repaired unknown tool call");
+        }
+        let (exec_name, mut exec_args) = match &m2 {
+            Some(r) => (r.name.clone(), r.arguments.clone()),
+            None => (tc.name.clone(), tc.arguments.clone()),
+        };
+
+        // Task B (opt-in): ground argument values before the first execute
+        // attempt, after any M2 name repair.
+        let b_pre = super::organ::ground_call_values(&exec_name, &exec_args, user_prompt, full_catalog);
+        if let Some(g) = &b_pre {
+            exec_args = g.arguments.clone();
+        }
+
+        let input = tool_input_from_args(&exec_args);
+        let mut param_repaired = false;
+        let mut a_note: Option<String> = None;
+        let (success, result) = match self.tool_registry.execute(&exec_name, input, engine) {
+            Ok(o) => (o.success, o.result),
+            Err(e) => {
+                // Task A: retry once, but only against the structurally
+                // repairable channel, and only when not opted out.
+                let opted_out = std::env::var("AKH_AGENT_PARAM_REPAIR").is_ok_and(|v| v == "0");
+                let repairable = matches!(e, super::error::AgentError::ToolExecution { .. });
+                let retry = if opted_out || !repairable {
+                    None
+                } else {
+                    super::organ::repair_known_call_args(&exec_name, &exec_args, full_catalog)
+                };
+                match retry {
+                    Some(repaired) => {
+                        let mut retry_args = repaired.arguments;
+                        let mut retry_note = repaired.note;
+                        if let Some(g) =
+                            super::organ::ground_call_values(&exec_name, &retry_args, user_prompt, full_catalog)
+                        {
+                            retry_args = g.arguments;
+                            retry_note = format!("{retry_note}; {}", g.note);
+                        }
+                        let retry_input = tool_input_from_args(&retry_args);
+                        match self.tool_registry.execute(&exec_name, retry_input, engine) {
+                            Ok(o) => {
+                                tracing::info!(
+                                    tool = %exec_name,
+                                    note = %retry_note,
+                                    "ADR 089 task A: retried tool call after param repair"
+                                );
+                                exec_args = retry_args;
+                                param_repaired = true;
+                                a_note = Some(retry_note);
+                                (o.success, o.result)
+                            }
+                            Err(e2) => (false, format!("tool error: {e2}")),
+                        }
+                    }
+                    None => (false, format!("tool error: {e}")),
+                }
+            }
+        };
+
+        let mut note_prefix = String::new();
+        if let Some(r) = &m2 {
+            note_prefix.push_str(&format!("[repaired: {}] ", r.note));
+        }
+        if let Some(g) = &b_pre {
+            note_prefix.push_str(&format!("[grounded: {}] ", g.note));
+        }
+        if let Some(note) = &a_note {
+            note_prefix.push_str(&format!("[repaired args: {note}] "));
+        }
+
+        let mut trace = json!({"tool": exec_name.clone(), "ok": success});
+        if m2.is_some() {
+            trace["repaired_from"] = json!(tc.name.clone());
+        }
+        if param_repaired {
+            trace["param_repaired"] = json!(true);
+        }
+
+        ToolCallOutcome {
+            exec_name,
+            exec_args,
+            success,
+            result,
+            note_prefix,
+            trace,
+        }
     }
 
     /// Final synthesis step when the [`RoundBudget`] is exhausted: nudge the model
@@ -997,6 +1127,213 @@ mod tests {
 
         unsafe {
             std::env::remove_var("AKH_TRANSCRIPT_CAPTURE");
+        }
+    }
+
+    // --- ADR 089 task A: param-repair-and-retry ---
+
+    /// A tool requiring an integer `party_size` param, which counts its own
+    /// invocations (via a shared atomic the test retains a handle to) so
+    /// tests can assert *how many times* `execute()` actually ran — the
+    /// "retries exactly once, never twice" requirement isn't observable from
+    /// the outcome alone. Rejects a `party_size` over 8 with a normal
+    /// `Ok(ToolOutput::err(..))` business failure (not a structural error),
+    /// so a test can drive the retried call into a *second* failure and
+    /// confirm no third attempt follows.
+    struct FlakyBookTool {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Tool for FlakyBookTool {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: "flaky_book".into(),
+                description: "Book a table for a party".into(),
+                parameters: vec![],
+            }
+        }
+        fn execute(&self, _e: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = input.get_i64("party_size").ok_or_else(|| {
+                crate::agent::error::AgentError::ToolExecution {
+                    tool_name: "flaky_book".into(),
+                    message: "missing required parameter: party_size".into(),
+                }
+            })?;
+            if n > 8 {
+                return Ok(ToolOutput::err("too many guests"));
+            }
+            Ok(ToolOutput::ok(format!("booked for {n}")))
+        }
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "flaky_book".into(),
+                description: "Book a table for a party".into(),
+                parameters: vec![ToolParamSchema {
+                    name: "party_size".into(),
+                    description: "how many guests".into(),
+                    required: true,
+                    param_type: "integer".into(),
+                    schema: None,
+                }],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: String::new(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+    }
+
+    /// Build an `(Agent, known_tools, full_catalog, calls)` fixture with one
+    /// `FlakyBookTool` registered, for the task-A tests below. `calls` is the
+    /// same `Arc<AtomicUsize>` the registered tool increments, so the test
+    /// can read the invocation count without downcasting through the
+    /// registry's `dyn Tool` (the trait carries no `Any` supertrait).
+    fn flaky_book_fixture() -> (
+        Agent,
+        std::collections::HashSet<String>,
+        Vec<Value>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let mut agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent
+            .tool_registry
+            .register(Box::new(FlakyBookTool { calls: calls.clone() }));
+        let known_tools: std::collections::HashSet<String> =
+            agent.tool_registry.list().into_iter().map(|s| s.name).collect();
+        let full_catalog = ollama_tool_catalog(&agent.tool_registry);
+        (agent, known_tools, full_catalog, calls)
+    }
+
+    // One test function (not several): AKH_AGENT_PARAM_REPAIR is
+    // process-global and cargo runs tests in parallel threads within one
+    // binary, so parallel tests each mutating it would race (same rationale
+    // as `transcript_capture_gate_and_emit_turn_wal` above).
+    #[test]
+    fn param_repair_retry_fires_once_and_respects_opt_out() {
+        unsafe {
+            std::env::remove_var("AKH_AGENT_PARAM_REPAIR");
+        }
+        let engine = test_engine();
+
+        // --- 1. Default ON: a near-miss param name + stringified value
+        //        repairs and the retry succeeds. Exactly 2 executions. ---
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "4"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(outcome.success, "repaired retry should succeed: {}", outcome.result);
+            assert_eq!(outcome.exec_args["party_size"], json!(4));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "exactly one retry, not zero or several"
+            );
+            assert_eq!(outcome.trace["param_repaired"], json!(true));
+            assert!(outcome.note_prefix.contains("repaired args"));
+        }
+
+        // --- 2. Retry itself fails (business rule, not structural) — still
+        //        only 2 executions total, never a third attempt. ---
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "9"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(!outcome.success);
+            assert_eq!(outcome.result, "too many guests");
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "must not retry a second time after the retry itself fails"
+            );
+            assert_eq!(outcome.trace["param_repaired"], json!(true));
+        }
+
+        // --- 3. Opt-out: exactly 1 execution, no repair. ---
+        unsafe {
+            std::env::set_var("AKH_AGENT_PARAM_REPAIR", "0");
+        }
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_sze": "4"}),
+            };
+            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            assert!(!outcome.success);
+            assert!(outcome.result.starts_with("tool error:"));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "opted-out: no retry attempt at all"
+            );
+            assert!(outcome.trace.get("param_repaired").is_none());
+        }
+
+        unsafe {
+            std::env::remove_var("AKH_AGENT_PARAM_REPAIR");
+        }
+    }
+
+    // --- ADR 089 task B: value grounding inside the dispatch path ---
+
+    #[test]
+    fn value_grounding_changes_a_miscopied_numeric_arg_only_when_enabled() {
+        unsafe {
+            std::env::remove_var("AKH_AGENT_VALUE_GROUND");
+        }
+        let engine = test_engine();
+
+        // --- Default OFF: the mis-copied value survives untouched, and the
+        //     call executes successfully with the wrong number. ---
+        {
+            let (agent, known_tools, full_catalog, _calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_size": 5}), // request says 4; arg says 5
+            };
+            let outcome =
+                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            assert!(outcome.success);
+            assert_eq!(outcome.exec_args["party_size"], json!(5), "untouched while grounding is off");
+            assert!(!outcome.note_prefix.contains("grounded"));
+        }
+
+        // --- Enabled: the mis-copied value is snapped to the request's own
+        //     number before execute() ever runs. ---
+        unsafe {
+            std::env::set_var("AKH_AGENT_VALUE_GROUND", "1");
+        }
+        {
+            let (agent, known_tools, full_catalog, calls) = flaky_book_fixture();
+            let tc = crate::agent::ollama::ToolCall {
+                name: "flaky_book".into(),
+                arguments: json!({"party_size": 5}),
+            };
+            let outcome =
+                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            assert!(outcome.success);
+            assert_eq!(outcome.exec_args["party_size"], json!(4), "grounded to the request's own value");
+            assert!(outcome.note_prefix.contains("grounded"));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "grounding fixed it before the first execute — no retry needed"
+            );
+        }
+
+        unsafe {
+            std::env::remove_var("AKH_AGENT_VALUE_GROUND");
         }
     }
 }

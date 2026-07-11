@@ -43,6 +43,7 @@
 use serde_json::Value;
 
 use crate::schema::{ParamType, ToolCall, ToolSchema};
+use crate::similarity::normalized_similarity_ci as normalized_similarity;
 
 /// What the grounding pass changed, for measurement.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -233,39 +234,6 @@ fn span_windows<'a>(text: &'a str, words: &[(usize, usize)]) -> Vec<&'a str> {
         }
     }
     out
-}
-
-/// Normalized string similarity in `[0, 1]`: `1 - lev(a,b) / max(|a|,|b|)`,
-/// case-insensitive. `1.0` for two empty strings.
-fn normalized_similarity(a: &str, b: &str) -> f64 {
-    let al: Vec<char> = a.to_ascii_lowercase().chars().collect();
-    let bl: Vec<char> = b.to_ascii_lowercase().chars().collect();
-    let max = al.len().max(bl.len());
-    if max == 0 {
-        return 1.0;
-    }
-    1.0 - levenshtein(&al, &bl) as f64 / max as f64
-}
-
-/// Classic two-row Levenshtein edit distance over char slices.
-fn levenshtein(a: &[char], b: &[char]) -> usize {
-    if a.is_empty() {
-        return b.len();
-    }
-    if b.is_empty() {
-        return a.len();
-    }
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
 }
 
 /// Coerce a grounded request number into the JSON shape the param type expects:
