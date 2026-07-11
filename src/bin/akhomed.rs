@@ -1108,6 +1108,25 @@ impl ServerState {
         }))
     }
 
+    /// Report the in-force schema for a workspace's engine — every declared
+    /// type with its effective (inherited-included) property shape, and
+    /// every declared relation (`_akh/schema/digest`, ADR 081 Slice 3
+    /// work-item 4: the `get_graph_schema`-style digest). Does not require
+    /// Postgres (unlike `schema/admit|list|install`) — it introspects
+    /// whatever the workspace's already-loaded engine has installed.
+    async fn schema_digest(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let engine = self.get_engine(ws).await?;
+        let digest = akh_medu::schema::digest(&engine).map_err(|e| format!("digest failed: {e}"))?;
+        serde_json::to_value(&digest).map_err(|e| format!("digest serialization failed: {e}"))
+    }
+
     /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
     ///
     /// Order: stop snapshot tickers, take one final snapshot per loaded
@@ -2086,6 +2105,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "schema/admit" => self.schema_admit(params).await,
                 "schema/list" => self.schema_list().await,
                 "schema/install" => self.schema_install(params).await,
+                "schema/digest" => self.schema_digest(params).await,
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }

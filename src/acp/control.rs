@@ -117,6 +117,7 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/schema/admit",
     "_akh/schema/list",
     "_akh/schema/install",
+    "_akh/schema/digest",
 ];
 
 /// Whether `method` is a control-plane method (a member of [`CONTROL_METHODS`]).

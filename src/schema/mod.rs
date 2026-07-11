@@ -38,10 +38,12 @@
 //! `019d9844-ce74-7993-a9f0-c953b8f04a4e`.
 
 pub mod compile;
+pub mod digest;
 pub mod install;
 pub mod project;
 #[cfg(feature = "postgres")]
 pub mod registry_pg;
+pub mod shape;
 pub mod source;
 
 use miette::Diagnostic;
@@ -50,10 +52,18 @@ use thiserror::Error;
 pub use compile::{
     CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
 };
+pub use digest::{PropertyDigest, RelationDigest, SchemaDigest, digest};
 pub use install::{InstallReport, activate_pack, install_pack};
-pub use project::{ProjectionReport, TypeOutcome, TypedNoteView, note_of_entity, project_note, typed_view};
+pub use project::{
+    ProjectionReport, TypeOutcome, TypedNoteView, TypedPropertyProjection, note_of_entity,
+    project_note, typed_view,
+};
 #[cfg(feature = "postgres")]
 pub use registry_pg::PgSchemaRegistry;
+pub use shape::{
+    EffectiveProperty, EffectivePropertySet, ShapeViolation, check_value_shape,
+    effective_properties, effective_properties_of_type, is_installed_type, type_chain,
+};
 pub use source::{PackScope, SchemaPackSource, ValueType, parse_source};
 
 /// Errors from schema-pack parsing, compilation, and installation.
@@ -249,6 +259,35 @@ pub enum SchemaError {
         )
     )]
     Registry { message: String },
+
+    #[error("subtype cycle detected while resolving \"{type_name}\": {}", chain.join(" -> "))]
+    #[diagnostic(
+        code(akh::schema::subtype_cycle),
+        help(
+            "The `is-a` chain loops back on itself instead of terminating at a root type. This \
+             can only happen across independently-compiled packs (each pack's own subtype edges \
+             are validated acyclic within the pack at parse time; the registry does not yet \
+             check cross-pack cycles at admission time — see ADR 081 decision 5). Fix one \
+             pack's `is_a` declaration to break the cycle and reinstall; until then, notes of \
+             this type project with an empty effective property set (every field lands in \
+             frontier) rather than hanging or failing the write."
+        )
+    )]
+    SubtypeCycle {
+        type_name: String,
+        chain: Vec<String>,
+    },
+
+    #[error("schema introspection failed: {message}")]
+    #[diagnostic(
+        code(akh::schema::introspection),
+        help(
+            "This is a read-only query against the installed schema graph (effective-property \
+             resolution or the schema digest). Check that at least one schema pack is installed \
+             in this engine, then retry."
+        )
+    )]
+    Introspection { message: String },
 }
 
 /// Result alias for schema-pack operations.
