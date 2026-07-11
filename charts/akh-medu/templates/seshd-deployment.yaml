@@ -8,6 +8,8 @@ metadata:
     {{- include "akh-medu.seshd.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.seshd.replicaCount }}
+  strategy:
+    type: Recreate  # models PVC is RWO; RollingUpdate deadlocks on the mount.
   selector:
     matchLabels:
       {{- include "akh-medu.seshd.selectorLabels" . | nindent 6 }}
