@@ -367,6 +367,23 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.signature()).collect()
     }
 
+    /// Would executing `name` right now stop at an **Ask** permission prompt?
+    ///
+    /// Used by the agentic dispatch loop's repair-retry (ADR 089 task A): a
+    /// retry re-runs the whole permission gate, so an `Ask`-gated tool that was
+    /// approved once and then failed structurally would prompt the user a
+    /// *second* time (and double-log the audit ledger) for one logical call.
+    /// The retry path skips such tools instead — the first approved failure
+    /// stands, exactly as it would without repair.
+    pub fn would_ask(&self, name: &str) -> bool {
+        self.manifests.get(name).is_some_and(|m| {
+            matches!(
+                self.policy.decide(m),
+                super::permission::PermissionDecision::Ask(_)
+            )
+        })
+    }
+
     /// Execute a tool by name.
     ///
     /// If an audit ledger is attached, records a `ToolInvocation` audit entry
@@ -564,6 +581,16 @@ mod tests {
         let out = reg.execute("w", ToolInput::new(), &engine).unwrap();
         assert!(!out.success, "plan mode should deny the write tool");
         assert!(out.result.contains("permission denied"), "result: {}", out.result);
+
+        // would_ask (ADR 089 task A retry gate): a side-effecting tool under
+        // Standard mode would stop at an Ask prompt — the repair-retry must
+        // skip it rather than re-prompt for one logical call. Under Bypass
+        // (and for unknown names) it never asks.
+        reg.set_permission_mode(PermissionMode::Standard);
+        assert!(reg.would_ask("w"), "Standard mode should Ask for a side-effecting tool");
+        reg.set_permission_mode(PermissionMode::Bypass);
+        assert!(!reg.would_ask("w"), "Bypass mode never asks");
+        assert!(!reg.would_ask("no_such_tool"), "unknown names never ask");
     }
 
     struct DummyTool;

@@ -587,10 +587,14 @@ impl Agent {
             Ok(o) => (o.success, o.result),
             Err(e) => {
                 // Task A: retry once, but only against the structurally
-                // repairable channel, and only when not opted out.
+                // repairable channel, and only when not opted out. An
+                // `Ask`-gated tool is also excluded: the retry re-runs the
+                // permission gate, so it would prompt the user a second time
+                // (and double-log the audit ledger) for one logical call —
+                // the first approved failure stands instead.
                 let opted_out = std::env::var("AKH_AGENT_PARAM_REPAIR").is_ok_and(|v| v == "0");
                 let repairable = matches!(e, super::error::AgentError::ToolExecution { .. });
-                let retry = if opted_out || !repairable {
+                let retry = if opted_out || !repairable || self.tool_registry.would_ask(&exec_name) {
                     None
                 } else {
                     super::organ::repair_known_call_args(&exec_name, &exec_args, full_catalog)
