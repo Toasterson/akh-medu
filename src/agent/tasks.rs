@@ -249,9 +249,12 @@ fn recurrence_human(r: &Recurrence) -> String {
         Recurrence::Daily => "every day".to_string(),
         Recurrence::EveryNDays(1) => "every day".to_string(),
         Recurrence::EveryNDays(n) => format!("every {n} days"),
-        Recurrence::Weekly(days) if days.is_empty() || days.len() >= 7 => "every week".to_string(),
+        Recurrence::Weekly(days) if days.as_slice().is_empty() || days.as_slice().len() >= 7 => {
+            "every week".to_string()
+        }
         Recurrence::Weekly(days) => {
             let names: Vec<&str> = days
+                .as_slice()
                 .iter()
                 .map(|d| match d {
                     0 => "Mon",
