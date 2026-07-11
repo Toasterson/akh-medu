@@ -89,6 +89,7 @@ pub mod source_reliability;
 pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
+pub mod tasks;
 pub mod temporal_experience;
 pub mod tool;
 pub mod trajectory;

@@ -296,7 +296,7 @@ impl Agent {
         backend_override: Option<Arc<dyn crate::backend::Backend>>,
         #[cfg(feature = "delegation")]
         delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
-    ) {
+    ) -> AgentResult<()> {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
@@ -398,6 +398,25 @@ impl Agent {
         registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
         #[cfg(not(feature = "delegation"))]
         registry.register(Box::new(tools::DelegateTool::new_noop()));
+
+        // Structured task tool (ADR 081 slice 6): the KG-backed, LLM-driven
+        // task store — distinct from the ephemeral `task_list` checklist
+        // registered above. One `Tool` per verb (create/update/complete/list).
+        let task_predicates = super::tasks::TaskPredicates::init(engine)?;
+        registry.register(Box::new(tools::StructuredTaskCreateTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskUpdateTool::new(
+            task_predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskCompleteTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskListTool::new(task_predicates)));
+
+        Ok(())
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -728,7 +747,7 @@ impl Agent {
             backend,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
@@ -3630,7 +3649,7 @@ impl Agent {
             None,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
