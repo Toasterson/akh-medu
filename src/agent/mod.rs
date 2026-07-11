@@ -67,6 +67,7 @@ pub mod memory;
 pub mod memory_sync;
 pub mod metacognition;
 pub mod model_manager;
+pub mod promotion;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;

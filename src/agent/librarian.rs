@@ -130,6 +130,46 @@ pub enum LibrarianModelError {
 /// Convenience alias.
 pub type LibrarianModelResult<T> = std::result::Result<T, LibrarianModelError>;
 
+/// Input to one [`LibrarianModel::propose_promotion`] call (ADR 081 Slice 5,
+/// `agent::promotion`): a frontier predicate that has already crossed
+/// [`super::promotion::promotion_candidates`]'s mechanical recurrence +
+/// value-shape thresholds, with a sample of its observed usage.
+#[derive(Debug, Clone)]
+pub struct PromotionRequest {
+    /// The frontier predicate (unprefixed — no `note:frontier/`).
+    pub predicate: String,
+    /// How many distinct subjects use this predicate.
+    pub distinct_subjects: usize,
+    /// A capped sample of subject labels observed with this predicate.
+    pub example_subjects: Vec<String>,
+    /// A capped sample of object labels observed with this predicate.
+    pub example_values: Vec<String>,
+    /// The in-force schema, so the model can name a real type/alias target
+    /// instead of guessing blind.
+    pub schema_types: Vec<SchemaTypeDigest>,
+}
+
+/// The model's advice on how a recurring frontier predicate should join the
+/// typed core — never applied automatically (ADR 081 decision 8: admission
+/// always requires an explicit human confirm). See
+/// `agent::promotion::run_promotion_pass` / `promote_proposal`.
+#[derive(Debug, Clone)]
+pub struct PromotionAdvice {
+    /// An already-installed type this property should extend, or `None` for
+    /// a new standalone type.
+    pub proposed_type: Option<String>,
+    /// The property name to mint (usually the frontier predicate itself,
+    /// unless a clearer schema.org-style name fits better).
+    pub proposed_property_name: String,
+    /// When set, this predicate is a synonym of an existing core
+    /// type/property name — promotion should alias onto it instead of
+    /// minting anything new (R5: keep the core small).
+    pub alias_of: Option<String>,
+    /// One-sentence justification, kept with the stored proposal for the
+    /// human confirming it.
+    pub rationale: String,
+}
+
 /// The Librarian's LLM extraction seam: given a source's text and the
 /// in-force schema, propose candidate typed triples. Implementations must
 /// NOT decide what is typed vs. frontier — that validation happens uniformly
@@ -140,6 +180,25 @@ pub trait LibrarianModel: Send + Sync {
     /// model/backend itself failed — the poison-safe path (the caller does
     /// not advance the watermark past a source that errors here).
     fn extract(&self, request: &ExtractionRequest) -> LibrarianModelResult<Vec<CandidateTriple>>;
+
+    /// Advise on promoting a recurring frontier predicate (ADR 081 Slice 5).
+    /// Default: propose the predicate verbatim as a new standalone
+    /// property, no alias — a safe, LLM-free fallback for implementations
+    /// that don't override it (nothing is applied without a human confirm
+    /// either way, so a trivial default cannot corrupt the core).
+    fn propose_promotion(
+        &self,
+        request: &PromotionRequest,
+    ) -> LibrarianModelResult<PromotionAdvice> {
+        Ok(PromotionAdvice {
+            proposed_type: None,
+            proposed_property_name: request.predicate.clone(),
+            alias_of: None,
+            rationale: "default advisor: no LLM configured — proposing the frontier predicate \
+                        verbatim as a new standalone property"
+                .to_string(),
+        })
+    }
 
     /// Short label recorded in provenance / logs (e.g. `"fake"`, an Ollama tag).
     fn label(&self) -> &str;
@@ -154,6 +213,10 @@ pub trait LibrarianModel: Send + Sync {
 pub struct FakeLibrarianModel {
     canned: std::collections::HashMap<String, Vec<CandidateTriple>>,
     fail_sources: std::collections::HashSet<String>,
+    /// Canned [`PromotionAdvice`] replies, keyed by [`PromotionRequest::predicate`]
+    /// (ADR 081 Slice 5 — `agent::promotion` tests inject these the same way
+    /// [`Self::with_extraction`] injects triple extractions).
+    canned_proposals: std::collections::HashMap<String, PromotionAdvice>,
 }
 
 impl FakeLibrarianModel {
@@ -172,9 +235,21 @@ impl FakeLibrarianModel {
     }
 
     /// Make `extract` return [`LibrarianModelError::MalformedReply`] for this
-    /// `source_id` (builder style) — the poison-safe test path.
+    /// `source_id` (builder style) — the poison-safe test path. Also honored
+    /// by [`LibrarianModel::propose_promotion`] when `source_id` names a
+    /// frontier predicate (the two seams share one failure-injection set —
+    /// there is only ever one reason a fake model fails: "configured to").
     pub fn failing_on(mut self, source_id: impl Into<String>) -> Self {
         self.fail_sources.insert(source_id.into());
+        self
+    }
+
+    /// Register the [`PromotionAdvice`] to return for a given frontier
+    /// `predicate` (builder style) — ADR 081 Slice 5's canned-proposals
+    /// extension. A predicate with no registered advice falls back to the
+    /// trait's default (verbatim standalone property, no alias).
+    pub fn with_proposal(mut self, predicate: impl Into<String>, advice: PromotionAdvice) -> Self {
+        self.canned_proposals.insert(predicate.into(), advice);
         self
     }
 }
@@ -191,6 +266,29 @@ impl LibrarianModel for FakeLibrarianModel {
             .get(&request.source_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn propose_promotion(
+        &self,
+        request: &PromotionRequest,
+    ) -> LibrarianModelResult<PromotionAdvice> {
+        if self.fail_sources.contains(&request.predicate) {
+            return Err(LibrarianModelError::MalformedReply {
+                reason: format!(
+                    "fake model configured to fail on \"{}\"",
+                    request.predicate
+                ),
+            });
+        }
+        match self.canned_proposals.get(&request.predicate) {
+            Some(advice) => Ok(advice.clone()),
+            None => Ok(PromotionAdvice {
+                proposed_type: None,
+                proposed_property_name: request.predicate.clone(),
+                alias_of: None,
+                rationale: "fake model: no canned proposal registered for this predicate".into(),
+            }),
+        }
     }
 
     fn label(&self) -> &str {
@@ -264,6 +362,25 @@ impl LibrarianModel for OllamaLibrarianModel {
         })
     }
 
+    fn propose_promotion(
+        &self,
+        request: &PromotionRequest,
+    ) -> LibrarianModelResult<PromotionAdvice> {
+        let prompt = build_promotion_prompt(request);
+        let reply = self
+            .mgr
+            .generate(LIBRARIAN_AGENT_ID, &prompt)
+            .map_err(|e| LibrarianModelError::GenerationFailed {
+                reason: e.to_string(),
+            })?;
+        parse_promotion_advice(&reply).ok_or_else(|| LibrarianModelError::MalformedReply {
+            reason: format!(
+                "no `{{\"proposed_property_name\":..}}` JSON object found in a {}-byte reply",
+                reply.len()
+            ),
+        })
+    }
+
     fn label(&self) -> &str {
         &self.model_tag
     }
@@ -323,6 +440,80 @@ fn parse_candidate_triples(text: &str) -> Option<Vec<CandidateTriple>> {
             })
             .collect(),
     )
+}
+
+/// Build the promotion-advice prompt (ADR 081 Slice 5): the in-force schema
+/// digest + a sample of one recurring frontier predicate's usage, asking for
+/// a single JSON object naming/typing/aliasing it.
+fn build_promotion_prompt(request: &PromotionRequest) -> String {
+    let mut schema_block = String::new();
+    for t in &request.schema_types {
+        schema_block.push_str("- ");
+        schema_block.push_str(&t.name);
+        if !t.properties.is_empty() {
+            schema_block.push_str(" (properties: ");
+            schema_block.push_str(&t.properties.join(", "));
+            schema_block.push(')');
+        }
+        schema_block.push('\n');
+    }
+    if schema_block.is_empty() {
+        schema_block.push_str("(no types installed yet)\n");
+    }
+
+    format!(
+        "A frontier (not-yet-typed) predicate has recurred across {n} distinct subjects in this \
+         akh's knowledge graph. Decide how it should join the typed core.\n\n\
+         Installed schema:\n{schema_block}\n\
+         Frontier predicate: \"{predicate}\"\n\
+         Example subjects: {subjects}\n\
+         Example values: {values}\n\n\
+         Reply with exactly one JSON object, nothing else:\n\
+         {{\"proposed_type\": \"<an installed type name this property should extend, or null for \
+         a new standalone type>\", \"proposed_property_name\": \"<the property name to mint — \
+         usually the frontier predicate itself, unless a clearer schema.org-style name fits \
+         better>\", \"alias_of\": \"<an existing installed property or type name this predicate \
+         is a synonym of, or null>\", \"rationale\": \"<one sentence>\"}}\n",
+        n = request.distinct_subjects,
+        predicate = request.predicate,
+        subjects = request.example_subjects.join(", "),
+        values = request.example_values.join(", "),
+    )
+}
+
+/// Parse a model reply into [`PromotionAdvice`] — lenient like
+/// [`parse_candidate_triples`]: scans for the first JSON object in the reply
+/// (via [`serde_json::Deserializer`]'s streaming parser) rather than
+/// requiring the reply to be *only* JSON, so a chatty model prefacing its
+/// answer with prose still parses. `None` when no JSON object with a
+/// `proposed_property_name` string field is found.
+fn parse_promotion_advice(text: &str) -> Option<PromotionAdvice> {
+    let idx = text.find('{')?;
+    let value = serde_json::Deserializer::from_str(&text[idx..])
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let obj = value.as_object()?;
+    let proposed_property_name = obj.get("proposed_property_name")?.as_str()?.to_string();
+    let proposed_type = obj
+        .get("proposed_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let alias_of = obj
+        .get("alias_of")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let rationale = obj
+        .get("rationale")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Some(PromotionAdvice {
+        proposed_type,
+        proposed_property_name,
+        alias_of,
+        rationale,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,6 +1339,77 @@ mod tests {
         let src = note_to_source(&with_body).unwrap();
         assert!(src.source_id.starts_with("note:"));
         assert_eq!(src.seq, None);
+    }
+
+    #[test]
+    fn fake_model_default_promotion_advice_proposes_verbatim_standalone_property() {
+        let model = FakeLibrarianModel::new();
+        let request = PromotionRequest {
+            predicate: "favoriteColor".into(),
+            distinct_subjects: 3,
+            example_subjects: vec!["Jane".into()],
+            example_values: vec!["teal".into()],
+            schema_types: vec![],
+        };
+        let advice = model.propose_promotion(&request).unwrap();
+        assert_eq!(advice.proposed_property_name, "favoriteColor");
+        assert!(advice.proposed_type.is_none());
+        assert!(advice.alias_of.is_none());
+    }
+
+    #[test]
+    fn fake_model_with_proposal_returns_the_canned_advice() {
+        let model = FakeLibrarianModel::new().with_proposal(
+            "favoriteColor",
+            PromotionAdvice {
+                proposed_type: Some("Person".into()),
+                proposed_property_name: "favoriteColor".into(),
+                alias_of: None,
+                rationale: "recurs on Person subjects".into(),
+            },
+        );
+        let request = PromotionRequest {
+            predicate: "favoriteColor".into(),
+            distinct_subjects: 3,
+            example_subjects: vec![],
+            example_values: vec![],
+            schema_types: vec![],
+        };
+        let advice = model.propose_promotion(&request).unwrap();
+        assert_eq!(advice.proposed_type.as_deref(), Some("Person"));
+        assert_eq!(advice.rationale, "recurs on Person subjects");
+    }
+
+    #[test]
+    fn fake_model_failing_on_also_poisons_promotion_advice() {
+        let model = FakeLibrarianModel::new().failing_on("favoriteColor");
+        let request = PromotionRequest {
+            predicate: "favoriteColor".into(),
+            distinct_subjects: 3,
+            example_subjects: vec![],
+            example_values: vec![],
+            schema_types: vec![],
+        };
+        assert!(matches!(
+            model.propose_promotion(&request),
+            Err(LibrarianModelError::MalformedReply { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_promotion_advice_is_lenient_about_prose_prefix_and_null_fields() {
+        let reply = "Sure! Here you go:\n\
+            {\"proposed_type\": null, \"proposed_property_name\": \"favoriteColor\", \
+             \"alias_of\": \"color\", \"rationale\": \"synonym of an existing term\"}\ntrailing junk";
+        let advice = parse_promotion_advice(reply).unwrap();
+        assert_eq!(advice.proposed_property_name, "favoriteColor");
+        assert!(advice.proposed_type.is_none());
+        assert_eq!(advice.alias_of.as_deref(), Some("color"));
+    }
+
+    #[test]
+    fn parse_promotion_advice_rejects_reply_with_no_json_object() {
+        assert!(parse_promotion_advice("no json here at all").is_none());
     }
 
     #[test]

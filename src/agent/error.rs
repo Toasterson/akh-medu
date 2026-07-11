@@ -241,6 +241,45 @@ pub enum AgentError {
         )
     )]
     Librarian { source_id: String, reason: String },
+
+    /// A `schema::` operation (compile/install/activate/registry-admit)
+    /// failed while running the frontier→core promotion pipeline
+    /// (`agent::promotion`, ADR 081 Slice 5).
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    Schema(#[from] crate::schema::SchemaError),
+
+    /// `agent::promotion::promote_proposal` / `reject_proposal` were asked
+    /// about a predicate with no stored proposal (`schema:proposal/{predicate}`
+    /// KG entity absent) — run the promotion pass first, or check
+    /// `akh schema proposals` for the exact pending id.
+    #[error("no promotion proposal found for frontier predicate \"{predicate}\"")]
+    #[diagnostic(
+        code(akh::agent::promotion_not_found),
+        help(
+            "Run `agent::promotion::run_promotion_pass` first so this predicate crosses the \
+             recurrence threshold and gets a proposal, then list pending proposals with \
+             `akh schema proposals`."
+        )
+    )]
+    PromotionNotFound { predicate: String },
+
+    /// `agent::promotion::promote_proposal` / `reject_proposal` were called
+    /// on a proposal that already left the `pending` state — guards against
+    /// double-promotion / double-rejection (ADR 081 Slice 5 acceptance:
+    /// "rejected proposals do not re-surface").
+    #[error(
+        "promotion proposal \"{predicate}\" is not pending (current status: {status}) — only a \
+         pending proposal can be promoted or rejected"
+    )]
+    #[diagnostic(
+        code(akh::agent::promotion_not_pending),
+        help(
+            "This proposal was already confirmed or rejected in an earlier call. Check \
+             `akh schema proposals` for what is still pending."
+        )
+    )]
+    PromotionNotPending { predicate: String, status: String },
 }
 
 impl From<crate::error::AkhError> for AgentError {
