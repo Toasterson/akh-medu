@@ -219,7 +219,7 @@ pub use event_calculus::{
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
     GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
-    PimResult, Recurrence,
+    PimResult, Recurrence, Weekdays,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use plan_monitor::{DeviationSeverity, PlanMonitor, plan_from_mcts, post_action_update};

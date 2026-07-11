@@ -62,6 +62,20 @@ pub enum PimError {
     )]
     RecurrenceParse { message: String },
 
+    #[error("weekly recurrence requires at least one weekday")]
+    #[diagnostic(
+        code(akh::agent::pim::empty_weekdays),
+        help("Provide at least one weekday, e.g. `weekly:mon,fri`. Valid names: mon,tue,wed,thu,fri,sat,sun.")
+    )]
+    EmptyWeekdays,
+
+    #[error("weekday out of range: {day}")]
+    #[diagnostic(
+        code(akh::agent::pim::weekday_out_of_range),
+        help("Weekdays are numbered 0=mon through 6=sun.")
+    )]
+    WeekdayOutOfRange { day: u8 },
+
     #[error("{0}")]
     #[diagnostic(
         code(akh::agent::pim::engine),
@@ -322,13 +336,60 @@ impl fmt::Display for EnergyLevel {
     }
 }
 
+/// Validated weekday list for [`Recurrence::Weekly`] (0 = Mon … 6 = Sun).
+///
+/// Invariants: non-empty, every entry in `0..=6`. Enforced by
+/// [`Weekdays::new`] and by serde (deserializes via `TryFrom<Vec<u8>>`), so
+/// [`Recurrence::as_label`] always produces a label that
+/// [`Recurrence::from_label`] accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>", into = "Vec<u8>")]
+pub struct Weekdays(Vec<u8>);
+
+impl Weekdays {
+    /// Validate and wrap a weekday list.
+    ///
+    /// # Errors
+    ///
+    /// - [`PimError::EmptyWeekdays`] if `days` is empty
+    /// - [`PimError::WeekdayOutOfRange`] if any entry is greater than 6
+    pub fn new(days: Vec<u8>) -> PimResult<Self> {
+        if days.is_empty() {
+            return Err(PimError::EmptyWeekdays);
+        }
+        if let Some(&day) = days.iter().find(|&&d| d > 6) {
+            return Err(PimError::WeekdayOutOfRange { day });
+        }
+        Ok(Self(days))
+    }
+
+    /// The validated weekday numbers (0 = Mon … 6 = Sun).
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<u8>> for Weekdays {
+    type Error = PimError;
+
+    fn try_from(days: Vec<u8>) -> PimResult<Self> {
+        Self::new(days)
+    }
+}
+
+impl From<Weekdays> for Vec<u8> {
+    fn from(w: Weekdays) -> Self {
+        w.0
+    }
+}
+
 /// Recurrence pattern (RRULE-lite).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Recurrence {
     /// Every day.
     Daily,
-    /// Specific days of week (0=Mon, 6=Sun).
-    Weekly(Vec<u8>),
+    /// Specific days of week.
+    Weekly(Weekdays),
     /// Day of month (1–31).
     Monthly(u8),
     /// Month (1–12) and day (1–31).
@@ -352,6 +413,9 @@ impl Recurrence {
             return Ok(Self::Daily);
         }
         if let Some(rest) = lower.strip_prefix("weekly:") {
+            if rest.trim().is_empty() {
+                return Err(PimError::EmptyWeekdays);
+            }
             let days: Result<Vec<u8>, _> = rest
                 .split(',')
                 .map(|d| match d.trim() {
@@ -367,7 +431,7 @@ impl Recurrence {
                     }),
                 })
                 .collect();
-            return Ok(Self::Weekly(days?));
+            return Ok(Self::Weekly(Weekdays::new(days?)?));
         }
         if let Some(rest) = lower.strip_prefix("monthly:") {
             let day: u8 = rest.trim().parse().map_err(|_| PimError::RecurrenceParse {
@@ -428,23 +492,21 @@ impl Recurrence {
                 // Find next matching weekday.
                 // Approximate: days since epoch mod 7 (epoch was Thursday = 3).
                 let current_dow = ((after_ts / DAY_SECS) + 3) % 7; // 0=Mon
-                let mut min_delta = u64::MAX;
-                for &d in days {
-                    let d = d as u64;
-                    let delta = if d > current_dow {
-                        d - current_dow
-                    } else {
-                        7 - current_dow + d
-                    };
-                    // At least 1 day in the future.
-                    let delta = if delta == 0 { 7 } else { delta };
-                    if delta < min_delta {
-                        min_delta = delta;
-                    }
-                }
-                if min_delta == u64::MAX {
-                    min_delta = 7;
-                }
+                let min_delta = days
+                    .as_slice()
+                    .iter()
+                    .map(|&d| {
+                        let d = d as u64;
+                        // Same-day recurrence lands a full week out, so the
+                        // delta is always at least 1 day in the future.
+                        if d > current_dow {
+                            d - current_dow
+                        } else {
+                            7 - current_dow + d
+                        }
+                    })
+                    .min()
+                    .expect("Weekdays invariant: non-empty");
                 after_ts + min_delta * DAY_SECS
             }
             Self::Monthly(day) => {
@@ -465,6 +527,7 @@ impl Recurrence {
             Self::Daily => "daily".into(),
             Self::Weekly(days) => {
                 let names: Vec<&str> = days
+                    .as_slice()
                     .iter()
                     .map(|d| match d {
                         0 => "mon",
@@ -474,7 +537,7 @@ impl Recurrence {
                         4 => "fri",
                         5 => "sat",
                         6 => "sun",
-                        _ => "?",
+                        _ => unreachable!("Weekdays invariant: entries in 0..=6"),
                     })
                     .collect();
                 format!("weekly:{}", names.join(","))
@@ -1831,7 +1894,7 @@ mod tests {
     #[test]
     fn recurrence_parse_weekly() {
         let rec = Recurrence::parse("weekly:mon,wed,fri").unwrap();
-        assert_eq!(rec, Recurrence::Weekly(vec![0, 2, 4]));
+        assert_eq!(rec, Recurrence::Weekly(Weekdays::new(vec![0, 2, 4]).unwrap()));
     }
 
     #[test]
@@ -1874,10 +1937,77 @@ mod tests {
 
     #[test]
     fn recurrence_roundtrip_label() {
-        let rec = Recurrence::Weekly(vec![0, 4]);
+        let rec = Recurrence::Weekly(Weekdays::new(vec![0, 4]).unwrap());
         let label = rec.as_label();
         let parsed = Recurrence::from_label(&label).unwrap();
         assert_eq!(parsed, rec);
+    }
+
+    #[test]
+    fn recurrence_label_roundtrip_all_variants() {
+        // Property-style: every constructible Recurrence round-trips through
+        // as_label/from_label, sweeping each variant's domain and edge cases.
+        let mut cases: Vec<Recurrence> = vec![Recurrence::Daily];
+        for d in 0..=6u8 {
+            cases.push(Recurrence::Weekly(Weekdays::new(vec![d]).unwrap()));
+        }
+        cases.push(Recurrence::Weekly(Weekdays::new((0..=6).collect()).unwrap()));
+        // Order and duplicates are preserved, not normalized.
+        cases.push(Recurrence::Weekly(Weekdays::new(vec![6, 0]).unwrap()));
+        cases.push(Recurrence::Weekly(Weekdays::new(vec![2, 2, 4]).unwrap()));
+        for day in 1..=31u8 {
+            cases.push(Recurrence::Monthly(day));
+        }
+        for month in 1..=12u8 {
+            for day in [1u8, 28, 31] {
+                cases.push(Recurrence::Yearly(month, day));
+            }
+        }
+        for n in [1u32, 2, 7, 365, u32::MAX] {
+            cases.push(Recurrence::EveryNDays(n));
+        }
+        for rec in cases {
+            let label = rec.as_label();
+            let parsed = Recurrence::from_label(&label)
+                .unwrap_or_else(|e| panic!("label {label:?} failed to parse back: {e}"));
+            assert_eq!(parsed, rec, "round-trip mismatch for label {label:?}");
+        }
+    }
+
+    #[test]
+    fn recurrence_weekly_empty_label_rejected() {
+        assert!(matches!(
+            Recurrence::parse("weekly:"),
+            Err(PimError::EmptyWeekdays)
+        ));
+        assert!(matches!(
+            Recurrence::parse("weekly:  "),
+            Err(PimError::EmptyWeekdays)
+        ));
+    }
+
+    #[test]
+    fn weekdays_rejects_empty_and_out_of_range() {
+        assert!(matches!(Weekdays::new(vec![]), Err(PimError::EmptyWeekdays)));
+        assert!(matches!(
+            Weekdays::new(vec![0, 7]),
+            Err(PimError::WeekdayOutOfRange { day: 7 })
+        ));
+    }
+
+    #[test]
+    fn weekdays_serde_validates() {
+        // Wire format stays a plain u8 array; invalid arrays are rejected on
+        // deserialize instead of resurrecting an unlabelable Weekly.
+        let ok: Weekdays = serde_json::from_str("[0,2,4]").unwrap();
+        assert_eq!(ok.as_slice(), &[0, 2, 4]);
+        assert!(serde_json::from_str::<Weekdays>("[]").is_err());
+        assert!(serde_json::from_str::<Weekdays>("[9]").is_err());
+
+        let rec = Recurrence::Weekly(Weekdays::new(vec![1, 3]).unwrap());
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: Recurrence = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rec);
     }
 
     // ── PimPredicates ────────────────────────────────────────────────
