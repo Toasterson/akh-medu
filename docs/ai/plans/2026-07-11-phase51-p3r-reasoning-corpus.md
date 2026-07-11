@@ -1,7 +1,7 @@
 # Phase 51 P3-R — Format-First Reasoning Corpus + Intermediate Supervision
 
 **Date:** 2026-07-11
-**Status:** Active
+**Status:** MEASURED 2026-07-11 — see [results](../2026-07-11-phase51-p3r-results.md). Gate 1 near-miss (exe 0.800 / valid 0.770 vs ~0.9 bar), gate 2 MET (axis-B 0.840 vs answer-only 0.516, flat across depths 2–4), gate 3 NULL-and-inverted (axis-A: trace 0.039 < answer 0.105; trace_valid 0.000 out-of-depth — the trace format is a length straitjacket), gate 4 PARTIAL (crossover 5→4 on axis-B, 4→3 abstention, pinned 6 on axis-A). Goyal/Bengio slot stays back-pocket per the trigger.
 **ADR:** [092 — High Grug v1 reasoning register](../decisions/092-high-grug-v1-reasoning-register.md)
 **Parent:** [Phase 51 plan](2026-07-05-phase51-grug-brain-baby-llm.md) P3 + §2a GWT amendment #3; probe evidence in [2026-07-11 results](../2026-07-11-phase51-gwt-emergence-probes.md)
 
