@@ -436,12 +436,22 @@ fn schema_digest(engine: &Engine) -> SchemaDigest {
 
     for type_symbol in type_symbols {
         let type_name = engine.resolve_label(type_symbol);
-        let properties: Vec<String> = property_pred
-            .map(|p| engine.knowledge_graph().objects_of(type_symbol, p))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| engine.resolve_label(s))
-            .collect();
+        // Effective (inherited-included) property set, so the extraction
+        // prompt shows e.g. Person with `name` from Thing (Slice 3's
+        // is-a chain walk). Falls back to directly-declared properties if
+        // the chain is degenerate (e.g. a cycle in a hand-built engine).
+        let properties: Vec<String> = match crate::schema::shape::effective_properties(
+            engine,
+            type_symbol,
+        ) {
+            Ok(set) => set.properties.into_keys().collect(),
+            Err(_) => property_pred
+                .map(|p| engine.knowledge_graph().objects_of(type_symbol, p))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| engine.resolve_label(s))
+                .collect(),
+        };
         for property in &properties {
             digest
                 .known_properties
