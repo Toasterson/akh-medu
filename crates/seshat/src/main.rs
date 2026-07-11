@@ -135,7 +135,7 @@ async fn main() -> miette::Result<()> {
         mcp_config,
     );
 
-    // Build script REST router (GET /scripts, GET /scripts/:name, POST /scripts/:name).
+    // Build script REST router (GET /scripts, GET /scripts/{name}, POST /scripts/{name}).
     let scripts_router = {
         use axum::routing::get;
         use seshat::scripts;
@@ -143,7 +143,7 @@ async fn main() -> miette::Result<()> {
         axum::Router::new()
             .route("/scripts", get(scripts::list_scripts))
             .route(
-                "/scripts/:name",
+                "/scripts/{name}",
                 get(scripts::get_script).post(scripts::save_script),
             )
             .with_state(Arc::clone(&db))
