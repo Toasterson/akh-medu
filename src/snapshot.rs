@@ -588,6 +588,10 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
 /// simply not written and `Agent::resume` falls back to defaults / KG rebuild.
 /// The only hard requirement is the `akh_state` row ([`SnapshotError::NotFound`]
 /// otherwise).
+///
+/// After the KG restore + WAL replay, also runs schema-pack lazy convergence
+/// (ADR 081 decision 9 — [`crate::schema::registry_pg::converge_workspace`]):
+/// installs every schema pack recorded active for `workspace_id`, idempotently.
 pub async fn wake(
     data_dir: &Path,
     akh_id: Uuid,
@@ -710,7 +714,25 @@ pub async fn wake(
         "woke akh from postgres snapshot"
     );
 
-    // 7. Flush the reconstructed KG snapshot back to local redb so a plain
+    // 7. Lazy schema-pack convergence (ADR 081 decision 9): install every
+    //    schema pack recorded as active for this workspace. Idempotent —
+    //    reinstalling an already-installed pack@version is a no-op
+    //    (`schema::install_pack`) — and always safe, because schema-pack
+    //    types are immutable+additive. Best-effort: a failure here is logged
+    //    and does not fail the wake (the akh still comes up; it just may be
+    //    missing a pack's types until the next wake or an explicit install).
+    let packs_converged =
+        crate::schema::registry_pg::converge_workspace(&engine, db, workspace_id).await;
+    if packs_converged > 0 {
+        tracing::info!(
+            akh = %akh_id,
+            %workspace_id,
+            packs_converged,
+            "wake: converged active schema packs"
+        );
+    }
+
+    // 8. Flush the reconstructed KG snapshot back to local redb so a plain
     //    restart (without Postgres) recovers too.
     engine
         .persist()

@@ -39,13 +39,19 @@
 
 pub mod compile;
 pub mod install;
+#[cfg(feature = "postgres")]
+pub mod registry_pg;
 pub mod source;
 
 use miette::Diagnostic;
 use thiserror::Error;
 
-pub use compile::{CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, compile};
+pub use compile::{
+    CompiledSchemaPack, PortableTriple, RegistryRow, SchemaRegistry, check_admission, compile,
+};
 pub use install::{InstallReport, activate_pack, install_pack};
+#[cfg(feature = "postgres")]
+pub use registry_pg::PgSchemaRegistry;
 pub use source::{PackScope, SchemaPackSource, ValueType, parse_source};
 
 /// Errors from schema-pack parsing, compilation, and installation.
@@ -208,6 +214,27 @@ pub enum SchemaError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("schema pack \"{name}@{version}\" is already admitted to the registry")]
+    #[diagnostic(
+        code(akh::schema::already_admitted),
+        help(
+            "Registry rows are immutable once admitted (ADR 081 decision 9). Bump the pack's \
+             version to publish a new revision — reinstalling the existing pack@version stays \
+             idempotent at the per-akh install step, so nothing is lost by leaving it as-is."
+        )
+    )]
+    AlreadyAdmitted { name: String, version: String },
+
+    #[error("schema-pack registry operation failed: {message}")]
+    #[diagnostic(
+        code(akh::schema::registry),
+        help(
+            "This is a registry-backend failure (e.g. the Postgres connection). Check the \
+             daemon's `[postgres]` configuration and connectivity, then retry."
+        )
+    )]
+    Registry { message: String },
 }
 
 /// Result alias for schema-pack operations.
