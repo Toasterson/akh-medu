@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use serde_json::json;
 
 use crate::agent::conversation::Speaker;
+use crate::library::note::{FrontmatterValue, Note};
 
 use super::budget::BudgetAllocator;
 use super::error::ContextResult;
@@ -24,6 +25,30 @@ use super::manager::{ContextManager, TokenCounter};
 use super::types::{
     AssembledContext, ContextSection, DroppedSpan, EpisodeState, StrategyId, TokenBudget,
 };
+
+/// Render a `key: value` frontmatter block for each note (title-labelled),
+/// **never** touching [`Note::body`] — this is the mechanical enforcement of
+/// the "bodies never resident" invariant (ADR 081 slice 7 decision 11):
+/// however a caller populated `active_notes` / `recent_notes` (even with
+/// bodies attached), this function has no way to render one. Notes with no
+/// frontmatter contribute nothing (there is nothing to show in a
+/// frontmatter-only tier).
+fn render_notes_frontmatter(notes: &[Note]) -> String {
+    let mut out = String::new();
+    for note in notes {
+        if note.frontmatter.is_empty() {
+            continue;
+        }
+        let title = match note.frontmatter.get("title") {
+            Some(FrontmatterValue::Text(t)) => t.clone(),
+            _ => note.document.title.clone(),
+        };
+        out.push_str(&format!("### {title} (note:{})\n", note.id.as_str()));
+        out.push_str(&note.frontmatter.to_block());
+        out.push('\n');
+    }
+    out
+}
 
 /// Assembles recent conversation history + the current turn within budget.
 ///
@@ -66,13 +91,18 @@ pub(super) fn assemble_with_cap(
         let available = budget.available();
 
         // Keep-first priority (what survives budget pressure): continuity seed →
-        // the question → grounding facts → recalled episodes → recent history →
+        // schema digest → active-note frontmatter (the core tier, ADR 081 slice
+        // 7) → the question → grounding facts → recently-touched-note
+        // frontmatter → recalled episodes (the recall tier) → recent history →
         // tools (trimmed first). The *render* order differs (positional): blocks
         // lead, history + current prompt trail, closest to the generation point.
         let allocator = BudgetAllocator::new(vec![
             ContextSection::System,
+            ContextSection::Schema,
+            ContextSection::ActiveNotes,
             ContextSection::UserPrompt,
             ContextSection::KnowledgeGraph,
+            ContextSection::RecentNotes,
             ContextSection::RecalledEpisodes,
             ContextSection::History,
             ContextSection::Tools,
@@ -97,10 +127,41 @@ pub(super) fn assemble_with_cap(
         {
             blocks.push(b);
         }
+        // Core tier (ADR 081 slice 7): the in-force schema digest, so the model
+        // always knows the installed types/relations — degrades like every
+        // other atomic section under budget pressure (an engine with no schema
+        // pack installed yields an empty digest, so this is silently absent).
+        if let Ok(digest) = crate::schema::digest(episode.engine)
+            && !digest.is_empty()
+            && let Some(b) = make_block(
+                ContextSection::Schema,
+                "In-force schema (get_graph_schema digest):",
+                &digest.render_compact(),
+            )
+        {
+            blocks.push(b);
+        }
+        // Core tier: active-note frontmatter only — never bodies (see
+        // `render_notes_frontmatter`).
+        if let Some(b) = make_block(
+            ContextSection::ActiveNotes,
+            "Active notes (frontmatter only):",
+            &render_notes_frontmatter(episode.active_notes),
+        ) {
+            blocks.push(b);
+        }
         if let Some(kg) = episode.kg_context
             && let Some(b) =
                 make_block(ContextSection::KnowledgeGraph, "Relevant knowledge from your memory:", kg)
         {
+            blocks.push(b);
+        }
+        // Recall tier: recently-touched-note frontmatter only — never bodies.
+        if let Some(b) = make_block(
+            ContextSection::RecentNotes,
+            "Recently touched notes (frontmatter only):",
+            &render_notes_frontmatter(episode.recent_notes),
+        ) {
             blocks.push(b);
         }
         if !episode.recalled.is_empty() {
@@ -153,7 +214,10 @@ pub(super) fn assemble_with_cap(
         // that's 44c-full); history + tools degrade smoothly within their grant.
         let atomic = [
             ContextSection::System,
+            ContextSection::Schema,
+            ContextSection::ActiveNotes,
             ContextSection::KnowledgeGraph,
+            ContextSection::RecentNotes,
             ContextSection::RecalledEpisodes,
             ContextSection::UserPrompt,
         ];
@@ -375,6 +439,169 @@ mod tests {
             out.dropped.iter().any(|d| d.section == ContextSection::Tools),
             "trimmed tools recorded as dropped"
         );
+    }
+
+    // -- ADR 081 slice 7: schema digest in core --------------------------------
+
+    const SEED_PACK: &str = r#"{
+        "pack": {"name": "compacting-test", "version": "0.1.0"},
+        "types": [
+            {"name": "Person", "properties": [
+                {"name": "email", "value_type": "text"}]}
+        ]
+    }"#;
+
+    fn install_seed(engine: &Engine) {
+        let pack = crate::schema::compile::compile(SEED_PACK).unwrap();
+        crate::schema::install::install_pack(engine, &pack).unwrap();
+    }
+
+    #[test]
+    fn schema_digest_absent_when_no_packs_installed() {
+        let (engine, _tmp) = test_engine();
+        let episode = EpisodeState::new("a", "hello", &engine);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert!(
+            !out.section_tokens.contains_key(&ContextSection::Schema),
+            "no digest block without an installed schema pack"
+        );
+    }
+
+    #[test]
+    fn schema_digest_appears_in_core_when_packs_installed() {
+        let (engine, _tmp) = test_engine();
+        install_seed(&engine);
+        let episode = EpisodeState::new("a", "hello", &engine);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert!(out.section_tokens.contains_key(&ContextSection::Schema));
+        assert!(
+            out.messages
+                .iter()
+                .any(|m| m["content"].as_str().unwrap_or("").contains("Person")),
+            "the digest names the installed type: {:?}",
+            out.messages
+        );
+    }
+
+    #[test]
+    fn schema_digest_dropped_under_tight_budget() {
+        let (engine, _tmp) = test_engine();
+        install_seed(&engine);
+        let episode = EpisodeState::new("a", "hi", &engine);
+        // A budget too tight to fit the (atomic) digest block at all: it must
+        // degrade to absent, not truncated garbage, and the turn must still
+        // succeed (the current prompt is never dropped).
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::new(6, 2), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert!(
+            !out.section_tokens.contains_key(&ContextSection::Schema),
+            "digest didn't fit whole ⇒ dropped, not partially rendered"
+        );
+        assert!(
+            out.dropped.iter().any(|d| d.section == ContextSection::Schema),
+            "the drop is recorded for telemetry/safety"
+        );
+    }
+
+    // -- ADR 081 slice 7: notes render frontmatter, never bodies ---------------
+
+    fn note_with_body(title: &str, body: &str) -> crate::library::note::Note {
+        use crate::library::model::{ContentFormat, DocumentRecord, DocumentSource};
+        use crate::library::note::{Frontmatter, FrontmatterValue};
+
+        let doc = DocumentRecord {
+            id: title.to_lowercase(),
+            title: title.to_string(),
+            source: DocumentSource::Inline,
+            format: ContentFormat::PlainText,
+            tags: vec![],
+            chunk_count: 0,
+            triple_count: 0,
+            ingested_at: 0,
+        };
+        let mut fm = Frontmatter::new();
+        fm.insert("title", FrontmatterValue::Text(title.to_string()));
+        crate::library::note::Note::new(doc, body).with_frontmatter(fm)
+    }
+
+    #[test]
+    fn active_note_frontmatter_present_body_absent() {
+        let (engine, _tmp) = test_engine();
+        let note = note_with_body("Paris", "SECRET BODY TEXT that must never be resident.");
+        let notes = vec![note];
+        let episode =
+            EpisodeState::new("a", "tell me about the city", &engine).with_notes(&notes, &[]);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+
+        assert!(out.section_tokens.contains_key(&ContextSection::ActiveNotes));
+        let rendered: String = out
+            .messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Paris"), "frontmatter title present: {rendered}");
+        assert!(
+            !rendered.contains("SECRET BODY TEXT"),
+            "body must never be resident: {rendered}"
+        );
+    }
+
+    #[test]
+    fn recent_note_frontmatter_present_body_absent() {
+        let (engine, _tmp) = test_engine();
+        let note = note_with_body("Berlin", "SECRET BODY TEXT that must never be resident.");
+        let notes = vec![note];
+        let episode =
+            EpisodeState::new("a", "what did I touch recently?", &engine).with_notes(&[], &notes);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+
+        assert!(out.section_tokens.contains_key(&ContextSection::RecentNotes));
+        let rendered: String = out
+            .messages
+            .iter()
+            .filter_map(|m| m["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Berlin"), "frontmatter title present: {rendered}");
+        assert!(
+            !rendered.contains("SECRET BODY TEXT"),
+            "body must never be resident: {rendered}"
+        );
+    }
+
+    #[test]
+    fn frontmatter_less_notes_contribute_nothing() {
+        let (engine, _tmp) = test_engine();
+        let note = crate::library::note::Note::new(
+            crate::library::model::DocumentRecord {
+                id: "plain".into(),
+                title: "Plain".into(),
+                source: crate::library::model::DocumentSource::Inline,
+                format: crate::library::model::ContentFormat::PlainText,
+                tags: vec![],
+                chunk_count: 0,
+                triple_count: 0,
+                ingested_at: 0,
+            },
+            "some body text",
+        );
+        let notes = vec![note];
+        let episode = EpisodeState::new("a", "hi", &engine).with_notes(&notes, &notes);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        assert!(!out.section_tokens.contains_key(&ContextSection::ActiveNotes));
+        assert!(!out.section_tokens.contains_key(&ContextSection::RecentNotes));
     }
 
     #[test]

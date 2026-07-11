@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::agent::conversation::ConversationState;
 use crate::engine::Engine;
+use crate::library::note::Note;
 use crate::symbol::SymbolId;
 
 /// Default model context window (tokens) assumed until 44b measures the real one
@@ -28,10 +29,20 @@ pub const DEFAULT_RESERVED_OUTPUT: usize = 1_024;
 pub enum ContextSection {
     /// The system prompt (psyche / explicit). Assembled by the backend, counted here.
     System,
+    /// The `get_graph_schema`-style digest of the akh's in-force schema (ADR
+    /// 081 slice 7): every installed type + relation, so the model always
+    /// knows the in-force vocabulary. Core tier — funded right after `System`.
+    Schema,
+    /// Frontmatter (never bodies) of notes the caller judges relevant to the
+    /// current turn (ADR 081 slice 7 decision 1). Core tier.
+    ActiveNotes,
     /// The current user turn.
     UserPrompt,
     /// Retrieved knowledge-graph facts.
     KnowledgeGraph,
+    /// Frontmatter (never bodies) of recently-touched notes (ADR 081 slice 7
+    /// decision 2), alongside recalled episodes. Recall tier.
+    RecentNotes,
     /// Prior conversation turns.
     History,
     /// Recalled episodic memories.
@@ -45,8 +56,11 @@ impl ContextSection {
     pub fn as_str(self) -> &'static str {
         match self {
             ContextSection::System => "system",
+            ContextSection::Schema => "schema",
+            ContextSection::ActiveNotes => "active_notes",
             ContextSection::UserPrompt => "user_prompt",
             ContextSection::KnowledgeGraph => "kg",
+            ContextSection::RecentNotes => "recent_notes",
             ContextSection::History => "history",
             ContextSection::RecalledEpisodes => "recalled",
             ContextSection::Tools => "tools",
@@ -99,6 +113,24 @@ pub struct EpisodeState<'a> {
     /// lowest-priority [`Tools`](ContextSection::Tools) section and returns the
     /// selected subset in [`AssembledContext::tools`]. Empty ⇒ no tools.
     pub tool_catalog: &'a [Value],
+    /// Notes the caller judges **active** for the current turn (ADR 081 slice
+    /// 7). Only [`Note::frontmatter`] is ever rendered — [`Note::body`] is
+    /// never read by the assembler, regardless of what a caller puts here, so
+    /// a body can never leak into the resident context through this field.
+    ///
+    /// **Minimal "active note" notion** (no persistent note store/linker
+    /// exists yet — see [`crate::library::note_store`]): the caller decides
+    /// relevance, e.g. notes whose wikilinks resolve to a symbol mentioned in
+    /// the current conversation, or a note the user is actively editing. The
+    /// context manager does not compute this itself; it only renders
+    /// frontmatter for whatever the caller supplies. Empty ⇒ no active-notes
+    /// block. Core tier — rendered in [`ContextSection::ActiveNotes`].
+    pub active_notes: &'a [Note],
+    /// Notes **recently touched** (written/read) this session, independent of
+    /// topical relevance (ADR 081 slice 7 decision 2). Same frontmatter-only
+    /// guarantee as [`Self::active_notes`]. Recall tier — rendered in
+    /// [`ContextSection::RecentNotes`], alongside recalled episodes.
+    pub recent_notes: &'a [Note],
 }
 
 impl<'a> EpisodeState<'a> {
@@ -114,6 +146,8 @@ impl<'a> EpisodeState<'a> {
             recalled: &[],
             session_seed: None,
             tool_catalog: &[],
+            active_notes: &[],
+            recent_notes: &[],
         }
     }
 
@@ -142,6 +176,15 @@ impl<'a> EpisodeState<'a> {
     #[must_use]
     pub fn with_tools(mut self, tool_catalog: &'a [Value]) -> Self {
         self.tool_catalog = tool_catalog;
+        self
+    }
+
+    /// Attach the active-note and recently-touched-note frontmatter sources
+    /// (ADR 081 slice 7 — see [`Self::active_notes`] / [`Self::recent_notes`]).
+    #[must_use]
+    pub fn with_notes(mut self, active_notes: &'a [Note], recent_notes: &'a [Note]) -> Self {
+        self.active_notes = active_notes;
+        self.recent_notes = recent_notes;
         self
     }
 }

@@ -47,7 +47,7 @@ pub mod trigger_manage;
 
 pub use code_gen::CodeGenTool;
 pub use code_ingest::CodeIngestTool;
-pub use core_memory::{ArchivalSearchTool, CoreMemoryAppendTool, CoreMemoryReplaceTool};
+pub use core_memory::{ArchivalSearchTool, CoreMemoryAppendTool, CoreMemoryReplaceTool, QueryGraphTool};
 pub use code_predicates::CodePredicates;
 pub use compile_feedback::CompileFeedbackTool;
 pub use content_ingest::ContentIngestTool;
