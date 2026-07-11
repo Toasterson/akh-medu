@@ -278,6 +278,7 @@ async fn harvest_watermark_roundtrips_and_survives_state_upsert() {
         psyche: None,
         extra: None,
         harvest_watermark: 0, // stale/wrong on purpose
+        librarian_watermark: 0,
         updated_at: akhomed_store::chrono::Utc::now(),
     };
     akhomed_store::snapshots::upsert_akh_state(&db, stale_state).await.unwrap();

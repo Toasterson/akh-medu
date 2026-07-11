@@ -44,6 +44,7 @@ fn akh_and_state_roundtrip() {
         psyche: Some(json!({ "awakened": true })),
         extra: Some(json!({ "method_stats": [] })),
         harvest_watermark: 12,
+        librarian_watermark: 4,
         updated_at: ts(),
     });
 }

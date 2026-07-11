@@ -113,6 +113,15 @@ pub const CONTROL_METHODS: &[&str] = &[
     "_akh/workspace/list-members",
     "_akh/projection/refresh",
     "_akh/migrate",
+    // ADR 081 decision 9 — the Postgres schema-pack registry.
+    "_akh/schema/admit",
+    "_akh/schema/list",
+    "_akh/schema/install",
+    "_akh/schema/digest",
+    // ADR 081 Slice 5 — promoting a proposal touches the Postgres registry
+    // (`_akh/schema/proposals` and `_akh/schema/reject` are engine-only
+    // data-plane ops and stay out of this list — see `dispatch_akh`).
+    "_akh/schema/promote",
 ];
 
 /// Whether `method` is a control-plane method (a member of [`CONTROL_METHODS`]).

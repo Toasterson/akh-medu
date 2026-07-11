@@ -397,6 +397,7 @@ impl DaemonSection {
             kg_compaction_interval: defaults.kg_compaction_interval,
             delegation_interval: defaults.delegation_interval,
             relation_enrichment_interval: defaults.relation_enrichment_interval,
+            librarian_interval: defaults.librarian_interval,
             max_cycles: self.max_cycles,
         }
     }

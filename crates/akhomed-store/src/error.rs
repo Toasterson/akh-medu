@@ -48,6 +48,18 @@ pub enum StoreError {
         #[from]
         source: sea_orm::DbErr,
     },
+
+    /// A write was refused because it would silently clobber existing state
+    /// (e.g. re-admitting an already-admitted schema-pack `(name, version)`).
+    #[error("{message}")]
+    #[diagnostic(
+        code(akhomed_store::conflict),
+        help(
+            "This is a duplicate-write guard, not a transient failure: check the existing \
+             row before retrying under a new identity (e.g. a bumped pack version)."
+        )
+    )]
+    Conflict { message: String },
 }
 
 /// Convenience result alias for store operations.

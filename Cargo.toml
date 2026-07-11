@@ -311,3 +311,22 @@ harness = false
 # registry consume this patched candle-core transparently.
 [patch.crates-io]
 candle-core = { path = "vendor/candle-core" }
+# illumos portability fix: hnsw_rs (always-on, item-memory ANN backend) pulls
+# mmap-rs unconditionally, which in turn depends on the `sysctl` crate for
+# every `cfg(unix)` target even though `sysctl` implements a `sys` backend
+# only for linux/android/macos/ios/tvos/visionos/freebsd — it has no illumos
+# module and fails to compile there (E0432/E0433: `mod sys` "configured
+# out"). Nothing mmap-rs does on illumos (which falls through to its generic
+# os_impl::unix) ever calls into sysctl; the one reference is a dead
+# `#[cfg(unix)] Error::Sysctl` variant. This vendored fork narrows that one
+# cfg (and the matching Cargo.toml dependency table) to exclude illumos —
+# byte-identical behavior on every other platform. See vendor/mmap-rs/src/error.rs.
+mmap-rs = { path = "vendor/mmap-rs" }
+# illumos portability fix: the `libc` crate's solarish (illumos/solaris)
+# bindings are missing CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID even
+# though illumos's own <sys/time_impl.h> defines them and clock_gettime(3c)
+# accepts them at runtime (verified on OpenIndiana 2026.04) — cpu-time (a
+# transitive dep of hnsw_rs, which is always-on) fails to compile without
+# them. This vendored fork adds only those two constants to
+# src/unix/solarish/mod.rs; every other platform's bindings are untouched.
+libc = { path = "vendor/libc" }

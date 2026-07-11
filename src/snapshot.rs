@@ -466,6 +466,9 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     // keeps that first-insert value correct without ever clobbering a value
     // the dedicated `set_harvest_watermark` setter already wrote.
     let harvest_watermark = ops::get_harvest_watermark(db, akh_id).await?;
+    // Same read-back-before-insert reasoning as `harvest_watermark` above,
+    // now for the ADR 081 slice 4 daily-Librarian watermark.
+    let librarian_watermark = ops::get_librarian_watermark(db, akh_id).await?;
 
     ops::replace_symbols(db, akh_id, symbols).await?;
     ops::replace_workspace_facts(db, workspace_id, facts).await?;
@@ -495,6 +498,7 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         psyche,
         extra,
         harvest_watermark,
+        librarian_watermark,
         updated_at: chrono::Utc::now(),
     };
     ops::upsert_akh_state(db, state).await?;
@@ -588,6 +592,10 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
 /// simply not written and `Agent::resume` falls back to defaults / KG rebuild.
 /// The only hard requirement is the `akh_state` row ([`SnapshotError::NotFound`]
 /// otherwise).
+///
+/// After the KG restore + WAL replay, also runs schema-pack lazy convergence
+/// (ADR 081 decision 9 — [`crate::schema::registry_pg::converge_workspace`]):
+/// installs every schema pack recorded active for `workspace_id`, idempotently.
 pub async fn wake(
     data_dir: &Path,
     akh_id: Uuid,
@@ -710,7 +718,25 @@ pub async fn wake(
         "woke akh from postgres snapshot"
     );
 
-    // 7. Flush the reconstructed KG snapshot back to local redb so a plain
+    // 7. Lazy schema-pack convergence (ADR 081 decision 9): install every
+    //    schema pack recorded as active for this workspace. Idempotent —
+    //    reinstalling an already-installed pack@version is a no-op
+    //    (`schema::install_pack`) — and always safe, because schema-pack
+    //    types are immutable+additive. Best-effort: a failure here is logged
+    //    and does not fail the wake (the akh still comes up; it just may be
+    //    missing a pack's types until the next wake or an explicit install).
+    let packs_converged =
+        crate::schema::registry_pg::converge_workspace(&engine, db, workspace_id).await;
+    if packs_converged > 0 {
+        tracing::info!(
+            akh = %akh_id,
+            %workspace_id,
+            packs_converged,
+            "wake: converged active schema packs"
+        );
+    }
+
+    // 8. Flush the reconstructed KG snapshot back to local redb so a plain
     //    restart (without Postgres) recovers too.
     engine
         .persist()
