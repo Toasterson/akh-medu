@@ -31,26 +31,27 @@ async fn admit_install_and_reinstall_the_seed_pack_over_postgres() {
         .unwrap();
     run_migrations(&db).await.unwrap();
 
-    // Unique version per run (admission is insert-only; re-admitting the same
-    // (name, version) is rejected — see the duplicate-admission assertion
-    // below, which exercises that same guard deliberately).
-    let run_id = akhomed_store::uuid::Uuid::new_v4();
-    let text = include_str!("../data/schema-packs/schema-org-core.json").replace(
-        "\"version\": \"0.1.0\",",
-        &format!("\"version\": \"test-{run_id}\","),
-    );
-    let pack = compile(&text).unwrap();
+    // The seed pack is admitted under its REAL version, exactly once per
+    // database lifetime: global type names are immutable across the whole
+    // registry (ADR 081 decision 5 — `check_admission` rejects ANY later
+    // pack, including a newer version of this one, re-declaring `Thing`),
+    // so a per-run-unique version would be correctly rejected on the second
+    // run. Admit-or-reuse keeps the test rerunnable against a persistent
+    // database while still exercising the admission path on a fresh one.
+    let text = include_str!("../data/schema-packs/schema-org-core.json");
+    let pack = compile(text).unwrap();
     assert_eq!(pack.name, "schema-org-core");
-    assert_eq!(pack.version, format!("test-{run_id}"));
 
     // `PgSchemaRegistry::admit` is a sync trait method (it bridges its own
     // async DB hop internally — see `schema::registry_pg::block_on`), so it
     // is called directly, no explicit `block_in_place` needed at the call
     // site (mirrors `PgTurnBodyReader::turn_body` in `src/bin/akhomed.rs`).
     let registry = PgSchemaRegistry::new(&db);
-    registry
-        .admit(RegistryRow::from_pack(&pack, "live-test-operator").unwrap())
-        .unwrap();
+    if registry.fetch(&pack.name, &pack.version).unwrap().is_none() {
+        registry
+            .admit(RegistryRow::from_pack(&pack, "live-test-operator").unwrap())
+            .unwrap();
+    }
 
     // Re-admitting the exact same (name, version) is rejected — the registry
     // gate ADR 081 decision 9 requires (rows are written exactly once).
