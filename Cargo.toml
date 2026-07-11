@@ -317,11 +317,14 @@ candle-core = { path = "vendor/candle-core" }
 # cfg (and the matching Cargo.toml dependency table) to exclude illumos —
 # byte-identical behavior on every other platform. See vendor/mmap-rs/src/error.rs.
 mmap-rs = { path = "vendor/mmap-rs" }
-# illumos portability fix: the `libc` crate's solarish (illumos/solaris)
-# bindings are missing CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID even
-# though illumos's own <sys/time_impl.h> defines them and clock_gettime(3c)
+# illumos portability fix: libc's solarish (illumos/solaris) bindings are
+# missing CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID even though
+# illumos's own <sys/time_impl.h> defines them and clock_gettime(3c)
 # accepts them at runtime (verified on OpenIndiana 2026.04) — cpu-time (a
 # transitive dep of hnsw_rs, which is always-on) fails to compile without
-# them. This vendored fork adds only those two constants to
-# src/unix/solarish/mod.rs; every other platform's bindings are untouched.
-libc = { path = "vendor/libc" }
+# them. Rather than vendoring all of libc for two constants, this vendored
+# cpu-time (upstream 1.0.0 + one cfg'd import) defines them locally under
+# cfg(solarish); every other platform compiles the pristine import path.
+# Drop once the upstream rust-lang/libc PR adding the constants is merged
+# and released.
+cpu-time = { path = "vendor/cpu-time" }
