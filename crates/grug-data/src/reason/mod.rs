@@ -30,12 +30,14 @@
 
 mod corpus;
 mod error;
+mod handoff;
 mod kg;
 mod replay;
 mod score;
 
 pub use corpus::{ReasonConfig, ReasonDataset, ReasonExample, TraceArm};
 pub use error::ReasonError;
+pub use handoff::{HandoffOutcome, handoff};
 pub use kg::{EntityId, EntityType, Fact, RelationKind, SyntheticKg, query_name, random_path};
 pub use replay::{ReplayReport, replay_trace};
 pub use score::{

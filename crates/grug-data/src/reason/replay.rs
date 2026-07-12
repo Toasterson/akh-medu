@@ -46,8 +46,12 @@ pub struct ReplayReport {
     pub broken_by_refs: Vec<usize>,
 }
 
+/// Visible to sibling submodules of `reason` (currently
+/// [`super::handoff`]) so the dual-process handoff splice can walk a raw
+/// organ output with the *exact same* grammar `replay_trace` uses, rather
+/// than maintaining a second parser that could silently drift out of sync.
 #[derive(Debug, Clone, PartialEq)]
-enum ParsedLine {
+pub(super) enum ParsedLine {
     Recall {
         step: usize,
         relation: RelationKind,
@@ -73,8 +77,9 @@ enum ParsedLine {
 
 /// Parse one trimmed, non-empty line. Total: never panics, falls back to
 /// [`ParsedLine::Malformed`] for anything that doesn't match the ADR 092
-/// grammar.
-fn parse_line(line: &str) -> ParsedLine {
+/// grammar. `pub(super)`: shared with [`super::handoff`] (see [`ParsedLine`]'s
+/// docs) rather than duplicated.
+pub(super) fn parse_line(line: &str) -> ParsedLine {
     let segs: Vec<&str> = line.split(" | ").map(str::trim).collect();
     if segs.len() < 2 {
         return ParsedLine::Malformed;
