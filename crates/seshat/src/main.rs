@@ -100,7 +100,7 @@ async fn main() -> miette::Result<()> {
         }
     };
     #[cfg(not(feature = "embedding"))]
-    let embedder: Option<seshat::embedder::SharedEmbedder> = None;
+    let embedder = None;
 
     // Start embedding worker (background task).
     #[cfg(feature = "embedding")]

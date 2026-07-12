@@ -14,7 +14,12 @@ use schemars::JsonSchema;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "embedding")]
 use crate::embedder::SharedEmbedder;
+/// Uninhabited stand-in so `SeshatMcpState` keeps its shape without the
+/// `embedding` feature; the `Option` is always `None` in that build.
+#[cfg(not(feature = "embedding"))]
+pub type SharedEmbedder = std::convert::Infallible;
 
 /// Shared state for MCP tool handlers.
 pub struct SeshatMcpState {
@@ -155,6 +160,38 @@ impl SeshatMcpServer {
         }
     }
 
+    /// Embed a query string with the configured embedder.
+    #[cfg(feature = "embedding")]
+    async fn embed_query(&self, query: String) -> Result<Vec<f32>, McpError> {
+        let embedder = self
+            .state
+            .embedder
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("embedding not configured", None))?;
+        let embedder_clone = Arc::clone(embedder);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = embedder_clone
+                .lock()
+                .map_err(|e| format!("embedder lock: {e}"))?;
+            guard
+                .embed_text(&query)
+                .map_err(|e| format!("embedding: {e}"))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("task: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e, None))
+    }
+
+    /// Without the `embedding` feature there is nothing to embed with;
+    /// vector-search tools surface a clear error instead of failing to build.
+    #[cfg(not(feature = "embedding"))]
+    async fn embed_query(&self, _query: String) -> Result<Vec<f32>, McpError> {
+        Err(McpError::internal_error(
+            "embedding support not compiled into this build (feature `embedding`)",
+            None,
+        ))
+    }
+
     #[tool(
         name = "seshat_search",
         description = "Search the corpus for chunks similar to a query using vector similarity. Returns ranked text chunks with source document info and similarity scores."
@@ -163,28 +200,8 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let embedder = self
-            .state
-            .embedder
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("embedding not configured", None))?;
-
         // Embed the query.
-        let query_embedding = {
-            let embedder_clone = Arc::clone(embedder);
-            let query = params.query.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut guard = embedder_clone
-                    .lock()
-                    .map_err(|e| format!("embedder lock: {e}"))?;
-                guard
-                    .embed_text(&query)
-                    .map_err(|e| format!("embedding: {e}"))
-            })
-            .await
-            .map_err(|e| McpError::internal_error(format!("task: {e}"), None))?
-            .map_err(|e| McpError::internal_error(e, None))?
-        };
+        let query_embedding = self.embed_query(params.query.clone()).await?;
 
         // Search pgvector.
         let results = crate::query::search_similar(
@@ -218,27 +235,7 @@ impl SeshatMcpServer {
         }
 
         // Embed query and search.
-        let embedder = self
-            .state
-            .embedder
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("embedding not configured", None))?;
-
-        let query_embedding = {
-            let embedder_clone = Arc::clone(embedder);
-            let query = params.query.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut guard = embedder_clone
-                    .lock()
-                    .map_err(|e| format!("embedder lock: {e}"))?;
-                guard
-                    .embed_text(&query)
-                    .map_err(|e| format!("embedding: {e}"))
-            })
-            .await
-            .map_err(|e| McpError::internal_error(format!("task: {e}"), None))?
-            .map_err(|e| McpError::internal_error(e, None))?
-        };
+        let query_embedding = self.embed_query(params.query.clone()).await?;
 
         let chunks = crate::query::search_similar(&self.state.db, &query_embedding, 10, 0.3)
             .await
@@ -389,28 +386,38 @@ impl SeshatMcpServer {
         description = "Force the embedding worker to process all pending chunks immediately. Returns the count of newly embedded chunks."
     )]
     async fn seshat_embed_now(&self) -> Result<CallToolResult, McpError> {
-        let embedder = self
-            .state
-            .embedder
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("embedding not configured", None))?;
+        #[cfg(not(feature = "embedding"))]
+        {
+            Err(McpError::internal_error(
+                "embedding support not compiled into this build (feature `embedding`)",
+                None,
+            ))
+        }
+        #[cfg(feature = "embedding")]
+        {
+            let embedder = self
+                .state
+                .embedder
+                .as_ref()
+                .ok_or_else(|| McpError::internal_error("embedding not configured", None))?;
 
-        let stats = crate::embed_worker::embed_pending_batch(
-            &self.state.db,
-            embedder,
-            256, // larger batch for manual trigger
-            "all-MiniLM-L6-v2",
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("embed: {e}"), None))?;
+            let stats = crate::embed_worker::embed_pending_batch(
+                &self.state.db,
+                embedder,
+                256, // larger batch for manual trigger
+                "all-MiniLM-L6-v2",
+            )
+            .await
+            .map_err(|e| McpError::internal_error(format!("embed: {e}"), None))?;
 
-        let result = serde_json::json!({
-            "chunks_processed": stats.chunks_processed,
-            "embeddings_created": stats.embeddings_created,
-        });
-        let json = serde_json::to_string_pretty(&result)
-            .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+            let result = serde_json::json!({
+                "chunks_processed": stats.chunks_processed,
+                "embeddings_created": stats.embeddings_created,
+            });
+            let json = serde_json::to_string_pretty(&result)
+                .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
+            Ok(CallToolResult::success(vec![Content::text(json)]))
+        }
     }
 }
 
