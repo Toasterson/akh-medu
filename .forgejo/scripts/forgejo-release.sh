@@ -31,8 +31,12 @@ AUTH="Authorization: token $TOKEN"
 BASE="$API/repos/$OWNER/$REPO"
 
 # Extract the first top-level "id": value from a JSON blob.
+# Two illumos/POSIX grep pitfalls that GNU grep tolerates (both bit the
+# illumos runner): a final line without a trailing newline is ignored, and
+# lines longer than LINE_MAX (~2k; the release JSON is ~4k) never match.
+# Terminate the stream and split it into short lines before grepping.
 first_id() {
-	grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*'
+	{ cat; echo; } | tr ',{' '\n\n' | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9][0-9]*'
 }
 
 ensure_release() {
@@ -76,8 +80,8 @@ upload_asset() {
 	[ -n "$rel_id" ] || { echo "forgejo-release: could not resolve release id for $tag" >&2; exit 1; }
 
 	# Replace an existing asset of the same name (idempotent re-runs).
-	old_id=$(curl -fsS -H "$AUTH" "$BASE/releases/$rel_id/assets" 2>/dev/null \
-		| tr '}' '\n' | grep "\"name\":\"$name\"" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*' || true)
+	old_id=$({ curl -fsS -H "$AUTH" "$BASE/releases/$rel_id/assets" 2>/dev/null; echo; } \
+		| tr '}' '\n' | grep "\"name\":\"$name\"" | { cat; echo; } | tr ',{' '\n\n' | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9][0-9]*' || true)
 	if [ -n "$old_id" ]; then
 		curl -fsS -X DELETE -H "$AUTH" "$BASE/releases/$rel_id/assets/$old_id" >/dev/null || true
 		echo "    replaced existing asset $name"
