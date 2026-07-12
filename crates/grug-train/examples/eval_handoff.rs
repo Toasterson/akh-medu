@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use grug_data::reason::{
     HandoffOutcome, ReasonConfig, ReasonDataset, ReasonEvalSummary, ReasonExample, handoff,
-    score_reason_outputs,
+    replay_trace, score_reason_outputs,
 };
 use grug_train::generate::GenerateConfig;
 use grug_train::reason_train::generate_reason_outputs;
@@ -100,6 +100,75 @@ struct Args {
     /// Defaults to `<artifacts-dir>/eval_handoff.json`.
     #[arg(long)]
     out: Option<PathBuf>,
+
+    /// Phase 51 P6 slice 2: dump one JSON line per scored example (all three
+    /// axes) carrying the organ/handoff splice point + gold chain, for the
+    /// main-crate `phase51_p6_engine_handoff` example to import as real KG
+    /// triples and run `engine.deliberate` from. Absent by default -- no
+    /// behavior change unless passed.
+    #[arg(long)]
+    dump_traces: Option<PathBuf>,
+}
+
+/// One line of the `--dump-traces` JSONL output: everything the P6 slice-2
+/// engine-handoff example needs to rebuild this example's chain as real KG
+/// triples and know where the neural prefix left off, without re-deriving
+/// anything from `grug_data::reason` types.
+#[derive(Debug, Clone, serde::Serialize)]
+struct TraceDumpRecord {
+    /// `"<axis>-<index>"`, e.g. `"axis_a-17"`.
+    id: String,
+    axis: String,
+    depth: usize,
+    /// `example.subject`'s label, followed by `example.gold_chain[i].object`'s
+    /// label for `i` in `0..depth` -- `chain.len() == depth + 1`, and
+    /// `chain[k]` is the entity the neural prefix would have reached after
+    /// `k` hops.
+    chain: Vec<String>,
+    neural_hops: usize,
+    splice_entity: String,
+    gold_answer: String,
+    is_abstention: bool,
+    broken_hop: Option<usize>,
+    organ_answer_correct: bool,
+}
+
+/// Append one [`TraceDumpRecord`] per `(example, output)` pair to `writer`,
+/// scored via the same [`handoff`] and [`replay_trace`] calls the axis
+/// stats already use (`organ_answer_correct` is `replay_trace`'s own
+/// `answer_correct` on the raw organ output -- exactly what
+/// `score_reason_outputs`'s `answer_accuracy` averages, i.e. the
+/// `organ_alone` condition, not the handoff's trivial-accept gate).
+fn dump_trace_records(
+    writer: &mut impl std::io::Write,
+    axis: &str,
+    examples: &[ReasonExample],
+    outputs: &[String],
+) -> std::io::Result<()> {
+    let n = examples.len().min(outputs.len());
+    for (i, (example, output)) in examples.iter().zip(outputs.iter()).take(n).enumerate() {
+        let outcome = handoff(example, output);
+        let organ_answer_correct = replay_trace(example, output).answer_correct;
+        let mut chain = Vec::with_capacity(example.depth + 1);
+        chain.push(example.subject.to_string());
+        chain.extend(example.gold_chain.iter().map(|f| f.object.to_string()));
+
+        let record = TraceDumpRecord {
+            id: format!("{axis}-{i}"),
+            axis: axis.to_string(),
+            depth: example.depth,
+            chain,
+            neural_hops: outcome.neural_hops,
+            splice_entity: outcome.splice_entity,
+            gold_answer: example.gold_answer.clone(),
+            is_abstention: example.is_abstention,
+            broken_hop: example.broken_hop,
+            organ_answer_correct,
+        };
+        serde_json::to_writer(&mut *writer, &record)?;
+        writer.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 fn parse_depths(s: &str, flag: &str) -> Vec<usize> {
@@ -278,6 +347,11 @@ fn main() {
 
     println!("\n=== Phase 51 P6 -- dual-process handoff eval, checkpoint step {step} ===");
 
+    let mut dump_file = args.dump_traces.as_ref().map(|path| {
+        std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("--dump-traces: failed to create {}: {e}", path.display()))
+    });
+
     let mut axes_json = serde_json::Map::new();
     for (label, examples, outputs) in axes {
         let organ_summary = score_reason_outputs(examples, outputs);
@@ -286,10 +360,20 @@ fn main() {
 
         print_axis_table(label, &organ_summary, &handoff_stats, &symbolic_stats);
 
+        let key = axis_key(label);
+        if let Some(f) = dump_file.as_mut() {
+            dump_trace_records(f, &key, examples, outputs)
+                .unwrap_or_else(|e| panic!("--dump-traces: write failed: {e}"));
+        }
+
         axes_json.insert(
-            axis_key(label),
+            key,
             axis_to_json(&organ_summary, &handoff_stats, &symbolic_stats),
         );
+    }
+
+    if let Some(path) = args.dump_traces.as_ref() {
+        println!("eval_handoff: wrote trace dump to {}", path.display());
     }
 
     let summary_json = serde_json::json!({

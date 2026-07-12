@@ -57,6 +57,14 @@ pub struct HandoffOutcome {
     /// full trace it sits in was fully valid -- used as-is, with no
     /// continuation spliced in. Keeps the handoff a no-op in-distribution.
     pub organ_answer_used: bool,
+    /// The label of the last on-path entity the neural prefix actually
+    /// reached -- `example.subject`'s label when `neural_hops == 0`,
+    /// otherwise `example.gold_chain[neural_hops - 1].object`'s label. This
+    /// is the production splice point: the P6 second slice hands the
+    /// System-2 continuation exactly this entity as `thinking:seeks` (see
+    /// `docs/ai/decisions/093-dual-process-trace-handoff.md`'s lab↔production
+    /// mapping), so it is recorded here rather than recomputed downstream.
+    pub splice_entity: String,
     /// The composed trace: neural-prefix hops + synthesized symbolic-suffix
     /// hops, renumbered `1..N` and re-rendered in canonical ADR-092 grammar,
     /// ending in `call answer | value <answer>`.
@@ -95,6 +103,7 @@ pub fn handoff(example: &ReasonExample, organ_output: &str) -> HandoffOutcome {
                 .unwrap_or_else(|| example.gold_answer.clone()),
             answer_correct: true,
             organ_answer_used: true,
+            splice_entity: splice_entity_label(example, example.depth),
             composed_trace: organ_output.trim().to_string(),
             composed_executability: organ_report.executability,
         };
@@ -186,8 +195,23 @@ pub fn handoff(example: &ReasonExample, organ_output: &str) -> HandoffOutcome {
         answer,
         answer_correct: composed_report.answer_correct,
         organ_answer_used: false,
+        splice_entity: splice_entity_label(example, neural_hops),
         composed_trace,
         composed_executability: composed_report.executability,
+    }
+}
+
+/// The label of the last on-path entity established after `neural_hops` --
+/// `example.subject` when `neural_hops == 0`, else
+/// `example.gold_chain[neural_hops - 1].object`. Shared by both `handoff`
+/// return sites (trivial-accept passes `example.depth`, the general path
+/// passes the computed `neural_hops`) so the two can never disagree on what
+/// "the splice point" means.
+fn splice_entity_label(example: &ReasonExample, neural_hops: usize) -> String {
+    if neural_hops == 0 {
+        example.subject.to_string()
+    } else {
+        example.gold_chain[neural_hops - 1].object.to_string()
     }
 }
 
@@ -330,6 +354,10 @@ mod tests {
         assert_eq!(outcome.symbolic_hops, 0);
         assert!(outcome.answer_correct);
         assert_eq!(outcome.answer, ex.gold_answer);
+        assert_eq!(
+            outcome.splice_entity,
+            ex.gold_chain.last().unwrap().object.to_string()
+        );
     }
 
     #[test]
@@ -357,6 +385,11 @@ mod tests {
                 outcome.composed_executability, 1.0,
                 "j={j}: composed trace must fully replay: {outcome:?}"
             );
+            assert_eq!(
+                outcome.splice_entity,
+                ex.gold_chain[outcome.neural_hops - 1].object.to_string(),
+                "j={j}: splice_entity should be the last neurally-resolved entity"
+            );
         }
     }
 
@@ -370,6 +403,7 @@ mod tests {
         assert!(outcome.answer_correct);
         assert_eq!(outcome.answer, ex.gold_answer);
         assert_eq!(outcome.composed_executability, 1.0);
+        assert_eq!(outcome.splice_entity, ex.subject.to_string());
     }
 
     #[test]
@@ -382,6 +416,7 @@ mod tests {
         assert_eq!(outcome.answer, "gap");
         assert!(outcome.answer_correct);
         assert_eq!(outcome.composed_executability, 1.0);
+        assert_eq!(outcome.splice_entity, ex.subject.to_string());
     }
 
     #[test]

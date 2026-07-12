@@ -60,3 +60,21 @@ In the lab the symbolic follower solves everything alone — the lab measures **
 Composed-trace executability = **1.000 on every axis** — the splice logic is exact. All four acceptance criteria hold: handoff never falls below symbolic-alone; in-distribution the trivial-accept leaves the organ in charge (94.9% of examples untouched, and the handoff *repairs the organ's residual 4–8% error to 1.000* — an unplanned bonus: the same protocol that extends depth also catches in-distribution derails); out-of-depth the **neural fraction is 0.31** (2.36 of ~7.5 hops resolved by a model that scores 0.004 alone — the 42% step-level validity converted into salvaged work); abstention preserved at 1.000.
 
 Lab caveat, stated plainly: symbolic-alone also scores 1.000 here because the lab's fact store is the prompt itself — the lab proves the **mechanics** (splice exactness, no interference, neural fraction > 0), while the **economics** (neural hops are cheap, System-2 hops cost budget) is the production claim, carried by the Phase-41 scaling law and measured only when the next slice wires `ThinkingLoop` as the continuation.
+
+## Measured (slice 2 — real engine as System-2, 2026-07-11, `runs/p3r-mixed-trace/handoff_traces.p6_engine_handoff.json`)
+
+Topology: organ offline (GPU harness dumps 640 trace records + splice points to JSONL), engine online (`examples/phase51_p6_engine_handoff.rs`, CPU): each chain imported as real triples with bench-style dead-end chaff (branching 3 × sub 2), `build_multi_hop` goal encoding, `engine.deliberate` from chain start vs from the neural splice entity.
+
+| depth | full-start steps | splice-start steps | saved | saved/neural-hop |
+|---|---|---|---|---|
+| 2–4 (in-distribution) | 16.0 | 0.3–0.8 | ~15.4 | 4.0–8.0 |
+| 5–6 (in-distribution) | 32.0 | 1.3–2.2 | ~30.2 | 5.3–6.6 |
+| 7 (out-of-depth) | 47.4 | 26.1 | **21.3 (45%)** | 9.2 |
+| 8 (out-of-depth) | 47.2 | 34.1 | **13.1 (28%)** | 5.5 |
+
+- **The economics claim holds and is now a number:** every neurally-resolved hop saves ~4–9 System-2 deliberation steps; in-distribution the engine's role collapses to confirmation (0.3–2.2 steps vs 16–32 — 93–98% of System-2 budget avoided); out-of-depth the organ's partial prefixes still cut deliberation 28–45%.
+- **Quantile structure (fine budget sweep 8..60):** the smallest-budget-to-95%-solve crossover moves only at depths 4–5 (bought back 8–16 steps of budget) and is flat at 6–8 — the 95th percentile is set by the *weakest* neural prefixes (records where the organ salvaged 0–1 hops), while the mean savings stay large. Handoff savings are per-record proportional to neural hops; worst-case budget provisioning must still assume a cold start. This is the honest shape of the value: **average-cost reduction, not worst-case reduction.**
+- **Abstention safety: 0/128 false answers** — with the broken hop's edge omitted from the import, the engine never confabulates a path to the (still-present, still-typed) target entity at any budget.
+- Slice-2 caveats: the continuation goal is bench-shaped (single path relation + answer-type marker), not the organ's per-hop typed relations — faithful to Phase 41f's measured regime but a simplification of the synthetic corpus's semantics; and steps are engine deliberation steps, not wall-clock (organ forward passes are not charged — the production accounting needs both sides' costs once the organ runs in-process).
+
+Remaining before P6 proper: the reverse direction (System-2 conclusion written back into the organ's context for re-proposal — broadcast-read), and charging both substrates' real costs in one ledger.
