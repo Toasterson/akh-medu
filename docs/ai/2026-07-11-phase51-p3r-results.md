@@ -35,3 +35,22 @@
 ## Artifacts
 
 `runs/p3r-trace/`, `runs/p3r-answer/` (checkpoints, per-500-step eval JSONL, `eval_reason.json` definitive evals, per-checkpoint probes under `runs/p3r-trace/probes/`). Harness commits: `3498587` (corpus + trace harness), `d487bc6` (abstention-stream fix). One first-launch abort is recorded in `d487bc6`'s message.
+
+---
+
+## Appendix: Mixed-Depth Curriculum (measured same day)
+
+**Setup:** identical A/B rerun with `--train-depths 2,3,4,5,6 --axis-a-depths 7,8` (`runs/p3r-mixed-trace`, `runs/p3r-mixed-answer`; depth-8 sequences fit ctx: max 370 of 640). Definitive `eval_reason` n=256/axis: trace @ step 19999 (best 0.969 @ 19500, no late decline this time), answer @ step 16000.
+
+| axis | trace | answer-only |
+|---|---|---|
+| axis-B acc (depths 2–6) | **0.957** | 0.477 |
+| axis-B per-depth 2/3/4/5/6 | .980/.949/.981/**.940**/**.930** | .333/.475/.453/.560/.581 |
+| axis-B exe / trace_valid | **0.956 / 0.949** | — |
+| axis-A acc (depths 7–8) | 0.004 | 0.199 |
+| axis-A per-step trace replay | 0.418 @ d7 / 0.277 @ d8 (trace_valid 0.000) | — |
+| abstention P / R (depths 2–6) | 1.000 / 0.977 | 1.000 / 0.961 |
+
+**Verdict on the gate-3 null: it was the render straitjacket, fully.** Depths 5–6 go 0.056/0.023 (held-out) → **0.940/0.930** (in-curriculum); reasoning is depth-flat across 2–6 at 11.7M. The wall moves exactly to the new curriculum edge (7–8 ≈ 0), so curriculum coverage — not architecture — buys any *bounded* depth; unbounded depth remains System-2's job, now measured rather than assumed (the P6 trace-until-gap handoff premise). Two supporting shifts: the **format gate clears** on the harder corpus (0.956/0.949 vs 0.800/0.770 — length diversity improved format discipline), and the **supervision gap widens** to +0.48 (0.957 vs 0.477; the answer arm gained nothing from the extra depths). Partial extrapolation nuance: at depth 7 the trace arm now replays 41.8% of steps before derailing (was: nothing valid at all out-of-depth) — length generalization degrades gradually at the step level even though whole-trace validity is 0.
+
+**Crossover correction (probe sweep, matched depth-2–4 probe corpus, `runs/p3r-mixed-trace/probes/`):** the mixed model's axis-B crossover is **pinned at layer 5** all run and its mid-stack curve sits *lower* than the easy-curriculum model's (layer-4 top1_final 0.74 vs 0.93) — the opposite of the baseline's 5→4 migration. Reading: **crossover position tracks spare capacity relative to trained task difficulty, not workspace formation as such** — deeper chains consume more of the 6-layer stack, deferring verbalization. The ADR-092 "downward-migration = imposed workspace" signature is therefore only interpretable at *matched curriculum difficulty*; across difficulties it inverts. Both facts stand: supervision moves verbalization earlier at fixed difficulty; difficulty moves it later at fixed supervision.
