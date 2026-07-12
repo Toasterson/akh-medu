@@ -48,6 +48,7 @@ mod inner {
     use std::time::{Duration, Instant};
 
     use akh_medu::agent::chat_backend::OllamaChatBackend;
+    use akh_medu::agent::context::{CompactingManager, SafetyEnforced};
     use akh_medu::agent::model_manager::{AgentModelManager, ModelManagerConfig};
     use akh_medu::agent::ollama::OllamaConfig;
     use akh_medu::agent::{Agent, AgentConfig};
@@ -55,7 +56,10 @@ mod inner {
     use akh_medu::backend::remote::{HostKeyPolicy, RemoteBackend, RemoteBackendConfig};
     use akh_medu::backend::{Backend, ExecRequest};
     use akh_medu::engine::{Engine, EngineConfig};
+    use akh_medu::graph::Triple;
     use akh_medu::message::{AkhMessage, MessageSink};
+    use akh_medu::nlu::kg_context::{build_kg_context, KgContextCache};
+    use akh_medu::symbol::SymbolKind;
 
     use clap::Parser;
     use harness_core::hash::hash_task_set_dir;
@@ -123,6 +127,23 @@ mod inner {
         /// Where `benchmarks/results/` (or an alternate results root) lives.
         #[arg(long, default_value = "benchmarks/results")]
         results: PathBuf,
+
+        /// Working-context assembly strategy for the agentic turn (ADR 065).
+        /// `passthrough` (default) is the bare baseline: KG grounding and
+        /// recall are computed and discarded, exactly as the v1/v2 sweeps ran.
+        /// `compacting` attaches the Phase-44 `CompactingManager` (wrapped in
+        /// `SafetyEnforced`), so a pre-seeded KG (see `--kg-fixture`) and
+        /// recalled memory are injected into the prompt — the "full harness".
+        #[arg(long, default_value = "passthrough", value_parser = ["passthrough", "compacting"])]
+        context_strategy: String,
+
+        /// Optional path to a KG microtheory fixture (TOML, see
+        /// `benchmarks/illumos-e2e/kg/illumos-native-api.toml`) asserted into
+        /// each task's fresh engine before the turn. Only surfaces in the
+        /// prompt under `--context-strategy compacting`; general knowledge
+        /// only, never task answers (honesty contract in the fixture header).
+        #[arg(long)]
+        kg_fixture: Option<PathBuf>,
 
         /// Run the full setup/verify/RunRecord plumbing but never drive the
         /// model. Proves the executor + grading path without spending any
@@ -220,6 +241,67 @@ mod inner {
         let path = task_dir.join("meta.toml");
         let text = read_file(&path)?;
         toml::from_str(&text).map_err(|source| RunnerError::MetaParse { path, source })
+    }
+
+    // -----------------------------------------------------------------
+    // KG microtheory fixture (--kg-fixture)
+    // -----------------------------------------------------------------
+
+    #[derive(Debug, Deserialize)]
+    struct KgFixture {
+        #[serde(default)]
+        fact: Vec<KgFact>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KgFact {
+        subject: String,
+        predicate: String,
+        object: String,
+    }
+
+    /// Assert every fact in a fixture into `engine`'s KG, interning each
+    /// distinct label once (subjects/objects as `Entity`, predicates as
+    /// `Relation`). Returns the number of triples asserted. The rendered form
+    /// the `CompactingManager` later injects is `"subject predicate object"`
+    /// (src/nlu/kg_context.rs), so the object label carries the guidance text.
+    fn load_kg_fixture(engine: &Engine, path: &Path) -> miette::Result<usize> {
+        let text = read_file(path)?;
+        let fixture: KgFixture =
+            toml::from_str(&text).map_err(|source| RunnerError::MetaParse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+
+        // Dedup labels -> SymbolId so a repeated subject/predicate is one node.
+        let mut symbols: std::collections::HashMap<String, akh_medu::symbol::SymbolId> =
+            std::collections::HashMap::new();
+        let mut intern = |engine: &Engine,
+                          label: &str,
+                          kind: SymbolKind|
+         -> miette::Result<akh_medu::symbol::SymbolId> {
+            if let Some(id) = symbols.get(label) {
+                return Ok(*id);
+            }
+            // Reuse an already-registered label if present (case-insensitive
+            // registry), else create it.
+            let id = match engine.resolve_symbol(label) {
+                Ok(id) => id,
+                Err(_) => engine.create_symbol(kind, label)?.id,
+            };
+            symbols.insert(label.to_string(), id);
+            Ok(id)
+        };
+
+        let mut n = 0usize;
+        for f in &fixture.fact {
+            let s = intern(engine, &f.subject, SymbolKind::Entity)?;
+            let p = intern(engine, &f.predicate, SymbolKind::Relation)?;
+            let o = intern(engine, &f.object, SymbolKind::Entity)?;
+            engine.add_triple(&Triple::new(s, p, o).with_confidence(0.95))?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// Derive a filesystem-safe model-tag slug from a provider tag when the
@@ -410,9 +492,17 @@ mod inner {
         task_id: &str,
         prompt: &str,
         timeout: Duration,
+        use_compacting: bool,
     ) -> miette::Result<(bool, bool)> {
         let mut agent = Agent::with_backend(Arc::clone(&engine), AgentConfig::default(), Some(backend))?;
         agent.set_chat_backend(Arc::new(OllamaChatBackend::new(Arc::clone(&mgr))));
+        // Full-harness path: attach the Phase-44 curating manager so the
+        // pre-seeded KG + recalled memory are injected into the prompt.
+        // Baseline (`passthrough`) leaves `context_manager` unset, which the
+        // turn treats as the byte-identical `PassThroughManager`.
+        if use_compacting {
+            agent.set_context_manager(Box::new(SafetyEnforced::new(CompactingManager)));
+        }
 
         let (tx, rx) = std::sync::mpsc::channel();
         let agent_id = format!("w3-{task_id}");
@@ -448,11 +538,15 @@ mod inner {
             .clone()
             .unwrap_or_else(|| default_model_slug(&cli.model));
 
+        let use_compacting = cli.context_strategy == "compacting";
+
         println!("=== Phase 50 / W3 runner ===");
         println!("exec1        : {user}@{host}:{port}");
         println!("key          : {}", cli.key.display());
         println!("model        : {} (slug {model_slug})", cli.model);
         println!("tasks-dir    : {}", cli.tasks_dir.display());
+        println!("context      : {} ({})", cli.context_strategy, if use_compacting { "FULL HARNESS — KG/recall injected" } else { "baseline — KG/recall discarded" });
+        println!("kg-fixture   : {}", cli.kg_fixture.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".to_string()));
         println!("dry-run      : {}", cli.dry_run);
         println!();
 
@@ -562,6 +656,27 @@ mod inner {
                     ..Default::default()
                 })?);
 
+                // Full-harness: seed the KG, then show exactly what the
+                // CompactingManager will inject for this prompt (auditable —
+                // proves grounding fired and on what).
+                if let Some(fixture_path) = &cli.kg_fixture {
+                    let n = load_kg_fixture(&engine, fixture_path)?;
+                    println!("    [harness] seeded {n} KG facts from {}", fixture_path.display());
+                    if use_compacting {
+                        let mut cache = KgContextCache::new();
+                        match build_kg_context(&engine, &prompt_md, &mut cache) {
+                            Some(block) => {
+                                let lines: Vec<&str> = block.lines().collect();
+                                println!("    [harness] KG grounding fired — {} line(s) injected:", lines.len().saturating_sub(1));
+                                for line in lines.iter().filter(|l| l.starts_with("- ")) {
+                                    println!("      {line}");
+                                }
+                            }
+                            None => println!("    [harness] KG grounding produced NO block for this prompt (no keyword match)"),
+                        }
+                    }
+                }
+
                 let mm = ModelManagerConfig {
                     ollama: OllamaConfig {
                         base_url: "https://ollama.com".to_string(),
@@ -582,6 +697,7 @@ mod inner {
                     task_id,
                     &prompt_md,
                     timeout,
+                    use_compacting,
                 )?;
                 let snapshot = mgr.usage();
                 usage = ResourceUsage {

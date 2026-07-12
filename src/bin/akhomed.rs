@@ -1502,12 +1502,17 @@ impl ServerState {
         // models selected onto `virtual` get the self-edit + archival/query tools.
         {
             use akh_medu::agent::context::{
-                CompactingManager, ContextManager, PassiveManager, SafetyEnforced,
-                VirtualContextManager,
+                CompactingManager, ContextManager, PassThroughManager, PassiveManager,
+                SafetyEnforced, VirtualContextManager,
             };
             let strategy =
                 std::env::var("AKH_CONTEXT_STRATEGY").unwrap_or_else(|_| "compacting".to_string());
             let manager: Box<dyn ContextManager> = match strategy.as_str() {
+                // Byte-identical no-op (ADR 065): the "harness off" control for
+                // A/B benchmarking — no history/KG/recall pre-loaded into the
+                // prompt (the raw single-turn agentic loop). Not a production
+                // default; explicit opt-in via AKH_CONTEXT_STRATEGY=passthrough.
+                "passthrough" | "none" | "off" => Box::new(PassThroughManager),
                 "passive" => Box::new(SafetyEnforced::new(PassiveManager::default())),
                 "virtual" => {
                     // Register the self-edit memory tools with this akh's id baked

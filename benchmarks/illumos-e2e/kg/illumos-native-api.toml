@@ -1,0 +1,232 @@
+# illumos native-API microtheory — GENERAL knowledge only.
+#
+# Purpose: seed an akh's knowledge graph so the Phase-44 CompactingManager
+# surfaces relevant native-API facts by topic-keyword match before each
+# agentic turn (see src/nlu/kg_context.rs — keyword -> symbol label ->
+# triples, rendered to the model as "subject predicate object").
+#
+# HONESTY CONTRACT (read benchmarks/results/*-v2-NOTES.md for the failure
+# mode this targets): every fact below is *general* illumos operator /
+# systems-programmer knowledge — the native primitive for a topic plus the
+# common Linux-carryover antipattern. NOTHING here encodes a specific task's
+# expected output, instance/service/role name, property value, or verify.sh
+# check. Subjects are topic anchors ("cpu", "libscf", "doors", "privilege")
+# that appear in the task PROMPTS; the model already sees those prompts. The
+# fixture reinforces "which native call" and "what NOT to do", the exact gap
+# the v2 sweep exposed (models knew the primitive existed yet shelled out).
+#
+# Each [[fact]] -> one KG triple. subject/object become Entity symbols,
+# predicate a Relation symbol; labels are deduplicated so a repeated subject
+# is the same node. Loaded by examples/phase50_w3_runner.rs --kg-fixture.
+
+# ── CPU / kstat / processor_info ────────────────────────────────────────
+[[fact]]
+subject   = "cpu"
+predicate = "on illumos is inspected via"
+object    = "libkstat (the cpu_info module) for per-CPU facts, or the processor_info(2) syscall for a single CPU; illumos has no lscpu and no parseable text /proc/cpuinfo"
+
+[[fact]]
+subject   = "clock"
+predicate = "speed in MHz comes from"
+object    = "the pi_clock field of processor_info(2), or the clock_MHz named value in the cpu_info kstat; both are native, neither requires shelling out"
+
+[[fact]]
+subject   = "speed"
+predicate = "for a CPU is read from"
+object   = "processor_info(2)'s pi_clock (MHz) or the cpu_info kstat clock_MHz value; for a datalink, from dladm show-phys / the link kstats — never assume a Linux tool"
+
+[[fact]]
+subject   = "libkstat"
+predicate = "is the native C API to"
+object    = "read kernel statistics — CPU, memory, NIC — via kstat_open, kstat_lookup, kstat_read and walking the kc_chain linked list; a program links -lkstat and calls these directly, it does not fork psrinfo, kstat(1) or netstat"
+
+[[fact]]
+subject   = "kstat"
+predicate = "as a library means"
+object   = "kstat_open() returns a kstat_ctl_t; iterate kc_chain, match ks_module/ks_name (e.g. \"cpu_info\"), kstat_read() then kstat_data_lookup() for a named value — this is the programmatic path, the kstat(1) CLI is the interactive one"
+
+[[fact]]
+subject   = "kstat_open"
+predicate = "is the entry point of"
+object   = "the libkstat walk: kstat_open -> iterate kc_chain -> kstat_lookup/kstat_read -> kstat_data_lookup; count distinct instances by counting matching chain entries, do not parse psrinfo output"
+
+[[fact]]
+subject   = "cpu_info"
+predicate = "is the kstat module that"
+object   = "carries one instance per online CPU (fields like clock_MHz, state, brand); counting its instances counts CPUs, the libkstat-native alternative to psrinfo -p"
+
+[[fact]]
+subject   = "processor_info"
+predicate = "is the illumos syscall"
+object   = "processor_info(2): fill a processor_info_t for a given processor id via a self-declared extern \"C\" binding (int processor_info(processorid_t, processor_info_t*)); pi_clock is MHz, pi_state is online/offline — call it, do not shell to psrinfo"
+
+[[fact]]
+subject   = "psrinfo"
+predicate = "is a CLI, so in code"
+object   = "prefer libkstat cpu_info or processor_info(2) instead; a program that shells out to psrinfo has not used the native API and defeats the purpose of an FFI/systems task"
+
+[[fact]]
+subject   = "syscall"
+predicate = "on illumos from Rust/C means"
+object   = "declaring the extern \"C\" prototype yourself and linking libc (illumos syscalls like processor_info(2) are libc entry points); no external crate is needed or available offline"
+
+# ── SMF / libscf ────────────────────────────────────────────────────────
+[[fact]]
+subject   = "smf"
+predicate = "is the illumos service framework where"
+object   = "services are FMRIs (svc:/category/name:instance) with properties in property groups; manage with svcs/svcadm/svccfg interactively, or libscf(3lib) programmatically — there is no systemd, no /etc/init.d"
+
+[[fact]]
+subject   = "libscf"
+predicate = "is the native C API to"
+object   = "read and write SMF service configuration: scf_simple_prop_get() then scf_simple_prop_next_astring()/_next_count()/_next_boolean() for a value; a program links -lscf and calls these, it does not shell out to svcprop or svccfg"
+
+[[fact]]
+subject   = "scf_simple_prop_get"
+predicate = "reads an SMF property by"
+object   = "taking an FMRI plus property-group/property names and returning an scf_simple_prop_t you drain with scf_simple_prop_next_astring (or _next_count etc.); the libscf-native replacement for `svcprop -p pg/prop`"
+
+[[fact]]
+subject   = "property"
+predicate = "of an SMF service lives in"
+object   = "a property group (e.g. config/greeting, restarter/state); read it live with libscf scf_simple_prop_get in C, and remember svccfg edits the repository while svcadm refresh makes the running instance pick it up"
+
+[[fact]]
+subject   = "restarter"
+predicate = "state of an instance is"
+object   = "the restarter/state property (online, offline, disabled, maintenance, degraded); read it via libscf or `svcs -H -o state FMRI` — the libscf path is scf_simple_prop_get on the restarter pg"
+
+[[fact]]
+subject   = "svcprop"
+predicate = "is a CLI, so in code"
+object   = "use libscf scf_simple_prop_get instead; a C program that execs svcprop/svccfg has not linked libscf and misses the point of a native-API task"
+
+[[fact]]
+subject   = "service"
+predicate = "lifecycle on illumos uses"
+object   = "svcadm enable -s / disable / restart / clear (to leave maintenance), svccfg to set properties, svcs -xv to diagnose; a property change needs svcadm refresh before the running instance reflects it"
+
+[[fact]]
+subject   = "manifest"
+predicate = "brings a daemon under SMF by"
+object   = "authoring an XML service manifest (name the instance FMRI, declare a start/stop exec method and duration), validating with svccfg validate, importing with svccfg import, then svcadm enable — this is how an unmanaged script becomes a supervised service"
+
+[[fact]]
+subject   = "fmri"
+predicate = "identifies an SMF instance as"
+object   = "svc:/category/name:instance (e.g. svc:/site/foo:default); libscf calls and svcs/svcadm both take the FMRI as the handle"
+
+# ── Doors IPC ───────────────────────────────────────────────────────────
+[[fact]]
+subject   = "doors"
+predicate = "is the illumos fast-IPC API where"
+object   = "door_create(3C) registers a server procedure and returns a door descriptor, door_call(3C) invokes it with a door_arg_t, and the server replies with door_return(3C); declare the extern \"C\" bindings yourself and link libc — there is no wrapper crate and none is needed"
+
+[[fact]]
+subject   = "door_create"
+predicate = "makes a door by"
+object   = "taking a server-procedure function pointer (void (*)(void*, char*, size_t, door_desc_t*, uint_t)) and returning a door fd; attach it to a name with fattach or call it in-process via the returned descriptor"
+
+[[fact]]
+subject   = "door_call"
+predicate = "invokes a door with"
+object   = "a door_arg_t whose data_ptr/data_size carry the request and rbuf/rsize receive the reply; within one process you can door_create then door_call the returned descriptor directly"
+
+[[fact]]
+subject   = "door_return"
+predicate = "sends the door reply via"
+object   = "door_return(data_ptr, data_size, desc_ptr, ndesc) from inside the server procedure; it does not return to the caller of the procedure, it returns to the door_call site"
+
+# ── Extended attributes ─────────────────────────────────────────────────
+[[fact]]
+subject   = "attribute"
+predicate = "extended, on illumos uses"
+object   = "the O_XATTR namespace: openat(2)/attropen(3C) with O_XATTR opens a file's hidden attribute directory, then read/write the attribute like an ordinary fd; this is NOT Linux setxattr/getxattr, which do not exist here"
+
+[[fact]]
+subject   = "attropen"
+predicate = "opens an extended attribute by"
+object   = "attropen(path, attrname, oflag, mode) (or openat with O_XATTR then openat again for the named attribute); write bytes with write(2), read them back with pread/read — self-declare the extern \"C\" bindings, no external crate"
+
+[[fact]]
+subject   = "openat"
+predicate = "with O_XATTR gives"
+object   = "access to a file's extended-attribute directory on illumos; combine with attropen(3C) to create/read a named attribute — the portable-illumos replacement for Linux's *xattr syscalls"
+
+[[fact]]
+subject   = "xattr"
+predicate = "the Linux way does not exist because"
+object   = "illumos has no setxattr/getxattr syscalls and no crates.io access offline; use openat(2)/attropen(3C) with O_XATTR via a self-declared extern \"C\" FFI instead"
+
+# ── ZFS / zpool ─────────────────────────────────────────────────────────
+[[fact]]
+subject   = "zpool"
+predicate = "is created and inspected with"
+object   = "zpool create NAME VDEV (a file vdev is a valid path), zpool status/list to confirm health; ZFS is native to illumos so these commands are the intended tool"
+
+[[fact]]
+subject   = "dataset"
+predicate = "is made and tuned with"
+object   = "zfs create POOL/NAME then zfs set property=value (compression=lz4, quota=50M, mountpoint=/path); zfs get confirms the applied values"
+
+[[fact]]
+subject   = "compression"
+predicate = "on a dataset is set by"
+object   = "zfs set compression=lz4 POOL/DATASET; likewise quota=<size> and mountpoint=<path> are zfs set properties, verifiable with zfs get"
+
+# ── RBAC / privileges ───────────────────────────────────────────────────
+[[fact]]
+subject   = "role"
+predicate = "on illumos is created with"
+object   = "roleadd (a role is an account with no direct login) carrying one or more rights profiles via -P; grant a user the role with usermod -R user; there is no sudo/sudoers — RBAC + pfexec is the native delegation model"
+
+[[fact]]
+subject   = "profile"
+predicate = "a rights profile, authorizes commands via"
+object   = "exec_attr/prof_attr entries: a profile lists commands with the euid/uid they run as; assign it with usermod -P (direct) or attach it to a role; the user then runs the command with pfexec"
+
+[[fact]]
+subject   = "rights"
+predicate = "profiles are the illumos unit that"
+object   = "bundle authorizations and privileged commands; built-in ones (e.g. \"Network Management\") exist in prof_attr, custom ones are added to prof_attr + exec_attr; delivered to users directly (usermod -P) or through a role"
+
+[[fact]]
+subject   = "pfexec"
+predicate = "runs a command under a profile so"
+object   = "the caller gets exactly the euid/privileges the matching exec_attr entry grants and nothing more; `pfexec cmd` succeeding while plain `cmd` is denied is the sign RBAC is set up correctly"
+
+[[fact]]
+subject   = "privilege"
+predicate = "the process privilege model lets you"
+object   = "narrow an account below the default \"basic\" set: usermod -K defaultpriv=basic,!proc_info drops just proc_info while keeping login/exec; privileges(7) lists them and ppriv inspects a live process"
+
+[[fact]]
+subject   = "privileges"
+predicate = "default set of an account is tuned by"
+object   = "user_attr's defaultpriv/limitpriv keys (usermod -K); the \"basic\" set includes proc_info (seeing other users' /proc entries); removing it is defaultpriv=basic,!proc_info, confirmed with ppriv on a process the user owns"
+
+[[fact]]
+subject   = "proc_info"
+predicate = "is a basic privilege that"
+object   = "allows examining /proc entries of processes owned by other uids; it is part of the default basic set, so restricting it means an explicit defaultpriv=basic,!proc_info via usermod -K"
+
+[[fact]]
+subject   = "ppriv"
+predicate = "inspects process privileges by"
+object   = "ppriv -v PID (or `ppriv $$`) printing the E/P/I/L privilege sets; use it to verify a defaultpriv change actually took effect on a freshly-started process for that user"
+
+# ── Datalinks / NIC ─────────────────────────────────────────────────────
+[[fact]]
+subject   = "link"
+predicate = "datalink state and speed come from"
+object   = "dladm show-link / dladm show-phys (STATE up|down, SPEED in Mbps); illumos link names are net0/e1000g0-style, not ethN — there is no ip(8) or ethtool here"
+
+[[fact]]
+subject   = "interface"
+predicate = "the primary one is found via"
+object   = "route -n get default (or netstat -rn) for the default-route interface, then ipadm show-addr to tie an IP to a link and dladm show-phys for that link's state/speed — all native, no `ip addr`"
+
+[[fact]]
+subject   = "nic"
+predicate = "on illumos is queried with"
+object   = "dladm (physical link state/speed) and ipadm (addresses); map the default route to its link, then read dladm show-phys LINK for up/down and Mbps — ethtool does not exist"
