@@ -73,6 +73,10 @@ struct Args {
     n: usize,
     #[arg(long, default_value_t = 220)]
     eval_max_new_tokens: usize,
+    /// Override the model context window — MUST match the training run's
+    /// `--max-seq-len` (the checkpoint's position-embedding table is that size).
+    #[arg(long, default_value_t = 0)]
+    max_seq_len: usize,
 }
 
 fn parse_depths(s: &str, flag: &str) -> Vec<usize> {
@@ -133,7 +137,10 @@ fn main() {
 
     let tokenizer =
         BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
-    let cfg = model_config(&args.model, tokenizer.vocab_size());
+    let mut cfg = model_config(&args.model, tokenizer.vocab_size());
+    if args.max_seq_len > 0 {
+        cfg.max_seq_len = args.max_seq_len;
+    }
     let max_seq_len = cfg.max_seq_len;
 
     let (model, optim) = init_training::<ActiveBackend>(&cfg, &device);

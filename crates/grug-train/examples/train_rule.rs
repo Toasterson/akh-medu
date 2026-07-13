@@ -117,6 +117,13 @@ struct Args {
     #[arg(long, default_value_t = 220)]
     eval_max_new_tokens: usize,
 
+    /// Override the model's context window (position-embedding table size). 0 =
+    /// use the preset's default. The saturated BPE (this templated corpus has
+    /// few unique substrings) leaves depth-6 sequences ~800 tokens, over p1a's
+    /// 640 default — set 1024 to fit them.
+    #[arg(long, default_value_t = 0)]
+    max_seq_len: usize,
+
     #[arg(long)]
     artifacts_dir: PathBuf,
     #[arg(long)]
@@ -255,7 +262,10 @@ fn main() {
         }
     );
 
-    let cfg = model_config(&args.model, tokenizer.vocab_size());
+    let mut cfg = model_config(&args.model, tokenizer.vocab_size());
+    if args.max_seq_len > 0 {
+        cfg.max_seq_len = args.max_seq_len;
+    }
     let max_seq_len = cfg.max_seq_len;
 
     // PROMPT-LEN sanity: longest prompt+target vs ctx (a depth-8 rule example
