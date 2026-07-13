@@ -249,6 +249,20 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 512, 8, 8, 2048, 640)
     }
 
+    /// Phase 51 P4 capacity-ladder rung ~50M (d_model 640, 10 layers, 10 heads,
+    /// d_ff 2560) — the middle rung of the 11M→50M→100M ladder that reads the
+    /// `chain`-component *slope* (Q5): a positive slope says "scale it", flat
+    /// says "broken corpus, not capacity".
+    pub fn p1a_50m(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 640, 10, 10, 2560, 640)
+    }
+
+    /// Phase 51 P4 capacity-ladder rung ~100M (d_model 768, 13 layers, 12
+    /// heads, d_ff 3072) — the top rung of the ladder.
+    pub fn p1a_100m(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 768, 13, 12, 3072, 640)
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))

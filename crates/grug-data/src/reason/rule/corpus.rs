@@ -151,6 +151,13 @@ impl Default for RuleCorpusConfig {
 
 const PROP_SEED_SALT: u64 = 0x51F0_9C2A_77B4_1E63;
 const RULE_SEED_SALT: u64 = 0x1D8E_44C7_A0B9_2F35;
+// Eval streams use distinct salts so a held-out draw is a *fresh individual*
+// (a novel base-fact pattern over the same shared rules) — genuine in-context
+// deductive generalization, since the rules themselves live in the prompt, not
+// in the weights. Not overlapping the train stream is what makes the eval a
+// generalization test rather than a memorization readout.
+const PROP_EVAL_SEED_SALT: u64 = 0xB7A2_4E19_6C03_51DF;
+const RULE_EVAL_SEED_SALT: u64 = 0x3C61_D9F5_2A87_44BE;
 
 /// A deductive corpus over a fixed [`RuleWorld`], generating both arms
 /// deterministically from a seed.
@@ -173,24 +180,39 @@ impl RuleDataset {
         &self.world
     }
 
-    /// `n` propositional examples, targets rendered under `arm`, slots typed or
-    /// bare per `typed_slots`.
+    /// `n` propositional TRAIN examples, targets rendered under `arm`, slots
+    /// typed or bare per `typed_slots`.
     pub fn propositional_examples(
         &self,
         n: usize,
         arm: TraceArm,
         typed_slots: bool,
     ) -> Vec<RuleExample> {
-        let mut rng = StdRng::seed_from_u64(self.config.world.seed ^ PROP_SEED_SALT);
+        self.prop_stream(PROP_SEED_SALT, n, arm, typed_slots)
+    }
+
+    /// The held-out propositional EVAL stream (fresh individuals; see the
+    /// eval-salt note above).
+    pub fn propositional_examples_eval(
+        &self,
+        n: usize,
+        arm: TraceArm,
+        typed_slots: bool,
+    ) -> Vec<RuleExample> {
+        self.prop_stream(PROP_EVAL_SEED_SALT, n, arm, typed_slots)
+    }
+
+    fn prop_stream(&self, salt: u64, n: usize, arm: TraceArm, typed: bool) -> Vec<RuleExample> {
+        let mut rng = StdRng::seed_from_u64(self.config.world.seed ^ salt);
         (0..n)
             .map(|_| {
                 let sort = random_sort(&mut rng);
-                build_prop(&mut rng, &self.world, &self.config, sort, arm, typed_slots)
+                build_prop(&mut rng, &self.world, &self.config, sort, arm, typed)
             })
             .collect()
     }
 
-    /// `n` rule-based examples over `depths` (each `<= world.max_level`),
+    /// `n` rule-based TRAIN examples over `depths` (each `<= world.max_level`),
     /// balanced `yes`/`no` by `config.yes_frac`.
     pub fn rule_examples(
         &self,
@@ -199,22 +221,39 @@ impl RuleDataset {
         arm: TraceArm,
         typed_slots: bool,
     ) -> Vec<RuleExample> {
+        self.rule_stream(RULE_SEED_SALT, n, depths, arm, typed_slots)
+    }
+
+    /// The held-out rule-based EVAL stream (fresh individuals + fresh chains
+    /// over the same rules; `depths` may be train depths for the
+    /// in-distribution axis or unseen depths for length generalization).
+    pub fn rule_examples_eval(
+        &self,
+        n: usize,
+        depths: &[usize],
+        arm: TraceArm,
+        typed_slots: bool,
+    ) -> Vec<RuleExample> {
+        self.rule_stream(RULE_EVAL_SEED_SALT, n, depths, arm, typed_slots)
+    }
+
+    fn rule_stream(
+        &self,
+        salt: u64,
+        n: usize,
+        depths: &[usize],
+        arm: TraceArm,
+        typed: bool,
+    ) -> Vec<RuleExample> {
         assert!(!depths.is_empty(), "rule_examples needs at least one depth");
-        let mut rng = StdRng::seed_from_u64(self.config.world.seed ^ RULE_SEED_SALT);
+        let mut rng = StdRng::seed_from_u64(self.config.world.seed ^ salt);
         (0..n)
             .map(|_| {
                 let depth = *depths.choose(&mut rng).expect("depths non-empty");
                 let sort = random_sort(&mut rng);
                 let want_yes = rng.gen_bool(self.config.yes_frac.clamp(0.0, 1.0));
                 build_rule(
-                    &mut rng,
-                    &self.world,
-                    &self.config,
-                    sort,
-                    depth,
-                    want_yes,
-                    arm,
-                    typed_slots,
+                    &mut rng, &self.world, &self.config, sort, depth, want_yes, arm, typed,
                 )
             })
             .collect()
@@ -1076,6 +1115,30 @@ mod tests {
                 b.rule_examples(40, &[2, 3, 4], TraceArm::Trace, typed)
             );
         }
+    }
+
+    #[test]
+    fn train_and_eval_streams_differ() {
+        // The held-out eval stream must be fresh individuals, not a replay of
+        // the train stream (else "generalization" would be memorization).
+        let ds = dataset();
+        let train = ds.rule_examples(100, &[2, 3, 4], TraceArm::Trace, true);
+        let eval = ds.rule_examples_eval(100, &[2, 3, 4], TraceArm::Trace, true);
+        let train_prompts: HashSet<&str> = train.iter().map(|e| e.prompt.as_str()).collect();
+        let overlap = eval
+            .iter()
+            .filter(|e| train_prompts.contains(e.prompt.as_str()))
+            .count();
+        assert!(overlap < 5, "train/eval streams overlap too much: {overlap}/100");
+
+        let ptrain = ds.propositional_examples(100, TraceArm::Trace, false);
+        let peval = ds.propositional_examples_eval(100, TraceArm::Trace, false);
+        let ptp: HashSet<&str> = ptrain.iter().map(|e| e.prompt.as_str()).collect();
+        let poverlap = peval
+            .iter()
+            .filter(|e| ptp.contains(e.prompt.as_str()))
+            .count();
+        assert!(poverlap < 15, "prop train/eval overlap too high: {poverlap}/100");
     }
 
     #[test]
