@@ -32,7 +32,9 @@ mod corpus;
 mod error;
 mod handoff;
 mod kg;
+pub mod register;
 mod replay;
+pub mod rule;
 mod score;
 
 pub use corpus::{ReasonConfig, ReasonDataset, ReasonExample, TraceArm};
