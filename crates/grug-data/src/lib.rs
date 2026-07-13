@@ -71,6 +71,17 @@ pub use reason::{
     EntityId, EntityType, Fact as ReasonFact, ReasonConfig, ReasonDataset, ReasonDiversityReport,
     ReasonError, ReasonEvalSummary, ReasonExample, RelationKind, ReplayReport, TraceArm,
 };
+// Phase 51 P4 slice 1 — the High-Grug-v2 deductive corpus arms.
+pub use reason::register::{Op as GrugOp, Slot as GrugSlot, Sort as GrugSort, Truth as GrugTruth};
+pub use reason::rule::corpus::{
+    ExampleKind, GoalSpec, LogicArm, PropConn, PropLiteral, RuleCorpusConfig, RuleDataset,
+    RuleExample,
+};
+pub use reason::rule::replay::{
+    replay_rule, score_rule_outputs, ComponentSummary, RuleDepthStats, RuleEvalSummary,
+    RuleReplayReport,
+};
+pub use reason::rule::world::{Predicate, Rule, RuleWorld, RuleWorldConfig};
 pub use semantic::{describe_tool, glossed_phrase, SignalMode};
 pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
 pub use similarity::{levenshtein, normalized_similarity, normalized_similarity_ci};

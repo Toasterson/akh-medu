@@ -126,7 +126,9 @@ impl Rule {
 pub struct RuleWorldConfig {
     pub seed: u64,
     /// Predicates per `(sort, level)` cell. Bigger = more distractor room and a
-    /// wider rule-selection space (harder `select`).
+    /// wider rule-selection space (harder `select`). Must be `>= 2` so the
+    /// level-0 pool splits into disjoint spine-base and guard sub-pools (see
+    /// [`RuleWorld::generate`]).
     pub preds_per_cell: u32,
     /// Highest predicate level, i.e. the deepest provable chain. Depth-`d`
     /// goals require `d <= max_level`.
@@ -168,23 +170,39 @@ impl RuleWorld {
     /// `guard_prob`, a level-0 guard — all from an independent per-cell seeded
     /// stream, so re-generating at the same seed reproduces byte-identical
     /// rules.
+    ///
+    /// **Disjoint level-0 pools.** The `ppc` level-0 predicates split into a
+    /// *spine* sub-pool `[0, spine_count)` and a *guard* sub-pool
+    /// `[spine_count, ppc)`. A level-1 rule's spine (the chain **base**) is
+    /// drawn only from the spine pool; a guard is drawn only from the guard
+    /// pool. So a guard can never equal a chain's base predicate — which is
+    /// what makes "base present + guards absent ⟹ provable" always consistent
+    /// (no `yes` chain is secretly blocked by its own base doubling as a
+    /// guard). Levels `> 1` draw their spine from the full `level-1` range
+    /// (those are derived, never a base, so no collision arises).
     pub fn generate(config: RuleWorldConfig) -> Self {
         let mut rules = HashMap::new();
-        let ppc = config.preds_per_cell.max(1);
+        let ppc = config.preds_per_cell.max(2);
+        let spine_count = (ppc / 2).clamp(1, ppc - 1);
         for &sort in Sort::ALL.iter() {
             for level in 1..=config.max_level {
                 for index in 0..ppc {
                     let mut rng = StdRng::seed_from_u64(cell_seed(config.seed, sort, level, index));
+                    let spine_index = if level == 1 {
+                        rng.gen_range(0..spine_count) // base: spine sub-pool only
+                    } else {
+                        rng.gen_range(0..ppc)
+                    };
                     let spine = Predicate {
                         sort,
                         level: level - 1,
-                        index: rng.gen_range(0..ppc),
+                        index: spine_index,
                     };
                     let guard = if rng.gen_bool(config.guard_prob.clamp(0.0, 1.0)) {
                         Some(Predicate {
                             sort,
                             level: 0,
-                            index: rng.gen_range(0..ppc),
+                            index: rng.gen_range(spine_count..ppc), // guard sub-pool only
                         })
                     } else {
                         None
@@ -202,7 +220,7 @@ impl RuleWorld {
     }
 
     pub fn preds_per_cell(&self) -> u32 {
-        self.config.preds_per_cell.max(1)
+        self.config.preds_per_cell.max(2)
     }
 
     /// The rule defining `pred`, or `None` if `pred` is a base (level-0)
@@ -341,6 +359,34 @@ mod tests {
             for p in w.base_predicates(sort) {
                 assert!(p.is_base());
                 assert_eq!(w.rule_for(p), None);
+            }
+        }
+    }
+
+    #[test]
+    fn no_chain_base_ever_doubles_as_a_guard() {
+        // The disjoint-pool invariant: a level-1 spine (a chain base) and any
+        // guard are drawn from disjoint level-0 sub-pools, so no `yes` chain is
+        // secretly blocked by its own base.
+        let w = world();
+        for sort in Sort::ALL {
+            for index in 0..5 {
+                let goal = Predicate {
+                    sort,
+                    level: 6,
+                    index,
+                };
+                let mut chain = w.spine_chain(goal);
+                chain.reverse();
+                let base = chain[0];
+                let guards: Vec<Predicate> = chain[1..]
+                    .iter()
+                    .filter_map(|p| w.rule_for(*p).and_then(|r| r.guard))
+                    .collect();
+                assert!(
+                    !guards.contains(&base),
+                    "base {base:?} doubles as a guard on the chain for {goal:?}"
+                );
             }
         }
     }

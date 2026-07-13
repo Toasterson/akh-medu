@@ -9,5 +9,6 @@
 //! `select/bind/fire/chain`-decomposed replayer ([`replay`]) so partial
 //! capability is visible at 11M (Q5's false-abandon guard).
 
+pub mod corpus;
+pub mod replay;
 pub mod world;
-// corpus + replay land in the same slice, added next.
