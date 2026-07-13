@@ -12,7 +12,7 @@ pub fn system_prompt() -> &'static str {
      - Output ONLY the JSON array, no explanation\n\
      - Maximum {max} triples per text\n\
      STRICT EXCLUSIONS — never use these as subject or object:\n\
-     - Internal agent components: tool names (tool:*, similarity_search, memory_recall, library_search), \
+     - Internal agent components: tool names (tool:*, similarity_search, memory_recall), \
        goal identifiers (goal:*), episode IDs (episode:*), criteria labels (criteria:*)\n\
      - Numeric literals, scores, or parameters: rate:*, priority:*, status:*, confidence values, \
        plain numbers like 0.8 or 69\n\

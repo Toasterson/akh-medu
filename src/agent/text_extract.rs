@@ -1,138 +1,14 @@
-//! Text ingest tool: extract triples from natural language using regex patterns.
+//! Free-text triple extraction: pattern-based NLU helpers shared by the chat
+//! processor and (formerly) the `text_ingest` tool.
 //!
 //! Built-in patterns recognize common relational constructs like "X is a Y",
 //! "X has Y", "X contains Y", etc. No LLM required for core extraction.
 
-use crate::agent::error::AgentResult;
-use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
-use crate::agent::tool_manifest::{
-    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
-};
 use crate::engine::Engine;
-use crate::fs::Filesystem;
 use crate::symbol::SymbolId;
-use std::collections::HashSet;
-use std::path::Path;
-use std::sync::Arc;
-
-/// Extract triples from natural language text and add them to the KG.
-///
-/// `fs: Some(..)` confines `file:`-prefixed reads to the akh's sandbox; `None`
-/// (the default, used by operator-driven CLI/daemon paths) reads raw.
-#[derive(Default)]
-pub struct TextIngestTool {
-    fs: Option<Arc<dyn Filesystem>>,
-}
-
-impl TextIngestTool {
-    /// Sandboxed: `file:` reads are confined to the akh's filesystem.
-    pub fn sandboxed(fs: Arc<dyn Filesystem>) -> Self {
-        Self { fs: Some(fs) }
-    }
-}
-
-impl Tool for TextIngestTool {
-    /// Retired from the LLM catalog (ADR 076 §1): inside an agentic session the
-    /// model reasons better than the internal NLU pass — it reads raw text and
-    /// emits typed episodes to `memory_write` instead. Still registered for
-    /// operator/CLI/daemon-ingest use.
-    fn advertise_to_llm(&self) -> bool {
-        false
-    }
-
-    fn signature(&self) -> ToolSignature {
-        ToolSignature {
-            name: "text_ingest".into(),
-            description: "Extract triples from natural language text using pattern matching \
-                          and add them to the knowledge graph."
-                .into(),
-            parameters: vec![
-                ToolParam {
-                    name: "text".into(),
-                    description: "The text to extract triples from. Can be inline text \
-                                  or a file path (prefixed with 'file:')."
-                        .into(),
-                    required: true,
-                },
-                ToolParam {
-                    name: "max_sentences".into(),
-                    description: "Maximum number of sentences to process. Default: 100.".into(),
-                    required: false,
-                },
-            ],
-        }
-    }
-
-    fn execute(&self, engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
-        let text_param = input.require("text", "text_ingest")?;
-        let max_sentences: usize = input
-            .get("max_sentences")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(100);
-
-        let text = if let Some(path) = text_param.strip_prefix("file:") {
-            let path = path.trim();
-            match crate::fs::read_optional(self.fs.as_ref(), Path::new(path)) {
-                Ok(content) => content,
-                Err(e) => {
-                    return Ok(ToolOutput::err(format!("Failed to read \"{path}\": {e}")));
-                }
-            }
-        } else {
-            text_param.to_string()
-        };
-
-        let sentences = split_sentences(&text);
-        let mut total_extracted = 0usize;
-        let mut symbols = Vec::new();
-
-        for sentence in sentences.iter().take(max_sentences) {
-            let extracted = extract_triples(sentence);
-            for (subject, predicate, object, confidence) in &extracted {
-                if let Ok(syms) = ingest_extracted(engine, subject, predicate, object, *confidence) {
-                    symbols.extend(syms);
-                    total_extracted += 1;
-                }
-            }
-        }
-
-        let msg = format!(
-            "Text ingest: processed {} sentence(s), extracted {} triple(s).",
-            sentences.len().min(max_sentences),
-            total_extracted,
-        );
-        Ok(ToolOutput::ok_with_symbols(msg, symbols))
-    }
-
-    fn manifest(&self) -> ToolManifest {
-        ToolManifest {
-            name: "text_ingest".into(),
-            description: "Extracts triples from text and writes them to the knowledge graph."
-                .into(),
-            parameters: vec![
-                ToolParamSchema::required(
-                    "text",
-                    "The text to extract triples from (inline text or file path with 'file:' prefix).",
-                ),
-                ToolParamSchema::optional(
-                    "max_sentences",
-                    "Maximum number of sentences to process (default: 100).",
-                ),
-            ],
-            danger: DangerInfo {
-                level: DangerLevel::Cautious,
-                capabilities: HashSet::from([Capability::WriteKg]),
-                description: "Extracts triples from text and writes them to the knowledge graph."
-                    .into(),
-                shadow_triggers: vec!["ingest".into()],
-            },
-            source: ToolSource::Native,
-        }
-    }
-}
 
 /// Split text into sentences using basic punctuation rules.
-fn split_sentences(text: &str) -> Vec<String> {
+pub(crate) fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
 
@@ -157,7 +33,7 @@ fn split_sentences(text: &str) -> Vec<String> {
 }
 
 /// A single extracted triple from text.
-type ExtractedTriple = (String, String, String, f32);
+pub(crate) type ExtractedTriple = (String, String, String, f32);
 
 /// Extract triples from a single sentence using regex-like pattern matching.
 ///
@@ -172,7 +48,7 @@ type ExtractedTriple = (String, String, String, f32);
 /// - "X is similar to Y" → (X, similar-to, Y)
 /// - "X, which is a Y" → (X, is-a, Y)
 /// - "X is made of Y" → (X, composed-of, Y)
-fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
+pub(crate) fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
     let s = sentence
         .trim()
@@ -474,6 +350,30 @@ pub(crate) fn ingest_extracted(
     Ok(vec![s, p, o])
 }
 
+/// Extract triples from free text (pattern-based) and write them to the KG.
+/// Returns (triples_written, touched_symbols). Mirrors the old TextIngestTool loop.
+pub(crate) fn ingest_text(
+    engine: &Engine,
+    text: &str,
+    max_sentences: usize,
+) -> (usize, Vec<SymbolId>) {
+    let sentences = split_sentences(text);
+    let mut total_extracted = 0usize;
+    let mut symbols = Vec::new();
+
+    for sentence in sentences.iter().take(max_sentences) {
+        let extracted = extract_triples(sentence);
+        for (subject, predicate, object, confidence) in &extracted {
+            if let Ok(syms) = ingest_extracted(engine, subject, predicate, object, *confidence) {
+                symbols.extend(syms);
+                total_extracted += 1;
+            }
+        }
+    }
+
+    (total_extracted, symbols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,57 +446,8 @@ mod tests {
     #[test]
     fn text_tool_execute() {
         let engine = test_engine();
-        let input =
-            ToolInput::new().with_param("text", "Dogs are mammals. Paris is located in France.");
-
-        let tool = TextIngestTool::default();
-        let result = tool.execute(&engine, input).unwrap();
-        assert!(result.success);
-        assert!(result.result.contains("extracted 2 triple(s)"));
-    }
-
-    #[test]
-    fn text_tool_file_input() {
-        let engine = test_engine();
-        let dir = tempfile::TempDir::new().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "The eagle is a bird. Gold is a metal.").unwrap();
-
-        let input = ToolInput::new().with_param("text", &format!("file:{}", file_path.display()));
-
-        let tool = TextIngestTool::default();
-        let result = tool.execute(&engine, input).unwrap();
-        assert!(result.success);
-        assert!(result.result.contains("extracted 2 triple(s)"));
-    }
-
-    #[test]
-    fn text_tool_sandboxed_denies_outside_file() {
-        use crate::fs::LocalFs;
-        use std::sync::Arc;
-
-        let engine = test_engine();
-        let sandbox_dir = tempfile::TempDir::new().unwrap();
-        let outside = tempfile::TempDir::new().unwrap();
-        let secret = outside.path().join("secret.txt");
-        std::fs::write(&secret, "Gold is a metal.").unwrap();
-
-        let tool = TextIngestTool::sandboxed(Arc::new(LocalFs::sandbox(sandbox_dir.path())));
-
-        // A file: read outside the sandbox is denied.
-        let input = ToolInput::new().with_param("text", &format!("file:{}", secret.display()));
-        let result = tool.execute(&engine, input).unwrap();
-        assert!(
-            !result.success,
-            "reading a file outside the sandbox must fail: {}",
-            result.result
-        );
-
-        // A file inside the sandbox reads fine through the same tool.
-        let inside = sandbox_dir.path().join("ok.txt");
-        std::fs::write(&inside, "The eagle is a bird.").unwrap();
-        let input = ToolInput::new().with_param("text", &format!("file:{}", inside.display()));
-        let result = tool.execute(&engine, input).unwrap();
-        assert!(result.success, "in-sandbox read should succeed: {}", result.result);
+        let (n, _symbols) =
+            ingest_text(&engine, "Dogs are mammals. Paris is located in France.", 100);
+        assert_eq!(n, 2);
     }
 }

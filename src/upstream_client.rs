@@ -155,12 +155,13 @@ impl UpstreamMcpClient {
         Ok((session_id, json))
     }
 
-    /// Call a named tool on the upstream MCP endpoint.
+    /// Establish an MCP session via the `initialize` handshake.
     ///
-    /// Returns the `content` array from the `CallToolResult`, or an empty vec if
-    /// the result contained no content items.
-    pub fn call_tool(&self, tool_name: &str, arguments: Value) -> UpstreamResult<Vec<Value>> {
-        // Step 1: initialize session.
+    /// Returns the `Mcp-Session-Id` header if the upstream provided one.
+    /// Non-fatal RPC errors and network errors during init are logged and
+    /// treated as "no session" — callers then attempt a direct call/list
+    /// without a session ID, matching upstreams that don't require one.
+    fn init_session(&self) -> Option<String> {
         let init_payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -175,7 +176,7 @@ impl UpstreamMcpClient {
             }
         });
 
-        let session_id = match self.send_rpc(self.post_mcp(), init_payload) {
+        match self.send_rpc(self.post_mcp(), init_payload) {
             Ok((sid, json)) => {
                 // Non-fatal RPC errors during init are ignored; proceed anyway.
                 if !json["error"].is_object() {
@@ -196,7 +197,16 @@ impl UpstreamMcpClient {
                 );
                 None
             }
-        };
+        }
+    }
+
+    /// Call a named tool on the upstream MCP endpoint.
+    ///
+    /// Returns the `content` array from the `CallToolResult`, or an empty vec if
+    /// the result contained no content items.
+    pub fn call_tool(&self, tool_name: &str, arguments: Value) -> UpstreamResult<Vec<Value>> {
+        // Step 1: initialize session.
+        let session_id = self.init_session();
 
         // Step 2: call the tool.
         let tool_payload = serde_json::json!({
@@ -223,6 +233,58 @@ impl UpstreamMcpClient {
             .unwrap_or_default();
 
         Ok(content)
+    }
+
+    /// List tools advertised by the upstream MCP endpoint (name + description).
+    pub fn list_tools(&self) -> UpstreamResult<Vec<(String, String)>> {
+        // Step 1: initialize session (same handshake as `call_tool`).
+        let session_id = self.init_session();
+
+        // Step 2: request the tool list.
+        let list_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+
+        let mut req = self.post_mcp();
+        if let Some(sid) = session_id.as_deref() {
+            req = req.set("Mcp-Session-Id", sid);
+        }
+
+        let (_, result_json) = self.send_rpc(req, list_payload)?;
+        check_rpc_error(&result_json)?;
+
+        Ok(parse_tools_list(&result_json))
+    }
+
+    /// List the upstream's tools as their raw MCP descriptor objects, each
+    /// carrying `name`, `description`, and `inputSchema`. Callers that need the
+    /// parameter schema (e.g. to build proxy tools) use this instead of
+    /// [`list_tools`], which returns only name + description.
+    pub fn list_tools_raw(&self) -> UpstreamResult<Vec<Value>> {
+        let session_id = self.init_session();
+
+        let list_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        });
+
+        let mut req = self.post_mcp();
+        if let Some(sid) = session_id.as_deref() {
+            req = req.set("Mcp-Session-Id", sid);
+        }
+
+        let (_, result_json) = self.send_rpc(req, list_payload)?;
+        check_rpc_error(&result_json)?;
+
+        Ok(result_json["result"]["tools"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// Call a tool and return the concatenated text from all `text`-type content items.
@@ -252,6 +314,21 @@ fn check_rpc_error(json: &Value) -> UpstreamResult<()> {
     } else {
         Ok(())
     }
+}
+
+/// Parse a `tools/list` JSON-RPC response body into `(name, description)` pairs.
+fn parse_tools_list(result_json: &Value) -> Vec<(String, String)> {
+    result_json["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|t| {
+            let name = t["name"].as_str().unwrap_or_default().to_string();
+            let description = t["description"].as_str().unwrap_or_default().to_string();
+            (name, description)
+        })
+        .collect()
 }
 
 /// Extract the last `data:` line from an SSE stream body and parse it as JSON.
@@ -312,5 +389,32 @@ mod tests {
             UpstreamError::RpcError { code, .. } => assert_eq!(code, -32601),
             other => panic!("unexpected: {other}"),
         }
+    }
+
+    #[test]
+    fn parse_tools_list_extracts_name_and_description() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {"name": "search", "description": "Search the corpus"},
+                    {"name": "list_work_items", "description": "List project work items"}
+                ]
+            }
+        });
+        let tools = parse_tools_list(&body);
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0], ("search".to_string(), "Search the corpus".to_string()));
+        assert_eq!(
+            tools[1],
+            ("list_work_items".to_string(), "List project work items".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_tools_list_missing_tools_array_is_empty() {
+        let body = serde_json::json!({"jsonrpc": "2.0", "id": 2, "result": {}});
+        assert!(parse_tools_list(&body).is_empty());
     }
 }

@@ -332,6 +332,15 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// Remove a previously-registered tool by name. Returns `true` if a tool was
+    /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
+    /// over ACP at `session/new`) after a prompt turn completes.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.manifests.remove(name);
+        self.unadvertised.remove(name);
+        self.tools.remove(name).is_some()
+    }
+
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|b| b.as_ref())

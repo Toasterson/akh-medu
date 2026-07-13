@@ -302,9 +302,6 @@ fn build_tool_input(
         "infer_rules" => ToolInput::new()
             .with_param("max_iterations", "5")
             .with_param("min_confidence", "0.1"),
-        "library_search" => ToolInput::new()
-            .with_param("query", &goal.description)
-            .with_param("top_k", "5"),
         "user_interact" => ToolInput::new().with_param(
             "question",
             &format!("What should I know about: {}?", goal.description),
@@ -316,7 +313,6 @@ fn build_tool_input(
         "shell_exec" => ToolInput::new()
             .with_param("command", "echo 'agent shell exec'")
             .with_param("timeout", "10"),
-        "content_ingest" => ToolInput::new().with_param("source", &goal_label),
         _ => {
             // Generic: fill required params from the registered tool signature.
             if let Some(tool) = tool_registry.get(tool_name) {

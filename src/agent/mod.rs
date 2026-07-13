@@ -94,6 +94,7 @@ pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tasks;
 pub mod temporal_experience;
+pub mod text_extract;
 pub mod tool;
 pub mod trajectory;
 pub mod tool_graph;

@@ -1135,61 +1135,6 @@ fn select_tool(
                         "dialog", "clarify", "confirm", "respond", "answer", "feedback", "help",
                     ],
                 ),
-                (
-                    "content_ingest",
-                    &[
-                        "ingest",
-                        "document",
-                        "book",
-                        "pdf",
-                        "epub",
-                        "html",
-                        "article",
-                        "website",
-                        "library",
-                        "read",
-                        "parse",
-                        "content",
-                        "import",
-                        "fetch",
-                        "download",
-                        "add",
-                        "store",
-                        "learn",
-                        "absorb",
-                        "paper",
-                        "capture",
-                        "save",
-                        "publication",
-                    ],
-                ),
-                (
-                    "library_search",
-                    &[
-                        "search",
-                        "library",
-                        "find",
-                        "document",
-                        "paragraph",
-                        "content",
-                        "lookup",
-                        "recall",
-                        "retrieve",
-                        "what",
-                        "about",
-                        "said",
-                        "mention",
-                        "topic",
-                        "learn",
-                        "reference",
-                        "quote",
-                        "knowledge",
-                        "look",
-                        "paper",
-                        "book",
-                        "article",
-                    ],
-                ),
             ];
 
             for (tool_name, concepts) in vsa_tools {
@@ -1288,28 +1233,6 @@ fn select_tool(
                                 format!("What should I know about: {}?", goal.description),
                             ),
                             format!("VSA semantic match for user interaction: {semantic_score:.3}"),
-                        )
-                    }
-                    "content_ingest" => {
-                        if semantic_score <= 0.50 {
-                            continue;
-                        }
-                        (
-                            semantic_score * 0.75,
-                            ToolInput::new().with_param("source", &goal_label),
-                            format!("VSA semantic match for content ingest: {semantic_score:.3}"),
-                        )
-                    }
-                    "library_search" => {
-                        if semantic_score <= 0.50 {
-                            continue;
-                        }
-                        (
-                            semantic_score * 0.80,
-                            ToolInput::new()
-                                .with_param("query", &goal.description)
-                                .with_param("top_k", "5"),
-                            format!("VSA semantic match for library search: {semantic_score:.3}"),
                         )
                     }
                     _ => continue,

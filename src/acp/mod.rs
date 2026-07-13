@@ -60,11 +60,16 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::agent::Agent;
 use crate::agent::{GoalStatus, PlanStatus, StepStatus};
+use crate::bootstrap::identity::{
+    ritual_of_awakening, CharacterKnowledge, CultureOrigin, IdentityError,
+};
+use crate::bootstrap::purpose::{DreyfusLevel, EntityType, PurposeModel};
 use crate::chat::ChatProcessor;
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
 pub mod control;
+pub mod mcp_bridge;
 pub use control::{
     is_control_method, ControlFuture, ResolveFuture, ServerControl, WorkspaceHandles,
     CONTROL_METHODS,
@@ -192,6 +197,11 @@ pub struct AkhAcpAgent {
     /// the request `cwd` sentinel) so each `session/prompt` routes to the right
     /// akh — the data-plane `-w` for chat.
     sessions: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Chat session → client-pushed MCP servers. Recorded at `session/new` from
+    /// `NewSessionRequest.mcp_servers`; each `session/prompt` connects to them,
+    /// discovers their tools, and registers namespaced proxies for that turn
+    /// (see [`mcp_bridge`]).
+    session_mcp: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::SessionMcpServerCfg>>>>,
     /// Agent name advertised during `initialize`.
     name: String,
     /// Client filesystem/terminal capabilities captured at `initialize`.
@@ -247,6 +257,7 @@ impl AkhAcpAgent {
             processor: Some(Arc::new(Mutex::new(processor))),
             default_ws: "akh-medu".to_string(),
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
@@ -268,6 +279,7 @@ impl AkhAcpAgent {
             name: default_ws.clone(),
             default_ws,
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
@@ -328,6 +340,18 @@ impl AkhAcpAgent {
             .unwrap_or_else(|| self.default_ws.clone())
     }
 
+    /// The MCP servers a client pushed for this session at `session/new`, or an
+    /// empty vec if none. Cloned per prompt so the bridge can connect without
+    /// holding the session lock across network I/O.
+    fn session_mcp_cfgs(&self, session_id: &str) -> Vec<mcp_bridge::SessionMcpServerCfg> {
+        self.session_mcp
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Attach a server-level control-plane backend.
     ///
     /// Wires the `_akh/{workspace,daemon,config}/*` methods to akhomed's
@@ -365,6 +389,7 @@ impl AkhAcpAgent {
         agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
+        mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
         sink: ChannelSink,
     ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
@@ -379,6 +404,24 @@ impl AkhAcpAgent {
             if let Some(asker) = asker {
                 agent.set_permission_asker(asker);
             }
+            // Session-scoped MCP tools: connect to the servers the client pushed
+            // at `session/new`, discover their tools, and register namespaced
+            // proxies for this turn only — removed before returning so they never
+            // leak into another session (turns on one akh are serialized by the
+            // agent lock we hold here). Discovery is blocking network I/O, which
+            // is why it lives inside this `spawn_blocking` closure. Daemon-only:
+            // the HTTP MCP client is behind the `daemon` feature.
+            #[cfg(feature = "daemon")]
+            let session_tool_names: Vec<String> = {
+                let mut names = Vec::new();
+                for tool in mcp_bridge::build_session_tools(&mcp_cfgs) {
+                    names.push(tool.signature().name);
+                    agent.register_tool(tool);
+                }
+                names
+            };
+            #[cfg(not(feature = "daemon"))]
+            let _ = &mcp_cfgs;
             // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools),
             // which streams directly into `sink`; fall back to the symbolic
             // ChatProcessor when no model backend is reachable, emitting its
@@ -389,6 +432,10 @@ impl AkhAcpAgent {
             {
                 let out = processor.process_input(&text, &mut agent, &engine);
                 sink.emit_batch(&out);
+            }
+            #[cfg(feature = "daemon")]
+            for name in &session_tool_names {
+                agent.unregister_tool(name);
             }
             agent.clear_permission_asker();
             // Guards + sink drop here; the dropped sink closes the channel.
@@ -637,6 +684,10 @@ fn dispatch_akh(
                 "microtheory", "psyche", "argue", "explain", "trust",
                 // ADR 081 Slice 9 — schema-coverage report.
                 "schema",
+                // Identity — client-driven Ritual of Awakening (re-exposed as an
+                // ACP data-plane op after IdentityAwakenTool's removal as an
+                // agent tool; see spec_C_identity_acp).
+                "identity",
             ];
             let mut methods = vec![
                 "_akh/health",
@@ -687,6 +738,8 @@ fn dispatch_akh(
                 // (`promote` is control-plane — see `CONTROL_METHODS`).
                 "_akh/schema/proposals",
                 "_akh/schema/reject",
+                // Identity — client-driven Ritual of Awakening.
+                "_akh/identity/awaken",
             ];
             // Server-level control-plane (only when a backend is wired).
             if has_control {
@@ -873,6 +926,103 @@ fn dispatch_akh(
                 "cascade_retracted": result.retracted.len(),
                 "cascade_depth": result.cascade_depth,
             }))
+        }
+
+        // ── identity group (client-driven Ritual of Awakening; re-exposes the
+        //    now-removed `IdentityAwakenTool` agent tool as an operator-driven
+        //    ACP extension so the OPERATOR/CLIENT drives awakening instead of
+        //    the LLM calling it mid-reasoning). Unguarded like the write group
+        //    above — a permission layer lands in P4. ─────────────────────────
+        "identity/awaken" => {
+            let name = params
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: name".to_string())?;
+            let description = params
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: description".to_string())?;
+            let purpose_text = params
+                .get("purpose")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "missing required param: purpose".to_string())?;
+            let entity_type_opt = params.get("entity_type").and_then(serde_json::Value::as_str);
+            let culture_opt = params.get("culture").and_then(serde_json::Value::as_str);
+            let domains = params
+                .get("domains")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let traits = params
+                .get("traits")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let archetypes = params
+                .get("archetypes")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
+
+            fn parse_entity_type(s: Option<&str>) -> EntityType {
+                match s.map(|v| v.trim().to_lowercase()).as_deref() {
+                    Some("deity") | Some("god") | Some("goddess") => EntityType::Deity,
+                    Some("fictional") | Some("fictional_character") | Some("character") => {
+                        EntityType::FictionalCharacter
+                    }
+                    Some("historical") | Some("historical_figure") | Some("person") => {
+                        EntityType::HistoricalFigure
+                    }
+                    Some("concept") => EntityType::Concept,
+                    _ => EntityType::Unknown,
+                }
+            }
+
+            let culture = culture_opt
+                .and_then(CultureOrigin::from_label)
+                .unwrap_or(CultureOrigin::Unknown);
+            let character = CharacterKnowledge {
+                name: name.to_string(),
+                entity_type: parse_entity_type(entity_type_opt),
+                culture,
+                description: description.to_string(),
+                domains: domains.clone(),
+                traits,
+                archetypes,
+            };
+            let purpose = PurposeModel {
+                domain: domains.first().cloned().unwrap_or_else(|| "general".to_string()),
+                competence_level: DreyfusLevel::Expert,
+                seed_concepts: domains,
+                description: purpose_text.to_string(),
+            };
+            match ritual_of_awakening(&character, &purpose, engine, force) {
+                Ok(result) => {
+                    engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                    Ok(serde_json::json!({
+                        "awakened": true,
+                        "name": result.chosen_name,
+                        "provenance_records": result.provenance_ids.len(),
+                    }))
+                }
+                Err(IdentityError::AlreadyAwakened) => {
+                    Err("already awakened; pass force=true to re-awaken".to_string())
+                }
+                Err(e) => Err(format!("awaken failed: {e}")),
+            }
         }
 
         // ── query group (read-only SPARQL SELECT; requires a persistent
@@ -2189,6 +2339,28 @@ fn build_connection(
                                 .unwrap_or_else(|e| e.into_inner())
                                 .insert(session_id.to_string(), ws.to_string());
                         }
+                        // Honor the MCP servers the client pushes at session
+                        // setup (ACP's `mcp_servers`, the equivalent of a CLI's
+                        // `--mcp-config`): record them so each prompt in this
+                        // session can bridge their tools into the akh. Only the
+                        // HTTP transport is connected; other transports are
+                        // counted and logged. See [`mcp_bridge`].
+                        let (mcp_cfgs, unsupported) =
+                            mcp_bridge::parse_mcp_servers(&req.mcp_servers);
+                        if !mcp_cfgs.is_empty() || unsupported > 0 {
+                            tracing::info!(
+                                session = %session_id,
+                                http = mcp_cfgs.len(),
+                                unsupported,
+                                "recorded client-pushed MCP servers for session"
+                            );
+                        }
+                        if !mcp_cfgs.is_empty() {
+                            me.session_mcp
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(session_id.to_string(), mcp_cfgs);
+                        }
                         responder.respond(NewSessionResponse::new(session_id))
                     }
                 }
@@ -2266,6 +2438,9 @@ fn build_connection(
                         // in one batch at turn-end.
                         let (msg_tx, mut msg_rx) =
                             tokio::sync::mpsc::unbounded_channel::<AkhMessage>();
+                        // MCP servers this client pushed for the session — the
+                        // turn connects to them and bridges their tools.
+                        let mcp_cfgs = me.session_mcp_cfgs(&session_id.to_string());
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
@@ -2273,6 +2448,7 @@ fn build_connection(
                             ws.clone(),
                             text,
                             Some(asker),
+                            mcp_cfgs,
                             ChannelSink { tx: msg_tx },
                         );
 

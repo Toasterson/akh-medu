@@ -1082,7 +1082,7 @@ mod tests {
         // Tool invocation names.
         assert!(is_noise_entity("tool:similarity_search"));
         assert!(is_noise_entity("tool:memory_recall"));
-        assert!(is_noise_entity("tool:library_search"));
+        assert!(is_noise_entity("tool:kg_query"));
 
         // Bare numeric strings (decimal and integer).
         assert!(is_noise_entity("0.9910"));

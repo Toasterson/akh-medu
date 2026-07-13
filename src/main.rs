@@ -318,6 +318,35 @@ enum AcpOp {
         /// Object label.
         object: String,
     },
+    /// Awaken (or re-awaken) the akh's identity over ACP (`_akh/identity/awaken`).
+    Awaken {
+        /// Persona name.
+        name: String,
+        /// One-line description of who this persona is.
+        #[arg(long)]
+        description: String,
+        /// Purpose / mission statement.
+        #[arg(long)]
+        purpose: String,
+        /// deity | fictional | historical | concept.
+        #[arg(long)]
+        entity_type: Option<String>,
+        /// egyptian | greek | norse | latin | fictional.
+        #[arg(long)]
+        culture: Option<String>,
+        /// Domain of competence (repeatable).
+        #[arg(long = "domain")]
+        domains: Vec<String>,
+        /// Character trait (repeatable).
+        #[arg(long = "trait")]
+        traits: Vec<String>,
+        /// Archetype (repeatable).
+        #[arg(long = "archetype")]
+        archetypes: Vec<String>,
+        /// Re-awaken even if already awakened.
+        #[arg(long)]
+        force: bool,
+    },
     /// Create (or resolve) a symbol by label.
     CreateSymbol {
         /// Symbol label.
@@ -604,6 +633,24 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
                 "predicate": predicate,
                 "object": object,
                 "confidence": confidence,
+            }),
+        ),
+        AcpOp::Awaken {
+            name,
+            description,
+            purpose,
+            entity_type,
+            culture,
+            domains,
+            traits,
+            archetypes,
+            force,
+        } => (
+            "_akh/identity/awaken",
+            serde_json::json!({
+                "name": name, "description": description, "purpose": purpose,
+                "entity_type": entity_type, "culture": culture,
+                "domains": domains, "traits": traits, "archetypes": archetypes, "force": force,
             }),
         ),
         AcpOp::RemoveTriple {

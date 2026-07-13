@@ -1429,23 +1429,16 @@ impl ChatProcessor {
 
     // ── Shared helpers ──────────────────────────────────────────────
 
-    /// Ingest text as a fact using the TextIngestTool.
+    /// Ingest text as a fact using the pattern-based text extractor.
     fn ingest_as_fact(
         &self,
         text: &str,
         engine: &Engine,
         tool_label: &str,
     ) -> Vec<AkhMessage> {
-        use crate::agent::tool::Tool;
-        let tool_input = crate::agent::ToolInput::new().with_param("text", text);
-        match crate::agent::tools::TextIngestTool::default().execute(engine, tool_input) {
-            Ok(output) => {
-                vec![AkhMessage::tool_result(tool_label, output.success, &output.result)]
-            }
-            Err(e) => {
-                vec![AkhMessage::error("ingest", e.to_string())]
-            }
-        }
+        let (n, _symbols) = crate::agent::text_extract::ingest_text(engine, text, 100);
+        let msg = format!("Text ingest: extracted {n} triple(s).");
+        vec![AkhMessage::tool_result(tool_label, true, &msg)]
     }
 
     /// Escalate unresolved input to a goal, run OODA cycles, and synthesize findings.
@@ -1650,7 +1643,7 @@ impl ChatProcessor {
                 if s.is_empty() || p.is_empty() || o.is_empty() {
                     return 0;
                 }
-                match crate::agent::tools::text_ingest::ingest_extracted(
+                match crate::agent::text_extract::ingest_extracted(
                     engine, s, p, o, confidence,
                 ) {
                     Ok(_) => 1,

@@ -256,9 +256,9 @@ fn build_inventory(
             "path": lance_dir.display().to_string(),
             "hint": "export to JSONL out-of-band via shell_exec, then read with file_io",
         },
-        "next": "Read persona files with file_io and call identity_awaken; \
-                 read each memory/*.md and call memory_write (origin=openclaw); \
-                 read each SKILL.md and call skill_author.",
+        "next": "Read persona files with file_io, then have the operator awaken the akh \
+                 via the ACP `identity/awaken` extension; read each memory/*.md and call \
+                 memory_write (origin=openclaw); read each SKILL.md and call skill_author.",
     })
 }
 

@@ -346,14 +346,8 @@ impl Agent {
         registry.register(Box::new(tools::InferRulesTool));
         registry.register(Box::new(tools::GapAnalysisTool));
 
-        // Ingest tools. The single-file ingesters share the agent's sandbox so
-        // their reads stay within the workspace (code/journal ingesters still
-        // read raw — sandboxing those walks folds into the ingestion rework).
-        registry.register(Box::new(tools::CsvIngestTool::sandboxed(fs.clone())));
-        registry.register(Box::new(tools::TextIngestTool::sandboxed(fs.clone())));
+        // Ingest tools.
         registry.register(Box::new(tools::CodeIngestTool));
-        registry.register(Box::new(tools::ContentIngestTool));
-        registry.register(Box::new(tools::JournalIngestTool));
 
         // Typed writer tools (ADR 076): the strongly-typed, LLM-facing
         // replacements for raw-text ingestion. The model reads source itself and
@@ -362,10 +356,6 @@ impl Agent {
         // tool is registered switch-gated by the daemon, not here.
         registry.register(Box::new(tools::MemoryWriteTool::new(predicates.clone())));
         registry.register(Box::new(tools::SkillAuthorTool));
-        registry.register(Box::new(tools::IdentityAwakenTool));
-
-        // Library search.
-        registry.register(Box::new(tools::LibrarySearchTool));
 
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
@@ -1680,6 +1670,13 @@ impl Agent {
     /// Register a custom tool.
     pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.register(tool);
+    }
+
+    /// Remove a previously-registered tool by name. Returns `true` if one was
+    /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
+    /// over ACP for one prompt turn) once the turn completes.
+    pub fn unregister_tool(&mut self, name: &str) -> bool {
+        self.tool_registry.remove(name)
     }
 
     /// List all registered tool signatures.
