@@ -1,6 +1,46 @@
-# ADR 092 — High Grug v1: The Reasoning Register (Trace Format for P3)
+# ADR 092 — High Grug: The Reasoning Register (v1 trace format → v2 ratified language)
 
-- **Status:** Accepted (self-grilled under the standing /goal to implement the training roadmap; **revisable on user grilling** — the D1–D6 resolutions below are the points to re-open). Number provisional — reconcile on merge.
+- **Status:** **v2 Accepted (user-grilled 2026-07-11).** v1 was self-grilled; the D1–D6 resolutions were reopened and ratified/extended under user grilling into the v2 design in the section immediately below. v1's text is retained intact beneath it (never delete). Number provisional — reconcile on merge.
+
+---
+
+## v2 — Ratified under user grilling (2026-07-11)
+
+**Deciders:** Till (grilled) + Fable 5. **Inputs added since v1:** the measured [P3-R + mixed-depth results](../2026-07-11-phase51-p3r-results.md) (supervision +0.48, curriculum-bounded depth, render-straitjacket), [ADR 093](093-dual-process-trace-handoff.md) (handoff economics), the [Phi-curriculum memo](../2026-07-11-phi-curriculum-350m-memo.md), and the 350M scale-up target. **Consumers:** the [Phase 51 P4 350M-foundation plan](../plans/2026-07-11-phase51-p4-350m-foundation.md).
+
+### What changed since v1
+v1 designed a trace format for an 11.7M synthetic-KG lab. v2 designs the reasoning register the **350M organ thinks in** — a *typed logic over a closed operator set*, its reserved token space, and how it threads pretrain vs SFT. v2 **supersedes** v1's D3 (entity-words → reserved special tokens + slots) and D1 (op inventory → larger, with logical connectives) and **promotes to first-class** the bilingual/pretrain-fluency channel v1 deferred.
+
+### The governing principle (Egyptian, made literal)
+The early Middle Kingdom sign set was small and *designed*; the Ptolemaic explosion was institutional decay, not linguistic necessity. Two intelligences with a shared goal hold the line: **the operator core is closed by governance, and the governance rule is "a corpus must measurably exercise it," not "it would be nice."** The Egyptian structure maps onto the register almost exactly, and we take the *structure*, never the *sign inventory*:
+
+| Egyptian device | High Grug v2 |
+|---|---|
+| **phonograms** (small closed sound-sign set, composed) | **operators** — the closed, learned-as-schema core (Q3/Q6) |
+| **determinatives** (unpronounced category glyph) | **slot type-classifiers** `x7·PLACE` (Q2) |
+| **phonetic complements** (redundant error-check signs) | **`got` / `by i j`** — self-verifying redundancy (the *complement principle*: every statement carries the redundancy to verify itself) |
+| **logograms** + ideogram-stroke marker | reserved SymbolId tokens (Q1, **dark**) + a reserved promotion marker |
+| **cartouche** (name-scope oval) | microtheory/goal scope (deferred) |
+
+### The eight ratified decisions
+
+- **Q1 — Entities are entity-agnostic positional slots** `x1..xN`, bound to SymbolIds at the boundary. The reserved SymbolId block is **carved but left dark** (logogram promotion deferred, forward-compatible). *Supersedes v1 D3.* Rationale: never couple the tokenizer to a KG snapshot (sovereignty/relocatability); the Phi memo confirms baking in symbols = knowledge-packing, the failure mode we deleted.
+- **Q2 — Determinative/classifier tokens on slots** (`x7·PLACE`), adopted as a **measured ablation** (typed vs bare) at 11M, with the sharp hypothesis that typed slots reduce **off-path derailment** (relation choice is type-gated: `RelationKind::of_source(ty)`).
+- **Q3 — Larger closed operator core:** trace-mechanics (`step recall got derive by check gap goal call-answer`) + **structural inference relations** (`is-a part-of causes before after`) + **logical connectives** (`and or not implies`). ~19 ops — larger but closed. *Supersedes v1 D1.* The operator set is chosen to be **exactly the engine's inference-licensing predicates**, so organ, System-2, and verifier share one vocabulary (seamless ADR-093 handoff).
+- **Q4 — Full commit to rule-based (first-order) inference.** `implies` introduces universally-quantified KG rules applied by **modus ponens** — the capability jump over 11.7M's graph-walking, mapped onto the `egg` e-graph. Corpus in two arms — **propositional** (`and/or/not` over ground facts) and **rule-based** — each **gated at 11M** before entering the 350M corpus.
+- **Q5 — Full measurement instrumentation.** Decompose rule-application into `select / bind / fire / chain` so partial capability is *visible* (a false-abandon guard: an 11M fail must distinguish *broken* from *capacity-gated*). Run an **11M→50M→100M capacity ladder on both arms** and read the *slope*; reuse per-step replay + `probe_lens` crossover as "is-it-forming" reads.
+- **Q6 — Operators/classifiers/markers are reserved special tokens** (the designed phonogram set) in one governed region of the definitive tokenizer + the dark SymbolId block; NL BPE for the open lexicon; **grammar parses from token IDs**. *Supersedes v1 D3's "learned ASCII words."* Enables VSA/gloss embedding-init (a head-start prior). Cost: tokenizer↔renderer lockstep is now load-bearing.
+- **Q7 — Level 4 threading: High Grug enters *pretrain* as fluency.** Engine-generated High-Grug fluency + `gloss↔trace` bilingual pairs in pretrain + VSA/gloss embedding-init — because the emergence probes say the workspace must be *imposed*, and GWT #4 (articulation improves silent reasoning) is the mechanism. **The fluency corpus is engine-generated (sovereign, correct, zero teacher)** — the sharpest edge over Phi. Gated by an 11M/50M pretrain-fluency-vs-cold-SFT ablation.
+- **Q8 — Teacher-free sovereign base + optional measured teacher arm.** Base = FineWeb-Edu + DE/Swiss (comprehension) + engine fluency/traces (reasoning); no teacher. Optional Phase-2a teacher-prose arm generated via **Ollama Cloud** (quota cleared) as an A/B, **provenance-flagged**: the experiment may use cloud, but if the arm wins the shipped recipe must be reproduced with a **local open-weight** model first.
+
+### What v2 still defers
+NSM primes, microtheory/cartouche scope ops, epistemic/DS masses, TMS ops (`assume/contradict/retract`), inter-akh Grug, the Phase-26 VSA projector for logogram entities — each still waits for a corpus that measurably exercises it. The governance rule is unchanged; the operator core simply grew to the set the 350M reasoning corpus will exercise.
+
+---
+
+## v1 (self-grilled, 2026-07-11) — retained
+
+- **Status (v1):** Accepted (self-grilled under the standing /goal to implement the training roadmap; **revisable on user grilling** — the D1–D6 resolutions below are the points to re-open). Number provisional — reconcile on merge.
 - **Date:** 2026-07-11
 - **Deciders:** Fable 5 (autonomous, per /goal); Till to ratify/amend
 - **Inputs:** [grilling brief](../2026-07-11-phase51-high-grug-v1-grilling-brief.md); [emergence-probe results](../2026-07-11-phase51-gwt-emergence-probes.md) (NEGATIVE at 6 layers — imposition, not emergence); [ADR 088](088-high-grug-boundary-format.md) (v0 pipe format, locked); [research 2026-07-04](../research/2026-07-04-grug-reasoning-language.md) (six design laws); Phase 51 plan §2a (GWT amendments)
