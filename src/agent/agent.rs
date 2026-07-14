@@ -921,13 +921,10 @@ impl Agent {
             }
         }
 
-        // Register all built-in tool manifests as KG triples for peer discovery.
-        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&agent.engine) {
-            let count = registrar.register_all(&agent.tool_registry, "akhomed", &["agent:any"]);
-            tracing::debug!(count, "tool_graph: registered tool manifests in KG");
-        } else {
-            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
-        }
+        // Reconcile the KG tool projection + seed the engine's live tool view.
+        // Called from every construction path (see `resume` too) so a resumed
+        // akh behaves identically to a fresh one.
+        agent.seed_tool_graph_and_live_view();
 
         // Initialize causal manager (Phase 15a): try restoring persisted
         // schemas first so a fresh Agent picks up bootstrapped schemas.
@@ -1670,13 +1667,66 @@ impl Agent {
     /// Register a custom tool.
     pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.register(tool);
+        self.sync_live_tools();
     }
 
     /// Remove a previously-registered tool by name. Returns `true` if one was
     /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
     /// over ACP for one prompt turn) once the turn completes.
     pub fn unregister_tool(&mut self, name: &str) -> bool {
-        self.tool_registry.remove(name)
+        let removed = self.tool_registry.remove(name);
+        self.sync_live_tools();
+        removed
+    }
+
+    /// Push the current tool registry into the engine's live-tool view so
+    /// engine-level introspection (`tool_query`) reports what is actually
+    /// callable *now* — including per-turn session tools (MCP-over-ACP) that
+    /// never touch the durable KG. Called at construction and on every
+    /// tool register/unregister. Cheap: a small clone under a brief write lock.
+    /// Reconcile the durable KG tool projection with the live registry (pruning
+    /// tools left over from an older build — the registrar is otherwise
+    /// append-only, so deleted tools would linger in Postgres and be reported
+    /// forever by `tool_query`/`gap_analysis`), then seed the engine's live tool
+    /// view. Idempotent. **Must** be invoked from every Agent construction path
+    /// (`with_backend` *and* `resume`) — a resumed akh is the common production
+    /// case, and skipping it there is what let stale tools survive.
+    pub(crate) fn seed_tool_graph_and_live_view(&self) {
+        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&self.engine) {
+            let (registered, pruned) =
+                registrar.reconcile(&self.tool_registry, "akhomed", &["agent:any"]);
+            tracing::debug!(registered, pruned, "tool_graph: reconciled tool manifests in KG");
+        } else {
+            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
+        }
+        self.sync_live_tools();
+    }
+
+    pub(crate) fn sync_live_tools(&self) {
+        use super::tool_manifest::ToolSource;
+        // Coarse origin tag for display. MCP proxies carry `ToolSource::Native`
+        // (they're compiled `McpProxyTool`s), so key off the `mcp__` name prefix.
+        fn origin(name: &str, source: &ToolSource) -> String {
+            if name.starts_with("mcp__") {
+                return "mcp".into();
+            }
+            match source {
+                ToolSource::Native => "native".into(),
+                ToolSource::Wasm { .. } => "wasm".into(),
+                ToolSource::Cli { .. } => "cli".into(),
+            }
+        }
+        let tools = self
+            .tool_registry
+            .list_manifests()
+            .into_iter()
+            .map(|m| crate::engine::LiveTool {
+                name: m.name.clone(),
+                description: m.description.clone(),
+                origin: origin(&m.name, &m.source),
+            })
+            .collect();
+        self.engine.set_live_tools(tools);
     }
 
     /// List all registered tool signatures.
@@ -4009,6 +4059,10 @@ impl Agent {
             }
         }
 
+        // Same reconcile + live-tool seed as the fresh-construction path — a
+        // resumed akh must prune stale tools and expose its live tools too.
+        agent.seed_tool_graph_and_live_view();
+
         Ok(agent)
     }
 
@@ -4083,6 +4137,63 @@ mod backend_seam_tests {
         assert!(
             agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
+        );
+    }
+
+    /// Regression: `Agent::resume` (the production path for any akh with
+    /// persisted state) must reconcile the KG tool projection and seed the live
+    /// tool view — exactly like `with_backend`. Skipping it here is what let
+    /// tools deleted in a prior build (`library_search` et al.) linger in
+    /// Postgres and be reported forever.
+    #[test]
+    fn resume_reconciles_stale_tools_and_seeds_live_view() {
+        use crate::agent::tool_graph::ToolGraphRegistrar;
+        use crate::agent::tool_manifest::{
+            Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+        };
+        use std::collections::HashSet;
+
+        let engine = test_engine();
+
+        // An older build seeded a tool that no longer exists in this build.
+        {
+            let reg = ToolGraphRegistrar::init(&engine).unwrap();
+            let stale = ToolManifest {
+                name: "library_search".into(),
+                description: "gone in a newer build".into(),
+                parameters: vec![],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: "x".into(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            };
+            reg.register_tool(&stale, "akhomed", &["agent:any"]).unwrap();
+            assert!(reg.list_all_tools().contains(&"tool:library_search".to_string()));
+        }
+
+        // Drive the resume path directly (its restores default gracefully with
+        // no persisted state — we only care that it reconciles + seeds).
+        let _agent = Agent::resume(Arc::clone(&engine), AgentConfig::default())
+            .expect("resume should construct");
+
+        // Fix 1: the stale tool is pruned; a real built-in survives.
+        let reg = ToolGraphRegistrar::init(&engine).unwrap();
+        let all = reg.list_all_tools();
+        assert!(
+            !all.contains(&"tool:library_search".to_string()),
+            "resume must prune stale tools; got {all:?}"
+        );
+        assert!(
+            all.iter().any(|t| t == "tool:kg_query"),
+            "a real built-in should remain registered"
+        );
+        // Fix 2: the live view is seeded (non-empty, includes built-ins).
+        assert!(
+            !engine.live_tools().is_empty(),
+            "resume must seed the engine live tool view"
         );
     }
 }

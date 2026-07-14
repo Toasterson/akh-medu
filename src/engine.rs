@@ -195,6 +195,27 @@ pub struct Engine {
     identity_index: dashmap::DashMap<TripleIdentity, IdentityKey>,
     /// Whether `identity_index` is complete w.r.t. the current KG contents.
     identity_index_built: AtomicBool,
+    /// Agent-layer live view of the currently-callable tools, populated by the
+    /// [`Agent`](crate::agent) via [`Engine::set_live_tools`]. Lets engine-level
+    /// introspection tools (`tool_query`) report what is *actually* invocable
+    /// right now — including per-turn session tools (e.g. MCP servers pushed over
+    /// ACP) that never touch the durable KG. Distinct from the KG `tool:*`
+    /// triples, which are the durable, cross-akh peer-discovery projection.
+    /// Empty until an Agent first syncs it.
+    live_tools: RwLock<Vec<LiveTool>>,
+}
+
+/// One currently-callable tool, as seen by the live registry (see
+/// [`Engine::live_tools`]). A coarse, display-oriented projection — not the
+/// authoritative manifest, which lives in the agent's `ToolRegistry`.
+#[derive(Debug, Clone)]
+pub struct LiveTool {
+    /// Invocation name (e.g. `kg_query`, `mcp__anima__list_projects`).
+    pub name: String,
+    /// Human-readable one-line description.
+    pub description: String,
+    /// Coarse origin tag for display: `native` | `mcp` | `cli` | `wasm`.
+    pub origin: String,
 }
 
 /// Session-local key of an indexed triple (values in [`Engine::identity_index`]).
@@ -415,6 +436,7 @@ impl Engine {
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
             identity_index: dashmap::DashMap::new(),
             identity_index_built: AtomicBool::new(false),
+            live_tools: RwLock::new(Vec::new()),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -3171,6 +3193,24 @@ impl Engine {
         &self.inference_options
     }
 
+    /// Replace the live tool view (see [`LiveTool`]). Called by the Agent whenever
+    /// its tool registry changes — construction, and per-turn session tool
+    /// install/removal. Cheap; a poisoned lock is treated as a no-op.
+    pub fn set_live_tools(&self, tools: Vec<LiveTool>) {
+        if let Ok(mut w) = self.live_tools.write() {
+            *w = tools;
+        }
+    }
+
+    /// Snapshot of the currently-callable tools. Empty until an Agent first
+    /// populates it via [`Engine::set_live_tools`].
+    pub fn live_tools(&self) -> Vec<LiveTool> {
+        self.live_tools
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_default()
+    }
+
     /// Get the compartment manager (if data_dir is configured).
     pub fn compartments(&self) -> Option<&crate::compartment::CompartmentManager> {
         self.compartment_manager.as_ref()
@@ -3427,6 +3467,29 @@ mod tests {
         let info = engine.info();
         assert_eq!(info.dimension, 1000);
         assert!(!info.persistent);
+    }
+
+    #[test]
+    fn live_tools_set_and_snapshot() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(engine.live_tools().is_empty(), "empty until populated");
+        engine.set_live_tools(vec![LiveTool {
+            name: "mcp__anima__seshat_status".into(),
+            description: "Seshat archive status.".into(),
+            origin: "mcp".into(),
+        }]);
+        let live = engine.live_tools();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].name, "mcp__anima__seshat_status");
+        assert_eq!(live[0].origin, "mcp");
+        // Replaces wholesale (not append).
+        engine.set_live_tools(vec![]);
+        assert!(engine.live_tools().is_empty());
     }
 
     #[test]
