@@ -75,7 +75,6 @@ mod proxy {
     use crate::agent::tool_manifest::{
         Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
     };
-    use crate::config::UpstreamEndpointConfig;
     use crate::engine::Engine;
     use crate::upstream_client::UpstreamMcpClient;
 
@@ -203,10 +202,7 @@ mod proxy {
 
         fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
             let args = self.build_args(&input);
-            let client = UpstreamMcpClient::new(&UpstreamEndpointConfig {
-                url: self.url.clone(),
-                auth_header: self.auth_header.clone(),
-            });
+            let client = UpstreamMcpClient::from_endpoint(self.url.clone(), self.auth_header.clone());
             match client.call_tool_text(&self.remote_name, args) {
                 Ok(text) if text.is_empty() => {
                     Ok(ToolOutput::ok(format!("{} returned no content.", self.remote_name)))
@@ -252,10 +248,7 @@ mod proxy {
     pub fn build_session_tools(cfgs: &[SessionMcpServerCfg]) -> Vec<Box<dyn Tool>> {
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
         for cfg in cfgs {
-            let client = UpstreamMcpClient::new(&UpstreamEndpointConfig {
-                url: cfg.url.clone(),
-                auth_header: cfg.auth_header.clone(),
-            });
+            let client = UpstreamMcpClient::from_endpoint(cfg.url.clone(), cfg.auth_header.clone());
             match client.list_tools_raw() {
                 Ok(descriptors) => {
                     let before = tools.len();

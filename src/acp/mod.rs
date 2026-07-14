@@ -44,7 +44,8 @@ use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::schema::{
     AgentCapabilities, ClientCapabilities, ContentBlock, ContentChunk, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    InitializeResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse,
     ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::util::{json_cast, MatchDispatch};
@@ -2301,10 +2302,17 @@ fn build_connection(
                         // requests on what the client advertised.
                         *me.client_caps.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(req.client_capabilities.clone());
-                        // Echo the client's protocol version; advertise default
-                        // (minimal) agent capabilities for the spike.
+                        // Echo the client's protocol version. Advertise
+                        // `mcp_capabilities.http = true` so a conformant client
+                        // (e.g. Zed) will push HTTP MCP servers at `session/new`
+                        // for us to bridge (mcp_bridge); a client that gates on
+                        // capabilities refuses to send them otherwise. SSE is
+                        // still unsupported.
                         let resp = InitializeResponse::new(req.protocol_version)
-                            .agent_capabilities(AgentCapabilities::default())
+                            .agent_capabilities(
+                                AgentCapabilities::default()
+                                    .mcp_capabilities(McpCapabilities::new().http(true)),
+                            )
                             .agent_info(agent_client_protocol::schema::Implementation::new(
                                 me.name.clone(),
                                 env!("CARGO_PKG_VERSION"),

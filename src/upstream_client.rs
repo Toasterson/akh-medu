@@ -81,30 +81,58 @@ pub type UpstreamResult<T> = Result<T, UpstreamError>;
 /// If initialization fails (e.g. the upstream does not require it), the client
 /// falls back to a direct tool call without a session ID.
 pub struct UpstreamMcpClient {
-    base_url: String,
+    /// Fully-resolved MCP endpoint URL to POST to (already includes any
+    /// transport path such as `/mcp`). Set verbatim by [`from_endpoint`];
+    /// derived as `{base}/mcp` by [`new`].
+    ///
+    /// [`from_endpoint`]: Self::from_endpoint
+    /// [`new`]: Self::new
+    endpoint: String,
     auth_header: Option<String>,
     agent: ureq::Agent,
 }
 
 impl UpstreamMcpClient {
-    /// Create a new client from an [`UpstreamEndpointConfig`].
+    /// Create a client from a config-declared upstream, treating `config.url`
+    /// as a **base** and appending the `/mcp` transport path.
+    ///
+    /// This is the convention for statically-configured upstreams (Anima,
+    /// Seshat), where the config holds a service root. For a URL that already
+    /// names the full MCP endpoint — e.g. an [`McpServer`] pushed over ACP at
+    /// `session/new`, per the Claude Code CLI contract — use [`from_endpoint`]
+    /// so no path is appended.
+    ///
+    /// [`McpServer`]: agent_client_protocol::schema::McpServer
+    /// [`from_endpoint`]: Self::from_endpoint
     pub fn new(config: &UpstreamEndpointConfig) -> Self {
+        let base = config.url.trim_end_matches('/');
+        Self::from_endpoint(format!("{base}/mcp"), config.resolved_auth())
+    }
+
+    /// Create a client for a **full** MCP endpoint URL, taken verbatim.
+    ///
+    /// Unlike [`new`], this appends nothing: the caller has already supplied the
+    /// complete endpoint to POST to. Use it for MCP servers pushed over ACP so a
+    /// server legitimately rooted at `/mcp` (or any other path) is honored
+    /// exactly rather than doubled to `/mcp/mcp`.
+    ///
+    /// [`new`]: Self::new
+    pub fn from_endpoint(endpoint: impl Into<String>, auth_header: Option<String>) -> Self {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(30))
             .build();
         Self {
-            base_url: config.url.trim_end_matches('/').to_string(),
-            auth_header: config.resolved_auth(),
+            endpoint: endpoint.into(),
+            auth_header,
             agent,
         }
     }
 
-    /// Build a POST request to `{base_url}/mcp` with common MCP headers.
+    /// Build a POST request to the resolved MCP endpoint with common MCP headers.
     fn post_mcp(&self) -> ureq::Request {
-        let endpoint = format!("{}/mcp", self.base_url);
         let mut req = self
             .agent
-            .post(&endpoint)
+            .post(&self.endpoint)
             .set("Content-Type", "application/json")
             .set("Accept", "application/json, text/event-stream");
         if let Some(ref auth) = self.auth_header {
@@ -354,6 +382,26 @@ fn parse_sse_last_data(body: &str) -> UpstreamResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_appends_mcp_path_to_base_url() {
+        let cfg = UpstreamEndpointConfig {
+            url: "http://anima.local:4100/".into(),
+            auth_header: None,
+        };
+        // Config convention: url is a base, `/mcp` is the transport path.
+        assert_eq!(UpstreamMcpClient::new(&cfg).endpoint, "http://anima.local:4100/mcp");
+    }
+
+    #[test]
+    fn from_endpoint_takes_url_verbatim() {
+        // ACP-pushed servers carry the full endpoint; never double `/mcp/mcp`,
+        // and honor a server legitimately rooted at `/mcp`.
+        let c = UpstreamMcpClient::from_endpoint("https://seshat.local/mcp", None);
+        assert_eq!(c.endpoint, "https://seshat.local/mcp");
+        let rooted = UpstreamMcpClient::from_endpoint("https://x.local/custom/path", None);
+        assert_eq!(rooted.endpoint, "https://x.local/custom/path");
+    }
 
     #[test]
     fn parse_sse_last_data_extracts_last_event() {
