@@ -68,6 +68,35 @@ pub enum AkhConfigError {
     },
 }
 
+/// One unrecognized key found while loading an `akh.toml`, surfaced so the
+/// operator can see exactly what was silently dropped (see
+/// [`AkhConfig::unknown_keys`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownConfigKey {
+    /// Dotted path of the offending key, e.g. `"ollama_endpoint.kidn"` or the
+    /// bare top-level key, e.g. `"modle"`.
+    pub path: String,
+    /// Set when the key exactly matches a *known top-level* field name but was
+    /// found nested one level deeper than expected — the classic footgun of a
+    /// scalar written under a preceding `[table]` header instead of above it.
+    pub misplaced_under_table: Option<String>,
+}
+
+impl std::fmt::Display for UnknownConfigKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.misplaced_under_table {
+            Some(table) => write!(
+                f,
+                "`{}` (nested under [{}] but that name matches a top-level akh.toml key — \
+                 it was probably meant to be a top-level scalar written *above* the first \
+                 [table] header, not inside one)",
+                self.path, table
+            ),
+            None => write!(f, "`{}` (not a recognized akh.toml key)", self.path),
+        }
+    }
+}
+
 /// Convenience alias for akh-config operations.
 pub type AkhConfigResult<T> = std::result::Result<T, AkhConfigError>;
 
@@ -243,6 +272,19 @@ pub struct AkhConfig {
     #[serde(default)]
     pub extra_read_roots: Vec<std::path::PathBuf>,
 
+    /// Whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091, `kind="turn"`). Default-on: capture is
+    /// the akh's own memory, so on-by-default is right, but a sovereign akh
+    /// must be able to refuse. `AKH_TRANSCRIPT_CAPTURE` ("0"/"1") overrides
+    /// this at the emit site regardless of what is set here.
+    ///
+    /// Kept here, above the table fields below, so it serializes as a
+    /// top-level scalar and precedes the first `[table]` header — a scalar
+    /// declared after a table would otherwise be silently nested into that
+    /// table by TOML (see the `AkhConfigError` diagnostics on this footgun).
+    #[serde(default = "default_true")]
+    pub capture_transcripts: bool,
+
     // ── tables (must be serialized after all values for TOML) ───────────────
     /// Where the pinned model runs (local Ollama or cloud).
     #[serde(default)]
@@ -256,14 +298,6 @@ pub struct AkhConfig {
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<DelegationConfig>,
-
-    /// Whether completed agentic turns are captured to the WAL as raw
-    /// transcript staging (ADR 091, `kind="turn"`). Default-on: capture is
-    /// the akh's own memory, so on-by-default is right, but a sovereign akh
-    /// must be able to refuse. `AKH_TRANSCRIPT_CAPTURE` ("0"/"1") overrides
-    /// this at the emit site regardless of what is set here.
-    #[serde(default = "default_true")]
-    pub capture_transcripts: bool,
 }
 
 impl Default for AkhConfig {
@@ -280,10 +314,10 @@ impl Default for AkhConfig {
             path_mode: PathMode::default(),
             openclaw_import: false,
             extra_read_roots: Vec::new(),
+            capture_transcripts: true,
             ollama_endpoint: OllamaEndpoint::default(),
             autonomy: AutonomyConfig::default(),
             delegation: None,
-            capture_transcripts: true,
         }
     }
 }
@@ -345,15 +379,162 @@ impl AkhConfig {
 
     /// Load from a TOML file. A legacy workspace-only TOML loads cleanly with
     /// all akh-level fields defaulted.
+    ///
+    /// Also validates the raw TOML against the known schema and emits a
+    /// `tracing::warn` naming every unrecognized key (typo'd field, or a
+    /// scalar misplaced under a `[table]` header) — `#[serde(flatten)]` on
+    /// [`Self::workspace`] makes `deny_unknown_fields` impossible, so this is
+    /// the only diagnostic an operator gets for a dropped key. Use
+    /// [`Self::load_checked`] to also get the list programmatically.
     pub fn load(path: &std::path::Path) -> AkhConfigResult<Self> {
+        let (cfg, unknown) = Self::load_checked(path)?;
+        for key in &unknown {
+            tracing::warn!(
+                target: "akh_config",
+                path = %path.display(),
+                key = %key.path,
+                "unrecognized key in akh.toml, value was dropped: {key}"
+            );
+        }
+        Ok(cfg)
+    }
+
+    /// Like [`Self::load`], but also returns the list of unrecognized keys
+    /// found in the raw TOML instead of only logging them.
+    pub fn load_checked(
+        path: &std::path::Path,
+    ) -> AkhConfigResult<(Self, Vec<UnknownConfigKey>)> {
         let content = std::fs::read_to_string(path).map_err(|e| AkhConfigError::Read {
             path: path.display().to_string(),
             source: e,
         })?;
-        toml::from_str(&content).map_err(|e| AkhConfigError::Parse {
+        let cfg: Self = toml::from_str(&content).map_err(|e| AkhConfigError::Parse {
             path: path.display().to_string(),
             message: e.to_string(),
-        })
+        })?;
+        let raw: toml::Value = toml::from_str(&content).map_err(|e| AkhConfigError::Parse {
+            path: path.display().to_string(),
+            message: e.to_string(),
+        })?;
+        Ok((cfg, Self::unknown_keys(&raw)))
+    }
+
+    /// Top-level scalar/array keys accepted at the root of `akh.toml`
+    /// (the [`Self::workspace`] flatten plus the akh-level fields declared
+    /// above the `[table]` section of this struct).
+    fn known_top_level_keys() -> &'static [&'static str] {
+        &[
+            // WorkspaceConfig (flattened)
+            "name",
+            "dimension",
+            "encoding",
+            "language",
+            "max_memory_mb",
+            "max_symbols",
+            "max_triples",
+            "seed_packs",
+            "shared_partitions",
+            // AkhConfig scalars
+            "model",
+            "reasoning_effort",
+            "system_prompt",
+            "is_main",
+            "backend",
+            "spec_decode",
+            "related_workspaces",
+            "path_mode",
+            "openclaw_import",
+            "extra_read_roots",
+            "capture_transcripts",
+        ]
+    }
+
+    /// Known `[table]` names at the root of `akh.toml`, each with its own
+    /// known key set (used to flag typos *inside* a table too).
+    fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
+        &[
+            ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            ("autonomy", &["enabled", "tasks"]),
+            (
+                "delegation",
+                &[
+                    "enabled",
+                    "max_concurrent",
+                    "daily_cost_budget_cents",
+                    "per_task_max_cents",
+                    "akhomed_url",
+                    "local",
+                    "remote",
+                    "peers",
+                ],
+            ),
+        ]
+    }
+
+    /// Diff a raw parsed TOML document against the known `akh.toml` schema,
+    /// returning every key that isn't recognized. Deliberately conservative:
+    /// unrecognized keys *inside* an unrecognized table are not further
+    /// expanded (the table itself is reported once).
+    fn unknown_keys(raw: &toml::Value) -> Vec<UnknownConfigKey> {
+        let mut found = Vec::new();
+        let Some(table) = raw.as_table() else {
+            return found;
+        };
+        let known_top = Self::known_top_level_keys();
+        let known_tables = Self::known_tables();
+
+        for (key, value) in table {
+            if known_top.contains(&key.as_str()) {
+                continue;
+            }
+            if let Some((_, table_keys)) = known_tables.iter().find(|(name, _)| name == key) {
+                // Recognized table: check its own keys for typos.
+                if let Some(inner) = value.as_table() {
+                    for inner_key in inner.keys() {
+                        if !table_keys.contains(&inner_key.as_str()) {
+                            found.push(UnknownConfigKey {
+                                path: format!("{key}.{inner_key}"),
+                                // The classic footgun: a nested key whose name
+                                // matches a *top-level* field means a scalar
+                                // was accidentally written under this table
+                                // header instead of above it.
+                                misplaced_under_table: known_top
+                                    .contains(&inner_key.as_str())
+                                    .then(|| key.clone()),
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+            // Entirely unrecognized top-level key. If it's a table and any of
+            // its inner keys collide with known top-level names, call that
+            // out explicitly — it's the same footgun under an unknown table.
+            if let Some(inner) = value.as_table() {
+                let mut any_misplaced = false;
+                for inner_key in inner.keys() {
+                    if known_top.contains(&inner_key.as_str()) {
+                        any_misplaced = true;
+                        found.push(UnknownConfigKey {
+                            path: format!("{key}.{inner_key}"),
+                            misplaced_under_table: Some(key.clone()),
+                        });
+                    }
+                }
+                if !any_misplaced {
+                    found.push(UnknownConfigKey {
+                        path: key.clone(),
+                        misplaced_under_table: None,
+                    });
+                }
+            } else {
+                found.push(UnknownConfigKey {
+                    path: key.clone(),
+                    misplaced_under_table: None,
+                });
+            }
+        }
+        found
     }
 
     /// Save to a TOML file (pretty-printed), creating parent directories.
@@ -371,7 +552,9 @@ impl AkhConfig {
         std::fs::write(path, content).map_err(|e| AkhConfigError::Write {
             path: path.display().to_string(),
             source: e,
-        })
+        })?;
+        restrict_to_owner(path);
+        Ok(())
     }
 
     /// Build the [`ModelManagerConfig`] this akh's model manager should use:
@@ -398,6 +581,31 @@ impl AkhConfig {
             system_prompt: self.system_prompt.clone(),
             ..Default::default()
         }
+    }
+}
+
+/// Restrict a just-written config file to owner-only read/write (`0600`) on
+/// Unix. `akh.toml` can carry an inline cloud `api_key`, so a world-readable
+/// default (`0644`) leaks it to every local user. Best-effort: a failure here
+/// is logged, not propagated — the file is already written and usable, and
+/// surfacing a permission-fixup failure as a save error would be surprising.
+/// No-op on non-Unix targets.
+fn restrict_to_owner(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                target: "akh_config",
+                path = %path.display(),
+                error = %e,
+                "failed to restrict akh.toml permissions to 0600 (it may contain secrets)"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
     }
 }
 
@@ -619,5 +827,102 @@ mod tests {
         assert_ne!(mm_a.system_prompt, mm_b.system_prompt);
         assert_eq!(mm_a.ollama.model, "qwen2.5:7b");
         assert_eq!(mm_b.ollama.model, "llama3.2:3b");
+    }
+
+    #[test]
+    fn capture_transcripts_serializes_before_first_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let cfg = AkhConfig::with_name("thoth");
+        cfg.save(&path).expect("save");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let scalar_at = content.find("capture_transcripts").expect("scalar present");
+        // Find the first *table header* line (starts with `[`, not an array
+        // literal like `seed_packs = [...]`).
+        let table_at = content
+            .lines()
+            .find(|line| line.starts_with('['))
+            .and_then(|line| content.find(line))
+            .expect("a table header present");
+        assert!(
+            scalar_at < table_at,
+            "capture_transcripts must serialize before the first [table]:\n{content}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let cfg = AkhConfig::with_name("thoth");
+        cfg.save(&path).expect("save");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "akh.toml may contain secrets and must be 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_reported() {
+        let toml_src = "name = \"a\"\nmodle = \"typo\"\n";
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "modle");
+        assert!(unknown[0].misplaced_under_table.is_none());
+    }
+
+    #[test]
+    fn unknown_key_inside_known_table_is_reported() {
+        let toml_src = "name = \"a\"\n[ollama_endpoint]\nkidn = \"cloud\"\n";
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "ollama_endpoint.kidn");
+    }
+
+    #[test]
+    fn scalar_misplaced_under_table_is_flagged_specifically() {
+        // The classic footgun: `model` belongs at the top level, but a table
+        // header above it in the file causes TOML to nest it underneath.
+        let toml_src = "name = \"a\"\n[ollama_endpoint]\nmodel = \"qwen2.5:7b\"\n";
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "ollama_endpoint.model");
+        assert_eq!(unknown[0].misplaced_under_table.as_deref(), Some("ollama_endpoint"));
+        let msg = unknown[0].to_string();
+        assert!(msg.contains("top-level"), "message should call out the footgun: {msg}");
+    }
+
+    #[test]
+    fn no_unknown_keys_for_full_valid_config() {
+        let toml_src = r#"
+            name = "ptah"
+            model = "qwen2.5:7b"
+            capture_transcripts = false
+
+            [ollama_endpoint]
+            kind = "cloud"
+            base_url = "https://ollama.com"
+            api_key = "env:OLLAMA_API_KEY"
+
+            [autonomy]
+            enabled = true
+            tasks = { consolidation = true }
+        "#;
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+    }
+
+    #[test]
+    fn load_checked_surfaces_typo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        std::fs::write(&path, "name = \"a\"\nmodle = \"typo\"\n").expect("write");
+        let (cfg, unknown) = AkhConfig::load_checked(&path).expect("load");
+        assert_eq!(cfg.name(), "a");
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "modle");
     }
 }
