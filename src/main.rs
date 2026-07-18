@@ -5,6 +5,20 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 
+/// Clap `value_parser` for confidence/weight arguments documented as
+/// `[0.0, 1.0]` — rejects out-of-range values at parse time instead of
+/// silently accepting nonsensical confidences/weights.
+fn unit_interval(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a valid number"))?;
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("must be in [0.0, 1.0], got {v}"))
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "akh", version, about = "Neuro-symbolic AI engine")]
 struct Cli {
@@ -137,9 +151,6 @@ enum SchemaAction {
         /// `name` or `name@version` (defaults to the most recently admitted
         /// version of `name` when no `@version` is given).
         pack: String,
-        /// Workspace to install into (defaults to --workspace).
-        #[arg(long)]
-        workspace: Option<String>,
     },
     /// Non-LLM schema-coverage report (ADR 081 Slice 9): what fraction of a
     /// workspace's live KG is typed-core vs. frontier vs. schema bookkeeping.
@@ -147,20 +158,13 @@ enum SchemaAction {
     /// classification, not migration; run this anytime to see whether the
     /// typed core is crystallizing.
     Coverage {
-        /// Workspace to report on (defaults to --workspace).
-        #[arg(long)]
-        workspace: Option<String>,
         /// Number of frontier predicates to list, ranked by occurrence count.
         #[arg(long, default_value_t = 20)]
         top: u64,
     },
     /// List pending frontier→core promotion proposals (ADR 081 Slice 5).
     /// Read-only, engine-local — does not require Postgres.
-    Proposals {
-        /// Workspace to list proposals for (defaults to --workspace).
-        #[arg(long)]
-        workspace: Option<String>,
-    },
+    Proposals,
     /// Promote a pending proposal to the shared registry (ADR 081 decision
     /// 8: admission always requires an explicit human confirm — pass
     /// `--yes`). Mints a small schema pack extending the proposed type (or a
@@ -171,9 +175,6 @@ enum SchemaAction {
         /// The proposal id (the frontier predicate name — see `akh schema
         /// proposals`).
         id: String,
-        /// Workspace to promote into (defaults to --workspace).
-        #[arg(long)]
-        workspace: Option<String>,
         /// Confirm promotion. Without this flag the command only prints the
         /// proposal and refuses to promote — the human-confirm gate.
         #[arg(long)]
@@ -188,9 +189,6 @@ enum SchemaAction {
     Reject {
         /// The proposal id (the frontier predicate name).
         id: String,
-        /// Workspace the proposal belongs to (defaults to --workspace).
-        #[arg(long)]
-        workspace: Option<String>,
         /// Optional free-text reason, recorded with the rejection.
         #[arg(long)]
         reason: Option<String>,
@@ -201,28 +199,20 @@ enum SchemaAction {
 /// (control-plane, over ACP `_akh/akh/*`).
 #[derive(Subcommand)]
 enum AkhAction {
-    /// Snapshot the akh's relational state to Postgres now.
-    Snapshot {
-        /// Workspace to snapshot (defaults to --workspace).
-        workspace: Option<String>,
-    },
-    /// Wake a cold akh from its Postgres snapshot into the local workspace.
-    Wake {
-        /// Workspace to wake (defaults to --workspace).
-        workspace: Option<String>,
-    },
+    /// Snapshot the akh's relational state to Postgres now (targets the
+    /// global `-w` workspace).
+    Snapshot,
+    /// Wake a cold akh from its Postgres snapshot into the local workspace
+    /// (targets the global `-w` workspace).
+    Wake,
     /// Deep-sleep the akh: snapshot + flush, then free its in-memory engine and
-    /// stop its background tasks. Wake it later with `akh akh wake`.
-    Sleep {
-        /// Workspace to sleep (defaults to --workspace).
-        workspace: Option<String>,
-    },
+    /// stop its background tasks. Wake it later with `akh akh wake`. Targets
+    /// the global `-w` workspace.
+    Sleep,
     /// Prepare the akh to move hosts: snapshot + flush so another host can
-    /// `akh akh wake` it. Requires a Postgres backing store.
-    Relocate {
-        /// Workspace to relocate (defaults to --workspace).
-        workspace: Option<String>,
-    },
+    /// `akh akh wake` it. Requires a Postgres backing store. Targets the
+    /// global `-w` workspace.
+    Relocate,
 }
 
 /// AGE graph-projection ops (control-plane, over ACP `_akh/projection/*`).
@@ -236,11 +226,13 @@ enum ProjectionAction {
 enum SetupAction {
     /// Download NLU models (NER ~130MB, LLM ~1.1GB).
     Models {
-        /// Only download the NER model (skip LLM).
-        #[arg(long)]
+        /// Only download the NER model (skip LLM). Mutually exclusive with
+        /// `--llm-only`.
+        #[arg(long, conflicts_with = "llm_only")]
         ner_only: bool,
-        /// Only download the LLM model (skip NER).
-        #[arg(long)]
+        /// Only download the LLM model (skip NER). Mutually exclusive with
+        /// `--ner-only`.
+        #[arg(long, conflicts_with = "ner_only")]
         llm_only: bool,
     },
     /// Download and install ONNX Runtime for the current platform.
@@ -277,7 +269,11 @@ enum ServiceAction {
     },
 }
 
-/// Read-only data-plane operations exposed over ACP `_akh/*` methods.
+/// Data-plane operations exposed over ACP `_akh/*` methods. Most are
+/// read-only queries (status, symbols, triples, query, recall, infer,
+/// explain, provenance, evidence, trust), but several mutate the akh's state
+/// (add-triple, remove-triple, awaken, create-symbol, permission-mode,
+/// microtheory/skill/psyche writes) — check each verb's own doc comment.
 #[derive(Subcommand)]
 enum AcpOp {
     /// Show the akh's status (workspace name + symbol/triple counts).
@@ -304,7 +300,7 @@ enum AcpOp {
         /// Object label.
         object: String,
         /// Confidence in [0.0, 1.0].
-        #[arg(long, default_value_t = 1.0)]
+        #[arg(long, default_value_t = 1.0, value_parser = unit_interval)]
         confidence: f64,
     },
     /// Remove a triple from the akh's knowledge graph (idempotent — a triple or
@@ -382,7 +378,7 @@ enum AcpOp {
         #[arg(long, default_value_t = 1)]
         depth: u64,
         /// Minimum activation confidence to include.
-        #[arg(long, default_value_t = 0.1)]
+        #[arg(long, default_value_t = 0.1, value_parser = unit_interval)]
         min_confidence: f64,
     },
     /// Show or set the akh's tool-permission mode. With no `--set`, reports the
@@ -530,16 +526,16 @@ enum PsycheOp {
     /// With no flags, reports the current weights.
     Archetypes {
         /// Healer weight in [0,1] — seeks missing knowledge.
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         healer: Option<f64>,
         /// Sage weight in [0,1] — seeks understanding.
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         sage: Option<f64>,
         /// Guardian weight in [0,1] — seeks stability and safety.
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         guardian: Option<f64>,
         /// Explorer weight in [0,1] — seeks novelty.
-        #[arg(long)]
+        #[arg(long, value_parser = unit_interval)]
         explorer: Option<f64>,
     },
 }
@@ -851,9 +847,55 @@ fn run_config_acp(action: ConfigAction) -> Result<()> {
             })?;
             ("_akh/config/set", serde_json::json!({ "config": cfg }))
         }
+        ConfigAction::Env => {
+            // Dispatched locally in `main` before reaching this function
+            // (`akh config env` never talks to a daemon over ACP).
+            unreachable!("ConfigAction::Env is handled locally in main(), not routed over ACP")
+        }
     };
     let result = acp_call(method, params)?;
     print_acp(&result)
+}
+
+/// Guard a destructive CLI action behind explicit confirmation. `--yes`
+/// (`skip_prompt`) bypasses the prompt outright; otherwise, on an interactive
+/// terminal, asks the user to type `yes` and aborts on anything else; on a
+/// non-interactive terminal (piped/scripted), errors immediately rather than
+/// silently proceeding or hanging on a read that will never come.
+fn confirm_destructive(warning: &str, action_desc: &str, skip_prompt: bool) -> Result<()> {
+    use std::io::IsTerminal;
+
+    if skip_prompt {
+        return Ok(());
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(miette::miette!(
+            code = "akh::cli::confirmation_required",
+            help = format!(
+                "re-run with --yes to confirm non-interactively (akh ... --yes) to {action_desc}"
+            ),
+            "refusing to {action_desc} without confirmation on a non-interactive terminal"
+        ));
+    }
+
+    eprintln!("{warning}");
+    eprint!("Type 'yes' to {action_desc}, anything else to abort: ");
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).into_diagnostic()?;
+
+    if input.trim() == "yes" {
+        Ok(())
+    } else {
+        Err(miette::miette!(
+            code = "akh::cli::confirmation_aborted",
+            help = "no changes were made; re-run and type 'yes' (or pass --yes) to confirm",
+            "aborted: {action_desc} was not confirmed"
+        ))
+    }
 }
 
 /// Dispatch `akh workspace <action>` over the ACP control-plane
@@ -870,7 +912,14 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
             }
             ("_akh/workspace/create", params)
         }
-        WorkspaceAction::Delete { name } => {
+        WorkspaceAction::Delete { name, yes } => {
+            confirm_destructive(
+                &format!(
+                    "This will permanently delete workspace '{name}' and all its data."
+                ),
+                &format!("delete workspace '{name}'"),
+                yes,
+            )?;
             ("_akh/workspace/delete", serde_json::json!({ "name": name }))
         }
         WorkspaceAction::Info { name } => {
@@ -896,23 +945,12 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
 /// snapshot the akh's state to Postgres, or wake a cold akh from it.
 #[cfg(feature = "acp")]
 fn run_akh_acp(current_ws: &str, action: AkhAction) -> Result<()> {
+    let ws = current_ws.to_string();
     let (method, params): (&str, serde_json::Value) = match action {
-        AkhAction::Snapshot { workspace } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
-            ("_akh/akh/snapshot", serde_json::json!({ "workspace": ws }))
-        }
-        AkhAction::Wake { workspace } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
-            ("_akh/akh/wake", serde_json::json!({ "workspace": ws }))
-        }
-        AkhAction::Sleep { workspace } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
-            ("_akh/akh/sleep", serde_json::json!({ "workspace": ws }))
-        }
-        AkhAction::Relocate { workspace } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
-            ("_akh/akh/relocate", serde_json::json!({ "workspace": ws }))
-        }
+        AkhAction::Snapshot => ("_akh/akh/snapshot", serde_json::json!({ "workspace": ws })),
+        AkhAction::Wake => ("_akh/akh/wake", serde_json::json!({ "workspace": ws })),
+        AkhAction::Sleep => ("_akh/akh/sleep", serde_json::json!({ "workspace": ws })),
+        AkhAction::Relocate => ("_akh/akh/relocate", serde_json::json!({ "workspace": ws })),
     };
     let result = acp_call(method, params)?;
     print_acp(&result)
@@ -1021,10 +1059,14 @@ enum WorkspaceAction {
         #[arg(long)]
         role: Option<String>,
     },
-    /// Delete a workspace and all its data.
+    /// Delete a workspace and all its data. Destructive and irreversible —
+    /// requires `--yes` or an interactive confirmation.
     Delete {
         /// Workspace name.
         name: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
     /// Show workspace info.
     Info {
@@ -1081,6 +1123,11 @@ enum ConfigAction {
         #[arg(long)]
         file: PathBuf,
     },
+    /// List every `AKH_*` environment variable akh-medu recognizes, with its
+    /// description, default, and whether it's currently set (secret-looking
+    /// names — KEY/TOKEN/SECRET — are masked, never printed). Local: does not
+    /// talk to a daemon.
+    Env,
 }
 
 fn main() -> Result<()> {
@@ -1123,7 +1170,10 @@ fn main() -> Result<()> {
 
         Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
 
-        Commands::Config { action } => run_config_acp(action)?,
+        Commands::Config { action } => match action {
+            ConfigAction::Env => dispatch_config_env()?,
+            other => run_config_acp(other)?,
+        },
 
         Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
 
@@ -1283,8 +1333,8 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             let result = acp_call("_akh/schema/list", serde_json::json!({}))?;
             print_acp(&result)?;
         }
-        SchemaAction::Install { pack, workspace } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+        SchemaAction::Install { pack } => {
+            let ws = current_ws.to_string();
             let (name, version) = match pack.split_once('@') {
                 Some((n, v)) => (n.to_string(), Some(v.to_string())),
                 None => (pack, None),
@@ -1297,32 +1347,26 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             let result = acp_call("_akh/schema/install", params)?;
             print_acp(&result)?;
         }
-        SchemaAction::Coverage { workspace, top } => {
+        SchemaAction::Coverage { top } => {
             // Data-plane op (per-workspace read of the live KG, not the
             // server-wide registry) — routed like `_akh/workspace/status`,
-            // with the `workspace` params field selecting the `-w` akh
-            // (defaults to the bound daemon workspace when omitted; we pass
-            // `--workspace`/`cli.workspace` explicitly so `akh -w foo schema
-            // coverage` targets the right akh from a multi-akh daemon).
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            // with the `workspace` params field selecting the `-w` akh so
+            // `akh -w foo schema coverage` targets the right akh from a
+            // multi-akh daemon.
+            let ws = current_ws.to_string();
             let params = serde_json::json!({ "workspace": ws, "top_n": top });
             let result = acp_call("_akh/schema/coverage", params)?;
             print_acp(&result)?;
         }
-        SchemaAction::Proposals { workspace } => {
+        SchemaAction::Proposals => {
             // Data-plane op (per-workspace read), same shape as `Coverage`.
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+            let ws = current_ws.to_string();
             let params = serde_json::json!({ "workspace": ws });
             let result = acp_call("_akh/schema/proposals", params)?;
             print_acp(&result)?;
         }
-        SchemaAction::Promote {
-            id,
-            workspace,
-            yes,
-            confirmed_by,
-        } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+        SchemaAction::Promote { id, yes, confirmed_by } => {
+            let ws = current_ws.to_string();
             // Print the pending proposal first, so the human confirming
             // promotion sees exactly what they are about to admit — same
             // shape as `Admit`'s local-decode-then-print step.
@@ -1368,12 +1412,8 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             let result = acp_call("_akh/schema/promote", params)?;
             print_acp(&result)?;
         }
-        SchemaAction::Reject {
-            id,
-            workspace,
-            reason,
-        } => {
-            let ws = workspace.unwrap_or_else(|| current_ws.to_string());
+        SchemaAction::Reject { id, reason } => {
+            let ws = current_ws.to_string();
             let params = serde_json::json!({ "workspace": ws, "id": id, "reason": reason });
             let result = acp_call("_akh/schema/reject", params)?;
             print_acp(&result)?;
@@ -1412,6 +1452,7 @@ fn dispatch_service(action: ServiceAction) -> Result<()> {
             println!("Service: {}", config.label);
             println!("  Loaded:      {}", st.loaded);
             println!("  Running:     {}", st.running);
+            println!("  ACP answering: {}", st.acp_answering);
             if let Some(pid) = st.pid {
                 println!("  PID:         {pid}");
             }
@@ -1419,6 +1460,18 @@ fn dispatch_service(action: ServiceAction) -> Result<()> {
                 println!("  Last exit:   {exit}");
             }
             println!("  Plist:       {}", config.plist_path.display());
+            if st.running && !st.acp_answering {
+                println!(
+                    "  Note: launchd reports the process running but its ACP socket is \
+                     not answering — the daemon may still be starting, or its bind failed \
+                     (check the stderr log)."
+                );
+            } else if !st.loaded && st.acp_answering {
+                println!(
+                    "  Note: a daemon is answering on the ACP socket but is not managed \
+                     by launchd (started manually?)."
+                );
+            }
         }
         ServiceAction::Uninstall => {
             let config = service::default_config(None).into_diagnostic()?;
@@ -1433,6 +1486,59 @@ fn dispatch_service(action: ServiceAction) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Dispatch `akh config env`: list every recognized `AKH_*` environment
+/// variable with its description, default, and current status. Reads
+/// `akh_medu::config::env_var_registry()` — local, no daemon/ACP involved.
+/// Secret-looking names (KEY/TOKEN/SECRET) never have their value printed.
+///
+/// `akh_medu::config` is gated behind the `daemon` feature; a build without
+/// it gets a clear, compile-working fallback below instead of a link error.
+#[cfg(feature = "daemon")]
+fn dispatch_config_env() -> Result<()> {
+    let registry = akh_medu::config::env_var_registry();
+
+    println!(
+        "{:<32} {:<8} {:<24} {}",
+        "NAME", "STATUS", "VALUE", "DESCRIPTION"
+    );
+    for spec in registry {
+        let name = spec.name;
+        let description = spec.description;
+        let default = spec.default;
+        let looks_secret = ["KEY", "TOKEN", "SECRET"]
+            .iter()
+            .any(|marker| name.contains(marker));
+        match std::env::var(name) {
+            Ok(_) if looks_secret => {
+                println!(
+                    "{:<32} {:<8} {:<24} {}",
+                    name, "set", "***masked***", description
+                );
+            }
+            Ok(value) => {
+                println!("{:<32} {:<8} {:<24} {}", name, "set", value, description);
+            }
+            Err(_) => {
+                let default_display = format!("(default: {default})");
+                println!(
+                    "{:<32} {:<8} {:<24} {}",
+                    name, "unset", default_display, description
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "daemon"))]
+fn dispatch_config_env() -> Result<()> {
+    miette::bail!(
+        "`akh config env` requires building `akh` with --features daemon (or server) — \
+         the environment-variable registry lives in the daemon-gated config module."
+    )
 }
 
 /// Dispatch `akh setup` subcommands. Works without an Engine.
