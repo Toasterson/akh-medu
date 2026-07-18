@@ -48,6 +48,17 @@ The 350M run sits at step 5, **behind** the cheap ablations — the same discipl
 
 Nulls are results (house rule): a flat capacity slope on rules is a real finding about deductive reasoning's floor at ≤100M and reshapes the 350M target rather than wasting its compute.
 
+## Slice-2 ablation results (2026-07-18) → 350M GO, with an LR caveat
+
+The 11M ablations ran (full data + tables in `runs/p4-ablation-RESULT-2026-07-13.md`, gitignored). Verdicts:
+
+- **Q4 — rule-based gate: MET, strong.** The 11M organ does near-perfect in-distribution first-order modus ponens over *in-prompt* rules: `select`/`fire` → 1.000, **`chain` 0.918**, answer 0.992 (converged ~step 7500). The capability jump past graph-walking is real at 11M.
+- **Q2 — sort determinative (typed `x1·SORT` vs bare `x1`): NULL under full information; typing KEPT by decision.** Matched runs are statistically identical (typed chain 0.918 vs bare 0.934, bare marginally ahead). Cause understood: in a fully-known corpus the coarse sort is *redundant with the fine predicate*, so the type-gate has nothing to prune. Typing is retained as a designed uncertainty-prior (its value is in unknown/open-world regimes this corpus doesn't exercise); **no retest** — decided on principle.
+- **Q5 — capacity ladder (11M→50M; 100M skipped): the length-generalization wall HOLDS.** len-gen `chain` = 0.000 at both 11M and 50M — capacity does not crack unseen-depth composition (fourth replication of "bounded depth learnable, unbounded = System-2's job"). Depth is architectural, not capacity-gated. *In-dist* slope is inconclusive: 50M was undertrained + LR-unstable (chain still climbing at step 15000, trace-validity depressed) — **not** a "bigger is worse" result.
+- **★ LR-AT-SCALE CAVEAT (the load-bearing carry-forward):** lr `3e-4` works at 11M but destabilizes 50M's trace-validity. **The 350M run must use a lower LR (~1e-4 or below) + warmup + cosine decay + more steps** — reusing 11M's recipe verbatim will reproduce the 50M instability. Bigger models are much slower/step (50M ~726ms vs 11M ~235ms) → plan **many-days on-and-off, checkpoint-resumable** training.
+
+**Status: cleared to build the 350M foundation in a fresh session.** Corpus/register/harness are proven (slice 1–2); gates Q2/Q4/Q5 understood; the only new tuning the scale-up needs is the LR schedule above. Operational rules learned: launch-verify by process+mtime (not deterministic log content); never run two GPU train jobs concurrently (hangs the card); eval has no KV-cache (keep eval-every high during training, precision eval at end).
+
 ## Out of scope (P5+)
 
 P6-proper broadcast-read + dual-substrate cost ledger (ADR 093); TMS/epistemic corpora (ADR-092 deferred set); RL post-SFT (ADR 087 curriculum); inter-akh Grug.
