@@ -84,6 +84,16 @@ impl ServerInfo {
 /// accepting connections, not merely that the PID exists. Since REST was retired
 /// (ADR-061 P8.4), ACP is the sole liveness signal — a record advertising no
 /// `acp_*` transport (a pre-ACP daemon) is treated as not discoverable.
+///
+/// A PID that's alive but whose transport never answers is ambiguous on a
+/// single probe (it could be mid-startup, between fork and ACP bind), so this
+/// doesn't delete the PID file on the first miss. Instead it counts
+/// consecutive failures in a sidecar marker (see [`record_stale_probe`]) and
+/// only retires the PID file once [`STALE_ACP_PROBE_THRESHOLD`] consecutive
+/// probes — necessarily spanning separate `discover_server` calls, i.e.
+/// separate CLI invocations, since the ACP bind takes milliseconds once a
+/// daemon is actually up — have failed. Until then it warns once per episode
+/// rather than on every command.
 pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
     let pid_path = paths.pid_file();
     let contents = match std::fs::read_to_string(&pid_path) {
@@ -105,23 +115,104 @@ pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
     if !process_alive(info.pid) {
         tracing::debug!(pid = info.pid, "stale PID file — process not alive, removing");
         let _ = std::fs::remove_file(&pid_path);
+        clear_stale_probe(&pid_path);
         return None;
     }
 
     // ACP-native liveness: probe the socket/TCP the daemon advertises.
     if acp_transport_alive(&info) {
+        clear_stale_probe(&pid_path);
         return Some(info);
     }
-    tracing::warn!(
-        pid = info.pid,
-        acp_socket = ?info.acp_socket,
-        acp_tcp = ?info.acp_tcp,
-        "akhomed process alive but no reachable ACP transport (advertised: \
-         socket={:?}, tcp={:?})",
-        info.acp_socket,
-        info.acp_tcp,
-    );
+
+    let failures = record_stale_probe(&pid_path);
+    if failures >= STALE_ACP_PROBE_THRESHOLD {
+        tracing::warn!(
+            pid = info.pid,
+            failures,
+            path = %pid_path.display(),
+            "akhomed PID file's process is alive but ACP has not answered in \
+             {failures} consecutive probes across separate invocations — \
+             treating it as stale and removing the PID file",
+        );
+        let _ = std::fs::remove_file(&pid_path);
+        clear_stale_probe(&pid_path);
+        return None;
+    }
+
+    // Only warn on the first miss of an episode; later probes within the
+    // grace window are logged at debug so a stuck daemon doesn't spam a
+    // warning on every subsequent command.
+    if failures <= 1 {
+        tracing::warn!(
+            pid = info.pid,
+            acp_socket = ?info.acp_socket,
+            acp_tcp = ?info.acp_tcp,
+            "akhomed process alive but no reachable ACP transport (advertised: \
+             socket={:?}, tcp={:?}) — will retire the PID file after {} \
+             consecutive failed probes",
+            info.acp_socket,
+            info.acp_tcp,
+            STALE_ACP_PROBE_THRESHOLD,
+        );
+    } else {
+        tracing::debug!(
+            pid = info.pid,
+            failures,
+            threshold = STALE_ACP_PROBE_THRESHOLD,
+            "akhomed process alive but ACP still unreachable (repeat probe)",
+        );
+    }
     None
+}
+
+/// Consecutive failed ACP-liveness probes (PID alive, transport unreachable)
+/// [`discover_server`] tolerates before concluding a PID file is stale and
+/// removing it. See [`discover_server`] for the rationale.
+const STALE_ACP_PROBE_THRESHOLD: u32 = 3;
+
+/// Sidecar marker tracking consecutive failed ACP-liveness probes for a given
+/// PID file. Discovery calls are one-shot CLI invocations with no shared
+/// in-process state, so the failure count has to persist to disk to be
+/// visible across "N failed probes" — same directory as the PID file, same
+/// lifecycle.
+#[derive(Debug, Serialize, Deserialize)]
+struct StaleProbeMarker {
+    /// Consecutive failed probes so far in the current episode.
+    count: u32,
+}
+
+/// Path to `pid_path`'s stale-probe marker (`<pid_file>.stale-probes`).
+fn stale_probe_marker_path(pid_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = pid_path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_else(|| std::ffi::OsString::from("akhomed.pid"));
+    name.push(".stale-probes");
+    pid_path.with_file_name(name)
+}
+
+/// Record one more failed ACP-liveness probe for `pid_path` and return the
+/// updated consecutive-failure count. Best-effort: a marker read/write
+/// failure just restarts the count at 1 rather than erroring — this is
+/// diagnostic bookkeeping, not correctness-critical state.
+fn record_stale_probe(pid_path: &std::path::Path) -> u32 {
+    let marker_path = stale_probe_marker_path(pid_path);
+    let count = std::fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<StaleProbeMarker>(&s).ok())
+        .map_or(0, |m| m.count)
+        + 1;
+    if let Ok(json) = serde_json::to_string(&StaleProbeMarker { count }) {
+        let _ = std::fs::write(&marker_path, json);
+    }
+    count
+}
+
+/// Clear `pid_path`'s stale-probe marker (transport answered again, or the
+/// PID file itself was just removed).
+fn clear_stale_probe(pid_path: &std::path::Path) {
+    let _ = std::fs::remove_file(stale_probe_marker_path(pid_path));
 }
 
 /// Probe whether the daemon's ACP transport is accepting connections.
@@ -135,7 +226,7 @@ fn acp_transport_alive(info: &ServerInfo) -> bool {
 
     #[cfg(unix)]
     if let Some(sock) = &info.acp_socket
-        && std::os::unix::net::UnixStream::connect(sock).is_ok()
+        && unix_socket_has_listener(std::path::Path::new(sock))
     {
         return true;
     }
@@ -148,6 +239,25 @@ fn acp_transport_alive(info: &ServerInfo) -> bool {
         return true;
     }
 
+    false
+}
+
+/// True if a process is actively accepting connections on the given Unix
+/// socket path. Connect-and-drop performs no ACP handshake — the server's
+/// per-connection task tolerates an immediate disconnect (it just ends) — so
+/// this is a pure liveness probe, safe to call speculatively.
+///
+/// Shared by [`discover_server`]'s ACP-native liveness check and by
+/// akhomed's single-instance startup guard: a socket *file* on disk proves
+/// nothing (crashes and unclean shutdowns leave it behind), only a live
+/// listener does.
+#[cfg(unix)]
+pub fn unix_socket_has_listener(path: &std::path::Path) -> bool {
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+#[cfg(not(unix))]
+pub fn unix_socket_has_listener(_path: &std::path::Path) -> bool {
     false
 }
 
@@ -348,6 +458,77 @@ mod tests {
         assert!(
             discover_server(&paths).is_none(),
             "a dead ACP socket must not be discovered even with a live PID"
+        );
+    }
+
+    /// A single dead-transport probe must not delete the PID file — it could
+    /// just be a startup race — but `STALE_ACP_PROBE_THRESHOLD` consecutive
+    /// failures across separate `discover_server` calls means the PID file
+    /// (and its stale-probe marker) get retired automatically instead of
+    /// warning forever.
+    #[cfg(unix)]
+    #[test]
+    fn discover_removes_stale_pid_file_after_repeated_dead_probes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let paths = test_paths(&runtime_dir);
+
+        let dead = tmp.path().join("nobody.sock");
+        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
+            .expect("write pid");
+
+        for _ in 0..STALE_ACP_PROBE_THRESHOLD - 1 {
+            assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+            assert!(
+                paths.pid_file().exists(),
+                "PID file must survive fewer than {STALE_ACP_PROBE_THRESHOLD} failed probes"
+            );
+        }
+
+        // The threshold-th consecutive failure retires the artifact.
+        assert!(discover_server(&paths).is_none());
+        assert!(
+            !paths.pid_file().exists(),
+            "PID file must be removed after {STALE_ACP_PROBE_THRESHOLD} consecutive \
+             failed ACP probes"
+        );
+        assert!(
+            !stale_probe_marker_path(&paths.pid_file()).exists(),
+            "stale-probe marker must be cleaned up alongside the PID file"
+        );
+    }
+
+    /// A transport that recovers before the threshold clears the marker
+    /// instead of carrying a stale failure count into a later, unrelated
+    /// episode.
+    #[cfg(unix)]
+    #[test]
+    fn discover_clears_stale_probe_marker_on_recovery() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let paths = test_paths(&runtime_dir);
+
+        let dead = tmp.path().join("nobody.sock");
+        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
+            .expect("write pid");
+        assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+        assert!(
+            stale_probe_marker_path(&paths.pid_file()).exists(),
+            "one failed probe must record a marker"
+        );
+
+        // Now advertise a live socket and re-discover.
+        let sock = tmp.path().join("acp.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind socket");
+        write_pid_file(&paths, 8200, "127.0.0.1", Some(sock.to_str().unwrap()), None)
+            .expect("rewrite pid");
+
+        assert!(discover_server(&paths).is_some(), "live transport ⇒ Some");
+        assert!(
+            !stale_probe_marker_path(&paths.pid_file()).exists(),
+            "a successful probe must clear the stale-probe marker"
         );
     }
 

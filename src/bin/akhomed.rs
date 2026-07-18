@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use miette::Diagnostic;
+use thiserror::Error;
 use tokio::sync::RwLock;
 
 use akh_medu::agent::trigger::TriggerStore;
@@ -1992,12 +1994,55 @@ impl akh_medu::acp::ServerControl for ServerState {
                     let value = serde_json::to_value(&*config).map_err(|e| e.to_string())?;
                     Ok(serde_json::json!({ "config": value }))
                 }
+                // `config/set` merges by default: each top-level table present in
+                // `config` (daemon/extraction/upstreams/acp/postgres) overwrites
+                // that table in the currently persisted config; tables the caller
+                // omits are left untouched. This is what stops a partial payload
+                // (e.g. just `{"acp": {...}}`) from silently resetting unrelated
+                // sections — postgres in particular — to their type defaults on
+                // next start. Pass `"replace": true` to opt into the old
+                // wholesale-replace behavior (the payload becomes the entire
+                // config verbatim, missing tables reset to defaults).
                 "config/set" => {
                     let cfg_val = params.get("config").ok_or_else(|| {
-                        "missing required param: config (the full AkhomedConfig object)".to_string()
+                        "missing required param: config (a full or partial AkhomedConfig \
+                         object — top-level tables only, merged by default; pass \
+                         \"replace\": true for wholesale replace)"
+                            .to_string()
                     })?;
-                    let new_config: AkhomedConfig = serde_json::from_value(cfg_val.clone())
-                        .map_err(|e| format!("invalid config payload: {e}"))?;
+                    let replace = params
+                        .get("replace")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+
+                    let new_config: AkhomedConfig = if replace {
+                        serde_json::from_value(cfg_val.clone())
+                            .map_err(|e| format!("invalid config payload: {e}"))?
+                    } else {
+                        let current = self.config.read().await.clone();
+                        let mut merged = serde_json::to_value(&current)
+                            .map_err(|e| format!("failed to snapshot current config: {e}"))?;
+                        match (&mut merged, cfg_val) {
+                            (
+                                serde_json::Value::Object(merged_map),
+                                serde_json::Value::Object(incoming_map),
+                            ) => {
+                                for (key, value) in incoming_map {
+                                    merged_map.insert(key.clone(), value.clone());
+                                }
+                            }
+                            _ => {
+                                return Err(
+                                    "config payload must be a JSON/TOML object of top-level \
+                                     sections (daemon, extraction, upstreams, acp, postgres)"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        serde_json::from_value(merged)
+                            .map_err(|e| format!("invalid config payload after merge: {e}"))?
+                    };
+
                     let config_path = self.paths.global_config_file();
                     new_config
                         .save(&config_path)
@@ -2005,10 +2050,11 @@ impl akh_medu::acp::ServerControl for ServerState {
                     *self.config.write().await = new_config.clone();
                     tracing::info!(
                         path = %config_path.display(),
+                        replace,
                         "config updated via ACP control-plane"
                     );
                     let value = serde_json::to_value(&new_config).map_err(|e| e.to_string())?;
-                    Ok(serde_json::json!({ "config": value }))
+                    Ok(serde_json::json!({ "config": value, "replace": replace }))
                 }
 
                 // ── model group (per-akh model + reasoning effort) ────────
@@ -2208,6 +2254,72 @@ impl akh_medu::acp::ServerControl for ServerState {
     }
 }
 
+/// Fatal errors that abort daemon startup before the async runtime settles
+/// into normal operation. akhomed has no supervisor above it besides
+/// launchd/systemd restart policies, so these are rendered as full miette
+/// diagnostics to stderr (captured in the service log) and exit the process —
+/// there is nothing left to fall back to.
+#[derive(Debug, Error, Diagnostic)]
+enum StartupError {
+    /// `AKH_SERVER_PORT` didn't parse. This used to `.expect()`-panic, which
+    /// under launchd's `KeepAlive` reads as a silent crash-loop with the real
+    /// cause buried in a raw Rust panic message in the stderr log.
+    #[error("AKH_SERVER_PORT={value:?} is not a valid TCP port")]
+    #[diagnostic(
+        code(akh::daemon::invalid_port),
+        help(
+            "AKH_SERVER_PORT must be an integer in 0..=65535 (e.g. `AKH_SERVER_PORT=8200`). \
+             Unset the variable to use the default port 8200."
+        )
+    )]
+    InvalidPort {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+
+    /// Single-instance guard: another akhomed is already accepting
+    /// connections on the ACP Unix socket this instance would bind.
+    #[error("another akhomed is already serving ACP on {socket}")]
+    #[diagnostic(
+        code(akh::daemon::already_running),
+        help(
+            "A live daemon ({owner}) is still accepting connections on this socket, so \
+             it was not reclaimed. Stop it first (`akh service stop`, or `kill <pid>`), \
+             or run this instance against a different socket via `acp.socket_path` in \
+             config.toml / `AKH_ACP_SOCKET`."
+        )
+    )]
+    AlreadyRunning { socket: String, owner: String },
+}
+
+/// Best-effort description of who owns a live socket, for the
+/// [`StartupError::AlreadyRunning`] diagnostic. Reads the discovery PID file
+/// (written by [`akh_medu::client::write_pid_file`] at startup) and reports
+/// the PID it recorded; the socket connect already proved *something* is
+/// listening; this is purely to make the message actionable.
+fn describe_socket_owner(paths: &AkhPaths) -> String {
+    std::fs::read_to_string(paths.pid_file())
+        .ok()
+        .and_then(|contents| serde_json::from_str::<akh_medu::client::ServerInfo>(&contents).ok())
+        .map(|info| format!("pid {}", info.pid))
+        .unwrap_or_else(|| "pid unknown — no readable PID file".to_string())
+}
+
+/// True if the discovery PID file currently names *this* process as the
+/// owner. Consulted at shutdown before unlinking the shared socket/PID
+/// artifacts: if a second `akhomed` raced in (started while this one was
+/// still up, or during our own drain), it will have overwritten the PID file
+/// with its own `std::process::id()` on startup, and this instance must not
+/// then rip the artifacts out from under it on the way down. A missing or
+/// unparseable PID file is treated as "not ours" — nothing to reclaim.
+fn owns_pid_file(paths: &AkhPaths) -> bool {
+    std::fs::read_to_string(paths.pid_file())
+        .ok()
+        .and_then(|contents| serde_json::from_str::<akh_medu::client::ServerInfo>(&contents).ok())
+        .is_some_and(|info| info.pid == std::process::id())
+}
+
 /// Bring up the ACP transport (Unix socket + optional TCP) for one workspace,
 /// serving alongside the REST/WS server during the migration to ACP-only.
 ///
@@ -2216,6 +2328,11 @@ impl akh_medu::acp::ServerControl for ServerState {
 /// discovery record; the handles are joined on shutdown. A failure to open the
 /// workspace or bind a listener disables that transport and is logged, never
 /// fatal — the daemon still serves REST.
+///
+/// Exception: if the Unix socket already has a live listener (a sibling
+/// akhomed still running), this refuses to steal it — see the single-instance
+/// guard note inline — and exits the whole process rather than limping along
+/// with a half-started daemon that shares no transport with `akh` clients.
 #[cfg(feature = "acp")]
 async fn start_acp_server(
     state: Arc<ServerState>,
@@ -2260,7 +2377,23 @@ async fn start_acp_server(
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| paths.runtime_dir.join("akhomed-acp.sock"));
-        // Clear a stale socket so bind() doesn't fail with EADDRINUSE.
+
+        // Single-instance guard: a socket file on disk proves nothing (a
+        // prior crash or unclean shutdown leaves one behind), so probe for a
+        // live listener before reclaiming it. Only bind-stealing an *actually
+        // serving* sibling daemon is fatal — that would silently split the
+        // workspace across two processes each thinking they own its
+        // redb/PG locks.
+        if akh_medu::client::unix_socket_has_listener(&sock) {
+            let err = StartupError::AlreadyRunning {
+                socket: sock.display().to_string(),
+                owner: describe_socket_owner(paths),
+            };
+            eprintln!("{:?}", miette::Report::new(err));
+            std::process::exit(1);
+        }
+        // Clear a stale (dead-listener, or never-bound) socket so bind()
+        // doesn't fail with EADDRINUSE.
         let _ = std::fs::remove_file(&sock);
         match tokio::net::UnixListener::bind(&sock) {
             Ok(listener) => {
@@ -2463,7 +2596,17 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let port_num: u16 = port.parse().expect("AKH_SERVER_PORT must be a valid u16");
+    let port_num: u16 = match port.parse() {
+        Ok(p) => p,
+        Err(source) => {
+            let err = StartupError::InvalidPort {
+                value: port.clone(),
+                source,
+            };
+            eprintln!("{:?}", miette::Report::new(err));
+            std::process::exit(1);
+        }
+    };
 
     // Load global config from $XDG_CONFIG_HOME/akh-medu/config.toml.
     // Creates a default config file on first boot.
@@ -2769,7 +2912,19 @@ async fn main() {
             let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
         }
         if let Some(path) = acp_socket_path {
-            let _ = std::fs::remove_file(path);
+            // Only unlink the socket if the PID file still names us as
+            // owner — a colliding second instance may have claimed both
+            // artifacts already (the single-instance guard in
+            // `start_acp_server` prevents the common case, but this covers
+            // the race where it started between our probe and our bind).
+            if owns_pid_file(&paths_for_shutdown) {
+                let _ = std::fs::remove_file(path);
+            } else {
+                tracing::warn!(
+                    socket = %path,
+                    "not removing ACP socket on shutdown — PID file now names a different owner"
+                );
+            }
         }
     }
 
@@ -2796,7 +2951,11 @@ async fn main() {
     tracing::info!("draining WAL flushers");
     state_for_shutdown.shutdown_wals().await;
 
-    akh_medu::client::remove_pid_file(&paths_for_shutdown);
+    if owns_pid_file(&paths_for_shutdown) {
+        akh_medu::client::remove_pid_file(&paths_for_shutdown);
+    } else {
+        tracing::warn!("not removing PID file on shutdown — owned by a different process");
+    }
 
     // abort() only cancels at .await points. Daemon tasks run sync CPU work
     // that never yields, so abort alone won't stop them. Force exit after a
@@ -2806,8 +2965,13 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // Belt-and-suspenders: clean up PID file on normal exit too.
-    akh_medu::client::remove_pid_file(&paths);
+    // Belt-and-suspenders: clean up PID file on normal exit too (already
+    // removed above in the common case; this only fires if the first call's
+    // ownership check raced against a startup collision resolving in our
+    // favour in the interim — cheap enough to just check again).
+    if owns_pid_file(&paths) {
+        akh_medu::client::remove_pid_file(&paths);
+    }
 }
 
 // ── ACP control-plane (`ServerControl for ServerState`) ─────────────────────
@@ -2930,6 +3094,60 @@ mod control_plane_tests {
         // set without a `config` param → error (never silently resets).
         let bad = state.dispatch("_akh/config/set", &json!({})).await;
         assert!(bad.is_err(), "config/set without config payload must error");
+    }
+
+    #[tokio::test]
+    async fn control_config_set_merges_by_default() {
+        let (_tmp, state) = temp_state();
+
+        // Establish a baseline with a postgres section set.
+        let baseline = AkhomedConfig {
+            postgres: Some(akh_medu::config::PostgresConfig {
+                url: "postgres://baseline/db".into(),
+                pool_size: 10,
+                connect_timeout_secs: 10,
+                migrate_on_start: false,
+                wal_flush_interval_secs: 2,
+                wal_batch_size: 64,
+                wal_max_buffer_mb: 16,
+                snapshot_interval_secs: 300,
+            }),
+            ..Default::default()
+        };
+        state
+            .dispatch("_akh/config/set", &json!({ "config": baseline }))
+            .await
+            .expect("baseline set ok");
+
+        // A partial payload touching only `acp` must not wipe `postgres`.
+        let partial = state
+            .dispatch(
+                "_akh/config/set",
+                &json!({ "config": { "acp": { "tcp_port": 9100 } } }),
+            )
+            .await
+            .expect("partial merge set ok");
+        assert_eq!(partial["config"]["acp"]["tcp_port"], 9100);
+        assert_eq!(
+            partial["config"]["postgres"]["url"], "postgres://baseline/db",
+            "partial config/set must merge at the table level, not reset \
+             unrelated sections: {partial}"
+        );
+
+        // `replace: true` opts into the old wholesale-replace behavior: a
+        // payload that omits `postgres` resets it to the type default (None).
+        let replaced = state
+            .dispatch(
+                "_akh/config/set",
+                &json!({ "config": { "acp": { "tcp_port": 9200 } }, "replace": true }),
+            )
+            .await
+            .expect("replace set ok");
+        assert_eq!(replaced["config"]["acp"]["tcp_port"], 9200);
+        assert!(
+            replaced["config"]["postgres"].is_null(),
+            "replace: true must reset omitted sections to defaults: {replaced}"
+        );
     }
 
     #[tokio::test]
