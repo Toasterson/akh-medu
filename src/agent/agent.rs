@@ -1665,6 +1665,20 @@ impl Agent {
     }
 
     /// Register a custom tool.
+    ///
+    /// Deliberately does **not** call [`Self::seed_tool_graph_and_live_view`]
+    /// (the KG reconciliation path) — only [`Self::sync_live_tools`], which
+    /// updates the engine's live-tool view. Callers of `register_tool` are
+    /// almost always registering *session-scoped* tools (e.g. MCP servers
+    /// pushed over ACP for one prompt turn — see `mcp_bridge`), which are
+    /// only ever meant to be locally callable for the lifetime of that
+    /// session and must not become durable, peer-visible entries in the KG's
+    /// tool-manifest projection. Compile-time/build-provided tools go through
+    /// [`Self::seed_tool_graph_and_live_view`] at construction instead, which
+    /// *does* reconcile the KG. This keeps `tool_query`'s scoped answer
+    /// ("which tools may agent X invoke?", answered from the KG — see
+    /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
+    /// per-turn session tools, only its durable ones.
     pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.register(tool);
         self.sync_live_tools();

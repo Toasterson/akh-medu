@@ -114,6 +114,13 @@ enum TurnStop {
     Timeout,
     /// Repeated an identical `(tool, args)` call past the repeat limit.
     RepeatLoop,
+    /// The caller's cancel flag was set (the ACP idle watchdog gave up on
+    /// this turn and already answered the client) — see the `cancel` param
+    /// on [`Agent::run_agentic_turn`]. Unlike the other variants, this stop
+    /// skips the forced-synthesis round entirely: nobody is waiting on the
+    /// answer, and issuing one more model call would only delay releasing
+    /// the agent lock that a wedged turn is holding.
+    Cancelled,
 }
 
 impl TurnStop {
@@ -122,6 +129,7 @@ impl TurnStop {
             TurnStop::IterationCap => "You have reached your tool-call limit",
             TurnStop::Timeout => "You have reached your time budget",
             TurnStop::RepeatLoop => "You are repeating the same tool call without progress",
+            TurnStop::Cancelled => "This turn was cancelled",
         }
     }
 }
@@ -257,12 +265,22 @@ impl Agent {
     /// [`spawn_blocking`](tokio::task::spawn_blocking) turn while the agent
     /// `Mutex` is held does not violate ADR-027 — no guard ever crosses an
     /// `.await`.
+    ///
+    /// `cancel` is checked once at the top of every round (between model
+    /// calls, never mid-call): when set, the loop stops immediately without
+    /// spending a final tool-free synthesis round, so the ACP idle watchdog
+    /// (which sets it once it gives up waiting on this turn) can reclaim the
+    /// agent lock as soon as the in-flight round returns instead of the
+    /// worker running unattended for the rest of the turn's budget. A caller
+    /// with no cancellation source (e.g. tests, the symbolic pipeline's
+    /// callers) passes a flag that is never set.
     pub fn run_agentic_turn(
         &mut self,
         engine: &Engine,
         agent_id: &str,
         user_prompt: &str,
         sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
     ) -> Option<()> {
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
@@ -411,6 +429,9 @@ impl Agent {
             if let Some(stop) = budget.exhausted() {
                 break stop;
             }
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break TurnStop::Cancelled;
+            }
             // Stream this round. Content deltas become live answer text, thinking
             // deltas become live reasoning. `used_fallback` records whether the
             // streaming path failed and we silently retried non-streaming — in
@@ -513,6 +534,21 @@ impl Agent {
                 conversation.push(json!({"role": "tool", "content": outcome.result}));
             }
         };
+
+        // Cancelled (the ACP idle watchdog already gave up and answered the
+        // client): stop right here rather than spending one more model round
+        // nobody is waiting on — this is exactly what unwedges the worker
+        // that (a) of the turn-wedge fix targets. `sink.emit` further down is
+        // harmless even if the client's drain loop has already returned (a
+        // closed channel just drops the message), but we skip it entirely
+        // since there is nothing meaningful left to narrate.
+        if stop == TurnStop::Cancelled {
+            tracing::warn!(
+                agent_id,
+                "agentic turn cancelled (idle watchdog); ending without forced synthesis"
+            );
+            return Some(());
+        }
 
         // Budget exhausted — force one tool-free synthesis ("reflect and answer")
         // so the turn returns the best answer it can from what it gathered, rather
@@ -1339,5 +1375,103 @@ mod tests {
         unsafe {
             std::env::remove_var("AKH_AGENT_VALUE_GROUND");
         }
+    }
+
+    // --- turn-wedge fix: `cancel` is polled once per round ---
+
+    /// A fake [`ChatBackend`](crate::agent::chat_backend::ChatBackend) that
+    /// always requests one `echo` tool call (never volunteering a final
+    /// answer on its own), so the agentic loop would otherwise keep going
+    /// until [`RoundBudget`] is exhausted. Counts its own invocations and,
+    /// optionally, flips a shared flag right after its first call — used to
+    /// simulate the ACP idle watchdog setting `cancel` while a round is
+    /// in flight.
+    struct ToolLoopBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        flip_after_first_call: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for ToolLoopBackend {
+        fn label(&self) -> &str {
+            "fake-tool-loop"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            _tools: &[Value],
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                if let Some(flag) = &self.flip_after_first_call {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: String::new(),
+                tool_calls: vec![crate::agent::ollama::ToolCall {
+                    name: "echo".into(),
+                    arguments: json!({"text": "hi"}),
+                }],
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A turn whose `cancel` flag is already set before the first round must
+    /// stop immediately, calling the model zero times — the "watchdog fired
+    /// before the worker even started its first round" edge of the turn-wedge
+    /// fix (part (a): `AkhAcpAgent::run_turn` → `Agent::run_agentic_turn`).
+    #[test]
+    fn run_agentic_turn_returns_immediately_when_cancel_already_set() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
+            calls: calls.clone(),
+            flip_after_first_call: None,
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel);
+        assert_eq!(result, Some(()));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a pre-cancelled turn must never call the model"
+        );
+    }
+
+    /// A turn cancelled *while a round is in flight* must stop at the next
+    /// round boundary — one model call (the round already started), then no
+    /// more, and critically no forced-synthesis round either (which would
+    /// otherwise show up as a second call with an empty tool catalog). This
+    /// is the scenario the ACP idle watchdog drives in production: it sets
+    /// `cancel` from another task while the blocking worker is mid-call.
+    #[test]
+    fn run_agentic_turn_stops_at_next_round_boundary_once_cancelled() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
+            calls: calls.clone(),
+            flip_after_first_call: Some(cancel.clone()),
+        }));
+        let sink = crate::message::VecSink::new();
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel);
+        assert_eq!(result, Some(()));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "must stop at the next round boundary once cancelled — no second \
+             model round, and no forced-synthesis round either"
+        );
     }
 }

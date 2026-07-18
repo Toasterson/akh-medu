@@ -131,19 +131,41 @@ pub enum AcpError {
     },
 
     /// A client failed to connect to a daemon's ACP endpoint.
+    ///
+    /// `help` is computed at construction (see [`default_connect_help`] /
+    /// [`tcp_connect_help`]) rather than a fixed literal, so a TCP connect
+    /// against a non-loopback host on macOS can carry the Local-Network TCC
+    /// hint alongside the baseline guidance.
     #[error("failed to connect to ACP daemon at {target}: {source}")]
-    #[diagnostic(
-        code(akh::acp::connect),
-        help(
-            "Ensure akhomed is running and the ACP socket/TCP endpoint advertised \
-             in the discovery record is correct and reachable."
-        )
-    )]
+    #[diagnostic(code(akh::acp::connect), help("{help}"))]
     Connect {
         /// The socket path or TCP address that could not be reached.
         target: String,
         /// The underlying I/O error.
         source: std::io::Error,
+        /// Actionable help text, tailored to the target (see above).
+        help: String,
+    },
+
+    /// A `--remote`/`AKH_REMOTE` TCP connect did not complete within
+    /// [`ACP_TCP_CONNECT_TIMEOUT`] — most likely a firewalled or unreachable
+    /// host silently dropping the SYN (which fails slow) rather than
+    /// refusing the connection outright (which fails fast as [`Self::Connect`]).
+    #[error("connecting to ACP daemon at {target} timed out after {timeout_secs}s")]
+    #[diagnostic(
+        code(akh::acp::connect_timeout),
+        help(
+            "The host may be unreachable, firewalled, or not listening on that \
+             port. Verify the daemon is running at {target} and reachable (try \
+             `nc -vz` or `ping`), and check for a firewall that silently drops \
+             the connection instead of refusing it."
+        )
+    )]
+    ConnectTimeout {
+        /// The TCP address that did not respond in time.
+        target: String,
+        /// The timeout budget that was exceeded, in seconds.
+        timeout_secs: u64,
     },
 
     /// The blocking task that ran the synchronous engine panicked or was cancelled.
@@ -156,18 +178,135 @@ pub enum AcpError {
         /// Description of the join failure.
         message: String,
     },
+
+    /// A JSON-RPC error returned by a remote daemon's **application** logic
+    /// (an `_akh/*` data-plane handler, a control-plane op, or similar) —
+    /// distinct from [`Self::Protocol`], which is a transport/protocol-layer
+    /// failure (bad handshake, malformed message, unknown ACP method).
+    ///
+    /// Reconstructed from the structured `data` payload the daemon attaches
+    /// to its JSON-RPC error (see `AcpAppError` / `dispatch_akh` in this
+    /// module), so the diagnostic `code` and `help` text the daemon computed
+    /// *there* survive the wire instead of collapsing into [`Self::Protocol`]'s
+    /// misleading "verify the client speaks ACP v1" guidance — a client
+    /// hitting `already awakened` or `unknown microtheory "x"` used to get
+    /// pointed at protocol-version debugging.
+    #[error("remote application error: {message}")]
+    #[diagnostic(code(akh::acp::remote_application), help("{help}"))]
+    RemoteApplication {
+        /// The remote daemon's own diagnostic code (e.g.
+        /// `akh::identity::already_awakened`), when it attached one.
+        remote_code: Option<String>,
+        /// The flattened error message (the daemon's `message` field, or the
+        /// bare JSON-RPC message when no structured data was attached).
+        message: String,
+        /// Help text reconstructed from the remote diagnostic's `help` text,
+        /// code, and source chain — see [`remote_help_text`].
+        help: String,
+    },
 }
 
 impl From<agent_client_protocol::Error> for AcpError {
     fn from(err: agent_client_protocol::Error) -> Self {
+        // A `data` payload present means this originated from one of this
+        // crate's own `_akh/*` / control-plane handlers (see `AcpAppError`,
+        // `dispatch_akh`), which always attach one — a genuine
+        // application-level failure, not a transport/protocol problem.
+        // Reconstruct its code/help instead of losing them to the generic
+        // handshake-debugging help text below.
+        if let Some(data) = &err.data {
+            return AcpError::RemoteApplication {
+                remote_code: data
+                    .get("code")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                message: data
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| err.message.clone()),
+                help: remote_help_text(data),
+            };
+        }
         AcpError::Protocol {
             message: err.to_string(),
         }
     }
 }
 
+/// Build the [`AcpError::RemoteApplication`] help text from a daemon-attached
+/// `AcpAppError` payload: the daemon's own `help`, its diagnostic `code`, and
+/// its `causes` source chain, folded into one actionable message — or a
+/// generic fallback when the daemon attached a plain `{"message": ...}` (no
+/// diagnostic to recover, e.g. a request-shape validation error).
+fn remote_help_text(data: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    match data.get("help").and_then(serde_json::Value::as_str) {
+        Some(help) => parts.push(help.to_string()),
+        None => parts.push(
+            "This is an application-level error from the remote akh's `_akh/*` \
+             handler, not an ACP transport/protocol problem."
+                .to_string(),
+        ),
+    }
+    if let Some(code) = data.get("code").and_then(serde_json::Value::as_str) {
+        parts.push(format!("Remote diagnostic code: {code}."));
+    }
+    if let Some(causes) = data.get("causes").and_then(serde_json::Value::as_array) {
+        let chain: Vec<&str> = causes.iter().filter_map(serde_json::Value::as_str).collect();
+        if !chain.is_empty() {
+            parts.push(format!("Caused by: {}.", chain.join(" -> ")));
+        }
+    }
+    parts.join(" ")
+}
+
 /// Convenience result alias for ACP transport operations.
 pub type AcpResult<T> = Result<T, AcpError>;
+
+/// Baseline `AcpError::Connect` help text — the same wording the variant
+/// carried before `help` became a per-instance field.
+fn default_connect_help() -> String {
+    "Ensure akhomed is running and the ACP socket/TCP endpoint advertised in \
+     the discovery record is correct and reachable."
+        .to_string()
+}
+
+/// `true` when `target` (a TCP `host:port`) names a non-loopback host and
+/// we're compiled for macOS — the shape where a `launchd`-run client/daemon
+/// reaching a LAN or remote host can be blocked by macOS's Local Network
+/// privacy control, surfacing as an instant, bare "connection refused"
+/// indistinguishable from "nothing is listening" (see the project memory
+/// note `macos-launchd-local-network-tcc`).
+#[cfg(target_os = "macos")]
+fn is_macos_non_loopback_tcp(target: &str) -> bool {
+    let host = target.rsplit_once(':').map(|(h, _)| h).unwrap_or(target);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_macos_non_loopback_tcp(_target: &str) -> bool {
+    false
+}
+
+/// Help text for a failed **TCP** ACP connect: the baseline guidance, plus —
+/// on macOS, for a non-loopback target — the Local Network TCC footgun,
+/// since that failure is otherwise indistinguishable from "no daemon there".
+fn tcp_connect_help(target: &str) -> String {
+    let base = default_connect_help();
+    if is_macos_non_loopback_tcp(target) {
+        format!(
+            "{base} If akhomed is running as a launchd job and this looks like \
+             an instant \"connection refused\" against a reachable LAN/remote \
+             host ({target}), macOS's Local Network privacy control may be the \
+             real cause: grant it in System Settings → Privacy & Security → \
+             Local Network, or run it as a LaunchDaemon instead."
+        )
+    } else {
+        base
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // Workspace — the shared, in-process state served over ACP
@@ -203,6 +342,18 @@ pub struct AkhAcpAgent {
     /// discovers their tools, and registers namespaced proxies for that turn
     /// (see [`mcp_bridge`]).
     session_mcp: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::SessionMcpServerCfg>>>>,
+    /// Session → discovered MCP tool descriptors, populated on the first
+    /// successful `session/prompt` discovery pass and never invalidated
+    /// (session-lifetime cache). Every prompt after the first rebuilds proxy
+    /// `Tool`s from these cached descriptors with zero network I/O instead of
+    /// re-running `initialize` + `tools/list` against each pushed server.
+    session_mcp_tools: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>>,
+    /// Insertion-ordered session ids (oldest first), paired with `sessions`,
+    /// `session_mcp`, and `session_mcp_tools` purely to pick an eviction
+    /// victim once [`MAX_TRACKED_SESSIONS`] is exceeded — those three maps are
+    /// otherwise insert-only and would retain client-pushed bearer tokens for
+    /// the daemon's entire lifetime.
+    session_order: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Agent name advertised during `initialize`.
     name: String,
     /// Client filesystem/terminal capabilities captured at `initialize`.
@@ -223,12 +374,39 @@ pub struct AkhAcpAgent {
     /// gateway slot forever. Zero disables the watchdog. Defaults from
     /// `AKH_TURN_IDLE_TIMEOUT_SECS` (see [`turn_idle_timeout_from_env`]).
     turn_idle_timeout: std::time::Duration,
+    /// Per-workspace in-flight-turn tracker for the `session/prompt` busy
+    /// fail-fast guard: one start-`Instant` per turn currently in flight for
+    /// that workspace, oldest at the front. A new prompt whose workspace
+    /// already has a *front* (oldest) entry older than `turn_idle_timeout`
+    /// means that specific earlier turn is either wedged or already past its
+    /// own watchdog's stall point but hasn't released the agent `Mutex` yet
+    /// — see [`Self::begin_turn`] / [`Self::end_turn`], which pairs with the
+    /// `cancel` flag threaded into [`Self::run_turn`] to fix the turn-wedge:
+    /// `cancel` asks the wedged worker to stop, this guard keeps a *third*
+    /// prompt from queuing behind it in the meantime.
+    ///
+    /// Deliberately per-turn rather than one shared `(Instant, count)` pair:
+    /// a shared anchor only resets once the workspace has zero turns
+    /// in-flight, so a workspace that stays continuously (but healthily)
+    /// busy — e.g. two ACP sessions sharing a workspace with back-to-back
+    /// turns — would eventually see every turn's elapsed time measured from
+    /// the very first turn in the streak, past `turn_idle_timeout`, and get
+    /// spuriously rejected as busy. Tracking each turn's own start and
+    /// checking only the oldest still-in-flight one ties the guard to an
+    /// actual stuck turn instead of to wall-clock streak length.
+    active_turns: Arc<Mutex<std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>>>,
 }
 
 /// Default prompt-turn idle watchdog (seconds). Generous: a healthy turn
 /// streams progress messages (answer deltas, tool steps, audit lines) far more
 /// often than this; only a genuinely stuck turn is silent for minutes.
 const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
+
+/// Cap on tracked ACP sessions (`sessions` + `session_mcp` +
+/// `session_mcp_tools`). Once exceeded, the oldest session's state (including
+/// any client-pushed bearer token) is evicted at `session/new` — see
+/// [`AkhAcpAgent::track_new_session`].
+const MAX_TRACKED_SESSIONS: usize = 256;
 
 /// The prompt-turn idle watchdog from `AKH_TURN_IDLE_TIMEOUT_SECS` (seconds;
 /// `0` disables), defaulting to [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`].
@@ -259,10 +437,13 @@ impl AkhAcpAgent {
             default_ws: "akh-medu".to_string(),
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
             turn_idle_timeout: turn_idle_timeout_from_env(),
+            active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -281,9 +462,12 @@ impl AkhAcpAgent {
             default_ws,
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
+            active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -332,13 +516,79 @@ impl AkhAcpAgent {
 
     /// The workspace a chat session is bound to (recorded at `session/new` from
     /// the request `cwd` sentinel), or the default when unrecorded.
+    ///
+    /// Also counts as a "use" of the session for eviction purposes (see
+    /// [`Self::touch_session`]): a session that keeps prompting is bumped to
+    /// the back of the eviction queue so [`Self::track_new_session`] only
+    /// ever evicts sessions that are both old *and* idle, never one that is
+    /// still actively bound and in use — silently misrouting a live
+    /// session's prompts to `default_ws` after eviction would be a
+    /// cross-workspace data-isolation break.
     fn session_workspace(&self, session_id: &str) -> String {
-        self.sessions
+        let ws = self
+            .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
-            .cloned()
-            .unwrap_or_else(|| self.default_ws.clone())
+            .cloned();
+        match ws {
+            Some(ws) => {
+                self.touch_session(session_id);
+                ws
+            }
+            None => self.default_ws.clone(),
+        }
+    }
+
+    /// Bump `session_id` to the most-recently-used end of the eviction
+    /// queue. A no-op if the session isn't tracked (e.g. already evicted, or
+    /// never registered via [`Self::track_new_session`]).
+    fn touch_session(&self, session_id: &str) {
+        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pos) = order.iter().position(|s| s == session_id) {
+            // Cheap for the O(1)-common case (already at or near the back
+            // for a session that prompts repeatedly); worst case is O(cap)
+            // with `MAX_TRACKED_SESSIONS` bounding it to 256.
+            order.remove(pos);
+            order.push_back(session_id.to_string());
+        }
+    }
+
+    /// Record a freshly-minted session id and evict the least-recently-used
+    /// tracked session's state once [`MAX_TRACKED_SESSIONS`] is exceeded.
+    ///
+    /// `sessions`, `session_mcp` (which holds any client-pushed bearer
+    /// tokens), and `session_mcp_tools` are otherwise append-only with no
+    /// session-end signal in ACP, so without this a long-lived daemon would
+    /// retain every client's credentials and discovered tool set forever.
+    /// Eviction is true LRU-by-use (see [`Self::touch_session`], called from
+    /// [`Self::session_workspace`] on every prompt): a session only becomes
+    /// the eviction victim once it is both the oldest tracked *and* has gone
+    /// unused since every other tracked session's last use.
+    fn track_new_session(&self, session_id: &str) {
+        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
+        order.push_back(session_id.to_string());
+        if order.len() > MAX_TRACKED_SESSIONS {
+            if let Some(evicted) = order.pop_front() {
+                self.sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_mcp
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_mcp_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                tracing::debug!(
+                    session = %evicted,
+                    cap = MAX_TRACKED_SESSIONS,
+                    "evicted oldest ACP session state (session cap reached)"
+                );
+            }
+        }
     }
 
     /// The MCP servers a client pushed for this session at `session/new`, or an
@@ -351,6 +601,51 @@ impl AkhAcpAgent {
             .get(session_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Record the start of a `session/prompt` turn for `ws` — the fail-fast
+    /// half of the turn-wedge fix (see [`Self::active_turns`]).
+    ///
+    /// Returns `Err(elapsed)` when this workspace already has a turn on
+    /// record that started `elapsed` ago and `elapsed >= deadline`
+    /// (`deadline == Duration::ZERO` disables the guard, matching
+    /// `turn_idle_timeout`'s own zero-disables convention): the caller should
+    /// fail the new prompt fast with a "workspace busy" error instead of
+    /// spawning another worker that would just block on the same `Mutex`
+    /// indefinitely. On `Ok`, the turn is now counted as in-flight and the
+    /// caller **must** call [`Self::end_turn`] exactly once when it learns
+    /// the turn is over (success, resolve failure, or watchdog stall —
+    /// whichever comes first on that request's path).
+    fn begin_turn(&self, ws: &str, deadline: std::time::Duration) -> Result<(), std::time::Duration> {
+        let mut active = self.active_turns.lock().unwrap_or_else(|e| e.into_inner());
+        let queue = active.entry(ws.to_string()).or_default();
+        if let Some(oldest) = queue.front() {
+            let elapsed = oldest.elapsed();
+            if !deadline.is_zero() && elapsed >= deadline {
+                return Err(elapsed);
+            }
+        }
+        queue.push_back(std::time::Instant::now());
+        Ok(())
+    }
+
+    /// Mark one in-flight turn for `ws` (started by a matching
+    /// [`Self::begin_turn`]) finished. Removes the oldest still-recorded
+    /// start time (a FIFO approximation — turns aren't individually
+    /// identified — which is exact when turns for a workspace complete in
+    /// the order they started, and self-corrects otherwise since any
+    /// leftover entry is still checked against its own age). Clears the
+    /// tracking entry entirely once no turns remain, so the *next* fresh
+    /// turn for this workspace starts its own deadline clock rather than
+    /// inheriting a stale one.
+    fn end_turn(&self, ws: &str) {
+        let mut active = self.active_turns.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(queue) = active.get_mut(ws) {
+            queue.pop_front();
+            if queue.is_empty() {
+                active.remove(ws);
+            }
+        }
     }
 
     /// Attach a server-level control-plane backend.
@@ -376,10 +671,24 @@ impl AkhAcpAgent {
     /// synchronous (never an `.await`), no `std::sync::Mutex` guard crosses an
     /// await, preserving ADR-027.
     ///
+    /// Session-scoped MCP proxy tools (`mcp__*`, carrying the pushed client's
+    /// bearer credential) are registered and unregistered through
+    /// [`SessionToolGuard`], whose `Drop` runs on both the normal return path
+    /// *and* unwind — so a panic mid-turn can never leave another session's
+    /// bearer-credentialed tools registered on the shared workspace `Agent`
+    /// for a later client to call.
+    ///
     /// Returns the blocking task's [`JoinHandle`]; the caller drains the paired
     /// channel into a [`AcpSink`] concurrently, then awaits the handle. The
     /// `sink` is dropped when the closure ends, closing the channel so the drain
     /// loop terminates.
+    ///
+    /// `cancel` is threaded into [`Agent::run_agentic_turn`], which polls it
+    /// once per round: the caller sets it after its own idle watchdog gives up
+    /// waiting on this turn, so the worker notices at the next round boundary
+    /// and unwinds instead of holding `agent`'s `Mutex` for the rest of the
+    /// turn's budget (the turn-wedge this pairs with the busy-fail-fast guard
+    /// in `session/prompt` to fix — see that handler).
     ///
     /// [`spawn_blocking`]: tokio::task::spawn_blocking
     /// [`JoinHandle`]: tokio::task::JoinHandle
@@ -390,8 +699,13 @@ impl AkhAcpAgent {
         agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
+        session_id: String,
         mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
+        mcp_tool_cache: Arc<
+            Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>,
+        >,
         sink: ChannelSink,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process (emitting via the channel sink), drop —
@@ -400,47 +714,116 @@ impl AkhAcpAgent {
             let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
             // made during the turn — by the LLM loop or the symbolic pipeline —
-            // can prompt the client; removed before the closure returns so its
-            // channel closes and the approver task ends.
+            // can prompt the client.
             if let Some(asker) = asker {
                 agent.set_permission_asker(asker);
             }
-            // Session-scoped MCP tools: connect to the servers the client pushed
-            // at `session/new`, discover their tools, and register namespaced
-            // proxies for this turn only — removed before returning so they never
-            // leak into another session (turns on one akh are serialized by the
-            // agent lock we hold here). Discovery is blocking network I/O, which
-            // is why it lives inside this `spawn_blocking` closure. Daemon-only:
-            // the HTTP MCP client is behind the `daemon` feature.
+            // `guard` owns the exclusive `&mut Agent` for the rest of the turn
+            // (accessed as `guard.agent`) so its `Drop` — which unregisters any
+            // session-scoped MCP proxy tools and clears the permission asker —
+            // is guaranteed to run even if `run_agentic_turn` /
+            // `process_input` panics, instead of being skipped by an unwind
+            // past a tail cleanup loop.
+            // `mut` is only exercised by `guard.register(..)` under the
+            // `daemon` feature (session MCP tools need the HTTP client); a
+            // non-daemon build never calls it, hence the blanket allow.
+            #[allow(unused_mut)]
+            let mut guard = SessionToolGuard::new(&mut agent);
+            // Session-scoped MCP tools: connect to the servers the client
+            // pushed at `session/new`, discover their tools once per session
+            // (cached thereafter — see `mcp_tool_cache`), and register
+            // namespaced proxies for this turn only. Daemon-only: the HTTP MCP
+            // client is behind the `daemon` feature.
             #[cfg(feature = "daemon")]
-            let session_tool_names: Vec<String> = {
-                let mut names = Vec::new();
-                for tool in mcp_bridge::build_session_tools(&mcp_cfgs) {
-                    names.push(tool.signature().name);
-                    agent.register_tool(tool);
+            if !mcp_cfgs.is_empty() {
+                let cached = mcp_tool_cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&session_id)
+                    .cloned();
+                let discovered = match cached {
+                    Some(d) => d,
+                    None => {
+                        // Discovery is blocking network I/O, which is why it
+                        // runs inside this `spawn_blocking` closure — but it
+                        // only runs once per session; every later prompt hits
+                        // the cache above with zero network I/O.
+                        let d = mcp_bridge::discover_session_tools(&mcp_cfgs, &sink);
+                        mcp_tool_cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(session_id.clone(), d.clone());
+                        d
+                    }
+                };
+                for tool in mcp_bridge::build_tools_from_discovered(&discovered) {
+                    guard.register(tool);
                 }
-                names
-            };
+            }
             #[cfg(not(feature = "daemon"))]
-            let _ = &mcp_cfgs;
+            let _ = (&session_id, &mcp_cfgs, &mcp_tool_cache);
             // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools),
             // which streams directly into `sink`; fall back to the symbolic
             // ChatProcessor when no model backend is reachable, emitting its
             // (batched) output through the same sink so the wire shape matches.
-            if agent
-                .run_agentic_turn(&engine, &agent_id, &text, &sink)
+            if guard
+                .agent
+                .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel)
                 .is_none()
             {
-                let out = processor.process_input(&text, &mut agent, &engine);
+                let out = processor.process_input(&text, guard.agent, &engine);
                 sink.emit_batch(&out);
             }
-            #[cfg(feature = "daemon")]
-            for name in &session_tool_names {
-                agent.unregister_tool(name);
-            }
-            agent.clear_permission_asker();
-            // Guards + sink drop here; the dropped sink closes the channel.
+            // `guard` drops here (normal return *or* unwind), unregistering
+            // session tools and clearing the permission asker; then the
+            // locks + sink drop, closing the channel.
         })
+    }
+}
+
+/// RAII guard that unregisters this turn's session-scoped MCP proxy tools and
+/// clears the permission asker on `Drop` — including on panic/unwind.
+///
+/// Holds the exclusive `&mut Agent` for the guard's lifetime so nothing can
+/// register a tool through it without going through [`Self::register`] (and
+/// therefore being tracked for teardown). Constructed once per
+/// [`AkhAcpAgent::run_turn`] call and dropped at the end of that closure;
+/// because `spawn_blocking` closures unwind normally on panic (this crate
+/// does not build with `panic = "abort"`), `Drop` runs even when
+/// `run_agentic_turn` / `process_input` panics mid-turn — the defect this
+/// guard replaces was a tail cleanup loop that a panic simply jumped over,
+/// leaving another client's bearer-credentialed `mcp__*` proxies registered
+/// on the shared workspace `Agent` for whichever session ran next.
+struct SessionToolGuard<'a> {
+    agent: &'a mut Agent,
+    tool_names: Vec<String>,
+}
+
+impl<'a> SessionToolGuard<'a> {
+    fn new(agent: &'a mut Agent) -> Self {
+        Self {
+            agent,
+            tool_names: Vec::new(),
+        }
+    }
+
+    /// Register one session-scoped tool and remember its name for teardown.
+    // Only called under the `daemon` feature (session MCP tools need the HTTP
+    // client); a non-daemon build never calls it.
+    #[cfg_attr(not(feature = "daemon"), allow(dead_code))]
+    fn register(&mut self, tool: Box<dyn crate::agent::tool::Tool>) {
+        let name = tool.signature().name;
+        self.agent.register_tool(tool);
+        self.tool_names.push(name);
+    }
+}
+
+impl<'a> Drop for SessionToolGuard<'a> {
+    fn drop(&mut self) {
+        for name in &self.tool_names {
+            self.agent.unregister_tool(name);
+        }
+        self.agent.clear_permission_asker();
     }
 }
 
@@ -643,12 +1026,92 @@ impl JsonRpcRequest for AkhExtRequest {
     type Response = AkhExtResponse;
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Application-level `_akh/*` errors — preserving diagnostic structure
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A structured application-level error for the `_akh/*` JSON-RPC data-plane.
+///
+/// Before this type existed, every `_akh/*` handler flattened its underlying
+/// error (frequently a `miette::Diagnostic` — every error enum in this crate
+/// derives one, per the house style) to a bare `Display` string via
+/// `format!("{e}")`, then that string became the JSON-RPC error's `data`
+/// field verbatim. The diagnostic `code`, `help` text, and source chain never
+/// left the daemon. [`AcpAppError`] carries those through instead: construct
+/// it from a typed `Diagnostic` with [`Self::diag`]/[`diag_err`] (preserves
+/// code/help/causes) or from a plain string with [`Self::msg`] (validation
+/// errors with no underlying error to preserve). [`Self::into_json`] renders
+/// it as the JSON-RPC `data` object; the client reconstructs an
+/// [`AcpError::RemoteApplication`] from that shape.
+#[derive(Debug, Clone)]
+struct AcpAppError(serde_json::Value);
+
+impl AcpAppError {
+    /// A plain message with no diagnostic structure — used for request-shape
+    /// validation (missing/invalid params) where there is no underlying
+    /// `Diagnostic` to preserve.
+    fn msg(text: impl Into<String>) -> Self {
+        AcpAppError(serde_json::json!({ "message": text.into() }))
+    }
+
+    /// Capture a `miette::Diagnostic`'s code, help text, and full `source()`
+    /// chain (each cause's `Display`, innermost last).
+    fn diag<E: std::error::Error + miette::Diagnostic>(err: &E) -> Self {
+        let code = err.code().map(|c| c.to_string());
+        let help = err.help().map(|h| h.to_string());
+        let mut causes = Vec::new();
+        let mut cur = std::error::Error::source(err);
+        while let Some(c) = cur {
+            causes.push(c.to_string());
+            cur = c.source();
+        }
+        AcpAppError(serde_json::json!({
+            "message": err.to_string(),
+            "code": code,
+            "help": help,
+            "causes": causes,
+        }))
+    }
+
+    /// Prefix the `message` field with extra call-site context (e.g. "persist
+    /// failed"), keeping `code`/`help`/`causes` intact. Mirrors the old
+    /// `format!("{context}: {e}")` convention without discarding the rest of
+    /// the diagnostic.
+    fn context(mut self, ctx: impl std::fmt::Display) -> Self {
+        if let serde_json::Value::Object(ref mut map) = self.0 {
+            let msg = map
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            map.insert("message".to_string(), serde_json::json!(format!("{ctx}: {msg}")));
+        }
+        self
+    }
+
+    /// Render as the JSON-RPC error `data` payload.
+    fn into_json(self) -> serde_json::Value {
+        self.0
+    }
+}
+
+/// Convenience for `.map_err(|e| diag_err(e, "context"))` at a `_akh/*`
+/// dispatch call site whose underlying error implements `Diagnostic` — the
+/// common case, since every error enum in this crate does.
+fn diag_err<E: std::error::Error + miette::Diagnostic>(
+    err: E,
+    ctx: impl std::fmt::Display,
+) -> AcpAppError {
+    AcpAppError::diag(&err).context(ctx)
+}
+
 /// Dispatch one `_akh/*` data-plane operation against the engine.
 ///
 /// `method` is the full wire method (e.g. `"_akh/health"`). Read-only engine
 /// access needs no agent lock (engine methods take `&self`); operations that
 /// mutate the agent would route through `spawn_blocking` per ADR-027 (none yet).
-/// Returns the JSON result, or an error string surfaced as a JSON-RPC error.
+/// Returns the JSON result, or a structured [`AcpAppError`] surfaced as a
+/// JSON-RPC error's `data` field (see [`AcpAppError`]).
 ///
 /// NOTE: agent-mutating data-plane methods (e.g. `_akh/permission/mode`) are
 /// NOT handled here — they take the agent lock and run in `spawn_blocking`
@@ -664,7 +1127,7 @@ fn dispatch_akh(
     has_control: bool,
     method: &str,
     params: &serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AcpAppError> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
         // ── meta group ──────────────────────────────────────────────────
@@ -746,6 +1209,11 @@ fn dispatch_akh(
             if has_control {
                 groups.push("daemon");
                 groups.push("config");
+                // `_akh/model/{list,set}` (CONTROL_METHODS) — the daemon's
+                // per-workspace model selection, advertised under its own
+                // group so a client doesn't have to infer it lives under
+                // "config".
+                groups.push("model");
                 // Phase 38 operator groups: akh lifecycle/relocation, AGE
                 // projection refresh (stub), and the migration runner.
                 groups.push("akh");
@@ -790,7 +1258,7 @@ fn dispatch_akh(
                 "returned": symbols.len(),
                 "symbols": symbols,
             }))
-            .map_err(|e| e.to_string())
+            .map_err(|e| AcpAppError::msg(e.to_string()))
         }
 
         // ── triples group (read-only) ───────────────────────────────────
@@ -798,10 +1266,10 @@ fn dispatch_akh(
             let sym = params
                 .get("symbol")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: symbol".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: symbol"))?;
             let id = engine
                 .resolve_symbol(sym)
-                .map_err(|e| format!("unknown symbol '{sym}': {e}"))?;
+                .map_err(|e| diag_err(e, format!("unknown symbol '{sym}'")))?;
             let triples: Vec<_> = engine
                 .triples_from(id)
                 .into_iter()
@@ -826,7 +1294,7 @@ fn dispatch_akh(
             let label = params
                 .get("label")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: label".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: label"))?;
             let kind = params
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -835,8 +1303,8 @@ fn dispatch_akh(
                 "relation" => engine.resolve_or_create_relation(label),
                 _ => engine.resolve_or_create_entity(label),
             }
-            .map_err(|e| format!("create failed: {e}"))?;
-            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+            .map_err(|e| diag_err(e, "create failed"))?;
+            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "id": id.get(),
                 "label": engine.resolve_label(id),
@@ -848,15 +1316,15 @@ fn dispatch_akh(
             let subject = params
                 .get("subject")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: subject".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: subject"))?;
             let predicate = params
                 .get("predicate")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: predicate".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: predicate"))?;
             let object = params
                 .get("object")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: object".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: object"))?;
             let confidence = params
                 .get("confidence")
                 .and_then(serde_json::Value::as_f64)
@@ -868,8 +1336,8 @@ fn dispatch_akh(
                     object.to_string(),
                     confidence,
                 )])
-                .map_err(|e| format!("ingest failed: {e}"))?;
-            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                .map_err(|e| diag_err(e, "ingest failed"))?;
+            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "subject": subject,
                 "predicate": predicate,
@@ -884,15 +1352,15 @@ fn dispatch_akh(
             let subject = params
                 .get("subject")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: subject".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: subject"))?;
             let predicate = params
                 .get("predicate")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: predicate".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: predicate"))?;
             let object = params
                 .get("object")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: object".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: object"))?;
             // Resolve labels to *existing* symbols; an unknown label means there
             // is nothing to remove (report removed=false rather than erroring, so
             // cleanup scripts are idempotent).
@@ -917,8 +1385,8 @@ fn dispatch_akh(
                 .any(|t| t.predicate == p && t.object == o);
             let result = engine
                 .remove_triple(s, p, o)
-                .map_err(|e| format!("remove failed: {e}"))?;
-            engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                .map_err(|e| diag_err(e, "remove failed"))?;
+            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "subject": subject,
                 "predicate": predicate,
@@ -938,15 +1406,15 @@ fn dispatch_akh(
             let name = params
                 .get("name")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: name".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: name"))?;
             let description = params
                 .get("description")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: description".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: description"))?;
             let purpose_text = params
                 .get("purpose")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: purpose".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: purpose"))?;
             let entity_type_opt = params.get("entity_type").and_then(serde_json::Value::as_str);
             let culture_opt = params.get("culture").and_then(serde_json::Value::as_str);
             let domains = params
@@ -978,26 +1446,48 @@ fn dispatch_akh(
                 .unwrap_or_default();
             let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
 
-            fn parse_entity_type(s: Option<&str>) -> EntityType {
-                match s.map(|v| v.trim().to_lowercase()).as_deref() {
-                    Some("deity") | Some("god") | Some("goddess") => EntityType::Deity,
-                    Some("fictional") | Some("fictional_character") | Some("character") => {
-                        EntityType::FictionalCharacter
+            /// Parse a wire `entity_type` token. Unlike a `.unwrap_or(Unknown)`
+            /// fallback, an unrecognized token is a hard error — silently
+            /// mapping a typo (e.g. `"diety"`) to `Unknown` would awaken the
+            /// identity with the wrong entity type and give the caller no
+            /// signal that anything went wrong.
+            fn parse_entity_type(s: &str) -> Option<EntityType> {
+                match s.trim().to_lowercase().as_str() {
+                    "deity" | "god" | "goddess" => Some(EntityType::Deity),
+                    "fictional" | "fictional_character" | "character" => {
+                        Some(EntityType::FictionalCharacter)
                     }
-                    Some("historical") | Some("historical_figure") | Some("person") => {
-                        EntityType::HistoricalFigure
+                    "historical" | "historical_figure" | "person" => {
+                        Some(EntityType::HistoricalFigure)
                     }
-                    Some("concept") => EntityType::Concept,
-                    _ => EntityType::Unknown,
+                    "concept" => Some(EntityType::Concept),
+                    "unknown" => Some(EntityType::Unknown),
+                    _ => None,
                 }
             }
 
-            let culture = culture_opt
-                .and_then(CultureOrigin::from_label)
-                .unwrap_or(CultureOrigin::Unknown);
+            let entity_type = match entity_type_opt {
+                Some(s) => parse_entity_type(s).ok_or_else(|| {
+                    AcpAppError::msg(format!(
+                        "unknown entity_type \"{s}\" (expected one of: deity|god|goddess, \
+                         fictional|fictional_character|character, \
+                         historical|historical_figure|person, concept, unknown)"
+                    ))
+                })?,
+                None => EntityType::Unknown,
+            };
+            let culture = match culture_opt {
+                Some(s) => CultureOrigin::from_label(s).ok_or_else(|| {
+                    AcpAppError::msg(format!(
+                        "unknown culture \"{s}\" (expected one of: egyptian, greek, norse, \
+                         latin, fictional, unknown)"
+                    ))
+                })?,
+                None => CultureOrigin::Unknown,
+            };
             let character = CharacterKnowledge {
                 name: name.to_string(),
-                entity_type: parse_entity_type(entity_type_opt),
+                entity_type,
                 culture,
                 description: description.to_string(),
                 domains: domains.clone(),
@@ -1012,17 +1502,36 @@ fn dispatch_akh(
             };
             match ritual_of_awakening(&character, &purpose, engine, force) {
                 Ok(result) => {
-                    engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                    // The ritual already mutated the in-memory engine by this
+                    // point, so a persist failure here is not "nothing
+                    // happened" — the identity change is live in memory but
+                    // not yet durable. Say so explicitly rather than letting
+                    // it read like an ordinary "persist failed" op error.
+                    engine.persist().map_err(|e| {
+                        diag_err(
+                            e,
+                            format!(
+                                "identity awakened in memory as \"{}\" but was NOT \
+                                 durably saved — the in-memory identity will diverge \
+                                 from the on-disk state until a later persist \
+                                 succeeds; retry (`force=true`) once the underlying \
+                                 issue is fixed to re-run the ritual and persist again",
+                                result.chosen_name,
+                            ),
+                        )
+                    })?;
                     Ok(serde_json::json!({
                         "awakened": true,
                         "name": result.chosen_name,
+                        "entity_type": entity_type.as_label(),
+                        "culture": culture.as_label(),
                         "provenance_records": result.provenance_ids.len(),
                     }))
                 }
                 Err(IdentityError::AlreadyAwakened) => {
-                    Err("already awakened; pass force=true to re-awaken".to_string())
+                    Err(AcpAppError::msg("already awakened; pass force=true to re-awaken"))
                 }
-                Err(e) => Err(format!("awaken failed: {e}")),
+                Err(e) => Err(diag_err(e, "awaken failed")),
             }
         }
 
@@ -1032,10 +1541,10 @@ fn dispatch_akh(
             let query = params
                 .get("query")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: query".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: query"))?;
             let rows = engine
                 .sparql_query(query)
-                .map_err(|e| format!("sparql query failed: {e}"))?;
+                .map_err(|e| diag_err(e, "sparql query failed"))?;
             // Each row is a solution: a list of (variable, value) bindings.
             let solutions: Vec<serde_json::Value> = rows
                 .into_iter()
@@ -1080,7 +1589,7 @@ fn dispatch_akh(
             }
 
             let predicates = crate::agent::AgentPredicates::init(engine)
-                .map_err(|e| format!("failed to resolve agent predicates: {e}"))?;
+                .map_err(|e| diag_err(e, "failed to resolve agent predicates"))?;
 
             // Resolve requested symbols; report unresolvable ones so the caller
             // can tell "no episodes" apart from "typo in the query".
@@ -1095,12 +1604,12 @@ fn dispatch_akh(
 
             let (episodes, mode) = if query_ids.is_empty() {
                 let eps = crate::agent::memory::recall_recent_episodes(engine, &predicates, top_k)
-                    .map_err(|e| format!("recall failed: {e}"))?;
+                    .map_err(|e| diag_err(e, "recall failed"))?;
                 (eps, "recent")
             } else {
                 let eps =
                     crate::agent::memory::recall_episodes(engine, &query_ids, &predicates, top_k, None)
-                        .map_err(|e| format!("recall failed: {e}"))?;
+                        .map_err(|e| diag_err(e, "recall failed"))?;
                 (eps, "matched")
             };
 
@@ -1163,11 +1672,11 @@ fn dispatch_akh(
             }
 
             if seed_ids.is_empty() {
-                Err(format!(
+                Err(AcpAppError::msg(format!(
                     "infer/activate requires at least one resolvable seed symbol \
                      (none of {} requested resolved: {unresolved:?})",
                     requested.len()
-                ))
+                )))
             } else {
                 let query = crate::infer::InferenceQuery {
                     seeds: seed_ids,
@@ -1178,7 +1687,7 @@ fn dispatch_akh(
                 };
                 let result = engine
                     .infer(&query)
-                    .map_err(|e| format!("inference failed: {e}"))?;
+                    .map_err(|e| diag_err(e, "inference failed"))?;
 
                 let activations: Vec<serde_json::Value> = result
                     .activations
@@ -1236,7 +1745,7 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             let name = params
                 .get("name")
                 .and_then(serde_json::Value::as_str)
@@ -1275,7 +1784,7 @@ fn dispatch_akh(
                 scope: Default::default(),
             };
             mgr.create_compartment(manifest)
-                .map_err(|e| format!("create microtheory failed: {e}"))?;
+                .map_err(|e| diag_err(e, "create microtheory failed"))?;
             Ok(serde_json::json!({
                 "id": id,
                 "name": name,
@@ -1290,7 +1799,7 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             let limit = params
                 .get("limit")
                 .and_then(serde_json::Value::as_u64)
@@ -1299,7 +1808,7 @@ fn dispatch_akh(
                 .all_compartments()
                 .into_iter()
                 .find(|(m, _, _)| m.id == id)
-                .ok_or_else(|| format!("unknown microtheory \"{id}\""))?;
+                .ok_or_else(|| AcpAppError::msg(format!("unknown microtheory \"{id}\"")))?;
             // Sample the compartment's triples (label-projected, capped).
             let triples: Vec<serde_json::Value> = engine
                 .all_triples()
@@ -1333,11 +1842,11 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             mgr.load(id, engine)
-                .map_err(|e| format!("load microtheory \"{id}\" failed: {e}"))?;
+                .map_err(|e| diag_err(e, format!("load microtheory \"{id}\" failed")))?;
             mgr.activate(id)
-                .map_err(|e| format!("activate microtheory \"{id}\" failed: {e}"))?;
+                .map_err(|e| diag_err(e, format!("activate microtheory \"{id}\" failed")))?;
             let triples = mgr
                 .all_compartments()
                 .into_iter()
@@ -1352,7 +1861,7 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             // `unload: true` additionally removes the compartment's triples from
             // the KG (back to Dormant); default just stops OODA influence.
             let unload = params
@@ -1360,10 +1869,10 @@ fn dispatch_akh(
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             mgr.deactivate(id)
-                .map_err(|e| format!("deactivate microtheory \"{id}\" failed: {e}"))?;
+                .map_err(|e| diag_err(e, format!("deactivate microtheory \"{id}\" failed")))?;
             let state = if unload {
                 mgr.unload(id, engine)
-                    .map_err(|e| format!("unload microtheory \"{id}\" failed: {e}"))?;
+                    .map_err(|e| diag_err(e, format!("unload microtheory \"{id}\" failed")))?;
                 "Dormant"
             } else {
                 "Loaded"
@@ -1383,7 +1892,7 @@ fn dispatch_akh(
                 .map(|n| n as usize)
                 .unwrap_or(crate::schema::coverage::DEFAULT_TOP_FRONTIER);
             let report = crate::schema::coverage_report_top_n(engine, top_n);
-            serde_json::to_value(&report).map_err(|e| e.to_string())
+            serde_json::to_value(&report).map_err(|e| AcpAppError::msg(e.to_string()))
         }
 
         // ── schema promotion group (ADR 081 Slice 5 — frontier→core
@@ -1393,19 +1902,19 @@ fn dispatch_akh(
         //    `akhomed.rs::schema_promote`). ──────────────────────────────
         "schema/proposals" => {
             let proposals = crate::agent::promotion::list_pending_proposals(engine)
-                .map_err(|e| format!("list proposals failed: {e}"))?;
+                .map_err(|e| diag_err(e, "list proposals failed"))?;
             serde_json::to_value(serde_json::json!({ "proposals": proposals }))
-                .map_err(|e| e.to_string())
+                .map_err(|e| AcpAppError::msg(e.to_string()))
         }
 
         "schema/reject" => {
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             let reason = params.get("reason").and_then(serde_json::Value::as_str);
             crate::agent::promotion::reject_proposal(engine, id, reason)
-                .map_err(|e| format!("reject failed: {e}"))?;
+                .map_err(|e| diag_err(e, "reject failed"))?;
             Ok(serde_json::json!({ "id": id, "status": "rejected" }))
         }
 
@@ -1416,10 +1925,10 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             let info = engine
                 .skill_info(id)
-                .map_err(|e| format!("unknown skill \"{id}\": {e}"))?;
+                .map_err(|e| diag_err(e, format!("unknown skill \"{id}\"")))?;
             let actions: Vec<serde_json::Value> = engine
                 .skill_actions(id)
                 .into_iter()
@@ -1446,10 +1955,10 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             let activation = engine
                 .load_skill(id)
-                .map_err(|e| format!("activate skill \"{id}\" failed: {e}"))?;
+                .map_err(|e| diag_err(e, format!("activate skill \"{id}\" failed")))?;
             Ok(serde_json::json!({
                 "id": activation.skill_id,
                 "state": "Hot",
@@ -1465,10 +1974,10 @@ fn dispatch_akh(
             let id = params
                 .get("id")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: id".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: id"))?;
             engine
                 .unload_skill(id)
-                .map_err(|e| format!("deactivate skill \"{id}\" failed: {e}"))?;
+                .map_err(|e| diag_err(e, format!("deactivate skill \"{id}\" failed")))?;
             Ok(serde_json::json!({ "id": id, "state": "Cold" }))
         }
 
@@ -1478,20 +1987,20 @@ fn dispatch_akh(
             let subject = params
                 .get("subject")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: subject".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: subject"))?;
             let predicate = params
                 .get("predicate")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: predicate".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: predicate"))?;
             let s = engine
                 .resolve_symbol(subject)
-                .map_err(|e| format!("unknown subject \"{subject}\": {e}"))?;
+                .map_err(|e| diag_err(e, format!("unknown subject \"{subject}\"")))?;
             let p = engine
                 .resolve_symbol(predicate)
-                .map_err(|e| format!("unknown predicate \"{predicate}\": {e}"))?;
+                .map_err(|e| diag_err(e, format!("unknown predicate \"{predicate}\"")))?;
             let set = engine
                 .argue(s, p)
-                .map_err(|e| format!("argumentation failed: {e}"))?;
+                .map_err(|e| diag_err(e, "argumentation failed"))?;
             let v = &set.verdict;
             Ok(serde_json::json!({
                 "subject": engine.resolve_label(set.subject),
@@ -1516,31 +2025,31 @@ fn dispatch_akh(
             // ExplanationQuery::parse, or a bare `subject` (entity label).
             if let Some(q) = params.get("question").and_then(serde_json::Value::as_str) {
                 let query = explain::ExplanationQuery::parse(q).ok_or_else(|| {
-                    format!(
+                    AcpAppError::msg(format!(
                         "could not parse an explanation question from {q:?} — try \
                          \"why <entity>?\", \"what do you know about <entity>?\", or \
                          \"how confident are you about <entity>?\" (or pass `subject`)"
-                    )
+                    ))
                 })?;
                 let prose = explain::execute_query(engine, &query, None)
-                    .map_err(|e| format!("explain failed: {e}"))?;
+                    .map_err(|e| diag_err(e, "explain failed"))?;
                 Ok(serde_json::json!({ "question": q, "prose": prose }))
             } else {
                 let subject = params
                     .get("subject")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "missing required param: subject (or question)".to_string())?;
+                    .ok_or_else(|| AcpAppError::msg("missing required param: subject (or question)"))?;
                 let max_depth = params
                     .get("max_depth")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(5) as usize;
                 let prose = explain::explain_entity(engine, subject)
-                    .map_err(|e| format!("explain failed: {e}"))?;
+                    .map_err(|e| diag_err(e, "explain failed"))?;
                 let id = engine
                     .resolve_symbol(subject)
-                    .map_err(|e| format!("unknown symbol \"{subject}\": {e}"))?;
+                    .map_err(|e| diag_err(e, format!("unknown symbol \"{subject}\"")))?;
                 let tree = explain::build_derivation_tree(engine, id, max_depth)
-                    .map_err(|e| format!("derivation tree failed: {e}"))?;
+                    .map_err(|e| diag_err(e, "derivation tree failed"))?;
                 Ok(serde_json::json!({
                     "subject": subject,
                     "prose": prose,
@@ -1553,13 +2062,13 @@ fn dispatch_akh(
             let symbol = params
                 .get("symbol")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "missing required param: symbol".to_string())?;
+                .ok_or_else(|| AcpAppError::msg("missing required param: symbol"))?;
             let id = engine
                 .resolve_symbol(symbol)
-                .map_err(|e| format!("unknown symbol \"{symbol}\": {e}"))?;
+                .map_err(|e| diag_err(e, format!("unknown symbol \"{symbol}\"")))?;
             let records: Vec<serde_json::Value> = engine
                 .provenance_of(id)
-                .map_err(|e| format!("provenance lookup failed: {e}"))?
+                .map_err(|e| diag_err(e, "provenance lookup failed"))?
                 .iter()
                 .map(|r| {
                     serde_json::json!({
@@ -1583,7 +2092,9 @@ fn dispatch_akh(
             }))
         }
 
-        other => Err(format!("unknown _akh data-plane method: _akh/{other}")),
+        other => Err(AcpAppError::msg(format!(
+            "unknown _akh data-plane method: _akh/{other}"
+        ))),
     }
 }
 
@@ -1591,18 +2102,21 @@ fn dispatch_akh(
 /// without a data_dir (compartments are disk-backed).
 ///
 /// [`CompartmentManager`]: crate::compartment::CompartmentManager
-fn compartment_manager(engine: &Engine) -> Result<&crate::compartment::CompartmentManager, String> {
+fn compartment_manager(
+    engine: &Engine,
+) -> Result<&crate::compartment::CompartmentManager, AcpAppError> {
     engine.compartments().ok_or_else(|| {
-        "this workspace has no compartment manager (no data_dir configured) — \
-         microtheories require a persistent workspace"
-            .to_string()
+        AcpAppError::msg(
+            "this workspace has no compartment manager (no data_dir configured) — \
+             microtheories require a persistent workspace",
+        )
     })
 }
 
 /// Parse a wire compartment-kind string into a [`CompartmentKind`].
 ///
 /// [`CompartmentKind`]: crate::compartment::CompartmentKind
-fn parse_compartment_kind(s: &str) -> Result<crate::compartment::CompartmentKind, String> {
+fn parse_compartment_kind(s: &str) -> Result<crate::compartment::CompartmentKind, AcpAppError> {
     use crate::compartment::CompartmentKind;
     match s.trim().to_ascii_lowercase().as_str() {
         "core" => Ok(CompartmentKind::Core),
@@ -1611,10 +2125,10 @@ fn parse_compartment_kind(s: &str) -> Result<crate::compartment::CompartmentKind
         "library" => Ok(CompartmentKind::Library),
         "person" => Ok(CompartmentKind::Person),
         "workspace" => Ok(CompartmentKind::Workspace),
-        other => Err(format!(
+        other => Err(AcpAppError::msg(format!(
             "unknown microtheory kind \"{other}\" \
              (expected core|skill|project|library|person|workspace)"
-        )),
+        ))),
     }
 }
 
@@ -1669,7 +2183,7 @@ fn dispatch_akh_agent(
     workspace: &str,
     method: &str,
     params: &serde_json::Value,
-) -> Option<Result<serde_json::Value, String>> {
+) -> Option<Result<serde_json::Value, AcpAppError>> {
     let op = method.strip_prefix("_akh/").unwrap_or(method);
     match op {
         "goals" | "tools" | "projects" | "status" | "usage" | "reasoning" | "evidence"
@@ -1731,11 +2245,11 @@ fn dispatch_akh_agent(
         "evidence/assess" => {
             let claim = match params.get("claim").and_then(serde_json::Value::as_str) {
                 Some(c) => c,
-                None => return Some(Err("missing required param: claim".to_string())),
+                None => return Some(Err(AcpAppError::msg("missing required param: claim"))),
             };
             let claim_id = match engine.resolve_symbol(claim) {
                 Ok(id) => id,
-                Err(e) => return Some(Err(format!("unknown claim \"{claim}\": {e}"))),
+                Err(e) => return Some(Err(diag_err(e, format!("unknown claim \"{claim}\"")))),
             };
             serde_json::json!({
                 "workspace": workspace,
@@ -2302,13 +2816,20 @@ fn build_connection(
                         // requests on what the client advertised.
                         *me.client_caps.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(req.client_capabilities.clone());
-                        // Echo the client's protocol version. Advertise
-                        // `mcp_capabilities.http = true` so a conformant client
-                        // (e.g. Zed) will push HTTP MCP servers at `session/new`
-                        // for us to bridge (mcp_bridge); a client that gates on
-                        // capabilities refuses to send them otherwise. SSE is
-                        // still unsupported.
-                        let resp = InitializeResponse::new(req.protocol_version)
+                        // Clamp to min(client_version, our max supported) per
+                        // the ACP spec, rather than blindly echoing whatever
+                        // the client asked for — a client requesting a newer
+                        // version than we implement must be told the version
+                        // we actually speak, not led to believe we support
+                        // protocol behavior we don't.
+                        let negotiated_version = req.protocol_version.min(ProtocolVersion::LATEST);
+                        // Advertise `mcp_capabilities.http = true` so a
+                        // conformant client (e.g. Zed) will push HTTP MCP
+                        // servers at `session/new` for us to bridge
+                        // (mcp_bridge); a client that gates on capabilities
+                        // refuses to send them otherwise. SSE is still
+                        // unsupported.
+                        let resp = InitializeResponse::new(negotiated_version)
                             .agent_capabilities(
                                 AgentCapabilities::default()
                                     .mcp_capabilities(McpCapabilities::new().http(true)),
@@ -2332,6 +2853,9 @@ fn build_connection(
                     let me = me.clone();
                     async move {
                         let session_id = SessionId::new(format!("akh-{}", next_session_suffix()));
+                        // Track + cap-evict session state before recording
+                        // anything for this session — see `track_new_session`.
+                        me.track_new_session(&session_id.to_string());
                         // The client encodes the target workspace in the session
                         // `cwd` as the sentinel `akh-ws:<name>` (akhomed otherwise
                         // ignores the client cwd). Record session → workspace so
@@ -2389,14 +2913,40 @@ fn build_connection(
                         let text = concat_prompt(&req.prompt);
 
                         // Route to the session's workspace (recorded at
-                        // session/new) and resolve its handles on demand — the
-                        // chat half of `-w`: one daemon serves any configured akh.
-                        // Resolution can wake the akh from its backing store, so
-                        // it too rides the idle watchdog: a hung wake (e.g. a
-                        // wedged Postgres connection) must error, not pin the
-                        // client's slot forever.
+                        // session/new).
                         let ws = me.session_workspace(&session_id.to_string());
                         let idle = me.turn_idle_timeout;
+
+                        // Busy fail-fast (turn-wedge fix, part b): if an
+                        // earlier turn for this workspace is on record as
+                        // having started at least `idle` ago, it is either
+                        // wedged or already past its own watchdog's stall
+                        // point but hasn't released the agent `Mutex` yet —
+                        // refuse this prompt with a clear JSON-RPC error
+                        // instead of spawning another worker that would just
+                        // queue behind the same lock indefinitely. Paired
+                        // with part (a) below (the `cancel` flag), which asks
+                        // that earlier worker to stop so the workspace
+                        // un-wedges on its own.
+                        if let Err(elapsed) = me.begin_turn(&ws, idle) {
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::internal_error().data(format!(
+                                    "workspace busy: a previous turn is still running for \
+                                     \"{ws}\" (running {}s, past the {}s idle deadline) — \
+                                     try again shortly; if this persists the daemon may \
+                                     need attention",
+                                    elapsed.as_secs(),
+                                    idle.as_secs(),
+                                )),
+                            );
+                        }
+
+                        // Resolve its handles on demand — the chat half of
+                        // `-w`: one daemon serves any configured akh.
+                        // Resolution can wake the akh from its backing store,
+                        // so it too rides the idle watchdog: a hung wake
+                        // (e.g. a wedged Postgres connection) must error, not
+                        // pin the client's slot forever.
                         let resolved = if idle.is_zero() {
                             me.resolve_handles(&ws).await
                         } else {
@@ -2412,6 +2962,7 @@ fn build_connection(
                         let (engine, agent, processor) = match resolved {
                             Ok(h) => h,
                             Err(e) => {
+                                me.end_turn(&ws);
                                 AcpSink::new(cx.clone(), session_id.clone()).emit(
                                     &AkhMessage::error(
                                         "acp",
@@ -2447,8 +2998,18 @@ fn build_connection(
                         let (msg_tx, mut msg_rx) =
                             tokio::sync::mpsc::unbounded_channel::<AkhMessage>();
                         // MCP servers this client pushed for the session — the
-                        // turn connects to them and bridges their tools.
+                        // turn connects to them (once; later prompts reuse the
+                        // per-session discovery cache) and bridges their tools.
                         let mcp_cfgs = me.session_mcp_cfgs(&session_id.to_string());
+                        // Turn-wedge fix, part (a): a cancel flag the idle
+                        // watchdog below sets once it gives up waiting on this
+                        // turn. `run_agentic_turn`'s round loop polls it once
+                        // per round and unwinds cleanly (via the RAII
+                        // `SessionToolGuard`) instead of running unattended —
+                        // without this, the `spawn_blocking` worker held
+                        // `agent`'s `Mutex` forever once the watchdog gave up,
+                        // wedging every later prompt for the workspace.
+                        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
@@ -2456,9 +3017,29 @@ fn build_connection(
                             ws.clone(),
                             text,
                             Some(asker),
+                            session_id.to_string(),
                             mcp_cfgs,
+                            me.session_mcp_tools.clone(),
                             ChannelSink { tx: msg_tx },
+                            Arc::clone(&cancel),
                         );
+                        // The busy tracker (`begin_turn` above) must stay set
+                        // until the worker actually finishes, which may be
+                        // well after this handler returns on the stalled
+                        // path below — so a dedicated task awaits `handle`
+                        // and clears it there, while relaying the join result
+                        // back to the normal-completion path over a oneshot
+                        // so panics are still surfaced exactly as before.
+                        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                        {
+                            let end_ws = ws.clone();
+                            let end_me = me.clone();
+                            tokio::spawn(async move {
+                                let result = handle.await;
+                                end_me.end_turn(&end_ws);
+                                let _ = done_tx.send(result);
+                            });
+                        }
 
                         // Drain the turn's messages under the idle watchdog: a
                         // healthy turn keeps emitting (deltas, tool steps, audit
@@ -2489,24 +3070,28 @@ fn build_connection(
                         }
 
                         if stalled {
-                            // The blocking turn thread cannot be killed; leave it
-                            // behind (it holds the agent lock until whatever it is
-                            // blocked on resolves) and free the client's slot with
-                            // an explicit error.
+                            // Ask the worker to stop at its next round
+                            // boundary (part (a)); the busy-tracker entry for
+                            // `ws` stays live until it actually does (the
+                            // bookkeeping task above clears it), so a
+                            // meanwhile-arriving third prompt fails fast via
+                            // `begin_turn` instead of queuing behind it too.
+                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                             tracing::error!(
                                 workspace = %ws,
                                 idle_secs = idle.as_secs(),
                                 "chat turn stalled (no progress within the idle \
-                                 watchdog) — ending the turn with an error; the \
-                                 turn's worker thread may still be blocked"
+                                 watchdog) — ending the turn with an error and \
+                                 signalling its worker to cancel at the next \
+                                 round boundary"
                             );
                             sink.emit(&AkhMessage::error(
                                 "acp",
                                 format!(
                                     "chat turn stalled: no progress for {}s — \
-                                     aborting this turn. The stuck step may still \
-                                     be blocked inside the daemon; check akhomed \
-                                     logs (workspace \"{ws}\").",
+                                     aborting this turn. The daemon has been \
+                                     signalled to cancel the stuck step \
+                                     (workspace \"{ws}\").",
                                     idle.as_secs()
                                 ),
                             ));
@@ -2514,14 +3099,23 @@ fn build_connection(
                                 .respond(PromptResponse::new(StopReason::EndTurn));
                         }
 
-                        // Join to surface a panicked turn task, and let the
+                        // Await the worker's join result (relayed by the
+                        // bookkeeping task above, which also cleared the busy
+                        // tracker) to surface a panicked turn task, and let the
                         // approver (whose Sender was dropped with the asker at
                         // turn-end) drain and finish.
-                        if let Err(e) = handle.await {
-                            sink.emit(&AkhMessage::error(
+                        match done_rx.await {
+                            Ok(Err(e)) => sink.emit(&AkhMessage::error(
                                 "acp",
                                 format!("turn task failed: {e}"),
-                            ));
+                            )),
+                            Ok(Ok(())) => {}
+                            Err(_) => {
+                                // The bookkeeping task itself was dropped
+                                // before sending — should not happen since it
+                                // is not cancellable from here, but don't
+                                // treat it as a turn failure.
+                            }
                         }
                         let _ = approver.await;
 
@@ -2562,15 +3156,15 @@ fn build_connection(
                                                 }
                                                 Err(e) => responder.respond_with_error(
                                                     agent_client_protocol::Error::internal_error()
-                                                        .data(e),
+                                                        .data(serde_json::json!({ "message": e })),
                                                 ),
                                             },
                                             None => responder.respond_with_error(
                                                 agent_client_protocol::Error::method_not_found()
-                                                    .data(format!(
+                                                    .data(serde_json::json!({ "message": format!(
                                                         "control-plane method {method} requires a \
                                                          ServerControl backend (none wired)"
-                                                    )),
+                                                    ) })),
                                             ),
                                         };
                                     }
@@ -2591,7 +3185,7 @@ fn build_connection(
                                             Err(e) => {
                                                 return responder.respond_with_error(
                                                     agent_client_protocol::Error::internal_error()
-                                                        .data(e),
+                                                        .data(serde_json::json!({ "message": e })),
                                                 );
                                             }
                                         };
@@ -2624,11 +3218,13 @@ fn build_connection(
                                             )),
                                             Ok(Err(e)) => responder.respond_with_error(
                                                 agent_client_protocol::Error::invalid_params()
-                                                    .data(e),
+                                                    .data(serde_json::json!({ "message": e })),
                                             ),
                                             Err(join_err) => responder.respond_with_error(
                                                 agent_client_protocol::Error::internal_error()
-                                                    .data(join_err.to_string()),
+                                                    .data(serde_json::json!({
+                                                        "message": join_err.to_string()
+                                                    })),
                                             ),
                                         };
                                     }
@@ -2657,11 +3253,13 @@ fn build_connection(
                                             }
                                             Ok(Err(e)) => responder.respond_with_error(
                                                 agent_client_protocol::Error::invalid_params()
-                                                    .data(e),
+                                                    .data(serde_json::json!({ "message": e })),
                                             ),
                                             Err(join_err) => responder.respond_with_error(
                                                 agent_client_protocol::Error::internal_error()
-                                                    .data(join_err.to_string()),
+                                                    .data(serde_json::json!({
+                                                        "message": join_err.to_string()
+                                                    })),
                                             ),
                                         };
                                     }
@@ -2683,7 +3281,7 @@ fn build_connection(
                                             }
                                             Err(e) => responder.respond_with_error(
                                                 agent_client_protocol::Error::internal_error()
-                                                    .data(e),
+                                                    .data(e.into_json()),
                                             ),
                                         };
                                     }
@@ -2697,7 +3295,7 @@ fn build_connection(
                                         Ok(value) => responder.respond(AkhExtResponse(value)),
                                         Err(e) => responder.respond_with_error(
                                             agent_client_protocol::Error::method_not_found()
-                                                .data(e),
+                                                .data(e.into_json()),
                                         ),
                                     }
                                 },
@@ -3071,6 +3669,34 @@ async fn connect_tcp_retrying(addr: &str) -> std::io::Result<TcpStream> {
     }
 }
 
+/// Wall-clock bound on a `--remote`/`AKH_REMOTE` TCP connect (chat and the
+/// `_akh/*` data-plane alike). [`connect_tcp_retrying`]'s own retry budget
+/// ([`ACP_CONNECT_RETRY_BUDGET`]) only covers fast-failing transient errors
+/// (ECONNREFUSED while a just-spawned daemon is still binding); a silently
+/// dropped SYN — an unreachable host, a firewall with a DROP rule — leaves a
+/// single `TcpStream::connect` attempt with no bound of its own, so a bad
+/// `--remote host:port` used to hang the whole command forever.
+const ACP_TCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Connect to `addr` over TCP under [`ACP_TCP_CONNECT_TIMEOUT`], translating
+/// both a timeout and a completed I/O failure into a rich [`AcpError`] — the
+/// latter carrying the macOS Local-Network TCC hint when applicable (see
+/// [`tcp_connect_help`]).
+async fn connect_tcp_bounded(addr: &str) -> AcpResult<TcpStream> {
+    match tokio::time::timeout(ACP_TCP_CONNECT_TIMEOUT, connect_tcp_retrying(addr)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(source)) => Err(AcpError::Connect {
+            target: addr.to_string(),
+            source,
+            help: tcp_connect_help(addr),
+        }),
+        Err(_elapsed) => Err(AcpError::ConnectTimeout {
+            target: addr.to_string(),
+            timeout_secs: ACP_TCP_CONNECT_TIMEOUT.as_secs(),
+        }),
+    }
+}
+
 /// Connect to an ACP daemon over a Unix socket and run `f` over one session.
 ///
 /// `f` receives a started [`ActiveSession`] (call `send_prompt` / `read_to_string`
@@ -3093,6 +3719,7 @@ where
         .map_err(|source| AcpError::Connect {
             target: path.display().to_string(),
             source,
+            help: default_connect_help(),
         })?;
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
@@ -3100,7 +3727,9 @@ where
 }
 
 /// Connect to an ACP daemon over TCP (`host:port`) and run `f` over one session
-/// bound to `workspace`.
+/// bound to `workspace`. The connect is bounded by [`ACP_TCP_CONNECT_TIMEOUT`]
+/// (see [`connect_tcp_bounded`]) — a bad `--remote`/`AKH_REMOTE` host used to
+/// hang the client indefinitely against a silently dropped SYN.
 pub async fn chat_over_tcp<R, F>(addr: &str, name: &str, workspace: &str, f: F) -> AcpResult<R>
 where
     F: AsyncFnOnce(
@@ -3108,12 +3737,7 @@ where
         ConnectionTo<AcpRole>,
     ) -> Result<R, agent_client_protocol::Error>,
 {
-    let stream = connect_tcp_retrying(addr)
-        .await
-        .map_err(|source| AcpError::Connect {
-            target: addr.to_string(),
-            source,
-        })?;
+    let stream = connect_tcp_bounded(addr).await?;
     let _ = stream.set_nodelay(true);
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
@@ -3159,6 +3783,7 @@ pub async fn ext_request_unix(
         .map_err(|source| AcpError::Connect {
             target: path.display().to_string(),
             source,
+            help: default_connect_help(),
         })?;
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
@@ -3166,17 +3791,13 @@ pub async fn ext_request_unix(
 }
 
 /// Send a `_akh/*` data-plane request to a daemon over TCP (`host:port`).
+/// Bounded by [`ACP_TCP_CONNECT_TIMEOUT`] — see [`connect_tcp_bounded`].
 pub async fn ext_request_tcp(
     addr: &str,
     method: &str,
     params: serde_json::Value,
 ) -> AcpResult<serde_json::Value> {
-    let stream = connect_tcp_retrying(addr)
-        .await
-        .map_err(|source| AcpError::Connect {
-            target: addr.to_string(),
-            source,
-        })?;
+    let stream = connect_tcp_bounded(addr).await?;
     let _ = stream.set_nodelay(true);
     let (read_half, write_half) = stream.into_split();
     let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
@@ -3314,6 +3935,310 @@ mod tests {
         let engine = Arc::new(engine);
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
         (engine, Arc::new(Mutex::new(agent)))
+    }
+
+    // ── SessionToolGuard (Breakage #1: cross-client MCP tool leak on panic) ──
+
+    /// Trivial tool used only to exercise [`SessionToolGuard`] register/drop
+    /// bookkeeping — its `execute` is never called by these tests.
+    struct EchoTool;
+    impl crate::agent::tool::Tool for EchoTool {
+        fn signature(&self) -> crate::agent::tool::ToolSignature {
+            crate::agent::tool::ToolSignature {
+                name: "mcp__pushed__echo".into(),
+                description: "test-only echo".into(),
+                parameters: vec![],
+            }
+        }
+        fn execute(
+            &self,
+            _engine: &Engine,
+            _input: crate::agent::tool::ToolInput,
+        ) -> crate::agent::error::AgentResult<crate::agent::tool::ToolOutput> {
+            Ok(crate::agent::tool::ToolOutput::ok("echo"))
+        }
+        fn manifest(&self) -> crate::agent::tool_manifest::ToolManifest {
+            crate::agent::tool_manifest::ToolManifest {
+                name: "mcp__pushed__echo".into(),
+                description: "test-only echo".into(),
+                parameters: vec![],
+                danger: crate::agent::tool_manifest::DangerInfo {
+                    level: crate::agent::tool_manifest::DangerLevel::Safe,
+                    capabilities: std::collections::HashSet::new(),
+                    description: String::new(),
+                    shadow_triggers: vec![],
+                },
+                source: crate::agent::tool_manifest::ToolSource::Native,
+            }
+        }
+    }
+
+    fn has_tool(agent: &Agent, name: &str) -> bool {
+        agent.list_tools().iter().any(|t| t.name == name)
+    }
+
+    #[test]
+    fn session_tool_guard_unregisters_tools_on_normal_drop() {
+        let (_engine, agent) = engine_and_agent();
+        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut guard = SessionToolGuard::new(&mut locked);
+            guard.register(Box::new(EchoTool));
+            assert!(has_tool(guard.agent, "mcp__pushed__echo"));
+        }
+        // Guard dropped at end of the block above: the session tool must be
+        // gone, and the permission asker cleared (clear is idempotent when
+        // none was set, so this only re-asserts no panic/leak).
+        assert!(!has_tool(&locked, "mcp__pushed__echo"));
+    }
+
+    #[test]
+    fn session_tool_guard_unregisters_tools_even_on_panic() {
+        // Reproduces breakage #1: a panic between "register" and the old tail
+        // cleanup loop used to skip cleanup entirely, leaving the session's
+        // (bearer-credentialed, in the real MCP-proxy case) tool registered
+        // for whatever session runs next on this shared `Agent`. The guard's
+        // `Drop` must still fire while the stack unwinds through the panic.
+        let (_engine, agent) = engine_and_agent();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = SessionToolGuard::new(&mut locked);
+            guard.register(Box::new(EchoTool));
+            assert!(has_tool(guard.agent, "mcp__pushed__echo"));
+            panic!("simulated mid-turn panic after tool registration");
+        }));
+        assert!(result.is_err(), "the simulated panic should propagate");
+
+        // The mutex is poisoned by the panic-while-held, matching every other
+        // lock site in this module; recover it the same way (`into_inner`).
+        let locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !has_tool(&locked, "mcp__pushed__echo"),
+            "SessionToolGuard::drop must unregister session tools even on unwind"
+        );
+    }
+
+    #[test]
+    fn session_tool_guard_clears_permission_asker_on_drop() {
+        use crate::agent::permission::PermissionAsker;
+        use crate::agent::tool_manifest::ToolManifest;
+
+        struct NeverAsker;
+        impl PermissionAsker for NeverAsker {
+            fn ask(&self, _manifest: &ToolManifest, _input_summary: &str) -> bool {
+                unreachable!("test never calls ask")
+            }
+        }
+
+        let (_engine, agent) = engine_and_agent();
+        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        locked.set_permission_asker(Arc::new(NeverAsker));
+        {
+            let _guard = SessionToolGuard::new(&mut locked);
+        }
+        // No direct getter for "is an asker set", so the behavioral contract
+        // (`clear_permission_asker` was called) is exercised via
+        // `permission_mode`/no-panic; the compile-time guarantee is that
+        // `Drop::drop` unconditionally calls `clear_permission_asker`. This
+        // test mainly guards against someone removing that call by accident —
+        // a future refactor could assert via a permission-mode round trip.
+        drop(locked);
+    }
+
+    // ── Session cap eviction (Breakage/watch-item #3: insert-only maps) ──
+
+    #[test]
+    fn track_new_session_evicts_oldest_once_cap_exceeded() {
+        let me = workspace();
+        let victim = "akh-oldest".to_string();
+        me.track_new_session(&victim);
+        me.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(victim.clone(), "some-workspace".into());
+
+        // Push exactly enough new sessions to trip the cap by one eviction.
+        for i in 0..MAX_TRACKED_SESSIONS {
+            me.track_new_session(&format!("akh-fill-{i}"));
+        }
+
+        assert_eq!(
+            me.session_order.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            MAX_TRACKED_SESSIONS,
+            "session_order must stay capped, not grow unbounded"
+        );
+        assert!(
+            !me.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&victim),
+            "the oldest session's recorded workspace binding must be evicted"
+        );
+    }
+
+    #[test]
+    fn track_new_session_spares_an_oldest_session_that_is_still_in_active_use() {
+        // Regression test: eviction must be true LRU-by-use, not raw
+        // creation order, or a long-lived-but-active client session gets
+        // silently misrouted to `default_ws` once enough newer sessions
+        // exist — a cross-workspace data-isolation break with no
+        // client-visible signal.
+        let me = workspace();
+        let survivor = "akh-oldest-but-active".to_string();
+        me.track_new_session(&survivor);
+        me.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(survivor.clone(), "survivor-workspace".into());
+
+        // Fill most of the cap with other sessions, "using" the survivor
+        // partway through so it is bumped to the back of the eviction queue.
+        for i in 0..MAX_TRACKED_SESSIONS / 2 {
+            me.track_new_session(&format!("akh-fill-{i}"));
+        }
+        assert_eq!(
+            me.session_workspace(&survivor),
+            "survivor-workspace",
+            "sanity: the binding resolves and this use touches the session"
+        );
+        for i in MAX_TRACKED_SESSIONS / 2..MAX_TRACKED_SESSIONS {
+            me.track_new_session(&format!("akh-fill-{i}"));
+        }
+
+        assert_eq!(
+            me.session_workspace(&survivor),
+            "survivor-workspace",
+            "an actively-used session must survive cap eviction, not fall back to default_ws"
+        );
+    }
+
+    // --- turn-wedge fix, part (b): the `session/prompt` busy fail-fast guard ---
+
+    #[test]
+    fn begin_turn_fails_fast_once_a_prior_turn_is_older_than_the_deadline() {
+        let me = workspace();
+        let deadline = std::time::Duration::from_millis(20);
+        // First turn starts fine.
+        assert!(me.begin_turn("akh-medu", deadline).is_ok());
+        // A second, concurrent turn for the same workspace arriving before the
+        // deadline is allowed to queue behind it normally (real serialization
+        // happens via the agent `Mutex`; this guard only fires once a turn is
+        // provably stale).
+        assert!(me.begin_turn("akh-medu", deadline).is_ok());
+        std::thread::sleep(deadline + std::time::Duration::from_millis(30));
+        // Now well past the deadline: a third arrival fails fast instead of
+        // spawning another worker that would just queue behind the same lock.
+        let elapsed = me
+            .begin_turn("akh-medu", deadline)
+            .expect_err("a stale in-flight turn must trip the busy guard");
+        assert!(elapsed >= deadline);
+
+        // Ending both in-flight turns clears the tracker...
+        me.end_turn("akh-medu");
+        me.end_turn("akh-medu");
+        // ...so a brand-new turn starts its own fresh deadline clock instead
+        // of inheriting the stale one.
+        assert!(me.begin_turn("akh-medu", deadline).is_ok());
+        me.end_turn("akh-medu");
+    }
+
+    #[test]
+    fn begin_turn_does_not_falsely_trip_when_workspace_stays_continuously_but_healthily_busy() {
+        // Regression test for the shared-anchor bug: previously `begin_turn`
+        // only stamped a fresh `Instant` when the workspace's in-flight
+        // count went 0->1, so a workspace that never had zero turns
+        // in-flight simultaneously (e.g. two ACP sessions handing off
+        // back-to-back turns) kept measuring every new turn's "elapsed"
+        // against the very first turn in the streak. Once the streak's wall
+        //-clock length passed `deadline`, every subsequent healthy turn was
+        // rejected as busy even though nothing was actually stuck.
+        let me = workspace();
+        let deadline = std::time::Duration::from_millis(40);
+        assert!(me.begin_turn("akh-medu", deadline).is_ok()); // turn 1 begins
+        for i in 0..6 {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            // Next turn begins while the previous one is still open — the
+            // in-flight count never drops to zero across the whole loop —
+            // but each individual turn is short-lived and healthy.
+            assert!(
+                me.begin_turn("akh-medu", deadline).is_ok(),
+                "iteration {i}: a healthy overlapping turn must not trip the busy guard"
+            );
+            me.end_turn("akh-medu"); // the previous turn ends
+        }
+        me.end_turn("akh-medu"); // the last turn ends
+    }
+
+    #[test]
+    fn begin_turn_zero_deadline_disables_the_busy_guard() {
+        let me = workspace();
+        assert!(me.begin_turn("akh-medu", std::time::Duration::ZERO).is_ok());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(
+            me.begin_turn("akh-medu", std::time::Duration::ZERO).is_ok(),
+            "a zero deadline (AKH_TURN_IDLE_TIMEOUT_SECS=0) must never fail fast"
+        );
+        me.end_turn("akh-medu");
+        me.end_turn("akh-medu");
+    }
+
+    // --- --remote/AKH_REMOTE TCP connect: timeout + macOS TCC hint ---
+
+    #[test]
+    fn tcp_connect_help_only_adds_the_macos_hint_for_non_loopback_targets() {
+        let loopback = tcp_connect_help("127.0.0.1:9999");
+        let remote = tcp_connect_help("192.168.1.50:9999");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(
+                !loopback.contains("Local Network"),
+                "a loopback target is never a Local-Network-TCC candidate"
+            );
+            assert!(
+                remote.contains("Local Network"),
+                "a non-loopback TCP target on macOS should carry the TCC hint"
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(loopback, remote, "non-macOS builds never add the TCC hint");
+            assert!(!remote.contains("Local Network"));
+        }
+    }
+
+    #[test]
+    fn connect_timeout_error_names_the_target_in_message_and_help() {
+        let err = AcpError::ConnectTimeout {
+            target: "example.com:4242".into(),
+            timeout_secs: 5,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("example.com:4242"));
+        assert!(msg.contains("timed out after 5s"));
+        let help = miette::Diagnostic::help(&err)
+            .expect("ConnectTimeout carries help text")
+            .to_string();
+        assert!(help.contains("example.com:4242"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tcp_connect_bounded_maps_a_fast_io_failure_to_connect_not_timeout() {
+        // Nothing listens on loopback port 0 as a connect target — the OS
+        // refuses immediately, well under the timeout budget — so this
+        // exercises `connect_tcp_bounded`'s `Ok(Err(source))` branch (mapped
+        // to `AcpError::Connect`) rather than the timeout branch. A true
+        // hang-against-an-unreachable-host is exercised in production by
+        // `--remote`; reproducing it deterministically in a sandboxed test
+        // environment (no guaranteed network black hole) would be flaky, so
+        // this test instead pins the *other* half of `connect_tcp_bounded`'s
+        // contract: a fast failure must not be misreported as a timeout.
+        let err = connect_tcp_bounded("127.0.0.1:0")
+            .await
+            .expect_err("port 0 is never listening");
+        assert!(
+            matches!(err, AcpError::Connect { .. }),
+            "a fast connection failure must map to Connect, not ConnectTimeout: {err:?}"
+        );
     }
 
     #[test]

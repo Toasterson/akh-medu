@@ -58,25 +58,59 @@ pub fn parse_mcp_servers(servers: &[McpServer]) -> (Vec<SessionMcpServerCfg>, us
     (out, unsupported)
 }
 
+/// Tool descriptors discovered from one client-pushed MCP server, cached for
+/// the session's lifetime after the first successful discovery pass.
+///
+/// Carries everything [`build_tools_from_discovered`] needs to rebuild fresh
+/// [`McpProxyTool`](proxy::McpProxyTool)s each turn with **zero network
+/// I/O** — discovery (`initialize` + `tools/list`, blocking HTTP) runs at
+/// most once per ACP session; every later `session/prompt` in that session
+/// reuses this.
+#[derive(Debug, Clone)]
+pub struct DiscoveredServerTools {
+    /// The client-supplied server name (used for tool namespacing).
+    pub name: String,
+    /// MCP endpoint base URL.
+    pub url: String,
+    /// Bearer/authorization header value, if the client supplied one.
+    pub auth_header: Option<String>,
+    /// Raw `{name, description, inputSchema}` tool descriptors as returned by
+    /// `tools/list`.
+    pub descriptors: Vec<serde_json::Value>,
+}
+
 // ── Proxy tools (daemon build only — needs the HTTP MCP client) ──────────────
 
 #[cfg(feature = "daemon")]
-pub use proxy::build_session_tools;
+pub use proxy::{build_tools_from_discovered, discover_session_tools};
 
 #[cfg(feature = "daemon")]
 mod proxy {
     use std::collections::HashSet;
+    use std::time::Duration;
 
     use serde_json::{Map, Value};
 
-    use super::SessionMcpServerCfg;
+    use super::{DiscoveredServerTools, SessionMcpServerCfg};
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
     use crate::agent::tool_manifest::{
         Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
     };
     use crate::engine::Engine;
+    use crate::message::{AkhMessage, MessageSink};
     use crate::upstream_client::UpstreamMcpClient;
+
+    /// Per-server discovery budget. Discovery runs synchronously inside the
+    /// prompt turn (see `AkhAcpAgent::run_turn`), so a slow/blackholed server
+    /// must not eat the full `session/prompt` round trip the way the client's
+    /// [`UpstreamMcpClient::new`]/[`from_endpoint`] 30s default would; a
+    /// handful of seconds is plenty for a healthy `initialize` + `tools/list`.
+    /// Discovery only ever runs once per session (see the cache in
+    /// `run_turn`), so this budget is paid at most once per pushed server.
+    ///
+    /// [`from_endpoint`]: UpstreamMcpClient::from_endpoint
+    const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// One parameter of a proxied remote tool, carrying enough type info to
     /// coerce the LLM's string argument back to the JSON type the server wants.
@@ -241,39 +275,111 @@ mod proxy {
         }
     }
 
-    /// Connect to each pushed HTTP MCP server, discover its tools, and build a
-    /// proxy `Tool` for each. Discovery failures are logged and skipped so one
-    /// unreachable server never breaks a turn. Runs blocking network I/O — call
-    /// only from a blocking context (the ADR-027 turn closure).
-    pub fn build_session_tools(cfgs: &[SessionMcpServerCfg]) -> Vec<Box<dyn Tool>> {
-        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-        for cfg in cfgs {
-            let client = UpstreamMcpClient::from_endpoint(cfg.url.clone(), cfg.auth_header.clone());
-            match client.list_tools_raw() {
-                Ok(descriptors) => {
-                    let before = tools.len();
-                    for descriptor in &descriptors {
-                        if let Some(tool) = McpProxyTool::from_descriptor(
-                            &cfg.name,
-                            &cfg.url,
-                            cfg.auth_header.as_deref(),
-                            descriptor,
-                        ) {
-                            tools.push(Box::new(tool));
-                        }
-                    }
+    /// Connect to each pushed HTTP MCP server and discover its tools, once.
+    ///
+    /// Runs blocking network I/O under a tight [`DISCOVERY_TIMEOUT`] per
+    /// server (not the client's normal 30s call budget) — call only from a
+    /// blocking context (the ADR-027 turn closure), and only when the
+    /// session's discovery hasn't already been cached (see `run_turn`).
+    ///
+    /// Servers are discovered **concurrently**, one OS thread per pushed
+    /// server (`std::thread::scope`, joined before returning) rather than
+    /// serially: a session with N pushed servers previously paid up to
+    /// `N * DISCOVERY_TIMEOUT` wall-clock on the one-time cache-miss path if
+    /// several were slow/unreachable, since each `list_tools_raw()` blocked
+    /// the next server's attempt. Concurrent discovery bounds the whole pass
+    /// to roughly one `DISCOVERY_TIMEOUT` regardless of server count. This
+    /// function already only runs from a blocking context (never inside the
+    /// async runtime), so spawning plain OS threads for the duration of one
+    /// discovery pass is safe and needs no extra runtime.
+    ///
+    /// A server that fails discovery is skipped, logged via `tracing::warn`,
+    /// **and** reported through `sink` as a visible [`AkhMessage::system`] so
+    /// the client learns its server was dropped instead of the turn simply
+    /// reading as if the server never existed. Output order matches `cfgs`
+    /// (independent of which thread finishes first).
+    pub fn discover_session_tools(
+        cfgs: &[SessionMcpServerCfg],
+        sink: &dyn MessageSink,
+    ) -> Vec<DiscoveredServerTools> {
+        let results: Vec<Result<DiscoveredServerTools, (String, String, String)>> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = cfgs
+                    .iter()
+                    .map(|cfg| {
+                        scope.spawn(move || {
+                            let client = UpstreamMcpClient::from_endpoint_with_timeout(
+                                cfg.url.clone(),
+                                cfg.auth_header.clone(),
+                                DISCOVERY_TIMEOUT,
+                            );
+                            match client.list_tools_raw() {
+                                Ok(descriptors) => Ok(DiscoveredServerTools {
+                                    name: cfg.name.clone(),
+                                    url: cfg.url.clone(),
+                                    auth_header: cfg.auth_header.clone(),
+                                    descriptors,
+                                }),
+                                Err(e) => Err((cfg.name.clone(), cfg.url.clone(), e.to_string())),
+                            }
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| {
+                        Err((
+                            "<unknown>".to_string(),
+                            "<unknown>".to_string(),
+                            "discovery thread panicked".to_string(),
+                        ))
+                    }))
+                    .collect()
+            });
+
+        let mut out = Vec::with_capacity(results.len());
+        for result in results {
+            match result {
+                Ok(server) => {
                     tracing::info!(
-                        server = %cfg.name,
-                        url = %cfg.url,
-                        tools = tools.len() - before,
-                        "session MCP server tools bridged"
+                        server = %server.name,
+                        url = %server.url,
+                        tools = server.descriptors.len(),
+                        "session MCP server tools discovered (cached for the session)"
                     );
+                    out.push(server);
                 }
-                Err(e) => tracing::warn!(
-                    server = %cfg.name,
-                    url = %cfg.url,
-                    "session MCP discovery failed, skipping: {e}"
-                ),
+                Err((name, url, e)) => {
+                    tracing::warn!(
+                        server = %name,
+                        url = %url,
+                        "session MCP discovery failed, skipping: {e}"
+                    );
+                    sink.emit(&AkhMessage::system(format!(
+                        "MCP server \"{name}\" was skipped for this session: tool discovery failed ({e})"
+                    )));
+                }
+            }
+        }
+        out
+    }
+
+    /// Build proxy `Tool`s from previously-discovered descriptors — no
+    /// network I/O. Called once per prompt turn (cheap JSON→struct work) so
+    /// each turn gets fresh `McpProxyTool` instances even though discovery
+    /// itself ran once for the whole session.
+    pub fn build_tools_from_discovered(discovered: &[DiscoveredServerTools]) -> Vec<Box<dyn Tool>> {
+        let mut tools: Vec<Box<dyn Tool>> = Vec::new();
+        for server in discovered {
+            for descriptor in &server.descriptors {
+                if let Some(tool) = McpProxyTool::from_descriptor(
+                    &server.name,
+                    &server.url,
+                    server.auth_header.as_deref(),
+                    descriptor,
+                ) {
+                    tools.push(Box::new(tool));
+                }
             }
         }
         tools

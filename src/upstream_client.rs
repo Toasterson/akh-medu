@@ -118,9 +118,24 @@ impl UpstreamMcpClient {
     ///
     /// [`new`]: Self::new
     pub fn from_endpoint(endpoint: impl Into<String>, auth_header: Option<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(30))
-            .build();
+        Self::from_endpoint_with_timeout(endpoint, auth_header, Duration::from_secs(30))
+    }
+
+    /// Create a client for a **full** MCP endpoint URL with an explicit
+    /// request timeout, taken verbatim (see [`from_endpoint`]).
+    ///
+    /// Used for time-sensitive callers such as ACP session-MCP discovery
+    /// (`session/prompt`), which runs synchronously inside the prompt turn
+    /// and must not let one slow/blackholed pushed server eat the default
+    /// 30s budget on every request.
+    ///
+    /// [`from_endpoint`]: Self::from_endpoint
+    pub fn from_endpoint_with_timeout(
+        endpoint: impl Into<String>,
+        auth_header: Option<String>,
+        timeout: Duration,
+    ) -> Self {
+        let agent = ureq::AgentBuilder::new().timeout(timeout).build();
         Self {
             endpoint: endpoint.into(),
             auth_header,
@@ -391,6 +406,19 @@ mod tests {
         };
         // Config convention: url is a base, `/mcp` is the transport path.
         assert_eq!(UpstreamMcpClient::new(&cfg).endpoint, "http://anima.local:4100/mcp");
+    }
+
+    #[test]
+    fn from_endpoint_with_timeout_is_honored_by_default_ctor() {
+        // `from_endpoint` should just be the 30s-default sugar over
+        // `from_endpoint_with_timeout` — same endpoint handling either way.
+        let a = UpstreamMcpClient::from_endpoint("https://x.local/mcp", None);
+        let b = UpstreamMcpClient::from_endpoint_with_timeout(
+            "https://x.local/mcp",
+            None,
+            Duration::from_secs(30),
+        );
+        assert_eq!(a.endpoint, b.endpoint);
     }
 
     #[test]
