@@ -165,7 +165,7 @@ pub fn generate_plan(
     let criteria_lower = goal.success_criteria.to_lowercase();
 
     // Check if this is a code generation goal — delegate to specialized planner.
-    if is_code_goal(&goal_lower, &criteria_lower) {
+    if is_code_goal(engine, goal) {
         return generate_code_plan(goal, engine, working_memory, attempt);
     }
 
@@ -575,31 +575,39 @@ pub fn backtrack_plan(
 // Code-aware planning (Phase 10c)
 // ---------------------------------------------------------------------------
 
-/// Code generation keywords that trigger code-aware planning.
-const CODE_KEYWORDS: &[&str] = &[
-    "generate",
-    "implement",
-    "write code",
-    "create function",
-    "create struct",
-    "create enum",
-    "create trait",
-    "create module",
-    "code_gen",
-    "write rust",
-    "generate code",
-    "implement function",
-    "implement struct",
-    "implement trait",
-    "scaffold",
-    "stub",
-    "boilerplate",
-];
-
 /// Detect whether a goal is about code generation.
-fn is_code_goal(goal_lower: &str, criteria_lower: &str) -> bool {
-    let combined = format!("{goal_lower} {criteria_lower}");
-    CODE_KEYWORDS.iter().any(|kw| combined.contains(kw))
+///
+/// Detected structurally via the KG's `code:*` predicate namespace rather
+/// than an English keyword whitelist (language-agnostic hard rule): a goal
+/// routes to the specialized code-generation planner when its own symbol,
+/// or an entity whose label matches a term in the goal description, already
+/// participates in a `code:*` triple — i.e. the goal sits inside a
+/// known code-structure context in the KG.
+///
+/// Note: this intentionally narrows the old behavior. A goal with zero KG
+/// code context (no existing code entities referenced at all) now falls
+/// through to the generic VSA-scored planner instead of the specialized
+/// one; that planner still emits `kg_mutate`/`file_io`/etc. steps as
+/// needed, so context-free "generate a function" goals remain plannable,
+/// just without the code-specific step template.
+fn is_code_goal(engine: &Engine, goal: &Goal) -> bool {
+    if super::ooda::has_code_predicate(engine, &engine.triples_from(goal.symbol_id))
+        || super::ooda::has_code_predicate(engine, &engine.triples_to(goal.symbol_id))
+    {
+        return true;
+    }
+
+    if let Some(label) = super::ooda::find_code_entity_for_query(engine, &goal.description) {
+        if let Ok(sym) = engine.lookup_symbol(&label) {
+            if super::ooda::has_code_predicate(engine, &engine.triples_from(sym))
+                || super::ooda::has_code_predicate(engine, &engine.triples_to(sym))
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Generate a code-aware plan with specialized steps for code generation.
