@@ -72,16 +72,13 @@ against each tool's semantic profile via cosine-like similarity.
 
 Each tool carries a keyword array (17-25 words) that defines its semantic
 profile. A **synonym expansion** pass widens these at build time using a
-static lookup table (~20 root-word entries), so natural sentences like
-"What did that paper say about gravity?" activate `library_search` even
-when few tokens overlap with the base keywords.
+static lookup table (~20 root-word entries), enabling natural sentences to
+activate tools even when few tokens overlap with the base keywords.
 
 Tools with lower risk use lower activation thresholds:
 
 | Tool | Threshold | Multiplier | Danger |
 |------|-----------|------------|--------|
-| `library_search` | 0.50 | 0.80 | Safe |
-| `content_ingest` | 0.50 | 0.75 | Cautious |
 | `file_io` | 0.55 | 0.75 | Cautious/Danger |
 | `http_fetch` | 0.55 | 0.75 | Cautious |
 | `shell_exec` | 0.55 | 0.75 | Danger |

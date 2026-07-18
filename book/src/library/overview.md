@@ -148,20 +148,11 @@ akh library watch --dir /path/to/papers/
 
 ## Agent Integration
 
-The agent has two tools for working with library content:
-
-- **`content_ingest`** -- Ingest a document (file or URL) into the library.
-  The agent uses this when a goal involves importing or learning from external
-  content. See [Tools](../agent/tools.md#content_ingest).
-
-- **`library_search`** -- Search ingested library paragraphs by natural
-  language query via VSA similarity. The agent uses this when a goal asks
-  about previously ingested content (e.g., "What did that paper say about
-  gravity?"). See [Tools](../agent/tools.md#library_search).
-
-Both tools are scored by the OODA loop's [VSA-based tool selector](../agent/ooda-loop.md)
-using synonym-expanded keyword profiles, so natural language goals reliably
-activate them.
+Within an agentic session, library integration is guided by the [typed writer tools](../agent/tools.md)
+(e.g., `memory_write`, `kg_mutate`) and structured data flows. Rather than consuming raw-text
+ingest tools, the agent reads source documents with `file_io` or `http_fetch`, reasons about them,
+and writes distilled structured triples to the knowledge graph. This paradigm ensures that
+ingested knowledge is expressed as typed, queryable entities rather than uninterpreted text.
 
 ## Compartment Integration
 

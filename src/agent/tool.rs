@@ -237,12 +237,14 @@ pub trait Tool: Send + Sync {
     fn manifest(&self) -> ToolManifest;
 
     /// Whether this tool is advertised in the LLM's agentic tool catalog
-    /// (ADR 076 §1). Defaults to `true`. Raw-text NLU ingesters
-    /// (`text_ingest`, `content_ingest`, `journal_ingest`) override this to
-    /// `false`: inside an LLM session the model reasons better than the
-    /// regex/NLU passes and emits typed structured data to the typed writer
-    /// tools instead. They stay registered (and dispatchable) for
+    /// (ADR 076 §1). Defaults to `true`. A tool overrides this to `false` when
+    /// the model reasons better without it — e.g. a raw-text ingester the LLM
+    /// should bypass by reading documents with `file_io` and emitting typed
+    /// structured data to the typed writer tools (`memory_write`, `kg_mutate`)
+    /// instead. Such tools stay registered (and dispatchable) for
     /// operator/CLI/daemon-ingest contexts — only the catalog hides them.
+    /// No built-in currently overrides this; the seam remains for that pattern
+    /// (the former raw-text ingesters that used it were removed outright).
     fn advertise_to_llm(&self) -> bool {
         true
     }

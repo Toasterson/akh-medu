@@ -21,9 +21,10 @@ workspace config and restart the daemon.
 2. **Identity (once).** If persona files are present and you are not already
    awakened: read `IDENTITY.md` and `SOUL.md` with `file_io`. Distill the name,
    a description, the purpose/mission, and any traits/archetypes/domains, then
-   call `identity_awaken` with those fields. If it reports already-awakened,
-   leave it — only pass `force=true` if the operator explicitly asks to
-   re-awaken.
+   report these to the operator. The operator awakens the akh by invoking the ACP
+   `identity/awaken` extension (e.g., `akh acp <workspace> _akh/identity/awaken`
+   with the distilled fields). Pass `force=true` only if explicitly asked to
+   re-awaken an existing identity.
 
 3. **Memory journals.** Use the `memory/*.md` glob from step 1. For each file:
    read it with `file_io`, then call `memory_write` with:
