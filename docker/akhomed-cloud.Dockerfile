@@ -145,6 +145,11 @@ RUN apt-get update && \
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${T}.tar.gz" \
       | tar xz -C /tmp && \
     install -m 0755 "/tmp/sccache-${SCCACHE_VERSION}-${T}/sccache" /usr/local/bin/sccache && \
-    rm -rf /tmp/sccache-*
+    rm -rf /tmp/sccache-* && \
+    # Agents reach for a literal /scratch as their clone/build target; point it
+    # at the persistent /data volume so it survives restarts and stays writable
+    # for uid 999 (the akh). The dir itself is created by the host/entrypoint —
+    # /data is a volume, so a build-time mkdir would be shadowed at run time.
+    ln -sfn /data/scratch /scratch
 ENV CARGO_HOME=/data/cache/cargo
 USER akh
