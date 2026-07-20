@@ -923,7 +923,14 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        // Cut at the last char boundary at or below `max` — a raw `&s[..max]`
+        // panics when the limit lands inside a multi-byte char (an em-dash in
+        // a doc comment took down a whole ingest turn this way).
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -1294,5 +1301,18 @@ mod tests {
             count1, count2,
             "re-ingest should not accumulate triples (first: {count1}, second: {count2})"
         );
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        // 255 ASCII bytes then an em-dash spanning bytes 255..258 — the exact
+        // shape that panicked a live ingest ("byte index 256 is not a char
+        // boundary").
+        let s = format!("{}— and more", "a".repeat(255));
+        let out = truncate(&s, 256);
+        assert!(out.ends_with("..."));
+        assert_eq!(&out[..255], "a".repeat(255));
+        // Multi-byte content shorter than the limit passes through whole.
+        assert_eq!(truncate("é—é", 64), "é—é");
     }
 }
