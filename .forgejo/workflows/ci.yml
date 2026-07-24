@@ -159,53 +159,53 @@ jobs:
             echo "=== git log --oneline -5 ===" && git log --oneline -5 || true
           fi
 
-          case "$BRANCH" in
-            main|develop) ;;
-            *)
-              echo "skipping chart publish — branch '$BRANCH' is not main/develop"
-              exit 0
-              ;;
-          esac
-          REGISTRY=oci://code.aopc.cloud/toasterson
-          CHART_DIR=charts/akh-medu
-          CHART_VERSION=$(awk '/^version:/ {print $2; exit}' "$CHART_DIR/Chart.yaml")
-          if [ -z "$CHART_VERSION" ]; then
-            echo "ERROR: could not read chart version from $CHART_DIR/Chart.yaml" >&2
-            exit 1
-          fi
-          echo "chart version from Chart.yaml: $CHART_VERSION"
-
-          # Idempotence: if this version is already up, log and exit clean.
-          # `helm pull` against a missing version returns non-zero, against
-          # an existing version succeeds and writes a .tgz into /tmp/check.
-          mkdir -p /tmp/check
-          if helm pull "$REGISTRY/akh-medu" --version "$CHART_VERSION" -d /tmp/check >/dev/null 2>&1; then
-            echo "chart akh-medu-$CHART_VERSION already published; nothing to do"
-            exit 0
-          fi
-
-          # NOTE: we intentionally skip `helm dependency update` — the only
-          # dependency is Bitnami postgresql (gated behind postgresql.enabled,
-          # which is always false in production because we use the shared
-          # CNPG postgres-ha cluster). Pulling from Docker Hub also risks
-          # anonymous-pull rate-limits. If a future chart grows a dep that
-          # must ship bundled, add it here.
-
-          mkdir -p /tmp/pkg
-          helm package "$CHART_DIR" -d /tmp/pkg
-
-          # Non-fatal push: helm push returns non-zero if the version already
-          # exists (e.g. the idempotence check above raced or returned an
-          # unexpected code). The chart is present if push succeeds or if the
-          # idempotence check above already exited 0.
-          if ! helm push "/tmp/pkg/akh-medu-$CHART_VERSION.tgz" "$REGISTRY"; then
-            # Verify the version really is in the registry before declaring success.
-            if helm pull "$REGISTRY/akh-medu" --version "$CHART_VERSION" -d /tmp/check >/dev/null 2>&1; then
-              echo "non-fatal: helm push returned non-zero but akh-medu-$CHART_VERSION is present in registry" >&2
-            else
-              echo "ERROR: helm push failed and chart version $CHART_VERSION is not reachable in registry" >&2
+          # NO mid-script `exit 0` anywhere in this step: the Solstice runner
+          # has been observed mapping early-exit-0 script deaths to failure
+          # (status.code().unwrap_or(1) on a reaped-elsewhere wait status —
+          # every historical failure of this job took an early-exit path and
+          # every success ran to the end). Structure as if/else fall-through
+          # so the shell always reaches the natural end of the script.
+          if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "develop" ]; then
+            echo "skipping chart publish — branch '$BRANCH' is not main/develop"
+          else
+            REGISTRY=oci://code.aopc.cloud/toasterson
+            CHART_DIR=charts/akh-medu
+            CHART_VERSION=$(awk '/^version:/ {print $2; exit}' "$CHART_DIR/Chart.yaml")
+            if [ -z "$CHART_VERSION" ]; then
+              echo "ERROR: could not read chart version from $CHART_DIR/Chart.yaml" >&2
               exit 1
             fi
-          else
-            echo "published akh-medu-$CHART_VERSION to $REGISTRY"
+            echo "chart version from Chart.yaml: $CHART_VERSION"
+
+            # Idempotence: `helm pull` against a missing version returns
+            # non-zero, against an existing version succeeds and writes a
+            # .tgz into /tmp/check.
+            mkdir -p /tmp/check
+            if helm pull "$REGISTRY/akh-medu" --version "$CHART_VERSION" -d /tmp/check >/dev/null 2>&1; then
+              echo "chart akh-medu-$CHART_VERSION already published; nothing to do"
+            else
+              # NOTE: we intentionally skip `helm dependency update` — the only
+              # dependency is Bitnami postgresql (gated behind postgresql.enabled,
+              # which is always false in production because we use the shared
+              # CNPG postgres-ha cluster). Pulling from Docker Hub also risks
+              # anonymous-pull rate-limits. If a future chart grows a dep that
+              # must ship bundled, add it here.
+              mkdir -p /tmp/pkg
+              helm package "$CHART_DIR" -d /tmp/pkg
+
+              # Non-fatal push: helm push returns non-zero if the version
+              # already exists (e.g. the idempotence check above raced).
+              if ! helm push "/tmp/pkg/akh-medu-$CHART_VERSION.tgz" "$REGISTRY"; then
+                # Verify the version really is in the registry before declaring success.
+                if helm pull "$REGISTRY/akh-medu" --version "$CHART_VERSION" -d /tmp/check >/dev/null 2>&1; then
+                  echo "non-fatal: helm push returned non-zero but akh-medu-$CHART_VERSION is present in registry" >&2
+                else
+                  echo "ERROR: helm push failed and chart version $CHART_VERSION is not reachable in registry" >&2
+                  exit 1
+                fi
+              else
+                echo "published akh-medu-$CHART_VERSION to $REGISTRY"
+              fi
+            fi
           fi
+          echo "chart publish step complete"
