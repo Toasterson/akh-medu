@@ -217,38 +217,126 @@ impl std::fmt::Debug for PeerRegistry {
 
 /// Delegate a task to a peer akh-medu instance.
 ///
-/// Sends a delegation request to the peer's `/delegation/incoming` endpoint
-/// and polls for the result. The peer is expected to return a
-/// `DelegationCallbackPayload` on its result channel.
+/// Sends a delegation request to the peer's `/workspaces/{ws}/agent/run`
+/// endpoint (the same HTTP API the Anima gateway uses) and awaits the
+/// `AgentRunResponse`. The peer runs a fresh agent session against the
+/// specified workspace, drives it to completion, and returns the synthesized
+/// overview as the delegation outcome.
 ///
-/// **Current status**: HTTP peer delegation requires the peer's akhomed server
-/// to expose a delegation API endpoint (planned in the daemon integration).
-/// This function provides the scaffold; until both sides are wired, it returns
-/// `DelegationError::PeerUnreachable`.
+/// This is a pure internal akhomed-to-akhomed HTTP call — it never touches
+/// Anima. The `target_workspace` field on `DelegationTask` selects which
+/// workspace the peer runs the task against; when `None`, the caller's
+/// workspace name is used (self-delegation).
 #[cfg(feature = "daemon")]
 pub async fn delegate_to_peer(
     endpoint: &str,
     task: &DelegationTask,
     id: DelegationId,
 ) -> DelegationResult<DelegationOutcome> {
-    // Build the delegation request payload.
+    use std::time::Instant;
+
+    // Determine target workspace — fall back to "default" when unspecified.
+    let workspace = task
+        .target_workspace
+        .as_deref()
+        .unwrap_or("default");
+
+    let url = format!(
+        "{endpoint}/workspaces/{workspace}/agent/run"
+    );
+
+    // Build the AgentRunRequest: a single goal = the task description.
     let payload = serde_json::json!({
-        "task_id": id.0.to_string(),
-        "description": task.description,
-        "required_capabilities": task.required_capabilities,
-        "context_triples": task.context_triples,
-        "goal_id": task.goal_id,
+        "goals": [task.description],
+        "max_cycles": 50,
+        "fresh": true,
     });
 
-    let url = format!("{endpoint}/delegation/incoming");
     let start = Instant::now();
 
-    // Attempt the HTTP call if reqwest is available.
-    // The delegation feature doesn't enable reqwest directly; fall back to
-    // PeerUnreachable so the manager can try a different target.
-    let _ = (payload, url, start, id);
-    Err(DelegationError::PeerUnreachable {
-        endpoint: endpoint.to_string(),
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| DelegationError::PeerUnreachable {
+            endpoint: endpoint.to_string(),
+        })?;
+
+    tracing::info!(
+        delegation_id = id.0,
+        peer_endpoint = %endpoint,
+        workspace = %workspace,
+        url = %url,
+        "dispatching peer delegation via /agent/run",
+    );
+
+    let resp = client
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, endpoint = %endpoint, "peer delegation HTTP request failed");
+            DelegationError::PeerUnreachable {
+                endpoint: endpoint.to_string(),
+            }
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(
+            endpoint = %endpoint,
+            status = %status,
+            body = %body,
+            "peer delegation returned non-2xx",
+        );
+        return Err(DelegationError::PeerUnreachable {
+            endpoint: endpoint.to_string(),
+        });
+    }
+
+    // Parse the AgentRunResponse.
+    let run_resp: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, endpoint = %endpoint, "failed to parse peer agent-run response");
+            DelegationError::PeerUnreachable {
+                endpoint: endpoint.to_string(),
+            }
+        })?;
+
+    let wall_time = start.elapsed();
+    let overview = run_resp
+        .get("overview")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cycles_completed = run_resp
+        .get("cycles_completed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    tracing::info!(
+        delegation_id = id.0,
+        endpoint = %endpoint,
+        workspace = %workspace,
+        cycles_completed = cycles_completed,
+        wall_time_ms = wall_time.as_millis() as u64,
+        "peer delegation completed",
+    );
+
+    Ok(DelegationOutcome {
+        id,
+        stdout: overview,
+        structured: None, // peer's KG is separate; no structured triples
+        wall_time,
+        tokens_consumed: None,
+        cost_usd: None,
+        exit_code: Some(0),
+        goal_id: task.goal_id,
+        error: None,
+        target: None,
     })
 }
 

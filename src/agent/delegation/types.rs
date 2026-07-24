@@ -195,6 +195,9 @@ pub struct DelegationTask {
     pub priority: f32,
     /// Optional explicit target hint ("local", "remote", "peer").
     pub target_hint: Option<String>,
+    /// Target workspace name for peer delegation (default: same as caller).
+    /// When None, the peer endpoint uses its default workspace.
+    pub target_workspace: Option<String>,
 }
 
 impl DelegationTask {
@@ -207,6 +210,7 @@ impl DelegationTask {
             goal_id: 0,
             priority: 0.5,
             target_hint: None,
+            target_workspace: None,
         }
     }
 }

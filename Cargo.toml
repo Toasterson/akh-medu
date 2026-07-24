@@ -84,6 +84,7 @@ epub = "2"
 
 # HTTP (sync)
 ureq = { version = "2", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # MCP protocol version vocabulary (`ProtocolVersion`, `KNOWN_VERSIONS`) for the
 # hand-rolled Streamable HTTP client in `src/upstream_client.rs` — reuses
@@ -244,7 +245,7 @@ wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
-delegation = ["daemon"]
+delegation = ["daemon", "reqwest"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
 # AMD GPU acceleration for the Candle backend (ADR 068). Opt-in: requires the
