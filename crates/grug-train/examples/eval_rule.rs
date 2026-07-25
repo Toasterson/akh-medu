@@ -27,9 +27,9 @@ use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
 use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "cuda"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
@@ -97,7 +97,8 @@ fn model_config(name: &str, vocab: usize) -> TinyTransformerConfig {
         "p1a_large" => TinyTransformerConfig::p1a_large(vocab),
         "p1a_50m" => TinyTransformerConfig::p1a_50m(vocab),
         "p1a_100m" => TinyTransformerConfig::p1a_100m(vocab),
-        other => panic!("--model must be p1a|p1a_large|p1a_50m|p1a_100m, got {other:?}"),
+        "p1a_350m" => TinyTransformerConfig::p1a_350m(vocab),
+        other => panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}"),
     }
 }
 
@@ -109,13 +110,16 @@ fn main() {
     let plits = parse_depths(&args.prop_literals, "--prop-literals");
     assert_eq!(plits.len(), 2, "--prop-literals must be lo,hi");
 
-    #[cfg(feature = "gpu")]
+    // Vendor-agnostic GPU device (ROCm under `--features gpu`, CUDA under
+    // `--features cuda`) so this example builds unchanged on the local 7900 XTX
+    // and on an H100 cloud box.
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
     let device = {
-        let d = burn::backend::rocm::RocmDevice::default();
+        let d = grug_train::gpu_device();
         println!("eval_rule: GPU backend, device: {d:?}");
         d
     };
-    #[cfg(not(feature = "gpu"))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
     let device = {
         println!("eval_rule: CPU backend");
         Default::default()

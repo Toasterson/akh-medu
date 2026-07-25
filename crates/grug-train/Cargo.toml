@@ -56,3 +56,13 @@ default = []
 # Requires ROCM_PATH (or CUBECL_ROCM_PATH) to point at the ROCm install
 # (this box: /opt/rocm-6.3.4, gfx1100). See `GpuAutodiffBackend` in `lib.rs`.
 gpu = ["burn/rocm"]
+
+# NVIDIA/CUDA GPU backend (H100 cloud training, Phase 51 P4->350M). Same
+# CubeCL forward+backward story as `gpu`/ROCm, different vendor runtime.
+# Mutually exclusive with `gpu` -- pick exactly one:
+#   local AMD 7900 XTX : --features gpu
+#   cloud NVIDIA H100  : --features cuda
+# Requires the CUDA toolkit at build time (CUDA_PATH / nvcc on PATH).
+# See `GpuAutodiffBackend` + `gpu_device()` in `lib.rs`, which are defined for
+# whichever of the two is enabled, so example code is vendor-agnostic.
+cuda = ["burn/cuda"]

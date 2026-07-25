@@ -263,6 +263,23 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 768, 13, 12, 3072, 640)
     }
 
+    /// **The Phase 51 P4 target: the 350M foundation model** — 347.3M params
+    /// (d_model 1024, 24 layers, 16 heads, d_ff 4864, ctx 1024), verified by
+    /// `Module::num_params` at vocab 3000 — the scale at which the
+    /// kludge-brain bet is meant to hold (cf. phi-1-small@350M, the one
+    /// primary datapoint at this size; see the Phi memo).
+    ///
+    /// Context defaults to 1024 (not the ladder's 640): the deductive corpus's
+    /// depth-6 sequences reach ~800 tokens under the saturated BPE, and 640
+    /// silently truncates them.
+    ///
+    /// **Do not train this with the 11M recipe.** `lr 3e-4` converged 11M but
+    /// left 50M undertrained with depressed trace-validity — 350M needs a
+    /// lower LR (~1e-4) plus warmup. See `training/configs/350m.env`.
+    pub fn p1a_350m(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 1024, 16, 24, 4864, 1024)
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))

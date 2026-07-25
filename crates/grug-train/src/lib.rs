@@ -89,3 +89,42 @@ pub type GpuBackend = burn::backend::Rocm<f32>;
 /// `burn::backend::rocm::RocmDevice`) instead of `CpuAutodiffBackend`.
 #[cfg(feature = "gpu")]
 pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
+
+/// The GPU inference backend under the `cuda` feature: Burn's CUDA (CubeCL)
+/// backend, for NVIDIA cloud training (H100). Same forward+backward CubeCL
+/// story as the ROCm path, different vendor runtime.
+///
+/// Requires the CUDA toolkit at build time (`CUDA_PATH` / `nvcc` on PATH).
+/// **Mutually exclusive with `gpu`** — enable exactly one.
+#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+pub type GpuBackend = burn::backend::Cuda<f32>;
+
+/// The CUDA *training* backend: [`GpuBackend`] wrapped in `Autodiff`.
+#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
+
+/// The default device for whichever GPU backend is enabled — the seam that
+/// keeps example/binary code **vendor-agnostic**: call `gpu_device()` instead
+/// of naming `RocmDevice`/`CudaDevice`, and the same source builds for the
+/// local 7900 XTX (`--features gpu`) and an H100 cloud box
+/// (`--features cuda`).
+#[cfg(feature = "gpu")]
+pub fn gpu_device() -> burn::backend::rocm::RocmDevice {
+    Default::default()
+}
+
+/// See the `gpu` variant above.
+#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+pub fn gpu_device() -> burn::backend::cuda::CudaDevice {
+    Default::default()
+}
+
+// Enabling both vendor backends at once is a configuration error: the
+// `GpuBackend`/`GpuAutodiffBackend`/`gpu_device` items would collide, and only
+// one CubeCL runtime can own the process's device context. Fail loudly at
+// compile time rather than producing a confusing type error.
+#[cfg(all(feature = "gpu", feature = "cuda"))]
+compile_error!(
+    "grug-train: features `gpu` (ROCm/AMD) and `cuda` (NVIDIA) are mutually exclusive — \
+     enable exactly one (local 7900 XTX: --features gpu; H100 cloud: --features cuda)."
+);
