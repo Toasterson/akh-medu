@@ -108,9 +108,14 @@ pub fn calendar_rules() -> Vec<egg::Rewrite<AkhLang, ()>> {
             => "(and (triple ?a ?before ?b) (and (triple ?b ?before ?c) (triple ?a ?before ?c)))"
         ),
         // Conflict: if two events overlap and require the same resource, they conflict.
+        // The derived predicate is the concrete symbol `conflicts` — it cannot be a
+        // pattern variable (`?conflicts`) because nothing on the LHS binds it; that
+        // variant panics inside `rewrite!` at construction time ("refers to unbound
+        // var"), which made this whole pack uncallable (latent since Phase 13f,
+        // surfaced by the Phase 40 measurement harness).
         egg::rewrite!("cal-conflict";
             "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (triple ?e2 ?requires ?r)))"
-            => "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (and (triple ?e2 ?requires ?r) (triple ?e1 ?conflicts ?e2))))"
+            => "(and (triple ?e1 ?overlaps ?e2) (and (triple ?e1 ?requires ?r) (and (triple ?e2 ?requires ?r) (triple ?e1 conflicts ?e2))))"
         ),
     ]
 }
@@ -206,6 +211,17 @@ mod tests {
     fn causal_rules_load() {
         let rules = causal_rules();
         assert_eq!(rules.len(), 4);
+    }
+
+    /// Every pack must at least *construct* — `rewrite!` panics at call time
+    /// on malformed patterns (e.g. an RHS variable unbound on the LHS), so a
+    /// pack without this coverage can hide an uncallable rule forever
+    /// (cal-conflict did exactly that until Phase 40).
+    #[test]
+    fn all_rule_packs_construct() {
+        assert_eq!(pim_rules().len(), 2);
+        assert_eq!(calendar_rules().len(), 2);
+        assert_eq!(epistemic_rules().len(), 3);
     }
 
     #[test]

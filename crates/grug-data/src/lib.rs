@@ -1,0 +1,87 @@
+//! `grug-data` — Phase 51 (Grug-Brain BabyLLM) data generator + eval scorer.
+//!
+//! Pure Rust, no machine-learning dependency. Two jobs:
+//!
+//! 1. **Generate** deterministic, seeded JSON tool-calling training examples
+//!    with owned ground truth (see [`Generator`], [`ToolCatalog`],
+//!    [`Dataset`]).
+//! 2. **Score** a model's raw output string against an example's ground
+//!    truth, gated level-by-level, plus an anti-collapse diversity alarm
+//!    (see [`eval::score_output`], [`eval::EvalReport`],
+//!    [`eval::DiversityReport`]).
+//!
+//! # Quick start
+//!
+//! ```
+//! use grug_data::{Dataset, eval};
+//!
+//! let dataset = Dataset::new(42).expect("built-in catalog splits cleanly");
+//! let train = dataset.train_examples(100).unwrap();
+//! let holdout = dataset.holdout_examples(20).unwrap();
+//!
+//! // Hand a model `train[i].user_request` + `train[i].tools`, get back a
+//! // raw string, score it:
+//! let raw = train[0].expected_call_as_json_string();
+//! let outcome = eval::score_output(&raw, &train[0]);
+//! assert!(outcome.arg_correct());
+//! ```
+
+pub mod catalog;
+mod catalog_tools;
+pub mod constrain;
+pub mod dataset;
+pub mod error;
+pub mod eval;
+pub mod format;
+pub mod ground;
+pub mod repair;
+pub mod generator;
+pub mod organ;
+pub mod phrasing;
+pub mod procedural;
+pub mod reason;
+pub mod retriever;
+pub mod schema;
+pub mod semantic;
+pub mod similarity;
+
+pub use catalog::ToolCatalog;
+pub use constrain::{GrammarState, ToolCallGrammar};
+pub use dataset::{AxisReport, Dataset, EvalAxis};
+pub use error::{GrugError, GrugResult};
+pub use eval::{
+    score_abstention_fmt, AbstentionOutcome, AbstentionReport, ArgMismatch, DiversityReport,
+    EvalOutcome, EvalReport, SchemaViolation,
+};
+pub use format::{parse_call, parse_output, render_call, render_tools, ParsedOutput, TargetFormat};
+pub use ground::{ground_values, GroundStats};
+pub use organ::{respond_to_gap, GapRecoveryReport, GapResponse};
+pub use repair::{repair_call, RepairStats};
+pub use retriever::{
+    embed_recall_at_k, retrieval_recall_at_k, semantic_recall_at_k, EmbedRetriever, Retriever,
+    SemanticRetriever,
+};
+pub use generator::{DistractorConfig, Generator, PhrasingMode};
+pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
+pub use procedural::{
+    build_catalog as build_procedural_catalog, build_catalog_signal, DEFAULT_TEMPLATES_PER_TOOL,
+};
+pub use reason::{
+    score_reason_outputs, AbstentionStats as ReasonAbstentionStats, DepthStats as ReasonDepthStats,
+    EntityId, EntityType, Fact as ReasonFact, ReasonConfig, ReasonDataset, ReasonDiversityReport,
+    ReasonError, ReasonEvalSummary, ReasonExample, RelationKind, ReplayReport, TraceArm,
+};
+// Phase 51 P4 slice 1 — the High-Grug-v2 deductive corpus arms.
+pub use reason::register::{Op as GrugOp, Slot as GrugSlot, Sort as GrugSort, Truth as GrugTruth};
+pub use reason::rule::corpus::{
+    ExampleKind, GoalSpec, LogicArm, PropConn, PropLiteral, RuleCorpusConfig, RuleDataset,
+    RuleExample,
+};
+pub use reason::rule::replay::{
+    replay_rule, score_rule_outputs, ComponentSummary, RuleDepthStats, RuleEvalSummary,
+    RuleReplayReport,
+};
+pub use reason::rule::world::{Predicate, Rule, RuleWorld, RuleWorldConfig};
+pub use semantic::{describe_tool, glossed_phrase, SignalMode};
+pub use schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
+pub use similarity::{levenshtein, normalized_similarity, normalized_similarity_ci};

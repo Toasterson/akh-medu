@@ -116,36 +116,6 @@ Prompt the user for input via stdout/stdin.
 | `prompt` | yes | Question to display |
 | `timeout_secs` | no | Input timeout |
 
-## Library Tools
-
-### content_ingest
-
-Ingest a document (file or URL) into the [shared content library](../library/overview.md).
-Parses HTML, PDF, EPUB, or plain text. Extracts triples and creates VSA
-embeddings for semantic search.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `source` | yes | File path or URL to ingest |
-| `title` | no | Override document title |
-| `tags` | no | Comma-separated tags for categorization |
-
-Danger level: **Cautious** (fetches/reads documents, writes triples + VSA embeddings).
-
-### library_search
-
-Search the shared content library for paragraphs matching a natural language
-query via VSA semantic similarity. Returns the most relevant library paragraphs
-with document context and similarity scores.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `query` | yes | Natural language search text |
-| `top_k` | no | Number of results (default: 5) |
-| `document` | no | Filter to a specific document slug |
-
-Danger level: **Safe** (read-only VSA search, no side effects).
-
 ## Advanced Tools
 
 ### infer_rules
@@ -165,24 +135,6 @@ Discover knowledge gaps by analyzing the graph structure.
 |-----------|----------|-------------|
 | `goal` | no | Focus analysis around a specific goal |
 | `max_gaps` | no | Maximum gaps to report (default: 10) |
-
-### csv_ingest
-
-Ingest structured data from CSV files.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `path` | yes | Path to CSV file |
-| `format` | no | `spo` (subject-predicate-object) or `entity` (header columns as predicates) |
-
-### text_ingest
-
-Extract facts from natural language text using the grammar parser.
-
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `text` | yes | Text to parse, or `file:/path` to read from file |
-| `max_sentences` | no | Maximum sentences to process |
 
 ### code_ingest
 

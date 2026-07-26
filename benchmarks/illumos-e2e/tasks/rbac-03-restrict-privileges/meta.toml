@@ -1,0 +1,9 @@
+id = "rbac-03-restrict-privileges"
+family = "rbac"
+description = "Narrow a service account's default privilege set below illumos 'basic' and verify the boundary with ppriv"
+timeout_secs = 600
+expected_manpages = ["usermod", "ppriv", "privileges"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

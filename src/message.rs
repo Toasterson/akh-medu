@@ -64,6 +64,47 @@ pub enum AkhMessage {
     },
 }
 
+// ── Message roles ─────────────────────────────────────────────────────────
+
+/// Conversational role of a message — drives TUI grouping, styling, and the
+/// "declutter" collapse of intermediate reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRole {
+    /// Something the user said (their prompt, echoed into the transcript).
+    User,
+    /// The engine's final, user-facing answer.
+    Assistant,
+    /// Intermediate reasoning, tool calls, audit entries, goal progress —
+    /// the "thinking" that is collapsed by default to keep the chat clean.
+    Trace,
+    /// System status (banners, connection notices, idle ticks).
+    System,
+    /// An error surfaced to the user.
+    Error,
+}
+
+impl AkhMessage {
+    /// Classify this message into a conversational [`MessageRole`].
+    pub fn role(&self) -> MessageRole {
+        match self {
+            AkhMessage::Prompt { .. } => MessageRole::User,
+            AkhMessage::Narrative { .. } | AkhMessage::Fact { .. } => MessageRole::Assistant,
+            AkhMessage::Reasoning { .. }
+            | AkhMessage::ToolResult { .. }
+            | AkhMessage::AuditLog { .. }
+            | AkhMessage::Gap { .. }
+            | AkhMessage::GoalProgress { .. } => MessageRole::Trace,
+            AkhMessage::Error { .. } => MessageRole::Error,
+            AkhMessage::System { .. } => MessageRole::System,
+        }
+    }
+
+    /// Whether this message is intermediate "thinking" that can be collapsed.
+    pub fn is_trace(&self) -> bool {
+        self.role() == MessageRole::Trace
+    }
+}
+
 // ── MessageSink trait ───────────────────────────────────────────────────
 
 /// A destination for structured agent messages.

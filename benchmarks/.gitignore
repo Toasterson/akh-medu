@@ -1,0 +1,28 @@
+# Downloaded datasets (fetch per MEMORY_BENCHMARKS.md / frontiercode README)
+locomo/*.json
+longmemeval/*.json
+# Regenerable task sets + run outputs
+frontiercode/tasks/*.json
+frontiercode/results/*.json
+results_*.json
+
+# Phase 50 W7 (ADR 086 §4): results/<date>-<harness>-<model>/run.jsonl and
+# summary.md are the committed "scores" — never gitignore those (they are
+# the longitudinal record the leaderboard/site are generated from). Raw
+# transcripts and VM artifacts a harness writes alongside them belong in a
+# transcripts/ or artifacts/ subdirectory next to run.jsonl, which IS ignored:
+results/*/transcripts/
+results/*/artifacts/
+
+# benchmarks/LEADERBOARD.md IS committed (regenerated via `bench-tool
+# leaderboard` / `just bench-leaderboard`; tracked so `git log` gives
+# regression history per ADR 086 §4).
+
+# benchmarks/site/index.html is fully regenerable from committed results
+# (`bench-tool site` / `just bench-site`) and would only grow as more runs
+# land, so it stays out of git. `site/sample-index.html` is a committed,
+# hand-frozen sample built from the synthetic demo runs under
+# `results/*-demo-*/` so reviewers can open a real rendered page without
+# building Rust; regenerate it deliberately, don't let the generator
+# overwrite it silently (the bin defaults to `index.html`, not this name).
+site/index.html

@@ -10,7 +10,18 @@ pub fn system_prompt() -> &'static str {
      - Predicate is a relation (is-a, has-a, part-of, located-in, causes, contains, supports, designed, built-by, etc.)\n\
      - Confidence: 1.0 for explicit statements, 0.7 for implied, 0.5 for uncertain\n\
      - Output ONLY the JSON array, no explanation\n\
-     - Maximum {max} triples per text"
+     - Maximum {max} triples per text\n\
+     STRICT EXCLUSIONS — never use these as subject or object:\n\
+     - Internal agent components: tool names (tool:*, similarity_search, memory_recall), \
+       goal identifiers (goal:*), episode IDs (episode:*), criteria labels (criteria:*)\n\
+     - Numeric literals, scores, or parameters: rate:*, priority:*, status:*, confidence values, \
+       plain numbers like 0.8 or 69\n\
+     - File paths, document names, or directory paths: anything ending in .md, .rs, .toml, .json, \
+       or containing path separators (e.g. SOUL.md, MEMORY.md, src/agent/foo.rs, memory/)\n\
+     - CI/CD infrastructure or runtime context: CI runner names, workflow names, platform identifiers \
+       (e.g. ForgejoActions, GitHub Actions, runner IDs)\n\
+     - UUID-like identifiers (e.g. 019e4909-cf4b-70e1-a703-287c3fdea3ef)\n\
+     These are agent-internal execution artifacts, NOT domain knowledge facts."
 }
 
 /// Build the few-shot example for the prompt.
@@ -45,10 +56,7 @@ pub fn chatml_prompt(text: &str, max_triples: usize) -> String {
 }
 
 /// Build OpenAI-compatible messages array for the external API.
-pub fn openai_messages(
-    text: &str,
-    max_triples: usize,
-) -> Vec<serde_json::Value> {
+pub fn openai_messages(text: &str, max_triples: usize) -> Vec<serde_json::Value> {
     let sys = system_prompt().replace("{max}", &max_triples.to_string());
     let few_shot = few_shot_example();
 
@@ -90,10 +98,7 @@ pub fn parse_triples(raw: &str) -> Vec<super::RawTriple> {
             let s = v.get("s")?.as_str()?.trim().to_string();
             let p = v.get("p")?.as_str()?.trim().to_string();
             let o = v.get("o")?.as_str()?.trim().to_string();
-            let c = v
-                .get("c")
-                .and_then(|c| c.as_f64())
-                .unwrap_or(0.7) as f32;
+            let c = v.get("c").and_then(|c| c.as_f64()).unwrap_or(0.7) as f32;
 
             if s.is_empty() || p.is_empty() || o.is_empty() {
                 return None;
@@ -211,6 +216,21 @@ mod tests {
         let prompt = chatml_prompt("test text here", 10);
         assert!(prompt.contains("test text here"));
         assert!(prompt.contains("<|im_start|>system"));
+    }
+
+    #[test]
+    fn system_prompt_excludes_scaffolding_entities() {
+        let prompt = system_prompt();
+        // Must instruct the LLM to exclude agent-internal artifacts.
+        assert!(prompt.contains("STRICT EXCLUSIONS"));
+        assert!(prompt.contains("tool:"));
+        assert!(prompt.contains("episode:"));
+        assert!(prompt.contains("goal:"));
+        assert!(prompt.contains("priority:"));
+        assert!(prompt.contains("status:"));
+        assert!(prompt.contains(".md"));
+        assert!(prompt.contains("UUID"));
+        assert!(prompt.contains("CI"));
     }
 
     #[test]

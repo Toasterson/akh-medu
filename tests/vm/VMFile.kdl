@@ -1,0 +1,211 @@
+// Phase 50 / W1 — VM substrate for the feature-test harness.
+//
+// Plan: docs/ai/plans/2026-07-05-phase50-feature-test-benchmarks.md (W1)
+// ADR:  docs/ai/decisions/086-feature-test-vm-harness-benchmarks.md
+// Runbook + full boot/provisioning analysis: docs/ops/vm-harness-openindiana.md
+// Shakeout baseline: docs/ai/2026-07-05-phase50-w1-illumos-shakeout.md
+//
+// ⚠ STATUS (2026-07-06, W1d): the three guests now point at
+// openindiana-hipster-cloud-fixed.qcow2 (NOT rust-ci) — see each vm block's
+// comment + docs/ai/2026-07-06-phase50-w1c-image-defects.md "W1d" section
+// for the full story. Short version: rust-ci is unfixable offline (missing
+// dladm/ipadm, below); hipster-cloud (OI 2025.04) has real networking, a
+// real cdrom driver, and illumos's native metadata/useragent provisioner,
+// but a first boot still doesn't answer SSH for ONE cheap reason — its root
+// pool is named `oirpool`, and the illumos metadata agent hardcodes `rpool`
+// (`zpool list rpool` -> fatal), so it aborts BEFORE configuring the NIC and
+// vioif0 never gets an IP (sshd IS up, just unreachable). The offline bake
+// (scripts/bake-hipster-cloud-image.sh) fixes this with declarative
+// /etc/hostname.vioif0 + /etc/dhcp.vioif0 (agent-independent DHCP) + a
+// static root SSH key + PermitRootLogin prohibit-password + sudo->pfexec.
+// The DHCP piece is baked but was NOT boot-verified in the session that
+// wrote this (VM-boot track closed after the bounded attempt); one
+// `tests/vm/smoke.sh` run should confirm green.
+//
+// ⚠ STATUS (2026-07-06, W1c — retained for the rust-ci forensics): the SSH
+// blocker is ROOT-CAUSED, and it is NOT a seed / cloud-init / provisioner
+// problem (every earlier session had that framing wrong). The published
+// `openindiana-rust-ci` OI Hipster
+// 2026.04 image is a BROKEN BUILD with THREE independent, fatal defects,
+// found this session by mounting the image offline (qemu-nbd + `zpool
+// import`, no boot) and reading its SMF logs + device tree directly:
+//
+//   1. /usr/lib/sysconfig/sysconfig is an x86-64 GNU/Linux ELF
+//      (interpreter /lib64/ld-linux-x86-64.so.2) shipped into an illumos
+//      image. illumos cannot exec it -> the SMF start method dies from
+//      SIGKILL every boot (NOT the 120s retry-timeout earlier sessions
+//      guessed) and svc:/system/sysconfig:default goes to maintenance, so
+//      no login user is ever created.
+//   2. NO IDE/ATAPI cdrom driver in the guest: the running device tree has
+//      only isa@1 + vioblk/vioif/viorand, no pci-ide/ata node. vmctl
+//      attaches the NoCloud CIDATA seed as an IDE cdrom, so the seed (and
+//      the per-run SSH key inside it) is UNREADABLE by the guest.
+//   3. /sbin/dladm, /sbin/ipadm, /sbin/flowadm are MISSING -- only the
+//      SUNWcs compat symlinks exist; the package that ships the actual
+//      command binaries was never installed. Without dladm/ipadm the
+//      datalink+IP layer can't be configured, so network/physical:default
+//      fails (`/sbin/dladm: not found`, `cannot plumb net0: Could not open
+//      DLPI link`) and the guest never gets an IP -> nothing answers the
+//      SSH host-forward.
+//
+// The `uefi #true` / `virtio-transitional #true` fix (W1b) + the q35->pc
+// PATH shim (scripts/qemu-illumos-shim/, still required, smoke.sh prepends
+// it) are correct and get the guest to multi-user; the three defects above
+// are what block SSH after that.
+//
+// scripts/bake-illumos-fixed-image.sh performs an OFFLINE transform that
+// fixes #1 (native /sbin/sh sysconfig replacement), disables the fatal
+// ipmp, and adds a sudo->pfexec shim + declarative DHCP files. It produces
+// openindiana-rust-ci-fixed.qcow2 (referenced below). BUT defect #3
+// (missing net binaries) CANNOT be fixed offline (no IPS content cache; the
+// 2025.04 OI image's libdladm/dlmgmtd are a different, non-ABI-compatible
+// build), so even the -fixed image is STILL NOT SSH-reachable. The real fix
+// is an image REBUILD with the network-commands package installed (and a
+// native-illumos sysconfig, and a seed on a bus illumos can read). See
+// tests/vm/scripts/illumos-image-fix/ + the W1c shakeout doc for the full
+// trace + the exact recipe changes a rebuild needs.
+//
+// Debugging note that keeps biting people: these images route the console
+// to VGA text mode once the kernel takes over, and vmctl's qemu backend
+// passes `-nodefaults` with no `-vga`, so serial `console.log` goes silent
+// after the loader even on a healthy boot. Do NOT read that silence as a
+// hang. The reliable liveness signal is SSH reachability, or -- far better
+// for illumos debugging -- mounting the overlay offline and reading
+// /var/svc/log/*.log directly, which is how the above was pinned down.
+//
+// Three OpenIndiana guests, all pulled from the same base image
+// (openindiana-rust-ci, the only OpenIndiana image in the CloudNebulaProject
+// registry — it already carries a Rust toolchain, which the `builder` role
+// wants and doesn't hurt `exec1`/`pg`). Each `vm` block gets its own
+// copy-on-write qcow2 overlay over the shared base, so the 14.7GB base
+// image is only stored once on the host.
+//
+// IMPORTANT — image acquisition note (see docs/ai/2026-07-05-phase50-w1-illumos-shakeout.md
+// "vmctl quirks" section for the full story): vmctl's `image-url "oci://..."`
+// path (used by `vmctl up`/`reload`) buffers the ENTIRE OCI layer in
+// process memory before writing it to disk (oci_client's `pull()` returns a
+// fully materialized `Vec<u8>` per layer). For a 14.7GB image on a host
+// with only ~8-10GB free (this box runs several concurrent agents), that
+// pull path OOMs. We pre-pulled the blob by hand with a streaming `curl`
+// (anonymous OCI bearer token from code.aopc.cloud's token endpoint — no
+// credentials needed, the registry issues anonymous pull tokens) directly
+// to `~/.local/share/vmctl/images/openindiana-rust-ci.qcow2`, and reference
+// it here via the local `image` field instead of `image-url oci://`. The
+// imperative `vmctl image pull oci://...` subcommand is ALSO broken
+// (crates/vmctl/src/commands/image.rs always calls the plain-HTTP
+// `ImageManager::pull`, never `pull_oci`, regardless of scheme) — only the
+// VMFile-driven `up`/`reload` path calls `pull_oci` correctly, and even
+// that path has the in-memory buffering bug above.
+//
+// To refresh the base image if needed:
+//   TOKEN=$(curl -s "https://code.aopc.cloud/v2/token?service=container_registry&scope=repository:cloudnebulaproject/openindiana-rust-ci:pull" | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+//   DIGEST=$(curl -s -H "Authorization: Bearer $TOKEN" \
+//     -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+//     https://code.aopc.cloud/v2/cloudnebulaproject/openindiana-rust-ci/manifests/latest \
+//     | python3 -c 'import json,sys;print(json.load(sys.stdin)["layers"][0]["digest"])')
+//   curl -H "Authorization: Bearer $TOKEN" -o ~/.local/share/vmctl/images/openindiana-rust-ci.qcow2 \
+//     "https://code.aopc.cloud/v2/cloudnebulaproject/openindiana-rust-ci/blobs/$DIGEST"
+
+vm "exec1" {
+    // Phase 50 / W1d — openindiana-hipster-cloud (OI 2025.04), NOT
+    // openindiana-rust-ci. See the W1d addendum comment block below the W1c
+    // one (right after this vm list) for why: rust-ci is an unfixable
+    // botched build (missing dladm/ipadm, ADR/W1c); hipster-cloud is a
+    // complete, working OI image with real networking, but its
+    // svc:/system/illumos/{metadata,useragent} provisioning agents ship
+    // sshd_config with `PermitRootLogin no` and no sudo(8), and the
+    // per-user cloud-config path (useragent's CloudConfig/UserConfig
+    // parser) grants no admin rights to created users. So the image was
+    // offline-baked (scripts/bake-hipster-cloud-image.sh) with: a static
+    // root SSH authorized_keys (.keys/root_ed25519.pub), sshd_config
+    // PermitRootLogin flipped to prohibit-password (key-only, no
+    // password), and a sudo->pfexec shim -- all independent of whether the
+    // cloud-init seed is ever read, which de-risks this from the seed/
+    // useragent-format uncertainty that blocked earlier sessions.
+    image "~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2"
+    vcpus 2
+    memory 4096
+    uefi #true
+    virtio-transitional #true
+
+    network "user"
+
+    cloud-init {
+        hostname "exec1"
+        // Bonus only, not required for login: if useragent's cidata seed
+        // read succeeds, this also creates a "vmctl" user + sets hostname
+        // via the real metadata-agent. SSH login does NOT depend on it --
+        // that's the baked root key below.
+    }
+
+    ssh {
+        user "root"
+        private-key ".keys/root_ed25519"
+    }
+
+    // Upload the akh-exec SSH pubkey (see scripts/gen-keys.sh — run it
+    // before `vmctl up`) so the 48c russh executor tests have a key-based
+    // login target that isn't the cloud-init admin user.
+    provision "file" {
+        source ".keys/akh-exec_ed25519.pub"
+        destination "/tmp/akh-exec.pub"
+    }
+
+    provision "shell" {
+        script "scripts/exec1-provision.sh"
+    }
+}
+
+vm "pg" {
+    // Phase 50 / W1d — see exec1's comment above: hipster-cloud + baked
+    // root key, not rust-ci.
+    image "~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2"
+    vcpus 2
+    memory 4096
+    uefi #true
+    virtio-transitional #true
+
+    network "user"
+
+    cloud-init {
+        hostname "pg"
+    }
+
+    ssh {
+        user "root"
+        private-key ".keys/root_ed25519"
+    }
+
+    provision "shell" {
+        script "scripts/pg-provision.sh"
+    }
+}
+
+vm "builder" {
+    // Phase 50 / W1d — see exec1's comment above: hipster-cloud + baked
+    // root key, not rust-ci. NOTE: hipster-cloud does NOT carry a
+    // pre-installed Rust toolchain the way rust-ci claimed to (and never
+    // actually delivered, given rust-ci was unusable) -- the builder
+    // native shakeout is expected to bootstrap Rust itself (rustup or the
+    // OI Rust package) as part of its first run.
+    image "~/.local/share/vmctl/images/openindiana-hipster-cloud-fixed.qcow2"
+    vcpus 4
+    memory 8192
+    uefi #true
+    virtio-transitional #true
+
+    network "user"
+
+    cloud-init {
+        hostname "builder"
+    }
+
+    ssh {
+        user "root"
+        private-key ".keys/root_ed25519"
+    }
+
+    provision "shell" {
+        script "scripts/builder-provision.sh"
+    }
+}

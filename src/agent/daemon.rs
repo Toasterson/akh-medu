@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use super::Agent;
 use super::error::AgentResult;
+use crate::akh_config::AutonomyConfig;
 use crate::client::DaemonStatus;
 use crate::message::AkhMessage;
 
@@ -105,6 +106,24 @@ pub struct DaemonConfig {
     /// completed results, asserts result triples into the KG, and stores
     /// delegation provenance.
     pub delegation_interval: Duration,
+    /// Relation-enrichment interval (default: 60 min).
+    ///
+    /// Runs the [`relation_enrichment::run_relation_enrichment`] pass which
+    /// injects missing predicate symbols and links orphaned entities to drive
+    /// the entity:relation ratio toward the healthy 2–3:1 target.
+    pub relation_enrichment_interval: Duration,
+    /// Daily-Librarian pass interval (default: 24 h).
+    ///
+    /// ADR 081 slice 4 (`agent::librarian`): LLM extraction of typed triples
+    /// from captured transcript turns against the in-force schema. Distinct
+    /// from `knowledge_elicitation_interval` (Phase 32, which *generates*
+    /// speculative concept knowledge) — this pass *extracts* grounded facts
+    /// from the akh's own captured material. The ticker fires on this
+    /// interval regardless, but the task itself is off unless
+    /// `AKH_LIBRARIAN=1` is set (real per-tick LLM cost, unlike the
+    /// always-on harvest phase's pure KG bookkeeping) and a Postgres store is
+    /// configured (turn material lives only in the WAL).
+    pub librarian_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -130,6 +149,8 @@ impl Default for DaemonConfig {
             knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
             kg_compaction_interval: Duration::from_secs(1800), // 30 min
             delegation_interval: Duration::from_secs(10),
+            relation_enrichment_interval: Duration::from_secs(3600), // 60 min
+            librarian_interval: Duration::from_secs(86400), // 24 hours
             max_cycles: 0,
         }
     }
@@ -162,6 +183,16 @@ pub struct AgentDaemon {
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     /// Optional shared status for real-time monitoring from HTTP handlers.
     status: Option<Arc<tokio::sync::Mutex<DaemonStatus>>>,
+    /// Per-akh automation gating (P5). Defaults to master-off, so a daemon
+    /// constructed without explicit autonomy runs only always-on infra tasks
+    /// (session persistence + user-trigger evaluation).
+    autonomy: AutonomyConfig,
+    /// Postgres backing store + this akh's stable id, for the ADR 091
+    /// sleep-cycle transcript-harvest phase. `None` in local-only mode (no
+    /// `[postgres]` section configured) — harvest is then a no-op, matching
+    /// every other store-backed background task's local-only degradation.
+    #[cfg(feature = "postgres")]
+    db: Option<(akhomed_store::DatabaseConnection, akhomed_store::uuid::Uuid)>,
 }
 
 impl AgentDaemon {
@@ -175,7 +206,22 @@ impl AgentDaemon {
             cycle_done: Arc::new(tokio::sync::Notify::new()),
             shutdown: None,
             status: None,
+            autonomy: AutonomyConfig::default(),
+            #[cfg(feature = "postgres")]
+            db: None,
         }
+    }
+
+    /// Set the per-akh automation gating (from `akh.toml` `[autonomy]`).
+    pub fn with_autonomy(mut self, autonomy: AutonomyConfig) -> Self {
+        self.autonomy = autonomy;
+        self
+    }
+
+    /// Whether a gated background task is enabled for this akh. Always-on infra
+    /// tasks (persist, trigger evaluation) do not consult this.
+    fn task_enabled(&self, task: &str) -> bool {
+        self.autonomy.task_enabled(task)
     }
 
     /// Pause the daemon — prevents new cycle/learning work from acquiring
@@ -206,6 +252,19 @@ impl AgentDaemon {
     /// Attach a shared status for real-time monitoring.
     pub fn with_status(mut self, status: Arc<tokio::sync::Mutex<DaemonStatus>>) -> Self {
         self.status = Some(status);
+        self
+    }
+
+    /// Attach the Postgres backing store + this akh's stable id, enabling the
+    /// ADR 091 sleep-cycle transcript-harvest phase. Omit (local-only mode) to
+    /// leave harvest a no-op.
+    #[cfg(feature = "postgres")]
+    pub fn with_db(
+        mut self,
+        db: akhomed_store::DatabaseConnection,
+        akh_id: akhomed_store::uuid::Uuid,
+    ) -> Self {
+        self.db = Some((db, akh_id));
         self
     }
 
@@ -262,6 +321,8 @@ impl AgentDaemon {
         let mut elicitation_tick = interval(self.config.knowledge_elicitation_interval);
         let mut kg_compaction_tick = interval(self.config.kg_compaction_interval);
         let mut delegation_tick = interval(self.config.delegation_interval);
+        let mut relation_enrichment_tick = interval(self.config.relation_enrichment_interval);
+        let mut librarian_tick = interval(self.config.librarian_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -269,16 +330,15 @@ impl AgentDaemon {
             ));
         });
 
-        // Startup: ensure causal world model covers all registered tools.
-        // Runs before goal generation so the world model is available for the
-        // first OODA cycle.
-        self.bootstrap_causal_schemas();
-
-        // Startup burst: seed goals so the akh can start acting immediately.
+        // Startup burst (P5-gated): seed the causal world model + initial goals
+        // so an autonomy-enabled akh can act immediately. A fresh akh with
+        // automation off seeds nothing and stays idle until prompted.
         // Continuous learning is deliberately NOT run at startup — it holds the
-        // agent mutex for 30-120s (network I/O + ingestion), blocking all HTTP
-        // handlers.  The interval timer will kick it off naturally.
-        tokio::task::block_in_place(|| self.run_goal_generation());
+        // agent mutex for 30-120s (network I/O + ingestion), blocking handlers.
+        if self.task_enabled("goal_generation") {
+            self.bootstrap_causal_schemas();
+            tokio::task::block_in_place(|| self.run_goal_generation());
+        }
 
         loop {
             // When paused, spin-sleep — prevents daemon from acquiring
@@ -288,74 +348,127 @@ impl AgentDaemon {
                 continue;
             }
 
+            // P5: each cognitive task arm is gated by `task_enabled(..)`; the
+            // ticker still fires but does nothing when disabled. `persist` and
+            // `trigger` are always-on infra (session durability + user-authored
+            // triggers, which are opt-in by being added).
             tokio::select! {
                 _ = equivalence_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_equivalence_learning());
+                    if self.task_enabled("equivalence") {
+                        tokio::task::block_in_place(|| self.run_equivalence_learning());
+                    }
                 }
                 _ = reflection_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_reflection());
+                    if self.task_enabled("reflection") {
+                        tokio::task::block_in_place(|| self.run_reflection());
+                    }
                 }
                 _ = consolidation_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_consolidation_check());
+                    if self.task_enabled("consolidation") {
+                        tokio::task::block_in_place(|| self.run_consolidation_check());
+                    }
                 }
                 _ = schema_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_schema_discovery());
+                    if self.task_enabled("schema_discovery") {
+                        tokio::task::block_in_place(|| self.run_schema_discovery());
+                    }
                 }
                 _ = rules_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_rule_inference());
+                    if self.task_enabled("rule_inference") {
+                        tokio::task::block_in_place(|| self.run_rule_inference());
+                    }
                 }
                 _ = gaps_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_gap_analysis());
+                    if self.task_enabled("gap_analysis") {
+                        tokio::task::block_in_place(|| self.run_gap_analysis());
+                    }
                 }
                 _ = persist_tick.tick() => {
+                    // Always on: session persistence is infra, not autonomy.
                     tokio::task::block_in_place(|| self.persist());
                 }
                 _ = idle_cycle_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_idle_cycle());
-                    if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
-                        tokio::task::block_in_place(|| {
-                            self.lock_agent().sink().emit(&AkhMessage::system(
-                                format!(
-                                    "daemon: max cycles ({}) reached, shutting down",
-                                    self.config.max_cycles,
-                                ),
-                            ));
-                        });
-                        break;
+                    if self.task_enabled("idle_cycle") {
+                        tokio::task::block_in_place(|| self.run_idle_cycle());
+                        if self.config.max_cycles > 0 && self.total_cycles >= self.config.max_cycles {
+                            tokio::task::block_in_place(|| {
+                                self.lock_agent().sink().emit(&AkhMessage::system(
+                                    format!(
+                                        "daemon: max cycles ({}) reached, shutting down",
+                                        self.config.max_cycles,
+                                    ),
+                                ));
+                            });
+                            break;
+                        }
                     }
                 }
                 _ = continuous_learning_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_continuous_learning());
+                    if self.task_enabled("continuous_learning") {
+                        tokio::task::block_in_place(|| self.run_continuous_learning());
+                    }
                 }
                 _ = goal_gen_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_goal_generation());
+                    if self.task_enabled("goal_generation") {
+                        tokio::task::block_in_place(|| self.run_goal_generation());
+                    }
                 }
                 _ = sleep_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_sleep_cycle());
+                    if self.task_enabled("sleep_cycle") {
+                        tokio::task::block_in_place(|| self.run_sleep_cycle());
+                    }
                 }
                 _ = trigger_tick.tick() => {
+                    // Always on: user-authored triggers are opt-in by existing.
                     tokio::task::block_in_place(|| self.run_trigger_evaluation());
                 }
                 _ = extraction_tick.tick() => {
-                    tokio::task::block_in_place(|| self.run_knowledge_extraction());
+                    if self.task_enabled("knowledge_extraction") {
+                        tokio::task::block_in_place(|| self.run_knowledge_extraction());
+                    }
                 }
                 _ = bridge_training_tick.tick() => {
-                    // run_bridge_training dispatches heavy work to spawn_blocking
-                    // internally; block_in_place covers only the brief mutex
-                    // acquisition at the start.
-                    tokio::task::block_in_place(|| self.run_bridge_training());
+                    if self.task_enabled("bridge_training") {
+                        // run_bridge_training dispatches heavy work to spawn_blocking
+                        // internally; block_in_place covers only the brief mutex
+                        // acquisition at the start.
+                        tokio::task::block_in_place(|| self.run_bridge_training());
+                    }
                 }
                 _ = openclaw_sync_tick.tick() => {
-                    self.run_openclaw_sync();
+                    if self.task_enabled("openclaw_sync") {
+                        self.run_openclaw_sync();
+                    }
                 }
                 _ = elicitation_tick.tick() => {
-                    self.run_knowledge_elicitation_task();
+                    if self.task_enabled("knowledge_elicitation") {
+                        self.run_knowledge_elicitation_task();
+                    }
                 }
                 _ = kg_compaction_tick.tick() => {
-                    self.run_kg_compaction();
+                    if self.task_enabled("kg_compaction") {
+                        self.run_kg_compaction();
+                    }
                 }
                 _ = delegation_tick.tick() => {
-                    self.run_delegation_tick().await;
+                    if self.task_enabled("delegation") {
+                        self.run_delegation_tick().await;
+                    }
+                }
+                _ = relation_enrichment_tick.tick() => {
+                    if self.task_enabled("relation_enrichment") {
+                        tokio::task::block_in_place(|| self.run_relation_enrichment());
+                    }
+                }
+                _ = librarian_tick.tick() => {
+                    // ADR 081 slice 4: gated on AKH_LIBRARIAN=1 *inside*
+                    // run_librarian_task (env-gated, like `openclaw_sync`'s
+                    // OPENCLAW_API_KEY check) rather than `task_enabled(..)`,
+                    // since this is an opt-in LLM-cost pass, not a
+                    // per-workspace autonomy toggle. No-op without the
+                    // `postgres` feature (turn material lives only in the WAL).
+                    #[cfg(feature = "postgres")]
+                    tokio::task::block_in_place(|| self.run_librarian_task());
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -798,6 +911,29 @@ impl AgentDaemon {
                     metrics.dream_connections_found,
                 )));
                 tracing::info!(?metrics, "daemon: sleep cycle complete");
+
+                // ADR 091: transcript-harvest phase, still inside the agent
+                // lock (this whole method already runs inside the caller's
+                // `block_in_place`) so the store calls' internal `block_on`
+                // never blocks a live async task on this thread.
+                #[cfg(feature = "postgres")]
+                if let Some((db, akh_id)) = self.db.as_ref() {
+                    match super::harvest::harvest_daily_log(
+                        db,
+                        &agent.engine,
+                        agent.predicates(),
+                        *akh_id,
+                    ) {
+                        Ok(hm) => tracing::info!(
+                            turns_harvested = hm.turns_harvested,
+                            episodes_minted = hm.episodes_minted,
+                            last_seq = hm.last_seq,
+                            "daemon: transcript harvest complete"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "daemon: transcript harvest failed"),
+                    }
+                }
+
                 drop(guard); // Release agent lock before status lock.
                 if let Some(ref status) = self.status
                     && let Ok(mut st) = status.try_lock()
@@ -806,6 +942,62 @@ impl AgentDaemon {
                 }
             }
             Err(e) => tracing::debug!(error = %e, "daemon: sleep cycle skipped"),
+        }
+    }
+
+    /// ADR 081 slice 4 — daily Librarian pass: LLM extraction of typed
+    /// triples from captured transcript turns against the in-force schema.
+    ///
+    /// Off by default (`AKH_LIBRARIAN=1` opts in) — unlike the always-on
+    /// harvest phase's pure KG bookkeeping, this is a real per-tick LLM cost
+    /// (ADR 081 decision 10: gpt-oss 120B). No-op without a configured
+    /// Postgres store, matching every other store-backed background task's
+    /// local-only degradation (turn material lives only in the WAL).
+    #[cfg(feature = "postgres")]
+    fn run_librarian_task(&self) {
+        if std::env::var("AKH_LIBRARIAN").as_deref() != Ok("1") {
+            return;
+        }
+        let Some((db, akh_id)) = self.db.as_ref() else {
+            tracing::debug!("daemon: librarian pass skipped — no Postgres store configured");
+            return;
+        };
+
+        let engine = {
+            let agent = self.lock_agent();
+            agent.engine.clone()
+        };
+
+        let model = super::librarian::OllamaLibrarianModel::from_env();
+        let config = super::librarian::LibrarianConfig::default();
+
+        // No notes supplied yet — the Note carrier (ADR 081 P1) has no
+        // durable "all notes since X" catalog query today, so this daemon
+        // wiring covers the turn-WAL half of slice 4 only; a caller with a
+        // note catalog can call `run_librarian_pass_over_wal` directly with
+        // its own `notes` slice.
+        match super::librarian::run_librarian_pass_over_wal(db, &engine, &model, *akh_id, &[], &config) {
+            Ok(report) => {
+                if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:librarian] {} source(s): +{} typed, +{} frontier triple(s)",
+                            report.sources_processed,
+                            report.typed_triples_asserted,
+                            report.frontier_triples_asserted,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    sources_processed = report.sources_processed,
+                    sources_skipped_empty = report.sources_skipped_empty,
+                    typed = report.typed_triples_asserted,
+                    frontier = report.frontier_triples_asserted,
+                    last_seq = report.last_seq,
+                    "daemon: librarian pass complete",
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "daemon: librarian pass failed"),
         }
     }
 
@@ -1162,6 +1354,51 @@ impl AgentDaemon {
             }
             Err(e) => {
                 tracing::debug!(error = %e, "daemon: KG compaction skipped");
+            }
+        }
+    }
+
+    /// Run one relation-enrichment pass.
+    ///
+    /// Injects missing predicate symbols and links orphaned entities to drive
+    /// the entity:relation ratio toward the healthy 2–3:1 target range.
+    /// Releases the agent lock before the pass runs to avoid blocking HTTP
+    /// handlers during the symbol-scan loop.
+    fn run_relation_enrichment(&self) {
+        use super::relation_enrichment::{RelationEnrichmentConfig, run_relation_enrichment};
+
+        // Brief lock: clone the engine Arc, then release.
+        let engine = {
+            let agent = self.agent.lock().unwrap();
+            agent.engine.clone()
+        };
+
+        let config = RelationEnrichmentConfig::default();
+        match run_relation_enrichment(&engine, &config) {
+            Ok(metrics) => {
+                if metrics.relations_added > 0 || metrics.triples_added > 0 {
+                    if let Ok(agent) = self.agent.lock() {
+                        agent.sink().emit(&AkhMessage::system(format!(
+                            "[daemon:relation-enrichment] +{} predicates, +{} links, ratio {:.2}→{:.2} ({}x under-represented)",
+                            metrics.relations_added,
+                            metrics.triples_added,
+                            metrics.ratio_before,
+                            metrics.ratio_after,
+                            metrics.under_represented_count,
+                        )));
+                    }
+                }
+                tracing::info!(
+                    relations_added = metrics.relations_added,
+                    triples_added = metrics.triples_added,
+                    ratio_before = metrics.ratio_before,
+                    ratio_after = metrics.ratio_after,
+                    under_represented = metrics.under_represented_count,
+                    "daemon: relation enrichment complete",
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: relation enrichment skipped");
             }
         }
     }
@@ -1551,6 +1788,11 @@ mod tests {
             config.knowledge_elicitation_interval,
             Duration::from_secs(1800)
         );
+        assert_eq!(
+            config.relation_enrichment_interval,
+            Duration::from_secs(3600)
+        );
+        assert_eq!(config.librarian_interval, Duration::from_secs(86400));
         assert_eq!(config.max_cycles, 0);
     }
 }

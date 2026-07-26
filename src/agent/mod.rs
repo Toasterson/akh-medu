@@ -17,6 +17,9 @@ pub mod calendar;
 pub mod causal;
 pub mod channel;
 pub mod counterfactual;
+pub mod agentic_chat;
+pub mod chat_backend;
+pub mod organ;
 pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
@@ -25,7 +28,9 @@ pub mod contact_calendar;
 pub mod contact_memory;
 pub mod contact_rel;
 pub mod contact_style;
+pub mod communicative;
 pub mod constraint_check;
+pub mod context;
 pub mod conversation;
 pub mod credibility;
 pub mod chunking;
@@ -52,20 +57,25 @@ pub mod operator_channel;
 #[cfg(feature = "oxifed")]
 pub mod oxifed;
 pub mod goal_generation;
+#[cfg(feature = "postgres")]
+pub mod harvest;
 pub mod idle;
 pub mod journal_ingest;
+pub mod librarian;
 pub mod library_learn;
 pub mod mcts;
 pub mod memory;
 pub mod memory_sync;
 pub mod metacognition;
 pub mod model_manager;
+pub mod promotion;
 pub mod multi_agent;
 pub mod nlp;
 pub mod ooda;
 pub mod ollama;
 pub mod openclaw;
 pub mod output;
+pub mod permission;
 pub mod pim;
 pub mod plan;
 pub mod plan_monitor;
@@ -73,15 +83,20 @@ pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
+pub mod relation_enrichment;
 pub mod resource;
+pub mod response_strategy;
 pub mod semantic_enrichment;
 pub mod sleep;
 pub mod source_reliability;
 pub mod state_value;
 pub mod synthesize;
 pub mod synthesize_abs;
+pub mod tasks;
 pub mod temporal_experience;
+pub mod text_extract;
 pub mod tool;
+pub mod trajectory;
 pub mod tool_graph;
 pub mod tool_manifest;
 pub mod tool_semantics;
@@ -118,6 +133,8 @@ pub use multi_agent::{
 pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
+#[cfg(feature = "postgres")]
+pub use harvest::{HarvestMetrics, harvest_daily_log, mint_turn_episode};
 pub use decomposition::{
     DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
     TaskNode, TaskNodeKind, TaskTree,
@@ -207,7 +224,7 @@ pub use event_calculus::{
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
     GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
-    PimResult, Recurrence,
+    PimResult, Recurrence, Weekdays,
 };
 pub use plan::{Plan, PlanStatus, PlanStep, StepStatus};
 pub use plan_monitor::{DeviationSeverity, PlanMonitor, plan_from_mcts, post_action_update};
@@ -226,7 +243,7 @@ pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
 pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use model_manager::{
     AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult,
-    build_system_prompt,
+    PromptMode, build_system_prompt, detect_prompt_mode,
 };
 pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
 pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
@@ -251,4 +268,13 @@ pub use watch::{
     WorldSnapshot,
 };
 pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use communicative::{
+    ComposedResponse, classify_query_type, compose_grounded, context_from_grounded,
+};
+pub use response_strategy::{
+    ConfidenceLevel, QueryType, ResponseStrategy, SelectedContent, Sentiment, ShadowFilter,
+    ShadowFilterResult, StrategyCategory, StrategyChoice, StrategyContext, StrategySelector,
+    StrategySelectorConfig, select_content,
+};
+pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
 pub use openclaw::{OpenClawConfig, OpenClawError};

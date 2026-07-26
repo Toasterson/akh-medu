@@ -140,6 +140,19 @@ pub struct DataFlowStep {
     pub via_type: Option<String>,
 }
 
+/// One coordinated verb phrase inside an [`AbsTree::Aggregated`] statement:
+/// a shared predicate applied to one or more objects.
+///
+/// `(has-a, [fur, tail])` linearizes as "has fur and tail" — the
+/// **predicate enumeration** rule of Phase 33a.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PredicateGroup {
+    /// The shared predicate (a `RelationRef` or `Freeform`).
+    pub predicate: AbsTree,
+    /// The objects this predicate applies to (entity-like leaves).
+    pub objects: Vec<AbsTree>,
+}
+
 /// Logical quantifier for quantified expressions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Quantifier {
@@ -206,6 +219,28 @@ pub enum AbsTree {
         subject: Box<AbsTree>,
         predicate: Box<AbsTree>,
         object: Box<AbsTree>,
+    },
+
+    /// A shared-subject aggregated statement (Phase 33a).
+    ///
+    /// Produced by `grammar::aggregate` from several triples that share a
+    /// subject; linearizes as ONE fluent sentence instead of one sentence
+    /// per triple:
+    ///
+    /// `"Dog is a mammal. Dog has fur. Dog has a tail."` →
+    /// `"Dog, a mammal, has fur and a tail."`
+    ///
+    /// - `appositions` come from `is-a` triples (**subject merge** rule).
+    /// - each [`PredicateGroup`] is a coordinated verb phrase
+    ///   (**predicate enumeration** rule).
+    /// - `continuation` marks a follow-up sentence about the same subject:
+    ///   linearizers substitute a pronoun and/or add a connective
+    ///   (**pronoun substitution** + **connective insertion** rules).
+    Aggregated {
+        subject: Box<AbsTree>,
+        appositions: Vec<AbsTree>,
+        groups: Vec<PredicateGroup>,
+        continuation: bool,
     },
 
     /// A similarity assertion between two entities.
@@ -362,6 +397,9 @@ impl AbsTree {
             AbsTree::RelationRef { .. } => Cat::Relation,
             AbsTree::Freeform(_) => Cat::Freeform,
             AbsTree::Triple { .. } => Cat::Statement,
+            // An aggregated statement is still a statement — it asserts the
+            // same facts as the triples it was folded from.
+            AbsTree::Aggregated { .. } => Cat::Statement,
             AbsTree::Similarity { .. } => Cat::Similarity,
             AbsTree::Gap { .. } => Cat::Gap,
             AbsTree::Inference { .. } => Cat::Inference,
@@ -427,6 +465,62 @@ impl AbsTree {
                 subject.validate()?;
                 predicate.validate()?;
                 object.validate()
+            }
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                let s_cat = subject.cat();
+                if !s_cat.valid_in_statement() {
+                    return Err(GrammarError::TypeMismatch {
+                        expected: Cat::Entity,
+                        actual: s_cat,
+                    });
+                }
+                // An aggregated statement must say *something*: at least one
+                // apposition or one predicate group.
+                if appositions.is_empty() && groups.is_empty() {
+                    return Err(GrammarError::TypeMismatch {
+                        expected: Cat::Statement,
+                        actual: Cat::Entity,
+                    });
+                }
+                for app in appositions {
+                    let a_cat = app.cat();
+                    if !a_cat.valid_in_statement() {
+                        return Err(GrammarError::TypeMismatch {
+                            expected: Cat::Entity,
+                            actual: a_cat,
+                        });
+                    }
+                }
+                for group in groups {
+                    let p_cat = group.predicate.cat();
+                    if p_cat != Cat::Relation && p_cat != Cat::Freeform {
+                        return Err(GrammarError::TypeMismatch {
+                            expected: Cat::Relation,
+                            actual: p_cat,
+                        });
+                    }
+                    if group.objects.is_empty() {
+                        return Err(GrammarError::TypeMismatch {
+                            expected: Cat::Entity,
+                            actual: Cat::Relation,
+                        });
+                    }
+                    for obj in &group.objects {
+                        let o_cat = obj.cat();
+                        if !o_cat.valid_in_statement() {
+                            return Err(GrammarError::TypeMismatch {
+                                expected: Cat::Entity,
+                                actual: o_cat,
+                            });
+                        }
+                    }
+                }
+                Ok(())
             }
             AbsTree::Similarity {
                 entity, similar_to, ..
@@ -555,6 +649,23 @@ impl AbsTree {
                 object,
             } => 1 + subject.node_count() + predicate.node_count() + object.node_count(),
 
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                1 + subject.node_count()
+                    + appositions.iter().map(|a| a.node_count()).sum::<usize>()
+                    + groups
+                        .iter()
+                        .map(|g| {
+                            g.predicate.node_count()
+                                + g.objects.iter().map(|o| o.node_count()).sum::<usize>()
+                        })
+                        .sum::<usize>()
+            }
+
             AbsTree::Similarity {
                 entity, similar_to, ..
             } => 1 + entity.node_count() + similar_to.node_count(),
@@ -634,6 +745,23 @@ impl AbsTree {
                 subject.collect_labels_inner(out);
                 predicate.collect_labels_inner(out);
                 object.collect_labels_inner(out);
+            }
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                subject.collect_labels_inner(out);
+                for app in appositions {
+                    app.collect_labels_inner(out);
+                }
+                for group in groups {
+                    group.predicate.collect_labels_inner(out);
+                    for obj in &group.objects {
+                        obj.collect_labels_inner(out);
+                    }
+                }
             }
             AbsTree::Similarity {
                 entity, similar_to, ..
@@ -764,6 +892,21 @@ impl AbsTree {
         AbsTree::WithConfidence {
             inner: Box::new(Self::triple(subject, predicate, object)),
             confidence,
+        }
+    }
+
+    /// Create a shared-subject aggregated statement (Phase 33a).
+    pub fn aggregated(
+        subject: AbsTree,
+        appositions: Vec<AbsTree>,
+        groups: Vec<PredicateGroup>,
+        continuation: bool,
+    ) -> Self {
+        AbsTree::Aggregated {
+            subject: Box::new(subject),
+            appositions,
+            groups,
+            continuation,
         }
     }
 
@@ -964,6 +1107,7 @@ impl AbsTree {
         match self {
             // Relational structures are assertable.
             AbsTree::Triple { .. }
+            | AbsTree::Aggregated { .. }
             | AbsTree::Similarity { .. }
             | AbsTree::Comparison { .. }
             | AbsTree::Conditional { .. }
@@ -1024,6 +1168,23 @@ impl AbsTree {
                 subject: Box::new(subject.ground(registry)),
                 predicate: Box::new(predicate.ground(registry)),
                 object: Box::new(object.ground(registry)),
+            },
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                continuation,
+            } => AbsTree::Aggregated {
+                subject: Box::new(subject.ground(registry)),
+                appositions: appositions.iter().map(|a| a.ground(registry)).collect(),
+                groups: groups
+                    .iter()
+                    .map(|g| PredicateGroup {
+                        predicate: g.predicate.ground(registry),
+                        objects: g.objects.iter().map(|o| o.ground(registry)).collect(),
+                    })
+                    .collect(),
+                continuation: *continuation,
             },
             AbsTree::Similarity {
                 entity,
@@ -1196,6 +1357,28 @@ impl AbsTree {
                     + predicate.unresolved_count()
                     + object.unresolved_count()
             }
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                subject.unresolved_count()
+                    + appositions
+                        .iter()
+                        .map(|a| a.unresolved_count())
+                        .sum::<usize>()
+                    + groups
+                        .iter()
+                        .map(|g| {
+                            g.predicate.unresolved_count()
+                                + g.objects
+                                    .iter()
+                                    .map(|o| o.unresolved_count())
+                                    .sum::<usize>()
+                        })
+                        .sum::<usize>()
+            }
             AbsTree::Similarity {
                 entity, similar_to, ..
             } => entity.unresolved_count() + similar_to.unresolved_count(),
@@ -1254,6 +1437,21 @@ impl AbsTree {
                 .first_unresolved()
                 .or_else(|| predicate.first_unresolved())
                 .or_else(|| object.first_unresolved()),
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => subject
+                .first_unresolved()
+                .or_else(|| appositions.iter().find_map(|a| a.first_unresolved()))
+                .or_else(|| {
+                    groups.iter().find_map(|g| {
+                        g.predicate
+                            .first_unresolved()
+                            .or_else(|| g.objects.iter().find_map(|o| o.first_unresolved()))
+                    })
+                }),
             AbsTree::Similarity {
                 entity, similar_to, ..
             } => entity
@@ -1354,6 +1552,54 @@ impl AbsTree {
                 let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
 
                 ops.bundle(&[&bound_s, &bound_p, &bound_o]).map_err(vsa_err)
+            }
+
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                // Encode as the bundle of the constituent triples' encodings,
+                // so an aggregated statement stays VSA-equivalent to the
+                // facts it was folded from.
+                let s_vec = subject.to_vsa(ops, item_memory, roles)?;
+                let role_s = vsa_encode_symbol(ops, roles.role_subject);
+                let role_p = vsa_encode_symbol(ops, roles.role_predicate);
+                let role_o = vsa_encode_symbol(ops, roles.role_object);
+                let bound_s = ops.bind(&role_s, &s_vec).map_err(vsa_err)?;
+
+                let mut fact_vecs: Vec<HyperVec> = Vec::new();
+                // Appositions are folded `is-a` facts.
+                let is_a_vec = encode_token(ops, "is-a");
+                for app in appositions {
+                    let o_vec = app.to_vsa(ops, item_memory, roles)?;
+                    let bound_p = ops.bind(&role_p, &is_a_vec).map_err(vsa_err)?;
+                    let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
+                    fact_vecs.push(
+                        ops.bundle(&[&bound_s, &bound_p, &bound_o])
+                            .map_err(vsa_err)?,
+                    );
+                }
+                for group in groups {
+                    let p_vec = group.predicate.to_vsa(ops, item_memory, roles)?;
+                    let bound_p = ops.bind(&role_p, &p_vec).map_err(vsa_err)?;
+                    for obj in &group.objects {
+                        let o_vec = obj.to_vsa(ops, item_memory, roles)?;
+                        let bound_o = ops.bind(&role_o, &o_vec).map_err(vsa_err)?;
+                        fact_vecs.push(
+                            ops.bundle(&[&bound_s, &bound_p, &bound_o])
+                                .map_err(vsa_err)?,
+                        );
+                    }
+                }
+                if fact_vecs.is_empty() {
+                    return Err(GrammarError::VsaError {
+                        message: "cannot encode empty aggregated statement".into(),
+                    });
+                }
+                let refs: Vec<&HyperVec> = fact_vecs.iter().collect();
+                ops.bundle(&refs).map_err(vsa_err)
             }
 
             AbsTree::Similarity {

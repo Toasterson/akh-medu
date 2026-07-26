@@ -99,17 +99,39 @@ pub struct LaunchdConfig {
     pub nice: i32,
 }
 
-/// Parsed status from `launchctl list`.
+/// Parsed status from `launchctl list`, plus an independent ACP liveness probe.
+///
+/// `loaded`/`running`/`pid`/`last_exit_status` are launchd's *belief* about the
+/// job — they come straight from `launchctl list` and say nothing about
+/// whether the process inside is actually serving traffic. `acp_answering` is
+/// a second, independent dimension: it connects to the ACP transport the
+/// daemon last advertised in its PID/discovery file (same probe the CLI/TUI
+/// use to find a server, see [`crate::client::discover_server`]) and reports
+/// whether that connection succeeds — regardless of how the daemon was
+/// started. Report both distinctly rather than collapsing them into one
+/// `running` bit:
+/// - `loaded=true, running=true, acp_answering=false` — launchd thinks the
+///   job is up, but its ACP bind failed or hung (a real "not actually
+///   running" case masked by `running` alone).
+/// - `loaded=false, acp_answering=true` — a daemon started manually (outside
+///   launchd) is answering fine; don't report it as down.
 #[derive(Debug, Clone)]
 pub struct ServiceStatus {
     /// Whether the service is loaded in launchd.
     pub loaded: bool,
-    /// Whether the service is currently running.
+    /// Whether launchd believes the service is currently running (has a PID).
     pub running: bool,
-    /// PID if running.
+    /// PID if running, per launchd.
     pub pid: Option<u32>,
     /// Last exit status (0 = clean).
     pub last_exit_status: Option<i32>,
+    /// Independent ACP liveness probe: `true` iff a daemon's advertised ACP
+    /// transport (Unix socket or TCP, from the discovery/PID file) accepted a
+    /// connection just now. `false` covers "no discovery file", "process
+    /// dead", and "process alive but transport unreachable" alike — callers
+    /// that need to distinguish those should use
+    /// [`crate::client::discover_server`] directly.
+    pub acp_answering: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +438,7 @@ pub fn status(config: &LaunchdConfig) -> ServiceResult<ServiceStatus> {
             running: false,
             pid: None,
             last_exit_status: None,
+            acp_answering: probe_acp_answering(),
         });
     }
 
@@ -427,13 +450,39 @@ pub fn status(config: &LaunchdConfig) -> ServiceResult<ServiceStatus> {
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_launchctl_list(&stdout, &config.label)
+    let mut status = parse_launchctl_list(&stdout, &config.label)?;
+    // `parse_launchctl_list` is pure string parsing (no I/O, unit-tested with
+    // canned `launchctl list` output) — the real, independent liveness probe
+    // happens here so status() stays the only I/O-performing entry point.
+    status.acp_answering = probe_acp_answering();
+    Ok(status)
+}
+
+/// Probe whether *some* akhomed daemon is currently answering ACP, regardless
+/// of whether launchd started it. Reuses the same discovery/PID-file +
+/// socket/TCP connect probe the CLI and TUI use to find a server
+/// ([`crate::client::discover_server`]); resolves paths fresh each call so it
+/// reflects the current environment (`XDG_*` overrides, etc).
+///
+/// Best-effort: any failure to resolve paths (e.g. `HOME` unset) is treated
+/// as "not answering" rather than propagated — this is a status probe, not a
+/// hard dependency.
+#[cfg(target_os = "macos")]
+fn probe_acp_answering() -> bool {
+    crate::paths::AkhPaths::resolve()
+        .ok()
+        .and_then(|paths| crate::client::discover_server(&paths))
+        .is_some()
 }
 
 /// Parse `launchctl list` output to extract service status.
 ///
 /// Each line has the format: `PID\tStatus\tLabel`
 /// where PID is `-` if not running and Status is the last exit code.
+///
+/// Pure parsing, no I/O — `acp_answering` is always `false` here; callers
+/// that want the real ACP liveness probe use [`status`], which fills it in
+/// via [`probe_acp_answering`] after parsing.
 pub fn parse_launchctl_list(output: &str, label: &str) -> ServiceResult<ServiceStatus> {
     for line in output.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -445,6 +494,7 @@ pub fn parse_launchctl_list(output: &str, label: &str) -> ServiceResult<ServiceS
                 running: pid.is_some(),
                 pid,
                 last_exit_status: exit_status,
+                acp_answering: false,
             });
         }
     }
@@ -454,6 +504,7 @@ pub fn parse_launchctl_list(output: &str, label: &str) -> ServiceResult<ServiceS
         running: false,
         pid: None,
         last_exit_status: None,
+        acp_answering: false,
     })
 }
 

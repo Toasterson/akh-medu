@@ -22,6 +22,7 @@ use crate::grammar::lexer::Language;
 use crate::grammar::parser::{ParseResult, parse_prose};
 use crate::graph::Triple;
 use crate::graph::analytics;
+use crate::graph::identity::TripleIdentity;
 use crate::graph::index::KnowledgeGraph;
 use crate::graph::sparql::SparqlStore;
 use crate::graph::traverse::{TraversalConfig, TraversalResult};
@@ -59,6 +60,21 @@ pub struct EngineConfig {
     pub max_symbols: usize,
     /// Default language for parsing. `Auto` means detect from text.
     pub language: Language,
+    /// Root of the agent filesystem's **read** sandbox. When `None`, defaults
+    /// to `data_dir` — correct only when `data_dir` *is* the akh's working
+    /// root. Workspace-backed engines point `data_dir` at `kg/`, so they must
+    /// set this to the workspace root; otherwise the agent cannot read the
+    /// scratch area it is given to work in.
+    pub workspace_root: Option<PathBuf>,
+    /// Directory the agent's file **writes** are confined to. When `None`,
+    /// defaults to `{data_dir}/scratch`. Set this whenever `data_dir` is a
+    /// subdirectory and scratch lives at the workspace root.
+    pub scratch_dir: Option<PathBuf>,
+    /// Additional read-only filesystem roots folded into the agent's `LocalFs`
+    /// **read** roots (writes stay confined to `scratch/`). Empty by default;
+    /// the OpenClaw self-import switch (ADR 076 §4) widens this to `~/.openclaw`
+    /// so the LLM can read its own OpenClaw past life.
+    pub extra_read_roots: Vec<PathBuf>,
 }
 
 impl Default for EngineConfig {
@@ -71,6 +87,9 @@ impl Default for EngineConfig {
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
+            workspace_root: None,
+            scratch_dir: None,
+            extra_read_roots: Vec::new(),
         }
     }
 }
@@ -164,6 +183,60 @@ pub struct Engine {
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
     predicate_hierarchy: RwLock<Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>,
     hierarchy_dirty: AtomicBool,
+    /// Phase 38b: optional write-ahead-log sink. Set once when the daemon wires
+    /// a Postgres-backed `MutationLog` for this workspace; absent in local-only
+    /// mode. Every successful assert/retract is recorded here (best-effort,
+    /// non-blocking).
+    mutation_sink: std::sync::OnceLock<Arc<dyn crate::mutation::MutationSink>>,
+    /// ADR 091 decision 5: optional WAL body-paging reader, installed by the
+    /// daemon binary alongside the `MutationSink` when a Postgres store is
+    /// configured. Lets [`Engine::turn_body`] page a captured turn's raw text
+    /// back out of the WAL at recall time without the engine itself depending
+    /// on SeaORM/tokio. Absent in local-only/in-memory mode.
+    turn_body_reader: std::sync::OnceLock<Arc<dyn crate::mutation::TurnBodyReader>>,
+    /// Phase 47: live, lock-free inference toggles (e.g. speculative decode). Shared by `Arc`
+    /// with the Candle chat backend so a tool flipping it via `&Engine` is observed next turn.
+    /// Seeded from the akh's `AkhConfig` at startup.
+    inference_options: Arc<crate::inference_options::InferenceOptions>,
+    /// ADR 081 P2: content-addressed triple-identity index. Maps the stable
+    /// label-based [`TripleIdentity`] hash to the session-local (s, p, o,
+    /// compartment) key so a projection can ask "same fact, still true?" in
+    /// O(1). Maintained on `add_triple`; bulk-restore paths mark it stale and
+    /// it lazily rebuilds from the KG (the hash is a pure function of
+    /// persisted labels, so the rebuild is deterministic).
+    identity_index: dashmap::DashMap<TripleIdentity, IdentityKey>,
+    /// Whether `identity_index` is complete w.r.t. the current KG contents.
+    identity_index_built: AtomicBool,
+    /// Agent-layer live view of the currently-callable tools, populated by the
+    /// [`Agent`](crate::agent) via [`Engine::set_live_tools`]. Lets engine-level
+    /// introspection tools (`tool_query`) report what is *actually* invocable
+    /// right now — including per-turn session tools (e.g. MCP servers pushed over
+    /// ACP) that never touch the durable KG. Distinct from the KG `tool:*`
+    /// triples, which are the durable, cross-akh peer-discovery projection.
+    /// Empty until an Agent first syncs it.
+    live_tools: RwLock<Vec<LiveTool>>,
+}
+
+/// One currently-callable tool, as seen by the live registry (see
+/// [`Engine::live_tools`]). A coarse, display-oriented projection — not the
+/// authoritative manifest, which lives in the agent's `ToolRegistry`.
+#[derive(Debug, Clone)]
+pub struct LiveTool {
+    /// Invocation name (e.g. `kg_query`, `mcp__anima__list_projects`).
+    pub name: String,
+    /// Human-readable one-line description.
+    pub description: String,
+    /// Coarse origin tag for display: `native` | `mcp` | `cli` | `wasm`.
+    pub origin: String,
+}
+
+/// Session-local key of an indexed triple (values in [`Engine::identity_index`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentityKey {
+    subject: SymbolId,
+    predicate: SymbolId,
+    object: SymbolId,
+    compartment_id: Option<String>,
 }
 
 impl Engine {
@@ -370,6 +443,12 @@ impl Engine {
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
+            mutation_sink: std::sync::OnceLock::new(),
+            turn_body_reader: std::sync::OnceLock::new(),
+            inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
+            identity_index: dashmap::DashMap::new(),
+            identity_index_built: AtomicBool::new(false),
+            live_tools: RwLock::new(Vec::new()),
         };
 
         // Restore Phase 9 registries from persistent storage if available.
@@ -455,6 +534,57 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Install the write-ahead-log sink (Phase 38b).
+    ///
+    /// Set once at workspace load when a Postgres backing store is configured.
+    /// Returns `Err` (ignored by callers) if a sink was already installed.
+    pub fn set_mutation_sink(
+        &self,
+        sink: Arc<dyn crate::mutation::MutationSink>,
+    ) -> Result<(), Arc<dyn crate::mutation::MutationSink>> {
+        self.mutation_sink.set(sink)
+    }
+
+    /// Record a mutation on the WAL sink if one is installed. Non-blocking; a
+    /// no-op in local-only mode.
+    #[inline]
+    fn record_mutation(&self, kind: crate::mutation::MutationKind, payload: serde_json::Value) {
+        if let Some(sink) = self.mutation_sink.get() {
+            sink.record(crate::mutation::MutationRecord::new(kind, payload));
+        }
+    }
+
+    /// Record a completed conversation turn on the WAL sink, if one is
+    /// installed (ADR 091: transcript→episodic capture, write-side first
+    /// slice). Non-blocking; a no-op for in-memory/local-only engines with no
+    /// `MutationSink` installed. `payload` is the locked turn-record schema
+    /// built by [`crate::agent::agentic_chat`]'s capture hook.
+    #[inline]
+    pub fn record_turn(&self, payload: serde_json::Value) {
+        self.record_mutation(crate::mutation::MutationKind::Turn, payload);
+    }
+
+    /// Install the turn-body WAL reader (ADR 091 decision 5).
+    ///
+    /// Set once at workspace load, alongside the `MutationSink`, when a
+    /// Postgres backing store is configured. Returns `Err` (ignored by
+    /// callers) if a reader was already installed.
+    pub fn set_turn_body_reader(
+        &self,
+        reader: Arc<dyn crate::mutation::TurnBodyReader>,
+    ) -> Result<(), Arc<dyn crate::mutation::TurnBodyReader>> {
+        self.turn_body_reader.set(reader)
+    }
+
+    /// Page a captured turn's raw body back out of the WAL by `seq`
+    /// (ADR 091 decision 5). Synchronous and best-effort: `None` if no
+    /// reader is installed (in-memory/local-only engines) or the underlying
+    /// lookup found nothing. Callers (recall) must treat `None` as "fall back
+    /// to the existing summary/label path", never as an error.
+    pub fn turn_body(&self, seq: i64) -> Option<String> {
+        self.turn_body_reader.get().and_then(|r| r.turn_body(seq))
     }
 
     /// Allocate a new symbol with the given kind and label.
@@ -642,7 +772,109 @@ impl Engine {
             }
         }
 
+        // --- ADR 081 P2: mint the stable triple identity alongside insertion ---
+        let identity = self.triple_identity(triple);
+        self.identity_index.insert(
+            identity,
+            IdentityKey {
+                subject: triple.subject,
+                predicate: triple.predicate,
+                object: triple.object,
+                compartment_id: triple.compartment_id.clone(),
+            },
+        );
+
+        // --- Phase 38b: write-ahead log ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Assert,
+            serde_json::json!({
+                "subject": triple.subject.get(),
+                "predicate": triple.predicate.get(),
+                "object": triple.object.get(),
+                "confidence": triple.confidence,
+                "compartment": triple.compartment_id,
+                // ADR 081 P2: content-addressed identity (stable across
+                // akhs/sessions) persisted with the mutation for diffing.
+                "identity": identity.to_hex(),
+            }),
+        );
+
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR 081 P2: stable triple identity
+    // -----------------------------------------------------------------------
+
+    /// Compute the content-addressed [`TripleIdentity`] of a triple: a blake3
+    /// hash over the canonical *labels* of (subject, predicate, object) plus
+    /// the owning compartment, excluding volatile fields (confidence,
+    /// timestamp, provenance). Re-asserting the same fact — in any session or
+    /// akh — yields the same identity (ADR 081,
+    /// `docs/ai/decisions/081-akh-memory-schema-typing.md`).
+    pub fn triple_identity(&self, triple: &Triple) -> TripleIdentity {
+        TripleIdentity::compute(
+            &self.resolve_label(triple.subject),
+            &self.resolve_label(triple.predicate),
+            &self.resolve_label(triple.object),
+            triple.compartment_id.as_deref(),
+        )
+    }
+
+    /// Look up the live triple carrying a given stable identity.
+    ///
+    /// Returns the triple with its *current* volatile fields (confidence,
+    /// timestamp) if the fact is still asserted, or `None` if it was never
+    /// asserted or has since been removed/retracted from the KG. Lazily
+    /// (re)builds the identity index on first use after a bulk restore.
+    pub fn triple_by_identity(&self, identity: &TripleIdentity) -> Option<Triple> {
+        self.ensure_identity_index();
+        let key = self.identity_index.get(identity)?.clone();
+        // Verify against the live KG so removals never yield stale hits.
+        let live = self
+            .knowledge_graph
+            .triples_from(key.subject)
+            .into_iter()
+            .find(|t| {
+                t.predicate == key.predicate
+                    && t.object == key.object
+                    && t.compartment_id == key.compartment_id
+            });
+        if live.is_none() {
+            // Evict the stale entry so future lookups stay O(1)-honest.
+            self.identity_index.remove(identity);
+        }
+        live
+    }
+
+    /// Rebuild the identity index from the current KG contents.
+    ///
+    /// Needed after bulk-restore paths that bypass `add_triple` (engine
+    /// construction, `restore_triples`). Returns the number of indexed
+    /// triples. Idempotent; also invoked lazily by [`Self::triple_by_identity`].
+    pub fn rebuild_identity_index(&self) -> usize {
+        self.identity_index.clear();
+        let triples = self.knowledge_graph.all_triples();
+        for t in &triples {
+            self.identity_index.insert(
+                self.triple_identity(t),
+                IdentityKey {
+                    subject: t.subject,
+                    predicate: t.predicate,
+                    object: t.object,
+                    compartment_id: t.compartment_id.clone(),
+                },
+            );
+        }
+        self.identity_index_built.store(true, Ordering::Release);
+        self.identity_index.len()
+    }
+
+    /// Build the identity index if it is not known to be complete.
+    fn ensure_identity_index(&self) {
+        if !self.identity_index_built.load(Ordering::Acquire) {
+            self.rebuild_identity_index();
+        }
     }
 
     /// Search for similar symbols by hypervector.
@@ -1070,6 +1302,18 @@ impl Engine {
         self.registry.all()
     }
 
+    /// Cheap count of registered symbols (no clone) — for status/introspection
+    /// polled frequently, unlike [`all_symbols`](Self::all_symbols).
+    pub fn symbol_count(&self) -> usize {
+        self.registry.len()
+    }
+
+    /// Cheap count of triples in the knowledge graph (no clone) — counterpart to
+    /// [`symbol_count`](Self::symbol_count).
+    pub fn triple_count(&self) -> usize {
+        self.knowledge_graph.triple_count()
+    }
+
     /// Resolve a name-or-id string: try parsing as u64 first, then label lookup.
     pub fn resolve_symbol(&self, name_or_id: &str) -> AkhResult<SymbolId> {
         // Try numeric ID first.
@@ -1109,6 +1353,30 @@ impl Engine {
     /// Get all triples in the knowledge graph.
     pub fn all_triples(&self) -> Vec<Triple> {
         self.knowledge_graph.all_triples()
+    }
+
+    /// All registered symbols (id ↔ kind ↔ label). Used by the Phase 38c
+    /// snapshot writer to materialise the registry into Postgres.
+    pub fn dump_symbols(&self) -> Vec<SymbolMeta> {
+        self.registry.all()
+    }
+
+    /// Bulk-load triples into the KG and item memory **without** the Phase 9
+    /// pipeline or the WAL (Phase 38c wake path). Used when rebuilding a fresh
+    /// engine's KG from `akhomed.facts`; the WAL sink must not be installed yet,
+    /// so this does not re-log. Returns the number of triples loaded.
+    pub fn restore_triples(&self, triples: &[Triple]) -> AkhResult<usize> {
+        let count = self.knowledge_graph.bulk_load(triples)?;
+        for t in triples {
+            self.item_memory.get_or_create(&self.ops, t.subject);
+            self.item_memory.get_or_create(&self.ops, t.predicate);
+            self.item_memory.get_or_create(&self.ops, t.object);
+        }
+        // ADR 081 P2: this path bypasses `add_triple`, so the identity index
+        // is no longer complete; it lazily rebuilds on next identity query.
+        self.identity_index_built
+            .store(false, Ordering::Release);
+        Ok(count)
     }
 
     /// Execute a SPARQL SELECT query.
@@ -2055,6 +2323,17 @@ impl Engine {
             });
         }
 
+        // --- Phase 38b: write-ahead log (only the primary retract; TMS-cascaded
+        // removals are re-derived on replay since the TMS rebuilds from facts) ---
+        self.record_mutation(
+            crate::mutation::MutationKind::Retract,
+            serde_json::json!({
+                "subject": subject.get(),
+                "predicate": predicate.get(),
+                "object": object.get(),
+            }),
+        );
+
         // Sync removal to SPARQL store
         if let Some(ref sparql) = self.sparql {
             let _ = sparql.remove_triple(subject, predicate, object);
@@ -2919,6 +3198,31 @@ impl Engine {
         &self.config
     }
 
+    /// Live, lock-free inference toggles for this akh (Phase 47). Shared by `Arc` with the
+    /// Candle chat backend, so a tool flipping an option here is observed on the next turn.
+    /// Seeded from the akh's `AkhConfig` at startup; mutated by the `inference_config` tool.
+    pub fn inference_options(&self) -> &Arc<crate::inference_options::InferenceOptions> {
+        &self.inference_options
+    }
+
+    /// Replace the live tool view (see [`LiveTool`]). Called by the Agent whenever
+    /// its tool registry changes — construction, and per-turn session tool
+    /// install/removal. Cheap; a poisoned lock is treated as a no-op.
+    pub fn set_live_tools(&self, tools: Vec<LiveTool>) {
+        if let Ok(mut w) = self.live_tools.write() {
+            *w = tools;
+        }
+    }
+
+    /// Snapshot of the currently-callable tools. Empty until an Agent first
+    /// populates it via [`Engine::set_live_tools`].
+    pub fn live_tools(&self) -> Vec<LiveTool> {
+        self.live_tools
+            .read()
+            .map(|r| r.clone())
+            .unwrap_or_default()
+    }
+
     /// Get the compartment manager (if data_dir is configured).
     pub fn compartments(&self) -> Option<&crate::compartment::CompartmentManager> {
         self.compartment_manager.as_ref()
@@ -3178,6 +3482,29 @@ mod tests {
     }
 
     #[test]
+    fn live_tools_set_and_snapshot() {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(engine.live_tools().is_empty(), "empty until populated");
+        engine.set_live_tools(vec![LiveTool {
+            name: "mcp__anima__seshat_status".into(),
+            description: "Seshat archive status.".into(),
+            origin: "mcp".into(),
+        }]);
+        let live = engine.live_tools();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].name, "mcp__anima__seshat_status");
+        assert_eq!(live[0].origin, "mcp");
+        // Replaces wholesale (not append).
+        engine.set_live_tools(vec![]);
+        assert!(engine.live_tools().is_empty());
+    }
+
+    #[test]
     fn create_symbol_and_search() {
         let engine = Engine::new(EngineConfig {
             dimension: Dimension::TEST,
@@ -3193,6 +3520,112 @@ mod tests {
         let results = engine.search_similar_to(sun.id, 3).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].symbol_id, sun.id);
+    }
+
+    // -- ADR 081 P2: stable triple identity ---------------------------------
+
+    fn identity_test_engine() -> Engine {
+        Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triple_identity_stable_across_reassertion() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("emits").unwrap();
+        let o = engine.resolve_or_create_entity("Light").unwrap();
+
+        let t1 = Triple::new(s, p, o).with_confidence(0.9);
+        engine.add_triple(&t1).unwrap();
+        let id1 = engine.triple_identity(&t1);
+
+        // Re-assert the same fact with different volatile fields.
+        let t2 = Triple {
+            confidence: 0.4,
+            timestamp: t1.timestamp + 1000,
+            provenance_id: Some(42),
+            ..t1.clone()
+        };
+        engine.add_triple(&t2).unwrap();
+        assert_eq!(id1, engine.triple_identity(&t2));
+
+        // Changing any content field changes the identity.
+        let other_o = engine.resolve_or_create_entity("Heat").unwrap();
+        let t3 = Triple::new(s, p, other_o);
+        assert_ne!(id1, engine.triple_identity(&t3));
+        let t4 = t1.clone().with_compartment("mt:other".into());
+        assert_ne!(id1, engine.triple_identity(&t4));
+    }
+
+    #[test]
+    fn triple_identity_stable_across_engines_with_different_symbol_ids() {
+        // The identity is label-based, so two akhs whose SymbolId allocation
+        // differs still agree on the identity of the same assertion.
+        let a = identity_test_engine();
+        let b = identity_test_engine();
+        // Skew b's allocator.
+        for i in 0..5 {
+            b.resolve_or_create_entity(&format!("skew-{i}")).unwrap();
+        }
+
+        let mk = |e: &Engine| {
+            let s = e.resolve_or_create_entity("Sun").unwrap();
+            let p = e.resolve_or_create_relation("is-a").unwrap();
+            let o = e.resolve_or_create_entity("Star").unwrap();
+            let t = Triple::new(s, p, o);
+            e.add_triple(&t).unwrap();
+            (t.subject.get(), e.triple_identity(&t))
+        };
+        let (sid_a, id_a) = mk(&a);
+        let (sid_b, id_b) = mk(&b);
+        assert_ne!(sid_a, sid_b, "test needs skewed SymbolIds to be meaningful");
+        assert_eq!(id_a, id_b);
+    }
+
+    #[test]
+    fn triple_by_identity_queries_live_triple() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("emits").unwrap();
+        let o = engine.resolve_or_create_entity("Light").unwrap();
+        let t = Triple::new(s, p, o).with_confidence(0.7);
+        engine.add_triple(&t).unwrap();
+
+        let id = engine.triple_identity(&t);
+        let found = engine.triple_by_identity(&id).expect("fact should be live");
+        assert_eq!(found.subject, s);
+        assert_eq!(found.predicate, p);
+        assert_eq!(found.object, o);
+        assert!((found.confidence - 0.7).abs() < 1e-6);
+
+        // An identity never asserted is absent.
+        let ghost = crate::graph::identity::TripleIdentity::compute("No", "such", "fact", None);
+        assert!(engine.triple_by_identity(&ghost).is_none());
+
+        // Removal is visible: the lookup verifies against the live KG.
+        assert!(engine.knowledge_graph().remove_triple(s, p, o));
+        assert!(engine.triple_by_identity(&id).is_none());
+    }
+
+    #[test]
+    fn identity_index_rebuilds_after_bulk_restore() {
+        let engine = identity_test_engine();
+        let s = engine.resolve_or_create_entity("Sun").unwrap();
+        let p = engine.resolve_or_create_relation("is-a").unwrap();
+        let o = engine.resolve_or_create_entity("Star").unwrap();
+
+        // Bypass add_triple entirely (Phase 38c wake path).
+        let t = Triple::new(s, p, o);
+        engine.restore_triples(std::slice::from_ref(&t)).unwrap();
+
+        // The lazily rebuilt index still answers.
+        let id = engine.triple_identity(&t);
+        assert!(engine.triple_by_identity(&id).is_some());
+        assert!(engine.rebuild_identity_index() >= 1);
     }
 
     #[test]

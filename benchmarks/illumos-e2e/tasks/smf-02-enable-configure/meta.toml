@@ -1,0 +1,9 @@
+id = "smf-02-enable-configure"
+family = "smf"
+description = "Enable a disabled custom service and configure a property via svccfg"
+timeout_secs = 600
+expected_manpages = ["svccfg", "svcadm", "svcprop"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

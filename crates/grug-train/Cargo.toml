@@ -1,0 +1,68 @@
+[package]
+name = "grug-train"
+version = "0.1.0"
+edition = "2024"
+description = "Phase 51 Grug-Brain BabyLLM: Burn-based from-scratch training (CPU/ndarray beachhead)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+# ADR 087 decision 2 / Phase 51 P0: Burn lives in its own workspace crate so the
+# `train` feature's `dataset` -> `burn-dataset` -> rusqlite -> libsqlite3-sys 0.35
+# chain never enters the dependency graph. We depend on exactly three Burn
+# features: `ndarray` (the burn-ndarray CPU tensor backend), `autodiff`
+# (burn-autodiff, wraps a backend to get backward()/grad()), and `std`. No
+# `train` (pulls `dataset`), no `burn-dataset`, no GPU/CubeCL backend
+# (wgpu/cuda/rocm) yet -- see docs/ai/decisions/087-grug-brain-baby-llm-training.md
+# and docs/ai/plans/2026-07-05-phase51-grug-brain-baby-llm.md (P0 gate).
+[dependencies]
+burn = { version = "0.21.0", default-features = false, features = ["ndarray", "autodiff", "std"] }
+
+# The data generator + eval scorer this crate trains against and evaluates
+# on (see docs/ai/plans/2026-07-05-phase51-grug-brain-baby-llm.md decision 5
+# and 9). Pure Rust, no ML dependency of its own.
+grug-data = { path = "../grug-data" }
+
+# Error handling (repo convention: miette + thiserror, rich #[diagnostic] help)
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Serialization (eval time-series JSONL rows)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Deterministic PRNG for batching/shuffling (not the data generator itself,
+# which lives in grug-data and has its own seeded RNG)
+rand = { version = "0.8", features = ["std", "std_rng"] }
+
+# P1a scale-up (Phase 51 plan): trainable byte-level BPE tokenizer, replacing
+# the P0 fixed byte-per-token scheme for real training runs (see `bpe.rs`).
+# Reuses the exact version already in the workspace root Cargo.toml
+# (`nlu-ml`/`candle-backend` features) so no new dependency version enters
+# the graph -- default-features off, only the pieces we actually use.
+tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "fancy-regex"] }
+
+# CLI config for `examples/train_p1a.rs` (steps/model-size/data-size/seed/
+# artifacts-dir/--resume). Reuses the exact version+features already in the
+# workspace root Cargo.toml.
+clap = { version = "4.5", features = ["derive"] }
+
+[features]
+default = []
+# Phase 51 P0 gate (R3): opt-in GPU backend for the 7900 XTX (gfx1100) factory
+# box. OFF by default -- the default build/test path stays CPU-only and light
+# per ADR 087 decision 2/3. Enables Burn's ROCm/HIP (CubeCL) backend, which
+# emits both forward *and* backward (autodiff) HIP kernels via CubeCL --
+# unlike the in-repo candle HIP fork (Phase 45), which is inference-only.
+# Requires ROCM_PATH (or CUBECL_ROCM_PATH) to point at the ROCm install
+# (this box: /opt/rocm-6.3.4, gfx1100). See `GpuAutodiffBackend` in `lib.rs`.
+gpu = ["burn/rocm"]
+
+# NVIDIA/CUDA GPU backend (H100 cloud training, Phase 51 P4->350M). Same
+# CubeCL forward+backward story as `gpu`/ROCm, different vendor runtime.
+# Mutually exclusive with `gpu` -- pick exactly one:
+#   local AMD 7900 XTX : --features gpu
+#   cloud NVIDIA H100  : --features cuda
+# Requires the CUDA toolkit at build time (CUDA_PATH / nvcc on PATH).
+# See `GpuAutodiffBackend` + `gpu_device()` in `lib.rs`, which are defined for
+# whichever of the two is enabled, so example code is vendor-agnostic.
+cuda = ["burn/cuda"]

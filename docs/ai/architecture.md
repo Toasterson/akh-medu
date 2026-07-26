@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-04-14 (Kubernetes deployment: Helm chart + Docker images, ADR 048)
+> Last updated: 2026-07-11 (**ADR 081 Akh Memory & Schema-Typing IMPLEMENTED — all work items** ([ADR 081](decisions/081-akh-memory-schema-typing.md), fleet session, branch `claude/typed-kg-storage-analysis-59ec37`): **P1** `library::note` — `Note` = `DocumentRecord` + typed `Frontmatter` (mirrors `schema::source::ValueType`) + `[[wikilinks]]` + stable `NoteId`; frontmatter-less Note byte-identical to Document. **Slice 1** `schema::project` — mechanical (no-LLM) projection: `type:` frontmatter → `is-a` + declared-property triples, unknown keys → `note:frontier/{key}` markers (writes never blocked), wikilinks → `links-to`, `typed_view` read-back; idempotent via the KG's (s,p,o) dedup. **Slice 2** — the PG registry half: `akhomed_schema_registry` table + `PgSchemaRegistry`, `akh schema admit --yes|list|install` over `_akh/schema/*`, wake-time lazy convergence (`snapshot::wake` step 7); activation rides `workspaces_active_microtheories`. **Slice 3** `schema::shape`+`digest` — is-a-chain effective property sets (cycle-safe, cross-pack), shape validation (violations demote to frontier + report, never block), `get_graph_schema`-style `schema::digest` + `_akh/schema/digest`. **Slice 4** `agent::librarian` — LLM extraction seam (`FakeLibrarianModel` deterministic + `OllamaLibrarianModel`, `AKH_LIBRARIAN_MODEL` default gpt-oss:120b), own `librarian_watermark` column, typed-vs-frontier validation, `DerivationKind::LibrarianExtraction`, daemon daily tick gated `AKH_LIBRARIAN=1`. **Slice 5** `agent::promotion` — mechanical candidates (≥3 distinct subjects + consistent value shape) → stored `schema:proposal/*` entities (never auto-applied) → `akh schema proposals|promote <id> --yes|reject`; promotion mints a one-property mini-pack via is-a subtyping through the normal admit path; aliasing = `onto:alias-of`. **Slice 6** `agent::tasks` + `structured_task_*` tools — typed Task (lifecycle-encoded completion), KG-authoritative via `task:` predicates, complete → past episode + recurrence spawn, task entity doubles as episodic future-spine node, Obsidian-Tasks emoji rendering boundary-only (no parser). **Slice 7** — context tiering: schema digest + active-note frontmatter in core, recent-note frontmatter in recall, bodies ONLY via `archival_search` (pre-Heka substring fallback over `NoteCatalog`) + new `query_graph` tool, both gated to the `virtual` strategy; never-resident-bodies invariant tested. **Slice 8** `schema::conflict` + `reproject_note` — per-note projection manifests as `(note-manifest:{id}, projection:asserted, {TripleIdentity})` triples in `mt:schema/projection-manifest`; diff by TripleIdentity: retract-changed via TMS (`was_retracted`-discoverable), `DerivationKind::NoteReprojection` audit; multi-akh conflict = DS belief intervals (Phase-17 masses × Phase-18 reliability), never last-writer-wins. **Slice 9** `schema::coverage` — grandfathering as pure classification (`TypedCore|Frontier|SchemaInfra`, no data rewrite), `akh schema coverage` + `_akh/schema/coverage`, top-N frontier predicates feed promotion. Full lib suite 2974 green (postgres); live-PG integration green (registry rerunnable, harvest, WAL, ADR-091 acceptance). Open: S0 empirical small-model bet (seams shipped with deterministic fakes), cross-akh promotion consensus signal, Heka vector archival, alias-aware coverage reclassification.) — Prior: 2026-07-08 (**ADR 091 — transcript→episodic capture designed (ADR-081 write-side first slice)**: a live audit found the akh memory loop broken at its first hop — conversations are recorded only into an ephemeral, never-serialized 10-turn ring buffer, so `akhomed_episodes` stays empty and the wired-but-starved downstream (recall `agent.rs:1711`, sleep/consolidation `daemon.rs:331,381`, introspection) never sees a transcript. A LongMemEval A/B made it concrete (a genuine `PassThroughManager` "off" arm was added to `akhomed.rs`'s `AKH_CONTEXT_STRATEGY` match — previously any unknown value silently fell through to `CompactingManager`, so the daemon had no true off mode): **0/6 harness-off vs 4/6 harness-on, but the 4/6 was ephemeral within-session working memory, not durable episodic**. Locked design (grilling 2026-07-08, [ADR 091](decisions/091-transcript-episodic-capture.md) / [plan](plans/2026-07-08-transcript-episodic-capture.md)): capture each completed turn at `run_agentic_turn` turn-end as a raw JSONL-style record in a **new `akhomed_mutation_log` `kind="turn"` row** (durable immediately, hypertable, wake-replay **skips** it — refines ADR 081 P1's "daily log = Document"); the daily-log is the projection `WHERE kind='turn'`; a **new harvest phase in `run_sleep_cycle`** reads turns by a per-akh `akh_state` watermark and mints lightweight `episode:turn:{seq}` indices (`learned`-linked to keyword-resolved symbols + `body_ref`=seq), reconciling onto the existing `memory.rs` `EpisodicEntry`; recall pages the body from the WAL on demand; the gpt-oss Librarian (ADR 081 slice 4) later supersedes the crude keyword distillation. Default-on + per-workspace opt-out; keep raw indefinitely (compressed), no prune this slice. Acceptance = cross-session recall across a **daemon restart** (inject A → sleep/harvest → restart → recall B), passthrough control = 0. Design only — not yet built. Also this session: benchmarked the harness-value question on single-turn illumos-e2e (Track 1 — KG grounding gave no reliable lift; prose-in-KG-labels *hurt* 8/15, atomic-KG 11/15 was n=1 variance, n=3 confirm ~50/50).) — Prior: 2026-07-06 (**Phase 50 W5 — first real public-benchmark leaderboard rows** (`benchmarks/`, ADR 086 §3/§4/§5): `bench-tool record-run` (`benchmarks/harness-core/src/bin/bench_tool.rs`) is a new schema-validated seam any harness (Rust or Python) can target — a JSON array of `RawTaskRow`s in, a provenance-stamped `RunRecord` out via `harness_core::store::write_run` — generalizing the W7 results pipeline beyond the `record-synthetic` demo path. `benchmarks/emit_run_record.py` converts `frontiercode`'s and `run_memory_bench.py`'s own result formats into that shape and calls the CLI. Both Python harnesses gained `--workspace`/`--host`/`--port` (previously hardcoded to `tecton`/`8201`) so they can drive *any* per-model benchmark akh; `run_memory_bench.py` also gained a hard `--max-requests` budget cap (ADR 086 §5: exceeding it aborts remaining items as `budget_exceeded`, never silently drops or loops) and per-item exception isolation (a transient ACP timeout aborts that item, not the whole process — a real crash this session exposed the gap). First real 3×3 matrix recorded: `frontiercode` (2 SWE-bench-Verified sympy tasks, full env+test grading) × `locomo` (1 conversation, all ~19 sessions, 5 questions — not the cheap oracle-capped mode) × `longmemeval` (oracle, 6 sampled items) against `deepseek-v4-pro` / `glm-5.2` / `qwen3.5:397b` over ollama.com cloud, driven through a dedicated benchmark `akhomed` instance (standalone Postgres via `scripts/pg-standalone.sh`, port 8301, separate `XDG_CONFIG_HOME` — the user's production `default`-workspace akhomed on 8201 was never touched). Result: frontiercode 0/2 for all three models (expected per the harness's own README — one real infra artifact disclosed: an accidental `kill -9` during live debugging hit a FAIL_TO_PASS pytest subprocess mid-run for glm-5.2/sympy-17630, recorded honestly as `rc=-9` in that task's notes rather than silently re-run); locomo (full-context, not oracle) 0/1 for all three (real long-context recall struggle, "no mention" hallucination pattern); longmemeval (oracle) 3/6, 3/6, 4/6 for deepseek/glm-5.2/qwen respectively. Terminal-Bench leg and W6 fleet-orchestration remain unbuilt (no adapter exists yet). `benchmarks/LEADERBOARD.md` + `benchmarks/site/index.html` regenerated (12 (harness,model) pairs total incl. the prior synthetic demo rows).) — Prior: 2026-07-05 (**Phase 48c `RemoteBackend` built** (`src/backend/remote.rs`, feature `remote-executor`, Phase 50/W2a): russh-over-SSH executor implementing the full `Backend` trait — SSH exec-channel for `exec`, shell-command file verbs (`cat`/`base64`/`ls`/`test`/`wc`) over the same channel on the remote FS (not SFTP), plain-provisioned-key auth with a `HostKeyPolicy` (KnownHosts/Pinned/InsecureAcceptAny; 48d OIDC→cert deferred per ADR 086 §1), no client-side path sandbox (OS is the sole boundary), new `Confinement::RemoteUnverified` posture; sync `Backend` trait bridges async russh via an owned multi-thread tokio runtime + `block_on` (trait signature unchanged); tested against an in-process russh **server** fixture over a `tokio::io::duplex` pipe (real SSH wire, 10 tests). — **Phase 40 measured + decided — e-graph persistence: Option (0), persist nothing** ([ADR 084](decisions/084-egraph-persistence-decision.md), [report](2026-07-05-phase40-egraph-resaturation.md)): production-limit saturation is 0.2–254 ms median across 10²–10⁵ facts (bounded at 5 s by `Runner::default()` itself), the Phase-38 `wake()` has no e-graph step, and HNSW rebuild — not the e-graph — is the real wake-path cost (~14 min at 100 k items; ADR 049's local-disk cache already covers it). New permanent measurement crate `crates/akh-egraph-bench/`; fixed latent `calendar_rules()` construction panic (unbound `?conflicts` in cal-conflict, hidden since Phase 13f).) — Prior: 2026-06-30 ( — **Phase 33a grammar aggregation rules built** — `grammar/aggregate.rs` folds shared-subject triples into fluent combined sentences before linearization (`AbsTree::Aggregated` + `PredicateGroup`): subject merge → apposition, predicate enumeration → Oxford-comma object lists, discourse ordering (is-a → properties → relations), pronoun-substituted continuation sentences, confidence-band-safe merging; wired into `build_discourse_response` (third person), `synthesize_abs::build_entity_section`, the communicative `triples_to_sentences` (34b style transform applies AFTER aggregation), and the `ground_query` fallback; knob `AKH_GRAMMAR_AGGREGATE` (default on); plan 33a, ADR 043. — **Phase 48a — executor `Backend` seam built** (`src/backend/`, [ADR 082](decisions/082-privilege-separated-executor-backend.md), [plan](plans/2026-07-04-phase48-privilege-separated-executor.md)): `Backend: Filesystem` + `exec`/`handshake`, `InProcessBackend` sole impl, `file_io`/`edit`/`glob`/`grep`/`shell_exec` rewired through `Arc<dyn Backend>` with zero behavior change; 48b LocalDrop / 48c russh Remote pending. — **Phase 29 capability exposure (29a–29e, 29h, 29i) shipped over ACP** — microtheories, skillpacks, psyche/archetypes, argumentation, explain/provenance, evidence assess, source trust as `_akh/*` groups + `akh acp` CLI verbs; see "Phase 29 capability exposure" under Interaction. Prior: — **ADR 081 prefactors built** — stable triple-identity hash (`graph::identity::TripleIdentity`, blake3 over canonical labels + compartment, cross-akh/session stable, minted in `add_triple` + persisted in the WAL record, queryable via `Engine::triple_by_identity`) and the schema-pack compiler (`src/schema/`: portable JSON source → validated → lowered to label-based native triples → bincode blob + `RegistryRow` checksum; per-akh `install_pack` bulk-insert-as-microtheory with the immutable-global-type-name guard; `akh schema compile|show`; seed pack `data/schema-packs/schema-org-core.json`). LLM Librarian, Obsidian/Orbit sides, and the Postgres registry table remain unbuilt. — **Phase 41 Thinking Engine built** — `src/thinking/`: unified `ThinkingLoop` + `ThoughtState` + budget + goal-shape scheduler + structural `CompositeVerifier` + VOC-adaptive budget + scaling-law bench; 41d Postgres persistence deferred to a `ThoughtPersistence` seam. See ADR 052 (design), [ADR 085](decisions/085-thinking-engine-findings.md) (findings). — **Phase 34 communicative intelligence built** — response strategy selector, psyche style transform, conversation trajectory, shadow filter; ADR 044. Prior update 2026-06-30: **Akh Memory & Schema-Typing subsystem designed** ([plan](plans/2026-06-30-akh-memory-schema.md), [ADR 081](decisions/081-akh-memory-schema-typing.md); *not yet built*) — *Obsidian write-side + Orbit read-side + an LLM Librarian projector + a human-gated schema-pack registry*: permissive note/transcript truth + a typed read-model projection that crystallizes a **globally-immutable, additive, `is-a`-subtyped** core at runtime; installable human-confirmed **microtheory packs** (dedicated registry table of native-triple byte blobs, compiled once from GitHub-curated Turtle/JSON-LD); tiered authoring (small local model append-only + type-guessing markers; **gpt-oss 120B daily Librarian** projector, complementing VSA sleep); feeds Passive/`VirtualContextManager` with bodies-in-archival so the resident footprint is horizon-independent (<100K, no compaction); reuses microtheories, `onto:` constraints, TMS supersede, Dempster-Shafer + source reliability, Phase-32 elicitation, Phase-44 context managers; work breakdown [`docs/ai/plans/2026-06-30-akh-memory-schema-issues.md`](plans/2026-06-30-akh-memory-schema-issues.md); de-risk first: the R2 small-model schema.org/task-tool bet. — **Release & packaging pipeline** (ADR 079): tag-triggered `.forgejo/workflows/release.yml` builds `akh`/`akhomed`/`seshd` container images for Linux + a native illumos **IPS pkg(5)** `.p5p` (SMF manifests under `contrib/smf/`, install helper `packaging/install.sh`, recipe under `packaging/illumos/`, runbook `docs/ops/release.md`); illumos builds are ORT-free (`akhomed --features server`, `seshd` synthesis-only) since onnxruntime has no illumos build; the Linux tarball reuses the image binaries so the memory-limited runner never recompiles the workspace. — **Phase 44 COMPLETE (44a–44j) — working-context assembly runtime** (`src/agent/context/`, `src/bench_phase44/`, ADR 065): a swappable `ContextManager` seam wired into `run_agentic_turn` with a `TokenCounter` abstraction (heuristic `len/4` + feature-gated Candle tokenizer) and a byte-identical `PassThroughManager` default (zero behaviour change), a `BudgetAllocator` (atomic sections all-or-nothing) + per-turn token telemetry, and provenance-derived `Retention` + a `SafetyEnforced` decorator that refuses to evict `PinnedSafety` spans (AgentDecision / ShadowVeto / dangerous-tool provenance) — guarding *eviction* as ADR-060 guards *execution*. Three live, per-akh-selectable strategies (`AKH_CONTEXT_STRATEGY`, default `compacting`): `CompactingManager` (seed→KG→recalled→history + budgeted tools; 44e recency/graph-proximity discourse; 44d opt-in KG-context delta), `PassiveManager` (44h, lean + background consolidation), `VirtualContextManager` (44i, MemGPT core/recall/archival tiers + `core_memory_append`/`core_memory_replace`/`archival_search` self-edit tools over KG-backed core memory). 44g recall = VSA-expanded + recency/confidence blend + TMS supersede filter (`was_retracted`). 44j deterministic A/B harness + dated report. 44k (Candle KV) / 44l (Heka retrieval swap) are `context::policy` trait stubs, recorded-deferred (gated on ADR 037 / Phase 42). Also: standalone CloudNativePG test harness (`scripts/pg-standalone.sh`) validating the whole Phase-38 workflow E2E, advisory-locked migrations (`run_migrations_locked`) for multi-host, and a 3-akh starter (`examples/three-akhs/`). Candle↔Ollama reconciliation + Phase 38e/f/g. **Selectable chat/agentic backing** — each akh picks Ollama (default; local/cloud, native tool calling) or Candle (in-process GGUF, *full* tool calling via grammar-constrained decoding `JsonConstraint`/`tool_call.gbnf`; device-limited), `ChatBackend` trait, ADR 070; forward-ported the candle boundary + ROCm/HIP AMD-GPU backend + Gemma-4 audio + hidden-states forks, ADRs 067/068/069. **Normalized** akhomed-store: JSON list-columns → edge/child tables (goal hierarchy/deps, method steps, provenance inputs, seed packs), ADR 072. **Phase 38e/f/g**: `SleepLevel` + HNSW local-disk wake cache; workspace-as-Postgres-row membership (`akh workspace join/leave/list-members`) + `WorkspaceJoin/Leave` protocol; relocation (`akh akh sleep/relocate`) with `last_seen` + Postgres advisory-lock split-brain guard + ops runbook + randomized recovery harness; the `akh` CLI command tree ADR 071. Deferred: 38d AGE (`projection refresh` stub), live `pg_notify` convergence + daemon auto-idle. Prior — Phase 38c: relational snapshot + wake/replay (Postgres truth, ADR 049); 38a/b `akhomed-store` + WAL; Pure-ACP **P8 COMPLETE**, ADR 061.)
 
 ## Overview
 
@@ -28,19 +28,22 @@ src/
 ├── argumentation/       1 module  — pro/con argumentation (Phase 9e): meta-rules, verdicts, evidence chains
 ├── compartment/         5 modules — knowledge isolation, Jungian psyche, microtheories (Phase 9a, per-repo code scoping), CWA/circumscription (Phase 9m)
 ├── dispatch/            1 module  — competitive reasoner dispatch (Phase 9f): Reasoner trait, bid-based registry, 7 built-in reasoners
-├── grammar/            22 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e)
-├── graph/               9 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o)
+├── grammar/            21 modules — GF-inspired parsing/generation, entity resolution, Rust code gen (Phase 10a), templates (Phase 10e), aggregation rules (Phase 33a)
+├── graph/              11 modules — KG (petgraph), SPARQL (oxigraph), analytics, predicate hierarchy (Phase 9b), defeasible reasoning (Phase 9d), arity constraints (Phase 9j), contradiction detection (Phase 9l), argumentation truth (Phase 9i), NARTs (Phase 9o), identity (ADR 081 P2: stable content-addressed TripleIdentity — blake3 over labels + compartment, cross-akh stable; engine-side index + `triple_by_identity`)
 ├── infer/               3 modules — spreading activation (with Phase 9 hierarchy + temporal context), backward chaining, superposition
 ├── library/            12 modules — document parsing, chunking, three-phase concept extraction (regex + standalone + NLU); seshat/ submodule for MCP client to Seshat service
 crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), MCP server (rmcp), ONNX embedding worker, optional Candle LLM synthesis, seshat-ingest CLI
+crates/akh-egraph-bench/ — Phase 40 wake-path measurement harness (e-graph re-saturation / HNSW rebuild / fork arms; subprocess-per-cell; JSON + markdown reports) — permanent measurement infra per ADR 084
 ├── reason/              3 modules — e-graph language (AkhLang), rewrite rules, second-order quantification (Phase 9n), anti-unification (Phase 10h)
 ├── simd/                5 modules — runtime SIMD kernel dispatch (AVX2 / generic)
+├── schema/              3 modules — ADR 081 schema packs: portable JSON source parser/validator (schema.org subset + Obsidian value types + is-a subtyping + onto: shapes), confirm-time compiler → native-triple bincode blob (`CompiledSchemaPack`, registry-row seam `SchemaRegistry`), per-akh install as microtheory with the global-immutable-type-name guard; `akh schema compile/show` CLI; seed pack `data/schema-packs/schema-org-core.json`
 ├── skills/              1 module  — skillpack lifecycle (Cold/Warm/Hot)
 ├── store/               3 modules — tiered storage (hot/warm/cold)
-├── tui/                 6 modules — ratatui terminal UI, WebSocket remote
+├── thinking/           10 modules — Phase 41 Thinking Engine (ADR 052): unified ThinkingLoop over existing primitives, ThoughtState (HyperVec focus + DS hypotheses + faithful trace), ThinkingBudget, schedulers (round-robin/weighted/goal-shape), CompositeVerifier (contradiction + evidence + source reliability + convergence), VocBudgetController (Phase 11g), ThoughtPersistence seam (41d Postgres deferred), 41f scaling-law bench harness
+├── tui/                 6 modules — ratatui terminal UI, ACP remote backend
 ├── vsa/                 5 modules — HyperVec, VsaOps, encoding, item memory (HNSW), code pattern encoding (Phase 10f)
 ├── chat.rs                        — unified ChatProcessor (NLU-first AbsTree dispatch: dialogue acts, facts, queries, goals; DialogueManager integration)
-├── api_types.rs                   — shared request/response types for akhomed ↔ AkhClient wire format
+├── acp/                           — ACP transport (agent-client-protocol): serve_unix/serve_tcp, control-plane (ServerControl), `_akh/*` data-plane, `session/prompt` → ChatProcessor bridge (ADR 059/060/061)
 ├── engine.rs                      — facade composing all subsystems (Phase9Config, 9 stored registries, wired add_triple/remove_triple pipeline)
 ├── error.rs                       — miette + thiserror rich diagnostics
 ├── rule_macro.rs                  — rule macro predicates (Phase 9g): RuleMacro trait, registry, genls/relationAllExists/relationExistsAll
@@ -50,15 +53,13 @@ crates/seshat/          — Seshat's Archive service: pgvector schema (SeaORM), 
 ├── tms.rs                         — truth maintenance system (Phase 9c): support sets, retraction cascades
 ├── symbol.rs                      — SymbolId (NonZeroU64), SymbolKind, allocator
 ├── pipeline.rs                    — composable stage pipelines
-├── mcp/                 1 module  — MCP server (feature-gated): AkhMcpServer with 36 tools for Claude Code integration (ADR-029). Phase 1: granular bootstrap (resolve_identity, ritual_of_awakening, expand_domain, analyze_prerequisites, assess_competence, remove_triple). Phase 2: agent introspection (agent_run_cycle, agent_goals, agent_recall, agent_psyche). Phase 3: knowledge introspection (triples_of, provenance_of, export_symbols, infer_analogy).
+├── upstream_client.rs             — OUTBOUND MCP client to Anima/Seshat (ureq + JSON-RPC/SSE, no rmcp; currently dormant — see ADR-061)
 ├── service.rs                     — macOS launchd service management (plist generation, install/uninstall/start/stop/status)
-└── main.rs                        — CLI (clap) with 50+ subcommands
-
-data/web/                          — embedded web UI (htmx + Alpine.js SPA)
-├── index.html                     — single-page app: workspace select, awakening ceremony, chat + audit log
-├── style.css                      — dark theme, message type styling, stage timeline animations
-└── vendor/                        — bundled JS (htmx 2.x, Alpine.js 3.x) — no CDN dependency
+└── main.rs                        — CLI (clap): control plane (init · workspace · daemon · config · acp) + chat
 ```
+
+> Retired in P8 (ADR-061): `src/mcp/` (inbound MCP server), `src/api_types.rs`
+> (REST DTOs), `data/web/` (HTMX/Alpine web UI), and the WebSocket TUI backend.
 
 ## Core Data Model
 
@@ -86,6 +87,27 @@ data/web/                          — embedded web UI (htmx + Alpine.js SPA)
 | Superposition | Parallel competing hypotheses, constructive/destructive interference | Multi-path exploration |
 | E-graph Rewriting | `AkhLang` + `egg` equality saturation | Symbolic simplification, equivalence |
 | Confidence Fusion | Noisy-OR and consensus across multi-source evidence | Combining evidence |
+| Thinking Loop (Phase 41) | Budgeted rotation of all primitives over a `ThoughtState`, structural verifier halting | "Think harder" dial: `engine.deliberate(goal, budget)` |
+
+### Phase 41 — The Thinking Engine (`src/thinking/`, ADR 052)
+
+A unified deliberation loop that composes the existing primitives — spreading
+activation (`Engine::infer`, one frontier ring per step; `infer_analogy` for
+analogy-shaped goals), egg e-graph saturation, MCTS (16a), argumentation (9e),
+counterfactual fork (15c), Dempster-Shafer fusion (17), and VSA superposition
+merge — under a `ThinkingBudget` (steps / wall-clock / VOC credits) with a
+faithful `ThoughtStep` trace. Goals are regular Entity symbols; optional
+`thinking:*` relations (`seeks`, `relation`, `answer-type`, `analogy-a/b/c`,
+`plan`) shape the query, mirroring the `agent:*` convention. The 41b scheduler
+biases the rotation by goal shape (factual / analogy / planning / exploratory);
+the 41c `CompositeVerifier` (Phase 9l contradictions + Phase 17 belief
+intervals + Phase 18a source trust + focus-vector convergence) halts the loop
+when the answer is structurally sufficient; the 41e `VocBudgetController`
+(Phase 11g VOC) halts on diminishing returns or extends under high marginal
+value. 41d persistence is a seam only (`ThoughtPersistence` trait + in-memory
+impl; Postgres `akhomed.thinking_traces` deferred). Scaling-law results:
+[ADR 085](decisions/085-thinking-engine-findings.md),
+[2026-07-05 report](2026-07-05-phase41f-scaling-law.md).
 
 ### Phase 9 — Production Pipeline (Wired into Engine Lifecycle)
 
@@ -169,6 +191,16 @@ All user input (except slash commands) flows through `ChatProcessor::process_inp
 
 The Tier 1 rule parser detects dialogue acts first via `try_dialogue_act()` using Lexicon word lists, before attempting structural or relational parses. The GBNF grammar also covers dialogue acts so Tier 3 (LLM) can produce them via constrained decoding.
 
+### Communicative Intelligence (Phase 34, ADR 044)
+
+On the grounded query path, `ChatProcessor` runs the communicative pipeline before constraint checking — one wiring point covers TUI, daemon WS, and headless CLI (ADR 024). Three symbolic stages, no LLM:
+
+1. **Response strategy selection** (`agent/response_strategy.rs`, 34a) — an 18-strategy taxonomy (Knowledge / Epistemic / Conversational / Meta-cognitive) scored by a deterministic function over the `StrategyContext`: answer confidence, Dempster-Shafer conflict + belief interval (Phase 17 primitives), topic repetition, discourse mode, engagement, and user sentiment (Phase 23 affect) — modulated by the psyche's OCEAN profile and archetype weights. A conversational companion move (e.g. `DirectAnswer` + `Empathy`) can ride along.
+2. **Content filter** (34c) — each strategy selects its own slice of the grounded triples (top-3 for direct answers, taxonomic-first for contextualization, pro/con partition for evidence weighing, derivation-tagged for reasoning traces).
+3. **Psyche style transform** (`grammar/style_transform.rs`, 34b) — OCEAN → `CommunicationRegister` (formality, hedging, elaboration, warmth, metaphor), dominant archetype → opening/closing moves + characteristic phrases, all deterministic string rewrites.
+
+The **shadow filter** (34e) sits between stages 1 and 2: shadow bias patterns soften assertive strategies (`Challenge` → `EvidenceWeighing`) and journal the encounter to the audit log. The **discourse trajectory** (`agent/trajectory.rs`, 34d) feeds selection: repeated topics switch strategy, argumentative mode favours evidence weighing, dropping engagement favours exploration prompts. Composition lives in `agent/communicative.rs` (34f); disable per-processor via `set_communicative(false)` or env `AKH_COMM_INTEL=0`. `concise` response detail bypasses the pipeline. Demo: `cargo run --example phase34_demo`.
+
 **Deprecated**: `classify_intent()`, `classify_conversational()`, and `ConversationalKind` in `nlp.rs` are deprecated (ADR 025). They remain as a structural-command fast-path but will be removed once all callers migrate to AbsTree dispatch.
 
 ### Server-Side NLU
@@ -202,37 +234,96 @@ The `ingest_document`, `ingest_file`, and `ingest_url` functions accept an optio
 
 ADR: `docs/ai/decisions/022-nlu-architecture.md`
 
-## Client-Only Build Mode
+## ACP Agentic Harness (Pure-ACP — sole transport; P0–P8 complete)
 
-The `akh` binary supports a `client-only` feature flag for lightweight remote-only deployments:
+ACP — the **Agent Client Protocol** over a Unix socket and optional TCP — is
+`akhomed`'s single inbound transport. `akhomed` is the ACP **agent**; the TUI,
+CLI, and Anima are ACP **clients** (ADR-059). The legacy surfaces it once served
+alongside ACP — a ~104-route REST API, WebSocket chat, a bundled HTMX/Alpine web
+UI, and an inbound MCP server — were deleted in **P8** (ADR-061), and
+`axum`/`tower-http`/`tokio-tungstenite`/`reqwest`/`rmcp` are no longer akh-medu
+dependencies. Outbound MCP to Anima/Seshat stays (`src/upstream_client.rs`).
 
-```
-cargo build --features client-only --bin akh
-```
+The 8 P8 increments: P8.1 ACP control-plane (`ServerControl`) · P8.2 ACP-native
+discovery probe · P8.3 trim CLI to control-plane + chat · P8.4 delete
+REST/WS/web-UI · P8.5 delete inbound MCP server · P8.6 drop axum/REST deps +
+collapse the feature graph (`acp` is now a **default** feature; `server` =
+`daemon + acp`; `client-only` retired) · P8.7 K8s/Helm → ACP-TCP (tcpSocket
+probes, XDG data path, exposed TCP) · P8.8 bounded connect-retry hardening.
 
-### Architecture
+The former `client-only` build mode (a thin HTTP `akh` against a remote akhomed)
+is retired with REST — `akh` talks to a daemon over ACP (`daemon`/`config`/`acp`
+control commands), discovered via the PID record's ACP socket/TCP endpoints.
 
-- **Feature flag**: `client-only` in `Cargo.toml` — no extra dependencies, strips local engine from `akh`
-- **Transport**: All 50+ CLI commands route through HTTP to a running `akhomed` server
-- **Discovery**: PID file (`~/.local/state/akh-medu/{ws}/akhomed.pid`) + health check
-- **Shared types**: `src/api_types.rs` defines request/response structs used by both akhomed handlers and `AkhClient`
-- **Error handling**: `ClientError::NoServer` with miette diagnostic telling the user to start akhomed
-
-### Command Dispatch
-
-Under `client-only`, `main.rs` calls `run_client_only(cli)` which routes every subcommand through `AkhClient::Remote`. The non-client-only codepath is completely unchanged (feature-gated behind `#[cfg(not(feature = "client-only"))]`).
-
-Commands that cannot work remotely (CSV/text ingest, headless chat, CalDAV sync, library watch) bail with informative diagnostics.
-
-### Feature Combinations
-
-| Features | Binary | Behavior |
-|----------|--------|----------|
-| (default) | `akh` | Local engine with remote fallback |
-| `client-only` | `akh` | Remote only, requires akhomed |
-| `server` | `akhomed` | HTTP+WS server with full engine |
-
-ADR: `docs/ai/decisions/023-client-only-mode.md`
+- **Transport** (`src/acp/`): `agent-client-protocol` 0.14; `session/prompt` →
+  the LLM agentic loop (`run_agentic_turn`, else symbolic `ChatProcessor`) run in
+  `spawn_blocking` (ADR-027). The turn now **streams**: each `AkhMessage` is
+  emitted to a `ChannelSink` the instant it is produced and the prompt handler
+  drains it concurrently into `session/update` notifications (answer →
+  `AgentMessageChunk`, reasoning + tool steps → `AgentThoughtChunk`); the client
+  consumes them incrementally via `read_update`. Token-level answer streaming
+  rides Ollama's `/api/chat` `stream:true` (`OllamaClient::chat_stream`, content
+  vs `thinking` deltas). A `_akh/<group>/<op>` data-plane carries read/admin ops
+  (meta, workspace, symbols, triples, query, memory, infer, permission, model)
+  over the same connection; cognitive ops are the agent LLM's *tools*, not
+  client methods (the data-plane is deliberately small).
+- **Phase 29 capability exposure** (plan
+  [2026-03-26-phase29-capability-exposure](plans/2026-03-26-phase29-capability-exposure.md),
+  [ADR 039](decisions/039-capability-exposure.md) — the plan's "MCP tools +
+  REST dashboard" surface predates ADR 061's ACP-only transport and is realized
+  as `_akh/*` groups + `akh acp` verbs): `microtheory/{list,create,inspect,
+  activate,deactivate}` (29a, compartment lifecycle), `skills/{inspect,activate,
+  deactivate}` (29b, Cold↔Hot skillpacks), `psyche` + `psyche/archetypes` (29c,
+  read + clamped weights-only archetype tuning under the agent lock),
+  `argue` (29d, pro/con verdicts from provenance chains), `explain` +
+  `provenance` (29e, derivation trees + `ExplanationQuery` free-text routing),
+  `evidence/assess` (29h, per-claim Dempster-Shafer) and `trust` (29i,
+  Admiralty leaderboard). Mirrored 1:1 by `akh acp
+  microtheory|skill|psyche|argue|explain|provenance|evidence|trust`. 29f
+  (hypothesis explorer) and 29g (causal explorer) remain unexposed.
+- **TUI** (`src/tui/`): pure-ACP ratatui client. Streams answer deltas into one
+  growing message, folds thinking/tool steps into a collapsible block (Tab),
+  renders answers as Markdown (`tui/markdown.rs`), and shows an animated spinner
+  in the input border while a turn is in flight. `/model` (picker + type-ahead
+  filter) and `/effort` switch the live model over `_akh/model/*`.
+- **First-class akh** (`src/akh_config.rs`, ADR-053): `akh.toml` pins
+  `{model + ollama endpoint + system prompt}` per workspace.
+- **Filesystem sandbox** (`src/fs/`, ADR-060): a `Filesystem` trait with a
+  `LocalFs` backend confining reads/writes to separate allow-listed roots with
+  symlink-safe canonical containment (no-follow-symlinks walks, depth caps).
+  All file-touching tools go through `Arc<dyn Filesystem>` — closing the old
+  read-anywhere / parent-only-write holes.
+- **Executor `Backend` seam** (`src/backend/`, ADR-082, Phase 48a): a unified
+  `Backend: Filesystem` trait adding `exec(ExecRequest) -> ExecOutcome` +
+  `handshake() -> Posture`, so the executor-facing tools
+  (`file_io`/`edit`/`glob`/`grep`/`shell_exec`) bind files *and* process
+  execution to one target. Sole 48a impl: `InProcessBackend` (wraps the
+  `LocalFs` sandbox + the historic in-process `/bin/sh -c` exec, byte-identical;
+  handshake honestly reports `Unconfined`, keeping `shell_exec` Critical).
+  48b `LocalDrop` plugs in behind the same trait via the tools' `with_backend`
+  constructors. **48c `RemoteBackend`** (`src/backend/remote.rs`, feature
+  `remote-executor`, Phase 50/W2a) is **built**: a russh-over-SSH executor —
+  `exec` runs the SSH exec-channel request capturing stdout/stderr/exit into
+  the same `ExecOutcome`; the `Filesystem` verbs run as shell commands
+  (`cat`/`base64`/`ls`/`test`/`wc`) over that same channel on the remote FS
+  (not SFTP — ADR-082 §2 leaves this open, shell keeps it single-protocol/
+  single-dependency); auth is **plain provisioned keys** (`HostKeyPolicy` =
+  KnownHosts / Pinned / InsecureAcceptAny; 48d OIDC→cert deferred per ADR-086
+  §1); no client-side path sandbox (the OS is the sole boundary, ADR-082 §8);
+  handshake reports the new `Confinement::RemoteUnverified` (policy-equivalent
+  to Unconfined until 48f's full self-report). The synchronous `Backend` trait
+  bridges async russh by owning a dedicated multi-thread tokio runtime and
+  `block_on`-ing each call (same sync-over-async shape as `main.rs`/`tui`);
+  the trait signature is unchanged. Tested against an in-process russh **server**
+  fixture over a `tokio::io::duplex` pipe (real SSH wire, not a mock).
+- **Claude-Code tool parity** (ADR-060): `ToolInput` re-backed by
+  `serde_json::Value` (string API preserved); new Edit / Glob / Grep /
+  WebSearch / structured `task_list` tools, all sandbox-routed. Tool count 34.
+- **Permission layer** (`src/agent/permission.rs`, ADR-060): a sync
+  `PermissionPolicy` (Bypass default / Standard / AcceptEdits / Plan) gates
+  side-effecting tools at `ToolRegistry::execute`; a supervising client sets the
+  mode via `_akh/permission/mode` and resolves interactive `Ask` decisions over
+  `session/request_permission` (bridged across the spawn_blocking↔async boundary).
 
 ## Storage Architecture
 
@@ -243,6 +334,85 @@ Cold (redb)        — ACID transactions, durable, slower writes
 Provenance (redb)  — multi-index ledger (derived/source/kind)
 SPARQL (oxigraph)  — persistent RDF store for structured queries
 ```
+
+### Postgres backing store (Phase 38, `crates/akhomed-store`)
+
+Phase 38 makes an Akh **relocatable**: the truth of its state lives in Postgres
+as **typed relational data** (no opaque blobs, no object store) while the daemon
+keeps the stores above as an in-process cache. 38a–38c are implemented.
+
+- New leaf crate `crates/akhomed-store/`: SeaORM entities + `sea-orm-migration`
+  migrations (schema-builder, not raw SQL), a pool builder, and the
+  `akhomed-migrate` CLI. The crate depends on nothing in `akh-medu`.
+- **Backend-portable schema** (Postgres now; SQLite / libSQL-**Turso** droppable
+  later): flat prefixed table names (`akhomed_*` / `workspaces_*`, **no** PG
+  schemas — SQLite has none), list-valued fields as SeaORM `Json` (no native
+  arrays), no DB-side defaults (UUIDs/timestamps generated in Rust). Postgres-only
+  optimizations are conditional add-ons: the `mutation_log` **TimescaleDB
+  hypertable** (probes `pg_available_extensions`; plain table where absent) and
+  an **AGE** read-projection over `facts` (deferred, 38d). ADR 049.
+- Tables: `akhomed_akh` (host-independent identity), `akhomed_facts` (KG triples,
+  content-addressed PK; AGE projects over this), `akhomed_symbols` (registry rows
+  — joins facts to labels), `akhomed_mutation_log` (the streaming WAL — 38b),
+  `akhomed_akh_state` (one runtime row/akh: watermark, allocator, cycle_count,
+  sleep phase, `psyche`/`extra` JSONB), the **cognitive tables** (`drives`,
+  `agenda`, `curiosity_config`, `goals`, `failure_cases`, `effort_cases`,
+  `learned_methods`, `competence_{tools,categories,calibration}`, `sleep_metrics`
+  — inspectable/queryable), plus `provenance` / `episodes` and the `workspaces_*`
+  membership tables (38f).
+- Gated behind the `postgres` cargo feature (folded into `server`); the lean
+  `akh` client never compiles SeaORM. Runtime-optional: with no `[postgres]`
+  config section the daemon logs a warning and runs in legacy local-only mode.
+- `[postgres]` config: `url`, `pool_size`, `connect_timeout_secs`,
+  `migrate_on_start` (`DATABASE_URL` overrides `url`).
+
+**Sub-phase 38b (implemented) — the mutation WAL.** Every successful
+assert/retract streams to `akhomed_mutation_log` within seconds; wake (38c)
+replays the tail. Bounded loss on crash, no loss while Postgres is down.
+
+- `src/mutation.rs` (core, ungated): a tiny `MutationSink` trait + `MutationKind`
+  taxonomy (assert/retract/microtheory_load/unload/compartment_create/destroy).
+  `Engine` holds `OnceLock<Arc<dyn MutationSink>>` and calls it after a
+  successful `add_triple` / `remove_triple`. The core carries **no** SeaORM
+  dependency — the lean `akh` client is unaffected.
+- `src/wal.rs` (postgres-gated): `MutationLog` implements `MutationSink`. A
+  synchronous, byte-capped `WalBuffer` (overflow drops oldest non-`assert`
+  first) feeds an async flusher that batches inserts every `flush_interval`.
+  Failed flushes re-insert the batch at the front and retry (at-least-once;
+  replay is idempotent). Stable per-workspace Akh/workspace UUIDs via UUIDv5.
+- Daemon: `ServerState::wire_wal` installs the WAL per workspace on first load
+  (ensuring the `akhomed_akh` row first); flushers drain on graceful shutdown.
+  WAL tuning in `[postgres]`: `wal_flush_interval_secs` (2), `wal_batch_size`
+  (64), `wal_max_buffer_mb` (16). WAL **retention/truncation** is deferred to a
+  later SleepCycle self-consolidation phase (38c does **not** truncate).
+
+**Sub-phase 38c (implemented) — relational snapshot + wake/replay.** The akh's
+DB is mechanical; an LLM facts-synthesis layer (off-time WAL→facts + a Curator
+Ennead-akh over Seshat) is deferred.
+
+- `src/snapshot.rs` (postgres-gated): `capture_snapshot` (sync — materialises the
+  live registry, KG, and cognitive subsystems into entity `Model`s; held under
+  the agent's `std::sync::Mutex` only for the fast in-memory copy) + the async
+  `persist_snapshot` (full-replaces the cognitive tables + upserts `akh_state`
+  with `watermark = MAX(mutation_log.seq)`). `wake(data_dir, akh_id,
+  workspace_id, db)` inverse-maps the rows back into a fresh host's redb meta
+  (`sym_meta:` registry + the `agent:*` bincode blobs the unchanged
+  `Agent::resume` reads), opens `Engine::new`, `restore_triples(facts)`, then
+  replays the WAL tail (`seq > watermark`) **before** the sink is wired (no
+  re-log). Goals are stored as full JSON in `goals.detail` (lossless across
+  data-bearing status variants); `session_summary`/`audience`/
+  `improvement_history`/`method_stats` ride in `akh_state.extra`. Managers
+  (PIM/calendar/causal/contact/…) and working memory rebuild from the KG /
+  defaults; a missing optional table degrades gracefully. The Phase 25c
+  `person_memory` index rides in `extra` as a JSON-safe `PortablePersonMemory`
+  projection (its `(contact, topic)` tuple key is flattened to a pair sequence).
+- Daemon: a per-workspace **snapshot ticker** (`spawn_snapshot_ticker`, alongside
+  `wire_wal`) snapshots every `snapshot_interval_secs` (default 300, `0`
+  disables); `shutdown_wals` stops tickers, takes a **final snapshot** per loaded
+  workspace, then drains the WAL. ACP control ops `_akh/akh/snapshot` /
+  `_akh/akh/wake` (CLI `akh akh snapshot|wake <ws>`) drive it manually; wake
+  routes a cold workspace through the normal lazy `get_agent` path so resume +
+  model-manager + WAL all apply.
 
 ## Provenance
 
@@ -428,13 +598,13 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 
 | Binary | Purpose | Features |
 |--------|---------|----------|
-| `akh` | CLI client | default (full) or `client-only` (thin HTTP client) |
-| `akhomed` | Background server/daemon | `server`, `daemon` |
+| `akh` | CLI client + TUI (ACP) | default (includes `acp`) |
+| `akhomed` | ACP daemon (agent) | `server` (= `daemon` + `acp`) |
 | `seshd` | Seshat's Archive MCP service | `embedding` (crate: `seshat`) |
 
 ### Daemon Mode (Primary)
 
-`akhomed` is the primary deployment path. It runs as an HTTP server (axum) with per-workspace agent daemons that execute 12 background tasks on independent tokio intervals:
+`akhomed` is the primary deployment path. It serves ACP over a Unix socket (and optional TCP) with per-workspace agent daemons that execute 12 background tasks on independent tokio intervals:
 
 - Equivalence learning, reflection, consolidation, schema discovery, rule inference, gap analysis
 - Session persistence, idle OODA cycles, continuous learning (Semantic Scholar / OpenAlex / Open Library)
@@ -458,13 +628,13 @@ Logs: `~/Library/Logs/akh-medu/akhomed.{stdout,stderr}.log`
 
 ### Monitoring
 
-`DaemonStatus` (GET `/workspaces/{ws}/daemon`) provides:
+`DaemonStatus` (ACP `_akh/daemon/status`, workspace param) provides:
 - Core: running, total_cycles, started_at, trigger_count
 - Task timestamps: last_persist_at, last_learning_at, last_sleep_at, last_goal_gen_at
 - KG stats: active_goals, kg_symbols, kg_triples
 
 Scripts:
-- `scripts/smoke-test.sh` — HTTP endpoint verification (~20 endpoints)
+- `scripts/smoke-test.sh` — legacy REST endpoint check; **stale post-ADR-061** (akhomed has no HTTP surface — verify via an ACP client instead)
 - `scripts/stability-monitor.sh` — CSV logging (RSS, KG size, cycles) for overnight monitoring
 
 ### Kubernetes Deployment (ADR-048)
@@ -483,7 +653,7 @@ charts/akh-medu/
     ├── seshd-service.yaml
     ├── seshd-configmap.yaml      # seshat.toml (DB URL from subchart secret)
     ├── seshd-pvc.yaml            # 1Gi models
-    └── *-ingress.yaml            # Optional per service
+    └── seshd-ingress.yaml        # Optional (seshd HTTP only; akhomed is raw-TCP ACP, exposed via Service, no ingress)
 ```
 
 PostgreSQL uses `pgvector/pgvector:pg16` image with `CREATE EXTENSION vector` in initdb.

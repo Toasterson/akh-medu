@@ -1,0 +1,341 @@
+# illumos native-API knowledge graph — ATOMIC triples (v2 of the fixture).
+#
+# WHY THIS EXISTS: the first fixture (illumos-native-api.toml) crammed whole
+# English sentences into the object *label* of each triple, so KG grounding
+# rendered prose. That is not a knowledge graph — it is RAG hidden in a label
+# field, and it did not help (glm-5.2 8/15 < 10/15 baseline; see
+# benchmarks/results/2026-07-08-illumos-e2e-glm-5.2-harness).
+#
+# This version is a genuine graph: every subject AND object is an ATOMIC term
+# (an API, a tool, a field, a mechanism), joined by atomic relations. The
+# knowledge lives in the TOPOLOGY — shared hub nodes (`extern-C-FFI`,
+# `CLI-tool`, `illumos`, `zfs set`, `usermod -K`, `rights-profile`, `dladm`)
+# are reached from many subjects, so a keyword match surfaces a *cluster* of
+# short facts the model must compose (e.g. keywords cpu/clock/psrinfo pull
+# `clock from pi_clock`, `pi_clock field-of processor_info`,
+# `processor_info is-a illumos-syscall`, `illumos-syscall called-via
+# extern-C-FFI`, `processor_info instead-of psrinfo`).
+#
+# HONESTY CONTRACT (unchanged): general illumos knowledge only — which native
+# primitive, which CLI it replaces, how it is invoked. No task instance names,
+# property values, role names, or verify.sh checks. src/nlu/kg_context.rs
+# renders each as "subject predicate object"; collect_relevant_triples takes
+# up to 3 outgoing + 3 incoming edges per keyword-matched node.
+
+# ── CPU: kstat / processor_info ─────────────────────────────────────────
+[[fact]]
+subject = "cpu"
+predicate = "info via"
+object = "cpu_info"
+[[fact]]
+subject = "cpu"
+predicate = "info via"
+object = "processor_info"
+[[fact]]
+subject = "cpu_info"
+predicate = "is-a"
+object = "kstat module"
+[[fact]]
+subject = "kstat module"
+predicate = "read via"
+object = "libkstat"
+[[fact]]
+subject = "libkstat"
+predicate = "entry point"
+object = "kstat_open"
+[[fact]]
+subject = "libkstat"
+predicate = "walks"
+object = "kc_chain"
+[[fact]]
+subject = "cpu_info"
+predicate = "has field"
+object = "clock_MHz"
+[[fact]]
+subject = "clock"
+predicate = "from"
+object = "clock_MHz"
+[[fact]]
+subject = "clock"
+predicate = "from"
+object = "pi_clock"
+[[fact]]
+subject = "speed"
+predicate = "from"
+object = "pi_clock"
+[[fact]]
+subject = "pi_clock"
+predicate = "field-of"
+object = "processor_info"
+[[fact]]
+subject = "processor_info"
+predicate = "is-a"
+object = "illumos-syscall"
+[[fact]]
+subject = "illumos-syscall"
+predicate = "called via"
+object = "extern-C-FFI"
+[[fact]]
+subject = "processor_info"
+predicate = "instead-of"
+object = "psrinfo"
+[[fact]]
+subject = "libkstat"
+predicate = "instead-of"
+object = "psrinfo"
+[[fact]]
+subject = "psrinfo"
+predicate = "is-a"
+object = "CLI-tool"
+[[fact]]
+subject = "kstat"
+predicate = "is-a"
+object = "CLI-tool"
+[[fact]]
+subject = "CLI-tool"
+predicate = "wrong-for"
+object = "in-program-use"
+
+# ── SMF: libscf ─────────────────────────────────────────────────────────
+[[fact]]
+subject = "smf"
+predicate = "config via"
+object = "libscf"
+[[fact]]
+subject = "libscf"
+predicate = "entry point"
+object = "scf_simple_prop_get"
+[[fact]]
+subject = "scf_simple_prop_get"
+predicate = "drained by"
+object = "scf_simple_prop_next_astring"
+[[fact]]
+subject = "property"
+predicate = "read via"
+object = "libscf"
+[[fact]]
+subject = "restarter"
+predicate = "holds"
+object = "restarter/state"
+[[fact]]
+subject = "restarter/state"
+predicate = "read via"
+object = "libscf"
+[[fact]]
+subject = "libscf"
+predicate = "instead-of"
+object = "svcprop"
+[[fact]]
+subject = "svcprop"
+predicate = "is-a"
+object = "CLI-tool"
+[[fact]]
+subject = "svcs"
+predicate = "is-a"
+object = "CLI-tool"
+[[fact]]
+subject = "service"
+predicate = "managed with"
+object = "svcadm"
+[[fact]]
+subject = "svcadm refresh"
+predicate = "applies"
+object = "property-change"
+[[fact]]
+subject = "property"
+predicate = "set with"
+object = "svccfg"
+[[fact]]
+subject = "manifest"
+predicate = "imported with"
+object = "svccfg import"
+[[fact]]
+subject = "manifest"
+predicate = "is-a"
+object = "smf-xml"
+[[fact]]
+subject = "fmri"
+predicate = "identifies"
+object = "service"
+
+# ── Doors IPC ───────────────────────────────────────────────────────────
+[[fact]]
+subject = "doors"
+predicate = "is-a"
+object = "illumos-IPC"
+[[fact]]
+subject = "doors"
+predicate = "function"
+object = "door_create"
+[[fact]]
+subject = "doors"
+predicate = "function"
+object = "door_call"
+[[fact]]
+subject = "doors"
+predicate = "function"
+object = "door_return"
+[[fact]]
+subject = "door_create"
+predicate = "takes"
+object = "server-procedure"
+[[fact]]
+subject = "door_call"
+predicate = "uses"
+object = "door_arg_t"
+[[fact]]
+subject = "doors"
+predicate = "called via"
+object = "extern-C-FFI"
+[[fact]]
+subject = "extern-C-FFI"
+predicate = "needs"
+object = "self-declared-bindings"
+[[fact]]
+subject = "extern-C-FFI"
+predicate = "needs-no"
+object = "external-crate"
+
+# ── Extended attributes ─────────────────────────────────────────────────
+[[fact]]
+subject = "attribute"
+predicate = "extended via"
+object = "O_XATTR"
+[[fact]]
+subject = "O_XATTR"
+predicate = "flag for"
+object = "openat"
+[[fact]]
+subject = "attribute"
+predicate = "opened with"
+object = "attropen"
+[[fact]]
+subject = "attropen"
+predicate = "is-a"
+object = "libc-function"
+[[fact]]
+subject = "attribute"
+predicate = "called via"
+object = "extern-C-FFI"
+[[fact]]
+subject = "openat"
+predicate = "instead-of"
+object = "setxattr"
+[[fact]]
+subject = "setxattr"
+predicate = "not-on"
+object = "illumos"
+[[fact]]
+subject = "xattr crate"
+predicate = "not-on"
+object = "illumos"
+
+# ── ZFS ─────────────────────────────────────────────────────────────────
+[[fact]]
+subject = "zpool"
+predicate = "created with"
+object = "zpool create"
+[[fact]]
+subject = "dataset"
+predicate = "created with"
+object = "zfs create"
+[[fact]]
+subject = "compression"
+predicate = "set with"
+object = "zfs set"
+[[fact]]
+subject = "quota"
+predicate = "set with"
+object = "zfs set"
+[[fact]]
+subject = "mountpoint"
+predicate = "set with"
+object = "zfs set"
+[[fact]]
+subject = "zpool"
+predicate = "checked with"
+object = "zpool status"
+
+# ── RBAC / privileges ───────────────────────────────────────────────────
+[[fact]]
+subject = "role"
+predicate = "created with"
+object = "roleadd"
+[[fact]]
+subject = "role"
+predicate = "assigned with"
+object = "usermod -R"
+[[fact]]
+subject = "profile"
+predicate = "is-a"
+object = "rights-profile"
+[[fact]]
+subject = "rights-profile"
+predicate = "defined in"
+object = "exec_attr"
+[[fact]]
+subject = "profile"
+predicate = "assigned with"
+object = "usermod -P"
+[[fact]]
+subject = "profile"
+predicate = "run with"
+object = "pfexec"
+[[fact]]
+subject = "sudo"
+predicate = "not-on"
+object = "illumos"
+[[fact]]
+subject = "privilege"
+predicate = "inspected with"
+object = "ppriv"
+[[fact]]
+subject = "privilege"
+predicate = "tuned with"
+object = "usermod -K"
+[[fact]]
+subject = "proc_info"
+predicate = "is-a"
+object = "basic-privilege"
+[[fact]]
+subject = "defaultpriv"
+predicate = "set with"
+object = "usermod -K"
+[[fact]]
+subject = "Network Management"
+predicate = "is-a"
+object = "rights-profile"
+
+# ── Datalinks / NIC ─────────────────────────────────────────────────────
+[[fact]]
+subject = "link"
+predicate = "state via"
+object = "dladm"
+[[fact]]
+subject = "link"
+predicate = "speed via"
+object = "dladm"
+[[fact]]
+subject = "nic"
+predicate = "queried with"
+object = "dladm"
+[[fact]]
+subject = "interface"
+predicate = "address via"
+object = "ipadm"
+[[fact]]
+subject = "ethtool"
+predicate = "not-on"
+object = "illumos"
+[[fact]]
+subject = "lscpu"
+predicate = "not-on"
+object = "illumos"
+[[fact]]
+subject = "ip"
+predicate = "not-on"
+object = "illumos"
+[[fact]]
+subject = "default route"
+predicate = "found with"
+object = "route -n get default"

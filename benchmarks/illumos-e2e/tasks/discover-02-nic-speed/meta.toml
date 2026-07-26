@@ -1,0 +1,16 @@
+id = "discover-02-nic-speed"
+family = "manpage-discovery"
+description = "Report link state and speed of the primary NIC via dladm, not ethtool/ip"
+timeout_secs = 300
+expected_manpages = ["dladm"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = true
+note = """
+Neither `ethtool` nor `ip link`/`ip addr` (iproute2) exist on illumos --
+there is no Linux network-namespace stack here. Link-level state and
+speed are illumos-native dladm(1M) concepts: `dladm show-phys` /
+`dladm show-linkprop -p speed,state <link>`, discoverable from the dladm
+manpage's PROPERTIES section.
+"""

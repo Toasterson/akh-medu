@@ -1,10 +1,20 @@
 [workspace]
-members = [".", "crates/seshat", "crates/heka", "crates/anima-ai"]
+members = [
+    ".",
+    "crates/seshat",
+    "crates/heka",
+    "crates/anima-ai",
+    "crates/akhomed-store",
+    "crates/akh-egraph-bench",
+    "crates/grug-data",
+    "crates/grug-train",
+    "benchmarks/harness-core",
+]
 resolver = "3"
 
 [package]
 name = "akh-medu"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
 license = "GPL-3.0-only"
@@ -13,6 +23,19 @@ homepage = "https://akh-medu.dev"
 readme = "README.md"
 keywords = ["ai", "knowledge-graph", "vsa", "reasoning", "neuro-symbolic"]
 categories = ["science", "algorithms", "command-line-utilities"]
+
+# cargo-binstall: fetch the prebuilt lean `akh` client from Forgejo releases
+# instead of compiling. Only `akh` is binstalled — `akhomed` is excluded by its
+# `required-features = ["server"]` and `generate_qa_dataset` by
+# `required-features = ["training-data"]`, so neither is in the default bin set.
+# The release workflow uploads `akh-{version}-{target}.tar.gz` (the binary at the
+# archive root) per target. The tag is `v{version}`, hence `v{ version }` below.
+[package.metadata.binstall]
+# Literal `.tar.gz` (not `{ archive-suffix }`, which is `.tgz` for pkg-fmt=tgz)
+# to match the asset name produced by packaging/build-binstall-archive.sh.
+pkg-url = "https://code.aopc.cloud/toasterson/akh-medu/releases/download/v{ version }/akh-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
 # Error handling
@@ -77,13 +100,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# Server (feature-gated)
-axum = { version = "0.8", features = ["ws"], optional = true }
+# Async runtime (feature-gated; shared by the daemon and the ACP server)
 tokio = { version = "1", features = ["full"], optional = true }
-tower-http = { version = "0.6", features = ["cors"], optional = true }
 
-# WebSocket client for TUI remote mode (feature-gated)
-tokio-tungstenite = { version = "0.26", optional = true }
+# Stream combinators for the oxifed federation channel (feature-gated)
 futures-util = { version = "0.3", optional = true }
 
 # WASM tool runtime (feature-gated)
@@ -92,7 +112,6 @@ wasmtime = { version = "29", features = ["component-model"], optional = true }
 # Federation via oxifed (feature-gated)
 lapin = { version = "2", optional = true }
 deadpool-lapin = { version = "0.12", optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
 
 # Email channel (feature-gated)
 mail-parser = { version = "0.11", optional = true }
@@ -123,14 +142,28 @@ candle-nn = { version = "0.10", optional = true }
 candle-transformers = { version = "0.10", optional = true }
 safetensors = { version = "0.7", optional = true }
 
+# Candle audio-native boundary (Gemma 4, ADR 069): 16 kHz mono WAV decode.
+hound = "3"
+# AMD GPU backend (ROCm/HIP, ADR 068): dlopen the HIP dequant kernel + rocBLAS.
+# Optional — only pulled under the `rocm` feature; off by default so CPU-only
+# and non-AMD hosts build clean.
+libloading = { version = "0.8", optional = true }
+
 # Training: Burn framework for LoRA fine-tuning (future, feature-gated)
 # NOTE: Burn 0.21-pre.3's burn-dataset pulls rusqlite→libsqlite3-sys 0.35
 # which conflicts with seshat's sea-orm→sqlx→libsqlite3-sys 0.26.
 # Deferred until Burn reaches stable release with decoupled dataset crate.
 # burn = { version = "0.21", optional = true, default-features = false, features = ["train", "ndarray", "std"] }
 
-# MCP server (feature-gated)
-rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"], optional = true }
+# Phase 38: Postgres-backed durable store for relocatable Akhs (feature-gated).
+# Pulled in only under the `postgres` feature (folded into `server`), so the
+# lean `akh` client binary never compiles SeaORM/sqlx.
+akhomed-store = { path = "crates/akhomed-store", optional = true }
+
+# Phase 51 / ADR 089: the organ's tool-call passes (retrieval-scoped catalog +
+# KG-repair of near-miss calls) at the live agent boundary. Pure Rust, no ML
+# dependency — the tested lab implementation, reused rather than reimplemented.
+grug-data = { path = "crates/grug-data" }
 
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
@@ -141,27 +174,66 @@ comrak = { version = "0.31", optional = true, default-features = false, features
 syntect = { version = "5", optional = true }
 minijinja = { version = "2", optional = true }
 tantivy = { version = "0.22", optional = true }
-blake3 = { version = "1", optional = true }
+# Unconditional since ADR 081: the stable triple-identity hash (schema/identity
+# prefactor) uses blake3 in the core engine, not only in the wiki feature.
+blake3 = { version = "1" }
+agent-client-protocol = { version = "0.14.0", optional = true }
+
+# ACP spike (P0): Unix-socket transport for the Agent Client Protocol.
+# `agent-client-protocol` is `futures`-based; we bridge tokio's UnixStream
+# halves into `futures::io::{AsyncRead,AsyncWrite}` via `tokio_util::compat`.
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+futures = { version = "0.3", optional = true }
+# Phase 48c (ADR 082): pure-Rust SSH for the `RemoteBackend` executor. `ring`
+# (not the default `aws-lc-rs`) is the crypto backend because `ring` is
+# already in the dependency tree via `lettre`'s `rustls-tls` — no new crypto
+# stack to vet/build. `rsa` is enabled because provisioned lab keys are
+# commonly RSA; `flate2`/`serde` stay off (unneeded).
+russh = { version = "0.62.1", default-features = false, features = ["ring", "rsa"], optional = true }
+# Encodes file-write payloads for `RemoteBackend`'s shell-command file verbs
+# (base64 | openssl base64 -d over the exec channel — see src/backend/remote.rs;
+# the remote-side decode uses `openssl base64 -d`, not GNU `base64 -d` — found
+# missing on the illumos exec1 guest in Phase 50 W2b).
+base64 = { version = "0.22.1", optional = true }
 
 [features]
-default = ["nlu-candle"]
-client-only = [ "daemon" ]  # Strips local engine from akh binary; requires running akhomed server
-daemon = ["tokio", "tokio-tungstenite", "futures-util"]
-server = ["daemon", "axum", "tower-http"]
-oxifed = ["daemon", "lapin", "deadpool-lapin", "reqwest"]
+default = ["nlu-candle", "acp"]
+daemon = ["tokio"]
+# `server` = the akhomed daemon feature set: workspace daemons + the ACP
+# inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
+# those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
+# in the Postgres backing store.
+server = ["daemon", "acp", "postgres"]
+# Phase 38a/38b: Postgres backing store. Optional at runtime (no [postgres]
+# config = legacy local-only mode); this feature only controls whether the code
+# is built. Pulls in `tokio` because the WAL flusher (38b) is async.
+postgres = ["dep:akhomed-store", "tokio"]
+oxifed = ["daemon", "lapin", "deadpool-lapin", "futures-util"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
 calendar = ["icalendar", "chrono"]
 wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
-mcp = ["server", "rmcp"]
 delegation = ["daemon"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
+# AMD GPU acceleration for the Candle backend (ADR 068). Opt-in: requires the
+# ROCm toolchain to build the HIP kernel (build.rs degrades gracefully if absent)
+# and an AMD GPU at runtime. Off by default — Candle runs CPU-only without it.
+rocm = ["candle-backend", "dep:libloading"]
+# Apple Metal GPU acceleration for the Candle backend (Apple Silicon — e.g. the
+# Mac mini). Enables candle's Metal device; the backend selects it at runtime via
+# the `#[cfg(feature = "metal")]` path in candle_backend.rs. macOS/arm64 only —
+# do not enable on Linux (candle's Metal backend won't compile there).
+metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+# Phase 45 / ADR 073: full Candle Device::Hip backend. Enables the vendored
+# candle-core HIP backend (fills the cuda module slot — see vendor/candle-core)
+# on top of the `rocm` dlopen runtime (nlu::hip). Off by default; superset of rocm.
+hip = ["rocm", "candle-core/hip"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
 training-data = []
-wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy", "dep:blake3"]
+wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy"]
 sparql-persist = ["oxigraph/rocksdb"]
 # Phase 32: LLM knowledge elicitation via T5 Knowledge model (Phase 35 provides
 # the model weights; this gate enables the elicitation code path).
@@ -169,10 +241,32 @@ sparql-persist = ["oxigraph/rocksdb"]
 # t5-knowledge-q6k.gguf model file.
 knowledge-bootstrap = ["candle-backend"]
 eliza = ["daemon", "dep:notify", "dep:knuffel"]
+agent-client-protocol = ["dep:agent-client-protocol"]
+# Phase P0 spike: ACP agent over a Unix domain socket, wrapping ChatProcessor
+# for one in-process workspace. Additive and OFF by default — does not touch
+# REST/WS/MCP transports. See src/acp/mod.rs and ADR-027 (concurrency invariant).
+acp = ["dep:agent-client-protocol", "dep:tokio-util", "dep:futures", "tokio"]
+# Lean TUI/CLI client: ACP transport only, no in-process LLM/candle. `akh` is a
+# pure ACP client (all engine work happens in the daemon), so it needs none of
+# the nlu-candle stack. This is what ships as the binstall `akh` binary and the
+# `akh` docker image:
+#   cargo build --release --no-default-features --features client --bin akh
+client = ["acp"]
+# Phase 48c (ADR 082): the russh-backed `RemoteBackend` (src/backend/remote.rs).
+# Bridges the synchronous `Backend` trait over an async SSH session; pulls in
+# `tokio` for the internal runtime the sync trait methods block on. Off by
+# default — in-process/local-drop backends need no SSH dependency at all.
+remote-executor = ["dep:russh", "dep:base64", "tokio"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+# Phase 50 / W3 runner (examples/phase50_w3_runner.rs): links the RunRecord
+# schema + hashing/storage helpers. `chrono` is pulled in separately here
+# (rather than relying on the optional main-crate feature that also gates
+# it) because examples only see [dev-dependencies] unconditionally.
+harness-core = { path = "benchmarks/harness-core" }
+chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
 name = "akh"
@@ -186,6 +280,10 @@ required-features = ["server"]
 [[bin]]
 name = "generate_qa_dataset"
 path = "src/bin/generate_qa_dataset.rs"
+# Training-data tooling, not a shipped binary. Gating it keeps it out of the
+# default bin set so `cargo binstall akh-medu` resolves only `akh`. Build it
+# with `cargo build --features training-data --bin generate_qa_dataset`.
+required-features = ["training-data"]
 
 [[bench]]
 name = "vsa_ops"
@@ -206,3 +304,32 @@ harness = false
 [[bench]]
 name = "vsa_decide"
 harness = false
+
+# Phase 45 / ADR 073: vendored candle-core fork that adds the ROCm/HIP backend
+# (gated behind candle-core's `hip` feature; no effect on the default build, which
+# binds the byte-identical 0.10.2 source). candle-nn / candle-transformers from the
+# registry consume this patched candle-core transparently.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
+# illumos portability fix: hnsw_rs (always-on, item-memory ANN backend) pulls
+# mmap-rs unconditionally, which in turn depends on the `sysctl` crate for
+# every `cfg(unix)` target even though `sysctl` implements a `sys` backend
+# only for linux/android/macos/ios/tvos/visionos/freebsd — it has no illumos
+# module and fails to compile there (E0432/E0433: `mod sys` "configured
+# out"). Nothing mmap-rs does on illumos (which falls through to its generic
+# os_impl::unix) ever calls into sysctl; the one reference is a dead
+# `#[cfg(unix)] Error::Sysctl` variant. This vendored fork narrows that one
+# cfg (and the matching Cargo.toml dependency table) to exclude illumos —
+# byte-identical behavior on every other platform. See vendor/mmap-rs/src/error.rs.
+mmap-rs = { path = "vendor/mmap-rs" }
+# illumos portability fix: libc's solarish (illumos/solaris) bindings are
+# missing CLOCK_PROCESS_CPUTIME_ID / CLOCK_THREAD_CPUTIME_ID even though
+# illumos's own <sys/time_impl.h> defines them and clock_gettime(3c)
+# accepts them at runtime (verified on OpenIndiana 2026.04) — cpu-time (a
+# transitive dep of hnsw_rs, which is always-on) fails to compile without
+# them. Rather than vendoring all of libc for two constants, this vendored
+# cpu-time (upstream 1.0.0 + one cfg'd import) defines them locally under
+# cfg(solarish); every other platform compiles the pristine import path.
+# Drop once the upstream rust-lang/libc PR adding the constants is merged
+# and released.
+cpu-time = { path = "vendor/cpu-time" }

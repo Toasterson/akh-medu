@@ -1,0 +1,9 @@
+id = "discover-03-zpool-create"
+family = "manpage-discovery"
+description = "Create a file-vdev zpool and dataset with exact compression/quota/mountpoint properties"
+timeout_secs = 600
+expected_manpages = ["zpool", "zfs"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

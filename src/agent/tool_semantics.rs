@@ -167,27 +167,6 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "csv_ingest",
-        &[
-            "csv",
-            "ingest",
-            "import",
-            "table",
-            "data",
-            "load",
-            "column",
-            "row",
-            "spreadsheet",
-        ],
-    ),
-    (
-        "text_ingest",
-        &[
-            "text", "ingest", "extract", "sentence", "natural", "language", "parse", "read",
-            "document",
-        ],
-    ),
-    (
         "code_ingest",
         &[
             "code",
@@ -200,61 +179,6 @@ const TOOL_CONCEPTS: &[(&str, &[&str])] = &[
             "trait",
             "architecture",
             "analyze",
-        ],
-    ),
-    (
-        "content_ingest",
-        &[
-            "ingest",
-            "document",
-            "book",
-            "pdf",
-            "epub",
-            "html",
-            "article",
-            "website",
-            "library",
-            "read",
-            "parse",
-            "content",
-            "import",
-            "fetch",
-            "download",
-            "add",
-            "store",
-            "learn",
-            "absorb",
-            "paper",
-            "capture",
-            "save",
-            "publication",
-        ],
-    ),
-    (
-        "library_search",
-        &[
-            "search",
-            "library",
-            "find",
-            "document",
-            "paragraph",
-            "content",
-            "lookup",
-            "recall",
-            "retrieve",
-            "what",
-            "about",
-            "said",
-            "mention",
-            "topic",
-            "learn",
-            "reference",
-            "quote",
-            "knowledge",
-            "look",
-            "paper",
-            "book",
-            "article",
         ],
     ),
     (
@@ -516,8 +440,10 @@ mod tests {
         registry.register(Box::new(tools::ReasonTool));
         registry.register(Box::new(tools::SimilaritySearchTool));
 
-        let scratch_dir = None;
-        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        // Lightweight semantic-profile registry: no filesystem access.
+        registry.register(Box::new(tools::FileIoTool::new(std::sync::Arc::new(
+            crate::fs::LocalFs::denied(),
+        ))));
 
         (engine, registry)
     }

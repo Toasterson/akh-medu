@@ -37,6 +37,7 @@
 //! ```
 
 pub mod abs;
+pub mod aggregate;
 pub mod bridge;
 pub mod cat;
 pub mod concrete;
@@ -53,17 +54,23 @@ pub mod narrative;
 pub mod parser;
 pub mod preprocess;
 pub mod rust_gen;
+pub mod style_transform;
 pub mod templates;
 pub mod terse;
 
 use std::collections::HashMap;
 
-pub use abs::{AbsTree, ProvenanceTag, VsaRoleSymbols};
+pub use abs::{AbsTree, PredicateGroup, ProvenanceTag, VsaRoleSymbols};
+pub use aggregate::{AggregationConfig, aggregate_statements};
 pub use cat::Cat;
 pub use concrete::{ConcreteGrammar, LinContext, ParseContext};
 pub use error::{GrammarError, GrammarResult};
 pub use lexer::Language;
 pub use parser::ParseResult;
+pub use style_transform::{
+    ArchetypeFraming, CommunicationRegister, InhibitionAction, ShadowInhibition, StyleTransform,
+    apply_register,
+};
 
 /// Runtime registry of available concrete grammars.
 ///

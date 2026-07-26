@@ -1,0 +1,45 @@
+#!/sbin/sh
+#
+# sudo -> pfexec shim -- Phase 50 / W1c
+#
+# The openindiana-rust-ci image ships no sudo(8), but the vmctl provisioner
+# scripts (tests/vm/scripts/*.sh) and tests/vm/smoke.sh call `sudo`. This
+# shim maps sudo invocations onto illumos's native pfexec(1) (RBAC), which
+# grants root to any user holding the "Primary Administrator" profile
+# (the sysconfig-native provisioner assigns it to the seed's admin user).
+#
+# Supported forms:
+#   sudo <cmd> [args...]              -> pfexec <cmd> [args...]      (run as root)
+#   sudo -u <user> <cmd> [args...]    -> pfexec su - <user> -c "<cmd> [args...]"
+# Common sudo flags (-n -S -H -E -i) are accepted and ignored.
+#
+PATH=/usr/sbin:/usr/bin:/sbin; export PATH
+
+runas=root
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u) runas="$2"; shift 2 ;;
+        -u*) runas="${1#-u}"; shift ;;
+        -n|-S|-H|-E|-i|-k|-b) shift ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "sudo(pfexec shim): no command given" >&2
+    exit 1
+fi
+
+if [ "$runas" = "root" ]; then
+    exec pfexec "$@"
+else
+    # Re-quote the command for `su -c`.
+    cmd=""
+    for a in "$@"; do
+        esc=`printf '%s' "$a" | sed "s/'/'\\\\\\''/g"`
+        cmd="$cmd '$esc'"
+    done
+    exec pfexec /usr/bin/su - "$runas" -c "$cmd"
+fi

@@ -1,0 +1,32 @@
+# Seshat's Archive (seshd) configuration.
+# Copy to /etc/akh-medu/seshat.toml and edit the database URL.
+#
+# Fields mirror crates/seshat/src/config.rs. Sections other than [database]
+# are optional and fall back to the defaults shown.
+
+[database]
+# PostgreSQL connection URL. Requires the pgvector extension.
+url = "postgres://akh:akh@localhost:5432/akhmedu"
+max_connections = 10
+
+[server]
+# Address the MCP server binds. Use 0.0.0.0:9090 to accept remote akhs.
+bind = "127.0.0.1:9090"
+transport = "streamable-http"
+
+[embedding]
+# Sentence-embedding model used by the embed worker.
+# NOTE: the embed worker only runs when seshd is built with the `embedding`
+# feature (onnxruntime). The illumos package is built without it — embedding
+# is a no-op there. Run a Linux seshd for in-process embedding.
+model = "all-MiniLM-L6-v2"
+batch_size = 32
+poll_interval_secs = 30
+# model_dir = "/var/lib/akh-medu/seshat/models"
+
+[synthesis]
+# Optional Candle-backed LLM synthesis for seshat_wish (microtheory RAG).
+enabled = false
+backend = "candle"
+model_path = ""
+max_triples = 30

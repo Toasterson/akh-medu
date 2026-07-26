@@ -786,6 +786,89 @@ pub enum DerivationKind {
         /// Opaque source identifier (e.g. file path, device name, or URI).
         source_id: String,
     },
+
+    // --- Relation enrichment (work item 019e4026) ----------------------------
+
+    /// The relation-enrichment daemon pass injected predicate symbols and
+    /// linking triples to improve the entity:relation ratio.
+    RelationEnrichment {
+        /// New `SymbolKind::Relation` symbols created this run.
+        relations_added: usize,
+        /// Linking triples added to connect sparse / orphaned entities.
+        triples_added: usize,
+        /// Entity:relation ratio before the pass.
+        ratio_before: f32,
+        /// Entity:relation ratio after the pass.
+        ratio_after: f32,
+    },
+
+    // --- OpenClaw self-import (ADR 076) ---------------------------------------
+
+    /// Knowledge the akh imported from its *own* OpenClaw past life — persona,
+    /// memory journals, skills, or the SQLite/Lance stores. Distinct from the
+    /// generic `FileImport` so the akh can query exactly what it absorbed from
+    /// OpenClaw and dedupe on re-import.
+    OpenClawImport {
+        /// The OpenClaw source path the knowledge came from.
+        source_path: String,
+        /// What kind of artefact: `journal` | `skill` | `persona` |
+        /// `sqlite_memory` | `vector_export`.
+        kind: String,
+    },
+
+    // --- ADR 081 slice 4: Daily Librarian projection --------------------------
+
+    /// A typed triple extracted by the daily Librarian pass (ADR 081 slice 4,
+    /// `agent::librarian`) against the akh's in-force schema.
+    ///
+    /// Distinct from `KnowledgeElicitation` (Phase 32): that pass *generates*
+    /// speculative concept knowledge from a model's world knowledge, whereas
+    /// this pass *extracts* grounded facts from material the akh itself
+    /// captured (transcript turns / note bodies) — the Librarian never
+    /// invents a source, it only structures one that already exists.
+    LibrarianExtraction {
+        /// Identifier for the extraction model (an Ollama model tag, e.g.
+        /// `"gpt-oss:120b"`, or `"fake"` for the deterministic test double).
+        model_id: String,
+        /// The captured material this triple was extracted from
+        /// (`"turn:{seq}"` for a transcript turn, `"note:{id}"` for a note body).
+        source_id: String,
+        /// The installed schema type name this triple validated against, when
+        /// it landed in the typed core. `None` for a frontier triple (the
+        /// predicate did not match any installed type/property — asserted via
+        /// `note:frontier/{predicate}` instead, never dropped).
+        schema_type: Option<String>,
+    },
+
+    // --- ADR 081 slice 8: diff-supersede + multi-akh DS conflict --------------
+
+    /// A previously-projected triple was retracted because re-projecting its
+    /// source note no longer asserts it (`schema::project::reproject_note`,
+    /// ADR 081 decision 12, work-item 8: "diff-based supersede... retract
+    /// only changed triples via the TMS, preserving history"). Recorded
+    /// *before* the retraction so the ledger keeps a durable "who/what
+    /// superseded this fact" audit trail even after the TMS marks the
+    /// triple's object `was_retracted`.
+    NoteReprojection {
+        /// The note whose re-projection caused the retraction.
+        note_id: String,
+        /// Why: what changed (frontmatter key removed/edited, body no longer
+        /// links, etc.) — free text for the audit trail, not machine-parsed.
+        reason: String,
+    },
+
+    /// A triple was asserted with an explicit source attribution, so
+    /// multiple sources' (dis)agreement about the same `(subject,
+    /// predicate)` can later be detected and resolved as a Dempster-Shafer
+    /// belief interval instead of last-writer-wins
+    /// (`schema::conflict::conflicting_assertions`, ADR 081 decision 12).
+    /// `source` names who/what is asserting the fact — an akh identity, a
+    /// note entity, a Librarian run marker, etc.
+    SourceAttributed {
+        subject: SymbolId,
+        predicate: SymbolId,
+        source: SymbolId,
+    },
 }
 
 impl DerivationKind {
@@ -895,6 +978,11 @@ impl DerivationKind {
             Self::KgCompaction { .. } => 100,
             Self::AffectiveAppraisal { .. } => 101,
             Self::Perceived { .. } => 102,
+            Self::RelationEnrichment { .. } => 103,
+            Self::OpenClawImport { .. } => 104,
+            Self::LibrarianExtraction { .. } => 105,
+            Self::NoteReprojection { .. } => 106,
+            Self::SourceAttributed { .. } => 107,
         }
     }
 }

@@ -9,9 +9,9 @@ spec:
   type: {{ .Values.akhomed.service.type }}
   ports:
     - port: {{ .Values.akhomed.service.port }}
-      targetPort: http
+      targetPort: acp
       protocol: TCP
-      name: http
+      name: acp
   selector:
     {{- include "akh-medu.akhomed.selectorLabels" . | nindent 4 }}
 {{- end }}

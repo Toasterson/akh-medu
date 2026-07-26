@@ -171,6 +171,82 @@ impl<'e> ToolGraphRegistrar<'e> {
         registered
     }
 
+    /// Reconcile the KG tool projection with the live registry for one provider.
+    ///
+    /// (Re)registers every tool in `registry`, then **prunes** KG tool symbols of
+    /// the *same* `provider` that are no longer in the live registry — e.g. tools
+    /// deleted in a newer build whose triples would otherwise linger in Postgres
+    /// forever (`ToolGraphRegistrar` is otherwise append-only, so `tool_query`
+    /// and `gap_analysis` would keep reporting dead tools). Tools registered
+    /// under a *different* provider (remote/federated, via [`register_remote`])
+    /// are left untouched.
+    ///
+    /// Returns `(registered, pruned)`.
+    ///
+    /// [`register_remote`]: Self::register_remote
+    pub fn reconcile(
+        &self,
+        registry: &ToolRegistry,
+        provider: &str,
+        access_agents: &[&str],
+    ) -> (usize, usize) {
+        let registered = self.register_all(registry, provider, access_agents);
+
+        let live: std::collections::HashSet<String> = registry
+            .list_manifests()
+            .into_iter()
+            .map(|m| format!("tool:{}", m.name))
+            .collect();
+
+        let mut pruned = 0usize;
+        for tool_label in self.list_all_tools() {
+            if live.contains(&tool_label) {
+                continue;
+            }
+            // Only prune tools this provider owns — never remote/peer tools.
+            if self.tool_provider(&tool_label).as_deref() == Some(provider) {
+                let name = tool_label.strip_prefix("tool:").unwrap_or(&tool_label);
+                if self.remove_tool(name) > 0 {
+                    pruned += 1;
+                }
+            }
+        }
+        (registered, pruned)
+    }
+
+    /// Remove every triple emanating from `tool:{name}`, orphaning the tool so
+    /// [`list_all_tools`]/[`query_tools_for_agent`] no longer return it.
+    /// Idempotent — a name with no triples removes nothing. Returns the number
+    /// of triples removed.
+    ///
+    /// [`list_all_tools`]: Self::list_all_tools
+    /// [`query_tools_for_agent`]: Self::query_tools_for_agent
+    pub fn remove_tool(&self, name: &str) -> usize {
+        let label = format!("tool:{name}");
+        let Ok(subject) = self.engine.lookup_symbol(&label) else {
+            return 0;
+        };
+        let mut removed = 0usize;
+        for t in self.engine.triples_from(subject) {
+            if let Ok(result) = self.engine.remove_triple(t.subject, t.predicate, t.object) {
+                if !result.retracted.is_empty() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
+    }
+
+    /// The provider recorded for a tool (`tool:{name} -> tool:provider -> X`), if any.
+    fn tool_provider(&self, tool_label: &str) -> Option<String> {
+        let subject = self.engine.lookup_symbol(tool_label).ok()?;
+        self.engine
+            .triples_from(subject)
+            .into_iter()
+            .find(|t| t.predicate == self.predicates.provider)
+            .map(|t| self.engine.resolve_label(t.object))
+    }
+
     /// Return the labels of all tools that `agent_label` has access to.
     ///
     /// Walks all `tool:access` triples whose object is the agent symbol and
@@ -357,5 +433,71 @@ mod tests {
         let all = reg.list_all_tools();
         assert!(all.contains(&"tool:alpha".to_string()));
         assert!(all.contains(&"tool:beta".to_string()));
+    }
+
+    #[test]
+    fn remove_tool_orphans_from_kg() {
+        let engine = make_engine();
+        let reg = ToolGraphRegistrar::init(&engine).unwrap();
+        reg.register_tool(&dummy_manifest("gone"), "akhomed", &["agent:any"])
+            .unwrap();
+        assert!(reg.list_all_tools().contains(&"tool:gone".to_string()));
+
+        let removed = reg.remove_tool("gone");
+        assert!(removed > 0, "should remove triples");
+        assert!(!reg.list_all_tools().contains(&"tool:gone".to_string()));
+        // Idempotent: nothing left to remove.
+        assert_eq!(reg.remove_tool("gone"), 0);
+    }
+
+    #[test]
+    fn reconcile_prunes_stale_akhomed_tools_keeps_remote() {
+        use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
+        use crate::agent::AgentResult;
+
+        struct T(&'static str);
+        impl Tool for T {
+            fn signature(&self) -> ToolSignature {
+                ToolSignature {
+                    name: self.0.into(),
+                    description: "t".into(),
+                    parameters: vec![],
+                }
+            }
+            fn execute(&self, _e: &Engine, _i: ToolInput) -> AgentResult<ToolOutput> {
+                Ok(ToolOutput::ok("ok"))
+            }
+            fn manifest(&self) -> ToolManifest {
+                dummy_manifest(self.0)
+            }
+        }
+
+        let engine = make_engine();
+        let reg = ToolGraphRegistrar::init(&engine).unwrap();
+
+        // A prior build seeded alpha + beta (provider "akhomed") into the KG.
+        reg.register_tool(&dummy_manifest("alpha"), "akhomed", &["agent:any"])
+            .unwrap();
+        reg.register_tool(&dummy_manifest("beta"), "akhomed", &["agent:any"])
+            .unwrap();
+        // A federated tool under a different provider must survive reconciliation.
+        reg.register_remote("seshat_search", "http://x", "{}", "seshat", &["agent:any"])
+            .unwrap();
+
+        // This build's live registry only has alpha (beta was deleted).
+        let mut live = ToolRegistry::new();
+        live.register(Box::new(T("alpha")));
+
+        let (registered, pruned) = reg.reconcile(&live, "akhomed", &["agent:any"]);
+        assert_eq!(registered, 1, "alpha re-registered");
+        assert_eq!(pruned, 1, "beta pruned");
+
+        let all = reg.list_all_tools();
+        assert!(all.contains(&"tool:alpha".to_string()), "alpha kept");
+        assert!(!all.contains(&"tool:beta".to_string()), "stale beta pruned");
+        assert!(
+            all.contains(&"tool:seshat_search".to_string()),
+            "remote-provider tool untouched"
+        );
     }
 }

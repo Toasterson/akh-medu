@@ -268,9 +268,23 @@ pub struct Agent {
     pub(crate) wasm_runtime: Option<super::wasm_runtime::WasmToolRuntime>,
     /// Per-agent model manager for local Gemma inference via Ollama (optional).
     pub(crate) model_manager: Option<std::sync::Arc<super::model_manager::AgentModelManager>>,
+    /// Alternative chat/agentic backing selected per-akh (ADR 070). When set,
+    /// `run_agentic_turn` drives this instead of wrapping `model_manager`
+    /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
+    pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
+    /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
+    /// byte-identical pass-through manager (current behaviour). When set,
+    /// `run_agentic_turn` builds each prompt through it.
+    pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
+    /// Whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091, `kind="turn"`). Default-on (capture is the
+    /// akh's own memory); per-workspace opt-out via `AkhConfig::capture_transcripts`
+    /// / the `AKH_TRANSCRIPT_CAPTURE` env override (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub(crate) capture_transcripts: bool,
 }
 
 impl Agent {
@@ -279,9 +293,10 @@ impl Agent {
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
+        backend_override: Option<Arc<dyn crate::backend::Backend>>,
         #[cfg(feature = "delegation")]
         delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
-    ) {
+    ) -> AgentResult<()> {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
@@ -290,25 +305,68 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        let scratch_dir = engine.config().data_dir.as_ref().map(|d| d.join("scratch"));
-        registry.register(Box::new(tools::FileIoTool::new(scratch_dir)));
+        // Reads are sandboxed to the akh's workspace root plus any
+        // `extra_read_roots` (ADR 076 §4 — e.g. `~/.openclaw` when the import
+        // switch is on); writes stay confined to its `scratch/` dir. With no
+        // data dir (in-memory engine) the filesystem fails closed.
+        //
+        // `workspace_root` / `scratch_dir` are explicit because a
+        // workspace-backed engine sets `data_dir` to `{workspace}/kg` — same
+        // reason `compartments_dir` exists. Deriving the sandbox from
+        // `data_dir` confined the agent to the KG store and locked it out of
+        // the scratch area it is handed to work in (the tecton lane spent
+        // 2026-07-23..26 completing turns it could not write a byte in).
+        let cfg = engine.config();
+        let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match cfg.data_dir.as_ref() {
+            Some(dir) => {
+                let mut read_roots = vec![cfg.workspace_root.clone().unwrap_or_else(|| dir.clone())];
+                read_roots.extend(cfg.extra_read_roots.iter().cloned());
+                let write_root = cfg
+                    .scratch_dir
+                    .clone()
+                    .unwrap_or_else(|| dir.join("scratch"));
+                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![write_root]))
+            }
+            None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
+        };
+        // One shared Backend (ADR 082) binds the executor-facing tools —
+        // file_io/edit/glob/grep/shell_exec — to a single target, so a file
+        // write and a shell command are guaranteed coherent. Phase 48a: the
+        // in-process backend by default; 48c: `Agent::with_backend` lets a
+        // caller swap in a privilege-dropped / remote executor here.
+        let backend: std::sync::Arc<dyn crate::backend::Backend> = backend_override
+            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::InProcessBackend::new(fs.clone())));
+        registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
+        // Claude-Code-parity coding tools, sharing the same sandbox so reads
+        // and writes stay confined to the akh's roots.
+        registry.register(Box::new(tools::EditTool::with_backend(backend.clone())));
+        registry.register(Box::new(tools::GlobTool::with_backend(backend.clone())));
+        registry.register(Box::new(tools::GrepTool::with_backend(backend.clone())));
         registry.register(Box::new(tools::HttpFetchTool));
-        registry.register(Box::new(tools::ShellExecTool));
+        registry.register(Box::new(tools::WebSearchTool));
+        registry.register(Box::new(tools::ShellExecTool::with_backend(
+            backend.clone(),
+        )));
         registry.register(Box::new(tools::UserInteractTool));
+        // Structured task list (TodoWrite-style working state).
+        registry.register(Box::new(tools::TaskListTool::new(std::sync::Arc::new(
+            std::sync::Mutex::new(Vec::new()),
+        ))));
 
         // Autonomous reasoning tools.
         registry.register(Box::new(tools::InferRulesTool));
         registry.register(Box::new(tools::GapAnalysisTool));
 
         // Ingest tools.
-        registry.register(Box::new(tools::CsvIngestTool));
-        registry.register(Box::new(tools::TextIngestTool));
         registry.register(Box::new(tools::CodeIngestTool));
-        registry.register(Box::new(tools::ContentIngestTool));
-        registry.register(Box::new(tools::JournalIngestTool));
 
-        // Library search.
-        registry.register(Box::new(tools::LibrarySearchTool));
+        // Typed writer tools (ADR 076): the strongly-typed, LLM-facing
+        // replacements for raw-text ingestion. The model reads source itself and
+        // emits structured data these persist deterministically (no internal NLU
+        // pass). Always-on builtins; the OpenClaw-specific `openclaw_discover`
+        // tool is registered switch-gated by the daemon, not here.
+        registry.register(Box::new(tools::MemoryWriteTool::new(predicates.clone())));
+        registry.register(Box::new(tools::SkillAuthorTool));
 
         // Documentation generation.
         registry.register(Box::new(tools::DocGenTool));
@@ -316,7 +374,7 @@ impl Agent {
         // Code generation, validation, and pattern mining.
         registry.register(Box::new(tools::CodeGenTool));
         registry.register(Box::new(tools::CompileFeedbackTool));
-        registry.register(Box::new(tools::PatternMineTool));
+        registry.register(Box::new(tools::PatternMineTool::sandboxed(fs.clone())));
 
         // Agent management (multi-agent orchestration).
         registry.register(Box::new(tools::AgentListTool));
@@ -326,6 +384,9 @@ impl Agent {
 
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
+
+        // Runtime inference options (Phase 47: speculative decode toggle).
+        registry.register(Box::new(tools::InferenceConfigTool));
 
         // Audit log.
         registry.register(Box::new(tools::AuditLogTool));
@@ -338,6 +399,25 @@ impl Agent {
         registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
         #[cfg(not(feature = "delegation"))]
         registry.register(Box::new(tools::DelegateTool::new_noop()));
+
+        // Structured task tool (ADR 081 slice 6): the KG-backed, LLM-driven
+        // task store — distinct from the ephemeral `task_list` checklist
+        // registered above. One `Tool` per verb (create/update/complete/list).
+        let task_predicates = super::tasks::TaskPredicates::init(engine)?;
+        registry.register(Box::new(tools::StructuredTaskCreateTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskUpdateTool::new(
+            task_predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskCompleteTool::new(
+            task_predicates.clone(),
+            predicates.clone(),
+        )));
+        registry.register(Box::new(tools::StructuredTaskListTool::new(task_predicates)));
+
+        Ok(())
     }
 
     /// Attach the audit ledger to the tool registry if persistence is configured.
@@ -636,6 +716,18 @@ impl Agent {
     /// Initializes well-known predicates, registers built-in tools, and
     /// optionally restores goals from the KG.
     pub fn new(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
+        Self::with_backend(engine, config, None)
+    }
+
+    /// Build an agent whose executor-facing tools (file_io/edit/glob/grep/shell_exec)
+    /// run through a caller-supplied [`Backend`](crate::backend::Backend) instead of
+    /// the default in-process one (ADR 082 / Phase 48c). Passing `None` reproduces
+    /// [`Agent::new`] byte-for-byte.
+    pub fn with_backend(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
@@ -653,9 +745,10 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            backend,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let working_memory = WorkingMemory::new(config.working_memory_capacity);
@@ -778,8 +871,11 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.
@@ -836,13 +932,10 @@ impl Agent {
             }
         }
 
-        // Register all built-in tool manifests as KG triples for peer discovery.
-        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&agent.engine) {
-            let count = registrar.register_all(&agent.tool_registry, "akhomed", &["agent:any"]);
-            tracing::debug!(count, "tool_graph: registered tool manifests in KG");
-        } else {
-            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
-        }
+        // Reconcile the KG tool projection + seed the engine's live tool view.
+        // Called from every construction path (see `resume` too) so a resumed
+        // akh behaves identically to a fresh one.
+        agent.seed_tool_graph_and_live_view();
 
         // Initialize causal manager (Phase 15a): try restoring persisted
         // schemas first so a fresh Agent picks up bootstrapped schemas.
@@ -1583,13 +1676,111 @@ impl Agent {
     }
 
     /// Register a custom tool.
+    ///
+    /// Deliberately does **not** call [`Self::seed_tool_graph_and_live_view`]
+    /// (the KG reconciliation path) — only [`Self::sync_live_tools`], which
+    /// updates the engine's live-tool view. Callers of `register_tool` are
+    /// almost always registering *session-scoped* tools (e.g. MCP servers
+    /// pushed over ACP for one prompt turn — see `mcp_bridge`), which are
+    /// only ever meant to be locally callable for the lifetime of that
+    /// session and must not become durable, peer-visible entries in the KG's
+    /// tool-manifest projection. Compile-time/build-provided tools go through
+    /// [`Self::seed_tool_graph_and_live_view`] at construction instead, which
+    /// *does* reconcile the KG. This keeps `tool_query`'s scoped answer
+    /// ("which tools may agent X invoke?", answered from the KG — see
+    /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
+    /// per-turn session tools, only its durable ones.
     pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.register(tool);
+        self.sync_live_tools();
+    }
+
+    /// Remove a previously-registered tool by name. Returns `true` if one was
+    /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
+    /// over ACP for one prompt turn) once the turn completes.
+    pub fn unregister_tool(&mut self, name: &str) -> bool {
+        let removed = self.tool_registry.remove(name);
+        self.sync_live_tools();
+        removed
+    }
+
+    /// Push the current tool registry into the engine's live-tool view so
+    /// engine-level introspection (`tool_query`) reports what is actually
+    /// callable *now* — including per-turn session tools (MCP-over-ACP) that
+    /// never touch the durable KG. Called at construction and on every
+    /// tool register/unregister. Cheap: a small clone under a brief write lock.
+    /// Reconcile the durable KG tool projection with the live registry (pruning
+    /// tools left over from an older build — the registrar is otherwise
+    /// append-only, so deleted tools would linger in Postgres and be reported
+    /// forever by `tool_query`/`gap_analysis`), then seed the engine's live tool
+    /// view. Idempotent. **Must** be invoked from every Agent construction path
+    /// (`with_backend` *and* `resume`) — a resumed akh is the common production
+    /// case, and skipping it there is what let stale tools survive.
+    pub(crate) fn seed_tool_graph_and_live_view(&self) {
+        if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&self.engine) {
+            let (registered, pruned) =
+                registrar.reconcile(&self.tool_registry, "akhomed", &["agent:any"]);
+            tracing::debug!(registered, pruned, "tool_graph: reconciled tool manifests in KG");
+        } else {
+            tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
+        }
+        self.sync_live_tools();
+    }
+
+    pub(crate) fn sync_live_tools(&self) {
+        use super::tool_manifest::ToolSource;
+        // Coarse origin tag for display. MCP proxies carry `ToolSource::Native`
+        // (they're compiled `McpProxyTool`s), so key off the `mcp__` name prefix.
+        fn origin(name: &str, source: &ToolSource) -> String {
+            if name.starts_with("mcp__") {
+                return "mcp".into();
+            }
+            match source {
+                ToolSource::Native => "native".into(),
+                ToolSource::Wasm { .. } => "wasm".into(),
+                ToolSource::Cli { .. } => "cli".into(),
+            }
+        }
+        let tools = self
+            .tool_registry
+            .list_manifests()
+            .into_iter()
+            .map(|m| crate::engine::LiveTool {
+                name: m.name.clone(),
+                description: m.description.clone(),
+                origin: origin(&m.name, &m.source),
+            })
+            .collect();
+        self.engine.set_live_tools(tools);
     }
 
     /// List all registered tool signatures.
     pub fn list_tools(&self) -> Vec<ToolSignature> {
         self.tool_registry.list()
+    }
+
+    /// Set the permission mode gating this agent's tool execution.
+    pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
+        self.tool_registry.set_permission_mode(mode);
+    }
+
+    /// The active tool-permission mode.
+    pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
+        self.tool_registry.permission_mode()
+    }
+
+    /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
+    /// `session/request_permission` bridge) for the duration of a turn.
+    pub fn set_permission_asker(
+        &mut self,
+        asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
+    ) {
+        self.tool_registry.set_permission_asker(asker);
+    }
+
+    /// Remove the permission approver (`Ask` then fails closed).
+    pub fn clear_permission_asker(&mut self) {
+        self.tool_registry.clear_permission_asker();
     }
 
     /// Get a reference to the wrapped engine.
@@ -1605,6 +1796,119 @@ impl Agent {
     /// Get the agent predicates.
     pub fn predicates(&self) -> &AgentPredicates {
         &self.predicates
+    }
+
+    /// Recall up to `top_k` past-episode summaries relevant to `prompt`, for the
+    /// Phase 44g context section.
+    ///
+    /// Resolves the prompt's content words to seed symbols, **VSA-expands** them
+    /// with their nearest neighbours (so episodes about *related* concepts surface
+    /// too), recalls a wider candidate pool, drops any episode referencing a
+    /// **TMS-retracted** (superseded) fact, then re-ranks by a blend of VSA
+    /// relevance ⊕ recency ⊕ confidence. Empty when nothing resolves or matches.
+    pub(crate) fn recall_for_prompt(&self, engine: &Engine, prompt: &str, top_k: usize) -> Vec<String> {
+        use std::collections::HashMap;
+
+        // 1. Resolve the prompt's content words to seed symbols.
+        let seeds: Vec<crate::symbol::SymbolId> = prompt
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| w.len() > 2)
+            .filter_map(|w| engine.resolve_symbol(w.as_str()).ok())
+            .collect();
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+
+        // 2. VSA expansion: each seed's nearest neighbours, keyed by similarity.
+        //    Binary-VSA analogy is degenerate, so trust only strong matches.
+        const SIM_FLOOR: f32 = 0.1;
+        let mut query = seeds.clone();
+        let mut sim_of: HashMap<crate::symbol::SymbolId, f32> =
+            seeds.iter().map(|s| (*s, 1.0_f32)).collect();
+        for s in &seeds {
+            if let Ok(neighbours) = engine.search_similar_to(*s, 5) {
+                for n in neighbours {
+                    if n.similarity < SIM_FLOOR {
+                        continue;
+                    }
+                    sim_of
+                        .entry(n.symbol_id)
+                        .and_modify(|v| *v = v.max(n.similarity))
+                        .or_insert(n.similarity);
+                    if !query.contains(&n.symbol_id) {
+                        query.push(n.symbol_id);
+                    }
+                }
+            }
+        }
+
+        // 3. Recall a wider candidate pool over the expanded query.
+        let candidates = match super::memory::recall_episodes(
+            engine,
+            &query,
+            self.predicates(),
+            top_k.saturating_mul(4).max(top_k),
+            None,
+        ) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        // 4. Drop superseded episodes (any learning the TMS retracted), re-rank.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let tms = engine.tms();
+        let mut scored: Vec<(f32, super::memory::EpisodicEntry)> = candidates
+            .into_iter()
+            .filter(|ep| !ep.learnings.iter().any(|l| tms.was_retracted(*l)))
+            .map(|ep| {
+                let vsa = ep
+                    .learnings
+                    .iter()
+                    .filter_map(|l| sim_of.get(l).copied())
+                    .fold(0.0_f32, f32::max);
+                let age_days = now.saturating_sub(ep.timestamp) as f32 / 86_400.0;
+                let recency = (-age_days / 30.0).exp();
+                let conf = tms.effective_confidence(ep.symbol_id) as f32;
+                let score = 0.5 * vsa + 0.3 * recency + 0.2 * ep.relevance_score.max(conf);
+                (score, ep)
+            })
+            .collect();
+        drop(tms);
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        scored
+            .into_iter()
+            .map(|(_, e)| e.summary)
+            .filter(|s| !s.trim().is_empty())
+            .take(top_k)
+            .collect()
+    }
+
+    /// A compact continuity seed for the working context (Phase 44e).
+    ///
+    /// Returns the opening operator ask of the current conversation so an akh
+    /// keeps the thread even when middle turns are later trimmed under budget.
+    /// `None` for a fresh (≤1-turn) conversation — there the first turn *is* the
+    /// current prompt, so a seed would just duplicate it.
+    pub(crate) fn session_seed(&self) -> Option<String> {
+        let conv = self.conversation_state();
+        if conv.turns.len() <= 1 {
+            return None;
+        }
+        let opening = conv
+            .turns
+            .iter()
+            .find(|t| matches!(t.speaker, crate::agent::conversation::Speaker::Operator))?;
+        let ask = opening.text.trim();
+        if ask.is_empty() {
+            return None;
+        }
+        let ask: String = ask.chars().take(200).collect();
+        Some(format!("This conversation began with: \"{ask}\""))
     }
 
     /// Set the message sink for structured output.
@@ -1694,6 +1998,33 @@ impl Agent {
         &self,
     ) -> Option<&super::model_manager::AgentModelManager> {
         self.model_manager.as_deref()
+    }
+
+    /// Set the akh's chat/agentic backing (ADR 070). When set, `run_agentic_turn`
+    /// drives this backend instead of the default Ollama path.
+    pub fn set_chat_backend(
+        &mut self,
+        backend: std::sync::Arc<dyn super::chat_backend::ChatBackend>,
+    ) {
+        self.chat_backend = Some(backend);
+    }
+
+    /// Attach a working-context assembly strategy (Phase 44a, ADR 065). `None`
+    /// (the default) uses the byte-identical pass-through manager, so an akh with
+    /// no manager set behaves exactly as before. Shipped managers should be
+    /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
+    pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
+        self.context_manager = Some(manager);
+    }
+
+    /// Set whether completed agentic turns are captured to the WAL as raw
+    /// transcript staging (ADR 091). Default `true` (capture is the akh's own
+    /// memory); wired from `AkhConfig::capture_transcripts` at agent
+    /// construction. The `AKH_TRANSCRIPT_CAPTURE` env var overrides this at
+    /// the emit site regardless of what was set here (see
+    /// `agentic_chat::Agent::transcript_capture_enabled`).
+    pub fn set_capture_transcripts(&mut self, enabled: bool) {
+        self.capture_transcripts = enabled;
     }
 
     /// Register this agent with its attached model manager using the current
@@ -3387,9 +3718,10 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
+            None,
             #[cfg(feature = "delegation")]
             delegation_pending,
-        );
+        )?;
         Self::wire_audit_ledger(&mut tool_registry, &engine);
 
         let store = engine.store();
@@ -3692,8 +4024,11 @@ impl Agent {
             #[cfg(feature = "wasm-tools")]
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
+            chat_backend: None,
+            context_manager: None,
             #[cfg(feature = "delegation")]
             delegation_manager,
+            capture_transcripts: true,
         };
 
         // Initialize interlocutor predicates.
@@ -3749,6 +4084,10 @@ impl Agent {
             }
         }
 
+        // Same reconcile + live-tool seed as the fresh-construction path — a
+        // resumed akh must prune stale tools and expose its live tools too.
+        agent.seed_tool_graph_and_live_view();
+
         Ok(agent)
     }
 
@@ -3788,5 +4127,98 @@ impl std::fmt::Debug for Agent {
             .field("constraint_checker", &self.constraint_checker)
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod backend_seam_tests {
+    use super::*;
+    use crate::engine::EngineConfig;
+    use crate::vsa::Dimension;
+
+    fn test_engine() -> Arc<Engine> {
+        Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .expect("engine construction should succeed"),
+        )
+    }
+
+    /// `Agent::with_backend(engine, config, None)` must construct exactly like
+    /// `Agent::new` (ADR 082 / Phase 48c seam): `None` selects the same
+    /// in-process `Backend` `register_builtin_tools` builds when no override is
+    /// given. This doesn't drive a swapped-in backend end-to-end (that's the
+    /// Phase 50 W3 runner's job against the real `RemoteBackend`); it just
+    /// proves the new constructor's `None` path is a drop-in for `Agent::new`.
+    #[test]
+    fn with_backend_none_matches_new() {
+        let agent = Agent::with_backend(test_engine(), AgentConfig::default(), None)
+            .expect("Agent::with_backend(.., None) should construct like Agent::new");
+
+        // Sanity: the executor-facing tools registered by register_builtin_tools
+        // are present, proving the in-process default backend path still ran.
+        assert!(
+            agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
+            "shell_exec tool should be registered via the default in-process backend"
+        );
+    }
+
+    /// Regression: `Agent::resume` (the production path for any akh with
+    /// persisted state) must reconcile the KG tool projection and seed the live
+    /// tool view — exactly like `with_backend`. Skipping it here is what let
+    /// tools deleted in a prior build (`library_search` et al.) linger in
+    /// Postgres and be reported forever.
+    #[test]
+    fn resume_reconciles_stale_tools_and_seeds_live_view() {
+        use crate::agent::tool_graph::ToolGraphRegistrar;
+        use crate::agent::tool_manifest::{
+            Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource,
+        };
+        use std::collections::HashSet;
+
+        let engine = test_engine();
+
+        // An older build seeded a tool that no longer exists in this build.
+        {
+            let reg = ToolGraphRegistrar::init(&engine).unwrap();
+            let stale = ToolManifest {
+                name: "library_search".into(),
+                description: "gone in a newer build".into(),
+                parameters: vec![],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: "x".into(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            };
+            reg.register_tool(&stale, "akhomed", &["agent:any"]).unwrap();
+            assert!(reg.list_all_tools().contains(&"tool:library_search".to_string()));
+        }
+
+        // Drive the resume path directly (its restores default gracefully with
+        // no persisted state — we only care that it reconciles + seeds).
+        let _agent = Agent::resume(Arc::clone(&engine), AgentConfig::default())
+            .expect("resume should construct");
+
+        // Fix 1: the stale tool is pruned; a real built-in survives.
+        let reg = ToolGraphRegistrar::init(&engine).unwrap();
+        let all = reg.list_all_tools();
+        assert!(
+            !all.contains(&"tool:library_search".to_string()),
+            "resume must prune stale tools; got {all:?}"
+        );
+        assert!(
+            all.iter().any(|t| t == "tool:kg_query"),
+            "a real built-in should remain registered"
+        );
+        // Fix 2: the live view is seeded (non-empty, includes built-ins).
+        assert!(
+            !engine.live_tools().is_empty(),
+            "resume must seed the engine live tool view"
+        );
     }
 }

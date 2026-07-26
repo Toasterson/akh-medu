@@ -1,0 +1,9 @@
+id = "c-02-libscf-read-prop"
+family = "c-native-libs"
+description = "Compile a C program against libscf that reads a custom SMF property value"
+timeout_secs = 900
+expected_manpages = ["scf_simple_prop_get", "libscf"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

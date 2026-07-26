@@ -1,0 +1,45 @@
+[package]
+name = "akhomed-store"
+version = "0.1.0"
+edition = "2024"
+description = "Postgres-backed durable store for relocatable akhomed Akhs (Phase 38a)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+[dependencies]
+# Database (SeaORM + PostgreSQL). Feature set mirrors `crates/seshat` so the two
+# Postgres-backed crates resolve to the same sqlx/sea-orm versions in the
+# workspace lock.
+sea-orm = { version = "1", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Types
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling (miette + thiserror per project convention)
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "akhomed-migrate"
+path = "src/bin/akhomed-migrate.rs"

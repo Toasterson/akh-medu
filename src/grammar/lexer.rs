@@ -228,7 +228,7 @@ impl Lexicon {
     }
 
     /// Build the default English lexicon with all patterns from the existing
-    /// `nlp.rs` and `text_ingest.rs` modules.
+    /// `nlp.rs` and `text_extract.rs` modules.
     pub fn default_english() -> Self {
         let void_words = vec!["a".into(), "an".into(), "the".into()];
 

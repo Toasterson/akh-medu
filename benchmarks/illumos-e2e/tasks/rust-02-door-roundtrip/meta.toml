@@ -1,0 +1,9 @@
+id = "rust-02-door-roundtrip"
+family = "rust-illumos"
+description = "Rust FFI to the illumos Doors API (door_create/door_call/door_return) for an in-process round trip"
+timeout_secs = 1200
+expected_manpages = ["door_create", "door_call", "door_return"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

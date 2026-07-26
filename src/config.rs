@@ -81,6 +81,152 @@ pub struct AkhomedConfig {
     /// Upstream MCP service endpoints (anima, seshat).
     #[serde(default)]
     pub upstreams: UpstreamsSection,
+
+    /// ACP (Agent Client Protocol) transport settings.
+    #[serde(default)]
+    pub acp: AcpSection,
+
+    /// Phase 38: Postgres backing store. When absent, the daemon runs in legacy
+    /// local-only mode (oxigraph + redb on disk, no WAL / relocation).
+    #[serde(default)]
+    pub postgres: Option<PostgresConfig>,
+}
+
+/// ACP transport configuration. Effective only when the daemon is built with the
+/// `acp` feature. By default the Unix socket is served and TCP is disabled.
+///
+/// Example TOML:
+/// ```toml
+/// [acp]
+/// unix = true
+/// # socket_path = "/run/akh-medu/akhomed-acp.sock"  # default: {runtime_dir}/akhomed-acp.sock
+/// tcp_bind = "127.0.0.1"
+/// tcp_port = 8201
+/// # workspace = "default"   # default: first auto_start workspace, else "default"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpSection {
+    /// Serve ACP over a Unix domain socket (default `true`).
+    #[serde(default = "default_acp_unix")]
+    pub unix: bool,
+    /// Override the Unix socket path. `None` ⇒ `{runtime_dir}/akhomed-acp.sock`.
+    #[serde(default)]
+    pub socket_path: Option<String>,
+    /// TCP bind host for ACP, e.g. `"127.0.0.1"`. Requires `tcp_port`.
+    #[serde(default)]
+    pub tcp_bind: Option<String>,
+    /// TCP port for ACP. `None` disables the TCP listener.
+    #[serde(default)]
+    pub tcp_port: Option<u16>,
+    /// Workspace (akh) the ACP server binds to. `None` ⇒ first auto-start
+    /// workspace, falling back to `"default"`.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+impl Default for AcpSection {
+    fn default() -> Self {
+        Self {
+            unix: default_acp_unix(),
+            socket_path: None,
+            tcp_bind: None,
+            tcp_port: None,
+            workspace: None,
+        }
+    }
+}
+
+fn default_acp_unix() -> bool {
+    true
+}
+
+impl AcpSection {
+    /// Resolved TCP bind address (`host:port`) if TCP serving is enabled.
+    /// Requires `tcp_port`; the host defaults to `127.0.0.1` when only the port
+    /// is set.
+    pub fn tcp_addr(&self) -> Option<String> {
+        let port = self.tcp_port?;
+        let host = self.tcp_bind.as_deref().unwrap_or("127.0.0.1");
+        Some(format!("{host}:{port}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Postgres backing store (Phase 38)
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL backing-store configuration.
+///
+/// Example TOML:
+/// ```toml
+/// [postgres]
+/// url = "postgres://akh:akh@postgres-ha.cluster:5432/akhmedu"
+/// pool_size = 10
+/// connect_timeout_secs = 10
+/// migrate_on_start = true
+/// ```
+///
+/// `DATABASE_URL` in the environment overrides `url` at startup (useful for
+/// Kubernetes secret injection), mirroring Seshat's behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostgresConfig {
+    /// Connection URL, e.g. `postgres://user:pass@host:5432/akhmedu`.
+    pub url: String,
+
+    /// Maximum number of pooled connections.
+    #[serde(default = "default_pg_pool_size")]
+    pub pool_size: u32,
+
+    /// Timeout, in seconds, for establishing a new connection.
+    #[serde(default = "default_pg_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+
+    /// Run pending migrations automatically on daemon start.
+    #[serde(default)]
+    pub migrate_on_start: bool,
+
+    /// Phase 38b WAL: seconds between mutation-log flush attempts.
+    #[serde(default = "default_wal_flush_interval_secs")]
+    pub wal_flush_interval_secs: u64,
+
+    /// Phase 38b WAL: maximum rows per flush transaction.
+    #[serde(default = "default_wal_batch_size")]
+    pub wal_batch_size: usize,
+
+    /// Phase 38b WAL: in-memory buffer cap in mebibytes before the overflow
+    /// drop policy applies.
+    #[serde(default = "default_wal_max_buffer_mb")]
+    pub wal_max_buffer_mb: usize,
+
+    /// Phase 38c snapshot: seconds between automatic per-workspace snapshots of
+    /// the akh's relational state to Postgres. `0` disables the periodic
+    /// snapshot (a final snapshot on shutdown still runs). Default: 300 (5 min).
+    #[serde(default = "default_snapshot_interval_secs")]
+    pub snapshot_interval_secs: u64,
+}
+
+fn default_pg_pool_size() -> u32 {
+    10
+}
+
+fn default_pg_connect_timeout_secs() -> u64 {
+    10
+}
+
+fn default_wal_flush_interval_secs() -> u64 {
+    2
+}
+
+fn default_wal_batch_size() -> usize {
+    64
+}
+
+fn default_wal_max_buffer_mb() -> usize {
+    16
+}
+
+fn default_snapshot_interval_secs() -> u64 {
+    300
 }
 
 // ---------------------------------------------------------------------------
@@ -126,12 +272,32 @@ pub struct UpstreamEndpointConfig {
 
 impl UpstreamEndpointConfig {
     /// Resolve the auth header, expanding `env:VAR` references.
+    ///
+    /// When `auth_header` is `"env:VAR"` and `VAR` is unset, this returns
+    /// `None` (not the literal `"env:VAR"` string) and emits a
+    /// `tracing::warn` naming the missing variable. Sending the literal
+    /// indirection string as a bearer token used to fail silently as an
+    /// unexplained 401 from the upstream; returning `None` instead makes the
+    /// call site (which omits the `Authorization` header entirely when this
+    /// is `None`) fail visibly as unauthenticated.
     pub fn resolved_auth(&self) -> Option<String> {
-        self.auth_header.as_ref().map(|h| {
+        self.auth_header.as_ref().and_then(|h| {
             if let Some(var) = h.strip_prefix("env:") {
-                std::env::var(var).unwrap_or_else(|_| h.clone())
+                match std::env::var(var) {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "akh_config",
+                            var,
+                            "auth_header references env var {var:?} but it is unset; \
+                             sending no Authorization header instead of the literal \
+                             indirection string"
+                        );
+                        None
+                    }
+                }
             } else {
-                h.clone()
+                Some(h.clone())
             }
         })
     }
@@ -142,7 +308,8 @@ impl UpstreamEndpointConfig {
 pub struct DaemonSection {
     /// Workspaces to auto-start daemons for on boot.
     ///
-    /// Defaults to `["default"]`. Set to empty list to disable auto-start.
+    /// Defaults to `[]` (P5: a fresh akh runs no background daemon). Add a
+    /// workspace name to opt in, or override via `AKH_AUTO_START` / `--auto-start`.
     #[serde(default = "default_auto_start")]
     pub auto_start: Vec<String>,
 
@@ -166,7 +333,8 @@ impl Default for DaemonSection {
 }
 
 fn default_auto_start() -> Vec<String> {
-    vec!["default".into()]
+    // P5: off by default — no workspace auto-starts a background daemon.
+    Vec::new()
 }
 
 /// Optional overrides for daemon task intervals (all in seconds).
@@ -248,6 +416,8 @@ impl DaemonSection {
                 .map_or(defaults.knowledge_elicitation_interval, Duration::from_secs),
             kg_compaction_interval: defaults.kg_compaction_interval,
             delegation_interval: defaults.delegation_interval,
+            relation_enrichment_interval: defaults.relation_enrichment_interval,
+            librarian_interval: defaults.librarian_interval,
             max_cycles: self.max_cycles,
         }
     }
@@ -288,7 +458,9 @@ impl AkhomedConfig {
         std::fs::write(path, content).map_err(|e| ConfigError::Write {
             path: path.display().to_string(),
             source: e,
-        })
+        })?;
+        restrict_to_owner(path);
+        Ok(())
     }
 
     /// Load from file, or create a default config file if none exists.
@@ -301,6 +473,103 @@ impl AkhomedConfig {
             Ok(config)
         }
     }
+}
+
+/// Restrict a just-written config file to owner-only read/write (`0600`) on
+/// Unix. `config.toml` can carry an inline Postgres URL with embedded
+/// credentials or an `[upstreams.*] auth_header` literal, so a world-readable
+/// default (`0644`) leaks it to every local user. Best-effort: a failure here
+/// is logged, not propagated — the file is already written and usable. No-op
+/// on non-Unix targets.
+fn restrict_to_owner(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                target: "akh_config",
+                path = %path.display(),
+                error = %e,
+                "failed to restrict config.toml permissions to 0600 (it may contain secrets)"
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AKH_* environment variable registry
+// ---------------------------------------------------------------------------
+
+/// One recognized `AKH_*` environment variable: its name, a short
+/// description of what it controls, and (if any) its default/unset
+/// behaviour, in the caller's own words at the read site.
+///
+/// This is a *catalog*, not a live reader — akhomed's ~45 behavior-controlling
+/// env vars are still read ad hoc at their own call sites (that migration is
+/// future work; this registry is the first step so they're at least
+/// discoverable). Kept in sync manually; when adding a new `AKH_*` var, add
+/// an entry here too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnvVarSpec {
+    /// The variable name, e.g. `"AKH_AGENT_MAX_ROUNDS"`.
+    pub name: &'static str,
+    /// What it controls.
+    pub description: &'static str,
+    /// Default / behaviour when unset, in human-readable form.
+    pub default: &'static str,
+}
+
+/// The full registry of recognized `AKH_*` environment variables.
+///
+/// Enumerated by grepping `AKH_[A-Z_]+` across `src/` and describing each
+/// from its usage site. A later CLI surfaces this (`akh config env`); this
+/// function only builds the table.
+pub fn env_var_registry() -> &'static [EnvVarSpec] {
+    &[
+        EnvVarSpec { name: "AKH_ACP_TCP_BIND", description: "ACP TCP listener bind host override.", default: "unset: uses [acp] config / 127.0.0.1" },
+        EnvVarSpec { name: "AKH_ACP_TCP_PORT", description: "ACP TCP listener port override.", default: "unset: TCP listener disabled unless configured" },
+        EnvVarSpec { name: "AKH_AGENT_DEBUG", description: "Verbose agentic-chat debug logging to stderr.", default: "\"1\" enables; unset/other = off" },
+        EnvVarSpec { name: "AKH_AGENT_MAX_ROUNDS", description: "Hard cap on agentic tool-call rounds per turn.", default: "unset: scaled default (see agentic_chat.rs)" },
+        EnvVarSpec { name: "AKH_AGENT_MAX_TOOLS", description: "Cap on distinct tools exposed per agentic turn.", default: "unset: no cap" },
+        EnvVarSpec { name: "AKH_AGENT_PARAM_REPAIR", description: "Enable automatic tool-call parameter repair.", default: "on by default; \"0\" opts out" },
+        EnvVarSpec { name: "AKH_AGENT_REPEAT_LIMIT", description: "Max identical consecutive tool calls before the loop aborts.", default: "unset: DEFAULT_REPEAT_LIMIT" },
+        EnvVarSpec { name: "AKH_AGENT_TOOL_REPAIR", description: "Enable tool-name repair (fuzzy match on unknown tool names).", default: "on by default; \"0\" opts out" },
+        EnvVarSpec { name: "AKH_AGENT_TOOL_RETRIEVAL", description: "Cap on tools surfaced via semantic tool retrieval.", default: "unset: retrieval cap default" },
+        EnvVarSpec { name: "AKH_AGENT_TURN_TIMEOUT_SECS", description: "Wall-clock timeout for one agentic turn.", default: "unset: built-in default" },
+        EnvVarSpec { name: "AKH_AGENT_VALUE_GROUND", description: "Enable value-grounding pass on agentic turns.", default: "test-toggled; see agentic_chat.rs" },
+        EnvVarSpec { name: "AKH_AUDIO_SCALE", description: "Scale audio embeddings in the Candle NLU backend.", default: "\"1\" enables; unset = off" },
+        EnvVarSpec { name: "AKH_AUTO_START", description: "Comma-separated workspaces to auto-start daemons for (CLI/service override of [daemon].auto_start).", default: "unset: uses config; empty = no auto-start (P5)" },
+        EnvVarSpec { name: "AKH_COMM_INTEL", description: "Enable Phase-34 communicative-intelligence response shaping.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_CONTEXT_STRATEGY", description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual.", default: "\"compacting\"" },
+        EnvVarSpec { name: "AKH_ENRICH_MEMORY", description: "Enable memory enrichment during goal generation.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_EXTRACTION_API_KEY", description: "API key for the LLM used by triple/knowledge extraction.", default: "unset: extraction falls back to configured key or is disabled" },
+        EnvVarSpec { name: "AKH_FONT", description: "Override glyph catalog font path.", default: "unset: built-in catalog default" },
+        EnvVarSpec { name: "AKH_GEMV_BATCH", description: "Enable batched GEMV verify path (Phase 47d) in the Candle backend.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_GPU_MATMUL", description: "Route quantized matmul through the GPU backend.", default: "off by default; \"1\" enables" },
+        EnvVarSpec { name: "AKH_GPU_QUANT", description: "Enable GPU-side quantization for quantized model backends.", default: "off by default; \"1\" enables" },
+        EnvVarSpec { name: "AKH_GRAMMAR_AGGREGATE", description: "Enable Phase-33a grammar aggregation (N triples -> one fluent sentence).", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_JOURNAL_DIR", description: "Override the akh-medu journal directory.", default: "unset: platform default under paths::journal_dir" },
+        EnvVarSpec { name: "AKH_KG_DELTA", description: "Include KG delta context in agentic turns (opt-in, Phase 44d).", default: "off by default; \"1\" enables" },
+        EnvVarSpec { name: "AKH_KV_CTX", description: "Override KV-cache context length for quantized Gemma models.", default: "unset: model default" },
+        EnvVarSpec { name: "AKH_LIBRARIAN", description: "Enable the librarian daemon task.", default: "off by default; \"1\" enables" },
+        EnvVarSpec { name: "AKH_LIBRARIAN_MODEL", description: "Model tag the librarian task uses.", default: "unset: built-in default tag" },
+        EnvVarSpec { name: "AKH_LLM_MODEL", description: "Model hint for the Candle NLU backend.", default: "unset: backend default" },
+        EnvVarSpec { name: "AKH_LLM_VERBALIZE", description: "Verbalization strategy override for chat responses.", default: "unset: built-in default strategy" },
+        EnvVarSpec { name: "AKH_NLU_LLM", description: "Enable LLM-backed NLU.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_OLLAMA_TIMEOUT_SECS", description: "HTTP timeout for Ollama requests.", default: "unset: built-in default" },
+        EnvVarSpec { name: "AKH_OPENROUTER_API_KEY", description: "API key for OpenRouter, used by the Phase 41g benchmark pattern.", default: "unset: benchmark pattern disabled" },
+        EnvVarSpec { name: "AKH_PERMISSION_ASK_TIMEOUT_SECS", description: "Timeout waiting on an ACP client permission prompt before failing closed.", default: "unset: built-in default" },
+        EnvVarSpec { name: "AKH_REMOTE", description: "Remote akhomed target for the CLI (host/URL) instead of the local daemon.", default: "unset: talk to local daemon" },
+        EnvVarSpec { name: "AKH_SERVER_BIND", description: "HTTP server bind address.", default: "\"0.0.0.0\"" },
+        EnvVarSpec { name: "AKH_SERVER_PORT", description: "HTTP server port.", default: "\"8200\"" },
+        EnvVarSpec { name: "AKH_SPEC_DECODE", description: "Enable speculative (prompt-lookup) decode for the Candle backing (Phase 47/ADR 075), unless overridden per-akh by AkhConfig::spec_decode.", default: "off by default; \"1\" enables" },
+        EnvVarSpec { name: "AKH_TRANSCRIPT_CAPTURE", description: "Override per-akh capture_transcripts at the emit site.", default: "unset: follows AkhConfig::capture_transcripts (on by default)" },
+        EnvVarSpec { name: "AKH_TURN_IDLE_TIMEOUT_SECS", description: "ACP turn idle timeout before the session is considered stalled.", default: "unset: built-in default" },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +585,7 @@ mod tests {
         let config = AkhomedConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AkhomedConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(parsed.daemon.auto_start, vec!["default".to_string()]);
+        assert!(parsed.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
         assert_eq!(parsed.daemon.max_cycles, 0);
     }
 
@@ -352,7 +621,7 @@ auto_start = []
     #[test]
     fn load_nonexistent_returns_defaults() {
         let config = AkhomedConfig::load(Path::new("/tmp/akh-does-not-exist.toml")).unwrap();
-        assert_eq!(config.daemon.auto_start, vec!["default".to_string()]);
+        assert!(config.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
     }
 
     #[test]
@@ -379,6 +648,49 @@ url = "http://seshat.local:4200"
         let config = AkhomedConfig::default();
         assert!(config.upstreams.anima.is_none());
         assert!(config.upstreams.seshat.is_none());
+    }
+
+    #[test]
+    fn postgres_section_parses_with_defaults() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://akh:pw@db.local:5432/akhmedu"
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.url, "postgres://akh:pw@db.local:5432/akhmedu");
+        assert_eq!(pg.pool_size, 10);
+        assert_eq!(pg.connect_timeout_secs, 10);
+        assert!(!pg.migrate_on_start);
+        // Phase 38b WAL defaults.
+        assert_eq!(pg.wal_flush_interval_secs, 2);
+        assert_eq!(pg.wal_batch_size, 64);
+        assert_eq!(pg.wal_max_buffer_mb, 16);
+    }
+
+    #[test]
+    fn postgres_section_honours_overrides() {
+        let toml_str = r#"
+[postgres]
+url = "postgres://db/akh"
+pool_size = 25
+connect_timeout_secs = 5
+migrate_on_start = true
+"#;
+        let config: AkhomedConfig = toml::from_str(toml_str).unwrap();
+        let pg = config.postgres.as_ref().unwrap();
+        assert_eq!(pg.pool_size, 25);
+        assert_eq!(pg.connect_timeout_secs, 5);
+        assert!(pg.migrate_on_start);
+    }
+
+    #[test]
+    fn postgres_section_absent_means_local_only() {
+        let config = AkhomedConfig::default();
+        assert!(config.postgres.is_none());
+        // A config with only a [daemon] section must still parse with no [postgres].
+        let config: AkhomedConfig = toml::from_str("[daemon]\nauto_start = []\n").unwrap();
+        assert!(config.postgres.is_none());
     }
 
     #[test]
@@ -414,5 +726,46 @@ url = "http://seshat.local:4200"
         let loaded = AkhomedConfig::load(&path).unwrap();
         assert_eq!(loaded.daemon.auto_start, vec!["ws1", "ws2"]);
         assert_eq!(loaded.daemon.intervals.idle_cycle_secs, Some(15));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        AkhomedConfig::default().save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config.toml may contain secrets and must be 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn unset_env_var_auth_resolves_to_none_not_literal() {
+        // Ensure the var really is unset in this process.
+        unsafe { std::env::remove_var("AKH_TEST_DEFINITELY_UNSET_XYZ") };
+        let endpoint = UpstreamEndpointConfig {
+            url: "http://example.com".into(),
+            auth_header: Some("env:AKH_TEST_DEFINITELY_UNSET_XYZ".into()),
+        };
+        // Must NOT fall back to the literal "env:AKH_TEST_DEFINITELY_UNSET_XYZ"
+        // string — that would send a bogus bearer token instead of failing
+        // visibly as unauthenticated.
+        assert_eq!(endpoint.resolved_auth(), None);
+    }
+
+    #[test]
+    fn env_var_registry_is_nonempty_and_all_akh_prefixed() {
+        let registry = env_var_registry();
+        assert!(!registry.is_empty());
+        for spec in registry {
+            assert!(spec.name.starts_with("AKH_"), "{} must be AKH_-prefixed", spec.name);
+            assert!(!spec.description.is_empty(), "{} needs a description", spec.name);
+        }
+        // No duplicate names.
+        let mut names: Vec<&str> = registry.iter().map(|s| s.name).collect();
+        names.sort_unstable();
+        let mut deduped = names.clone();
+        deduped.dedup();
+        assert_eq!(names, deduped, "env_var_registry has duplicate entries");
     }
 }

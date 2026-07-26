@@ -6,3 +6,11 @@ rustflags = []
 # toolchain path.  Point cc-rs at the SDK copy so RocksDB (oxrocksdb-sys) can
 # find <string>, <algorithm>, etc.
 CPLUS_INCLUDE_PATH = { value = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1", force = false }
+# Workaround: onig_sys (pulled in unconditionally by the `tokenizers` crate,
+# which `nlu-candle`/`candle-backend` depends on) vendors oniguruma's C
+# source. oniguruma's regint.h only `#include <alloca.h>` when HAVE_ALLOCA_H
+# is defined, and onig_sys's build.rs never defines it for illumos, so gcc
+# sees a bare `alloca()` call with no declaration in scope (illumos libc,
+# unlike glibc, does not implicitly declare it). cc-rs reads per-target
+# CFLAGS_<target> env vars, so this scopes cleanly to the illumos target only.
+CFLAGS_x86_64_unknown_illumos = { value = "-DHAVE_ALLOCA_H", force = false }

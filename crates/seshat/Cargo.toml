@@ -70,6 +70,11 @@ ureq = { version = "2", features = ["json"] }
 flate2 = "1"
 tar = "0.4"
 
+[dev-dependencies]
+# Phase 51 P3d-2: the semantic-retrieval corpus + retrievers, to measure
+# learned-embedding recall vs the surface floor (examples/semantic_recall_minilm).
+grug-data = { path = "../grug-data" }
+
 [features]
 default = ["embedding"]
 embedding = ["ort", "tokenizers", "ndarray"]

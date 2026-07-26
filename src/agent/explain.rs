@@ -1189,6 +1189,37 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
             )
         }
+        DerivationKind::RelationEnrichment {
+            relations_added,
+            triples_added,
+            ratio_before,
+            ratio_after,
+        } => {
+            format!(
+                "relation enrichment: +{relations_added} predicates, +{triples_added} links, ratio {ratio_before:.2}→{ratio_after:.2}"
+            )
+        }
+        DerivationKind::OpenClawImport { source_path, kind } => {
+            format!("imported from OpenClaw ({kind}): {source_path}")
+        }
+        DerivationKind::LibrarianExtraction {
+            model_id,
+            source_id,
+            schema_type,
+        } => match schema_type {
+            Some(type_name) => format!(
+                "Librarian-extracted triple typed as {type_name} (model: {model_id}, source: {source_id})"
+            ),
+            None => format!(
+                "Librarian-extracted frontier triple (model: {model_id}, source: {source_id})"
+            ),
+        },
+        DerivationKind::NoteReprojection { note_id, reason } => {
+            format!("retracted by re-projecting note {note_id}: {reason}")
+        }
+        DerivationKind::SourceAttributed { source, .. } => {
+            format!("source-attributed assertion (source symbol {})", source.get())
+        }
     }
 }
 

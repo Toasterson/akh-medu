@@ -1,0 +1,118 @@
+{
+  "strategy": "compacting",
+  "n": 8,
+  "accuracy": 0,
+  "retrieval": 8,
+  "wal_delta": 0,
+  "episode_delta": 0,
+  "results": [
+    {
+      "id": "cluster-nodes",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "file_io",
+        "glob",
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "shell_exec",
+        "similarity_search"
+      ],
+      "elapsed": 40.4,
+      "answer": "Let me search my memory for both of those topics.I see episodes about cluster topology and some dated May 2026 memories. Let me drill into both the cluster topology memories and the ones around the May 9 timeframe.I have episode IDs but need to pull the actual facts. Let me query"
+    },
+    {
+      "id": "alert-routing",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover",
+        "similarity_search"
+      ],
+      "elapsed": 37.8,
+      "answer": "Let me recall both of these from memory.Let me dig deeper into the knowledge graph for these specifics.Let me search for cluster topology and alerting details from the recalled episodes.Let me try similarity searches and broader KG queries.Let me try recalling the specific episod"
+    },
+    {
+      "id": "similarity-bug",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 57.9,
+      "answer": "Let me search my memory for all three of these topics.The first and third queries returned relevant episodes. The Anima query returned nothing, so let me dig deeper. Let me query the KG for the specific symbols and check the episode details.Good \u2014 I can see the relevant episodes."
+    },
+    {
+      "id": "utf8-panic",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "glob",
+        "kg_query",
+        "memory_recall",
+        "similarity_search"
+      ],
+      "elapsed": 24.4,
+      "answer": "Let me search my memory for each of these topics.I have some leads on the cluster topology and VSA issues. Let me dig deeper into the knowledge graph for specifics.Let me look for the specific memory files and query more specific symbols.Good, I found alert-related symbols. Let m"
+    },
+    {
+      "id": "merge-loop",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "file_io",
+        "glob",
+        "kg_query",
+        "memory_recall",
+        "openclaw_discover"
+      ],
+      "elapsed": 180.0,
+      "answer": "Let me recall from memory across all these topics at once.Let me dig deeper into the specific episodes to pull out the detailed facts.Let me try to get the cluster topology and the May-9 daily digest episodes, plus the VSA diagnosis episode.Let me try to read the source files dir"
+    },
+    {
+      "id": "archibald-disk",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover"
+      ],
+      "elapsed": 44.7,
+      "answer": "Let me recall the relevant episodes from memory to answer all six questions.Let me drill into the specific episodes and KG symbols for each topic.Now let me query the specific symbols for more detail on each topic.Let me search for the Anima observability alert routing details an"
+    },
+    {
+      "id": "redb-path",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "kg_query",
+        "library_search",
+        "memory_recall",
+        "openclaw_discover"
+      ],
+      "elapsed": 38.9,
+      "answer": "Let me recall from memory across all these topics. I'll fire several queries in parallel.Good \u2014 I have relevant episodes for all seven questions. Let me now pull the specific facts from the knowledge graph for each topic.Let me try more specific symbol names based on the episode "
+    },
+    {
+      "id": "hephaistos",
+      "retrieved": true,
+      "correct": false,
+      "tools": [
+        "kg_query",
+        "memory_recall"
+      ],
+      "elapsed": 18.9,
+      "answer": "Recalling from memory across all these topics at once.The recall returned episode IDs but I need the actual facts stored in the KG. Let me query the knowledge graph for specific symbols related to each question.(stopped after 8 tool-call rounds without a final answer)"
+    }
+  ]
+}

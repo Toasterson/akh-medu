@@ -23,23 +23,18 @@ akhomed:
 
   service:
     type: ClusterIP
-    port: 8200
+    port: 8201
 
-  ingress:
-    enabled: false
-    className: ""
-    annotations: {}
-    hosts:
-      - host: akh-medu.local
-        paths:
-          - path: /
-            pathType: Prefix
-    tls: []
+  # ACP transport — the daemon's only inbound surface (ADR-061). TCP must bind
+  # 0.0.0.0 (not the config default 127.0.0.1) so the kubelet probe and the
+  # Service can reach it. Injected as AKH_ACP_TCP_{PORT,BIND} env (see deployment).
+  acp:
+    tcpPort: 8201
+    tcpBind: "0.0.0.0"
 
-  # Environment variables passed to akhomed.
+  # Environment variables passed to akhomed. (Data/config/state paths come from
+  # the XDG_* env set in the deployment template; ACP TCP from `acp` above.)
   env:
-    AKH_SERVER_BIND: "0.0.0.0"
-    AKH_SERVER_PORT: "8200"
     AKH_AUTO_START: "default"
     RUST_LOG: "info"
 
@@ -71,18 +66,18 @@ akhomed:
   tolerations: []
   affinity: {}
 
-  # Readiness/liveness probes hit the akhomed status endpoint.
+  # Probes verify the ACP TCP listener is accepting connections — there is no
+  # HTTP surface anymore (ADR-061), so the old httpGet /status probe could never
+  # pass.
   probes:
     liveness:
-      httpGet:
-        path: /status
-        port: http
+      tcpSocket:
+        port: acp
       initialDelaySeconds: 10
       periodSeconds: 30
     readiness:
-      httpGet:
-        path: /status
-        port: http
+      tcpSocket:
+        port: acp
       initialDelaySeconds: 5
       periodSeconds: 10
 

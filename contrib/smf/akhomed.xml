@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+<!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
+<!--
+  SMF manifest for the akh-medu daemon (akhomed).
+
+  Delivered by the IPS package to /lib/svc/manifest/application/akh-medu/akhomed.xml
+  and imported automatically (restart_fmri=svc:/system/manifest-import:default).
+  For tarball installs, `install.sh` copies it and runs `svccfg import`.
+
+  Service runs as the unprivileged `akh` user. Configuration is environment +
+  XDG driven (see method_environment below); the `config/*` property group
+  exposes the network bind/port as svccfg-tunable knobs:
+
+      svccfg -s svc:/application/akh-medu/akhomed:default setprop config/port = 8300
+      svcadm refresh akhomed; svcadm restart akhomed
+-->
+<service_bundle type="manifest" name="akh-medu:akhomed">
+  <service name="application/akh-medu/akhomed" type="service" version="1">
+
+    <!-- Operator enables explicitly: `svcadm enable akhomed`. -->
+    <create_default_instance enabled="false"/>
+    <single_instance/>
+
+    <!-- The ACP transport binds a TCP/Unix listener once the network is up. -->
+    <dependency name="network" grouping="require_all" restart_on="error" type="service">
+      <service_fmri value="svc:/milestone/network:default"/>
+    </dependency>
+    <dependency name="filesystem-local" grouping="require_all" restart_on="none" type="service">
+      <service_fmri value="svc:/system/filesystem/local:default"/>
+    </dependency>
+
+    <!--
+      Start: the daemon stays in the foreground, so startd manages it as a
+      contract service. The method script reads the config/* props and execs
+      the binary.
+    -->
+    <exec_method type="method" name="start"
+                 exec="/lib/svc/method/akhomed %m"
+                 timeout_seconds="120">
+      <method_context working_directory="/var/lib/akh-medu">
+        <method_credential user="akh" group="akh"/>
+        <method_environment>
+          <envvar name="HOME" value="/var/lib/akh-medu"/>
+          <envvar name="XDG_CONFIG_HOME" value="/etc"/>
+          <envvar name="XDG_DATA_HOME" value="/var/lib"/>
+          <envvar name="XDG_CACHE_HOME" value="/var/cache"/>
+          <envvar name="XDG_STATE_HOME" value="/var/lib/akh-medu/state"/>
+          <envvar name="XDG_RUNTIME_DIR" value="/var/run"/>
+          <envvar name="RUST_LOG" value="info,egg=warn,hnsw_rs=warn"/>
+        </method_environment>
+      </method_context>
+    </exec_method>
+
+    <exec_method type="method" name="stop"
+                 exec=":kill"
+                 timeout_seconds="30"/>
+
+    <!--
+      No `refresh` method: akhomed has no SIGHUP handler and reads config/* only
+      at start, so changes to config/bind|port require a restart:
+          svccfg -s ...:default setprop config/port = 8300
+          svcadm restart akhomed
+    -->
+
+    <property_group name="startd" type="framework">
+      <!-- Restart the daemon if it dumps core or exits non-zero. -->
+      <propval name="duration" type="astring" value="contract"/>
+      <propval name="ignore_error" type="astring" value="core,signal"/>
+    </property_group>
+
+    <!-- Operator-tunable knobs; read by /lib/svc/method/akhomed via svcprop. -->
+    <property_group name="config" type="application">
+      <propval name="bind" type="astring" value="127.0.0.1"/>
+      <propval name="port" type="count" value="8200"/>
+    </property_group>
+
+    <stability value="Evolving"/>
+
+    <template>
+      <common_name>
+        <loctext xml:lang="C">akh-medu daemon (akhomed)</loctext>
+      </common_name>
+      <description>
+        <loctext xml:lang="C">Neuro-symbolic reasoning daemon hosting akh workspaces behind the Agent Client Protocol.</loctext>
+      </description>
+      <documentation>
+        <doc_link name="akh-medu.dev" uri="https://akh-medu.dev"/>
+      </documentation>
+    </template>
+  </service>
+</service_bundle>

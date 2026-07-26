@@ -1,0 +1,9 @@
+id = "rust-01-processor-info"
+family = "rust-illumos"
+description = "Rust FFI to the illumos processor_info(2) syscall to report CPU 0's clock speed"
+timeout_secs = 900
+expected_manpages = ["processor_info", "psrinfo"]
+mode = ["autonomous", "advisory"]
+
+[version_trap]
+present = false

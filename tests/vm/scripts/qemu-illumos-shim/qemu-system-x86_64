@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Phase 50 / W1 — QEMU machine-type shim for illumos guests.
+#
+# WHY THIS EXISTS: vmctl hardcodes `-machine q35,accel=kvm` in its QEMU
+# backend (crates/vm-manager/src/backends/qemu.rs). On q35's PCIe root
+# complex, illumos's virtio-blk driver (vioblk) cannot map the modern
+# virtio PCI capability:
+#
+#     WARNING: vioblk0: Failed to map CAP 2 @ BAR4 0x3000+1000
+#     WARNING: vioblk0: failed to start Virtio init
+#     ...
+#     Cannot mount root on /pseudo/lofi@2:b fstype zfs
+#     panic[cpu0]: vfs_mountroot: cannot mount root
+#
+# so the OpenIndiana root ZFS pool never mounts and the kernel panics.
+# Switching to the i440fx machine (`-machine pc`) — conventional PCI, which
+# is exactly what the proven-working refraction-forger libvirt backend uses
+# (`machine="pc"`) — makes vioblk map its caps and boot cleanly.
+#
+# vmctl exposes NO way to pick the machine type via VMFile.kdl (it's
+# hardcoded), so until vmctl grows that knob (see the shakeout doc for the
+# exact one-line fix), we intercept its qemu invocation here: rewrite
+# `q35` -> `pc` in the -machine argument and exec the real qemu. Put this
+# directory FIRST on PATH when running vmctl against illumos guests:
+#
+#     PATH="$(pwd)/tests/vm/scripts/qemu-illumos-shim:$PATH" vmctl up ...
+#
+# Non-invasive: does not touch the shared ~/.cargo/bin/vmctl binary or the
+# system qemu. Reversible by dropping it off PATH.
+set -uo pipefail
+
+REAL_QEMU=""
+for c in /usr/bin/qemu-system-x86_64 /usr/local/bin/qemu-system-x86_64; do
+    [ -x "$c" ] && { REAL_QEMU="$c"; break; }
+done
+[ -n "$REAL_QEMU" ] || { echo "qemu-illumos-shim: real qemu-system-x86_64 not found" >&2; exit 127; }
+
+args=()
+i=0
+argv=("$@")
+n=${#argv[@]}
+while [ "$i" -lt "$n" ]; do
+    a="${argv[$i]}"
+    if [ "$a" = "-machine" ] && [ $((i+1)) -lt "$n" ]; then
+        next="${argv[$((i+1))]}"
+        # rewrite the machine type token (first comma-field) from q35 to pc,
+        # preserving accel= and any other options.
+        rewritten="pc${next#q35}"
+        args+=("-machine" "$rewritten")
+        i=$((i+2))
+        continue
+    fi
+    args+=("$a")
+    i=$((i+1))
+done
+
+exec "$REAL_QEMU" "${args[@]}"

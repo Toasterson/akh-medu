@@ -1,15 +1,22 @@
 //! Shell execution tool: run commands with timeout and output limits.
 //!
-//! Executes a command via the system shell (`/bin/sh -c` on Unix).
-//! Enforces a timeout and maximum output size to prevent runaway processes.
+//! Executes a command through the session's [`Backend`] (ADR 082) — never by
+//! spawning processes itself. The default backend is the in-process one
+//! ([`InProcessBackend`]), which runs `/bin/sh -c` in the akhomed process
+//! exactly as this tool historically did; 48b/48c swap in privilege-dropped or
+//! remote executors via [`ShellExecTool::with_backend`] without changing the
+//! model-facing surface. Enforces a timeout and maximum output size to prevent
+//! runaway processes.
 
-use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
+use crate::backend::{Backend, ExecError, ExecRequest, InProcessBackend};
 use crate::engine::Engine;
 use std::collections::HashSet;
 
@@ -19,8 +26,40 @@ const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 /// Default timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// Execute shell commands with timeout and output limits.
-pub struct ShellExecTool;
+/// Execute shell commands with timeout and output limits through a
+/// [`Backend`].
+pub struct ShellExecTool {
+    /// Explicitly injected backend; `None` routes through a per-call default
+    /// [`InProcessBackend`] (the historic in-process behavior).
+    backend: Option<Arc<dyn Backend>>,
+}
+
+/// Source-compat unit-style value: pre-Phase-48 call sites construct the tool
+/// as the bare expression `ShellExecTool`, which a field-carrying struct can
+/// no longer satisfy. This same-named const keeps those call sites compiling
+/// unchanged; it executes through the default in-process backend.
+#[allow(non_upper_case_globals)]
+pub const ShellExecTool: ShellExecTool = ShellExecTool { backend: None };
+
+impl ShellExecTool {
+    /// The tool bound to an explicit backend — the seam where 48b (local
+    /// privilege drop) and 48c (russh remote) plug in.
+    pub fn with_backend(backend: Arc<dyn Backend>) -> Self {
+        Self {
+            backend: Some(backend),
+        }
+    }
+
+    /// The backend commands execute through: the injected one, or a fresh
+    /// exec-only in-process backend (file verbs denied, matching the historic
+    /// tool that had no file surface).
+    fn backend(&self) -> Arc<dyn Backend> {
+        match &self.backend {
+            Some(backend) => Arc::clone(backend),
+            None => Arc::new(InProcessBackend::exec_only()),
+        }
+    }
+}
 
 impl Tool for ShellExecTool {
     fn signature(&self) -> ToolSignature {
@@ -51,73 +90,33 @@ impl Tool for ShellExecTool {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        // Spawn the child process.
-        let mut child = match Command::new("/bin/sh")
-            .arg("-c")
-            .arg(command_str)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(e) => {
-                return Ok(ToolOutput::err(format!("Failed to spawn shell: {e}")));
+        let request = ExecRequest::shell(command_str, Duration::from_secs(timeout_secs));
+        let outcome = match self.backend().exec(request) {
+            Ok(outcome) => outcome,
+            Err(ExecError::Spawn { source }) => {
+                return Ok(ToolOutput::err(format!("Failed to spawn shell: {source}")));
+            }
+            Err(ExecError::Timeout { .. }) => {
+                return Ok(ToolOutput::err(format!(
+                    "Command timed out after {timeout_secs}s: {command_str}"
+                )));
+            }
+            Err(ExecError::Wait { source }) => {
+                return Ok(ToolOutput::err(format!(
+                    "Failed to wait on command: {source}"
+                )));
+            }
+            // Only the russh `RemoteBackend` (feature `remote-executor`)
+            // produces this; the rich `RemoteError` diagnostic already carries
+            // the host/auth/timeout detail, so surface it verbatim.
+            #[cfg(feature = "remote-executor")]
+            Err(remote @ ExecError::Remote(_)) => {
+                return Ok(ToolOutput::err(format!("Remote execution failed: {remote}")));
             }
         };
 
-        // Poll for completion with a timeout loop.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        // Timeout — kill the process.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Ok(ToolOutput::err(format!(
-                            "Command timed out after {timeout_secs}s: {command_str}"
-                        )));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(e) => {
-                    return Ok(ToolOutput::err(format!("Failed to wait on command: {e}")));
-                }
-            }
-        };
-
-        let status = match status {
-            Some(s) => s,
-            None => {
-                return Ok(ToolOutput::err("Command ended without status."));
-            }
-        };
-
-        // Read stdout and stderr.
-        let stdout = child
-            .stdout
-            .take()
-            .and_then(|mut s| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut s, &mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-
-        let stderr = child
-            .stderr
-            .take()
-            .and_then(|mut s| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut s, &mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-
-        let stdout_str = String::from_utf8_lossy(&stdout);
-        let stderr_str = String::from_utf8_lossy(&stderr);
+        let stdout_str = String::from_utf8_lossy(&outcome.stdout);
+        let stderr_str = String::from_utf8_lossy(&outcome.stderr);
 
         let mut output = String::new();
         if !stdout_str.is_empty() {
@@ -143,10 +142,10 @@ impl Tool for ShellExecTool {
             }
         }
 
-        let exit_code = status.code().unwrap_or(-1);
+        let exit_code = outcome.exit_code;
         let result = format!("Command: {command_str}\nExit code: {exit_code}\n{output}");
 
-        if status.success() {
+        if outcome.success {
             Ok(ToolOutput::ok(result))
         } else {
             Ok(ToolOutput::err(result))
@@ -175,5 +174,9 @@ impl Tool for ShellExecTool {
             },
             source: ToolSource::Native,
         }
+    }
+
+    fn locus(&self) -> Option<crate::backend::ExecLocus> {
+        Some(self.backend().locus())
     }
 }

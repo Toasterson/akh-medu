@@ -1,0 +1,32 @@
+# Global akhomed daemon config (host-wide) — install at
+#   ~/.config/akh-medu/config.toml
+#
+# This is shared by every akh (workspace) the daemon serves on this host. The
+# per-akh chat/agentic backing is chosen in each workspace file (see
+# workspaces/*.toml in this directory).
+
+# ── Postgres backing store (Phase 38: relocatable Akh) ──────────────────────
+# Truth lives in Postgres (snapshot + WAL); the daemon keeps an in-process cache.
+# This points at the standalone CloudNativePG brought up by
+# `scripts/pg-standalone.sh up`. For the homelab cluster, swap in the CNPG
+# service DSN and add `?sslmode=require` (see docs/ops/three-akhs-postgres.md).
+[postgres]
+url = "postgres://akh:akh@127.0.0.1:5432/akhmedu?sslmode=disable"
+pool_size = 10
+connect_timeout_secs = 10
+# Apply migrations on start. Safe to leave true on every host: the runner takes
+# a Postgres advisory lock, so several hosts starting at once against one fresh
+# cluster database serialize instead of racing on `seaql_migrations`.
+migrate_on_start = true
+# WAL flush cadence — a hard kill loses at most this much (default 5 s).
+wal_flush_interval_secs = 5
+
+# ── ACP transport (the akh CLI talks to the daemon over this) ───────────────
+[acp]
+unix = true
+# Bind the ACP server to a default workspace; the `akh -w <name>` flag selects
+# per-call. Leave unset to bind the first workspace.
+# workspace = "tecton"
+
+# DATABASE_URL in the environment overrides [postgres].url at startup (handy for
+# K8s secret injection / pointing a recovery host at the same cluster).

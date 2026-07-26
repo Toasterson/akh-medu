@@ -97,6 +97,59 @@ impl NarrativeGrammar {
                 Ok(format!("{transition}{s} {p} {o}."))
             }
 
+            // Phase 33a: shared-subject aggregated statement.
+            // "dog, a mammal, has fur and lives in forests."
+            // Continuations use a pronoun: "Furthermore, it chases cats."
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                continuation,
+            } => {
+                let transition = self.next_transition();
+                let subj = if *continuation {
+                    "it".to_string()
+                } else {
+                    self.linearize_inner(subject, ctx)?
+                };
+                let mut out = format!("{transition}{subj}");
+
+                if !appositions.is_empty() {
+                    let labels: Vec<String> = appositions
+                        .iter()
+                        .map(|a| self.linearize_inner(a, ctx))
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    let phrase = super::aggregate::apposition_phrase(&labels);
+                    if groups.is_empty() {
+                        // Apposition without a main clause — realize as a
+                        // copula sentence instead of a dangling apposition.
+                        out.push_str(&format!(" is {phrase}."));
+                        return Ok(out);
+                    }
+                    out.push_str(&format!(", {phrase},"));
+                }
+
+                let vps: Vec<String> = groups
+                    .iter()
+                    .map(|g| {
+                        let p = self.linearize_inner(&g.predicate, ctx)?;
+                        let objs: Vec<String> = g
+                            .objects
+                            .iter()
+                            .map(|o| self.linearize_inner(o, ctx))
+                            .collect::<GrammarResult<Vec<_>>>()?;
+                        Ok(super::aggregate::english_verb_phrase(&p, &objs))
+                    })
+                    .collect::<GrammarResult<Vec<_>>>()?;
+
+                if !vps.is_empty() {
+                    out.push(' ');
+                    out.push_str(&morpho::join_list(&vps, "and"));
+                }
+                out.push('.');
+                Ok(out)
+            }
+
             AbsTree::Similarity {
                 entity,
                 similar_to,

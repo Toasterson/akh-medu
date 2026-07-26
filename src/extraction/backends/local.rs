@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
+use crate::extraction::RawTriple;
 use crate::extraction::error::{ExtractionError, ExtractionResult};
 use crate::extraction::prompt;
-use crate::extraction::RawTriple;
 use crate::nlu::llm_translator::LlmTranslator;
 
 /// Backend using the shared local LLM.

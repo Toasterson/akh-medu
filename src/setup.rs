@@ -455,9 +455,30 @@ mod tests {
 
     #[test]
     fn ort_platform_suffix_resolves() {
-        // Should not error on any supported build target.
         let result = ort_platform_suffix();
+        // Platforms with an upstream onnxruntime release: the suffix must resolve.
+        #[cfg(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        ))]
         assert!(result.is_ok(), "platform suffix should resolve: {result:?}");
+        // Everywhere else (e.g. illumos, which ships ORT-free by design — see
+        // docs/ops/release.md), the typed UnsupportedPlatform error IS the
+        // contract, not a failure.
+        #[cfg(not(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+        )))]
+        assert!(
+            matches!(result, Err(SetupError::UnsupportedPlatform { .. })),
+            "expected UnsupportedPlatform on {}/{}: {result:?}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
     }
 
     #[test]

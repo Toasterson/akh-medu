@@ -1,15 +1,25 @@
-//! Stub pipeline harness: NLU → ThinkingLoop → Pattern C → verbalize.
+//! Pipeline harness: NLU (stub) → **real ThinkingLoop (Phase 41a/41b)** →
+//! Pattern C (stub) → verbalize.
 //!
-//! The real ThinkingLoop (Phase 41a/41b) and Pattern C OODA adapter (Phase 41h)
-//! are not yet implemented.  This module provides a structurally faithful stub
-//! that exercises the same interface so the harness compiles and produces
-//! meaningful timing / halt-reason metrics today.  Drop-in replacement:
-//! swap `stub_nlu_parse`, `stub_thinking_loop`, and `stub_pattern_c_execute`
-//! for real impls when Phase 41h lands.
+//! The ThinkingLoop stub was replaced with the real `crate::thinking`
+//! deliberation loop: each prompt's category plan is encoded as a relation
+//! chain in an in-memory engine, and the loop must *discover* the plan steps
+//! through spreading activation under the configured step budget. Timing,
+//! VOC, and halt-reason metrics now come from real deliberation. The NLU
+//! parse and Pattern C execution adapters remain structurally faithful stubs
+//! (Phase 41h).
 
 use std::time::Instant;
 
 use serde::Serialize;
+
+use crate::engine::{Engine, EngineConfig};
+use crate::graph::Triple;
+use crate::symbol::SymbolId;
+use crate::thinking::{
+    self, ThinkingBudget, ThinkingLoop, ThinkingPredicates, ThoughtStep,
+};
+use crate::vsa::Dimension;
 
 use super::{AcceptancePredicate, BenchPrompt, PromptCategory};
 
@@ -25,7 +35,7 @@ pub enum HaltReason {
     PlanCompleted,
     /// The step budget was exhausted before the plan finished.
     StepBudgetExhausted,
-    /// Deliberation converged early (stub: never happens; real loop may converge).
+    /// Deliberation converged/halted before completing the plan.
     Converged,
     /// Internal error aborted the run.
     Error,
@@ -50,7 +60,7 @@ pub struct BenchResult {
     pub step_budget: u64,
     pub success: bool,
     pub wall_ms: u64,
-    /// Simulated volume-of-computation: sum of per-step cost units.
+    /// VOC consumed by the deliberation (Phase 11g currency, rounded).
     pub voc_consumed: u64,
     pub halt_reason: HaltReason,
     pub steps_taken: usize,
@@ -101,81 +111,135 @@ fn stub_nlu_parse(prompt: &BenchPrompt) -> ParsedIntent {
 }
 
 // ---------------------------------------------------------------------------
-// Stub ThinkingLoop
+// Category plans (encoded into the KG for the real loop to discover)
 // ---------------------------------------------------------------------------
 
-struct ThoughtStep {
-    description: String,
-    /// Simulated cost in computation units (proportional to output verbosity).
-    cost_units: u64,
-}
-
-fn stub_thinking_loop(intent: &ParsedIntent) -> Vec<ThoughtStep> {
-    // Generate a realistic plan based on category: code-add gets more steps than
-    // doc-write, debug gets diagnostic steps before fix steps.
-    // The outer loop enforces the step budget — this function returns the full plan.
-    let base_steps: &[(&str, u64)] = match intent.category {
+/// The canonical plan for a prompt category.
+fn category_plan(category: PromptCategory) -> &'static [&'static str] {
+    match category {
         PromptCategory::CodeAdd => &[
-            ("analyse existing codebase structure", 15),
-            ("identify insertion point", 8),
-            ("draft new construct with types", 20),
-            ("add error handling", 12),
-            ("add unit tests", 18),
-            ("verify with cargo check stub", 10),
+            "analyse existing codebase structure",
+            "identify insertion point",
+            "draft new construct with types",
+            "add error handling",
+            "add unit tests",
+            "verify with cargo check stub",
         ],
         PromptCategory::CodeEdit => &[
-            ("locate target symbol in knowledge graph", 10),
-            ("plan minimal diff", 12),
-            ("apply edit", 14),
-            ("propagate change to call sites", 16),
-            ("run acceptance predicate check", 8),
+            "locate target symbol in knowledge graph",
+            "plan minimal diff",
+            "apply edit",
+            "propagate change to call sites",
+            "run acceptance predicate check",
         ],
         PromptCategory::Refactor => &[
-            ("audit current structure", 12),
-            ("identify extraction boundary", 10),
-            ("draft new module layout", 15),
-            ("rewrite with idiomatic patterns", 20),
-            ("update mod.rs re-exports", 8),
-            ("verify behaviour equivalence", 14),
+            "audit current structure",
+            "identify extraction boundary",
+            "draft new module layout",
+            "rewrite with idiomatic patterns",
+            "update mod.rs re-exports",
+            "verify behaviour equivalence",
         ],
         PromptCategory::DocWrite => &[
-            ("read target module public API", 10),
-            ("draft rustdoc prose", 18),
-            ("add examples section", 12),
-            ("lint doc links", 6),
+            "read target module public API",
+            "draft rustdoc prose",
+            "add examples section",
+            "lint doc links",
         ],
         PromptCategory::Debug => &[
-            ("reproduce failure description", 8),
-            ("identify root cause via static analysis", 15),
-            ("draft minimal fix", 12),
-            ("add regression test", 16),
-            ("verify fix resolves description", 10),
+            "reproduce failure description",
+            "identify root cause via static analysis",
+            "draft minimal fix",
+            "add regression test",
+            "verify fix resolves description",
         ],
-    };
+    }
+}
 
-    base_steps
-        .iter()
-        .map(|(desc, cost)| {
-            let description = format!(
-                "[{}] {} (tokens: {})",
-                intent.category,
-                desc,
-                intent.tokens.join(" ")
-            );
-            ThoughtStep {
-                description,
-                cost_units: *cost,
+// ---------------------------------------------------------------------------
+// Real ThinkingLoop deliberation
+// ---------------------------------------------------------------------------
+
+struct DeliberationOutcome {
+    /// Plan-step symbols discovered, in discovery order.
+    discovered: Vec<SymbolId>,
+    voc_used: f32,
+    halt: thinking::HaltReason,
+}
+
+/// Encode the category plan as a `task -next-> s1 -next-> ... -next-> sN`
+/// chain and let the real loop discover it under the step budget.
+fn deliberate_plan(
+    intent: &ParsedIntent,
+    max_steps: u64,
+) -> Result<(DeliberationOutcome, Vec<SymbolId>), crate::error::AkhError> {
+    let engine = Engine::new(EngineConfig {
+        dimension: Dimension::TEST,
+        ..Default::default()
+    })?;
+    let preds = ThinkingPredicates::resolve(&engine).map_err(crate::error::AkhError::from)?;
+
+    let next = engine.resolve_or_create_relation("plan:next")?;
+    let step_type = engine.resolve_or_create_entity("plan:step")?;
+    let task = engine.resolve_or_create_entity(&format!("task:{}", intent.category))?;
+
+    let mut plan_symbols = Vec::new();
+    let mut prev = task;
+    for (i, desc) in category_plan(intent.category).iter().enumerate() {
+        let step = engine.resolve_or_create_entity(&format!("step{i}:{desc}"))?;
+        engine.add_triple(&Triple::new(prev, next, step).with_confidence(0.95))?;
+        engine.add_triple(&Triple::new(step, preds.is_a, step_type))?;
+        plan_symbols.push(step);
+        prev = step;
+    }
+
+    let goal = engine.resolve_or_create_entity(&format!("query:plan:{}", intent.category))?;
+    engine.add_triple(&Triple::new(goal, preds.seeks, task))?;
+    engine.add_triple(&Triple::new(goal, preds.relation, next))?;
+    engine.add_triple(&Triple::new(goal, preds.answer_type, step_type))?;
+
+    let mut config = thinking::ThinkingConfig::default();
+    config.adaptive_budget = false; // fixed budgets: deterministic sweeps
+    let mut tl = ThinkingLoop::new(&engine)
+        .map_err(crate::error::AkhError::from)?
+        .with_config(config);
+    // Plan discovery wants the *whole* chain, not one sufficient answer:
+    // disable the verifier's sufficiency shortcut so the loop runs to
+    // convergence (frontier exhausted) or budget exhaustion.
+    tl.verifier_mut().config.sufficiency_threshold = 2.0;
+    let budget_steps = max_steps.min(u32::MAX as u64) as u32;
+    let conclusion = tl
+        .deliberate(goal, ThinkingBudget::steps(budget_steps))
+        .map_err(crate::error::AkhError::from)?;
+
+    // Which plan steps did deliberation actually reach?
+    let mut discovered = Vec::new();
+    for step in &conclusion.trace {
+        if let ThoughtStep::SpreadingActivation { new_concepts, .. } = step {
+            for c in new_concepts {
+                if plan_symbols.contains(c) && !discovered.contains(c) {
+                    discovered.push(*c);
+                }
             }
-        })
-        .collect()
+        }
+    }
+
+    Ok((
+        DeliberationOutcome {
+            discovered,
+            voc_used: conclusion.voc_used,
+            halt: conclusion.halt_reason,
+        },
+        plan_symbols,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Stub Pattern C execution
 // ---------------------------------------------------------------------------
 
-/// Execute a single thought step and produce verbalized output.
-fn stub_pattern_c_execute(step: &ThoughtStep, prompt: &BenchPrompt) -> String {
+/// Execute a single (discovered) thought step and produce verbalized output.
+fn stub_pattern_c_execute(description: &str, prompt: &BenchPrompt) -> String {
     // Produce output that is syntactically faithful to the prompt's acceptance predicates
     // so the stub pipeline returns meaningful success/failure signals.
     let predicate_hints: String = prompt
@@ -193,7 +257,7 @@ fn stub_pattern_c_execute(step: &ThoughtStep, prompt: &BenchPrompt) -> String {
 
     format!(
         "Step: {}\nOutput hint: {}\nGenerated: {}",
-        step.description, predicate_hints, predicate_hints
+        description, predicate_hints, predicate_hints
     )
 }
 
@@ -201,7 +265,7 @@ fn stub_pattern_c_execute(step: &ThoughtStep, prompt: &BenchPrompt) -> String {
 // Public harness entry point
 // ---------------------------------------------------------------------------
 
-/// Run the full stub pipeline for `prompt` under `config`.
+/// Run the full pipeline for `prompt` under `config`.
 ///
 /// Returns a [`BenchResult`] capturing timing, VOC, halt reason, and whether
 /// all acceptance predicates passed.
@@ -209,23 +273,52 @@ pub fn run_pipeline(prompt: &BenchPrompt, config: &PipelineConfig) -> BenchResul
     let start = Instant::now();
 
     let intent = stub_nlu_parse(prompt);
-    let steps = stub_thinking_loop(&intent);
 
-    let mut output_parts: Vec<String> = Vec::with_capacity(steps.len());
-    let mut voc_consumed: u64 = 0;
-    let mut steps_taken: usize = 0;
-    let mut halt_reason = HaltReason::PlanCompleted;
-
-    for (i, step) in steps.iter().enumerate() {
-        if i as u64 >= config.max_steps {
-            halt_reason = HaltReason::StepBudgetExhausted;
-            break;
+    let (outcome, plan_symbols) = match deliberate_plan(&intent, config.max_steps) {
+        Ok(v) => v,
+        Err(_) => {
+            return BenchResult {
+                prompt_id: prompt.id.clone(),
+                category: prompt.category.to_string(),
+                step_budget: config.max_steps,
+                success: false,
+                wall_ms: start.elapsed().as_millis() as u64,
+                voc_consumed: 0,
+                halt_reason: HaltReason::Error,
+                steps_taken: 0,
+                output_text: String::new(),
+            };
         }
-        let out = stub_pattern_c_execute(step, prompt);
-        voc_consumed += step.cost_units;
-        output_parts.push(out);
+    };
+
+    // Execute (verbalize) each discovered plan step, in plan order.
+    let descriptions = category_plan(intent.category);
+    let mut output_parts: Vec<String> = Vec::with_capacity(outcome.discovered.len());
+    let mut steps_taken = 0usize;
+    for (i, sym) in plan_symbols.iter().enumerate() {
+        if !outcome.discovered.contains(sym) {
+            continue;
+        }
+        let description = format!(
+            "[{}] {} (tokens: {})",
+            intent.category,
+            descriptions[i],
+            intent.tokens.join(" ")
+        );
+        output_parts.push(stub_pattern_c_execute(&description, prompt));
         steps_taken += 1;
     }
+
+    let plan_completed = steps_taken == plan_symbols.len();
+    let halt_reason = if plan_completed {
+        HaltReason::PlanCompleted
+    } else {
+        match outcome.halt {
+            thinking::HaltReason::BudgetExhausted { .. } => HaltReason::StepBudgetExhausted,
+            thinking::HaltReason::Aborted { .. } => HaltReason::Error,
+            _ => HaltReason::Converged,
+        }
+    };
 
     let output_text = output_parts.join("\n");
     let success = prompt.accepts(&output_text, steps_taken, &halt_reason);
@@ -236,7 +329,7 @@ pub fn run_pipeline(prompt: &BenchPrompt, config: &PipelineConfig) -> BenchResul
         step_budget: config.max_steps,
         success,
         wall_ms: start.elapsed().as_millis() as u64,
-        voc_consumed,
+        voc_consumed: outcome.voc_used.round().max(0.0) as u64,
         halt_reason,
         steps_taken,
         output_text,
@@ -279,6 +372,7 @@ mod tests {
         );
         let result = run_pipeline(&prompt, &PipelineConfig::new(1));
         assert!(result.steps_taken <= 1);
+        assert_ne!(result.halt_reason, HaltReason::PlanCompleted);
     }
 
     #[test]

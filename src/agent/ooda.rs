@@ -185,6 +185,25 @@ pub fn run_ooda_cycle_with_mode(
         );
     }
 
+    // ── OODA transcript (profiling) ───────────────────────────────────────
+    // Emitted at DEBUG level so it is opt-in via RUST_LOG=akh=debug.
+    // Captures per-cycle metrics useful for comparing model efficiency
+    // (e.g. Gemma 4 vs DeepSeek cycles-per-fact).
+    tracing::debug!(
+        cycle,
+        active_goals    = observation.active_goals.len(),
+        wm_size         = observation.working_memory_size,
+        knowledge_facts = orientation.relevant_knowledge.len(),
+        inferences      = orientation.inferences.len(),
+        memory_pressure = orientation.memory_pressure,
+        chosen_tool     = %decision.chosen_tool,
+        reasoning       = %decision.reasoning,
+        tool_success    = action_result.tool_output.success,
+        goal_progress   = ?action_result.goal_progress,
+        contaminants_purged,
+        "ooda:transcript",
+    );
+
     Ok(OodaCycleResult {
         cycle_number: cycle,
         observation,
@@ -771,7 +790,7 @@ fn select_tool(
     let has_episodes = !observation.recalled_episodes.is_empty();
 
     // Detect code-related queries for smarter tool selection.
-    let is_code_query = is_code_goal(&goal.description);
+    let is_code_query = is_code_goal(engine, goal.symbol_id, &goal.description, orientation);
 
     // Pre-compute unexplored child once to avoid redundant WM scans.
     let unexplored_child = if is_code_query {
@@ -1090,95 +1109,48 @@ fn select_tool(
                         "propagate",
                     ],
                 ),
-                (
-                    "gap_analysis",
-                    &[
-                        "gap",
-                        "missing",
-                        "incomplete",
-                        "discover",
-                        "explore",
-                        "what",
-                        "unknown",
-                        "coverage",
-                        "lack",
-                        "absent",
-                        "need",
-                        "require",
-                        "insufficient",
-                        "sparse",
-                    ],
-                ),
-                (
-                    "user_interact",
-                    &[
-                        "ask", "user", "input", "question", "interact", "human", "prompt",
-                        "dialog", "clarify", "confirm", "respond", "answer", "feedback", "help",
-                    ],
-                ),
-                (
-                    "content_ingest",
-                    &[
-                        "ingest",
-                        "document",
-                        "book",
-                        "pdf",
-                        "epub",
-                        "html",
-                        "article",
-                        "website",
-                        "library",
-                        "read",
-                        "parse",
-                        "content",
-                        "import",
-                        "fetch",
-                        "download",
-                        "add",
-                        "store",
-                        "learn",
-                        "absorb",
-                        "paper",
-                        "capture",
-                        "save",
-                        "publication",
-                    ],
-                ),
-                (
-                    "library_search",
-                    &[
-                        "search",
-                        "library",
-                        "find",
-                        "document",
-                        "paragraph",
-                        "content",
-                        "lookup",
-                        "recall",
-                        "retrieve",
-                        "what",
-                        "about",
-                        "said",
-                        "mention",
-                        "topic",
-                        "learn",
-                        "reference",
-                        "quote",
-                        "knowledge",
-                        "look",
-                        "paper",
-                        "book",
-                        "article",
-                    ],
-                ),
+                // gap_analysis and user_interact carry no hardcoded English
+                // concept seeds (CLAUDE.md hard rule: no hardcoded
+                // natural-language matching constants). Their profile vector
+                // is grounded at runtime from the tool's own registered name
+                // and manifest description below, mirroring the generic
+                // unscored-tool fallback loop further down in this function.
+                ("gap_analysis", &[]),
+                ("user_interact", &[]),
             ];
 
             for (tool_name, concepts) in vsa_tools {
-                let profile_vec =
+                let profile_vec = if concepts.is_empty() {
+                    // No hardcoded concept seeds: ground the tool profile
+                    // from a KG-linked symbol if one exists for the tool
+                    // name (e.g. skillpack-established), else fall back to
+                    // encoding the tool's own registered name + description
+                    // (data already carried on the tool, not a matching
+                    // wordlist authored here).
+                    match engine.lookup_symbol(tool_name) {
+                        Ok(sym_id) => im.get_or_create(ops, sym_id),
+                        Err(_) => {
+                            let desc = tool_registry
+                                .get(tool_name)
+                                .map(|t| t.signature().description)
+                                .unwrap_or_default();
+                            match crate::vsa::grounding::encode_text_as_vector(
+                                &format!("{tool_name} {desc}"),
+                                engine,
+                                ops,
+                                im,
+                            ) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            }
+                        }
+                    }
+                } else {
                     match crate::vsa::grounding::bundle_symbols(engine, ops, im, concepts) {
                         Ok(v) => v,
                         Err(_) => continue,
-                    };
+                    }
+                };
 
                 let semantic_score = ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
 
@@ -1269,28 +1241,6 @@ fn select_tool(
                                 format!("What should I know about: {}?", goal.description),
                             ),
                             format!("VSA semantic match for user interaction: {semantic_score:.3}"),
-                        )
-                    }
-                    "content_ingest" => {
-                        if semantic_score <= 0.50 {
-                            continue;
-                        }
-                        (
-                            semantic_score * 0.75,
-                            ToolInput::new().with_param("source", &goal_label),
-                            format!("VSA semantic match for content ingest: {semantic_score:.3}"),
-                        )
-                    }
-                    "library_search" => {
-                        if semantic_score <= 0.50 {
-                            continue;
-                        }
-                        (
-                            semantic_score * 0.80,
-                            ToolInput::new()
-                                .with_param("query", &goal.description)
-                                .with_param("top_k", "5"),
-                            format!("VSA semantic match for library search: {semantic_score:.3}"),
                         )
                     }
                     _ => continue,
@@ -1825,39 +1775,65 @@ fn is_metadata_label(label: &str) -> bool {
     super::synthesize::is_metadata_label(label)
 }
 
-/// Code-related keywords that indicate a code-structure query.
-const CODE_KEYWORDS: &[&str] = &[
-    "module",
-    "function",
-    "struct",
-    "trait",
-    "enum",
-    "type",
-    "impl",
-    "architecture",
-    "code",
-    "crate",
-    "method",
-    "field",
-    "vsa",
-    "engine",
-    "agent",
-    "ooda",
-    "tool",
-    "graph",
-    "symbol",
-    "triple",
-    "fn",
-    "mod",
-    "defines",
-    "depends",
-    "contains",
-];
+/// Whether a triple set contains any triple whose predicate lives in the
+/// `code:` KG namespace (e.g. `code:defines-fn`, `code:contains-mod`).
+///
+/// `pub(crate)` so `plan.rs`'s code-generation gate can reuse the same
+/// structural signal instead of its own hardcoded keyword list.
+pub(crate) fn has_code_predicate(engine: &crate::engine::Engine, triples: &[Triple]) -> bool {
+    triples
+        .iter()
+        .any(|t| engine.resolve_label(t.predicate).starts_with("code:"))
+}
 
-/// Whether a goal description is asking about code structure.
-fn is_code_goal(description: &str) -> bool {
-    let lower = description.to_lowercase();
-    CODE_KEYWORDS.iter().any(|kw| lower.contains(kw))
+/// Whether a goal is asking about code structure.
+///
+/// Detected structurally via the KG's `code:*` predicate namespace rather
+/// than an English keyword whitelist (language-agnostic hard rule): a goal
+/// counts as a code query when its own symbol, its already-retrieved
+/// relevant knowledge/inferences, or an entity whose label matches a term
+/// in the goal description already participates in a `code:*` triple.
+fn is_code_goal(
+    engine: &crate::engine::Engine,
+    goal_symbol: SymbolId,
+    description: &str,
+    orientation: &Orientation,
+) -> bool {
+    if has_code_predicate(engine, &engine.triples_from(goal_symbol))
+        || has_code_predicate(engine, &engine.triples_to(goal_symbol))
+    {
+        return true;
+    }
+
+    if orientation
+        .relevant_knowledge
+        .iter()
+        .any(|t| engine.resolve_label(t.predicate).starts_with("code:"))
+    {
+        return true;
+    }
+
+    if orientation.inferences.iter().any(|(sym, _)| {
+        has_code_predicate(engine, &engine.triples_from(*sym))
+            || has_code_predicate(engine, &engine.triples_to(*sym))
+    }) {
+        return true;
+    }
+
+    // Fall back to resolving description terms against KG entity labels
+    // (structural label match, not a hardcoded keyword whitelist) and
+    // checking whether the matched entity carries a code:* triple.
+    if let Some(label) = find_code_entity_for_query(engine, description) {
+        if let Ok(sym) = engine.lookup_symbol(&label) {
+            if has_code_predicate(engine, &engine.triples_from(sym))
+                || has_code_predicate(engine, &engine.triples_to(sym))
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Extract code entity labels that appeared in kg_query results (as children)
@@ -1991,7 +1967,13 @@ const STOP_WORDS: &[&str] = &[
 /// Scores all non-metadata symbols by keyword overlap with the description.
 /// Uses exact word-boundary matching (not substring), filters stop words,
 /// and prefers shorter labels (more specific entities).
-fn find_code_entity_for_query(engine: &crate::engine::Engine, description: &str) -> Option<String> {
+///
+/// `pub(crate)` so `plan.rs`'s code-generation gate can reuse this
+/// structural (KG-label) lookup instead of its own hardcoded keyword list.
+pub(crate) fn find_code_entity_for_query(
+    engine: &crate::engine::Engine,
+    description: &str,
+) -> Option<String> {
     let desc_words: Vec<String> = description
         .split_whitespace()
         .map(|w| {

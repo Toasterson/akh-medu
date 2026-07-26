@@ -145,6 +145,47 @@ impl CustomGrammar {
                 }
             }
 
+            // Phase 33a: aggregated statement. Custom grammars may supply an
+            // "aggregated" template with {subject}, {appositions}, {groups};
+            // otherwise the neutral English realization is used.
+            AbsTree::Aggregated {
+                subject,
+                appositions,
+                groups,
+                ..
+            } => {
+                if let Some(template) = self.templates.get("aggregated") {
+                    let s = self.linearize_inner(subject, ctx)?;
+                    let apps: Vec<String> = appositions
+                        .iter()
+                        .map(|a| self.linearize_inner(a, ctx))
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    let gs: Vec<String> = groups
+                        .iter()
+                        .map(|g| {
+                            let p = self.linearize_inner(&g.predicate, ctx)?;
+                            let objs: Vec<String> = g
+                                .objects
+                                .iter()
+                                .map(|o| self.linearize_inner(o, ctx))
+                                .collect::<GrammarResult<Vec<_>>>()?;
+                            Ok(format!("{p} {}", objs.join(", ")))
+                        })
+                        .collect::<GrammarResult<Vec<_>>>()?;
+                    let mut vars = HashMap::new();
+                    vars.insert("subject", s);
+                    vars.insert("appositions", apps.join(", "));
+                    vars.insert("groups", gs.join("; "));
+                    Ok(self.apply_template(template, &vars))
+                } else {
+                    // Neutral realization fallback.
+                    match super::aggregate::realize_statement(tree) {
+                        Some(prose) => Ok(format!("{prose}.")),
+                        None => Ok(String::new()),
+                    }
+                }
+            }
+
             AbsTree::Similarity {
                 entity,
                 similar_to,

@@ -23,6 +23,23 @@ pub mod micro_ml;
 
 pub mod llm_translator;
 pub mod candle_backend;
+/// Speculative decoding (Phase 47 / ADR 075): draft-free prompt-lookup drafter + the
+/// greedy verify/accept loop. The drafter is pure token logic (no model dependency).
+pub mod spec_decode;
+
+// Candle GPU + audio + hidden-states forks (ADRs 067/068/069). `gpu` is a pure
+// host-capability probe (no candle dep); `hip` needs the ROCm toolchain
+// (`rocm` feature); `audio` (Gemma-4) and the `vendored` hidden-states model
+// forks need the Candle backend.
+pub mod channel;
+pub mod json_constraint;
+pub mod gpu;
+#[cfg(feature = "rocm")]
+pub mod hip;
+#[cfg(feature = "candle-backend")]
+pub mod audio;
+#[cfg(feature = "candle-backend")]
+pub mod vendored;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -260,7 +277,9 @@ impl NluPipeline {
             }
         }
         #[cfg(feature = "nlu-llm")]
-        {
+        if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
+            tracing::info!(tier = 3, "NLU LLM tier disabled (AKH_NLU_LLM=0); skipping llama-cpp translator");
+        } else {
             let llm_file = "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
             let result = llm_translator::LlmTranslator::load(&_data_dir.join(llm_file))
                 .or_else(|_| {
@@ -284,8 +303,17 @@ impl NluPipeline {
             }
         }
         // Candle backend (Tier 3 alternative): preferred over llama-cpp-2 when available.
+        // Skippable via AKH_NLU_LLM=0 so a host whose *chat* backing already loads a
+        // large in-process Candle model (ADR 070, e.g. Gemma 4 12B) does not pay for
+        // a second copy of the weights — the two paths don't yet share one model
+        // instance, so on memory-constrained hosts loading both OOMs.
         #[cfg(feature = "candle-backend")]
-        {
+        if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
+            tracing::info!(
+                tier = 3,
+                "NLU LLM tier disabled (AKH_NLU_LLM=0); using tiers 1/2/4 (rules/NER/ranker) only"
+            );
+        } else {
             let result = candle_backend::CandleBackend::try_load(_data_dir)
                 .or_else(|| {
                     _shared_dir
@@ -684,7 +712,7 @@ impl NluPipeline {
     /// `kg_context` is injected into the system prompt so the model can ground
     /// its response in actual knowledge-graph facts. The combined prompt is
     /// designed to stay under 3 800 tokens (Psyche prompt + KG context).
-    #[allow(unused_variables)] // params used only when nlu-llm feature is enabled
+    #[allow(unused_variables)] // params used only when a backend feature is enabled
     pub fn generate_dialogue_with_kg(
         &self,
         act: &str,
@@ -693,6 +721,23 @@ impl NluPipeline {
         context: Option<&str>,
         kg_context: Option<&str>,
     ) -> Option<String> {
+        // Candle (native, in-process): the primary conversational backend when an
+        // akh is Candle-backed. Prefer grounded KG context as the dialogue context.
+        #[cfg(feature = "candle-backend")]
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
+            if let Ok(mut backend) = candle_arc.lock() {
+                let ctx = kg_context.or(context);
+                match backend.generate_dialogue(act, persona_name, traits, ctx) {
+                    Ok(text) if !text.is_empty() => return Some(text),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(backend = "candle", error = %e, "dialogue generation failed");
+                    }
+                }
+            }
+        }
+
+        // Fallback: llama.cpp llm_translator (legacy `nlu-llm`).
         #[cfg(feature = "nlu-llm")]
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
@@ -711,6 +756,107 @@ impl NluPipeline {
                     return Some(text);
                 }
                 _ => {}
+            }
+        }
+        None
+    }
+
+    /// Channel-aware variant of [`generate_dialogue`](Self::generate_dialogue):
+    /// returns the typed [`ChannelStream`](channel::ChannelStream) so the chat
+    /// layer can surface the boundary model's internal reasoning (Gemma-4
+    /// `thought` channel) as a collapsible trace distinct from the answer. Candle
+    /// only; `None` when no Candle backend is loaded. See ADR 069.
+    #[allow(unused_variables)]
+    pub fn generate_dialogue_channels(
+        &self,
+        act: &str,
+        persona_name: &str,
+        traits: &[String],
+        context: Option<&str>,
+    ) -> Option<channel::ChannelStream> {
+        #[cfg(feature = "candle-backend")]
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
+            if let Ok(mut backend) = candle_arc.lock() {
+                match backend.generate_dialogue_channels(act, persona_name, traits, context) {
+                    Ok(stream) if !stream.answer().is_empty() || stream.has_thoughts() => {
+                        return Some(stream);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(backend = "candle", error = %e, "dialogue generation failed");
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Whether a conversational verbalizer is available (the Candle backend).
+    ///
+    /// When `true`, [`verbalize`](Self::verbalize) can rephrase grounded facts
+    /// into fluent, chat-like prose. When `false`, callers fall back to the
+    /// grammar linearizer (deterministic, no LLM).
+    pub fn has_verbalizer(&self) -> bool {
+        let mut available = false;
+        #[cfg(feature = "candle-backend")]
+        {
+            available = available || self.candle_backend.is_some();
+        }
+        available
+    }
+
+    /// Verbalize a grounded answer: turn KG-derived `facts` into a natural,
+    /// conversational reply to `question`, constrained to those facts.
+    ///
+    /// Grounded generation — the facts come from the knowledge graph, so the KG
+    /// remains the source of truth. Returns `None` when no verbalizer backend is
+    /// loaded (caller falls back to grammar linearization).
+    #[allow(unused_variables)]
+    pub fn verbalize(
+        &self,
+        question: &str,
+        facts: &str,
+        persona_name: &str,
+        traits: &[String],
+    ) -> Option<String> {
+        #[cfg(feature = "candle-backend")]
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
+            if let Ok(mut backend) = candle_arc.lock() {
+                match backend.verbalize(question, facts, persona_name, traits) {
+                    Ok(text) if !text.is_empty() => return Some(text),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(backend = "candle", error = %e, "verbalization failed");
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Channel-aware variant of [`verbalize`](Self::verbalize): returns the typed
+    /// [`ChannelStream`](channel::ChannelStream) so grounded reasoning can be
+    /// surfaced as a collapsible trace. Candle only. See ADR 069.
+    #[allow(unused_variables)]
+    pub fn verbalize_channels(
+        &self,
+        question: &str,
+        facts: &str,
+        persona_name: &str,
+        traits: &[String],
+    ) -> Option<channel::ChannelStream> {
+        #[cfg(feature = "candle-backend")]
+        if let Some(candle_arc) = self.candle_backend.as_ref().map(std::sync::Arc::clone) {
+            if let Ok(mut backend) = candle_arc.lock() {
+                match backend.verbalize_channels(question, facts, persona_name, traits) {
+                    Ok(stream) if !stream.answer().is_empty() || stream.has_thoughts() => {
+                        return Some(stream);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(backend = "candle", error = %e, "verbalization failed");
+                    }
+                }
             }
         }
         None
