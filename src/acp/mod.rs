@@ -729,6 +729,16 @@ impl AkhAcpAgent {
             // non-daemon build never calls it, hence the blanket allow.
             #[allow(unused_mut)]
             let mut guard = SessionToolGuard::new(&mut agent);
+
+            // Install a tool execution tracker for this turn so tool calls emit
+            // structured ToolCallStarted/ToolCallCompleted events over ACP.
+            // The tracker wraps the same ChannelSink that carries regular
+            // AkhMessages, so ToolCall events stream through the same drain loop.
+            let tracker = Arc::new(crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
+                Arc::new(sink.clone()),
+            ));
+            guard.set_tracker(tracker);
+
             // Session-scoped MCP tools: connect to the servers the client
             // pushed at `session/new`, discover their tools once per session
             // (cached thereafter — see `mcp_tool_cache`), and register
@@ -801,6 +811,8 @@ impl AkhAcpAgent {
 struct SessionToolGuard<'a> {
     agent: &'a mut Agent,
     tool_names: Vec<String>,
+    /// The tracker we installed (if any), for teardown.
+    tracker: Option<Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>>,
 }
 
 impl<'a> SessionToolGuard<'a> {
@@ -808,7 +820,14 @@ impl<'a> SessionToolGuard<'a> {
         Self {
             agent,
             tool_names: Vec::new(),
+            tracker: None,
         }
+    }
+
+    /// Install a tool execution tracker for this turn (for ACP ToolCall events).
+    fn set_tracker(&mut self, tracker: Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>) {
+        self.agent.set_tool_tracker(tracker.clone());
+        self.tracker = Some(tracker);
     }
 
     /// Register one session-scoped tool and remember its name for teardown.
@@ -828,6 +847,11 @@ impl<'a> Drop for SessionToolGuard<'a> {
             self.agent.unregister_tool(name);
         }
         self.agent.clear_permission_asker();
+        // Flush any coalesced search bursts before clearing the tracker.
+        if let Some(tracker) = &self.tracker {
+            tracker.flush_all_search_bursts();
+        }
+        self.agent.clear_tool_tracker();
     }
 }
 
@@ -843,6 +867,7 @@ impl<'a> Drop for SessionToolGuard<'a> {
 /// it streams its messages through this sink; the prompt handler receives them
 /// and re-emits each as a `session/update` via [`AcpSink`]. The send is
 /// non-blocking, so emitting while the agent `Mutex` is held is ADR-027-safe.
+#[derive(Clone)]
 struct ChannelSink {
     tx: tokio::sync::mpsc::UnboundedSender<AkhMessage>,
 }
@@ -950,6 +975,44 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         }
         AkhMessage::AuditLog { kind, summary, .. } => {
             SessionUpdate::AgentThoughtChunk(chunk(format!("audit[{kind}]: {summary}")))
+        }
+        AkhMessage::ToolCallStarted { .. } | AkhMessage::ToolCallCompleted { .. } => {
+            // These are mapped to SessionUpdate::ToolCall* variants below, not
+            // thought chunks. This arm is a temporary stub while the ACP protocol
+            // update lands — for now they still go through AgentThoughtChunk.
+            use crate::message::ToolKind;
+            match msg {
+                AkhMessage::ToolCallStarted { tool_id, kind, title, locations } => {
+                    let loc_str = if locations.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", locations.join(", "))
+                    };
+                    let kind_str = match kind {
+                        ToolKind::Execute => "exec",
+                        ToolKind::Edit => "edit",
+                        ToolKind::Fetch => "fetch",
+                        ToolKind::Search => "search",
+                        ToolKind::Other => "tool",
+                    };
+                    SessionUpdate::AgentThoughtChunk(chunk(format!(
+                        "[{kind_str}:{tool_id}] {title}{loc_str}\n"
+                    )))
+                }
+                AkhMessage::ToolCallCompleted { tool_id, success, output, diff } => {
+                    let status = if *success { "ok" } else { "failed" };
+                    let mut text = format!("[{tool_id}:{status}]");
+                    if let Some(out) = output {
+                        text.push_str(&format!(" {out}"));
+                    }
+                    if let Some(d) = diff {
+                        text.push_str(&format!("\n{d}"));
+                    }
+                    text.push('\n');
+                    SessionUpdate::AgentThoughtChunk(chunk(text))
+                }
+                _ => unreachable!(),
+            }
         }
     }
 }

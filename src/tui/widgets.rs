@@ -136,6 +136,69 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             ),
             Span::raw(summary.clone()),
         ]),
+        AkhMessage::ToolCallStarted {
+            tool_id,
+            kind,
+            title,
+            locations,
+        } => {
+            use crate::message::ToolKind;
+            let kind_color = match kind {
+                ToolKind::Execute => Color::Red,
+                ToolKind::Edit => Color::Yellow,
+                ToolKind::Fetch => Color::Cyan,
+                ToolKind::Search => Color::Blue,
+                ToolKind::Other => Color::Magenta,
+            };
+            let mut spans = vec![
+                Span::styled(format!("[{kind:?}] "), Style::default().fg(kind_color)),
+                Span::styled(
+                    format!("{tool_id} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(title.clone()),
+            ];
+            if !locations.is_empty() {
+                spans.push(Span::styled(
+                    format!(" ({})", locations.join(", ")),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        }
+        AkhMessage::ToolCallCompleted {
+            tool_id,
+            success,
+            output,
+            diff,
+        } => {
+            let status_color = if *success {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            let status = if *success { "ok" } else { "failed" };
+            let mut spans = vec![
+                Span::styled(
+                    format!("[{status}] "),
+                    Style::default().fg(status_color),
+                ),
+                Span::styled(
+                    format!("{tool_id} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            if let Some(out) = output {
+                spans.push(Span::raw(out.clone()));
+            }
+            if let Some(d) = diff {
+                spans.push(Span::styled(
+                    format!("\n{d}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            Line::from(spans)
+        }
     }
 }
 
