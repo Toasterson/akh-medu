@@ -1317,6 +1317,11 @@ impl ServerState {
             dimension: Dimension::DEFAULT,
             data_dir: Some(ws_paths.kg_dir.clone()),
             compartments_dir: Some(ws_paths.compartments_dir.clone()),
+            // The agent's file sandbox follows the workspace, not the KG store:
+            // reads across the workspace root, writes confined to its scratch
+            // (where Anima provisions `scratch/anima-worktrees/<session>`).
+            workspace_root: Some(ws_paths.root.clone()),
+            scratch_dir: Some(ws_paths.scratch_dir.clone()),
             extra_read_roots,
             ..Default::default()
         };

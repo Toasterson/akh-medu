@@ -305,16 +305,27 @@ impl Agent {
         registry.register(Box::new(tools::SimilaritySearchTool));
 
         // External world-interaction tools.
-        // Reads are sandboxed to the whole workspace data dir plus any
+        // Reads are sandboxed to the akh's workspace root plus any
         // `extra_read_roots` (ADR 076 §4 — e.g. `~/.openclaw` when the import
-        // switch is on); writes stay confined to a `scratch/` subdir. With no
+        // switch is on); writes stay confined to its `scratch/` dir. With no
         // data dir (in-memory engine) the filesystem fails closed.
-        let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match engine.config().data_dir.as_ref()
-        {
+        //
+        // `workspace_root` / `scratch_dir` are explicit because a
+        // workspace-backed engine sets `data_dir` to `{workspace}/kg` — same
+        // reason `compartments_dir` exists. Deriving the sandbox from
+        // `data_dir` confined the agent to the KG store and locked it out of
+        // the scratch area it is handed to work in (the tecton lane spent
+        // 2026-07-23..26 completing turns it could not write a byte in).
+        let cfg = engine.config();
+        let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match cfg.data_dir.as_ref() {
             Some(dir) => {
-                let mut read_roots = vec![dir.clone()];
-                read_roots.extend(engine.config().extra_read_roots.iter().cloned());
-                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![dir.join("scratch")]))
+                let mut read_roots = vec![cfg.workspace_root.clone().unwrap_or_else(|| dir.clone())];
+                read_roots.extend(cfg.extra_read_roots.iter().cloned());
+                let write_root = cfg
+                    .scratch_dir
+                    .clone()
+                    .unwrap_or_else(|| dir.join("scratch"));
+                std::sync::Arc::new(crate::fs::LocalFs::new(read_roots, vec![write_root]))
             }
             None => std::sync::Arc::new(crate::fs::LocalFs::denied()),
         };

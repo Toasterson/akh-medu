@@ -242,6 +242,10 @@ impl WorkspaceConfig {
             encoding,
             data_dir: Some(ws_paths.kg_dir.clone()),
             compartments_dir: Some(ws_paths.compartments_dir.clone()),
+            // The agent's file sandbox follows the workspace, not the KG store:
+            // reads across the workspace root, writes confined to its scratch.
+            workspace_root: Some(ws_paths.root.clone()),
+            scratch_dir: Some(ws_paths.scratch_dir.clone()),
             max_memory_mb: self.max_memory_mb,
             max_symbols: self.max_symbols as usize,
             language,
@@ -634,5 +638,77 @@ max_symbols = 1000000
         // Delete.
         mgr.delete("alpha").unwrap();
         assert!(!ws.exists());
+    }
+
+    /// The agent's file sandbox must follow the workspace, not the KG store.
+    ///
+    /// `data_dir` deliberately points at `{workspace}/kg`, so deriving the
+    /// sandbox from it confines the akh to the KG directory and denies every
+    /// read and write in `{workspace}/scratch` — the area Anima provisions
+    /// worktrees into. That regression silently cost the tecton lane three
+    /// days of turns that completed without writing a byte.
+    #[test]
+    fn engine_config_sandboxes_the_workspace_not_the_kg_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        let ws_paths = paths.workspace("tecton");
+        let cfg = WorkspaceConfig::with_name("tecton").to_engine_config(&ws_paths);
+
+        assert_eq!(cfg.workspace_root.as_ref(), Some(&ws_paths.root));
+        assert_eq!(cfg.scratch_dir.as_ref(), Some(&ws_paths.scratch_dir));
+        // The sandbox roots must not sit under the KG store.
+        assert!(!cfg.workspace_root.unwrap().starts_with(&ws_paths.kg_dir));
+        assert!(!cfg.scratch_dir.unwrap().starts_with(&ws_paths.kg_dir));
+    }
+
+    /// End-to-end on the sandbox itself: a `LocalFs` built the way
+    /// `Agent::register_builtin_tools` builds it must accept a worktree path
+    /// under `{workspace}/scratch` and still refuse paths outside the
+    /// workspace.
+    #[test]
+    fn workspace_sandbox_admits_anima_worktrees() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let paths = AkhPaths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            state_dir: tmp.path().join("state"),
+            runtime_dir: tmp.path().join("run"),
+            cache_dir: tmp.path().join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let mgr = WorkspaceManager::new(paths.clone());
+        let ws_paths = mgr.create(WorkspaceConfig::with_name("tecton")).unwrap();
+        let cfg = WorkspaceConfig::with_name("tecton").to_engine_config(&ws_paths);
+
+        let fs = crate::fs::LocalFs::new(
+            vec![cfg.workspace_root.clone().unwrap()],
+            vec![cfg.scratch_dir.clone().unwrap()],
+        );
+
+        let worktree = ws_paths
+            .scratch_dir
+            .join("anima-worktrees")
+            .join("019f99f7-f608-7c21-87c7-4e1b3dae75c9");
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        let target = worktree.join("src/message.rs");
+
+        use crate::fs::Filesystem;
+        fs.write(&target, "pub enum AkhMessage {}\n").unwrap();
+        assert_eq!(
+            fs.read_to_string(&target).unwrap(),
+            "pub enum AkhMessage {}\n"
+        );
+
+        // Containment still holds outside the workspace.
+        let outside = tmp.path().join("elsewhere.rs");
+        std::fs::write(&outside, "nope").unwrap();
+        assert!(fs.read_to_string(&outside).is_err());
+        assert!(fs.write(&outside, "nope").is_err());
     }
 }
