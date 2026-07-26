@@ -347,8 +347,12 @@ impl Psyche {
             "kg_query" | "infer_rules" | "synthesize_triple" | "reason" => self.archetypes.sage,
             // Healer tools: gap-finding and interaction
             "gap_analysis" | "user_interact" => self.archetypes.healer,
-            // Explorer tools: external world interaction
-            "file_io" | "http_fetch" | "shell_exec" => self.archetypes.explorer,
+            // Explorer tools: external world interaction. `edit` belongs here
+            // with its siblings: it is the akh's primary means of changing the
+            // world when implementing, and omitting it left the one tool that
+            // actually writes code scoring neutral while its read-only
+            // counterparts were weighted.
+            "file_io" | "http_fetch" | "shell_exec" | "edit" => self.archetypes.explorer,
             // Guardian tools: memory and consolidation
             "memory_recall" | "similarity_search" => self.archetypes.guardian,
             _ => 0.5, // neutral
@@ -686,6 +690,29 @@ mod tests {
         let p = Psyche::default();
         let bias = p.archetype_bias("memory_recall");
         assert!((bias - (-0.015)).abs() < 0.001);
+    }
+
+    /// `edit` is the akh's coding tool and must be weighted with its Explorer
+    /// siblings. It was absent from the map, so the one tool that writes code
+    /// scored neutral while `file_io` and `shell_exec` — which only read —
+    /// carried the Explorer weight.
+    #[test]
+    fn archetype_bias_treats_edit_as_an_explorer_tool() {
+        // Explorer must differ from the neutral 0.5 or the mapping is
+        // unobservable — at the default weights every bias is 0.0.
+        let mut p = Psyche::default();
+        p.archetypes.explorer = 0.9;
+
+        assert_eq!(
+            p.archetype_bias("edit"),
+            p.archetype_bias("file_io"),
+            "edit must carry the same Explorer weight as its siblings"
+        );
+        assert_ne!(
+            p.archetype_bias("edit"),
+            p.archetype_bias("some_unmapped_tool"),
+            "edit must not fall through to the neutral default"
+        );
     }
 
     #[test]
