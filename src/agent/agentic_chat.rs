@@ -121,6 +121,10 @@ enum TurnStop {
     /// answer, and issuing one more model call would only delay releasing
     /// the agent lock that a wedged turn is holding.
     Cancelled,
+    /// The model declared completion (no tool calls) but the post-condition
+    /// guard detected no work was performed (no mutating tool calls and
+    /// clean worktree). Dispatch-only failure mode.
+    DeclaredButIdle,
 }
 
 impl TurnStop {
@@ -130,6 +134,11 @@ impl TurnStop {
             TurnStop::Timeout => "You have reached your time budget",
             TurnStop::RepeatLoop => "You are repeating the same tool call without progress",
             TurnStop::Cancelled => "This turn was cancelled",
+            TurnStop::DeclaredButIdle => {
+                "You declared completion but verification shows no work was performed. \
+                 The worktree has no uncommitted changes and no mutating tool calls were made. \
+                 Review the task requirements and use the appropriate tools to make the necessary changes"
+            }
         }
     }
 }
@@ -212,6 +221,16 @@ impl RoundBudget {
             }
         }
     }
+
+    /// Current round number (for post-condition retry budget).
+    fn rounds_so_far(&self) -> usize {
+        self.round
+    }
+
+    /// Iteration cap (for post-condition retry budget).
+    fn max_rounds(&self) -> usize {
+        self.hard_max
+    }
 }
 
 /// Result of [`Agent::execute_tool_call`] running one requested tool call
@@ -281,6 +300,7 @@ impl Agent {
         user_prompt: &str,
         sink: &dyn MessageSink,
         cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
     ) -> Option<()> {
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
@@ -479,6 +499,45 @@ impl Agent {
             }));
 
             if turn.tool_calls.is_empty() {
+                // Post-condition guard: in autonomous dispatch mode, verify that
+                // work was actually performed before accepting the model's
+                // declaration of completion (no tool calls = "I'm done").
+                // Tri-state verdict: ⊤ accept, ⊥retry with feedback, ⊥fatal after
+                // exhaustion.
+                if is_autonomous_dispatch {
+                    // Deterministic oracle: did the turn perform any mutating
+                    // operations? Check tool_trace for file_io/edit/shell_exec (ok
+                    // = true).
+                    let has_mutating_calls = tool_trace.iter().any(|entry| {
+                        if let (Some(tool), Some(ok)) = (entry.get("tool").and_then(|v| v.as_str()),
+                                                          entry.get("ok").and_then(|v| v.as_bool())) {
+                            ok && matches!(tool, "file_io" | "edit" | "shell_exec")
+                        } else {
+                            false
+                        }
+                    });
+
+                    // If no mutating calls were made, the model declared completion
+                    // but performed no work: retry with taxonomy-anchored feedback.
+                    // (We don't check git status when there were zero tool calls -
+                    // the model didn't even try to do work.)
+                    if !has_mutating_calls {
+                        // Increment retry count and check budget
+                        if budget.rounds_so_far() >= budget.max_rounds() / 2 {
+                            // Exhausted: close with a named failure
+                            break TurnStop::DeclaredButIdle;
+                        }
+                        // Retry: append feedback and continue the loop
+                        conversation.push(json!({
+                            "role": "user",
+                            "content": TurnStop::DeclaredButIdle.clause(),
+                        }));
+                        continue;
+                    }
+                }
+
+                // Either we're in interactive mode, or the post-condition passed:
+                // record the turn and exit normally.
                 let answer = turn.content.trim();
                 if !answer.is_empty() {
                     self.conversation_state_mut().record_agent_turn(answer);
@@ -1439,7 +1498,7 @@ mod tests {
         }));
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(true);
-        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel);
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel, false);
         assert_eq!(result, Some(()));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1466,13 +1525,109 @@ mod tests {
             flip_after_first_call: Some(cancel.clone()),
         }));
         let sink = crate::message::VecSink::new();
-        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel);
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello?", &sink, &cancel, false);
         assert_eq!(result, Some(()));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "must stop at the next round boundary once cancelled — no second \
              model round, and no forced-synthesis round either"
+        );
+    }
+
+    /// Backend that returns prose with no tool calls on the first round, then
+    /// tool calls on subsequent rounds — simulating the WI-249 failure case
+    /// where the model declares completion without doing any work.
+    struct IdleFirstRoundBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for IdleFirstRoundBackend {
+        fn label(&self) -> &str {
+            "idle-first-round"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            _tools: &[Value],
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // First round: return prose with no tool calls (declare completion
+                // without doing work)
+                Ok(crate::agent::ollama::AssistantTurn {
+                    content: "I've completed the task.".into(),
+                    tool_calls: vec![],
+                    ..Default::default()
+                })
+            } else {
+                // Subsequent rounds: actually do work (call a tool)
+                Ok(crate::agent::ollama::AssistantTurn {
+                    content: String::new(),
+                    tool_calls: vec![crate::agent::ollama::ToolCall {
+                        name: "echo".into(),
+                        arguments: json!({"text": "doing work now"}),
+                    }],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// When in autonomous dispatch mode, a turn that declares completion (no
+    /// tool calls) without performing any mutating operations must retry with
+    /// taxonomy-anchored feedback rather than accepting the declaration.
+    /// This is the WI-249 guard: preventing the model from saying "I'm done"
+    /// when the worktree has no changes.
+    #[test]
+    fn dispatch_mode_retries_when_model_declares_completion_without_work() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
+            calls: calls.clone(),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // is_autonomous_dispatch = true: enable the post-condition guard
+        let result = agent.run_agentic_turn(&engine, "tecton", "make changes to the repo", &sink, &cancel, true);
+        assert_eq!(result, Some(()));
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "dispatch mode must retry when the model declares completion without \
+             performing work (no mutating tool calls + clean worktree); got {} calls",
+            calls.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    /// In interactive (non-dispatch) mode, the guard must not fire: a model
+    /// that returns prose with no tool calls is yielding to the user, which
+    /// is correct behavior. The turn should end normally after one call.
+    #[test]
+    fn interactive_mode_accepts_completion_without_work() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
+            calls: calls.clone(),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // is_autonomous_dispatch = false: guard disabled
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello", &sink, &cancel, false);
+        assert_eq!(result, Some(()));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "interactive mode must accept the model's completion declaration \
+             without retrying, even when no work was performed"
         );
     }
 }

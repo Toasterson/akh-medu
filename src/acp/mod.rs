@@ -766,9 +766,13 @@ impl AkhAcpAgent {
             // which streams directly into `sink`; fall back to the symbolic
             // ChatProcessor when no model backend is reachable, emitting its
             // (batched) output through the same sink so the wire shape matches.
+            // WI-249: Enable dispatch post-condition guard via AKH_DISPATCH_MODE=1.
+            let is_dispatch = std::env::var("AKH_DISPATCH_MODE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
             if guard
                 .agent
-                .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel)
+                .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel, is_dispatch)
                 .is_none()
             {
                 let out = processor.process_input(&text, guard.agent, &engine);

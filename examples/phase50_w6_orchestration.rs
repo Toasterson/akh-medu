@@ -392,8 +392,9 @@ mod inner {
         let agent_id_owned = agent_id.to_string();
         let prompt_owned = prompt.to_string();
         let engine_for_thread = Arc::clone(&engine);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::spawn(move || {
-            let outcome = agent.run_agentic_turn(&engine_for_thread, &agent_id_owned, &prompt_owned, sink.as_ref());
+            let outcome = agent.run_agentic_turn(&engine_for_thread, &agent_id_owned, &prompt_owned, sink.as_ref(), &cancel, true);
             let _ = tx.send(outcome.is_some());
         });
 
