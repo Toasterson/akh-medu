@@ -30,7 +30,14 @@ mkdir -p "$CARGO_HOME"
 
 echo "=== conflict-marker backstop ==="
 # Begin/end markers only; the merge engine already guards this server-side.
-if git grep -lnI -e '^<<<<<<< ' -e '^>>>>>>> ' -- . ':(exclude).forgejo/workflows/ci.yml' ':(exclude).solstice/job.sh' ':(exclude)vendor'; then
+#
+# frontiercode's harness is excluded because it *legitimately* contains
+# `<<<<<<< SEARCH` / `>>>>>>> REPLACE` — the SEARCH/REPLACE edit format from
+# ccacf4d, not an unresolved merge. Those literals live on main, so every
+# branch cut from it inherited them and this backstop failed CI for the whole
+# repo: akh-medu WI-254 burned its entire retry budget on it and parked
+# 2026-07-26, and nothing on this repo could reach ci_green.
+if git grep -lnI -e '^<<<<<<< ' -e '^>>>>>>> ' -- . ':(exclude).forgejo/workflows/ci.yml' ':(exclude).solstice/job.sh' ':(exclude)vendor' ':(exclude)benchmarks/frontiercode/harness'; then
   echo "ERROR: unresolved git conflict markers found in the files listed above"
   exit 1
 fi
