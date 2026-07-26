@@ -78,7 +78,8 @@ fn main() -> miette::Result<()> {
     println!("task         : {task}\n");
     println!("=== AGENTIC TRACE (run_agentic_turn) ===");
     let t0 = std::time::Instant::now();
-    let outcome = agent.run_agentic_turn(&engine, "agentic-demo", &task, &TraceSink);
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let outcome = agent.run_agentic_turn(&engine, "agentic-demo", &task, &TraceSink, &cancel, false);
     println!("=== {} in {:.1}s ===", if outcome.is_some() { "completed" } else { "no backend / fell back" }, t0.elapsed().as_secs_f32());
     Ok(())
 }
