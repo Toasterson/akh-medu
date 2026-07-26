@@ -62,6 +62,39 @@ pub enum AkhMessage {
         summary: String,
         timestamp: u64,
     },
+    /// Tool call started (for ACP session updates).
+    ToolCallStarted {
+        tool_id: String,
+        kind: ToolKind,
+        title: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        locations: Vec<String>,
+    },
+    /// Tool call completed (for ACP session updates).
+    ToolCallCompleted {
+        tool_id: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<String>,
+    },
+}
+
+/// Kind of tool operation for ACP ToolCall events.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolKind {
+    /// Shell execution, file write, MCP mutations, mail send.
+    Execute,
+    /// File edit operations.
+    Edit,
+    /// Network fetch, API calls.
+    Fetch,
+    /// Search operations (seshat, KG queries) — coalesced.
+    Search,
+    /// Other tool operations.
+    Other,
 }
 
 // ── Message roles ─────────────────────────────────────────────────────────
@@ -93,7 +126,9 @@ impl AkhMessage {
             | AkhMessage::ToolResult { .. }
             | AkhMessage::AuditLog { .. }
             | AkhMessage::Gap { .. }
-            | AkhMessage::GoalProgress { .. } => MessageRole::Trace,
+            | AkhMessage::GoalProgress { .. }
+            | AkhMessage::ToolCallStarted { .. }
+            | AkhMessage::ToolCallCompleted { .. } => MessageRole::Trace,
             AkhMessage::Error { .. } => MessageRole::Error,
             AkhMessage::System { .. } => MessageRole::System,
         }
@@ -200,6 +235,34 @@ impl MessageSink for StdoutSink {
                 ..
             } => {
                 println!("[audit:{kind}] #{id} {summary}");
+            }
+            AkhMessage::ToolCallStarted {
+                tool_id,
+                kind,
+                title,
+                locations,
+            } => {
+                print!("[tool:{kind:?}] {tool_id} — {title}");
+                if !locations.is_empty() {
+                    print!(" ({})", locations.join(", "));
+                }
+                println!();
+            }
+            AkhMessage::ToolCallCompleted {
+                tool_id,
+                success,
+                output,
+                diff,
+            } => {
+                let status = if *success { "completed" } else { "failed" };
+                print!("[tool:{status}] {tool_id}");
+                if let Some(out) = output {
+                    print!(" — {out}");
+                }
+                if let Some(d) = diff {
+                    print!("\n{d}");
+                }
+                println!();
             }
         }
     }
@@ -400,6 +463,34 @@ impl AkhMessage {
                 summary,
                 ..
             } => format!("[audit:{kind}] #{id} {summary}"),
+            AkhMessage::ToolCallStarted {
+                tool_id,
+                kind,
+                title,
+                locations,
+            } => {
+                let mut s = format!("[tool:{kind:?}] {tool_id} — {title}");
+                if !locations.is_empty() {
+                    s.push_str(&format!(" ({})", locations.join(", ")));
+                }
+                s
+            }
+            AkhMessage::ToolCallCompleted {
+                tool_id,
+                success,
+                output,
+                diff,
+            } => {
+                let status = if *success { "completed" } else { "failed" };
+                let mut s = format!("[tool:{status}] {tool_id}");
+                if let Some(out) = output {
+                    s.push_str(&format!(" — {out}"));
+                }
+                if let Some(d) = diff {
+                    s.push_str(&format!("\n{d}"));
+                }
+                s
+            }
         }
     }
 }

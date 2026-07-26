@@ -279,6 +279,8 @@ pub struct ToolRegistry {
     /// Optional approver for [`PermissionDecision::Ask`] tools (e.g. an ACP
     /// client bridge). With none attached, `Ask` fails closed.
     asker: Option<Arc<dyn super::permission::PermissionAsker>>,
+    /// Optional execution tracker for emitting ToolCall events over ACP.
+    tracker: Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>,
 }
 
 impl ToolRegistry {
@@ -291,12 +293,23 @@ impl ToolRegistry {
             audit_ledger: None,
             policy: super::permission::PermissionPolicy::default(),
             asker: None,
+            tracker: None,
         }
     }
 
     /// Attach an audit ledger for automatic tool invocation logging.
     pub fn set_audit_ledger(&mut self, ledger: Arc<AuditLedger>) {
         self.audit_ledger = Some(ledger);
+    }
+
+    /// Attach a tool execution tracker for emitting ToolCall events (for ACP).
+    pub fn set_tracker(&mut self, tracker: Arc<super::tool_execution_tracker::ToolExecutionTracker>) {
+        self.tracker = Some(tracker);
+    }
+
+    /// Remove any attached tracker.
+    pub fn clear_tracker(&mut self) {
+        self.tracker = None;
     }
 
     /// Set the permission mode gating tool execution.
@@ -436,9 +449,28 @@ impl ToolRegistry {
             }
         }
 
+        // Start tracking this tool execution for ACP ToolCall events.
+        let guard = self.tracker.as_ref().map(|tracker| {
+            let title = build_tool_title(name, &input);
+            let locations = extract_tool_locations(name, &input);
+            tracker.start_tool(name, title, locations)
+        });
+
         let start = std::time::Instant::now();
         let result = tool.execute(engine, input.clone());
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Complete tracking (success or failure) if we started one.
+        if let Some(guard) = guard {
+            let (success, output, diff) = match &result {
+                Ok(out) => {
+                    let diff = extract_diff(name, &input, out);
+                    (out.success, Some(truncate_summary(&out.result, 200)), diff)
+                }
+                Err(e) => (false, Some(truncate_summary(&e.to_string(), 200)), None),
+            };
+            guard.complete(success, output, diff);
+        }
 
         // Best-effort audit logging — never fail the tool call.
         if let Some(ref ledger) = self.audit_ledger {
@@ -514,6 +546,72 @@ fn truncate_summary(s: &str, max_len: usize) -> String {
             end -= 1;
         }
         format!("{}...", &s[..end])
+    }
+}
+
+/// Build a concise title for a tool execution (for ToolCall events).
+fn build_tool_title(tool_name: &str, input: &ToolInput) -> String {
+    match tool_name {
+        "shell_exec" => {
+            input.get("command").map(|c| truncate_summary(c, 80)).unwrap_or_else(|| "shell".to_string())
+        }
+        "file_io" => {
+            let path = input.get("path").unwrap_or("?");
+            let op = input.get("operation").unwrap_or("?");
+            format!("{op} {path}")
+        }
+        "edit" => {
+            let path = input.get("path").unwrap_or("?");
+            format!("edit {path}")
+        }
+        "web_fetch" => {
+            let url = input.get("url").unwrap_or("?");
+            format!("fetch {url}")
+        }
+        "seshat_search" | "search_library" => {
+            input.get("query").map(|q| truncate_summary(q, 80)).unwrap_or_else(|| "search".to_string())
+        }
+        "kg_query" | "query_symbols" => {
+            input.get("pattern").or_else(|| input.get("query"))
+                .map(|q| truncate_summary(q, 80))
+                .unwrap_or_else(|| "query".to_string())
+        }
+        _ => {
+            // Generic fallback: show first param value or just the tool name.
+            input.params.values().next()
+                .and_then(|v| v.as_str())
+                .map(|s| truncate_summary(s, 80))
+                .unwrap_or_else(|| tool_name.to_string())
+        }
+    }
+}
+
+/// Extract location information for tools that operate on files/paths.
+fn extract_tool_locations(tool_name: &str, input: &ToolInput) -> Vec<String> {
+    match tool_name {
+        "file_io" | "edit" | "glob" | "grep" => {
+            if let Some(path) = input.get("path") {
+                vec![path.to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Extract diff information for edit operations.
+fn extract_diff(tool_name: &str, _input: &ToolInput, output: &ToolOutput) -> Option<String> {
+    if tool_name == "edit" && output.success {
+        // The edit tool's output is typically the diff.
+        // For now, we don't parse it further — just truncate.
+        if output.result.contains("@@") || output.result.contains("---") {
+            Some(truncate_summary(&output.result, 500))
+        } else {
+            None
+        }
+    } else {
+        None
     }
 }
 

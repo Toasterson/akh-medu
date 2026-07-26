@@ -1783,6 +1783,19 @@ impl Agent {
         self.tool_registry.clear_permission_asker();
     }
 
+    /// Install a tool execution tracker (for ACP ToolCall events).
+    pub fn set_tool_tracker(
+        &mut self,
+        tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
+    ) {
+        self.tool_registry.set_tracker(tracker);
+    }
+
+    /// Remove the tool execution tracker.
+    pub fn clear_tool_tracker(&mut self) {
+        self.tool_registry.clear_tracker();
+    }
+
     /// Get a reference to the wrapped engine.
     pub fn engine(&self) -> &Engine {
         &self.engine
