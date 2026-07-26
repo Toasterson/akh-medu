@@ -76,7 +76,15 @@ pub trait ChatBackend: Send + Sync {
 
     /// Refresh per-akh state (e.g. the system prompt) before a turn. Default:
     /// no-op.
-    fn prepare(&self, _agent_id: &str, _psyche: Option<&crate::compartment::psyche::Psyche>) {}
+    ///
+    /// The `manifests` parameter provides the advertised tool manifests for
+    /// generating the tool-operations section of the system prompt.
+    fn prepare(
+        &self,
+        _agent_id: &str,
+        _psyche: Option<&crate::compartment::psyche::Psyche>,
+        _manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) {}
 
     /// The model's capabilities, read from the model (GGUF metadata / Ollama
     /// `/api/show`). Default: unknown. Consumed by the Phase 44 context budget
@@ -137,9 +145,14 @@ impl ChatBackend for OllamaChatBackend {
         self.mgr.ollama_available()
     }
 
-    fn prepare(&self, agent_id: &str, psyche: Option<&crate::compartment::psyche::Psyche>) {
+    fn prepare(
+        &self,
+        agent_id: &str,
+        psyche: Option<&crate::compartment::psyche::Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) {
         // Refresh the akh's cached system prompt from its current psyche.
-        self.mgr.load_agent(agent_id, agent_id, psyche);
+        self.mgr.load_agent(agent_id, agent_id, psyche, manifests);
     }
 
     fn capabilities(&self) -> ModelCapabilities {
