@@ -750,12 +750,12 @@ const OPERATING_CONVENTIONS: &str = "\
 ## Operating Conventions\n\
 \n\
 ### Knowledge Graph\n\
-- Use `kg_query` to read facts; `kg_assert` to write new beliefs.\n\
+- Use `kg_query` to read facts; `kg_mutate` to write new beliefs.\n\
 - Provenance is tracked automatically — cite sources when adding facts.\n\
 - The KG is your long-term memory; use it to ground decisions.\n\
 \n\
 ### Skills & Tools\n\
-- Skills are activated via the `activate_skill` tool or when needed for a task.\n\
+- Skills auto-activate when a task needs them; `skill_author` writes new ones.\n\
 - Dangerous tools (Critical level) may require user approval.\n\
 - Always check tool descriptions and danger levels before invoking.\n\
 \n\
@@ -892,6 +892,56 @@ fn describe_archetypes(a: &ArchetypeWeights) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of this section is that the model is told the truth
+    /// about its tools, so a name here that no tool answers to is worse than
+    /// saying nothing: it invites an `unknown tool` failure from the one
+    /// document meant to prevent them.
+    ///
+    /// Shipped with two such names — `kg_assert` (the tool is `kg_mutate`) and
+    /// `activate_skill` (no such tool; skills auto-activate). Review waved the
+    /// first through as "polish" and did not catch the second.
+    ///
+    /// `mcp__anima__*` names are deliberately exempt: those are proxied from
+    /// the Anima MCP server at session time and are not in the local registry.
+    #[test]
+    fn operating_conventions_only_name_real_tools() {
+        let known: std::collections::HashSet<&str> = [
+            "kg_query",
+            "kg_mutate",
+            "reason",
+            "memory_recall",
+            "similarity_search",
+            "gap_analysis",
+            "file_io",
+            "edit",
+            "glob",
+            "grep",
+            "shell_exec",
+            "http_fetch",
+            "skill_author",
+            "audit_log",
+        ]
+        .into_iter()
+        .collect();
+
+        for name in OPERATING_CONVENTIONS
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| {
+                !s.is_empty()
+                    && !s.starts_with("mcp__")
+                    && s.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            })
+        {
+            assert!(
+                known.contains(name),
+                "OPERATING_CONVENTIONS names `{name}`, which no tool registers — \
+                 either the name is wrong or this allow-list needs the new tool"
+            );
+        }
+    }
 
     #[test]
     fn usage_ledger_accumulates_and_snapshots() {
