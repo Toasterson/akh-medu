@@ -60,6 +60,16 @@ pub struct EngineConfig {
     pub max_symbols: usize,
     /// Default language for parsing. `Auto` means detect from text.
     pub language: Language,
+    /// Root of the agent filesystem's **read** sandbox. When `None`, defaults
+    /// to `data_dir` — correct only when `data_dir` *is* the akh's working
+    /// root. Workspace-backed engines point `data_dir` at `kg/`, so they must
+    /// set this to the workspace root; otherwise the agent cannot read the
+    /// scratch area it is given to work in.
+    pub workspace_root: Option<PathBuf>,
+    /// Directory the agent's file **writes** are confined to. When `None`,
+    /// defaults to `{data_dir}/scratch`. Set this whenever `data_dir` is a
+    /// subdirectory and scratch lives at the workspace root.
+    pub scratch_dir: Option<PathBuf>,
     /// Additional read-only filesystem roots folded into the agent's `LocalFs`
     /// **read** roots (writes stay confined to `scratch/`). Empty by default;
     /// the OpenClaw self-import switch (ADR 076 §4) widens this to `~/.openclaw`
@@ -77,6 +87,8 @@ impl Default for EngineConfig {
             max_memory_mb: 1024,
             max_symbols: 1_000_000,
             language: Language::Auto,
+            workspace_root: None,
+            scratch_dir: None,
             extra_read_roots: Vec::new(),
         }
     }
