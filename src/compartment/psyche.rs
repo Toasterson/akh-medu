@@ -500,11 +500,14 @@ impl Psyche {
 
         macro_rules! add {
             ($s:expr, $p:expr, $o:expr, $c:expr) => {{
-                let t = crate::graph::Triple::new($s, $p, $o)
-                    .with_confidence($c)
-                    .with_compartment(cid.clone());
-                engine.add_triple(&t)?;
-                count += 1;
+                // Skip if triple already exists (idempotent injection for restarts).
+                if !engine.has_triple($s, $p, $o) {
+                    let t = crate::graph::Triple::new($s, $p, $o)
+                        .with_confidence($c)
+                        .with_compartment(cid.clone());
+                    engine.add_triple(&t)?;
+                    count += 1;
+                }
             }};
         }
 

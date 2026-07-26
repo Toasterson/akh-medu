@@ -94,6 +94,40 @@ impl WorkingMemory {
         Ok(id)
     }
 
+    /// Push a high-priority entry, evicting lowest-relevance entries if needed.
+    ///
+    /// This is used for critical entries (e.g., session summaries) that should
+    /// take precedence over restored working memory entries. If working memory
+    /// is at capacity, this evicts the lowest-relevance entry to make room.
+    pub fn push_priority(&mut self, mut entry: WorkingMemoryEntry) -> AgentResult<u64> {
+        // Make room if needed by evicting the lowest-relevance entry.
+        if self.entries.len() >= self.capacity {
+            if let Some((idx, _)) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.relevance.partial_cmp(&b.relevance).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                let evicted = self.entries.remove(idx);
+                tracing::debug!(
+                    evicted_id = evicted.id,
+                    evicted_relevance = evicted.relevance,
+                    new_relevance = entry.relevance,
+                    "evicted low-relevance entry to make room for priority entry"
+                );
+            }
+        }
+
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        entry.id = id;
+        entry.timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.entries.push(entry);
+        Ok(id)
+    }
+
     /// Get an entry by ID.
     pub fn get(&self, id: u64) -> Option<&WorkingMemoryEntry> {
         self.entries.iter().find(|e| e.id == id)
@@ -948,7 +982,7 @@ pub fn restore_session_summary(
         summary.cycle_range.1,
         summary.accomplished.len()
     );
-    let id = wm.push(WorkingMemoryEntry {
+    let id = wm.push_priority(WorkingMemoryEntry {
         id: 0,
         content: overview,
         symbols: Vec::new(),
@@ -965,7 +999,7 @@ pub fn restore_session_summary(
     if !summary.pending.is_empty() {
         let pending_desc = summary.pending.join("; ");
         let content = format!("Pending from last session: {pending_desc}");
-        let id = wm.push(WorkingMemoryEntry {
+        let id = wm.push_priority(WorkingMemoryEntry {
             id: 0,
             content,
             symbols: Vec::new(),
@@ -983,7 +1017,7 @@ pub fn restore_session_summary(
     if !summary.next_steps.is_empty() {
         let steps_desc = summary.next_steps.join("; ");
         let content = format!("Next steps: {steps_desc}");
-        let id = wm.push(WorkingMemoryEntry {
+        let id = wm.push_priority(WorkingMemoryEntry {
             id: 0,
             content,
             symbols: Vec::new(),
@@ -1000,7 +1034,7 @@ pub fn restore_session_summary(
     // Active project entry (if any).
     if let Some(ref project_name) = summary.active_project {
         let content = format!("Active project: {project_name}");
-        let id = wm.push(WorkingMemoryEntry {
+        let id = wm.push_priority(WorkingMemoryEntry {
             id: 0,
             content,
             symbols: Vec::new(),
@@ -1124,6 +1158,49 @@ mod tests {
         wm.push(make_entry(WorkingMemoryKind::Observation, "b", 1))
             .unwrap();
         assert_eq!(wm.pressure(), 0.5);
+    }
+
+    #[test]
+    fn push_priority_evicts_low_relevance() {
+        let mut wm = WorkingMemory::new(3);
+
+        // Fill to capacity with entries of varying relevance.
+        let id1 = wm.push(make_entry(WorkingMemoryKind::Observation, "low", 1)).unwrap();
+        wm.update_relevance(id1, 0.3);
+
+        let id2 = wm.push(make_entry(WorkingMemoryKind::Observation, "medium", 1)).unwrap();
+        wm.update_relevance(id2, 0.6);
+
+        let id3 = wm.push(make_entry(WorkingMemoryKind::Observation, "high", 1)).unwrap();
+        wm.update_relevance(id3, 0.9);
+
+        assert_eq!(wm.len(), 3);
+        assert!(wm.is_full());
+
+        // Push a high-priority entry. Should evict the lowest-relevance entry (id1).
+        let mut priority_entry = make_entry(WorkingMemoryKind::Observation, "priority", 2);
+        priority_entry.relevance = 0.95;
+        let id4 = wm.push_priority(priority_entry).unwrap();
+
+        // Still at capacity, but the low-relevance entry was evicted.
+        assert_eq!(wm.len(), 3);
+        assert!(wm.get(id1).is_none(), "low-relevance entry should be evicted");
+        assert!(wm.get(id2).is_some(), "medium-relevance entry should remain");
+        assert!(wm.get(id3).is_some(), "high-relevance entry should remain");
+        assert!(wm.get(id4).is_some(), "priority entry should be added");
+    }
+
+    #[test]
+    fn push_priority_succeeds_when_not_full() {
+        let mut wm = WorkingMemory::new(5);
+        wm.push(make_entry(WorkingMemoryKind::Observation, "existing", 1)).unwrap();
+
+        let mut priority_entry = make_entry(WorkingMemoryKind::Observation, "priority", 2);
+        priority_entry.relevance = 0.95;
+        let result = wm.push_priority(priority_entry);
+
+        assert!(result.is_ok());
+        assert_eq!(wm.len(), 2);
     }
 
     // -- ACT-R activation tests --
