@@ -108,9 +108,12 @@ Concrete commitments:
   secret mechanism.
 - **Ollama→fallback failover is opt-in per akh** (`failover` flag), not implicit.
 - **One system-prompt assembly function.** The three current assembly sites
-  collapse into a single function whose contract is: *if `AkhConfig.system_prompt`
-  is `Some`, that text is authoritative; otherwise fall back to the
-  psyche-derived prompt.* Psyche stops being the mandatory prompt source.
+  collapse into a single function (`assemble_system_prompt`) whose contract is
+  (REVISED 2026-07-26): the operator section (`AkhConfig.system_prompt` when
+  set, otherwise psyche-derived) composes with machine-owned sections
+  (tool-operations + operating conventions). Psyche stops being the mandatory
+  prompt source; the explicit prompt is no longer verbatim-replacement but the
+  operator-controlled persona/voice authority that precedes tool documentation.
 - **`related_workspaces`, `[autonomy]`, `[delegation]`, `path_mode`** are parsed
   and stored now but **consumed by later phases** (P6, P5, P4). P1 only lands the
   schema + loader + the model/prompt wiring; it does not change automation or
@@ -157,10 +160,16 @@ stays a file.
 **Why considered.** Preserves psyche-derived flavour while letting operators add
 instructions.
 
-**Why rejected.** Locked decision #3 is explicit: the prompt **replaces** the
-psyche-derived text, so behaviour is exactly what the operator wrote — no hidden
-psyche text leaking in and drifting as the psyche mutates. Operators who want
-psyche flavour simply leave `system_prompt` unset (the fallback path).
+**Why rejected initially, then REVISED 2026-07-26.** Locked decision #3 was
+explicit: the prompt **replaces** the psyche-derived text, so behaviour is
+exactly what the operator wrote. However, this created a critical gap: models
+were never briefed on available tools, invocation syntax, or operating
+conventions. **Revision**: `system_prompt` now forms the **operator section**
+(persona/voice authority), which composes with **machine-owned sections**
+(tool-operations from the manifest registry + operating conventions). The
+explicit prompt no longer replaces the entire assembly — it composes, ensuring
+every akh receives tool documentation. See WI-250 ("mechanism that builds the
+system prompt so models know how akh-medu tools work").
 
 ## Consequences
 

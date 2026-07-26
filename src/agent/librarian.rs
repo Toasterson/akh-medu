@@ -332,7 +332,8 @@ impl OllamaLibrarianModel {
                 ..Default::default()
             },
         );
-        mgr.load_agent(LIBRARIAN_AGENT_ID, LIBRARIAN_AGENT_ID, None);
+        // Librarian has no tools - it's a specialized extraction model
+        mgr.load_agent(LIBRARIAN_AGENT_ID, LIBRARIAN_AGENT_ID, None, &[]);
         Self { mgr, model_tag }
     }
 

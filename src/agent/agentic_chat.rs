@@ -299,7 +299,8 @@ impl Agent {
         }
 
         // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
-        backend.prepare(agent_id, self.psyche.as_ref());
+        let manifests = self.tool_registry.list_advertised_manifests();
+        backend.prepare(agent_id, self.psyche.as_ref(), &manifests);
 
         let mut tools = ollama_tool_catalog(&self.tool_registry);
         // ADR 089 task A/B: the FULL pre-retrieval-scoping catalog, captured

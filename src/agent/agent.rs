@@ -2038,7 +2038,8 @@ impl Agent {
         let Some(ref mgr) = self.model_manager else {
             return false;
         };
-        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref());
+        let manifests = self.tool_registry.list_advertised_manifests();
+        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifests);
         true
     }
 

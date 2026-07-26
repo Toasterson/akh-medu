@@ -342,13 +342,23 @@ impl AgentModelManager {
     ///
     /// Callers can pass `None` for `psyche` to get a generic system prompt
     /// keyed only on the agent's name.
-    pub fn load_agent(&self, agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) {
+    ///
+    /// The `manifests` parameter provides the advertised tool manifests for
+    /// generating the tool-operations section of the prompt.
+    pub fn load_agent(
+        &self,
+        agent_id: &str,
+        agent_name: &str,
+        psyche: Option<&Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) {
         let prompt = assemble_system_prompt(
             agent_id,
             agent_name,
             psyche,
             self.config.system_prompt.as_deref(),
             self.prompt_mode,
+            manifests,
         );
         let mut agents = self.agents.lock().expect("model manager lock poisoned");
         let entry = agents.entry(agent_id.to_string()).or_insert_with(|| AgentEntry {
@@ -363,6 +373,7 @@ impl AgentModelManager {
             agent_id,
             agent_name,
             model = %self.config.ollama.model,
+            tool_count = manifests.len(),
             "agent model entry loaded"
         );
     }
@@ -648,11 +659,19 @@ impl AgentModelManager {
 ///
 /// Single authoritative system-prompt assembly entry point.
 ///
-/// Precedence (ADR-053):
-/// 1. An explicit, non-empty `explicit` prompt (from `AkhConfig.system_prompt`)
-///    is returned **verbatim** — it fully replaces the psyche-derived text, with
-///    no archetype/persona framing appended.
-/// 2. Otherwise the psyche-derived prompt from [`build_system_prompt`] is used.
+/// Composition (ADR-053, revised):
+/// 1. **Operator section**: An explicit, non-empty `explicit` prompt (from
+///    `AkhConfig.system_prompt`) takes precedence as the persona/voice authority;
+///    otherwise the psyche-derived text from [`build_system_prompt`] is used.
+/// 2. **Machine-owned sections** (always appended):
+///    - Tool-operations section (generated from `manifests` registry)
+///    - Operating conventions block
+/// 3. **Mode constraints**: [`PromptMode::Terse`] brevity constraints compose
+///    after both.
+///
+/// The explicit prompt no longer **replaces** the entire assembly — it composes
+/// with the machine-owned sections. This ensures every akh receives tool
+/// documentation regardless of whether an operator-written prompt is present.
 ///
 /// This collapses the previously-scattered prompt-assembly logic so callers on
 /// the inference path go through exactly one function.
@@ -662,15 +681,29 @@ pub fn assemble_system_prompt(
     psyche: Option<&Psyche>,
     explicit: Option<&str>,
     mode: PromptMode,
+    manifests: &[&crate::agent::tool_manifest::ToolManifest],
 ) -> String {
-    if let Some(text) = explicit {
+    // 1. Operator section (persona/voice authority)
+    let operator_section = if let Some(text) = explicit {
         if !text.trim().is_empty() {
-            // Authoritative: returned verbatim. `mode` (incl. Terse brevity) is
-            // intentionally NOT applied — the operator owns the full prompt.
-            return text.to_string();
+            text.to_string()
+        } else {
+            build_system_prompt_body(agent_id, agent_name, psyche)
         }
+    } else {
+        build_system_prompt_body(agent_id, agent_name, psyche)
+    };
+
+    // 2. Machine-owned sections (always appended)
+    let tool_section = generate_tool_operations_section(manifests);
+    let conventions = OPERATING_CONVENTIONS;
+
+    // 3. Assemble with mode-specific constraints
+    let base = format!("{operator_section}\n\n{tool_section}\n\n{conventions}");
+    match mode {
+        PromptMode::Standard => base,
+        PromptMode::Terse => format!("{base}\n\n{TERSE_CONSTRAINTS}"),
     }
-    build_system_prompt(agent_id, agent_name, psyche, mode)
 }
 
 /// Translates the agent's Jungian psyche configuration into a natural-language
@@ -708,6 +741,80 @@ const TERSE_CONSTRAINTS: &str = "\
 CRITICAL: Respond in at most 2 sentences. No preamble. No summaries.\n\
 State only the required answer or the chosen tool and its parameters.\n\
 Do not explain your reasoning. Do not repeat the question. Just act.";
+
+/// Operating conventions block (static, versioned in-repo).
+///
+/// Documents KG read/write etiquette, skills activation, workspace/worktree layout,
+/// and the Anima session contract (diff capture, wip docs, mcp__anima__* purpose).
+const OPERATING_CONVENTIONS: &str = "\
+## Operating Conventions\n\
+\n\
+### Knowledge Graph\n\
+- Use `kg_query` to read facts; `kg_assert` to write new beliefs.\n\
+- Provenance is tracked automatically — cite sources when adding facts.\n\
+- The KG is your long-term memory; use it to ground decisions.\n\
+\n\
+### Skills & Tools\n\
+- Skills are activated via the `activate_skill` tool or when needed for a task.\n\
+- Dangerous tools (Critical level) may require user approval.\n\
+- Always check tool descriptions and danger levels before invoking.\n\
+\n\
+### Workspace & Session Contract (Anima)\n\
+- When running in an Anima session, you operate in a git worktree.\n\
+- `.anima/wip/` contains session documentation and artifacts.\n\
+- After each turn, the runner captures your diff for the work item.\n\
+- `mcp__anima__*` tools interact with the Anima project tracker:\n\
+  - `mcp__anima__get_work_item` — fetch your current work item\n\
+  - `mcp__anima__post_message` — communicate on the work item thread\n\
+  - `mcp__anima__update_work_item` — update phase/status/priority\n\
+  - Use these to coordinate with the tracker and other agents.";
+
+/// Generate the tool-operations section from the manifest registry.
+///
+/// Returns a formatted markdown section listing each advertised tool with:
+/// - Tool name
+/// - One-line description
+/// - Danger level
+/// - Key capabilities
+///
+/// Derived from the same manifest registry that builds the function catalog
+/// (one source, so prompt and catalog cannot drift).
+fn generate_tool_operations_section(
+    manifests: &[&crate::agent::tool_manifest::ToolManifest],
+) -> String {
+    use crate::agent::tool_manifest::DangerLevel;
+
+    if manifests.is_empty() {
+        return "## Available Tools\n\nNo tools currently available.".to_string();
+    }
+
+    let mut section = String::from("## Available Tools\n\n");
+    section.push_str("You have access to the following tools. ");
+    section.push_str("Invoke them via the function-calling API.\n\n");
+
+    for manifest in manifests {
+        let danger_emoji = match manifest.danger.level {
+            DangerLevel::Safe => "✓",
+            DangerLevel::Cautious => "⚠",
+            DangerLevel::Dangerous => "⚠⚠",
+            DangerLevel::Critical => "⛔",
+        };
+
+        section.push_str(&format!(
+            "- **{}** {} — {} (Danger: {})\n",
+            manifest.name,
+            danger_emoji,
+            manifest.description,
+            manifest.danger.level
+        ));
+    }
+
+    section.push_str("\n**Tool Invocation**: Call tools using the function-calling API provided by your backend. ");
+    section.push_str("Each tool accepts structured parameters as defined in its schema. ");
+    section.push_str("Results are returned to you for analysis and next steps.\n");
+
+    section
+}
 
 fn build_system_prompt_body(agent_id: &str, agent_name: &str, psyche: Option<&Psyche>) -> String {
     let Some(p) = psyche else {
@@ -944,43 +1051,51 @@ mod tests {
     }
 
     #[test]
-    fn assemble_prefers_explicit_prompt_verbatim() {
+    fn assemble_composes_explicit_with_tool_section() {
         let explicit = "You are Thoth, keeper of records.";
-        // Even with a rich psyche present, the explicit prompt wins verbatim.
+        // The explicit prompt is now composed with machine-owned sections.
         let prompt = assemble_system_prompt(
             "t1",
             "Thoth",
             Some(&thoth_psyche()),
             Some(explicit),
             PromptMode::Standard,
+            &[], // No tools for this test
         );
-        assert_eq!(prompt, explicit);
-        assert!(!prompt.contains("archetype"), "no psyche framing is appended");
+        assert!(prompt.starts_with(explicit), "explicit prompt is the operator section");
+        assert!(prompt.contains("Available Tools"), "tool section is appended");
+        assert!(prompt.contains("Operating Conventions"), "conventions are appended");
+        assert!(!prompt.contains("archetype"), "psyche framing is NOT used when explicit is set");
     }
 
     #[test]
     fn assemble_falls_back_to_psyche_when_no_explicit() {
-        let psyche_prompt =
-            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
         let assembled =
-            assemble_system_prompt("t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard);
-        assert_eq!(assembled, psyche_prompt);
+            assemble_system_prompt("t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard, &[]);
+        // Now composed, not equal to psyche_prompt alone
+        assert!(assembled.contains("Thoth"), "contains agent name");
+        assert!(assembled.contains("archetype"), "psyche framing present");
+        assert!(assembled.contains("Available Tools"), "tool section appended");
+        assert!(assembled.contains("Operating Conventions"), "conventions appended");
     }
 
     #[test]
     fn assemble_ignores_blank_explicit_prompt() {
-        let psyche_prompt =
-            build_system_prompt("t1", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
         let assembled = assemble_system_prompt(
             "t1",
             "Thoth",
             Some(&thoth_psyche()),
             Some("   \n  "),
             PromptMode::Standard,
+            &[],
         );
-        assert_eq!(
-            assembled, psyche_prompt,
-            "a whitespace-only explicit prompt is treated as absent"
+        assert!(
+            assembled.contains("archetype"),
+            "a whitespace-only explicit prompt is treated as absent, psyche used"
+        );
+        assert!(
+            assembled.contains("Available Tools"),
+            "tool section still appended"
         );
     }
 
@@ -991,19 +1106,18 @@ mod tests {
             ..Default::default()
         };
         let mgr = AgentModelManager::new(cfg);
-        // Even with a psyche, the configured explicit prompt is authoritative.
-        mgr.load_agent("a1", "Alice", Some(&thoth_psyche()));
-        assert_eq!(
-            mgr.system_prompt_for("a1").as_deref(),
-            Some("You are a pinned akh.")
-        );
+        // Even with a psyche, the configured explicit prompt is authoritative for the operator section.
+        mgr.load_agent("a1", "Alice", Some(&thoth_psyche()), &[]);
+        let prompt = mgr.system_prompt_for("a1").unwrap();
+        assert!(prompt.starts_with("You are a pinned akh."), "explicit prompt is operator section");
+        assert!(prompt.contains("Available Tools"), "tool section is composed");
     }
 
     #[test]
     fn load_agent_is_idempotent() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
-        mgr.load_agent("a1", "Alice", None);
-        mgr.load_agent("a1", "Alice", None); // second call must not panic
+        mgr.load_agent("a1", "Alice", None, &[]);
+        mgr.load_agent("a1", "Alice", None, &[]); // second call must not panic
         assert!(mgr.is_loaded("a1"));
         let loaded = mgr.loaded_agents();
         assert_eq!(loaded.len(), 1);
@@ -1012,9 +1126,9 @@ mod tests {
     #[test]
     fn load_agent_updates_system_prompt() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
-        mgr.load_agent("a1", "Alice", None);
+        mgr.load_agent("a1", "Alice", None, &[]);
         let p = tecton_psyche();
-        mgr.load_agent("a1", "Alice", Some(&p));
+        mgr.load_agent("a1", "Alice", Some(&p), &[]);
         // Verify via generate returning AgentNotLoaded-vs-known behaviour
         // (we can't check the internal prompt directly, but we can verify is_loaded).
         assert!(mgr.is_loaded("a1"));
@@ -1023,7 +1137,7 @@ mod tests {
     #[test]
     fn unload_agent_removes_entry() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
-        mgr.load_agent("a1", "Alice", None);
+        mgr.load_agent("a1", "Alice", None, &[]);
         assert!(mgr.unload_agent("a1"));
         assert!(!mgr.is_loaded("a1"));
         assert!(!mgr.unload_agent("a1"), "second unload returns false");
@@ -1052,7 +1166,7 @@ mod tests {
             ..Default::default()
         };
         let mgr = AgentModelManager::new(cfg);
-        mgr.load_agent("a1", "Alice", None);
+        mgr.load_agent("a1", "Alice", None, &[]);
         let err = mgr.generate("a1", "What is the Sun?").unwrap_err();
         assert!(
             matches!(err, ModelManagerError::NoBackendAvailable { .. }),
@@ -1067,8 +1181,8 @@ mod tests {
             ..ModelManagerConfig::default()
         };
         let mgr = AgentModelManager::new(cfg);
-        mgr.load_agent("a1", "Alice", None);
-        mgr.load_agent("a2", "Bob", None);
+        mgr.load_agent("a1", "Alice", None, &[]);
+        mgr.load_agent("a2", "Bob", None, &[]);
         // Sleep a tick to ensure elapsed > 0
         std::thread::sleep(std::time::Duration::from_millis(1));
         let evicted = mgr.unload_idle();
@@ -1083,7 +1197,7 @@ mod tests {
             ..ModelManagerConfig::default()
         };
         let mgr = AgentModelManager::new(cfg);
-        mgr.load_agent("a1", "Alice", None);
+        mgr.load_agent("a1", "Alice", None, &[]);
         let evicted = mgr.unload_idle();
         assert_eq!(evicted, 0);
         assert!(mgr.is_loaded("a1"));

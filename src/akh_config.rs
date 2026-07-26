@@ -12,9 +12,12 @@
 //!   and the workspace fields flatten in, so a legacy `{name}.toml` containing
 //!   only [`WorkspaceConfig`] fields deserializes into an [`AkhConfig`] with all
 //!   new fields defaulted. Absence of any akh config reproduces today's behaviour.
-//! - **The explicit `system_prompt` is authoritative.** When set it *replaces*
-//!   the psyche-derived prompt (locked decision #3 of the ACP pivot); psyche
-//!   becomes optional flavour.
+//! - **The explicit `system_prompt` composes (REVISED 2026-07-26).** When set it
+//!   forms the **operator section** (persona/voice authority) that precedes the
+//!   machine-owned sections (tool-operations + operating conventions). The
+//!   explicit prompt no longer *replaces* the entire assembly — it composes,
+//!   ensuring every akh receives tool documentation. Psyche remains the fallback
+//!   when `system_prompt` is unset.
 //! - **Several fields are parsed now, consumed later.** `related_workspaces`
 //!   (P6 federation), `autonomy` (P5 automation gating), `delegation` (Phase 36),
 //!   and `path_mode` (P4 filesystem) are stored by P1 but wired by their phases.
