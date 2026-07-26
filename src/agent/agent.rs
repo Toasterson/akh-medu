@@ -3805,9 +3805,25 @@ impl Agent {
         // Restore session summary and inject into WM for cross-session continuity.
         if let Some(summary_bytes) = store.get_meta(b"agent:session_summary").ok().flatten()
             && let Ok(summary) = bincode::deserialize::<SessionSummary>(&summary_bytes)
-            && let Err(e) = restore_session_summary(&mut working_memory, &summary, cycle_count)
         {
-            tracing::warn!("failed to restore session summary: {e}");
+            match restore_session_summary(&mut working_memory, &summary, cycle_count) {
+                Ok(ids) => {
+                    tracing::info!(
+                        entry_count = ids.len(),
+                        wm_size = working_memory.len(),
+                        cycle_range = ?summary.cycle_range,
+                        "restored session summary into working memory"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        wm_size = working_memory.len(),
+                        wm_capacity = working_memory.capacity(),
+                        "CRITICAL: failed to restore session summary — session started without prior context"
+                    );
+                }
+            }
         }
 
         // Restore competence model (Phase 11f).
