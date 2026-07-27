@@ -413,6 +413,7 @@ impl ToolRegistry {
     /// If an audit ledger is attached, records a `ToolInvocation` audit entry
     /// with timing, truncated params/output, and success status.
     /// Audit failures never block the tool call.
+    #[tracing::instrument(skip(self, input, engine), fields(tool = %name))]
     pub fn execute(
         &self,
         name: &str,

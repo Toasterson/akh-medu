@@ -37,8 +37,7 @@ struct InnerShutdown {
     /// Shared handle to the tracer provider we installed globally. Cloned
     /// *before* `set_tracer_provider` so the guard flushes the *correct*
     /// provider, not whatever no-op was there before (review round 1 fix).
-    provider: Arc<opentelemetry_sdk::global::GlobalTracerProvider>,
-    _layer_guard: tracing_opentelemetry::LayerGuard,
+    provider: Arc<opentelemetry_sdk::trace::TracerProvider>,
 }
 
 impl TracerShutdown {
@@ -56,10 +55,9 @@ impl Drop for TracerShutdown {
     fn drop(&mut self) {
         #[cfg(feature = "tracing-otel")]
         if let Some(inner) = self.inner.take() {
-            // Drop the layer guard first to stop emitting new spans, then
-            // shut down the provider to flush the batch span processor.
-            drop(inner._layer_guard);
-            inner.provider.shutdown();
+            // Shut down the provider to flush the batch span processor so
+            // in-flight spans reach the collector before the process exits.
+            let _ = inner.provider.shutdown();
         }
     }
 }
@@ -195,21 +193,16 @@ fn init_otel(
     // layer) has a stable home.
     opentelemetry::global::set_tracer_provider(provider_for_global);
 
-    // The LayerGuard is extracted from the layer so dropping it stops new
-    // spans before the provider flushes.
-    let layer_guard = tracing_opentelemetry::LayerGuard::current();
-
     Ok(TracerShutdown {
         inner: Some(InnerShutdown {
             provider: provider_arc,
-            _layer_guard: layer_guard,
         }),
     })
 }
 
 #[cfg(feature = "tracing-otel")]
 fn build_sampler() -> Sampler {
-    use opentelemetry_sdk::trace::{Sampler, TraceIdRatioBased};
+    use opentelemetry_sdk::trace::Sampler;
 
     let name = env::var("OTEL_TRACES_SAMPLER").unwrap_or_else(|_| {
         "parentbased_traceidratio".to_string()
@@ -219,11 +212,11 @@ fn build_sampler() -> Sampler {
 
     match name.as_str() {
         "parentbased_traceidratio" | "parentbased" => {
-            Sampler::ParentBased(Box::new(TraceIdRatioBased(ratio)))
+            Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio)))
         }
         "traceidratio" => Sampler::TraceIdRatioBased(ratio),
         "always_on" => Sampler::AlwaysOn,
         "always_off" => Sampler::AlwaysOff,
-        _ => Sampler::ParentBased(Box::new(TraceIdRatioBased(ratio))),
+        _ => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio))),
     }
 }
