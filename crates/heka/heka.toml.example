@@ -1,0 +1,39 @@
+# Heka configuration example.
+#
+# Copy to ~/.config/heka/heka.toml or pass a path as the first CLI argument
+# to `hekad`. Environment variables (DATABASE_URL, HEKA_BIND, etc.) override
+# the values here.
+
+# ---------------------------------------------------------------------------
+# PostgreSQL connection
+# ---------------------------------------------------------------------------
+[database]
+# Connection URL. The `heka_*` tables live in the same schema as Seshat's
+# `pa_*` tables — both can share a single database instance.
+url = "postgres://akhmedu:akhmedu@localhost:5432/akhmedu"
+
+# Maximum connections in the SeaORM pool.
+max_connections = 10
+
+# ---------------------------------------------------------------------------
+# Service (hekad HTTP bind address — reserved for Phase 42b MCP server)
+# ---------------------------------------------------------------------------
+[server]
+bind = "127.0.0.1:9091"
+
+# ---------------------------------------------------------------------------
+# Embedding model
+# ---------------------------------------------------------------------------
+[embedding]
+# Sentence embedding model name (for model directory lookup).
+model = "all-MiniLM-L6-v2"
+
+# Directory for downloaded models. Defaults to ~/.local/share/heka/models/.
+# model_dir = "/var/lib/heka/models"
+
+# ---------------------------------------------------------------------------
+# Evaluation data (ground-truth corpus for recall/precision scoring)
+# ---------------------------------------------------------------------------
+[eval]
+# Path to the evaluation dataset (JSONL or CSV).
+data_path = "/var/lib/heka/eval/ground-truth.jsonl"
