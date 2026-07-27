@@ -544,6 +544,7 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
         EnvVarSpec { name: "AKH_AUDIO_SCALE", description: "Scale audio embeddings in the Candle NLU backend.", default: "\"1\" enables; unset = off" },
         EnvVarSpec { name: "AKH_AUTO_START", description: "Comma-separated workspaces to auto-start daemons for (CLI/service override of [daemon].auto_start).", default: "unset: uses config; empty = no auto-start (P5)" },
         EnvVarSpec { name: "AKH_COMM_INTEL", description: "Enable Phase-34 communicative-intelligence response shaping.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_COMPILE_FEEDBACK_TIMEOUT_SECS", description: "Per-process default timeout for the compile_feedback tool's `cargo check`/`clippy`/`test` runs. Distinct from AKH_TURN_IDLE_TIMEOUT_SECS (the ACP idle watchdog) and from acp_adapter.py's --timeout (the client-side transport deadline); see src/agent/tools/compile_feedback.rs module docs for how the three reconcile.", default: "unset: built-in default (600s)" },
         EnvVarSpec { name: "AKH_CONTEXT_STRATEGY", description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual.", default: "\"compacting\"" },
         EnvVarSpec { name: "AKH_ENRICH_MEMORY", description: "Enable memory enrichment during goal generation.", default: "on by default; \"0\" disables" },
         EnvVarSpec { name: "AKH_EXTRACTION_API_KEY", description: "API key for the LLM used by triple/knowledge extraction.", default: "unset: extraction falls back to configured key or is disabled" },
@@ -568,7 +569,7 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
         EnvVarSpec { name: "AKH_SERVER_PORT", description: "HTTP server port.", default: "\"8200\"" },
         EnvVarSpec { name: "AKH_SPEC_DECODE", description: "Enable speculative (prompt-lookup) decode for the Candle backing (Phase 47/ADR 075), unless overridden per-akh by AkhConfig::spec_decode.", default: "off by default; \"1\" enables" },
         EnvVarSpec { name: "AKH_TRANSCRIPT_CAPTURE", description: "Override per-akh capture_transcripts at the emit site.", default: "unset: follows AkhConfig::capture_transcripts (on by default)" },
-        EnvVarSpec { name: "AKH_TURN_IDLE_TIMEOUT_SECS", description: "ACP turn idle timeout before the session is considered stalled.", default: "unset: built-in default" },
+        EnvVarSpec { name: "AKH_TURN_IDLE_TIMEOUT_SECS", description: "ACP turn idle timeout before the session is considered stalled.", default: "unset: built-in default (300s)" },
     ]
 }
 
