@@ -50,6 +50,15 @@ schemars = { version = "0.8", features = ["uuid1", "chrono"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Phase 38i: OTLP tracing skeleton. Exact-pinned per research §2.1.
+# Default-on under the `tracing-otel` feature (folded into `default` so seshd
+# always ships with OTLP); the feature is also independently togglable.
+opentelemetry = { version = "=0.27", optional = true }
+opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace"], optional = true }
+tracing-opentelemetry = { version = "=0.28", optional = true }
+opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_experimental"], optional = true }
+
 # Hashing (for query cache keys)
 sha2 = "0.10"
 
@@ -76,9 +85,12 @@ tar = "0.4"
 grug-data = { path = "../grug-data" }
 
 [features]
-default = ["embedding"]
+default = ["embedding", "tracing-otel"]
 embedding = ["ort", "tokenizers", "ndarray"]
 synthesis = ["candle-core", "candle-nn", "candle-transformers"]
+# Phase 38i: OTLP tracing for seshd. Default-on (research §8: accept-parent
+# sampling on seshd). Off-by-default build excludes all OTel crates from link.
+tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]
 
 [[bin]]
 name = "seshd"

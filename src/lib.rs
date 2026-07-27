@@ -74,6 +74,9 @@ pub mod provenance;
 pub mod reason;
 pub mod reasoning;
 pub mod registry;
+/// Phase 38i: OTLP tracing skeleton — `init_tracing` helper + `TracerShutdown`.
+#[cfg(feature = "tracing-otel")]
+pub mod observability;
 pub mod rule_macro;
 /// ADR 081: schema packs — the installable type system for Akh memory
 /// (stable triple identity lives in `graph::identity`).
