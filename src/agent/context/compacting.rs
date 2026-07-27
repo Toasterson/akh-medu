@@ -23,7 +23,8 @@ use super::budget::BudgetAllocator;
 use super::error::ContextResult;
 use super::manager::{ContextManager, TokenCounter};
 use super::types::{
-    AssembledContext, ContextSection, DroppedSpan, EpisodeState, StrategyId, TokenBudget,
+    AssembledContext, ContextSection, ContextWindowStats, DroppedSpan, DropReason, EpisodeState,
+    StrategyId, TokenBudget,
 };
 
 /// Render a `key: value` frontmatter block for each note (title-labelled),
@@ -71,6 +72,40 @@ impl ContextManager for CompactingManager {
         counter: &dyn TokenCounter,
     ) -> ContextResult<AssembledContext> {
         assemble_with_cap(episode, budget, counter, None)
+    }
+
+    /// Override to fill the compacting extras (ADR 065 D12). `compacted` is the
+    /// count of history spans dropped this turn (regardless of reason — under
+    /// pressure they're compacted away either by budget or by age); the
+    /// `compaction_ratio` is `kept / requested` for the History section (0.0
+    /// means history was fully compacted away, 1.0 nothing was).
+    fn stats(&self, ctx: &AssembledContext, budget: &TokenBudget) -> ContextWindowStats {
+        let mut s = super::manager::default_stats(self.id(), ctx, budget, 0);
+        let compacted = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .count();
+        s.compacted = Some(compacted);
+        // Find the History section's kept/in to compute the ratio.
+        let hist_kept = ctx
+            .section_tokens
+            .get(&ContextSection::History)
+            .copied()
+            .unwrap_or(0);
+        let hist_dropped: usize = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .map(|d| d.text.len().div_ceil(4))
+            .sum();
+        let hist_in = hist_kept + hist_dropped;
+        s.compaction_ratio = Some(if hist_in == 0 {
+            1.0
+        } else {
+            (hist_kept as f32) / (hist_in as f32)
+        });
+        s
     }
 }
 
@@ -236,7 +271,12 @@ pub(super) fn assemble_with_cap(
                 messages.push(json!({ "role": "system", "content": content }));
                 *section_tokens.entry(*section).or_insert(0) += *tokens;
             } else {
-                dropped.push(DroppedSpan::new(*section, content.clone(), None));
+                dropped.push(DroppedSpan::with_reason(
+                    *section,
+                    content.clone(),
+                    None,
+                    DropReason::Budget,
+                ));
             }
         }
 
@@ -288,12 +328,23 @@ pub(super) fn assemble_with_cap(
                 messages.push(json!({ "role": role, "content": text }));
             }
             section_tokens.insert(ContextSection::History, used);
+            // Per-span drop reasons (ADR 065 D12, open question 5 — per-span, not
+            // per-section): a turn dropped because it was outside the tail cap is
+            // `Age`; a turn that *was* eligible (inside the tail) but lost the
+            // budget race is `Budget`. `history_cap=None` (CompactingManager)
+            // ⇒ every drop is Budget.
+            let tail_start = history_cap.map(|n| history.len().saturating_sub(n.max(1)));
             for (i, (_, text, _)) in history.iter().enumerate() {
                 if !keep.contains(&i) {
-                    dropped.push(DroppedSpan::new(
+                    let reason = match tail_start {
+                        Some(start) if i < start => DropReason::Age,
+                        _ => DropReason::Budget,
+                    };
+                    dropped.push(DroppedSpan::with_reason(
                         ContextSection::History,
                         (*text).to_string(),
                         None,
+                        reason,
                     ));
                 }
             }
@@ -316,7 +367,12 @@ pub(super) fn assemble_with_cap(
                     used += *cost;
                     tools.push(tool.clone());
                 } else {
-                    dropped.push(DroppedSpan::new(ContextSection::Tools, "(tool)", None));
+                    dropped.push(DroppedSpan::with_reason(
+                        ContextSection::Tools,
+                        "(tool)",
+                        None,
+                        DropReason::Budget,
+                    ));
                 }
             }
             if used > 0 {
@@ -621,5 +677,134 @@ mod tests {
         // Fewer than all 20 turns, and the LAST rendered is the most recent.
         assert!(out.messages.len() < 20, "history trimmed to budget");
         assert_eq!(out.messages.last().unwrap()["content"], "turn number 19 here");
+    }
+
+    // ── Phase 44m: stats + drop-reason tests (ADR 065 D12) ────────────────
+
+    #[test]
+    fn golden_allocator_degrades_in_priority_order() {
+        // Acceptance #2: total kept ≤ available; sections degrade by
+        // declaration-order priority (not independent truncation); Tools
+        // degrades first.
+        let (engine, _tmp) = test_engine();
+        // Three large tools + a tight budget: the prompt survives (high
+        // priority), tools degrade (lowest priority).
+        let tools: Vec<_> = (0..3)
+            .map(|i| json!({"type":"function","function":{"name":format!("tool{i}"),"description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}))
+            .collect();
+        let episode = EpisodeState::new("a", "the quick brown fox jumps over the lazy dog", &engine)
+            .with_tools(&tools);
+        let budget = TokenBudget::new(60, 10); // available = 50
+        let out = CompactingManager
+            .assemble(&episode, &budget, &HeuristicTokenCounter)
+            .expect("assemble");
+        let stats = CompactingManager.stats(&out, &budget);
+
+        // Total kept ≤ available.
+        let total_kept: usize = stats.sections.iter().map(|s| s.tokens_kept).sum();
+        assert!(
+            total_kept <= budget.available(),
+            "kept {total_kept} must be ≤ available {}",
+            budget.available()
+        );
+
+        // Tools is the lowest-priority section ⇒ degrades first. Either it's
+        // absent (got 0 grant) or its kept < in.
+        let tools_stat = stats.sections.iter().find(|s| s.section == ContextSection::Tools);
+        if let Some(t) = tools_stat {
+            assert!(
+                t.tokens_kept <= t.tokens_in,
+                "Tools degraded: kept {} ≤ in {}",
+                t.tokens_kept,
+                t.tokens_in
+            );
+            // If anything was dropped from Tools, the reason is Budget.
+            if t.tokens_dropped > 0 {
+                assert_eq!(t.drop_reason, Some(DropReason::Budget));
+            }
+        }
+
+        // The prompt (UserPrompt) is higher priority than Tools; it must
+        // have been kept in full or absent (atomic) — not partially truncated.
+        if let Some(p) = stats.sections.iter().find(|s| s.section == ContextSection::UserPrompt) {
+            assert!(
+                p.tokens_kept == p.tokens_in || p.tokens_kept == 0,
+                "prompt atomic: kept {} vs in {}",
+                p.tokens_kept,
+                p.tokens_in
+            );
+        }
+    }
+
+    #[test]
+    fn tools_section_stat_reflects_real_catalog_size() {
+        // Acceptance #3: the Tools section stat reflects the real catalog
+        // size on the live agentic path — guards the 44a gap staying closed.
+        // The catalog is routed through the manager (44b), so the Tools
+        // section's `tokens_in` must equal the catalog's actual cost.
+        let (engine, _tmp) = test_engine();
+        let tools = vec![
+            json!({"type":"function","function":{"name":"a","description":"tool a does something useful"}}),
+            json!({"type":"function","function":{"name":"b","description":"tool b does another thing"}}),
+        ];
+        let catalog_tokens: usize = tools.iter().map(|t| t.to_string().len().div_ceil(4)).sum();
+        let episode = EpisodeState::new("a", "hi", &engine).with_tools(&tools);
+        let budget = TokenBudget::default();
+        let out = CompactingManager
+            .assemble(&episode, &budget, &HeuristicTokenCounter)
+            .expect("assemble");
+        let stats = CompactingManager.stats(&out, &budget);
+
+        let tools_stat = stats
+            .sections
+            .iter()
+            .find(|s| s.section == ContextSection::Tools)
+            .expect("Tools section present when a catalog is supplied");
+        // Under a large budget the whole catalog fits ⇒ kept == in ==
+        // catalog_tokens (the real size).
+        assert_eq!(
+            tools_stat.tokens_in, catalog_tokens,
+            "Tools section in-tokens matches the real catalog cost"
+        );
+        assert_eq!(tools_stat.tokens_kept, catalog_tokens, "whole catalog kept");
+        assert_eq!(tools_stat.tokens_dropped, 0);
+    }
+
+    #[test]
+    fn passive_age_drops_are_classified_age_not_budget() {
+        // Per-span drop reasons (ADR 065 D12 OQ5): a turn dropped because it
+        // was outside the PassiveManager tail cap is `Age`, not `Budget`.
+        let (engine, _tmp) = test_engine();
+        let mut conv = ConversationState::new("acp", "default");
+        for i in 0..8 {
+            conv.record_operator_turn(&format!("turn number {i} here"));
+        }
+        let ep = EpisodeState::new("a", "turn number 7 here", &engine).with_conversation(Some(&conv));
+        let out = crate::agent::context::PassiveManager::with_tail(2)
+            .assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        // Turns outside the tail ⇒ Age; turns inside the tail that lost the
+        // budget race (none here, big budget) ⇒ Budget. At least 5 Age drops.
+        let age_drops = out
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History && d.reason == DropReason::Age)
+            .count();
+        assert!(age_drops >= 5, "expected ≥5 Age drops, got {age_drops}");
+    }
+
+    #[test]
+    fn compacting_stats_extras_populated() {
+        // CompactingManager's stats override fills `compacted` and
+        // `compaction_ratio`. With no history drops, compacted=0 and ratio=1.0.
+        let (engine, _tmp) = test_engine();
+        let ep = EpisodeState::new("a", "hello", &engine);
+        let budget = TokenBudget::default();
+        let out = CompactingManager
+            .assemble(&ep, &budget, &HeuristicTokenCounter)
+            .expect("assemble");
+        let stats = CompactingManager.stats(&out, &budget);
+        assert_eq!(stats.compacted, Some(0), "no history drops ⇒ compacted=0");
+        assert_eq!(stats.compaction_ratio, Some(1.0), "no compaction ⇒ ratio=1.0");
     }
 }

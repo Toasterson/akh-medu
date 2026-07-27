@@ -52,8 +52,9 @@ pub use retention::{ProvenanceRetentionClassifier, Retention};
 pub use virtual_ctx::VirtualContextManager;
 pub use safety::SafetyEnforced;
 pub use types::{
-    AssembledContext, ContextSection, DroppedSpan, EpisodeState, StrategyId, TokenBudget,
-    TurnOutcome, DEFAULT_CONTEXT_WINDOW, DEFAULT_RESERVED_OUTPUT,
+    AssembledContext, ContextSection, ContextWindowStats, DeferredReason, DeferredToolGroup,
+    DroppedSpan, DropReason, EpisodeState, SectionStats, StrategyId, TokenBudget, TurnOutcome,
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_RESERVED_OUTPUT,
 };
 
 #[cfg(feature = "candle-backend")]

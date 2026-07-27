@@ -22,7 +22,9 @@ use super::compacting::assemble_with_cap;
 use super::core_memory;
 use super::error::ContextResult;
 use super::manager::{ContextManager, TokenCounter};
-use super::types::{AssembledContext, ContextSection, EpisodeState, StrategyId, TokenBudget};
+use super::types::{
+    AssembledContext, ContextSection, ContextWindowStats, EpisodeState, StrategyId, TokenBudget,
+};
 
 /// Recall-tier history tail kept verbatim (the model pages older context in via
 /// `archival_search` / `memory_recall` instead of carrying it in every prompt).
@@ -83,6 +85,47 @@ impl ContextManager for VirtualContextManager {
                 .or_insert(core_tokens);
         }
         Ok(assembled)
+    }
+
+    /// Override to fill the virtual-context extras (ADR 065 D12). Today there
+    /// is no live VSA paging in the assembler — the model pages archival
+    /// context in via the `archival_search` tool, which runs *during* the
+    /// turn, not in `assemble`. So all three VSA extras are `Some(0)` (the
+    /// manager *is* a virtual one, just not yet paging at assemble-time);
+    /// the compacting extras inherit from the shared `assemble_with_cap`.
+    fn stats(&self, ctx: &AssembledContext, budget: &TokenBudget) -> ContextWindowStats {
+        let mut s = super::manager::default_stats(self.id(), ctx, budget, 0);
+        // Inherit the compacting-style extras (this manager delegates to
+        // assemble_with_cap, so history compaction is reported the same way).
+        let compacted = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .count();
+        s.compacted = Some(compacted);
+        let hist_kept = ctx
+            .section_tokens
+            .get(&ContextSection::History)
+            .copied()
+            .unwrap_or(0);
+        let hist_dropped: usize = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .map(|d| d.text.len().div_ceil(4))
+            .sum();
+        let hist_in = hist_kept + hist_dropped;
+        s.compaction_ratio = Some(if hist_in == 0 {
+            1.0
+        } else {
+            (hist_kept as f32) / (hist_in as f32)
+        });
+        // VSA extras — reserved for the future paging work; present so the
+        // panel can tell this is a virtual manager.
+        s.virtual_referenced = Some(0);
+        s.physical_materialized = Some(0);
+        s.vsa_hit_rate = Some(0.0);
+        s
     }
 }
 

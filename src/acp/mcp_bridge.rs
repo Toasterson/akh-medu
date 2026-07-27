@@ -134,6 +134,7 @@ mod proxy {
         params: Vec<ProxyParam>,
         url: String,
         auth_header: Option<String>,
+        server: String,
     }
 
     /// Sanitize a server name into the `mcp__server__tool` namespace segment.
@@ -186,6 +187,7 @@ mod proxy {
                 params,
                 url: url.to_string(),
                 auth_header: auth_header.map(String::from),
+                server: server.to_string(),
             })
         }
 
@@ -270,7 +272,7 @@ mod proxy {
                     description: "Calls a client-provided MCP server over the network.".into(),
                     shadow_triggers: vec!["mcp".into(), "remote".into(), "external".into()],
                 },
-                source: ToolSource::Native,
+                source: ToolSource::Mcp { server: self.server.clone() },
             }
         }
     }

@@ -276,6 +276,21 @@ pub struct Agent {
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
     pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
+    /// Last [`ContextWindowStats`] committed by `run_agentic_turn`, behind its
+    /// own `Mutex` so the ACP `_akh/usage` handler can read it **without** the
+    /// agent lock (Phase 44m, ADR 065 D12.1). `None` until the first turn.
+    /// Cloned as an `Arc` and shared with the ACP layer on first read, so a
+    /// busy agent lock returns the previous value with `"stale": true` rather
+    /// than an empty panel.
+    pub(crate) last_context_stats:
+        std::sync::Arc<std::sync::Mutex<Option<super::context::ContextWindowStats>>>,
+    /// Last deferred-tool set (ADR 089 M1 retrieval-scoping leftovers), cached
+    /// the same way as [`last_context_stats`] so the ACP `_akh/usage` panel
+    /// can show "loaded-but-deferred" tiers without the agent lock. Each entry
+    /// is `(label, tokens, count, reason)`. Empty until the first turn.
+    pub(crate) last_deferred_tools: std::sync::Arc<
+        std::sync::Mutex<Vec<super::context::DeferredToolGroup>>,
+    >,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
@@ -873,6 +888,8 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             context_manager: None,
+            last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
             delegation_manager,
             capture_transcripts: true,
@@ -1729,8 +1746,9 @@ impl Agent {
 
     pub(crate) fn sync_live_tools(&self) {
         use super::tool_manifest::ToolSource;
-        // Coarse origin tag for display. MCP proxies carry `ToolSource::Native`
-        // (they're compiled `McpProxyTool`s), so key off the `mcp__` name prefix.
+        // Coarse origin tag for display. A `ToolSource::Mcp { .. }` manifest is
+        // the primary signal; the `mcp__` name prefix remains a fallback for
+        // proxies that were registered before the Mcp variant existed.
         fn origin(name: &str, source: &ToolSource) -> String {
             if name.starts_with("mcp__") {
                 return "mcp".into();
@@ -1739,6 +1757,7 @@ impl Agent {
                 ToolSource::Native => "native".into(),
                 ToolSource::Wasm { .. } => "wasm".into(),
                 ToolSource::Cli { .. } => "cli".into(),
+                ToolSource::Mcp { .. } => "mcp".into(),
             }
         }
         let tools = self
@@ -4056,6 +4075,8 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             context_manager: None,
+            last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
             delegation_manager,
             capture_transcripts: true,
