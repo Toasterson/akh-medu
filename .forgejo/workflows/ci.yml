@@ -106,6 +106,8 @@ jobs:
           if [ "${CI_DEBUG:-0}" = "1" ]; then
             echo "=== CI_DEBUG env ===" && env | sort
             echo "=== git log --oneline -5 ===" && git log --oneline -5 || true
+            echo "=== docker info ===" && docker info || true
+            echo "=== docker images ===" && docker images || true
           fi
 
           # sha tag always gets pushed — this is the canonical deploy artifact
@@ -157,6 +159,7 @@ jobs:
           if [ "${CI_DEBUG:-0}" = "1" ]; then
             echo "=== CI_DEBUG env ===" && env | sort
             echo "=== git log --oneline -5 ===" && git log --oneline -5 || true
+            echo "=== helm version ===" && helm version --short || true
           fi
 
           # NO mid-script `exit 0` anywhere in this step: the Solstice runner
