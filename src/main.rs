@@ -1142,14 +1142,10 @@ fn main() -> Result<()> {
     }))
     .ok(); // Ignore error if hook already set (e.g., in tests)
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // Default: show akh-medu info, silence noisy deps (egg, hnsw).
-                tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
-            }),
-        )
-        .init();
+    // Phase 38i: OTLP tracing skeleton — installs OTLP exporter + sampler
+    // when OTEL_EXPORTER_OTLP_ENDPOINT is set, else plain fmt(). The guard
+    // flushes the batch span processor on drop; hold until process exit.
+    let _tracer_guard = akh_medu::observability::init_tracing("akh");
 
     let cli = Cli::parse();
 

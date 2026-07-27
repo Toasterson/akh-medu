@@ -75,7 +75,9 @@ pub mod reason;
 pub mod reasoning;
 pub mod registry;
 /// Phase 38i: OTLP tracing skeleton — `init_tracing` helper + `TracerShutdown`.
-#[cfg(feature = "tracing-otel")]
+/// The module is always available; the OTLP exporter path is gated behind the
+/// `tracing-otel` feature inside the module so the lean `akh` CLI binary can
+/// still call `init_tracing` and get the plain-`fmt` fallback.
 pub mod observability;
 pub mod rule_macro;
 /// ADR 081: schema packs — the installable type system for Akh memory
