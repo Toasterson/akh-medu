@@ -65,7 +65,7 @@ use crate::bootstrap::identity::{
     ritual_of_awakening, CharacterKnowledge, CultureOrigin, IdentityError,
 };
 use crate::bootstrap::purpose::{DreyfusLevel, EntityType, PurposeModel};
-use crate::chat::ChatProcessor;
+use crate::chat::{ChatProcessor, SessionContext};
 use crate::engine::Engine;
 use crate::message::{AkhMessage, MessageSink};
 
@@ -348,11 +348,18 @@ pub struct AkhAcpAgent {
     /// `Tool`s from these cached descriptors with zero network I/O instead of
     /// re-running `initialize` + `tools/list` against each pushed server.
     session_mcp_tools: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>>,
+    /// Per-session cognitive context (KG cache, ELIZA router, discourse
+    /// trajectory). One [`SessionContext`] per ACP session so per-session
+    /// cognitive state doesn't bleed across sessions sharing the workspace's
+    /// single `Arc<Mutex<ChatProcessor>>`. Evicted alongside `sessions`,
+    /// `session_mcp`, and `session_mcp_tools` in [`Self::track_new_session`].
+    session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
     /// Insertion-ordered session ids (oldest first), paired with `sessions`,
-    /// `session_mcp`, and `session_mcp_tools` purely to pick an eviction
-    /// victim once [`MAX_TRACKED_SESSIONS`] is exceeded — those three maps are
-    /// otherwise insert-only and would retain client-pushed bearer tokens for
-    /// the daemon's entire lifetime.
+    /// `session_mcp`, `session_mcp_tools`, and `session_contexts` purely to
+    /// pick an eviction victim once [`MAX_TRACKED_SESSIONS`] is exceeded —
+    /// those four maps are otherwise insert-only and would retain
+    /// client-pushed bearer tokens and per-session cognitive state for the
+    /// daemon's entire lifetime.
     session_order: Arc<Mutex<std::collections::VecDeque<String>>>,
     /// Agent name advertised during `initialize`.
     name: String,
@@ -403,9 +410,9 @@ pub struct AkhAcpAgent {
 const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Cap on tracked ACP sessions (`sessions` + `session_mcp` +
-/// `session_mcp_tools`). Once exceeded, the oldest session's state (including
-/// any client-pushed bearer token) is evicted at `session/new` — see
-/// [`AkhAcpAgent::track_new_session`].
+/// `session_mcp_tools` + `session_contexts`). Once exceeded, the oldest
+/// session's state (including any client-pushed bearer token) is evicted at
+/// `session/new` — see [`AkhAcpAgent::track_new_session`].
 const MAX_TRACKED_SESSIONS: usize = 256;
 
 /// The prompt-turn idle watchdog from `AKH_TURN_IDLE_TIMEOUT_SECS` (seconds;
@@ -438,6 +445,7 @@ impl AkhAcpAgent {
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
@@ -463,6 +471,7 @@ impl AkhAcpAgent {
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
@@ -558,13 +567,15 @@ impl AkhAcpAgent {
     /// tracked session's state once [`MAX_TRACKED_SESSIONS`] is exceeded.
     ///
     /// `sessions`, `session_mcp` (which holds any client-pushed bearer
-    /// tokens), and `session_mcp_tools` are otherwise append-only with no
-    /// session-end signal in ACP, so without this a long-lived daemon would
-    /// retain every client's credentials and discovered tool set forever.
-    /// Eviction is true LRU-by-use (see [`Self::touch_session`], called from
-    /// [`Self::session_workspace`] on every prompt): a session only becomes
-    /// the eviction victim once it is both the oldest tracked *and* has gone
-    /// unused since every other tracked session's last use.
+    /// tokens), `session_mcp_tools`, and `session_contexts` (per-session
+    /// cognitive state) are otherwise append-only with no session-end signal
+    /// in ACP, so without this a long-lived daemon would retain every
+    /// client's credentials, discovered tool set, and per-session cognitive
+    /// state forever — an unbounded memory leak. Eviction is true LRU-by-use
+    /// (see [`Self::touch_session`], called from [`Self::session_workspace`]
+    /// on every prompt): a session only becomes the eviction victim once it
+    /// is both the oldest tracked *and* has gone unused since every other
+    /// tracked session's last use.
     fn track_new_session(&self, session_id: &str) {
         let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
         order.push_back(session_id.to_string());
@@ -579,6 +590,10 @@ impl AkhAcpAgent {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
                 self.session_mcp_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_contexts
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
@@ -696,6 +711,7 @@ impl AkhAcpAgent {
         engine: Arc<Engine>,
         agent: Arc<Mutex<Agent>>,
         processor: Arc<Mutex<ChatProcessor>>,
+        session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
         agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
@@ -785,7 +801,19 @@ impl AkhAcpAgent {
                 .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel, is_dispatch)
                 .is_none()
             {
-                let out = processor.process_input(&text, guard.agent, &engine);
+                // Get or create this session's cognitive context. Held across
+                // `process_input` so per-session state (kg_cache, eliza,
+                // trajectory) is mutated in place — no clone-and-writeback
+                // that would let concurrent turns for the same session lose
+                // updates. Inserted on first use; evicted with the session by
+                // `track_new_session`.
+                let mut ctx_map = session_contexts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let ctx = ctx_map
+                    .entry(session_id.clone())
+                    .or_default();
+                let out = processor.process_input(ctx, &text, guard.agent, &engine);
                 sink.emit_batch(&out);
             }
             // `guard` drops here (normal return *or* unwind), unregistering
@@ -3317,6 +3345,7 @@ fn build_connection(
                             engine,
                             agent,
                             processor,
+                            me.session_contexts.clone(),
                             ws.clone(),
                             text,
                             Some(asker),
@@ -4359,6 +4388,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(victim.clone(), "some-workspace".into());
+        me.session_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(victim.clone(), SessionContext::new());
 
         // Push exactly enough new sessions to trip the cap by one eviction.
         for i in 0..MAX_TRACKED_SESSIONS {
@@ -4376,6 +4409,13 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .contains_key(&victim),
             "the oldest session's recorded workspace binding must be evicted"
+        );
+        assert!(
+            !me.session_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&victim),
+            "the oldest session's SessionContext must be evicted, not leaked"
         );
     }
 

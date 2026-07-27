@@ -17,7 +17,7 @@ use akh_medu::agent::conversation::ground_query;
 use akh_medu::agent::response_strategy::QueryType;
 use akh_medu::agent::trajectory::DiscourseTrajectory;
 use akh_medu::agent::{Agent, AgentConfig};
-use akh_medu::chat::ChatProcessor;
+use akh_medu::chat::{ChatProcessor, SessionContext};
 use akh_medu::compartment::psyche::{ArchetypeWeights, OceanProfile, Psyche};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
@@ -200,7 +200,7 @@ fn chat_response(input: &str, psyche_cfg: Psyche) -> String {
     processor.set_create_goal(false);
     processor.set_communicative(true);
 
-    let msgs = processor.process_input(input, &mut agent, &engine);
+    let msgs = processor.process_input(&mut SessionContext::new(), input, &mut agent, &engine);
     msgs.iter()
         .filter_map(|m| match m {
             AkhMessage::Narrative { text, .. } => Some(text.clone()),
@@ -250,7 +250,7 @@ fn communicative_flag_off_restores_plain_grounding() {
     processor.set_create_goal(false);
     processor.set_communicative(false);
 
-    let msgs = processor.process_input("What is a dog?", &mut agent, &engine);
+    let msgs = processor.process_input(&mut SessionContext::new(), "What is a dog?", &mut agent, &engine);
     let text: String = msgs
         .iter()
         .filter_map(|m| match m {

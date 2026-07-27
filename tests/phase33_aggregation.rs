@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use akh_medu::agent::{Agent, AgentConfig};
-use akh_medu::chat::ChatProcessor;
+use akh_medu::chat::{ChatProcessor, SessionContext};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::style_transform::{CommunicationRegister, apply_register};
 use akh_medu::grammar::{
@@ -239,7 +239,7 @@ fn chat_response(input: &str, communicative: bool) -> String {
     processor.set_create_goal(false);
     processor.set_communicative(communicative);
 
-    let msgs = processor.process_input(input, &mut agent, &engine);
+    let msgs = processor.process_input(&mut SessionContext::new(), input, &mut agent, &engine);
     msgs.iter()
         .filter_map(|m| match m {
             AkhMessage::Narrative { text, .. } => Some(text.clone()),

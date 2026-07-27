@@ -300,10 +300,12 @@ fn kg_context_extraction_finds_ennead_facts() {
     let arc_engine = std::sync::Arc::new(engine);
 
     let nlu = NluPipeline::new();
-    let processor = ChatProcessor::new(&*arc_engine, nlu);
+    let _processor = ChatProcessor::new(&*arc_engine, nlu);
 
     // ELIZA should classify this as KG-grounded.
-    let routing = processor.eliza().classify("What is the Ennead?");
+    let routing = akh_medu::chat::SessionContext::new()
+        .eliza
+        .classify("What is the Ennead?");
     assert!(
         matches!(routing, ElizaRouting::KgGrounded { .. }),
         "expected KgGrounded, got {routing:?}"
