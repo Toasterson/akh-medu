@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::error::{ContextError, ContextResult};
 use super::manager::{ContextManager, TokenCounter};
 use super::retention::{ProvenanceRetentionClassifier, Retention};
-use super::types::{AssembledContext, EpisodeState, StrategyId, TokenBudget, TurnOutcome};
+use super::types::{
+    AssembledContext, ContextWindowStats, EpisodeState, StrategyId, TokenBudget, TurnOutcome,
+};
 
 /// Decorates a [`ContextManager`], asserting no `PinnedSafety` span was evicted.
 ///
@@ -71,6 +73,15 @@ impl<M: ContextManager> ContextManager for SafetyEnforced<M> {
 
     fn commit(&mut self, outcome: &TurnOutcome) {
         self.inner.commit(outcome);
+    }
+
+    fn stats(&self, ctx: &AssembledContext, budget: &TokenBudget) -> ContextWindowStats {
+        // Surface the decorator's own violation counter so a caller reading
+        // stats off the *decorated* manager sees the real number (the inner
+        // manager's default stats() would report 0).
+        let mut s = self.inner.stats(ctx, budget);
+        s.safety_violations = self.violations.load(Ordering::Relaxed) as usize;
+        s
     }
 }
 

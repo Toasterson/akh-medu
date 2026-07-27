@@ -76,6 +76,12 @@ pub enum ToolSource {
         binary_path: String,
         skill_id: Option<String>,
     },
+    /// A proxied tool from a remote MCP server (Phase 44m, ADR 065 D12.1). The
+    /// `server` is the session-registered server name, so the ACP `_akh/usage`
+    /// panel can group MCP tools by server (`MCP tools` → per-server children)
+    /// by reading the manifest rather than guessing from a `mcp__{server}__{tool}`
+    /// name prefix.
+    Mcp { server: String },
 }
 
 /// Complete manifest describing a tool's interface and metadata.

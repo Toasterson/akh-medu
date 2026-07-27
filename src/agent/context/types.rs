@@ -220,24 +220,204 @@ impl Default for TokenBudget {
     }
 }
 
+/// Why a span was evicted from the working context (Phase 44m, ADR 065 D12).
+///
+/// Per-span, not per-section: `CompactingManager` can drop one section's spans
+/// for two different reasons in a single turn (e.g. an atomic block that did
+/// not fit the budget ⇒ `Budget`, plus an older history turn aged out by the
+/// tail cap ⇒ `Age`). The per-section dominant reason is derived as a histogram
+/// in [`crate::agent::context::manager::ContextWindowStats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DropReason {
+    /// Evicted because the section did not fit the token budget (the allocator
+    /// denied it, whole or in part). The common reason under pressure.
+    Budget,
+    /// Evicted because the retention classifier refused it (a `Recoverable`
+    /// span that recall can bring back is preferred over a `PinnedSafety`
+    /// span — but the classifier itself never drops; this reason records the
+    /// rare case the manager chose to drop *because* the retention class
+    /// permitted it). Today no shipped manager emits this; it is reserved.
+    Retention,
+    /// Evicted by an age / tail cap (e.g. `PassiveManager`'s `tail`, which
+    /// leaves older turns to recall rather than carrying them verbatim).
+    Age,
+    /// Evicted by a virtual-context / VSA policy (the model manages its own
+    /// context window and chose to page a span out of the resident tier).
+    /// Reserved for `VirtualContextManager`'s future paging work; today it
+    /// does not emit this either.
+    Vsa,
+}
+
+impl DropReason {
+    /// Stable lower-case label for telemetry and the ACP surface.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DropReason::Budget => "budget",
+            DropReason::Retention => "retention",
+            DropReason::Age => "age",
+            DropReason::Vsa => "vsa",
+        }
+    }
+}
+
 /// A unit of content the assembler considered but did **not** include, with its
 /// anchoring symbol (if any) so retention/safety (44f) can classify it. A drop
 /// of a `PinnedSafety` span is a hard error.
+///
+/// `reason` (Phase 44m, ADR 065 D12) is per-span; the dominant reason per
+/// section is derived as a histogram in [`ContextWindowStats::sections`]. See
+/// ADR 065 open question 5 for the per-span-vs-dominant decision.
 #[derive(Debug, Clone)]
 pub struct DroppedSpan {
     pub section: ContextSection,
     pub text: String,
     pub anchor: Option<SymbolId>,
+    /// Why this span was evicted. Defaults to [`DropReason::Budget`] for
+    /// backward compatibility with callers that did not specify (the common
+    /// reason under pressure); set explicitly by managers that age-out or
+    /// VSA-page spans.
+    pub reason: DropReason,
 }
 
 impl DroppedSpan {
-    pub fn new(section: ContextSection, text: impl Into<String>, anchor: Option<SymbolId>) -> Self {
+    /// Construct a dropped span with an explicit [`DropReason`].
+    pub fn with_reason(
+        section: ContextSection,
+        text: impl Into<String>,
+        anchor: Option<SymbolId>,
+        reason: DropReason,
+    ) -> Self {
         Self {
             section,
             text: text.into(),
             anchor,
+            reason,
         }
     }
+
+    /// Construct a dropped span attributed to the budget (the common reason).
+    /// Prefer [`DroppedSpan::with_reason`] when the manager knows the actual
+    /// reason (age / retention / VSA).
+    pub fn new(section: ContextSection, text: impl Into<String>, anchor: Option<SymbolId>) -> Self {
+        Self::with_reason(section, text, anchor, DropReason::Budget)
+    }
+}
+
+/// Per-section accounting for one assembled turn (Phase 44m, ADR 065 D12).
+///
+/// `tokens_in` is what the section *asked for* (the cost of the candidate span
+/// before the allocator ran); `tokens_kept` is what survived; `tokens_dropped`
+/// is `tokens_in - tokens_kept`. `drop_reason` is the **dominant** reason for
+/// the section (the mode of the per-span `DroppedSpan::reason` histogram, with
+/// ties broken in declaration order `Budget > Retention > Age > Vsa`); `None`
+/// when nothing was dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionStats {
+    pub section: ContextSection,
+    pub tokens_in: usize,
+    pub tokens_kept: usize,
+    pub tokens_dropped: usize,
+    pub drop_reason: Option<DropReason>,
+}
+
+/// One deferred-tool group for the ACP `_akh/usage` panel (Phase 44m, ADR 065
+/// D12.1). A tool is "deferred" when it was in `full_catalog` (the pre-
+/// retrieval-scoping catalog) but was NOT in the `tools` set actually offered
+/// this round — ADR 089 M1 narrowed it. The reason distinguishes
+/// `retrieval_scoped` (`AKH_AGENT_TOOL_RETRIEVAL`) from `capped`
+/// (`AKH_AGENT_MAX_TOOLS`) from `unadvertised` (`ToolRegistry::unadvertised`).
+/// Deferred rows carry tokens and a count but **no percent** — they are not in
+/// the window.
+#[derive(Debug, Clone)]
+pub struct DeferredToolGroup {
+    /// Row id: `tools` (System tools / Skills) or `mcp` (MCP tools).
+    pub id: &'static str,
+    /// Human-readable label for the row.
+    pub label: String,
+    /// Total tokens of the deferred tools in this group (heuristic estimate).
+    pub tokens: usize,
+    /// Number of deferred tools in this group.
+    pub count: usize,
+    /// Why these tools were deferred.
+    pub reason: DeferredReason,
+}
+
+/// Why a tool was not offered this turn (Phase 44m, ADR 065 D12.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeferredReason {
+    /// `AKH_AGENT_TOOL_RETRIEVAL=<k>` kept only the top-K relevant tools.
+    RetrievalScoped,
+    /// `AKH_AGENT_MAX_TOOLS=<cap>` truncated the catalog (legacy blind cap).
+    Capped,
+    /// `ToolRegistry::unadvertised` hid the tool from the catalog entirely.
+    Unadvertised,
+}
+
+impl DeferredReason {
+    /// Stable label for the ACP surface.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeferredReason::RetrievalScoped => "retrieval_scoped",
+            DeferredReason::Capped => "capped",
+            DeferredReason::Unadvertised => "unadvertised",
+        }
+    }
+}
+
+/// Normalized context-window statistics for one assembled turn (Phase 44m,
+/// ADR 065 D12). Every [`ContextManager`](super::manager::ContextManager)
+/// reports the same shape so the 44j A/B harness and the `_akh/usage` panel can
+/// compare strategies apples-to-apples.
+///
+/// Strategy extras are all `Option` so a new manager is never a breaking
+/// change: a caller that doesn't know about `compacted` just sees `None`.
+#[derive(Debug, Clone)]
+pub struct ContextWindowStats {
+    /// Which strategy produced this account.
+    pub strategy: StrategyId,
+    /// The model's full context window, in tokens.
+    pub window_total: usize,
+    /// Tokens reserved for the model's response.
+    pub reserved: usize,
+    /// `window_total - reserved` — what the assembler may spend.
+    pub available: usize,
+    /// `tokens_kept / available` (0.0–1.0, NaN-free; >1.0 clamped if a manager
+    /// over-spent, which is itself a signal). 1.0 = the window is full.
+    pub budget_pressure: f32,
+    /// One entry per section the manager considered, in `ContextSection`'s
+    /// declaration order. Sections the manager never touched are omitted.
+    pub sections: Vec<SectionStats>,
+    /// How many spans the [`SafetyEnforced`](super::safety::SafetyEnforced)
+    /// guard would have pinned (anchors a decision / safety veto / dangerous
+    /// tool execution) — counted whether or not they were actually dropped.
+    pub provenance_pinned_count: usize,
+    /// How many `PinnedSafety` spans the guard caught being evicted. Must be 0
+    /// in a healthy backend; >0 means the manager tried and the guard refused.
+    pub safety_violations: usize,
+    /// D10 KV-cache token count (Candle-only). `None` until the Candle-in-loop
+    /// work lands a real `KvCachePolicy`.
+    pub kv_cache_tokens: Option<usize>,
+
+    // ── CompactingManager extras ──
+    /// Number of history turns that were *compacted* (summarized / dropped
+    /// wholesale) rather than kept verbatim. `None` for managers that do not
+    /// compact.
+    pub compacted: Option<usize>,
+    /// `kept_tokens / requested_tokens` for the compactable section(s) —
+    /// 0.0 means everything was compacted away, 1.0 nothing was. `None` for
+    /// managers that do not compact.
+    pub compaction_ratio: Option<f32>,
+
+    // ── VirtualContextManager extras ──
+    /// How many virtual spans the model *referenced* this turn (paged in by
+    /// name). `None` for non-virtual managers.
+    pub virtual_referenced: Option<usize>,
+    /// How many virtual spans were actually *materialized* into the window
+    /// (vs. just referenced by handle). `None` for non-virtual managers.
+    pub physical_materialized: Option<usize>,
+    /// `virtual_referenced / physical_materialized` hit rate (0.0–1.0).
+    /// `None` for non-virtual managers.
+    pub vsa_hit_rate: Option<f32>,
 }
 
 /// The result of assembling context for one turn.

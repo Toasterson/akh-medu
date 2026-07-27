@@ -354,6 +354,20 @@ impl Agent {
             tools.truncate(cap);
         }
 
+        // Phase 44m (ADR 065 D12.1): capture the deferred-tool set — what was
+        // in `full_catalog` but NOT offered this round — so the ACP `_akh/usage`
+        // panel can show the "loaded-but-deferred" tier. Group by tool origin
+        // (`System tools` / `MCP tools`) and reason. Cached outside the agent
+        // lock the same way `last_context_stats` is, so a busy turn does not
+        // block a sidebar poll.
+        {
+            let deferred_groups =
+                compute_deferred_groups(&full_catalog, &tools, &self.tool_registry);
+            if let Ok(mut slot) = self.last_deferred_tools.lock() {
+                *slot = deferred_groups;
+            }
+        }
+
         // Record the operator turn before assembling, so the conversation's last
         // turn IS the current prompt — a history-aware ContextManager renders the
         // turns directly (the agent turn is recorded at the end). The symbolic
@@ -410,8 +424,16 @@ impl Agent {
                 self.context_manager.as_deref().unwrap_or(&PASS_THROUGH);
             match manager.assemble(&episode, &budget, &counter) {
                 Ok(assembled) => {
+                    // Phase 44m (ADR 065 D12): cache the normalized stats
+                    // outside the agent lock so the ACP `_akh/usage` panel can
+                    // read them without contending for this `&mut self` — a
+                    // busy turn returns the previous value with `stale: true`.
+                    let stats = manager.stats(&assembled, &budget);
+                    if let Ok(mut slot) = self.last_context_stats.lock() {
+                        *slot = Some(stats);
+                    }
                     super::context::budget::record_assembly_telemetry(
-                        &manager.id(),
+                        manager,
                         &assembled,
                         &budget,
                         counter.label(),
@@ -940,6 +962,118 @@ fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
                         "required": required,
                     }
                 }
+            })
+        })
+        .collect()
+}
+
+/// Phase 44m (ADR 065 D12.1): group the deferred-tool set — what was in
+/// `full_catalog` but NOT in `tools` (the offered set) — by origin and reason
+/// for the ACP `_akh/usage` panel. The reason is inferred from which env var
+/// was active (call site): `AKH_AGENT_TOOL_RETRIEVAL` ⇒ `retrieval_scoped`,
+/// `AKH_AGENT_MAX_TOOLS` ⇒ `capped`. `unadvertised` tools are not in
+/// `full_catalog` (they're filtered upstream by `list_advertised_manifests`),
+/// so they never appear here — the panel reports them as zero-count rather
+/// than a misleading positive count.
+fn compute_deferred_groups(
+    full_catalog: &[Value],
+    offered: &[Value],
+    registry: &super::tool::ToolRegistry,
+) -> Vec<super::context::DeferredToolGroup> {
+    use super::context::{DeferredReason, DeferredToolGroup};
+    use super::tool_manifest::ToolSource;
+    use std::collections::HashSet;
+
+    let offered_names: HashSet<String> = offered
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+        .collect();
+
+    // Reason: which env var was active at the call site? (Both can't be
+    // active — the call site is if/else.) Neither active ⇒ no deferred set,
+    // but the caller still calls us; return empty.
+    let reason = if std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|k| k < full_catalog.len())
+        .unwrap_or(false)
+    {
+        DeferredReason::RetrievalScoped
+    } else if std::env::var("AKH_AGENT_MAX_TOOLS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|cap| cap < full_catalog.len())
+        .unwrap_or(false)
+    {
+        DeferredReason::Capped
+    } else {
+        // No scoping was active — `full_catalog == offered`. Nothing deferred.
+        return Vec::new();
+    };
+
+    // Per-manifest origin lookup; fall back to the `mcp__` name prefix for
+    // proxies registered before the `ToolSource::Mcp` variant existed.
+    let manifest_origin = |name: &str| -> &'static str {
+        if let Some(m) = registry.manifest(name) {
+            return match &m.source {
+                ToolSource::Native => "system",
+                ToolSource::Wasm { .. } | ToolSource::Cli { .. } => "skills",
+                ToolSource::Mcp { .. } => "mcp",
+            };
+        }
+        if name.starts_with("mcp__") {
+            "mcp"
+        } else {
+            "system"
+        }
+    };
+
+    let mut groups: std::collections::HashMap<&'static str, (usize, usize)> =
+        std::collections::HashMap::new();
+    for tool in full_catalog {
+        let name = match tool["function"]["name"].as_str() {
+            Some(n) => n,
+            None => continue,
+        };
+        if offered_names.contains(name) {
+            continue;
+        }
+        let origin = manifest_origin(name);
+        let tokens = tool.to_string().len().div_ceil(4); // heuristic, matches the budget counter
+        let (t, c) = groups.entry(origin).or_insert((0, 0));
+        *t += tokens;
+        *c += 1;
+    }
+
+    let label_for = |origin: &str| -> &str {
+        match origin {
+            "system" => "System tools (deferred)",
+            "skills" => "Skills (deferred)",
+            "mcp" => "MCP tools (deferred)",
+            _ => "Deferred",
+        }
+    };
+    let id_for = |origin: &str| -> &'static str {
+        match origin {
+            "system" | "skills" => "tools",
+            "mcp" => "mcp",
+            _ => "tools",
+        }
+    };
+
+    // Stable order: system, skills, mcp.
+    let mut order = ["system", "skills", "mcp"];
+    order.sort_unstable(); // alphabetical: mcp, skills, system — fine, stable
+    order
+        .into_iter()
+        .filter_map(|origin| {
+            let (tokens, count) = groups.get(origin).copied()?;
+            Some(DeferredToolGroup {
+                id: id_for(origin),
+                label: label_for(origin).to_string(),
+                tokens,
+                count,
+                reason,
             })
         })
         .collect()

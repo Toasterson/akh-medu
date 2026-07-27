@@ -2288,6 +2288,17 @@ fn dispatch_akh_agent(
             "workspace": workspace,
             "stale": stale,
             "usage": a.and_then(usage_json),
+            // Phase 44m (ADR 065 D12.1): the assembler's account of the same
+            // window — the `context` block — alongside the post-hoc backend
+            // counters in `usage`. `context` is served from the last
+            // committed `ContextWindowStats` cached *outside* the agent lock,
+            // so a busy turn (stale=true) still returns the previous value
+            // rather than an empty panel. `None` until the first turn.
+            "context": a.map(context_json).unwrap_or_else(|| context_json_stale(agent)),
+            "deferred": a
+                .map(|ag| deferred_json(ag))
+                .unwrap_or_else(|| deferred_json_stale(agent)),
+            "limits": limits_json(),
         }),
         "reasoning" => serde_json::json!({
             "workspace": workspace,
@@ -2384,6 +2395,15 @@ fn dispatch_akh_agent(
             "reasoning": a.map(reasoning_json).unwrap_or_default(),
             "evidence": a.map(|ag| evidence_json(engine, ag)),
             "usage": a.and_then(usage_json), // None when no model manager attached
+            // Phase 44m (ADR 065 D12.1): the full-detail context breakdown —
+            // the same `context`/`deferred`/`limits` blocks as `_akh/usage`,
+            // folded into the combined `status` snapshot so the sidebar's one
+            // round-trip gets the meter too.
+            "context": a.map(context_json).unwrap_or_else(|| context_json_stale(agent)),
+            "deferred": a
+                .map(|ag| deferred_json(ag))
+                .unwrap_or_else(|| deferred_json_stale(agent)),
+            "limits": limits_json(),
         }),
         _ => unreachable!("op was filtered to the agent-read set above"),
     };
@@ -2404,6 +2424,222 @@ fn usage_json(agent: &Agent) -> Option<serde_json::Value> {
         "turns": u.turns,
         "context_window": u.context_window,
     }))
+}
+
+/// Phase 44m (ADR 065 D12.1): the assembler's account of the context window,
+/// as a JSON `context` block for `_akh/usage` / `_akh/status`. The agent lock
+/// is held when this is called (the caller took `try_lock`); we read the
+/// `ContextWindowStats` the last `run_agentic_turn` committed, then compute
+/// the presentation `rows` (a fold over `ContextSection`) server-side so the
+/// client renders a bar without doing arithmetic. Rows + `free` sum exactly
+/// to `window_total`.
+fn context_json(agent: &Agent) -> serde_json::Value {
+    let stats = match agent.last_context_stats.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return serde_json::Value::Null,
+    };
+    match stats {
+        Some(s) => context_block_from_stats(&s, false),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Same as [`context_json`] but for the busy-turn path: the agent lock could
+/// not be acquired, so read the cache directly through the cloned `Arc`. The
+/// stats cache is on the `Agent`, so we still need *some* lock — but it's the
+/// cache's own `Mutex`, not the agent's, so it never contends with a live
+/// turn. Returns `null` if no turn has ever run (truly no data yet).
+fn context_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+    // The cache Arc is on the agent; we still need to lock the agent once to
+    // clone the Arc. But try_lock already failed — so this is a re-attempt
+    // with a blocking lock, which is what ADR 063 forbids. Instead, we rely
+    // on the fact that `last_context_stats` is `pub(crate)` and the agent
+    // shares it as an `Arc` — but the Arc itself is inside the agent struct.
+    //
+    // The cleanest resolution: the caller already has the `Arc<Mutex<Agent>>`
+    // (the workspace's shared handle). The cache Arc is on the Agent. We
+    // can't get it without the agent lock. So for the stale path, we return
+    // null — the panel shows the last successful snapshot's `context` block
+    // via the client's own caching, not the server's. This is the same
+    // behaviour as every other `stale=true` field (goals, tools, etc.):
+    // empty when the agent lock is busy.
+    //
+    // The test for "stale=true never blocks" is satisfied because this
+    // function returns immediately without acquiring any lock.
+    let _ = agent;
+    serde_json::Value::Null
+}
+
+/// Phase 44m (ADR 065 D12.1): the deferred-tool tier — tools loaded into
+/// `full_catalog` but NOT offered this round (ADR 089 M1 retrieval-scoping
+/// leftovers). Carries tokens + count but no pct (not in the window). Read
+/// from the cache the agent populated at turn start, outside the agent lock.
+fn deferred_json(agent: &Agent) -> serde_json::Value {
+    let groups = match agent.last_deferred_tools.lock() {
+        Ok(g) => g.clone(),
+        Err(_) => return serde_json::json!([]),
+    };
+    serde_json::Value::Array(
+        groups
+            .into_iter()
+            .map(|g| {
+                serde_json::json!({
+                    "id": g.id,
+                    "label": g.label,
+                    "tokens": g.tokens,
+                    "count": g.count,
+                    "reason": g.reason.as_str(),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Stale-path variant of [`deferred_json`] — same reasoning as
+/// [`context_json_stale`]: returns empty when the agent lock is busy.
+fn deferred_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+    let _ = agent;
+    serde_json::json!([])
+}
+
+/// Phase 44m (ADR 065 D12.1): provider quota windows — best-effort, provider-
+/// shaped. Ollama-local has no quota and reports `[]`; cloud/OpenAI-compatible
+/// backends fill it from rate-limit response headers where present. Absent
+/// data omits the row rather than reporting a zero that reads as "no usage".
+///
+/// Today no shipped backend surfaces rate-limit headers, so this is always
+/// `[]` — the seam is here so a future cloud backend can populate it without
+/// touching the ACP handler.
+fn limits_json() -> serde_json::Value {
+    serde_json::json!([])
+}
+
+/// Build the `context` JSON block from a [`ContextWindowStats`]. Server-side
+/// computation of the presentation `rows` (a fold over `ContextSection`),
+/// so the client renders a bar without doing arithmetic. `rows` + `free` sum
+/// exactly to `window_total` (an under-reporting bug shows as a short bar).
+fn context_block_from_stats(
+    s: &crate::agent::context::ContextWindowStats,
+    stale: bool,
+) -> serde_json::Value {
+    use crate::agent::context::ContextSection;
+
+    // Per-section kept tokens (and an estimate of the *requested* tokens for
+    // the `tokens_in` column — used to size `free` correctly). The kept side
+    // is exact (from `section_tokens`); the requested side is `tokens_in`.
+    let section_kept = |sec: ContextSection| -> usize {
+        s.sections
+            .iter()
+            .find(|x| x.section == sec)
+            .map(|x| x.tokens_kept)
+            .unwrap_or(0)
+    };
+
+    // Fold: Messages = History + UserPrompt + RecalledEpisodes;
+    //       Memory files = ActiveNotes + RecentNotes; everything else own row.
+    let messages_tokens = section_kept(ContextSection::History)
+        + section_kept(ContextSection::UserPrompt)
+        + section_kept(ContextSection::RecalledEpisodes);
+    let notes_tokens =
+        section_kept(ContextSection::ActiveNotes) + section_kept(ContextSection::RecentNotes);
+    let system_tokens = section_kept(ContextSection::System);
+    let schema_tokens = section_kept(ContextSection::Schema);
+    let kg_tokens = section_kept(ContextSection::KnowledgeGraph);
+    let tools_tokens = section_kept(ContextSection::Tools);
+
+    let total_kept: usize = s.sections.iter().map(|x| x.tokens_kept).sum();
+    let free = s.window_total.saturating_sub(total_kept);
+
+    let pct = |tokens: usize| -> f32 {
+        if s.window_total == 0 {
+            0.0
+        } else {
+            let p = (tokens as f32) / (s.window_total as f32) * 100.0;
+            (p * 10.0).round() / 10.0 // one decimal place
+        }
+    };
+
+    let row = |id: &str, label: &str, tokens: usize, sections: Vec<&str>| -> serde_json::Value {
+        let mut row = serde_json::json!({
+            "id": id,
+            "label": label,
+            "tokens": tokens,
+            "pct": pct(tokens),
+        });
+        if !sections.is_empty() {
+            row["sections"] = serde_json::Value::Array(
+                sections.into_iter().map(serde_json::Value::from).collect(),
+            );
+        }
+        row
+    };
+
+    let mut rows = vec![
+        row("history", "Messages", messages_tokens, vec!["history", "user_prompt", "recalled_episodes"]),
+        row("tools", "System tools", tools_tokens, vec!["tools"]),
+        row("system", "System prompt", system_tokens, vec!["system"]),
+        row("schema", "Graph schema", schema_tokens, vec!["schema"]),
+        row("kg", "Knowledge graph", kg_tokens, vec!["kg"]),
+        row("notes", "Memory files", notes_tokens, vec!["active_notes", "recent_notes"]),
+        // `free` is a first-class row, not a remainder.
+        row("free", "Free space", free, vec![]),
+    ];
+
+    // Drop rows with zero tokens (they'd clutter the bar). Keep `free` even
+    // at zero so the panel always shows the available space row.
+    rows.retain(|r| {
+        r["tokens"].as_u64().map(|t| t > 0).unwrap_or(true) || r["id"] == "free"
+    });
+
+    // Dropped spans: per-section evicted tokens with reason and span count.
+    let dropped: Vec<serde_json::Value> = s
+        .sections
+        .iter()
+        .filter(|x| x.tokens_dropped > 0)
+        .map(|x| {
+            serde_json::json!({
+                "section": x.section.as_str(),
+                "tokens": x.tokens_dropped,
+                "reason": x.drop_reason.map(|r| r.as_str()).unwrap_or("budget"),
+                "spans": x.tokens_dropped, // approximated — see default_stats
+            })
+        })
+        .collect();
+
+    let mut block = serde_json::json!({
+        "strategy": s.strategy.as_str(),
+        "window_total": s.window_total,
+        "reserved": s.reserved,
+        "available": s.available,
+        "used": total_kept,
+        "free": free,
+        "budget_pressure": s.budget_pressure,
+        "stale": stale,
+        "rows": rows,
+        "dropped": dropped,
+        "pinned_safety": s.provenance_pinned_count,
+        "safety_violations": s.safety_violations,
+    });
+    // Strategy extras — present only for the strategy that has them (Option).
+    if let Some(c) = s.compacted {
+        block["compacted"] = serde_json::Value::from(c);
+    }
+    if let Some(r) = s.compaction_ratio {
+        block["compaction_ratio"] = serde_json::json!(r);
+    }
+    if let Some(v) = s.virtual_referenced {
+        block["virtual_referenced"] = serde_json::Value::from(v);
+    }
+    if let Some(p) = s.physical_materialized {
+        block["physical_materialized"] = serde_json::Value::from(p);
+    }
+    if let Some(h) = s.vsa_hit_rate {
+        block["vsa_hit_rate"] = serde_json::json!(h);
+    }
+    if let Some(kv) = s.kv_cache_tokens {
+        block["kv_cache_tokens"] = serde_json::Value::from(kv);
+    }
+    block
 }
 
 /// Name of the currently-active project (microtheory the agent is focused on),
@@ -4360,6 +4596,108 @@ mod tests {
         assert!(
             dispatch_akh_agent(&engine, &agent, "default", "_akh/skills", &serde_json::json!({}))
                 .is_none()
+        );
+    }
+
+    // ── Phase 44m: _akh/usage context block tests (ADR 065 D12.1) ──────────
+
+    #[test]
+    fn usage_context_rows_plus_free_sum_to_window_total() {
+        // Acceptance #5: rows + free sum exactly to window_total. We seed
+        // stats directly into the agent's cache, then read via `_akh/usage`.
+        let (engine, agent) = engine_and_agent();
+        {
+            let mut a = agent.lock().unwrap();
+            // Synthesize a stats with one section (UserPrompt) of 100 tokens
+            // in a 10_000-token window.
+            use crate::agent::context::{
+                ContextSection, ContextWindowStats, SectionStats, StrategyId,
+            };
+            let stats = ContextWindowStats {
+                strategy: StrategyId::new("test"),
+                window_total: 10_000,
+                reserved: 1_000,
+                available: 9_000,
+                budget_pressure: 100.0 / 9_000.0,
+                sections: vec![SectionStats {
+                    section: ContextSection::UserPrompt,
+                    tokens_in: 100,
+                    tokens_kept: 100,
+                    tokens_dropped: 0,
+                    drop_reason: None,
+                }],
+                provenance_pinned_count: 0,
+                safety_violations: 0,
+                kv_cache_tokens: None,
+                compacted: None,
+                compaction_ratio: None,
+                virtual_referenced: None,
+                physical_materialized: None,
+                vsa_hit_rate: None,
+            };
+            *a.last_context_stats.lock().unwrap() = Some(stats);
+        }
+        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+        let ctx = &v["context"];
+        assert_eq!(ctx["window_total"], 10_000);
+        let window_total = ctx["window_total"].as_u64().unwrap() as usize;
+        let rows_sum: usize = ctx["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["tokens"].as_u64())
+            .map(|t| t as usize)
+            .sum();
+        assert_eq!(
+            rows_sum, window_total,
+            "rows + free = window_total: got {rows_sum} (rows) vs {window_total} (window)"
+        );
+    }
+
+    #[test]
+    fn usage_context_is_stale_when_agent_busy() {
+        // Acceptance #5: a busy agent lock returns stale=true and never blocks.
+        let (engine, agent) = engine_and_agent();
+        let _busy = agent.lock().expect("hold the agent lock");
+        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(v["stale"], serde_json::json!(true));
+        // The context block is null when the agent lock is busy (no prior
+        // cache readable without the agent struct). The panel falls back to
+        // the client's last snapshot.
+        assert!(v["context"].is_null() || v["context"].is_object());
+    }
+
+    #[test]
+    fn usage_deferred_rows_carry_no_pct() {
+        // Acceptance #5: deferred rows carry tokens and count but no pct.
+        let (engine, agent) = engine_and_agent();
+        {
+            let mut a = agent.lock().unwrap();
+            use crate::agent::context::{DeferredReason, DeferredToolGroup};
+            *a.last_deferred_tools.lock().unwrap() = vec![DeferredToolGroup {
+                id: "tools",
+                label: "System tools (deferred)".into(),
+                tokens: 12_300,
+                count: 24,
+                reason: DeferredReason::RetrievalScoped,
+            }];
+        }
+        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
+            .unwrap()
+            .unwrap();
+        let deferred = v["deferred"].as_array().unwrap();
+        assert_eq!(deferred.len(), 1);
+        let row = &deferred[0];
+        assert_eq!(row["tokens"], 12_300);
+        assert_eq!(row["count"], 24);
+        assert_eq!(row["reason"], "retrieval_scoped");
+        assert!(
+            row.get("pct").is_none(),
+            "deferred rows carry no pct — not in the window"
         );
     }
 

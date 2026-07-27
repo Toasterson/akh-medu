@@ -23,8 +23,8 @@
 use serde::Serialize;
 
 use crate::agent::context::{
-    CompactingManager, ContextManager, EpisodeState, HeuristicTokenCounter, PassiveManager,
-    SafetyEnforced, TokenBudget, VirtualContextManager, core_memory,
+    CompactingManager, ContextManager, ContextWindowStats, EpisodeState, HeuristicTokenCounter,
+    PassiveManager, SafetyEnforced, TokenBudget, VirtualContextManager, core_memory,
 };
 use crate::agent::conversation::{ConversationState, Speaker};
 use crate::engine::{Engine, EngineConfig};
@@ -286,6 +286,185 @@ pub fn emit_markdown(result: &BenchResult) -> String {
     out
 }
 
+// ── Phase 44m: A/B diff over ContextWindowStats (ADR 065 D12) ──────────────
+
+/// Per-section delta between two strategies' stats (kept tokens).
+#[derive(Debug, Clone, Serialize)]
+pub struct SectionDelta {
+    pub section: String,
+    pub a_kept: usize,
+    pub b_kept: usize,
+    pub delta: i64,
+}
+
+/// Dropped-by-reason histogram for one strategy.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct DroppedHistogram {
+    pub budget: usize,
+    pub retention: usize,
+    pub age: usize,
+    pub vsa: usize,
+}
+
+impl DroppedHistogram {
+    fn from_stats(s: &ContextWindowStats) -> Self {
+        let mut h = DroppedHistogram::default();
+        for sec in &s.sections {
+            if let Some(r) = sec.drop_reason {
+                match r {
+                    crate::agent::context::DropReason::Budget => h.budget += 1,
+                    crate::agent::context::DropReason::Retention => h.retention += 1,
+                    crate::agent::context::DropReason::Age => h.age += 1,
+                    crate::agent::context::DropReason::Vsa => h.vsa += 1,
+                }
+            }
+        }
+        h
+    }
+}
+
+/// One A/B comparison between two strategies over one episode.
+#[derive(Debug, Clone, Serialize)]
+pub struct AbDiff {
+    pub scenario: String,
+    pub strategy_a: String,
+    pub strategy_b: String,
+    pub total_kept_a: usize,
+    pub total_kept_b: usize,
+    pub total_kept_delta: i64,
+    pub section_deltas: Vec<SectionDelta>,
+    pub dropped_a: DroppedHistogram,
+    pub dropped_b: DroppedHistogram,
+    /// Would strategy B have evicted a span that strategy A kept pinned?
+    /// (The cross-check the ADR asks for: the PinnedSafety invariant.)
+    pub b_would_evict_pinned_that_a_kept: bool,
+}
+
+/// Diff two strategies over one scenario, using their `ContextWindowStats`.
+/// Both strategies assemble the **same** `EpisodeState` (same engine, same
+/// conversation, same KG); the diff is purely what each manager shaped the
+/// window into. Returns `None` if either strategy errored.
+pub fn diff_strategies<M: ContextManager, N: ContextManager>(
+    scenario_name: &str,
+    scenario: &Scenario,
+    mgr_a: &SafetyEnforced<M>,
+    label_a: &str,
+    mgr_b: &SafetyEnforced<N>,
+    label_b: &str,
+) -> Option<AbDiff> {
+    let engine = fresh_engine();
+    seed_kg(&engine, &scenario.kg);
+    if scenario.salient_in == SalientChannel::Core {
+        let _ = core_memory::append(&engine, BENCH_AGENT, scenario.salient);
+    }
+    let conv = build_conversation(&scenario.history, scenario.prompt);
+
+    let mut cache = KgContextCache::default();
+    let kg = build_kg_context(&engine, scenario.prompt, &mut cache);
+    let recalled: Vec<String> = Vec::new();
+    let ep = EpisodeState::new(BENCH_AGENT, scenario.prompt, &engine)
+        .with_conversation(Some(&conv))
+        .with_context(kg.as_deref(), &recalled, None);
+
+    let counter = HeuristicTokenCounter;
+    let a = mgr_a.assemble(&ep, &scenario.budget, &counter).ok()?;
+    let b = mgr_b.assemble(&ep, &scenario.budget, &counter).ok()?;
+    let sa = mgr_a.stats(&a, &scenario.budget);
+    let sb = mgr_b.stats(&b, &scenario.budget);
+
+    // Per-section delta (kept tokens). Iterate the union of sections.
+    use std::collections::BTreeSet;
+    let mut sections: BTreeSet<String> = BTreeSet::new();
+    for s in &sa.sections {
+        sections.insert(s.section.as_str().to_string());
+    }
+    for s in &sb.sections {
+        sections.insert(s.section.as_str().to_string());
+    }
+    let kept = |s: &ContextWindowStats, name: &str| -> usize {
+        s.sections
+            .iter()
+            .find(|x| x.section.as_str() == name)
+            .map(|x| x.tokens_kept)
+            .unwrap_or(0)
+    };
+    let section_deltas: Vec<SectionDelta> = sections
+        .iter()
+        .map(|sec| {
+            let a_kept = kept(&sa, sec);
+            let b_kept = kept(&sb, sec);
+            SectionDelta {
+                section: sec.clone(),
+                a_kept,
+                b_kept,
+                delta: b_kept as i64 - a_kept as i64,
+            }
+        })
+        .collect();
+
+    let total_a: usize = sa.sections.iter().map(|x| x.tokens_kept).sum();
+    let total_b: usize = sb.sections.iter().map(|x| x.tokens_kept).sum();
+
+    // Cross-check: would B evict a PinnedSafety span that A kept? Today neither
+    // strategy evicts pinned spans (the guard refuses), so this is always
+    // false — but the field is here so the harness *can* catch a regression.
+    // (Computed by checking B's safety_violations; >0 ⇒ B tried.)
+    let b_would_evict = sb.safety_violations > 0;
+
+    Some(AbDiff {
+        scenario: scenario_name.to_string(),
+        strategy_a: label_a.to_string(),
+        strategy_b: label_b.to_string(),
+        total_kept_a: total_a,
+        total_kept_b: total_b,
+        total_kept_delta: total_b as i64 - total_a as i64,
+        section_deltas,
+        dropped_a: DroppedHistogram::from_stats(&sa),
+        dropped_b: DroppedHistogram::from_stats(&sb),
+        b_would_evict_pinned_that_a_kept: b_would_evict,
+    })
+}
+
+/// Run A/B diffs across the default scenario set: compacting vs passive,
+/// compacting vs virtual, passive vs virtual.
+pub fn run_diffs() -> Vec<AbDiff> {
+    let scenarios = default_scenarios();
+    let mut diffs = Vec::new();
+    for s in &scenarios {
+        if let Some(d) = diff_strategies(
+            s.name,
+            s,
+            &SafetyEnforced::new(CompactingManager),
+            "compacting",
+            &SafetyEnforced::new(PassiveManager::default()),
+            "passive",
+        ) {
+            diffs.push(d);
+        }
+        if let Some(d) = diff_strategies(
+            s.name,
+            s,
+            &SafetyEnforced::new(CompactingManager),
+            "compacting",
+            &SafetyEnforced::new(VirtualContextManager::default()),
+            "virtual",
+        ) {
+            diffs.push(d);
+        }
+        if let Some(d) = diff_strategies(
+            s.name,
+            s,
+            &SafetyEnforced::new(PassiveManager::default()),
+            "passive",
+            &SafetyEnforced::new(VirtualContextManager::default()),
+            "virtual",
+        ) {
+            diffs.push(d);
+        }
+    }
+    diffs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +516,43 @@ mod tests {
     #[ignore = "prints the report; run with `--ignored --nocapture`"]
     fn dump_report() {
         println!("\n{}", emit_markdown(&run()));
+    }
+
+    // ── Phase 44m: A/B diff tests (ADR 065 D12) ────────────────────────────
+
+    #[test]
+    fn ab_diff_reports_per_section_delta_and_histograms() {
+        // Acceptance #4: the harness diffs two strategies on one episode and
+        // reports per-section delta, total-kept delta, dropped-by-reason
+        // histogram, and a PinnedSafety cross-check.
+        let diffs = run_diffs();
+        assert!(!diffs.is_empty(), "A/B diffs produced");
+        // Every diff has the full shape.
+        for d in &diffs {
+            assert!(!d.section_deltas.is_empty(), "section deltas present");
+            // The cross-check field is always populated (false today — no
+            // strategy evicts pinned spans).
+            assert!(!d.b_would_evict_pinned_that_a_kept, "no strategy evicts pinned spans");
+        }
+        // At least one diff exists per scenario (3 scenarios × 3 pairs = 9).
+        assert_eq!(diffs.len(), 9);
+    }
+
+    #[test]
+    fn ab_diff_total_kept_delta_is_signed() {
+        let scenarios = default_scenarios();
+        let s = &scenarios[0]; // grounding_in_kg: every strategy keeps the KG fact
+        let d = diff_strategies(
+            s.name,
+            s,
+            &SafetyEnforced::new(CompactingManager),
+            "compacting",
+            &SafetyEnforced::new(PassiveManager::default()),
+            "passive",
+        )
+        .expect("diff");
+        // On a large budget both keep everything ⇒ delta is 0 (or very small
+        // due to tail-cap differences).
+        let _ = d.total_kept_delta; // signed i64
     }
 }

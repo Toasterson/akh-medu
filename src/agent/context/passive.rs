@@ -18,7 +18,9 @@
 use super::compacting::assemble_with_cap;
 use super::error::ContextResult;
 use super::manager::{ContextManager, TokenCounter};
-use super::types::{AssembledContext, EpisodeState, StrategyId, TokenBudget};
+use super::types::{
+    AssembledContext, ContextSection, ContextWindowStats, EpisodeState, StrategyId, TokenBudget,
+};
 
 /// Most-recent turns kept verbatim (one user+agent pair plus the current prompt).
 pub const DEFAULT_TAIL: usize = 3;
@@ -56,6 +58,39 @@ impl ContextManager for PassiveManager {
         counter: &dyn TokenCounter,
     ) -> ContextResult<AssembledContext> {
         assemble_with_cap(episode, budget, counter, Some(self.tail))
+    }
+
+    /// Override to fill the compacting extras the same way CompactingManager
+    /// does (the two share `assemble_with_cap`). PassiveManager's distinct
+    /// character (age-capping history to the tail) is already visible in the
+    /// per-section `drop_reason` — History drops under the tail cap are
+    /// `Age`, not `Budget`.
+    fn stats(&self, ctx: &AssembledContext, budget: &TokenBudget) -> ContextWindowStats {
+        let mut s = super::manager::default_stats(self.id(), ctx, budget, 0);
+        let compacted = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .count();
+        s.compacted = Some(compacted);
+        let hist_kept = ctx
+            .section_tokens
+            .get(&ContextSection::History)
+            .copied()
+            .unwrap_or(0);
+        let hist_dropped: usize = ctx
+            .dropped
+            .iter()
+            .filter(|d| d.section == ContextSection::History)
+            .map(|d| d.text.len().div_ceil(4))
+            .sum();
+        let hist_in = hist_kept + hist_dropped;
+        s.compaction_ratio = Some(if hist_in == 0 {
+            1.0
+        } else {
+            (hist_kept as f32) / (hist_in as f32)
+        });
+        s
     }
 }
 

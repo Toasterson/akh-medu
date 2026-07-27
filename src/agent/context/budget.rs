@@ -8,7 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use super::types::{AssembledContext, ContextSection, StrategyId, TokenBudget};
+use super::manager::ContextManager;
+use super::types::{AssembledContext, ContextSection, ContextWindowStats, TokenBudget};
 
 /// Divides a token budget across context sections by priority.
 #[derive(Debug, Clone)]
@@ -109,26 +110,38 @@ impl BudgetAllocator {
     }
 }
 
-/// Emit a structured per-turn telemetry event with token usage per section.
+/// Emit a structured per-turn telemetry event with the normalized
+/// [`ContextWindowStats`] shape (Phase 44m, ADR 065 D12). Replaces the ad-hoc
+/// per-section `tracing::debug!` line that 44a shipped; the same gating
+/// applies (no behaviour change when the stats path is off — `tracing::debug!`
+/// is itself level-gated).
 ///
-/// Answers measure-first Q2 (the real window vs. what the legacy caps sum to)
-/// from a live run: enable `akh_medu::agent::context=debug` and read the
-/// `sections` field per turn.
-pub fn record_assembly_telemetry(
-    strategy: &StrategyId,
+/// `manager.stats(ctx, budget)` does the work; this is the sink. The
+/// `counter_label` is reported so a reader can tell a `heuristic(len/4)`
+/// breakdown from a real-tokenizer one.
+pub fn record_assembly_telemetry<M: ContextManager + ?Sized>(
+    manager: &M,
     ctx: &AssembledContext,
     budget: &TokenBudget,
     counter_label: &str,
 ) {
+    let stats = manager.stats(ctx, budget);
     tracing::debug!(
-        strategy = strategy.as_str(),
+        strategy = stats.strategy.as_str(),
         counter = counter_label,
-        total_tokens = ctx.total_tokens(),
-        available = budget.available(),
-        window = budget.window,
-        dropped = ctx.dropped.len(),
+        window_total = stats.window_total,
+        reserved = stats.reserved,
+        available = stats.available,
+        budget_pressure = stats.budget_pressure,
+        total_tokens_kept = ctx.total_tokens(),
         sections = ?ctx.section_tokens,
-        "phase44: context assembled",
+        dropped = ctx.dropped.len(),
+        safety_violations = stats.safety_violations,
+        provenance_pinned_count = stats.provenance_pinned_count,
+        compacted = ?stats.compacted,
+        compaction_ratio = ?stats.compaction_ratio,
+        virtual_referenced = ?stats.virtual_referenced,
+        "phase44m: context assembled (ContextWindowStats)",
     );
 }
 

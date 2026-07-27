@@ -487,3 +487,11 @@ caps sum to; (3) **VSA vs pgvector for episodic recall** (LongMemEval/LoCoMo,
    can drop one section's spans for two different reasons in a single turn. Per-span
    reasons on `DroppedSpan` with a per-section histogram, or accept the dominant
    reason? Decide when wiring `compacting.rs`.
+
+   **Decision (2026-07-27, Phase 44m):** per-span reasons on `DroppedSpan`, with
+   the per-section `SectionStats.drop_reason` derived as the histogram mode (ties
+   broken in declaration order `Budget > Retention > Age > Vsa`). This keeps the
+   full-fidelity signal (`CompactingManager`'s history drops are `Budget` for
+   turns that lost the allocator race vs `Age` for turns outside `PassiveManager`'s
+   tail cap — both within the same `History` section in one turn) while the ACP
+   panel still gets one reason per row.
