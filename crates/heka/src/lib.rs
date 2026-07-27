@@ -1,13 +1,30 @@
-//! Heka — personal memory daemon.
+//! Heka — Postgres+pgvector evaluation store for akh-medu long-term memory.
 //!
-//! Stores timestamped "drawers" (memory entries) with MCP tool access.
-//! The `heka_contradict` tool is the flagship feature: given two drawer IDs,
-//! it runs Phase 18 ACH + Phase 17 Dempster-Shafer to determine which claim
-//! is better supported, returning Dempster-Shafer confidence intervals and
-//! a deciding-evidence chain.
+//! Named after Heka, the Egyptian god of magic and writing — the personification
+//! of the creative power of words. This crate provides the foundational schema
+//! (5 tables + HNSW index) and a `hekad migrate` CLI that creates the schema on
+//! a target PostgreSQL database.
 //!
-//! Anima WI: `019dd0c7-2557-7e40-874d-d3c99af2e239` (Phase 42i)
+//! This crate mirrors the Phase 37 Seshat pattern: SeaORM 1.x entities, raw-SQL
+//! migrations for pgvector types that SeaORM's `ColumnDef` cannot express, and a
+//! miette-diagnostic error enum.
+//!
+//! # Tables
+//!
+//! | Table                     | Purpose                                          |
+//! |---------------------------|--------------------------------------------------|
+//! | `heka_akhs`               | Registered akh instances (per-workspace identity)|
+//! | `heka_project_bindings`   | Akh ↔ project associations                        |
+//! | `heka_drawers`            | Top-level memory entries (a "drawer" of memories) |
+//! | `heka_drawer_chunks`      | Text chunks within a drawer                        |
+//! | `heka_drawer_embeddings`  | 384-dim pgvector embeddings for chunks (HNSW idx) |
+//!
+//! See `migrations/20260427_000001_init.sql` for the full DDL.
 
-pub mod drawer;
+pub mod config;
+pub mod entity;
 pub mod error;
-pub mod mcp;
+pub mod migration;
+
+pub use config::HekaConfig;
+pub use error::{HekaError, HekaResult};

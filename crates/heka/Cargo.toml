@@ -2,38 +2,46 @@
 name = "heka"
 version = "0.1.0"
 edition = "2024"
-description = "Heka memory daemon — personal memory store with MCP tool interface"
+description = "Heka — Postgres+pgvector evaluation store for akh-medu long-term memory"
 license = "GPL-3.0-only"
 repository = "https://github.com/Toasterson/akh-medu"
 
 [dependencies]
-# Workspace engine
-akh-medu = { path = "../..", default-features = false }
+# Database (SeaORM + PostgreSQL) — mirrors crates/seshat
+sea-orm = { version = "1", features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-chrono",
+    "with-json",
+] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-query = "0.32"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Types
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
 miette = { version = "7", features = ["fancy"] }
 thiserror = "2"
 
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-bincode = "1"
-
-# Storage
-redb = "2"
-
-# MCP server
-rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
-schemars = "1"
-
-# Async runtime + HTTP server
-tokio = { version = "1", features = ["full"] }
-axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# UUID for drawer IDs
-uuid = { version = "1", features = ["v4"] }
+[features]
+default = []
+
+[[bin]]
+name = "hekad"
+path = "src/bin/hekad.rs"

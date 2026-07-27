@@ -5464,18 +5464,16 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 name = "heka"
 version = "0.1.0"
 dependencies = [
- "akh-medu",
- "axum",
- "bincode 1.3.3",
+ "chrono",
  "miette 7.6.0",
- "redb",
- "rmcp",
- "schemars 1.2.1",
+ "sea-orm",
+ "sea-orm-migration",
+ "sea-query",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tower-http",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "uuid",
