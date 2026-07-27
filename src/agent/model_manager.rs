@@ -744,6 +744,12 @@ Do not explain your reasoning. Do not repeat the question. Just act.";
 
 /// Operating conventions block (static, versioned in-repo).
 ///
+/// Machine-owned: this block is composed into every akh's system prompt
+/// alongside the operator section, so any tool named below must exist in the
+/// tool registry — the `operating_conventions_only_name_real_tools` test
+/// enforces that invariant.  Do not edit the prose contents by hand without
+/// also updating the registry and the test.
+///
 /// Documents KG read/write etiquette, skills activation, workspace/worktree layout,
 /// and the Anima session contract (diff capture, wip docs, mcp__anima__* purpose).
 const OPERATING_CONVENTIONS: &str = "\
