@@ -67,6 +67,44 @@ fn communicative_default() -> bool {
     std::env::var("AKH_COMM_INTEL").map(|v| v != "0").unwrap_or(true)
 }
 
+// ── SessionContext ──────────────────────────────────────────────────────
+
+/// Per-session cognitive context, isolated from the shared [`ChatProcessor`].
+///
+/// Each session (TUI, WS handler, headless, ACP chat) owns its own
+/// `SessionContext` so the KG context cache, ELIZA routing state, and
+/// discourse trajectory don't bleed across sessions sharing one
+/// `ChatProcessor` (which is `Arc<Mutex<ChatProcessor>>` — one per workspace).
+///
+/// This is the foundation for delegation: a delegated session gets its own
+/// `SessionContext` so it can't pollute the calling session's cognitive state.
+pub struct SessionContext {
+    /// Session-scoped KG context cache for LLM prompt injection.
+    pub kg_cache: KgContextCache,
+    /// ELIZA routing classifier (KG vs LLM decision).
+    pub eliza: ElizaRouter,
+    /// Discourse trajectory (Phase 34d): topic repetition, discourse mode,
+    /// strategy history, engagement estimate.
+    pub trajectory: crate::agent::trajectory::DiscourseTrajectory,
+}
+
+impl Default for SessionContext {
+    fn default() -> Self {
+        Self {
+            kg_cache: KgContextCache::new(),
+            eliza: ElizaRouter::new(),
+            trajectory: crate::agent::trajectory::DiscourseTrajectory::default(),
+        }
+    }
+}
+
+impl SessionContext {
+    /// Create a fresh per-session context.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 // ── ChatProcessor ───────────────────────────────────────────────────────
 
 /// Unified input processor for all chat surfaces.
@@ -83,13 +121,6 @@ pub struct ChatProcessor {
     nlu_pipeline: NluPipeline,
     config: ChatProcessorConfig,
     lexicon: Lexicon,
-    /// Session-scoped KG context cache for LLM prompt injection.
-    kg_cache: KgContextCache,
-    /// ELIZA routing classifier (KG vs LLM decision).
-    eliza: ElizaRouter,
-    /// Discourse trajectory (Phase 34d): topic repetition, discourse mode,
-    /// strategy history, engagement estimate.
-    trajectory: crate::agent::trajectory::DiscourseTrajectory,
 }
 
 impl ChatProcessor {
@@ -122,9 +153,6 @@ impl ChatProcessor {
                 ..Default::default()
             },
             lexicon,
-            kg_cache: KgContextCache::new(),
-            eliza: ElizaRouter::new(),
-            trajectory: crate::agent::trajectory::DiscourseTrajectory::default(),
         }
     }
 
@@ -140,6 +168,7 @@ impl ChatProcessor {
     /// 3. AbsTree variant dispatch: dialogue acts, facts, queries, goals
     pub fn process_input(
         &mut self,
+        ctx: &mut SessionContext,
         text: &str,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -151,14 +180,14 @@ impl ChatProcessor {
 
         // ── Discourse trajectory (Phase 34d) ────────────────────────
         // Update discourse mode + engagement from every user turn.
-        self.trajectory.observe_input(trimmed);
+        ctx.trajectory.observe_input(trimmed);
 
         // ── Structural command fast-path (skip NLU) ─────────────────
         // These are system commands where NLU parsing would be wasteful.
         if is_structural_command(trimmed) {
             #[allow(deprecated)]
             let intent = classify_intent(trimmed);
-            return self.dispatch_structural(intent, trimmed, agent, engine);
+            return self.dispatch_structural(ctx, intent, trimmed, agent, engine);
         }
 
         // ── Polar (yes/no) + relational-wh fast-path (read-only KG) ─────
@@ -176,10 +205,10 @@ impl ChatProcessor {
         // Creative/open-ended queries bypass the KG path and go to the LLM
         // with KG-fact context injected. Factual queries continue to the NLU
         // pipeline which will ground them against the knowledge graph.
-        let eliza_routing = self.eliza.classify(trimmed);
+        let eliza_routing = ctx.eliza.classify(trimmed);
         if let ElizaRouting::LlmFallback { reason } = &eliza_routing {
             if matches!(reason, FallbackReason::Creative) {
-                return self.handle_creative_llm_fallback(trimmed, agent, engine);
+                return self.handle_creative_llm_fallback(ctx, trimmed, agent, engine);
             }
             // LowConfidence: let NLU try — it may still parse well enough.
         }
@@ -192,7 +221,7 @@ impl ChatProcessor {
         );
 
         // Build KG context for LLM tiers (gracefully absent when KG is empty).
-        let kg_context = build_kg_context(engine, trimmed, &mut self.kg_cache);
+        let kg_context = build_kg_context(engine, trimmed, &mut ctx.kg_cache);
 
         match self.nlu_pipeline.parse_with_context(trimmed, &parse_ctx, kg_context.as_deref()) {
             Ok(nlu_result) => {
@@ -207,7 +236,7 @@ impl ChatProcessor {
                 );
 
                 // Dispatch on AbsTree variant
-                self.dispatch_abstree(&nlu_result.tree, trimmed, agent, engine)
+                self.dispatch_abstree(ctx, &nlu_result.tree, trimmed, agent, engine)
             }
             Err(_) => {
                 // NLU pipeline completely failed — escalate to goal
@@ -241,11 +270,6 @@ impl ChatProcessor {
         let _ = engine.store().put_meta(b"nlu_ranker_state", &ranker_bytes);
     }
 
-    /// Access the ELIZA routing classifier.
-    pub fn eliza(&self) -> &ElizaRouter {
-        &self.eliza
-    }
-
     /// Access the NLU pipeline (e.g. for model loading status checks).
     pub fn nlu_pipeline(&self) -> &NluPipeline {
         &self.nlu_pipeline
@@ -264,6 +288,7 @@ impl ChatProcessor {
     /// Dispatch on an NLU-parsed AbsTree variant.
     fn dispatch_abstree(
         &mut self,
+        ctx: &mut SessionContext,
         tree: &AbsTree,
         raw_input: &str,
         agent: &mut Agent,
@@ -275,19 +300,19 @@ impl ChatProcessor {
         match tree {
             // ── Dialogue acts ───────────────────────────────────────
             AbsTree::Greeting { .. } => {
-                self.handle_dialogue_greeting(&mut msgs, agent, engine, &grammar, raw_input);
+                self.handle_dialogue_greeting(ctx, &mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Farewell { .. } => {
-                self.handle_dialogue_farewell(&mut msgs, agent, engine, &grammar, raw_input);
+                self.handle_dialogue_farewell(ctx, &mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::Acknowledgment { .. } => {
-                self.handle_dialogue_ack(&mut msgs, agent, engine, &grammar, raw_input);
+                self.handle_dialogue_ack(ctx, &mut msgs, agent, engine, &grammar, raw_input);
             }
             AbsTree::FollowUpRequest { .. } => {
                 self.handle_dialogue_follow_up(&mut msgs, agent, engine, &grammar);
             }
             AbsTree::MetaQuery { .. } => {
-                self.handle_dialogue_meta_query(&mut msgs, agent, engine, &grammar);
+                self.handle_dialogue_meta_query(ctx, &mut msgs, agent, engine, &grammar);
             }
             AbsTree::GoalRequest { description } => {
                 if self.config.create_goal {
@@ -352,6 +377,7 @@ impl ChatProcessor {
                     );
                 } else {
                     self.handle_query_from_tree(
+                        ctx,
                         &mut msgs,
                         agent,
                         engine,
@@ -370,6 +396,7 @@ impl ChatProcessor {
 
     fn handle_dialogue_greeting(
         &mut self,
+        ctx: &mut SessionContext,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -381,7 +408,7 @@ impl ChatProcessor {
         // Build KG context for the greeting (topic-aware).
         let kg_ctx = active_topic
             .as_deref()
-            .and_then(|topic| build_kg_context(engine, topic, &mut self.kg_cache));
+            .and_then(|topic| build_kg_context(engine, topic, &mut ctx.kg_cache));
         // Try LLM-generated greeting — but validate it mentions the persona name.
         // Small LLMs often ignore the system prompt and produce generic greetings.
         let text = self
@@ -399,6 +426,7 @@ impl ChatProcessor {
 
     fn handle_dialogue_farewell(
         &mut self,
+        ctx: &mut SessionContext,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -406,7 +434,7 @@ impl ChatProcessor {
         raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
-        let kg_ctx = build_kg_context(engine, raw_input, &mut self.kg_cache);
+        let kg_ctx = build_kg_context(engine, raw_input, &mut ctx.kg_cache);
         let text = self
             .nlu_pipeline
             .generate_dialogue("farewell", &name, &traits, None, kg_ctx.as_deref())
@@ -417,6 +445,7 @@ impl ChatProcessor {
 
     fn handle_dialogue_ack(
         &mut self,
+        ctx: &mut SessionContext,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -424,7 +453,7 @@ impl ChatProcessor {
         raw_input: &str,
     ) {
         let (name, traits) = Self::persona_name_and_traits(engine);
-        let kg_ctx = build_kg_context(engine, raw_input, &mut self.kg_cache);
+        let kg_ctx = build_kg_context(engine, raw_input, &mut ctx.kg_cache);
         let text = self
             .nlu_pipeline
             .generate_dialogue("acknowledgment", &name, &traits, None, kg_ctx.as_deref())
@@ -469,6 +498,7 @@ impl ChatProcessor {
 
     fn handle_dialogue_meta_query(
         &mut self,
+        ctx: &mut SessionContext,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -477,7 +507,7 @@ impl ChatProcessor {
         // Route through the standard query pipeline with subject "self".
         // This produces a first-person, discourse-ranked response from the KG
         // using the same grammar pipeline as any other query.
-        self.handle_query_from_tree(msgs, agent, engine, "self", "who are you?", grammar);
+        self.handle_query_from_tree(ctx, msgs, agent, engine, "self", "who are you?", grammar);
     }
 
     fn handle_structural_command(
@@ -562,6 +592,7 @@ impl ChatProcessor {
     #[allow(deprecated)]
     fn dispatch_structural(
         &mut self,
+        ctx: &mut SessionContext,
         intent: UserIntent,
         raw_input: &str,
         agent: &mut Agent,
@@ -589,6 +620,7 @@ impl ChatProcessor {
                 capability_signal: _,
             } => {
                 self.handle_query_from_tree(
+                    ctx,
                     &mut msgs,
                     agent,
                     engine,
@@ -738,6 +770,7 @@ impl ChatProcessor {
     /// Handle a query derived from an AbsTree parse (entity ref, etc.).
     fn handle_query_from_tree(
         &mut self,
+        ctx: &mut SessionContext,
         msgs: &mut Vec<AkhMessage>,
         agent: &mut Agent,
         engine: &Arc<Engine>,
@@ -754,7 +787,7 @@ impl ChatProcessor {
             // composed prose flows through the existing constraint check
             // and rendering — one wiring point for all chat surfaces.
             let (gr, shadow_journal) =
-                self.apply_communicative(gr, subject, original_input, agent, engine);
+                self.apply_communicative(ctx, gr, subject, original_input, agent, engine);
             let (out_msg, decision) = agent.check_and_wrap_grounded(
                 &gr,
                 "operator",
@@ -968,6 +1001,7 @@ impl ChatProcessor {
     /// terse.
     fn apply_communicative(
         &mut self,
+        ctx: &mut SessionContext,
         gr: crate::agent::conversation::GroundedResponse,
         subject: &str,
         original_input: &str,
@@ -996,25 +1030,25 @@ impl ChatProcessor {
         let sentiment = Sentiment::from_valence(agent.affective_system.current_affect().valence);
 
         let query_type = classify_query_type(original_input, subject);
-        let ctx = context_from_grounded(
+        let comm_ctx = context_from_grounded(
             &gr,
             subject,
             query_type,
-            &self.trajectory,
+            &ctx.trajectory,
             Some(sentiment),
         );
-        let composed = compose_grounded(&gr, subject, &psyche, &ctx);
+        let composed = compose_grounded(&gr, subject, &psyche, &comm_ctx);
 
         tracing::debug!(
             subject = %subject,
             strategy = composed.strategy,
             companion = ?composed.companion,
-            mode = %self.trajectory.discourse_mode(),
+            mode = %ctx.trajectory.discourse_mode(),
             "communicative strategy selected"
         );
 
         // Record this response turn in the trajectory (34d).
-        self.trajectory.record_turn(
+        ctx.trajectory.record_turn(
             Some(subject),
             engine.resolve_symbol(subject).ok(),
             composed.strategy,
@@ -1026,11 +1060,6 @@ impl ChatProcessor {
             ..gr
         };
         (transformed, shadow_journal)
-    }
-
-    /// Access the discourse trajectory (Phase 34d) — for introspection and tests.
-    pub fn trajectory(&self) -> &crate::agent::trajectory::DiscourseTrajectory {
-        &self.trajectory
     }
 
     /// Enable or disable the communicative pipeline (Phase 34f).
@@ -1339,6 +1368,7 @@ impl ChatProcessor {
     /// 4. If LLM unavailable, fall through to OODA goal escalation.
     fn handle_creative_llm_fallback(
         &mut self,
+        _ctx: &mut SessionContext,
         original_input: &str,
         agent: &mut Agent,
         engine: &Arc<Engine>,
