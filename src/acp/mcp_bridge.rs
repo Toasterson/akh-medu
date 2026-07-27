@@ -79,10 +79,44 @@ pub struct DiscoveredServerTools {
     pub descriptors: Vec<serde_json::Value>,
 }
 
+/// Aggregate failure reported by [`discover_session_tools_strict`] when one or
+/// more client-pushed MCP servers did not come back after the bounded retry.
+///
+/// The session **must not** continue tool-less — the work item "Turns die
+/// quietly" requires the turn to terminate with the upstream status visible
+/// in the thread. The caller streams an `error[acp]` message carrying the
+/// `summaries` and ends the turn with a stop reason Anima can distinguish
+/// from a clean completion.
+#[derive(Debug, Clone)]
+pub struct DiscoveryFailure {
+    /// How many servers the caller asked the bridge to reach.
+    pub attempted: usize,
+    /// How many servers actually came up before the failure was returned.
+    pub succeeded: usize,
+    /// One human-readable line per failing server: `name (url): error_text`.
+    pub summaries: Vec<String>,
+}
+
+impl DiscoveryFailure {
+    /// Render the failure as a single line for an `error[acp]` message.
+    pub fn summary(&self) -> String {
+        if self.summaries.len() == 1 {
+            self.summaries[0].clone()
+        } else {
+            format!(
+                "{} of {} MCP servers failed discovery: {}",
+                self.summaries.len(),
+                self.attempted,
+                self.summaries.join("; ")
+            )
+        }
+    }
+}
+
 // ── Proxy tools (daemon build only — needs the HTTP MCP client) ──────────────
 
 #[cfg(feature = "daemon")]
-pub use proxy::{build_tools_from_discovered, discover_session_tools};
+pub use proxy::{build_tools_from_discovered, discover_session_tools, discover_session_tools_strict};
 
 #[cfg(feature = "daemon")]
 mod proxy {
@@ -91,7 +125,7 @@ mod proxy {
 
     use serde_json::{Map, Value};
 
-    use super::{DiscoveredServerTools, SessionMcpServerCfg};
+    use super::{DiscoveredServerTools, DiscoveryFailure, SessionMcpServerCfg};
     use crate::agent::error::AgentResult;
     use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
     use crate::agent::tool_manifest::{
@@ -111,6 +145,12 @@ mod proxy {
     ///
     /// [`from_endpoint`]: UpstreamMcpClient::from_endpoint
     const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Backoff between discovery retries in [`discover_with_retries`]. Short
+    /// enough that a single transient HTTP 401 (the work item's failure mode)
+    /// rides through without blowing the prompt turn's idle budget; long
+    /// enough that a flap-the-door upstream is not hammered.
+    const DISCOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
     /// One parameter of a proxied remote tool, carrying enough type info to
     /// coerce the LLM's string argument back to the JSON type the server wants.
@@ -300,10 +340,165 @@ mod proxy {
     /// the client learns its server was dropped instead of the turn simply
     /// reading as if the server never existed. Output order matches `cfgs`
     /// (independent of which thread finishes first).
+    ///
+    /// **Legacy behaviour**: callers that want a tool-less session to *fail
+    /// the turn* rather than silently continue should use
+    /// [`discover_session_tools_strict`] instead — see the work item
+    /// "Turns die quietly: … MCP discovery that 401s and 'skips'".
     pub fn discover_session_tools(
         cfgs: &[SessionMcpServerCfg],
         sink: &dyn MessageSink,
     ) -> Vec<DiscoveredServerTools> {
+        let (ok, failed, _) = discover_with_retries(cfgs, 0);
+        for server in &ok {
+            tracing::info!(
+                server = %server.name,
+                url = %server.url,
+                tools = server.descriptors.len(),
+                "session MCP server tools discovered (cached for the session)"
+            );
+        }
+        for (name, url, e) in &failed {
+            tracing::warn!(
+                server = %name,
+                url = %url,
+                "session MCP discovery failed, skipping: {e}"
+            );
+            sink.emit(&AkhMessage::system(format!(
+                "MCP server \"{name}\" was skipped for this session: tool discovery failed ({e})"
+            )));
+        }
+        ok
+    }
+
+    /// Strict variant of [`discover_session_tools`]: a session that loses any
+    /// pushed MCP server **fails the turn** rather than continuing tool-less.
+    ///
+    /// Each failing server gets one bounded retry (after a short backoff) to
+    /// ride through the intermittent HTTP 401s the work item documents — a
+    /// second failure terminates the session with the upstream status in the
+    /// reason. The success path matches [`discover_session_tools`] (caching
+    /// the descriptors for the rest of the session); the failure path returns
+    /// a [`DiscoveryFailure`] carrying every server that did not come back, so
+    /// the caller can stream a single `error[acp]` message and end the turn
+    /// with a stop reason Anima can distinguish from a clean completion.
+    ///
+    /// Call only from a blocking context (see [`discover_session_tools`]).
+    pub fn discover_session_tools_strict(
+        cfgs: &[SessionMcpServerCfg],
+        sink: &dyn MessageSink,
+    ) -> Result<Vec<DiscoveredServerTools>, DiscoveryFailure> {
+        const RETRIES: usize = 1;
+
+        let (ok, failed, attempted) = discover_with_retries(cfgs, RETRIES);
+
+        // Log every server that came up so the daemon record shows the
+        // healthy half of the pass too.
+        for server in &ok {
+            tracing::info!(
+                server = %server.name,
+                url = %server.url,
+                tools = server.descriptors.len(),
+                "session MCP server tools discovered (cached for the session)"
+            );
+        }
+
+        if failed.is_empty() {
+            return Ok(ok);
+        }
+
+        // One or more servers did not come back after `RETRIES` retries: fail
+        // the session. Emit a per-server `error[acp]` so the upstream status
+        // is visible in the thread (the work item requires "the upstream
+        // status in the reason"), then return the aggregate failure.
+        let mut summaries = Vec::with_capacity(failed.len());
+        for (name, url, err) in &failed {
+            tracing::warn!(
+                server = %name,
+                url = %url,
+                retries = RETRIES,
+                "session MCP discovery failed after retries — failing the session (tool-less continuation is unsafe)"
+            );
+            sink.emit(&AkhMessage::error(
+                "acp",
+                format!(
+                    "MCP server \"{name}\" ({url}) discovery failed after {RETRIES} retr\
+                     {plural}: {err}",
+                    plural = if RETRIES == 1 { "y" } else { "ies" }
+                ),
+            ));
+            summaries.push(format!("{name} ({url}): {err}"));
+        }
+
+        Err(DiscoveryFailure {
+            attempted,
+            succeeded: ok.len(),
+            summaries,
+        })
+    }
+
+    /// One pass of concurrent discovery, optionally retrying the failing
+    /// servers `retries` more times with a short backoff between passes.
+    ///
+    /// Returns `(ok, failed, attempted)` where `failed` lists every server
+    /// that did not come back after the final retry, and `attempted` is the
+    /// total number of servers the caller asked us to reach. The retry loop
+    /// only re-attempts the servers that failed the previous pass, so a
+    /// session with one flaky server and three healthy ones pays at most
+    /// `1 * DISCOVERY_TIMEOUT` per retry, not `4 * DISCOVERY_TIMEOUT`.
+    fn discover_with_retries(
+        cfgs: &[SessionMcpServerCfg],
+        retries: usize,
+    ) -> (Vec<DiscoveredServerTools>, Vec<(String, String, String)>, usize) {
+        let attempted = cfgs.len();
+        if cfgs.is_empty() {
+            return (Vec::new(), Vec::new(), 0);
+        }
+
+        // First pass: try every server concurrently.
+        let mut ok: Vec<DiscoveredServerTools> = Vec::new();
+        let mut failed: Vec<(String, String, String)> = Vec::new();
+        let (pass_ok, pass_err) = discover_pass(cfgs);
+        ok.extend(pass_ok);
+        failed.extend(pass_err);
+
+        // Bounded retries: re-attempt only the servers that failed, once per
+        // retry, with a short backoff between passes. A pass that fully
+        // resolves clears `failed`; a pass that produces new failures
+        // replaces `failed` with the still-failing set.
+        for _ in 0..retries {
+            if failed.is_empty() {
+                break;
+            }
+            std::thread::sleep(DISCOVERY_RETRY_BACKOFF);
+            let retry_cfgs: Vec<SessionMcpServerCfg> = failed
+                .iter()
+                .filter_map(|(name, url, _)| {
+                    cfgs.iter()
+                        .find(|c| c.name == *name && c.url == *url)
+                        .cloned()
+                })
+                .collect();
+            let (retry_ok, retry_err) = discover_pass(&retry_cfgs);
+            // Promote any retries that succeeded.
+            ok.extend(retry_ok);
+            // `failed` becomes whatever is still failing after this retry.
+            failed = retry_err;
+        }
+
+        (ok, failed, attempted)
+    }
+
+    /// One concurrent discovery pass over `cfgs`. Returns the servers that
+    /// came up plus the `(name, url, error_text)` triple for each that did
+    /// not. Output order matches `cfgs` (independent of which thread finishes
+    /// first) so retries re-issue in a stable order.
+    fn discover_pass(
+        cfgs: &[SessionMcpServerCfg],
+    ) -> (Vec<DiscoveredServerTools>, Vec<(String, String, String)>) {
+        if cfgs.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
         let results: Vec<Result<DiscoveredServerTools, (String, String, String)>> =
             std::thread::scope(|scope| {
                 let handles: Vec<_> = cfgs
@@ -339,31 +534,15 @@ mod proxy {
                     .collect()
             });
 
-        let mut out = Vec::with_capacity(results.len());
+        let mut ok = Vec::new();
+        let mut failed = Vec::new();
         for result in results {
             match result {
-                Ok(server) => {
-                    tracing::info!(
-                        server = %server.name,
-                        url = %server.url,
-                        tools = server.descriptors.len(),
-                        "session MCP server tools discovered (cached for the session)"
-                    );
-                    out.push(server);
-                }
-                Err((name, url, e)) => {
-                    tracing::warn!(
-                        server = %name,
-                        url = %url,
-                        "session MCP discovery failed, skipping: {e}"
-                    );
-                    sink.emit(&AkhMessage::system(format!(
-                        "MCP server \"{name}\" was skipped for this session: tool discovery failed ({e})"
-                    )));
-                }
+                Ok(server) => ok.push(server),
+                Err(triple) => failed.push(triple),
             }
         }
-        out
+        (ok, failed)
     }
 
     /// Build proxy `Tool`s from previously-discovered descriptors — no
@@ -455,6 +634,95 @@ mod proxy {
                 .expect("proxy");
             let args = t.build_args(&ToolInput::new().with_param("query", "q"));
             assert!(args.get("top_k").is_none());
+        }
+
+        /// `discover_session_tools_strict` must fail the session when a pushed
+        /// MCP server is unreachable, instead of silently skipping it and
+        /// continuing tool-less (work item "Turns die quietly" defect 2).
+        ///
+        /// Uses a port that is practically guaranteed to refuse the TCP
+        /// connection (port 1 is unprivileged but no daemon binds it on a
+        /// test runner), so `list_tools_raw` returns a transport error and
+        /// the strict variant returns `Err(DiscoveryFailure)` after its one
+        /// bounded retry. The legacy `discover_session_tools` would have
+        /// returned an empty `Vec` here, leaving the session tool-less.
+        #[test]
+        fn strict_discovery_fails_the_session_when_a_server_is_unreachable() {
+            let cfg = SessionMcpServerCfg {
+                name: "anima".into(),
+                url: "http://127.0.0.1:1/mcp".into(),
+                auth_header: None,
+            };
+            let sink = crate::message::VecSink::new();
+            let result = discover_session_tools_strict(&[cfg], &sink);
+            assert!(
+                result.is_err(),
+                "strict discovery must fail when a pushed server is unreachable"
+            );
+            let failure = result.unwrap_err();
+            assert_eq!(failure.attempted, 1);
+            assert_eq!(failure.succeeded, 0);
+            assert_eq!(failure.summaries.len(), 1);
+            assert!(
+                failure.summaries[0].contains("anima"),
+                "failure summary should name the server: {}",
+                failure.summaries[0]
+            );
+            // The strict variant streams an `error[acp]` per failing server
+            // so the upstream status is visible in the thread — verify at
+            // least one error message landed in the sink.
+            let has_error = sink.messages().iter().any(|m| matches!(
+                m,
+                crate::message::AkhMessage::Error { code, .. } if code == "acp"
+            ));
+            assert!(
+                has_error,
+                "strict discovery should stream an error[acp] message for the failing server"
+            );
+        }
+
+        /// `discover_session_tools_strict` succeeds when every pushed server
+        /// comes up. We can't run a real MCP server in a unit test, but we
+        /// can verify the empty-cfgs path: no servers pushed ⇒ no failure,
+        /// no tools, no error messages. (The healthy-nonempty path is
+        /// exercised by the ACP integration tests that push a real server.)
+        #[test]
+        fn strict_discovery_with_no_servers_is_ok_with_no_tools() {
+            let sink = crate::message::VecSink::new();
+            let result = discover_session_tools_strict(&[], &sink);
+            assert!(result.is_ok(), "empty cfgs should not fail");
+            assert!(result.unwrap().is_empty());
+            assert!(
+                sink.is_empty(),
+                "no messages should be emitted when there are no servers to discover"
+            );
+        }
+
+        /// `discover_session_tools` (the legacy non-strict variant) preserves
+        /// its pre-fix behaviour for back-compat: an unreachable server is
+        /// skipped with a `system` message, not a session-failing error.
+        #[test]
+        fn legacy_discovery_skips_unreachable_server_without_failing() {
+            let cfg = SessionMcpServerCfg {
+                name: "anima".into(),
+                url: "http://127.0.0.1:1/mcp".into(),
+                auth_header: None,
+            };
+            let sink = crate::message::VecSink::new();
+            let result = discover_session_tools(&[cfg], &sink);
+            assert!(
+                result.is_empty(),
+                "legacy discovery should return an empty Vec when the server is unreachable"
+            );
+            // The legacy path emits a `system` (skip) message, not an error.
+            let has_system = sink.messages().iter().any(|m| matches!(
+                m,
+                crate::message::AkhMessage::System { text } if text.contains("skipped")
+            ));
+            assert!(
+                has_system,
+                "legacy discovery should emit a 'skipped' system message for the failing server"
+            );
         }
     }
 }

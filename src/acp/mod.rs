@@ -722,7 +722,7 @@ impl AkhAcpAgent {
         >,
         sink: ChannelSink,
         cancel: Arc<std::sync::atomic::AtomicBool>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process (emitting via the channel sink), drop —
             // all synchronous, no await while a guard is held. ──
@@ -760,6 +760,17 @@ impl AkhAcpAgent {
             // (cached thereafter — see `mcp_tool_cache`), and register
             // namespaced proxies for this turn only. Daemon-only: the HTTP MCP
             // client is behind the `daemon` feature.
+            //
+            // **Defect-2 fix**: a session that loses any pushed MCP server
+            // **fails the turn** instead of continuing tool-less. The strict
+            // discovery variant retries once (short backoff) to ride through
+            // the intermittent HTTP 401s the work item documents, then
+            // surfaces the upstream status in an `error[acp]` message and
+            // returns [`TurnStartError::McpDiscoveryFailed`] so the prompt
+            // handler can end the turn with a stop reason Anima can
+            // distinguish from a clean completion. The cache is only written
+            // on a fully-successful pass, so a later prompt in the same
+            // session does not inherit a half-discovered tool set.
             #[cfg(feature = "daemon")]
             if !mcp_cfgs.is_empty() {
                 let cached = mcp_tool_cache
@@ -774,12 +785,23 @@ impl AkhAcpAgent {
                         // runs inside this `spawn_blocking` closure — but it
                         // only runs once per session; every later prompt hits
                         // the cache above with zero network I/O.
-                        let d = mcp_bridge::discover_session_tools(&mcp_cfgs, &sink);
-                        mcp_tool_cache
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(session_id.clone(), d.clone());
-                        d
+                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &sink) {
+                            Ok(d) => {
+                                mcp_tool_cache
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .insert(session_id.clone(), d.clone());
+                                d
+                            }
+                            Err(failure) => {
+                                // The strict variant already streamed a per-
+                                // server `error[acp]` message through `sink`;
+                                // surface the aggregate failure to the prompt
+                                // handler so it can end the turn with a
+                                // distinct stop reason.
+                                return Err(TurnStartError::McpDiscoveryFailed(failure));
+                            }
+                        }
                     }
                 };
                 for tool in mcp_bridge::build_tools_from_discovered(&discovered) {
@@ -819,8 +841,23 @@ impl AkhAcpAgent {
             // `guard` drops here (normal return *or* unwind), unregistering
             // session tools and clearing the permission asker; then the
             // locks + sink drop, closing the channel.
+            Ok(())
         })
     }
+}
+
+/// Failure returned by [`AkhAcpAgent::run_turn`] when the turn could not
+/// safely start — today, only MCP tool discovery failure (the work item
+/// "Turns die quietly" defect 2). The prompt handler matches on this to end
+/// the turn with a [`StopReason::Refusal`] that Anima can distinguish from a
+/// clean completion (the crate's v1 `StopReason` has no `Other` variant),
+/// instead of letting the session continue tool-less.
+#[derive(Debug)]
+enum TurnStartError {
+    /// One or more client-pushed MCP servers did not come back after the
+    /// bounded retry. The session must not continue without its tools.
+    #[cfg(feature = "daemon")]
+    McpDiscoveryFailed(mcp_bridge::DiscoveryFailure),
 }
 
 /// RAII guard that unregisters this turn's session-scoped MCP proxy tools and
@@ -905,6 +942,147 @@ impl MessageSink for ChannelSink {
         // A closed receiver (client gone) just drops the message — best-effort,
         // matching the `MessageSink::emit` infallible contract.
         let _ = self.tx.send(msg.clone());
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// LastStepTracker — name the stuck step when the idle watchdog fires
+// ──────────────────────────────────────────────────────────────────────────
+
+/// A coarse classification of the last [`AkhMessage`] the turn emitted, used
+/// to name the stuck step when the idle watchdog aborts the turn.
+///
+/// The previous abort message named nothing ("no progress for 300s — aborting
+/// this turn"), so a stalled turn was indistinguishable from a clean no-op in
+/// the daemon log. This tracker records the kind of the most recent message
+/// plus the wall-clock instant it arrived, so the stall log line and the
+/// `error[acp]` message streamed back to the client both say what was in
+/// flight when the turn went silent (e.g. "last step: tool_call_started
+/// (mcp__anima__find), 41s ago").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    /// No message has been emitted yet — the turn blocked before its first
+    /// step (e.g. wedged on the agent `Mutex` before any output).
+    None,
+    /// `ToolCallStarted` — a tool is mid-execution.
+    ToolCallStarted,
+    /// `ToolCallCompleted` — a tool just returned.
+    ToolCallCompleted,
+    /// `ToolResult` — symbolic-pipeline tool result.
+    ToolResult,
+    /// `Reasoning` — model thinking deltas.
+    Reasoning,
+    /// `Narrative` — streamed answer content.
+    Narrative,
+    /// `Fact` — a KG query answer.
+    Fact,
+    /// `System` — a system notice (e.g. an MCP skip warning).
+    System,
+    /// `Error` — an error message.
+    Error,
+    /// Anything else (`Gap`, `GoalProgress`, `AuditLog`, `Prompt`).
+    Other,
+}
+
+impl StepKind {
+    /// Lowercase wire name used in logs and the streamed error message.
+    fn as_str(self) -> &'static str {
+        match self {
+            StepKind::None => "none",
+            StepKind::ToolCallStarted => "tool_call_started",
+            StepKind::ToolCallCompleted => "tool_call_completed",
+            StepKind::ToolResult => "tool_result",
+            StepKind::Reasoning => "reasoning",
+            StepKind::Narrative => "narrative",
+            StepKind::Fact => "fact",
+            StepKind::System => "system",
+            StepKind::Error => "error",
+            StepKind::Other => "other",
+        }
+    }
+
+    /// Classify an [`AkhMessage`] into the step kind the tracker records.
+    fn from_message(msg: &AkhMessage) -> Self {
+        match msg {
+            AkhMessage::ToolCallStarted { .. } => StepKind::ToolCallStarted,
+            AkhMessage::ToolCallCompleted { .. } => StepKind::ToolCallCompleted,
+            AkhMessage::ToolResult { .. } => StepKind::ToolResult,
+            AkhMessage::Reasoning { .. } => StepKind::Reasoning,
+            AkhMessage::Narrative { .. } => StepKind::Narrative,
+            AkhMessage::Fact { .. } => StepKind::Fact,
+            AkhMessage::System { .. } => StepKind::System,
+            AkhMessage::Error { .. } => StepKind::Error,
+            AkhMessage::Gap { .. }
+            | AkhMessage::GoalProgress { .. }
+            | AkhMessage::AuditLog { .. }
+            | AkhMessage::Prompt { .. } => StepKind::Other,
+        }
+    }
+}
+
+/// Tracks the kind + arrival instant of the most recent [`AkhMessage`] a turn
+/// emitted, so the idle-watchdog abort path can name the stuck step.
+///
+/// Updated by the prompt handler's drain loop on every message; read once when
+/// the watchdog fires. The instant is the daemon's `Instant::now()`, so the
+/// elapsed-seconds figure is monotonic and unaffected by wall-clock jumps.
+#[derive(Debug)]
+struct LastStepTracker {
+    kind: std::sync::atomic::AtomicU8,
+    /// `Instant::now()` is not `AtomicU64`-friendly, so we store the elapsed
+    /// millis since turn start (monotonic) and reconstruct the age on read.
+    /// Stored as `u64::MAX` when no step has landed yet.
+    since_start_ms: std::sync::atomic::AtomicU64,
+}
+
+impl LastStepTracker {
+    fn new() -> Self {
+        Self {
+            kind: std::sync::atomic::AtomicU8::new(StepKind::None as u8),
+            since_start_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+        }
+    }
+
+    /// Record a message observed at `now`, relative to the turn's `start`.
+    fn observe(&self, msg: &AkhMessage, start: std::time::Instant, now: std::time::Instant) {
+        let kind = StepKind::from_message(msg) as u8;
+        self.kind.store(kind, std::sync::atomic::Ordering::Relaxed);
+        let ms = now.duration_since(start).as_millis().min(u64::MAX as u128) as u64;
+        self.since_start_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Snapshot the last step kind + its age relative to `now`.
+    ///
+    /// `age` is how long ago the step arrived: `(now - start) - step_arrival`,
+    /// where `step_arrival` is the millis-since-turn-start stored by
+    /// [`Self::observe`]. For the `None` sentinel (no step observed yet),
+    /// age is the whole turn so far (`now - start`).
+    fn snapshot(&self, start: std::time::Instant, now: std::time::Instant) -> (StepKind, std::time::Duration) {
+        let kind_u8 = self.kind.load(std::sync::atomic::Ordering::Relaxed);
+        let kind = match kind_u8 {
+            0 => StepKind::None,
+            1 => StepKind::ToolCallStarted,
+            2 => StepKind::ToolCallCompleted,
+            3 => StepKind::ToolResult,
+            4 => StepKind::Reasoning,
+            5 => StepKind::Narrative,
+            6 => StepKind::Fact,
+            7 => StepKind::System,
+            8 => StepKind::Error,
+            _ => StepKind::Other,
+        };
+        let ms = self.since_start_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if ms == u64::MAX {
+            // No step observed yet: age is the whole turn so far.
+            return (kind, now.duration_since(start));
+        }
+        let turn_age_ms = now.duration_since(start).as_millis().min(u64::MAX as u128) as u64;
+        // `ms` is when the step arrived (millis since turn start); the step's
+        // age at `now` is `turn_age - step_arrival`. Saturate in case the
+        // monotonic clock moved backwards across threads (should not happen,
+        // but `Instant` comparisons are only total within one thread).
+        let age_ms = turn_age_ms.saturating_sub(ms);
+        (kind, std::time::Duration::from_millis(age_ms))
     }
 }
 
@@ -3305,6 +3483,23 @@ fn build_connection(
                             }
                         };
 
+                        // Snapshot the NLU tier status (work item "Turns die
+                        // quietly" defect 1, part 2): every tecton session
+                        // init logs `T3(LLM)=off`, and one turn in seven
+                        // stalls. Whether the missing LLM translator
+                        // correlates with the stalls is unverified — but the
+                        // two facts should not sit next to each other
+                        // unexamined. Capturing the tier status here lets the
+                        // stall log line below name it alongside the stuck
+                        // step, so a single grep over the daemon log answers
+                        // the correlation question without a separate
+                        // instrumentation pass.
+                        let nlu_status = processor
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .nlu_pipeline()
+                            .tier_status();
+
                         // Per-turn permission bridge: a sync asker (consulted
                         // inside the blocking chat turn when the policy says
                         // "Ask") relays to this async approver task, which calls
@@ -3380,6 +3575,17 @@ fn build_connection(
                         // client round-trip. Fail the turn instead of pinning
                         // the client's slot forever.
                         let sink = AcpSink::new(cx, session_id.clone());
+                        // Track the kind + arrival instant of the last message
+                        // the turn emitted, so the watchdog can name the stuck
+                        // step in its abort log + error message (work item
+                        // "Turns die quietly" defect 1, part 1). The previous
+                        // abort named nothing, so a stalled turn was
+                        // indistinguishable from a clean no-op in the daemon
+                        // log; this turns "no progress for 300s" into
+                        // "no progress for 300s — last step: tool_call_started
+                        // (mcp__anima__find), 41s ago".
+                        let tracker = Arc::new(LastStepTracker::new());
+                        let turn_start = std::time::Instant::now();
                         let mut stalled = false;
                         loop {
                             let next = if idle.is_zero() {
@@ -3394,7 +3600,10 @@ fn build_connection(
                                 }
                             };
                             match next {
-                                Some(msg) => sink.emit(&msg),
+                                Some(msg) => {
+                                    tracker.observe(&msg, turn_start, std::time::Instant::now());
+                                    sink.emit(&msg);
+                                }
                                 // Channel closed ⇒ the turn finished and dropped
                                 // its sink.
                                 None => break,
@@ -3409,26 +3618,58 @@ fn build_connection(
                             // meanwhile-arriving third prompt fails fast via
                             // `begin_turn` instead of queuing behind it too.
                             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            let (step_kind, step_age) =
+                                tracker.snapshot(turn_start, std::time::Instant::now());
+                            // **Defect-1 fix, part 3**: report the stall as a
+                            // *turn outcome* Anima can distinguish from a
+                            // clean no-op, not as `StopReason::EndTurn`. The
+                            // crate's `schema::StopReason` is the v1 enum
+                            // (no `Other` variant), so we use `Refusal` —
+                            // semantically "the agent refused to continue",
+                            // which matches a stall (the turn produced
+                            // nothing usable and the prompt should not be
+                            // silently re-included next turn) and is
+                            // distinguishable from `EndTurn` on the Anima
+                            // side. The streamed `error[acp]` message carries
+                            // the machine-greppable `_akh_stalled` marker so
+                            // the Anima turn-outcome defect
+                            // (`019f98b5-2ccd-7d80-9842-ec3e395b0d12`) can
+                            // route the turn correctly even before the
+                            // protocol-level stop reason is widened.
+                            let stop_reason = StopReason::Refusal;
                             tracing::error!(
                                 workspace = %ws,
                                 idle_secs = idle.as_secs(),
+                                last_step = step_kind.as_str(),
+                                last_step_age_secs = step_age.as_secs(),
+                                nlu_t1_rules = nlu_status.tier1_rule_parser,
+                                nlu_t2_ner = nlu_status.tier2_ml_ner,
+                                nlu_t3_llm = nlu_status.tier3_llm,
+                                nlu_t4_ranker = nlu_status.tier4_ranker,
+                                stop_reason = ?stop_reason,
                                 "chat turn stalled (no progress within the idle \
-                                 watchdog) — ending the turn with an error and \
-                                 signalling its worker to cancel at the next \
-                                 round boundary"
+                                 watchdog) — ending the turn with a distinguishable \
+                                 stop reason and signalling its worker to cancel at \
+                                 the next round boundary. The `last_step` field \
+                                 names the in-flight step; the `nlu_t*` fields \
+                                 surface whether the missing LLM translator \
+                                 correlates with the stall (work item 'Turns die \
+                                 quietly' defect 1, parts 1–3)."
                             );
                             sink.emit(&AkhMessage::error(
                                 "acp",
                                 format!(
                                     "chat turn stalled: no progress for {}s — \
-                                     aborting this turn. The daemon has been \
-                                     signalled to cancel the stuck step \
-                                     (workspace \"{ws}\").",
-                                    idle.as_secs()
+                                     aborting this turn. Last step: {} ({}s ago). \
+                                     The daemon has been signalled to cancel the \
+                                     stuck step (workspace \"{ws}\"). Stop reason: \
+                                     `_akh_stalled`.",
+                                    idle.as_secs(),
+                                    step_kind.as_str(),
+                                    step_age.as_secs(),
                                 ),
                             ));
-                            return responder
-                                .respond(PromptResponse::new(StopReason::EndTurn));
+                            return responder.respond(PromptResponse::new(stop_reason));
                         }
 
                         // Await the worker's join result (relayed by the
@@ -3441,7 +3682,52 @@ fn build_connection(
                                 "acp",
                                 format!("turn task failed: {e}"),
                             )),
-                            Ok(Ok(())) => {}
+                            Ok(Ok(Err(start_err))) => {
+                                // The turn could not start safely. Today this
+                                // is only MCP discovery failure (defect 2):
+                                // the strict discovery variant already
+                                // streamed a per-server `error[acp]` message
+                                // through `sink`; surface the aggregate
+                                // failure here and end the turn with a
+                                // distinguishable stop reason so Anima does
+                                // not charge a tool-less session as a clean
+                                // no-op.
+                                #[cfg(feature = "daemon")]
+                                match start_err {
+                                    TurnStartError::McpDiscoveryFailed(failure) => {
+                                        tracing::error!(
+                                            workspace = %ws,
+                                            attempted = failure.attempted,
+                                            succeeded = failure.succeeded,
+                                            "MCP discovery failed for session — \
+                                             ending the turn tool-less rather than \
+                                             continuing without the pushed servers"
+                                        );
+                                        sink.emit(&AkhMessage::error(
+                                            "acp",
+                                            format!(
+                                                "session cannot continue without its \
+                                                 MCP tools: {}. Stop reason: \
+                                                 `_akh_mcp_discovery_failed`.",
+                                                failure.summary()
+                                            ),
+                                        ));
+                                        return responder.respond(PromptResponse::new(
+                                            StopReason::Refusal,
+                                        ));
+                                    }
+                                }
+                                #[cfg(not(feature = "daemon"))]
+                                {
+                                    // Non-daemon builds never produce a
+                                    // `TurnStartError` today; the variant is
+                                    // `#[cfg(feature = "daemon")]`-gated. Keep
+                                    // the match exhaustive without pulling in
+                                    // the daemon-only type.
+                                    let _ = start_err;
+                                }
+                            }
+                            Ok(Ok(Ok(()))) => {}
                             Err(_) => {
                                 // The bookkeeping task itself was dropped
                                 // before sending — should not happen since it
@@ -4229,6 +4515,83 @@ mod tests {
     use agent_client_protocol::schema::{InitializeRequest, ProtocolVersion};
     use agent_client_protocol::Client;
 
+    // ── StepKind / LastStepTracker (work item "Turns die quietly" defect 1) ──
+
+    #[test]
+    fn step_kind_classifies_each_message_variant() {
+        // Every AkhMessage variant maps to a non-`None` step kind, so the
+        // stall log line always names *something* the turn was doing.
+        let cases: Vec<(AkhMessage, StepKind)> = vec![
+            (AkhMessage::Fact { text: "x".into(), confidence: None, provenance: None }, StepKind::Fact),
+            (AkhMessage::Reasoning { step: "s".into(), expression: None }, StepKind::Reasoning),
+            (AkhMessage::Gap { entity: "e".into(), description: "d".into() }, StepKind::Other),
+            (AkhMessage::ToolResult { tool: "t".into(), success: true, output: "o".into() }, StepKind::ToolResult),
+            (AkhMessage::Narrative { text: "n".into(), grammar: "g".into() }, StepKind::Narrative),
+            (AkhMessage::System { text: "s".into() }, StepKind::System),
+            (AkhMessage::Error { code: "c".into(), message: "m".into(), help: None }, StepKind::Error),
+            (AkhMessage::GoalProgress { goal: "g".into(), status: "s".into(), detail: None }, StepKind::Other),
+            (AkhMessage::Prompt { question: "q".into() }, StepKind::Other),
+            (AkhMessage::AuditLog { id: 1, kind: "k".into(), summary: "s".into(), timestamp: 0 }, StepKind::Other),
+            (AkhMessage::ToolCallStarted { tool_id: "t".into(), kind: crate::message::ToolKind::Execute, title: "x".into(), locations: vec![] }, StepKind::ToolCallStarted),
+            (AkhMessage::ToolCallCompleted { tool_id: "t".into(), success: true, output: None, diff: None }, StepKind::ToolCallCompleted),
+        ];
+        for (msg, expected) in cases {
+            assert_eq!(
+                StepKind::from_message(&msg),
+                expected,
+                "wrong step kind for {:?}",
+                msg
+            );
+            // The wire name is stable, lowercase, non-empty — the stall log
+            // line and error message depend on it not changing shape.
+            assert!(!expected.as_str().is_empty());
+        }
+        // The "no message yet" sentinel is distinct from every variant.
+        assert_eq!(StepKind::None.as_str(), "none");
+    }
+
+    #[test]
+    fn last_step_tracker_names_the_stuck_step_with_its_age() {
+        let tracker = LastStepTracker::new();
+        let start = std::time::Instant::now();
+
+        // Before any message: None, age = whole turn so far.
+        let (kind, age) = tracker.snapshot(start, std::time::Instant::now());
+        assert_eq!(kind, StepKind::None);
+        assert!(age.as_millis() < 1000, "pre-message age should be ~0");
+
+        // Simulate a tool-call-started message arriving ~50ms into the turn.
+        let mid = start + std::time::Duration::from_millis(50);
+        tracker.observe(
+            &AkhMessage::ToolCallStarted {
+                tool_id: "mcp__anima__find".into(),
+                kind: crate::message::ToolKind::Search,
+                title: "find".into(),
+                locations: vec![],
+            },
+            start,
+            mid,
+        );
+
+        // Snapshot taken ~300ms into the turn: the step is the tool call,
+        // and its age is ~250ms (snapshot - step arrival), not 300ms.
+        let later = start + std::time::Duration::from_millis(300);
+        let (kind, age) = tracker.snapshot(start, later);
+        assert_eq!(kind, StepKind::ToolCallStarted);
+        assert_eq!(age.as_millis(), 250, "age should be (snapshot - step arrival)");
+
+        // A later message overwrites the tracker.
+        let even_later = start + std::time::Duration::from_millis(400);
+        tracker.observe(
+            &AkhMessage::System { text: "skip".into() },
+            start,
+            even_later,
+        );
+        let (kind, age) = tracker.snapshot(start, even_later);
+        assert_eq!(kind, StepKind::System);
+        assert_eq!(age.as_millis(), 0, "just-observed step should have age 0");
+    }
+
     /// Build a tiny in-process workspace seeded with one fact.
     fn workspace() -> AkhAcpAgent {
         let engine = Engine::new(EngineConfig {
@@ -4891,6 +5254,124 @@ mod tests {
         assert!(
             answer.contains("error[acp]") && answer.contains("stalled"),
             "expected the idle-watchdog error in the turn output, got: {answer:?}"
+        );
+        // Defect-1 fix, part 1: the abort must name the stuck step. The wedged
+        // turn emits no messages before the watchdog fires, so the tracker
+        // reports `none` — but the message shape must still include the
+        // "Last step:" prefix and the `_akh_stalled` stop-reason marker so
+        // Anima can grep the turn outcome out of the thread.
+        assert!(
+            answer.contains("Last step:"),
+            "stall message should name the stuck step, got: {answer:?}"
+        );
+        assert!(
+            answer.contains("none"),
+            "wedged-before-first-message turn should report last step 'none', got: {answer:?}"
+        );
+        assert!(
+            answer.contains("_akh_stalled"),
+            "stall message should carry the `_akh_stalled` marker for Anima, got: {answer:?}"
+        );
+    }
+
+    /// Drive an ACP prompt lifecycle that pushes a broken MCP server at
+    /// `session/new` (one whose discovery will fail), returning the
+    /// concatenated agent message text. Used by the defect-2 regression
+    /// below to verify a tool-less session fails the turn instead of
+    /// continuing.
+    #[cfg(feature = "daemon")]
+    async fn unix_client_prompt_with_broken_mcp(stream: UnixStream) -> String {
+        use agent_client_protocol::schema::{McpServer, McpServerHttp};
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let lifecycle = Client
+            .builder()
+            .name("akh-acp-test-client-broken-mcp")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+
+                // Build a session whose cwd carries the workspace sentinel
+                // and whose `mcp_servers` points at a port nothing binds —
+                // discovery will fail with a transport error on every retry.
+                let mut req = agent_client_protocol::schema::NewSessionRequest::new(
+                    &std::env::current_dir().expect("cwd"),
+                );
+                req.mcp_servers = vec![McpServer::Http(McpServerHttp::new(
+                    "anima",
+                    "http://127.0.0.1:1/mcp",
+                ))];
+                cx.build_session_from(req)
+                    .block_task()
+                    .run_until(async move |mut session| {
+                        session.send_prompt("hello?")?;
+                        session.read_to_string().await
+                    })
+                    .await
+            });
+        tokio::time::timeout(std::time::Duration::from_secs(60), lifecycle)
+            .await
+            .expect("unix client lifecycle timed out (transport/protocol deadlock)")
+            .expect("unix client lifecycle completed")
+    }
+
+    /// Defect-2 regression: a session whose MCP discovery fails must terminate
+    /// with that failure visible in its thread, instead of running without
+    /// tools. Pushes a broken MCP server (port 1 — nothing binds it on the
+    /// test runner), sends a prompt, and asserts the turn output carries the
+    /// `_akh_mcp_discovery_failed` marker and a per-server `error[acp]` line.
+    ///
+    /// Before the fix, `discover_session_tools` logged "skipping" and the
+    /// session continued with zero Anima tools — indistinguishable from an
+    /// agent that simply chose not to act.
+    ///
+    /// Gated on the `daemon` feature: the MCP bridge's strict-discovery path
+    /// is `#[cfg(feature = "daemon")]`-only (the HTTP MCP client lives
+    /// behind that gate), so without `daemon` the session has no bridge to
+    /// fail and the assertion would be meaningless.
+    #[cfg(feature = "daemon")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mcp_discovery_failure_fails_the_session_instead_of_continuing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-mcp-fail.sock");
+
+        // Use a tight idle timeout so the test fails fast if the strict
+        // discovery path somehow does not short-circuit the turn.
+        let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(5));
+
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        let answer = unix_client_prompt_with_broken_mcp(stream).await;
+
+        // The strict discovery variant streams a per-server `error[acp]`
+        // message naming the broken server, plus an aggregate failure line
+        // carrying the `_akh_mcp_discovery_failed` marker.
+        assert!(
+            answer.contains("error[acp]"),
+            "expected an error[acp] line for the failing server, got: {answer:?}"
+        );
+        assert!(
+            answer.contains("anima"),
+            "the error should name the broken server, got: {answer:?}"
+        );
+        assert!(
+            answer.contains("_akh_mcp_discovery_failed"),
+            "expected the `_akh_mcp_discovery_failed` marker, got: {answer:?}"
+        );
+        // The session must NOT have continued tool-less — i.e. the turn
+        // output should not contain a normal answer to "hello?". (The
+        // workspace's seeded fact is "Sun is-a Star"; a tool-less turn that
+        // fell through to the symbolic pipeline might still emit something,
+        // but it would not contain the discovery-failed marker. The marker
+        // assertion above is the primary check; this is a belt-and-braces
+        // sanity check that the turn did not silently produce a clean
+        // answer.)
+        assert!(
+            !answer.contains("Sun") || answer.contains("error[acp]"),
+            "tool-less session should not produce a clean KG answer, got: {answer:?}"
         );
     }
 
