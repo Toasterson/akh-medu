@@ -37,12 +37,24 @@ pub struct ServerConfig {
     pub bind: String,
 }
 
-/// Embedding model settings.
+/// Embedding model and worker settings.
+///
+/// Mirrors `seshat::config::EmbeddingConfig`. The embed worker polls
+/// `heka_drawer_chunks` for rows with `embedded_at IS NULL`, embeds
+/// them in batches, and writes the vectors to `heka_drawer_embeddings`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
     /// Sentence embedding model name (for model directory lookup).
     #[serde(default = "default_embedding_model")]
     pub model: String,
+
+    /// Number of chunks to embed per batch.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
+    /// Seconds between embed worker polls for unembedded chunks.
+    #[serde(default = "default_poll_interval")]
+    pub poll_interval_secs: u64,
 
     /// Directory for downloaded models.
     /// Defaults to `~/.local/share/heka/models/`.
@@ -71,6 +83,14 @@ fn default_embedding_model() -> String {
     "all-MiniLM-L6-v2".into()
 }
 
+fn default_batch_size() -> usize {
+    32
+}
+
+fn default_poll_interval() -> u64 {
+    30
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -83,6 +103,8 @@ impl Default for EmbeddingConfig {
     fn default() -> Self {
         Self {
             model: default_embedding_model(),
+            batch_size: default_batch_size(),
+            poll_interval_secs: default_poll_interval(),
             model_dir: None,
         }
     }
