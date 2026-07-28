@@ -237,10 +237,10 @@ impl Generator {
     ///
     /// The offered set is the same size as a normal example's (`distractor_count
     /// + 1` tools, none of them `T`), so abstention vs. call is *not* trivially
-    /// separable by counting offered tools — the model must actually read the
-    /// schemas and notice none match. Abstention is an in-distribution
-    /// classification the weights can learn (unlike open-world zero-shot), which
-    /// is exactly the claim P3c tests.
+    ///   separable by counting offered tools — the model must actually read the
+    ///   schemas and notice none match. Abstention is an in-distribution
+    ///   classification the weights can learn (unlike open-world zero-shot), which
+    ///   is exactly the claim P3c tests.
     ///
     /// Returns an error only if the drawn tool has no phrasing bank (same
     /// contract as [`Generator::try_next_example`]).

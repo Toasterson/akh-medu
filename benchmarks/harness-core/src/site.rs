@@ -136,16 +136,16 @@ fn render_trend_section(
         series.sort_by_key(|(ts, _)| *ts);
 
         out.push_str("<div class=\"chart\">\n");
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "<h3>{} &times; {}</h3>\n",
+            "<h3>{} &times; {}</h3>",
             escape_html(harness.as_str()),
             escape_html(model_tag.as_str())
         );
         out.push_str(&render_trend_svg(&series));
-        let _ = write!(
+        let _ = writeln!(
             out,
-            "<p class=\"muted small\">{} run(s), mean score over time (0.0&ndash;1.0)</p>\n",
+            "<p class=\"muted small\">{} run(s), mean score over time (0.0&ndash;1.0)</p>",
             series.len()
         );
         out.push_str("</div>\n");
@@ -179,27 +179,27 @@ fn render_trend_svg(points: &[(DateTime<Utc>, f64)]) -> String {
     let y_at = |score: f64| -> f64 { pad + (1.0 - score.clamp(0.0, 1.0)) * plot_h };
 
     let mut svg = String::new();
-    let _ = write!(
+    let _ = writeln!(
         svg,
         "<svg viewBox=\"0 0 {width} {height}\" width=\"100%\" height=\"{height}\" role=\"img\" \
-         aria-label=\"trend chart, mean score over {n} run(s)\">\n"
+         aria-label=\"trend chart, mean score over {n} run(s)\">"
     );
 
     // Gridlines at score 0.0 and 1.0.
     let y_top = y_at(1.0);
     let y_bot = y_at(0.0);
-    let _ = write!(
+    let _ = writeln!(
         svg,
-        "<line x1=\"{pad}\" y1=\"{y_top:.1}\" x2=\"{x_end:.1}\" y2=\"{y_top:.1}\" style=\"stroke:var(--border)\" stroke-width=\"1\"/>\n",
+        "<line x1=\"{pad}\" y1=\"{y_top:.1}\" x2=\"{x_end:.1}\" y2=\"{y_top:.1}\" style=\"stroke:var(--border)\" stroke-width=\"1\"/>",
         x_end = width - pad
     );
-    let _ = write!(
+    let _ = writeln!(
         svg,
-        "<line x1=\"{pad}\" y1=\"{y_bot:.1}\" x2=\"{x_end:.1}\" y2=\"{y_bot:.1}\" style=\"stroke:var(--border)\" stroke-width=\"1\"/>\n",
+        "<line x1=\"{pad}\" y1=\"{y_bot:.1}\" x2=\"{x_end:.1}\" y2=\"{y_bot:.1}\" style=\"stroke:var(--border)\" stroke-width=\"1\"/>",
         x_end = width - pad
     );
-    let _ = write!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">1.0</text>\n", y_top + 3.0);
-    let _ = write!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">0.0</text>\n", y_bot + 3.0);
+    let _ = writeln!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">1.0</text>", y_top + 3.0);
+    let _ = writeln!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">0.0</text>", y_bot + 3.0);
 
     if n > 1 {
         let poly_points: String = points
@@ -208,16 +208,16 @@ fn render_trend_svg(points: &[(DateTime<Utc>, f64)]) -> String {
             .map(|(i, (_, score))| format!("{:.1},{:.1}", x_at(i), y_at(*score)))
             .collect::<Vec<_>>()
             .join(" ");
-        let _ = write!(
+        let _ = writeln!(
             svg,
-            "<polyline points=\"{poly_points}\" fill=\"none\" style=\"stroke:var(--accent)\" stroke-width=\"2\"/>\n"
+            "<polyline points=\"{poly_points}\" fill=\"none\" style=\"stroke:var(--accent)\" stroke-width=\"2\"/>"
         );
     }
 
     for (i, (_, score)) in points.iter().enumerate() {
-        let _ = write!(
+        let _ = writeln!(
             svg,
-            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.5\" style=\"fill:var(--accent)\"/>\n",
+            "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"2.5\" style=\"fill:var(--accent)\"/>",
             x_at(i),
             y_at(*score)
         );
@@ -225,15 +225,15 @@ fn render_trend_svg(points: &[(DateTime<Utc>, f64)]) -> String {
 
     let first_date = points.first().unwrap().0.format("%Y-%m-%d");
     let last_date = points.last().unwrap().0.format("%Y-%m-%d");
-    let _ = write!(
+    let _ = writeln!(
         svg,
-        "<text x=\"{pad}\" y=\"{y:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">{first_date}</text>\n",
+        "<text x=\"{pad}\" y=\"{y:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">{first_date}</text>",
         y = height - 4.0
     );
     if n > 1 {
-        let _ = write!(
+        let _ = writeln!(
             svg,
-            "<text x=\"{x_end:.1}\" y=\"{y:.1}\" font-size=\"9\" text-anchor=\"end\" style=\"fill:var(--muted)\">{last_date}</text>\n",
+            "<text x=\"{x_end:.1}\" y=\"{y:.1}\" font-size=\"9\" text-anchor=\"end\" style=\"fill:var(--muted)\">{last_date}</text>",
             x_end = width - pad,
             y = height - 4.0
         );

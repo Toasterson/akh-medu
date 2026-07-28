@@ -421,10 +421,10 @@ fn arg_value_hits_fmt(
         for (k, wv) in &want {
             total += 1;
             let ty = schema.and_then(|s| s.param(k)).map(|p| &p.ty);
-            if let Some(gv) = got.as_ref().and_then(|g| g.get(k)) {
-                if values_equal_normalized(gv, wv, ty) {
-                    hits += 1;
-                }
+            if let Some(gv) = got.as_ref().and_then(|g| g.get(k))
+                && values_equal_normalized(gv, wv, ty)
+            {
+                hits += 1;
             }
         }
     }
