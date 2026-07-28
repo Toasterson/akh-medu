@@ -210,7 +210,7 @@ impl SemanticRetriever {
     /// as spaces so `fetch_ledger` trigrams read like the phrase) plus its
     /// description into a hypervector.
     pub fn new(registry: &[ToolSchema]) -> Self {
-        let tool_hvs = registry.iter().map(|t| encode_tool(t)).collect();
+        let tool_hvs = registry.iter().map(encode_tool).collect();
         Self { tool_hvs }
     }
 

@@ -91,13 +91,13 @@ pub fn ground_values(
     // First pass: mark grounded numeric args and collect ungrounded ones.
     for (name, value) in &args {
         let Some(spec) = schema.param(name) else { continue };
-        if matches!(spec.ty, ParamType::Integer | ParamType::Number) {
-            if let Some(v) = value.as_f64() {
-                if let Some(pos) = available.iter().position(|r| (r - v).abs() < 1e-6) {
-                    available.remove(pos); // this request number is claimed
-                } else {
-                    ungrounded_numeric.push(name.clone());
-                }
+        if matches!(spec.ty, ParamType::Integer | ParamType::Number)
+            && let Some(v) = value.as_f64()
+        {
+            if let Some(pos) = available.iter().position(|r| (r - v).abs() < 1e-6) {
+                available.remove(pos); // this request number is claimed
+            } else {
+                ungrounded_numeric.push(name.clone());
             }
         }
     }
@@ -187,12 +187,13 @@ pub fn ground_values(
                 best = Some((i, sim));
             }
         }
-        if let Some((i, sim)) = best {
-            if sim >= STR_SNAP_THRESHOLD && !windows[i].eq_ignore_ascii_case(s) {
-                new_args.insert(name.clone(), Value::String(windows[i].to_string()));
-                claimed[i] = true;
-                stats.string_regrounded += 1;
-            }
+        if let Some((i, sim)) = best
+            && sim >= STR_SNAP_THRESHOLD
+            && !windows[i].eq_ignore_ascii_case(s)
+        {
+            new_args.insert(name.clone(), Value::String(windows[i].to_string()));
+            claimed[i] = true;
+            stats.string_regrounded += 1;
         }
     }
 

@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 use crate::error::{HarnessError, HarnessResult};
 use crate::schema::{HarnessId, ModelTag, RunHeader, RunLine, RunRecord, TaskResult};
 
+/// `(directory, error)` pairs collected by [`scan_results_lenient`] for runs
+/// that failed to parse.
+type ScanFailures = Vec<(PathBuf, HarnessError)>;
+
 const RUN_FILE: &str = "run.jsonl";
 const SUMMARY_FILE: &str = "summary.md";
 
@@ -121,7 +125,7 @@ pub fn scan_results(results_root: &Path) -> HarnessResult<Vec<RunRecord>> {
 /// Like [`scan_results`], but never aborts: returns the runs that parsed
 /// successfully alongside `(directory, error)` pairs for the ones that
 /// didn't.
-pub fn scan_results_lenient(results_root: &Path) -> HarnessResult<(Vec<RunRecord>, Vec<(PathBuf, HarnessError)>)> {
+pub fn scan_results_lenient(results_root: &Path) -> HarnessResult<(Vec<RunRecord>, ScanFailures)> {
     let mut ok = Vec::new();
     let mut errs = Vec::new();
     for dir in result_subdirs(results_root)? {
