@@ -480,13 +480,36 @@ impl Agent {
             // streaming path failed and we silently retried non-streaming — in
             // which case nothing was streamed and we emit the result ourselves.
             let mut used_fallback = false;
+            // Throttle Keepalive emissions: tool-call chunks can arrive at token
+            // rate (~100/sec for a 1k-char JSON payload at 100 tok/s), so we emit
+            // at most one heartbeat per 30s to reset the watchdog without spam.
+            let mut last_keepalive = Instant::now();
+            const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
             let turn = {
                 let mut on_event = |ev: StreamEvent| match ev {
-                    StreamEvent::Content(delta) => sink.emit(&AkhMessage::narrative(delta, "acp")),
-                    StreamEvent::Thinking(delta) => sink.emit(&AkhMessage::Reasoning {
-                        step: delta,
-                        expression: None,
-                    }),
+                    StreamEvent::Content(delta) => {
+                        // Content/thinking resets the implicit heartbeat — a model
+                        // generating visible text is alive by definition.
+                        last_keepalive = Instant::now();
+                        sink.emit(&AkhMessage::narrative(delta, "acp"));
+                    }
+                    StreamEvent::Thinking(delta) => {
+                        last_keepalive = Instant::now();
+                        sink.emit(&AkhMessage::Reasoning {
+                            step: delta,
+                            expression: None,
+                        });
+                    }
+                    // Keepalive: the stream is alive but yielded no visible delta
+                    // (e.g. tool-call chunks Ollama accumulates). Emit a throttled
+                    // heartbeat to reset the watchdog's idle timer without cluttering
+                    // the thread (ask 3: "reset on any chunk received from the provider").
+                    StreamEvent::Keepalive => {
+                        if last_keepalive.elapsed() >= KEEPALIVE_INTERVAL {
+                            sink.emit(&AkhMessage::system("."));
+                            last_keepalive = Instant::now();
+                        }
+                    }
                 };
                 match backend.chat_with_tools_streaming(agent_id, &conversation, &tools, &mut on_event) {
                     Ok(t) => t,
@@ -495,6 +518,14 @@ impl Agent {
                             agent_id,
                             "streaming chat failed ({stream_err}); falling back to non-streaming"
                         );
+                        // Make the fallback observable: emit a System message so the
+                        // operator sees the degradation in the thread and the idle
+                        // watchdog's timer is reset (it would otherwise kill a long
+                        // non-streaming response at exactly 900s).
+                        sink.emit(&AkhMessage::system(format!(
+                            "streaming failed ({backend_label}), continuing non-streaming",
+                            backend_label = backend.label()
+                        )));
                         used_fallback = true;
                         match backend.chat_with_tools(agent_id, &conversation, &tools) {
                             Ok(t) => t,
@@ -809,19 +840,37 @@ impl Agent {
         // Empty catalog → the model must produce text, not another tool call.
         let no_tools: [Value; 0] = [];
         let mut used_fallback = false;
+        let mut last_keepalive = Instant::now();
         let turn = {
             let mut on_event = |ev: StreamEvent| match ev {
-                StreamEvent::Content(delta) => sink.emit(&AkhMessage::narrative(delta, "acp")),
-                StreamEvent::Thinking(delta) => sink.emit(&AkhMessage::Reasoning {
-                    step: delta,
-                    expression: None,
-                }),
+                StreamEvent::Content(delta) => {
+                    last_keepalive = Instant::now();
+                    sink.emit(&AkhMessage::narrative(delta, "acp"));
+                }
+                StreamEvent::Thinking(delta) => {
+                    last_keepalive = Instant::now();
+                    sink.emit(&AkhMessage::Reasoning {
+                        step: delta,
+                        expression: None,
+                    });
+                }
+                StreamEvent::Keepalive => {
+                    if last_keepalive.elapsed() >= Duration::from_secs(30) {
+                        sink.emit(&AkhMessage::system("."));
+                        last_keepalive = Instant::now();
+                    }
+                }
             };
             match backend.chat_with_tools_streaming(agent_id, conversation, &no_tools, &mut on_event)
             {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(agent_id, "forced-answer streaming failed ({e}); non-streaming");
+                    // Make the fallback observable (same fix as the normal round).
+                    sink.emit(&AkhMessage::system(format!(
+                        "streaming failed ({backend_label}), continuing non-streaming",
+                        backend_label = backend.label()
+                    )));
                     used_fallback = true;
                     match backend.chat_with_tools(agent_id, conversation, &no_tools) {
                         Ok(t) => t,
