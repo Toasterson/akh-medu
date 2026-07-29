@@ -221,6 +221,11 @@ pub enum StreamEvent {
     /// A delta of chain-of-thought text (`message.thinking`), emitted only by
     /// reasoning models with `think` enabled.
     Thinking(String),
+    /// Keepalive: a chunk was received from the provider but yielded no visible
+    /// delta (e.g. tool-call payloads, which Ollama accumulates). Signals
+    /// transport liveness so the idle watchdog doesn't mistake an active stream
+    /// for a stuck one (work item "Turns die quietly" ask 3).
+    Keepalive,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +514,8 @@ impl OllamaClient {
         })
     }
 
-    /// Run one tool-enabled `/api/chat` turn with **streaming** enabled.
+    /// Run one tool-enabled `/api/chat` turn with **streaming** enabled,
+    /// retrying transient connection failures before falling back.
     ///
     /// Identical to [`chat`](Self::chat) in request shape (same `messages`,
     /// `tools`, and `think` handling) but sets `"stream": true`, so the server
@@ -521,12 +527,51 @@ impl OllamaClient {
     /// streamed token-by-token by Ollama.
     ///
     /// The returned `AssistantTurn.content` is the concatenation of all content
-    /// deltas (thinking is intentionally **not** folded in). On any transport or
-    /// HTTP error the call returns an [`OllamaError`]; callers that want a
-    /// non-streaming fallback should catch it and retry with [`chat`](Self::chat).
-    /// Unparseable NDJSON lines are skipped defensively rather than aborting the
-    /// stream.
+    /// deltas (thinking is intentionally **not** folded in).
+    ///
+    /// **Retry logic**: transient transport errors (connection reset, read
+    /// timeout) trigger up to 2 retries with exponential backoff (200ms, 400ms)
+    /// before surfacing the error to the caller. HTTP-level failures (4xx/5xx)
+    /// are not retried. Unparseable NDJSON lines are skipped defensively rather
+    /// than aborting the stream.
     pub fn chat_stream(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> OllamaResult<AssistantTurn> {
+        const MAX_RETRIES: usize = 2;
+        const INITIAL_BACKOFF_MS: u64 = 200;
+
+        let mut attempt = 0;
+        loop {
+            match self.chat_stream_once(messages, tools, on_event) {
+                Ok(turn) => return Ok(turn),
+                Err(e) => {
+                    // Only retry transient transport errors (connection reset,
+                    // network unreachable, read timeout); HTTP errors (4xx/5xx)
+                    // are not retried.
+                    let is_retryable = matches!(&e, OllamaError::Unreachable { reason, .. }
+                        if reason.contains("reset") || reason.contains("timeout") || reason.contains("Network Error"));
+                    if !is_retryable || attempt >= MAX_RETRIES {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    let backoff_ms = INITIAL_BACKOFF_MS * (1 << (attempt - 1));
+                    tracing::debug!(
+                        attempt,
+                        backoff_ms,
+                        error = %e,
+                        "streaming request failed with retryable error; backing off"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                }
+            }
+        }
+    }
+
+    /// Internal: one streaming attempt without retry.
+    fn chat_stream_once(
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
@@ -534,6 +579,7 @@ impl OllamaClient {
     ) -> OllamaResult<AssistantTurn> {
         use std::io::BufRead;
 
+        let request_start = std::time::Instant::now();
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
 
         let mut body = serde_json::json!({
@@ -582,9 +628,20 @@ impl OllamaClient {
         let mut completion_tokens = 0u64;
         let reader = std::io::BufReader::new(response.into_reader());
         for line in reader.lines() {
-            let line = line.map_err(|e| OllamaError::Unreachable {
-                url: url.clone(),
-                reason: format!("stream read error: {e}"),
+            let line = line.map_err(|e| {
+                // Capture request duration at the point of stream failure for
+                // diagnosing duration-bound connection resets (work item "Turns
+                // die quietly" defect 2, ask 4).
+                let duration = request_start.elapsed();
+                tracing::warn!(
+                    duration_secs = duration.as_secs(),
+                    error = %e,
+                    "streaming read failed mid-response"
+                );
+                OllamaError::Unreachable {
+                    url: url.clone(),
+                    reason: format!("stream read error: {e}"),
+                }
             })?;
             let line = line.trim();
             if line.is_empty() {
@@ -596,16 +653,21 @@ impl OllamaClient {
                 continue;
             };
             if let Some(msg) = chunk.get("message") {
+                // Track whether this chunk produced any visible event so we can
+                // emit a Keepalive if it didn't (transport-liveness signal).
+                let mut emitted_something = false;
                 if let Some(delta) = msg.get("content").and_then(serde_json::Value::as_str)
                     && !delta.is_empty()
                 {
                     content.push_str(delta);
                     on_event(StreamEvent::Content(delta.to_string()));
+                    emitted_something = true;
                 }
                 if let Some(delta) = msg.get("thinking").and_then(serde_json::Value::as_str)
                     && !delta.is_empty()
                 {
                     on_event(StreamEvent::Thinking(delta.to_string()));
+                    emitted_something = true;
                 }
                 if let Some(calls) = msg.get("tool_calls").and_then(serde_json::Value::as_array) {
                     for call in calls {
@@ -622,6 +684,12 @@ impl OllamaClient {
                             });
                         }
                     }
+                }
+                // If we received a chunk but emitted nothing (e.g. accumulated
+                // tool-call payloads), emit Keepalive so the idle watchdog knows
+                // the stream is alive (ask 3: "reset on any chunk received").
+                if !emitted_something {
+                    on_event(StreamEvent::Keepalive);
                 }
             }
             if chunk.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -745,7 +813,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 StreamEvent::Content(s) => Some(s.as_str()),
-                StreamEvent::Thinking(_) => None,
+                StreamEvent::Thinking(_) | StreamEvent::Keepalive => None,
             })
             .collect();
         assert_eq!(content, ["Hel", "lo"], "content events arrive in order");
