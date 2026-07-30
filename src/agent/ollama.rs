@@ -578,6 +578,8 @@ impl OllamaClient {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OllamaResult<AssistantTurn> {
         use std::io::BufRead;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         let request_start = std::time::Instant::now();
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
@@ -622,12 +624,42 @@ impl OllamaClient {
             },
         })?;
 
+        // Client-side heartbeat: emit Keepalive on a timer while the request is
+        // in flight. This is REQUIRED because Ollama sends ZERO chunks during
+        // tool-call generation (measured: 6.9s of complete silence for a 600-word
+        // tool argument). The watchdog must not depend on the provider emitting
+        // anything — the client knows a request is outstanding and emits liveness
+        // itself (work item "The watchdog is blind while the model generates a
+        // tool call").
+        const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+        let request_alive = Arc::new(AtomicBool::new(true));
+        let request_alive_clone = Arc::clone(&request_alive);
+
+        // Spawn heartbeat thread: emit Keepalive every HEARTBEAT_INTERVAL_SECS
+        // while the request is active. Uses a channel to send events back to the
+        // main thread since `on_event` is a `&mut dyn FnMut` that can't be shared
+        // across threads.
+        let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel::<StreamEvent>();
+        let heartbeat_thread = std::thread::spawn(move || {
+            while request_alive_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+                if request_alive_clone.load(Ordering::Relaxed) {
+                    let _ = heartbeat_tx.send(StreamEvent::Keepalive);
+                }
+            }
+        });
+
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
         let reader = std::io::BufReader::new(response.into_reader());
         for line in reader.lines() {
+            // Drain heartbeats from the background thread (non-blocking).
+            while let Ok(heartbeat_event) = heartbeat_rx.try_recv() {
+                on_event(heartbeat_event);
+            }
+
             let line = line.map_err(|e| {
                 // Capture request duration at the point of stream failure for
                 // diagnosing duration-bound connection resets (work item "Turns
@@ -638,6 +670,8 @@ impl OllamaClient {
                     error = %e,
                     "streaming read failed mid-response"
                 );
+                // Signal heartbeat thread to stop before returning error.
+                request_alive.store(false, Ordering::Relaxed);
                 OllamaError::Unreachable {
                     url: url.clone(),
                     reason: format!("stream read error: {e}"),
@@ -704,6 +738,16 @@ impl OllamaClient {
                     .unwrap_or(0);
                 break;
             }
+        }
+
+        // Signal heartbeat thread to stop and join it (best-effort).
+        request_alive.store(false, Ordering::Relaxed);
+        let _ = heartbeat_thread.join();
+
+        // Drain any remaining heartbeats (one might have been sent just before
+        // we set request_alive to false).
+        while let Ok(heartbeat_event) = heartbeat_rx.try_recv() {
+            on_event(heartbeat_event);
         }
 
         Ok(AssistantTurn {
@@ -822,6 +866,98 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, StreamEvent::Thinking(s) if s == "hmm")),
             "thinking delta surfaced as a Thinking event"
+        );
+    }
+
+    /// Regression test for work item "The watchdog is blind while the model
+    /// generates a tool call": a turn whose model spends > idle_secs generating
+    /// a single large tool call completes normally, not killed by the watchdog.
+    ///
+    /// Simulates Ollama's measured behavior: 46 total chunks over 7.5s, with the
+    /// first 43 arriving in 180ms (thinking/content), then 6.9s of complete
+    /// silence (tool-call generation), then 1 final chunk carrying the entire
+    /// tool_calls payload. The client-side heartbeat (emitting Keepalive on a
+    /// 10s timer) must keep the idle watchdog alive through the silent phase.
+    #[test]
+    fn long_tool_call_generation_survives_via_heartbeat() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        // Track emitted StreamEvents to verify heartbeats arrived.
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        // NDJSON body: 43 thinking chunks (streamed fast), then a 12s gap,
+        // then 1 tool-call chunk, then done. This models the measured 6.9s
+        // silence scaled up to exceed the 10s heartbeat interval.
+        let mut body = String::new();
+        for i in 0..43 {
+            body.push_str(&format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n"));
+        }
+        let tool_call_chunk = "{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"write_file\",\"arguments\":{\"path\":\"/tmp/test\",\"content\":\"x\"}}}]}}\n";
+        body.push_str("{\"done\":true}\n");
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                // Write header
+                let _ = stream.write_all(response.as_bytes());
+                // Write first 43 chunks fast
+                for i in 0..43 {
+                    let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
+                    let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                    let _ = stream.write_all(chunk.as_bytes());
+                    let _ = stream.write_all(b"\r\n");
+                }
+                // 12s gap simulating tool-call generation (no chunks)
+                std::thread::sleep(std::time::Duration::from_secs(12));
+                // Tool call chunk
+                let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
+                let _ = stream.write_all(tool_call_chunk.as_bytes());
+                let _ = stream.write_all(b"\r\n");
+                // Done chunk
+                let done = "{\"done\":true}\n";
+                let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
+                let _ = stream.write_all(done.as_bytes());
+                let _ = stream.write_all(b"\r\n0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        let client = OllamaClient::new(OllamaConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            timeout_secs: 30, // socket timeout, not total
+            ..OllamaConfig::default()
+        });
+
+        let turn = client
+            .chat_stream(
+                &[serde_json::json!({"role": "user", "content": "hi"})],
+                &[serde_json::json!({"name": "write_file", "parameters": {}})],
+                &mut |ev| events_clone.lock().unwrap().push(ev),
+            )
+            .expect("turn survives 12s silence via heartbeat");
+        let _ = server.join();
+
+        // Verify the turn succeeded and tool call was parsed.
+        assert_eq!(turn.tool_calls.len(), 1, "tool call parsed");
+        assert_eq!(turn.tool_calls[0].name, "write_file");
+
+        // Verify heartbeats were emitted during the silent phase. With a 10s
+        // interval and 12s gap, at least 1 heartbeat should have fired.
+        let events = events.lock().unwrap();
+        let keepalive_count = events.iter().filter(|e| matches!(e, StreamEvent::Keepalive)).count();
+        assert!(
+            keepalive_count >= 1,
+            "at least 1 heartbeat emitted during 12s silent tool-call generation (got {keepalive_count})"
         );
     }
 
