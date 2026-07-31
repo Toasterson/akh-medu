@@ -931,6 +931,7 @@ mod tests {
             .chat_stream(
                 &[serde_json::json!({"role": "user", "content": "hi"})],
                 &[],
+                0,
                 &mut |ev| events.push(ev),
             )
             .expect("chat_stream ok");
@@ -1033,6 +1034,7 @@ mod tests {
             .chat_stream(
                 &[serde_json::json!({"role": "user", "content": "hi"})],
                 &[serde_json::json!({"name": "write_file", "parameters": {}})],
+                0,
                 &mut |ev| {
                     let elapsed = test_start.elapsed();
                     events_clone.lock().unwrap().push((elapsed, ev));

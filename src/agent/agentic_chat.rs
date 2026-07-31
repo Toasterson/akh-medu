@@ -51,6 +51,12 @@ const DEFAULT_TURN_TIMEOUT_SECS: u64 = 300;
 /// harnesses use to break a spinning agent. Override with `AKH_AGENT_REPEAT_LIMIT`.
 const DEFAULT_REPEAT_LIMIT: usize = 3;
 
+/// Wedge detection: if a turn is active but no LLM request has been issued for
+/// this many seconds, end the turn rather than waiting for the runner's 3600s cap.
+/// This catches the WI-259 wedge where the model stopped requesting tools but the
+/// loop neither completed nor continued. Override with `AKH_AGENT_WEDGE_TIMEOUT_SECS`.
+const DEFAULT_WEDGE_TIMEOUT_SECS: u64 = 60;
+
 /// Characters of a tool-call argument blob surfaced in the "calling tool" line.
 const ARG_PREVIEW_LEN: usize = 160;
 
@@ -125,6 +131,11 @@ enum TurnStop {
     /// guard detected no work was performed (no mutating tool calls and
     /// clean worktree). Dispatch-only failure mode.
     DeclaredButIdle,
+    /// Wedge detected: the turn has been active but no LLM request has been
+    /// issued for longer than the wedge timeout. This catches the WI-259
+    /// failure mode where the model stopped requesting tools but the loop
+    /// neither completed nor continued.
+    WedgeTimeout,
 }
 
 impl TurnStop {
@@ -138,6 +149,9 @@ impl TurnStop {
                 "You declared completion but verification shows no work was performed. \
                  The worktree has no uncommitted changes and no mutating tool calls were made. \
                  Review the task requirements and use the appropriate tools to make the necessary changes"
+            }
+            TurnStop::WedgeTimeout => {
+                "The turn has been inactive for too long without making progress"
             }
         }
     }
@@ -158,11 +172,15 @@ struct RoundBudget {
     hard_max: usize,
     timeout: Duration,
     repeat_limit: usize,
+    wedge_timeout: Duration,
     started: Instant,
     round: usize,
     /// Count of each `(tool, args)` signature issued this turn, for spin detection.
     counts: HashMap<u64, usize>,
     looped: bool,
+    /// Last time an LLM request was issued. Updated at the start of each round
+    /// to detect the WI-259 wedge (loop active but no request for N seconds).
+    last_request: Instant,
 }
 
 impl RoundBudget {
@@ -182,14 +200,22 @@ impl RoundBudget {
                 .unwrap_or(DEFAULT_TURN_TIMEOUT_SECS),
         );
         let repeat_limit = env_usize("AKH_AGENT_REPEAT_LIMIT").unwrap_or(DEFAULT_REPEAT_LIMIT);
+        let wedge_timeout = Duration::from_secs(
+            env_usize("AKH_AGENT_WEDGE_TIMEOUT_SECS")
+                .map(|n| n as u64)
+                .unwrap_or(DEFAULT_WEDGE_TIMEOUT_SECS),
+        );
+        let now = Instant::now();
         Self {
             hard_max,
             timeout,
             repeat_limit,
-            started: Instant::now(),
+            wedge_timeout,
+            started: now,
             round: 0,
             counts: HashMap::new(),
             looped: false,
+            last_request: now,
         }
     }
 
@@ -201,6 +227,8 @@ impl RoundBudget {
             Some(TurnStop::Timeout)
         } else if self.looped {
             Some(TurnStop::RepeatLoop)
+        } else if self.last_request.elapsed() >= self.wedge_timeout {
+            Some(TurnStop::WedgeTimeout)
         } else {
             None
         }
@@ -230,6 +258,11 @@ impl RoundBudget {
     /// Iteration cap (for post-condition retry budget).
     fn max_rounds(&self) -> usize {
         self.hard_max
+    }
+
+    /// Mark that an LLM request is being issued, updating the wedge-detection timer.
+    fn note_request(&mut self) {
+        self.last_request = Instant::now();
     }
 }
 
@@ -494,6 +527,8 @@ impl Agent {
                 .map(|s| s.len())
                 .sum();
             let request_seq = turn_metrics.note_prompt(prompt_chars);
+            // Mark that we're issuing a request (wedge-detection timer).
+            budget.note_request();
             let turn = {
                 let mut on_event = |ev: StreamEvent| match ev {
                     StreamEvent::Content(delta) => {
@@ -561,6 +596,22 @@ impl Agent {
             }));
 
             if turn.tool_calls.is_empty() {
+                let answer = turn.content.trim();
+
+                // Check for empty answer first (WI-259 wedge fix): the model
+                // stopped calling tools but produced no answer text. This must
+                // be checked BEFORE the dispatch mode guard, otherwise dispatch
+                // mode would retry indefinitely when the model keeps returning
+                // empty answers.
+                if answer.is_empty() {
+                    tracing::warn!(
+                        agent_id,
+                        rounds = budget.rounds_so_far(),
+                        "model declared completion but produced empty answer — forcing final synthesis"
+                    );
+                    break TurnStop::IterationCap;
+                }
+
                 // Post-condition guard: in autonomous dispatch mode, verify that
                 // work was actually performed before accepting the model's
                 // declaration of completion (no tool calls = "I'm done").
@@ -587,9 +638,19 @@ impl Agent {
                         // Increment retry count and check budget
                         if budget.rounds_so_far() >= budget.max_rounds() / 2 {
                             // Exhausted: close with a named failure
+                            tracing::info!(
+                                agent_id,
+                                rounds = budget.rounds_so_far(),
+                                "dispatch turn: post-condition check failed (no work), exhausted retry budget"
+                            );
                             break TurnStop::DeclaredButIdle;
                         }
                         // Retry: append feedback and continue the loop
+                        tracing::info!(
+                            agent_id,
+                            rounds = budget.rounds_so_far(),
+                            "dispatch turn: post-condition check failed (no work), retrying with feedback"
+                        );
                         conversation.push(json!({
                             "role": "user",
                             "content": TurnStop::DeclaredButIdle.clause(),
@@ -600,18 +661,21 @@ impl Agent {
 
                 // Either we're in interactive mode, or the post-condition passed:
                 // record the turn and exit normally.
-                let answer = turn.content.trim();
-                if !answer.is_empty() {
-                    self.conversation_state_mut().record_agent_turn(answer);
-                    // ADR 091: capture the completed turn to the WAL (raw
-                    // staging; a no-op if no sink is installed or capture is
-                    // opted out).
-                    self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
-                    // Streaming already emitted the answer as deltas; only the
-                    // non-streaming fallback still needs to emit it.
-                    if used_fallback {
-                        sink.emit(&AkhMessage::narrative(answer, "acp"));
-                    }
+                tracing::info!(
+                    agent_id,
+                    answer_len = answer.len(),
+                    mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
+                    "turn complete: model declared completion with answer"
+                );
+                self.conversation_state_mut().record_agent_turn(answer);
+                // ADR 091: capture the completed turn to the WAL (raw
+                // staging; a no-op if no sink is installed or capture is
+                // opted out).
+                self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
+                // Streaming already emitted the answer as deltas; only the
+                // non-streaming fallback still needs to emit it.
+                if used_fallback {
+                    sink.emit(&AkhMessage::narrative(answer, "acp"));
                 }
                 return Some(());
             }
@@ -1665,6 +1729,7 @@ mod tests {
             _agent_id: &str,
             _conversation: &[Value],
             _tools: &[Value],
+            _request_seq: usize,
         ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
         {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1756,6 +1821,7 @@ mod tests {
             _agent_id: &str,
             _conversation: &[Value],
             _tools: &[Value],
+            _request_seq: usize,
         ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
         {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1830,6 +1896,98 @@ mod tests {
             1,
             "interactive mode must accept the model's completion declaration \
              without retrying, even when no work was performed"
+        );
+    }
+
+    // --- WI-259 wedge fix: empty answer forces final synthesis ---
+
+    /// Backend that returns an empty answer (no tool calls, empty content) on
+    /// the first round, simulating the WI-259 wedge scenario where the model
+    /// stopped calling tools but produced no prose.
+    struct EmptyAnswerBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for EmptyAnswerBackend {
+        fn label(&self) -> &str {
+            "empty-answer"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // If tools are offered, return empty with no tool calls (the wedge).
+            // If no tools (forced synthesis), return prose.
+            if tools.is_empty() {
+                Ok(crate::agent::ollama::AssistantTurn {
+                    content: "Here is my final answer based on what I gathered.".into(),
+                    tool_calls: vec![],
+                    ..Default::default()
+                })
+            } else {
+                Ok(crate::agent::ollama::AssistantTurn {
+                    content: String::new(),
+                    tool_calls: vec![],
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    /// When the model returns empty content with no tool calls (the WI-259
+    /// wedge), the turn must force a final synthesis instead of wedging
+    /// indefinitely. Two calls total: the empty round, then forced synthesis.
+    #[test]
+    fn empty_answer_forces_final_synthesis_instead_of_wedge() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
+            calls: calls.clone(),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // Interactive mode: the guard is disabled but the empty-answer path still applies.
+        let result = agent.run_agentic_turn(&engine, "tecton", "hello", &sink, &cancel, false);
+        assert_eq!(result, Some(()));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "empty answer must force a final synthesis (2 calls: empty round + forced synthesis), not wedge"
+        );
+    }
+
+    /// In dispatch mode, an empty answer (no tool calls, empty content) also
+    /// forces final synthesis — the same fix as interactive mode, since the
+    /// post-condition guard only fires when has_mutating_calls is checked,
+    /// which doesn't happen when tool_calls is empty in the first place.
+    #[test]
+    fn dispatch_mode_empty_answer_also_forces_synthesis() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.tool_registry.register(Box::new(DummyTool));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
+            calls: calls.clone(),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        // is_autonomous_dispatch = true
+        let result = agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
+        assert_eq!(result, Some(()));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "dispatch mode with empty answer must also force final synthesis"
         );
     }
 }
