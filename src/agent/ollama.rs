@@ -578,6 +578,8 @@ impl OllamaClient {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OllamaResult<AssistantTurn> {
         use std::io::BufRead;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
 
         let request_start = std::time::Instant::now();
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
@@ -622,13 +624,77 @@ impl OllamaClient {
             },
         })?;
 
+        // Client-side heartbeat + decoupled streaming: heartbeats must be
+        // delivered DURING provider silence, not after. The previous implementation
+        // drained heartbeats inside the blocking `reader.lines()` loop, so they
+        // accumulated in the channel and were flushed only after the first byte
+        // arrived — which is precisely when the watchdog had already fired. This
+        // inverted architecture moves the blocking read into its own thread and
+        // selects over a line channel and a heartbeat channel, so heartbeats fire
+        // on schedule regardless of provider behavior (work item "The watchdog is
+        // blind while the model generates a tool call", review round 2).
+        const HEARTBEAT_INTERVAL_SECS: u64 = 10;
+        let request_alive = Arc::new(AtomicBool::new(true));
+
+        // Line-reader thread: read NDJSON lines from the response stream and
+        // send them through a channel. Signals completion by dropping the sender.
+        enum LineEvent {
+            Line(Result<String, std::io::Error>),
+        }
+        let (line_tx, line_rx) = std::sync::mpsc::channel::<LineEvent>();
+        let reader_alive = Arc::clone(&request_alive);
+        let reader_thread = {
+            let reader = std::io::BufReader::new(response.into_reader());
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in reader.lines() {
+                    if !reader_alive.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if line_tx.send(LineEvent::Line(line)).is_err() {
+                        // Receiver dropped — caller is gone.
+                        break;
+                    }
+                }
+                // Sender drops, signaling EOF to the main thread.
+            })
+        };
+
+        // Heartbeat thread: emit Keepalive on a timer.
+        let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel::<StreamEvent>();
+        let heartbeat_alive = Arc::clone(&request_alive);
+        let heartbeat_thread = std::thread::spawn(move || {
+            while heartbeat_alive.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+                if heartbeat_alive.load(Ordering::Relaxed) {
+                    if heartbeat_tx.send(StreamEvent::Keepalive).is_err() {
+                        // Receiver dropped.
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Main event loop: select over lines and heartbeats. This is a
+        // synchronous `select!`-equivalent using `recv_timeout` — check
+        // heartbeats frequently (every 100ms) so they are delivered promptly,
+        // but don't busy-wait.
         let mut content = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut prompt_tokens = 0u64;
         let mut completion_tokens = 0u64;
-        let reader = std::io::BufReader::new(response.into_reader());
-        for line in reader.lines() {
-            let line = line.map_err(|e| {
+        loop {
+            // Drain all pending heartbeats (non-blocking).
+            while let Ok(ev) = heartbeat_rx.try_recv() {
+                on_event(ev);
+            }
+
+            // Wait for the next line with a short timeout so we can check for
+            // heartbeats periodically.
+            let line_result = line_rx.recv_timeout(std::time::Duration::from_millis(100));
+            match line_result {
+                Ok(LineEvent::Line(line)) => {
+                    let line = line.map_err(|e| {
                 // Capture request duration at the point of stream failure for
                 // diagnosing duration-bound connection resets (work item "Turns
                 // die quietly" defect 2, ask 4).
@@ -638,6 +704,8 @@ impl OllamaClient {
                     error = %e,
                     "streaming read failed mid-response"
                 );
+                // Signal heartbeat thread to stop before returning error.
+                request_alive.store(false, Ordering::Relaxed);
                 OllamaError::Unreachable {
                     url: url.clone(),
                     reason: format!("stream read error: {e}"),
@@ -704,6 +772,31 @@ impl OllamaClient {
                     .unwrap_or(0);
                 break;
             }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // No line received in the last 100ms — continue the loop to
+                    // check for heartbeats again. This is NOT a failure; the
+                    // reader thread is still working.
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    // Line sender dropped (EOF or reader thread panicked).
+                    // If we got here without seeing `done: true`, the stream
+                    // ended prematurely.
+                    break;
+                }
+            }
+        }
+
+        // Signal both threads to stop.
+        request_alive.store(false, Ordering::Relaxed);
+        let _ = reader_thread.join();
+        let _ = heartbeat_thread.join();
+
+        // Drain any remaining heartbeats (one might have been sent just before
+        // we set request_alive to false).
+        while let Ok(heartbeat_event) = heartbeat_rx.try_recv() {
+            on_event(heartbeat_event);
         }
 
         Ok(AssistantTurn {
@@ -822,6 +915,123 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, StreamEvent::Thinking(s) if s == "hmm")),
             "thinking delta surfaced as a Thinking event"
+        );
+    }
+
+    /// Regression test for work item "The watchdog is blind while the model
+    /// generates a tool call": a turn whose model spends > idle_secs generating
+    /// a single large tool call completes normally, not killed by the watchdog.
+    ///
+    /// Simulates Ollama's measured behavior: 46 total chunks over 7.5s, with the
+    /// first 43 arriving in 180ms (thinking/content), then 6.9s of complete
+    /// silence (tool-call generation), then 1 final chunk carrying the entire
+    /// tool_calls payload. The client-side heartbeat (emitting Keepalive on a
+    /// 10s timer) must keep the idle watchdog alive through the silent phase.
+    #[test]
+    fn long_tool_call_generation_survives_via_heartbeat() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        // Track emitted StreamEvents WITH TIMESTAMPS to verify heartbeats
+        // arrive DURING the silent phase, not after (review round 2).
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let test_start = Instant::now();
+
+        // NDJSON body: 43 thinking chunks (streamed fast), then a 12s gap,
+        // then 1 tool-call chunk, then done. This models the measured 6.9s
+        // silence scaled up to exceed the 10s heartbeat interval.
+        let mut body = String::new();
+        for i in 0..43 {
+            body.push_str(&format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n"));
+        }
+        let tool_call_chunk = "{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"write_file\",\"arguments\":{\"path\":\"/tmp/test\",\"content\":\"x\"}}}]}}\n";
+        body.push_str("{\"done\":true}\n");
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                // Write header
+                let _ = stream.write_all(response.as_bytes());
+                // Write first 43 chunks fast
+                for i in 0..43 {
+                    let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
+                    let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                    let _ = stream.write_all(chunk.as_bytes());
+                    let _ = stream.write_all(b"\r\n");
+                }
+                // 12s gap simulating tool-call generation (no chunks)
+                std::thread::sleep(std::time::Duration::from_secs(12));
+                // Tool call chunk
+                let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
+                let _ = stream.write_all(tool_call_chunk.as_bytes());
+                let _ = stream.write_all(b"\r\n");
+                // Done chunk
+                let done = "{\"done\":true}\n";
+                let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
+                let _ = stream.write_all(done.as_bytes());
+                let _ = stream.write_all(b"\r\n0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        let client = OllamaClient::new(OllamaConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            timeout_secs: 30, // socket timeout, not total
+            ..OllamaConfig::default()
+        });
+
+        let turn = client
+            .chat_stream(
+                &[serde_json::json!({"role": "user", "content": "hi"})],
+                &[serde_json::json!({"name": "write_file", "parameters": {}})],
+                &mut |ev| {
+                    let elapsed = test_start.elapsed();
+                    events_clone.lock().unwrap().push((elapsed, ev));
+                },
+            )
+            .expect("turn survives 12s silence via heartbeat");
+        let _ = server.join();
+
+        // Verify the turn succeeded and tool call was parsed.
+        assert_eq!(turn.tool_calls.len(), 1, "tool call parsed");
+        assert_eq!(turn.tool_calls[0].name, "write_file");
+
+        // Verify heartbeats were emitted DURING the silent phase, not after.
+        // The server writes 43 thinking chunks fast (< 100ms), then sleeps 12s,
+        // then writes the tool call + done chunks. A heartbeat that arrives
+        // only after the sleep ends (> 12s elapsed) would prove the old broken
+        // behavior (heartbeats queued but not delivered until the read loop
+        // woke up). We need at least one Keepalive in the window [1s, 12s].
+        let events = events.lock().unwrap();
+        let keepalives_during_silence: Vec<_> = events
+            .iter()
+            .filter_map(|(elapsed, ev)| {
+                if matches!(ev, StreamEvent::Keepalive)
+                    && elapsed.as_secs_f64() > 1.0  // After thinking chunks
+                    && elapsed.as_secs_f64() < 12.0 // Before tool call arrives
+                {
+                    Some(elapsed.as_secs_f64())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            !keepalives_during_silence.is_empty(),
+            "at least 1 heartbeat must arrive DURING the 12s silent window (1s-12s), \
+             got {} total Keepalives but none in the silent window. Timings: {:?}",
+            events.iter().filter(|(_, ev)| matches!(ev, StreamEvent::Keepalive)).count(),
+            keepalives_during_silence
         );
     }
 

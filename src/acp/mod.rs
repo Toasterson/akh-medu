@@ -381,6 +381,13 @@ pub struct AkhAcpAgent {
     /// gateway slot forever. Zero disables the watchdog. Defaults from
     /// `AKH_TURN_IDLE_TIMEOUT_SECS` (see [`turn_idle_timeout_from_env`]).
     turn_idle_timeout: std::time::Duration,
+    /// Socket read timeout: individual socket reads within an LLM request
+    /// must complete within this duration. This is DISTINCT from
+    /// `turn_idle_timeout` — socket timeout detects dead network connections,
+    /// while idle timeout detects application-level stalls (blocked locks,
+    /// unanswered round-trips). Zero disables. Defaults from
+    /// `AKH_SOCKET_READ_TIMEOUT_SECS` (see [`socket_read_timeout_from_env`]).
+    socket_read_timeout: std::time::Duration,
     /// Per-workspace in-flight-turn tracker for the `session/prompt` busy
     /// fail-fast guard: one start-`Instant` per turn currently in flight for
     /// that workspace, oldest at the front. A new prompt whose workspace
@@ -409,6 +416,14 @@ pub struct AkhAcpAgent {
 /// often than this; only a genuinely stuck turn is silent for minutes.
 const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// Default socket read timeout (seconds). This applies to individual socket
+/// reads within a request, NOT to the total request duration. A healthy stream
+/// should have bytes arriving periodically (from provider chunks or client-side
+/// heartbeats); a socket that goes silent for this long is likely dead. This is
+/// shorter than `TURN_IDLE_TIMEOUT` because socket-level failure should be
+/// detected before application-level idle.
+const DEFAULT_SOCKET_READ_TIMEOUT_SECS: u64 = 60;
+
 /// Cap on tracked ACP sessions (`sessions` + `session_mcp` +
 /// `session_mcp_tools` + `session_contexts`). Once exceeded, the oldest
 /// session's state (including any client-pushed bearer token) is evicted at
@@ -422,6 +437,18 @@ fn turn_idle_timeout_from_env() -> std::time::Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_TURN_IDLE_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
+/// The socket read timeout from `AKH_SOCKET_READ_TIMEOUT_SECS` (seconds;
+/// `0` disables), defaulting to [`DEFAULT_SOCKET_READ_TIMEOUT_SECS`]. This
+/// timeout applies to individual socket reads, detecting dead connections
+/// faster than the application-level idle watchdog.
+fn socket_read_timeout_from_env() -> std::time::Duration {
+    let secs = std::env::var("AKH_SOCKET_READ_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SOCKET_READ_TIMEOUT_SECS);
     std::time::Duration::from_secs(secs)
 }
 
@@ -451,6 +478,7 @@ impl AkhAcpAgent {
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
             turn_idle_timeout: turn_idle_timeout_from_env(),
+            socket_read_timeout: socket_read_timeout_from_env(),
             active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -476,6 +504,7 @@ impl AkhAcpAgent {
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
+            socket_read_timeout: socket_read_timeout_from_env(),
             active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -486,6 +515,15 @@ impl AkhAcpAgent {
     #[must_use]
     pub fn with_turn_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.turn_idle_timeout = timeout;
+        self
+    }
+
+    /// Override the socket read timeout. Zero disables. This is DISTINCT from
+    /// the turn idle timeout: socket timeout detects dead network connections
+    /// at the byte level, while idle timeout detects application-level stalls.
+    #[must_use]
+    pub fn with_socket_read_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.socket_read_timeout = timeout;
         self
     }
 
@@ -3557,7 +3595,7 @@ fn build_connection(
                         // and clears it there, while relaying the join result
                         // back to the normal-completion path over a oneshot
                         // so panics are still surfaced exactly as before.
-                        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
                         {
                             let end_ws = ws.clone();
                             let end_me = me.clone();
@@ -3611,65 +3649,96 @@ fn build_connection(
                         }
 
                         if stalled {
-                            // Ask the worker to stop at its next round
-                            // boundary (part (a)); the busy-tracker entry for
-                            // `ws` stays live until it actually does (the
-                            // bookkeeping task above clears it), so a
-                            // meanwhile-arriving third prompt fails fast via
-                            // `begin_turn` instead of queuing behind it too.
-                            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            let (step_kind, step_age) =
-                                tracker.snapshot(turn_start, std::time::Instant::now());
-                            // **Defect-1 fix, part 3**: report the stall as a
-                            // *turn outcome* Anima can distinguish from a
-                            // clean no-op, not as `StopReason::EndTurn`. The
-                            // crate's `schema::StopReason` is the v1 enum
-                            // (no `Other` variant), so we use `Refusal` —
-                            // semantically "the agent refused to continue",
-                            // which matches a stall (the turn produced
-                            // nothing usable and the prompt should not be
-                            // silently re-included next turn) and is
-                            // distinguishable from `EndTurn` on the Anima
-                            // side. The streamed `error[acp]` message carries
-                            // the machine-greppable `_akh_stalled` marker so
-                            // the Anima turn-outcome defect
-                            // (`019f98b5-2ccd-7d80-9842-ec3e395b0d12`) can
-                            // route the turn correctly even before the
-                            // protocol-level stop reason is widened.
-                            let stop_reason = StopReason::Refusal;
-                            tracing::error!(
-                                workspace = %ws,
-                                idle_secs = idle.as_secs(),
-                                last_step = step_kind.as_str(),
-                                last_step_age_secs = step_age.as_secs(),
-                                nlu_t1_rules = nlu_status.tier1_rule_parser,
-                                nlu_t2_ner = nlu_status.tier2_ml_ner,
-                                nlu_t3_llm = nlu_status.tier3_llm,
-                                nlu_t4_ranker = nlu_status.tier4_ranker,
-                                stop_reason = ?stop_reason,
-                                "chat turn stalled (no progress within the idle \
-                                 watchdog) — ending the turn with a distinguishable \
-                                 stop reason and signalling its worker to cancel at \
-                                 the next round boundary. The `last_step` field \
-                                 names the in-flight step; the `nlu_t*` fields \
-                                 surface whether the missing LLM translator \
-                                 correlates with the stall (work item 'Turns die \
-                                 quietly' defect 1, parts 1–3)."
-                            );
-                            sink.emit(&AkhMessage::error(
-                                "acp",
-                                format!(
-                                    "chat turn stalled: no progress for {}s — \
-                                     aborting this turn. Last step: {} ({}s ago). \
-                                     The daemon has been signalled to cancel the \
-                                     stuck step (workspace \"{ws}\"). Stop reason: \
-                                     `_akh_stalled`.",
-                                    idle.as_secs(),
-                                    step_kind.as_str(),
-                                    step_age.as_secs(),
-                                ),
-                            ));
-                            return responder.respond(PromptResponse::new(stop_reason));
+                            // The drain loop timed out — but the worker might have
+                            // already completed and its messages are queued in msg_rx,
+                            // just not delivered yet. Check if the worker is done
+                            // (non-blocking); if it is, drain remaining messages and
+                            // return normally rather than discarding completed work
+                            // (requirement 3: "Never discard completed work").
+                            match done_rx.try_recv() {
+                                Ok(Ok(Ok(()))) => {
+                                    // Worker finished successfully. Drain any
+                                    // remaining messages that were queued but not
+                                    // delivered before the timeout fired.
+                                    while let Ok(msg) = msg_rx.try_recv() {
+                                        tracker.observe(&msg, turn_start, std::time::Instant::now());
+                                        sink.emit(&msg);
+                                    }
+                                    // Fall through to the normal completion path
+                                    // (awaiting approver, returning EndTurn).
+                                }
+                                Ok(Ok(Err(_))) | Ok(Err(_)) => {
+                                    // Worker failed or panicked — the stall is real.
+                                    // Fall through to report it.
+                                }
+                                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                                    // Worker still running — this is a genuine stall.
+                                    // Ask the worker to stop at its next round
+                                    // boundary (part (a)); the busy-tracker entry for
+                                    // `ws` stays live until it actually does (the
+                                    // bookkeeping task above clears it), so a
+                                    // meanwhile-arriving third prompt fails fast via
+                                    // `begin_turn` instead of queuing behind it too.
+                                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let (step_kind, step_age) =
+                                        tracker.snapshot(turn_start, std::time::Instant::now());
+                                    // **Defect-1 fix, part 3**: report the stall as a
+                                    // *turn outcome* Anima can distinguish from a
+                                    // clean no-op, not as `StopReason::EndTurn`. The
+                                    // crate's `schema::StopReason` is the v1 enum
+                                    // (no `Other` variant), so we use `Refusal` —
+                                    // semantically "the agent refused to continue",
+                                    // which matches a stall (the turn produced
+                                    // nothing usable and the prompt should not be
+                                    // silently re-included next turn) and is
+                                    // distinguishable from `EndTurn` on the Anima
+                                    // side. The streamed `error[acp]` message carries
+                                    // the machine-greppable `_akh_stalled` marker so
+                                    // the Anima turn-outcome defect
+                                    // (`019f98b5-2ccd-7d80-9842-ec3e395b0d12`) can
+                                    // route the turn correctly even before the
+                                    // protocol-level stop reason is widened.
+                                    let stop_reason = StopReason::Refusal;
+                                    tracing::error!(
+                                        workspace = %ws,
+                                        idle_secs = idle.as_secs(),
+                                        last_step = step_kind.as_str(),
+                                        last_step_age_secs = step_age.as_secs(),
+                                        nlu_t1_rules = nlu_status.tier1_rule_parser,
+                                        nlu_t2_ner = nlu_status.tier2_ml_ner,
+                                        nlu_t3_llm = nlu_status.tier3_llm,
+                                        nlu_t4_ranker = nlu_status.tier4_ranker,
+                                        stop_reason = ?stop_reason,
+                                        "chat turn stalled (no progress within the idle \
+                                         watchdog) — ending the turn with a distinguishable \
+                                         stop reason and signalling its worker to cancel at \
+                                         the next round boundary. The `last_step` field \
+                                         names the in-flight step; the `nlu_t*` fields \
+                                         surface whether the missing LLM translator \
+                                         correlates with the stall (work item 'Turns die \
+                                         quietly' defect 1, parts 1–3)."
+                                    );
+                                    sink.emit(&AkhMessage::error(
+                                        "acp",
+                                        format!(
+                                            "chat turn stalled: no progress for {}s — \
+                                             aborting this turn. Last step: {} ({}s ago). \
+                                             The daemon has been signalled to cancel the \
+                                             stuck step (workspace \"{ws}\"). Stop reason: \
+                                             `_akh_stalled`.",
+                                            idle.as_secs(),
+                                            step_kind.as_str(),
+                                            step_age.as_secs(),
+                                        ),
+                                    ));
+                                    return responder.respond(PromptResponse::new(stop_reason));
+                                }
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                                    // Bookkeeping task dropped the sender without
+                                    // sending — this shouldn't happen (it's not
+                                    // cancellable from here), but treat as completion.
+                                }
+                            }
                         }
 
                         // Await the worker's join result (relayed by the
