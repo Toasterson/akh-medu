@@ -445,8 +445,12 @@ impl OllamaClient {
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
+        request_seq: usize,
     ) -> OllamaResult<AssistantTurn> {
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+
+        // Metrics: track this non-streaming request.
+        let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -491,13 +495,31 @@ impl OllamaClient {
         })?;
 
         let chat_resp: ChatResponse =
-            response.into_json().map_err(|e| OllamaError::ParseFailed {
-                reason: format!("JSON decode failed: {e}"),
+            response.into_json().map_err(|e| {
+                metrics.log(&self.config.model, "cancelled");
+                OllamaError::ParseFailed {
+                    reason: format!("JSON decode failed: {e}"),
+                }
             })?;
 
-        let msg = chat_resp.message.ok_or_else(|| OllamaError::ParseFailed {
-            reason: "Ollama chat response had no message".into(),
+        let msg = chat_resp.message.ok_or_else(|| {
+            metrics.log(&self.config.model, "cancelled");
+            OllamaError::ParseFailed {
+                reason: "Ollama chat response had no message".into(),
+            }
         })?;
+
+        // Track the response: non-streaming means we got one "chunk" (the whole response).
+        let content_len = msg.content.as_ref().map(|s| s.len()).unwrap_or(0);
+        metrics.note_chunk(content_len);
+        if content_len > 0 {
+            metrics.note_content_delta();
+        }
+        if !msg.tool_calls.is_empty() {
+            metrics.note_tool_call_chunk();
+        }
+        metrics.set_tokens(chat_resp.prompt_eval_count, chat_resp.eval_count);
+        metrics.log(&self.config.model, "completed");
 
         Ok(AssistantTurn {
             content: msg.content.unwrap_or_default(),
@@ -538,6 +560,7 @@ impl OllamaClient {
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
+        request_seq: usize,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OllamaResult<AssistantTurn> {
         const MAX_RETRIES: usize = 2;
@@ -545,7 +568,7 @@ impl OllamaClient {
 
         let mut attempt = 0;
         loop {
-            match self.chat_stream_once(messages, tools, on_event) {
+            match self.chat_stream_once(messages, tools, request_seq, on_event) {
                 Ok(turn) => return Ok(turn),
                 Err(e) => {
                     // Only retry transient transport errors (connection reset,
@@ -575,6 +598,7 @@ impl OllamaClient {
         &self,
         messages: &[serde_json::Value],
         tools: &[serde_json::Value],
+        request_seq: usize,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OllamaResult<AssistantTurn> {
         use std::io::BufRead;
@@ -582,6 +606,9 @@ impl OllamaClient {
         use std::sync::Arc;
 
         let request_start = std::time::Instant::now();
+        // Metrics: track per-request counters (chunks, bytes, deltas) for diagnosing
+        // "turns die quietly" (work item ask 1-4).
+        let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
 
         let mut body = serde_json::json!({
@@ -706,12 +733,16 @@ impl OllamaClient {
                 );
                 // Signal heartbeat thread to stop before returning error.
                 request_alive.store(false, Ordering::Relaxed);
+                // Log metrics on cancellation path.
+                metrics.log(&self.config.model, "cancelled");
                 OllamaError::Unreachable {
                     url: url.clone(),
                     reason: format!("stream read error: {e}"),
                 }
             })?;
             let line = line.trim();
+            // Track chunk received (bytes).
+            metrics.note_chunk(line.len());
             if line.is_empty() {
                 continue;
             }
@@ -729,15 +760,18 @@ impl OllamaClient {
                 {
                     content.push_str(delta);
                     on_event(StreamEvent::Content(delta.to_string()));
+                    metrics.note_content_delta();
                     emitted_something = true;
                 }
                 if let Some(delta) = msg.get("thinking").and_then(serde_json::Value::as_str)
                     && !delta.is_empty()
                 {
                     on_event(StreamEvent::Thinking(delta.to_string()));
+                    metrics.note_thinking_delta();
                     emitted_something = true;
                 }
                 if let Some(calls) = msg.get("tool_calls").and_then(serde_json::Value::as_array) {
+                    metrics.note_tool_call_chunk();
                     for call in calls {
                         if let Some(func) = call.get("function")
                             && let Some(name) =
@@ -757,6 +791,7 @@ impl OllamaClient {
                 // tool-call payloads), emit Keepalive so the idle watchdog knows
                 // the stream is alive (ask 3: "reset on any chunk received").
                 if !emitted_something {
+                    metrics.note_keepalive();
                     on_event(StreamEvent::Keepalive);
                 }
             }
@@ -770,6 +805,7 @@ impl OllamaClient {
                     .get("eval_count")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
+                metrics.set_tokens(prompt_tokens, completion_tokens);
                 break;
             }
                 }
@@ -798,6 +834,9 @@ impl OllamaClient {
         while let Ok(heartbeat_event) = heartbeat_rx.try_recv() {
             on_event(heartbeat_event);
         }
+
+        // Log metrics on successful completion.
+        metrics.log(&self.config.model, "completed");
 
         Ok(AssistantTurn {
             content,

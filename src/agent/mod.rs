@@ -63,6 +63,7 @@ pub mod idle;
 pub mod journal_ingest;
 pub mod librarian;
 pub mod library_learn;
+pub mod llm_metrics;
 pub mod mcts;
 pub mod memory;
 pub mod memory_sync;
