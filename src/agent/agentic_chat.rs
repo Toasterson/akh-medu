@@ -468,6 +468,9 @@ impl Agent {
         // a flat round count. The loop yields *why* it stopped so the turn can end
         // with a forced synthesis rather than a bare cutoff.
         let mut budget = RoundBudget::new(backend.capabilities().context_window);
+        // Turn-level metrics: track total prompt size and request count for diagnosing
+        // pathological latency (work item "turns die quietly", ask 2).
+        let mut turn_metrics = super::llm_metrics::TurnMetrics::new();
         let stop: TurnStop = loop {
             if let Some(stop) = budget.exhausted() {
                 break stop;
@@ -485,6 +488,12 @@ impl Agent {
             // at most one heartbeat per 30s to reset the watchdog without spam.
             let mut last_keepalive = Instant::now();
             const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+            // Track prompt size and get request sequence number before the backend call.
+            let prompt_chars: usize = conversation.iter()
+                .filter_map(|m| m.get("content").and_then(serde_json::Value::as_str))
+                .map(|s| s.len())
+                .sum();
+            let request_seq = turn_metrics.note_prompt(prompt_chars);
             let turn = {
                 let mut on_event = |ev: StreamEvent| match ev {
                     StreamEvent::Content(delta) => {
@@ -511,7 +520,7 @@ impl Agent {
                         }
                     }
                 };
-                match backend.chat_with_tools_streaming(agent_id, &conversation, &tools, &mut on_event) {
+                match backend.chat_with_tools_streaming(agent_id, &conversation, &tools, request_seq, &mut on_event) {
                     Ok(t) => t,
                     Err(stream_err) => {
                         tracing::warn!(
@@ -527,7 +536,7 @@ impl Agent {
                             backend_label = backend.label()
                         )));
                         used_fallback = true;
-                        match backend.chat_with_tools(agent_id, &conversation, &tools) {
+                        match backend.chat_with_tools(agent_id, &conversation, &tools, request_seq) {
                             Ok(t) => t,
                             Err(e) => {
                                 sink.emit(&AkhMessage::error("llm", e.to_string()));
@@ -675,7 +684,10 @@ impl Agent {
             sink,
             stop,
             &tool_trace,
+            &mut turn_metrics,
         );
+        // Log turn-level metrics summary (total prompt size, request count).
+        turn_metrics.log();
         Some(())
     }
 
@@ -827,6 +839,7 @@ impl Agent {
         sink: &dyn MessageSink,
         stop: TurnStop,
         tool_trace: &[Value],
+        turn_metrics: &mut super::llm_metrics::TurnMetrics,
     ) {
         conversation.push(json!({
             "role": "user",
@@ -841,6 +854,12 @@ impl Agent {
         let no_tools: [Value; 0] = [];
         let mut used_fallback = false;
         let mut last_keepalive = Instant::now();
+        // Track the forced-answer prompt size and get request sequence number.
+        let prompt_chars: usize = conversation.iter()
+            .filter_map(|m| m.get("content").and_then(serde_json::Value::as_str))
+            .map(|s| s.len())
+            .sum();
+        let request_seq = turn_metrics.note_prompt(prompt_chars);
         let turn = {
             let mut on_event = |ev: StreamEvent| match ev {
                 StreamEvent::Content(delta) => {
@@ -861,7 +880,7 @@ impl Agent {
                     }
                 }
             };
-            match backend.chat_with_tools_streaming(agent_id, conversation, &no_tools, &mut on_event)
+            match backend.chat_with_tools_streaming(agent_id, conversation, &no_tools, request_seq, &mut on_event)
             {
                 Ok(t) => t,
                 Err(e) => {
@@ -872,7 +891,7 @@ impl Agent {
                         backend_label = backend.label()
                     )));
                     used_fallback = true;
-                    match backend.chat_with_tools(agent_id, conversation, &no_tools) {
+                    match backend.chat_with_tools(agent_id, conversation, &no_tools, request_seq) {
                         Ok(t) => t,
                         Err(e) => {
                             sink.emit(&AkhMessage::error("llm", e.to_string()));

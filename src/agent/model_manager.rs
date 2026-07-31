@@ -447,6 +447,7 @@ impl AgentModelManager {
         agent_id: &str,
         conversation: &[serde_json::Value],
         tools: &[serde_json::Value],
+        request_seq: usize,
     ) -> ModelManagerResult<AssistantTurn> {
         let system_prompt = {
             let mut agents = self.agents.lock().expect("model manager lock poisoned");
@@ -464,7 +465,7 @@ impl AgentModelManager {
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
-        let turn = self.ollama.chat(&messages, tools)?;
+        let turn = self.ollama.chat(&messages, tools, request_seq)?;
         self.usage.record(turn.prompt_tokens, turn.completion_tokens);
         self.ensure_context_window();
         Ok(turn)
@@ -482,6 +483,7 @@ impl AgentModelManager {
         agent_id: &str,
         conversation: &[serde_json::Value],
         tools: &[serde_json::Value],
+        request_seq: usize,
         on_event: &mut dyn FnMut(super::ollama::StreamEvent),
     ) -> ModelManagerResult<AssistantTurn> {
         let system_prompt = {
@@ -500,7 +502,7 @@ impl AgentModelManager {
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
-        let turn = self.ollama.chat_stream(&messages, tools, on_event)?;
+        let turn = self.ollama.chat_stream(&messages, tools, request_seq, on_event)?;
         self.usage.record(turn.prompt_tokens, turn.completion_tokens);
         self.ensure_context_window();
         Ok(turn)

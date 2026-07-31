@@ -95,11 +95,15 @@ pub trait ChatBackend: Send + Sync {
 
     /// One tool-enabled chat turn: the model answers `conversation`, optionally
     /// requesting tools from `tools` (OpenAI-style function schemas).
+    ///
+    /// `request_seq` is the 0-indexed sequence number of this request within the
+    /// turn (for diagnosing retry loops vs slow single generations).
     fn chat_with_tools(
         &self,
         agent_id: &str,
         conversation: &[Value],
         tools: &[Value],
+        request_seq: usize,
     ) -> Result<AssistantTurn, ChatBackendError>;
 
     /// Streaming counterpart. Default: run [`chat_with_tools`](Self::chat_with_tools)
@@ -111,9 +115,10 @@ pub trait ChatBackend: Send + Sync {
         agent_id: &str,
         conversation: &[Value],
         tools: &[Value],
+        request_seq: usize,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AssistantTurn, ChatBackendError> {
-        let turn = self.chat_with_tools(agent_id, conversation, tools)?;
+        let turn = self.chat_with_tools(agent_id, conversation, tools, request_seq)?;
         if !turn.content.is_empty() {
             on_event(StreamEvent::Content(turn.content.clone()));
         }
@@ -164,9 +169,10 @@ impl ChatBackend for OllamaChatBackend {
         agent_id: &str,
         conversation: &[Value],
         tools: &[Value],
+        request_seq: usize,
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.mgr
-            .chat_with_tools(agent_id, conversation, tools)
+            .chat_with_tools(agent_id, conversation, tools, request_seq)
             .map_err(|e| ChatBackendError::TurnFailed {
                 backend: "ollama".into(),
                 reason: e.to_string(),
@@ -178,10 +184,11 @@ impl ChatBackend for OllamaChatBackend {
         agent_id: &str,
         conversation: &[Value],
         tools: &[Value],
+        request_seq: usize,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.mgr
-            .chat_with_tools_streaming(agent_id, conversation, tools, on_event)
+            .chat_with_tools_streaming(agent_id, conversation, tools, request_seq, on_event)
             .map_err(|e| ChatBackendError::TurnFailed {
                 backend: "ollama".into(),
                 reason: e.to_string(),
@@ -240,7 +247,11 @@ impl ChatBackend for CandleChatBackend {
         _agent_id: &str,
         conversation: &[Value],
         tools: &[Value],
+        request_seq: usize,
     ) -> Result<AssistantTurn, ChatBackendError> {
+        // Metrics: track this Candle request (non-streaming).
+        let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+
         let mut be = self.backend.lock().map_err(|_| ChatBackendError::Unavailable {
             backend: "candle".into(),
         })?;
@@ -252,9 +263,12 @@ impl ChatBackend for CandleChatBackend {
         // answer-channel cleaning would strip before we can parse it.
         let raw = be
             .generate_raw(&prompt, 512)
-            .map_err(|e| ChatBackendError::TurnFailed {
-                backend: "candle".into(),
-                reason: e.to_string(),
+            .map_err(|e| {
+                metrics.log("candle", "cancelled");
+                ChatBackendError::TurnFailed {
+                    backend: "candle".into(),
+                    reason: e.to_string(),
+                }
             })?;
 
         let (content, mut tool_calls) = parse_tool_calls(&raw);
@@ -282,6 +296,17 @@ impl ChatBackend for CandleChatBackend {
                 }
             }
         }
+
+        // Track the generation: Candle is non-streaming so we got one "chunk".
+        metrics.note_chunk(raw.len());
+        if !content.is_empty() {
+            metrics.note_content_delta();
+        }
+        if !tool_calls.is_empty() {
+            metrics.note_tool_call_chunk();
+        }
+        // Candle doesn't report token counts; leave at 0.
+        metrics.log("candle", "completed");
 
         Ok(AssistantTurn {
             content: if tool_calls.is_empty() { content } else { String::new() },
