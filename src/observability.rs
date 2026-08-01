@@ -118,14 +118,14 @@ fn init_otel(
     endpoint: String,
     filter: EnvFilter,
 ) -> Result<TracerShutdown, Box<dyn std::error::Error + Send + Sync>> {
-    use opentelemetry::KeyValue;
+    use opentelemetry::{KeyValue, trace::TracerProvider as _};
     use opentelemetry_sdk::{
         Resource,
         propagation::TraceContextPropagator,
         runtime::Tokio,
         trace::{Sampler, TracerProvider},
     };
-    use opentelemetry_otlp::{Protocol, SpanExporter};
+    use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
 
     // Resource: service.name, service.namespace, deployment.environment,
     // service.instance.id (from env — set via downward API in Helm).
@@ -170,15 +170,14 @@ fn init_otel(
     // Install W3C TraceContext propagator for cross-process propagation (38k).
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // Clone the provider *before* installing globally so the shutdown guard
-    // holds the correct provider (review round 1 fix).
-    let provider_arc = Arc::new(provider);
-    let provider_for_global = provider_arc.clone();
+    // Install W3C TraceContext propagator for cross-process propagation (38k).
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    let tracer = opentelemetry::trace::TracerProvider::tracer(
-        &provider_for_global,
-        service_name,
-    );
+    // Get the tracer from the provider before wrapping in Arc.
+    let tracer = provider.tracer(service_name);
+
+    // Set the global provider.
+    opentelemetry::global::set_tracer_provider(provider.clone());
 
     // Install the OpenTelemetry layer on top of the fmt layer.
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -189,9 +188,8 @@ fn init_otel(
         .with(otel_layer)
         .init();
 
-    // Set the global provider last so the tracer above (already bound to the
-    // layer) has a stable home.
-    opentelemetry::global::set_tracer_provider(provider_for_global);
+    // Keep an Arc to the provider for the shutdown guard.
+    let provider_arc = Arc::new(provider);
 
     Ok(TracerShutdown {
         inner: Some(InnerShutdown {
@@ -201,7 +199,7 @@ fn init_otel(
 }
 
 #[cfg(feature = "tracing-otel")]
-fn build_sampler() -> Sampler {
+fn build_sampler() -> opentelemetry_sdk::trace::Sampler {
     use opentelemetry_sdk::trace::Sampler;
 
     let name = env::var("OTEL_TRACES_SAMPLER").unwrap_or_else(|_| {

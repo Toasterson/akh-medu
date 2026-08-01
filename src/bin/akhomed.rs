@@ -2576,13 +2576,7 @@ fn raise_nofile_limit() {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,egg=warn,hnsw_rs=warn")
-            }),
-        )
-        .init();
+    let _tracer_guard = akh_medu::observability::init_tracing("akhomed");
 
     #[cfg(unix)]
     raise_nofile_limit();

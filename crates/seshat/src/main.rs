@@ -16,12 +16,7 @@ use seshat::migration::Migrator;
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     // Initialize tracing.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "seshat=info".parse().unwrap()),
-        )
-        .init();
+    let _tracer_guard = seshat::observability::init_tracing("seshd");
 
     // Parse CLI arguments.
     let args: Vec<String> = std::env::args().collect();

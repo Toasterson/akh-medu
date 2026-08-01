@@ -37,6 +37,12 @@ akhomed:
   env:
     AKH_AUTO_START: "default"
     RUST_LOG: "info"
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+    OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+    OTEL_SERVICE_NAME: "akhomed"
+    OTEL_RESOURCE_ATTRIBUTES: "service.namespace=akh-medu,deployment.environment=prod"
+    OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+    OTEL_TRACES_SAMPLER_ARG: "0.1"
 
   # Persistent volume for engine data (KG, HNSW, redb).
   persistence:
@@ -108,6 +114,12 @@ seshd:
 
   env:
     RUST_LOG: "seshat=info"
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4317"
+    OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+    OTEL_SERVICE_NAME: "seshd"
+    OTEL_RESOURCE_ATTRIBUTES: "service.namespace=akh-medu,deployment.environment=prod"
+    OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+    OTEL_TRACES_SAMPLER_ARG: "0.1"
 
   # Seshat config (rendered as ConfigMap → mounted at /config/seshat.toml).
   config:
