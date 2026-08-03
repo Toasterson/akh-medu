@@ -54,6 +54,11 @@ spec:
               value: {{ .Values.akhomed.acp.tcpPort | quote }}
             - name: AKH_ACP_TCP_BIND
               value: {{ .Values.akhomed.acp.tcpBind | quote }}
+            # OTLP service instance ID from the pod name.
+            - name: OTEL_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           volumeMounts:
             - name: data
               mountPath: /data

@@ -146,6 +146,7 @@ pub fn run_ooda_cycle(agent: &mut Agent) -> AgentResult<OodaCycleResult> {
 ///
 /// - [`DecideMode::LlmDriven`]: heuristic-enhanced VSA scoring (legacy default).
 /// - [`DecideMode::VsaNative`]: pure VSA similarity ranking with UCB1-MCTS fallback.
+#[tracing::instrument(skip_all, fields(cycle = agent.cycle_count + 1))]
 pub fn run_ooda_cycle_with_mode(
     agent: &mut Agent,
     mode: DecideMode,
@@ -215,6 +216,7 @@ pub fn run_ooda_cycle_with_mode(
 }
 
 /// Observe: gather current state.
+#[tracing::instrument(skip_all, fields(cycle = cycle))]
 fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
     let active = goal::active_goals(&agent.goals);
     let active_goals: Vec<SymbolId> = active.iter().map(|g| g.symbol_id).collect();
@@ -300,6 +302,7 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
 }
 
 /// Orient: build context for the current goals.
+#[tracing::instrument(skip_all)]
 fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientation> {
     let mut relevant_knowledge = Vec::new();
     let mut inferences = Vec::new();
@@ -379,6 +382,7 @@ fn orient(agent: &mut Agent, observation: &Observation) -> AgentResult<Orientati
 }
 
 /// Decide: choose a tool and construct input based on the top-priority goal.
+#[tracing::instrument(skip_all, fields(cycle = cycle))]
 fn decide(
     agent: &mut Agent,
     observation: &Observation,
@@ -1476,6 +1480,7 @@ fn detect_impasse(candidates: &[ToolCandidate], goal_id: SymbolId) -> Option<Dec
 }
 
 /// Act: execute the selected tool and update goal status.
+#[tracing::instrument(skip_all, fields(cycle = cycle))]
 fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<ActionResult> {
     // Shadow veto check: if the psyche vetoes this action, block it.
     if let Some(ref psyche) = agent.psyche {
