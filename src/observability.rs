@@ -170,9 +170,6 @@ fn init_otel(
     // Install W3C TraceContext propagator for cross-process propagation (38k).
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // Install W3C TraceContext propagator for cross-process propagation (38k).
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-
     // Get the tracer from the provider before wrapping in Arc.
     let tracer = provider.tracer(service_name);
 
