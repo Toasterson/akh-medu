@@ -3657,10 +3657,20 @@ fn build_connection(
                         let tracker = Arc::new(LastStepTracker::new());
                         let turn_start = std::time::Instant::now();
                         let mut stalled = false;
-                        // Track whether done_rx has been consumed (by try_recv on
-                        // the stalled path) to avoid the "called after complete"
-                        // panic when awaiting it a second time.
-                        let mut done_rx_consumed = false;
+                        // The worker's join result, captured the *first* time
+                        // `done_rx` resolves (either by the `done_rx` branch of
+                        // the select below firing, or by `try_recv` on the
+                        // stalled path). Stored here so the post-loop code can
+                        // process it uniformly without re-awaiting the oneshot
+                        // (which would panic with "called after complete"). The
+                        // `Option` is also the "has this been consumed?" flag:
+                        // `None` ⇒ not yet consumed, `Some(_)` ⇒ consumed.
+                        let mut done_result: Option<
+                            Result<
+                                Result<Result<(), TurnStartError>, tokio::task::JoinError>,
+                                tokio::sync::oneshot::error::RecvError,
+                            >,
+                        > = None;
                         // Worker-finished flag set by the `done_rx` branch of the
                         // select below, so the post-loop code can tell "the
                         // oneshot fired" (clean completion, possibly with a stale
@@ -3723,9 +3733,8 @@ fn build_connection(
                                         }
                                     }
                                     res = &mut done_rx => {
-                                        let _ = res;
+                                        done_result = Some(res);
                                         worker_finished = true;
-                                        done_rx_consumed = true;
                                         while let Ok(msg) = msg_rx.try_recv() {
                                             tracker.observe(
                                                 &msg,
@@ -3770,9 +3779,8 @@ fn build_connection(
                                         }
                                     }
                                     res = &mut done_rx => {
-                                        let _ = res;
+                                        done_result = Some(res);
                                         worker_finished = true;
-                                        done_rx_consumed = true;
                                         while let Ok(msg) = msg_rx.try_recv() {
                                             tracker.observe(
                                                 &msg,
@@ -3806,22 +3814,22 @@ fn build_connection(
                             // return normally rather than discarding completed work
                             // (requirement 3: "Never discard completed work").
                             match done_rx.try_recv() {
-                                Ok(Ok(Ok(()))) => {
-                                    // Worker finished successfully. Drain any
-                                    // remaining messages that were queued but not
-                                    // delivered before the timeout fired.
-                                    done_rx_consumed = true;
+                                Ok(ok_val) => {
+                                    // Worker finished (success or failure) while
+                                    // the watchdog was counting down. Store the
+                                    // result so the post-loop code can surface
+                                    // it uniformly, drain any messages that were
+                                    // queued but not yet delivered, and fall
+                                    // through to the normal completion path
+                                    // (requirement 3: "Never discard completed
+                                    // work").
+                                    done_result = Some(Ok(ok_val));
                                     while let Ok(msg) = msg_rx.try_recv() {
                                         tracker.observe(&msg, turn_start, std::time::Instant::now());
                                         sink.emit(&msg);
                                     }
-                                    // Fall through to the normal completion path
-                                    // (awaiting approver, returning EndTurn).
-                                }
-                                Ok(Ok(Err(_))) | Ok(Err(_)) => {
-                                    // Worker failed or panicked — the stall is real.
-                                    // Fall through to report it.
-                                    done_rx_consumed = true;
+                                    // Fall through to the post-loop completion
+                                    // path, which consumes `done_result`.
                                 }
                                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                                     // Worker still running — this is a genuine stall.
@@ -3888,21 +3896,41 @@ fn build_connection(
                                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                                     // Bookkeeping task dropped the sender without
                                     // sending — this shouldn't happen (it's not
-                                    // cancellable from here), but treat as completion.
-                                    done_rx_consumed = true;
+                                    // cancellable from here), but treat as
+                                    // successful completion: the worker is gone
+                                    // and there is nothing to await or surface.
+                                    // The original code fell through to
+                                    // `EndTurn` in this case; preserve that.
+                                    done_result = Some(Ok(Ok(Ok(()))));
                                 }
                             }
                         }
 
-                        // Await the worker's join result (relayed by the
+                        // Surface the worker's join result (relayed by the
                         // bookkeeping task above, which also cleared the busy
                         // tracker) to surface a panicked turn task, and let the
                         // approver (whose Sender was dropped with the asker at
                         // turn-end) drain and finish.
-                        // Skip this if we already consumed done_rx via try_recv
-                        // on the stalled path to avoid "called after complete".
-                        if !done_rx_consumed {
-                            match done_rx.await {
+                        //
+                        // The result was captured the first time `done_rx`
+                        // resolved — either by the `done_rx` branch of the
+                        // select above (clean completion via the authoritative
+                        // signal) or by `try_recv` on the stalled path (worker
+                        // finished while the watchdog was counting down). If
+                        // neither fired (only possible when the drain loop
+                        // exited via the `None` channel-closed branch without
+                        // the oneshot having fired yet, which shouldn't happen
+                        // because the bookkeeping task sends before dropping the
+                        // sender, but is defensive), await the oneshot here.
+                        // `done_result` being `Some` is the "already consumed"
+                        // guard: we never both `try_recv`/select on and then
+                        // `await` the same receiver, so there is no "called
+                        // after complete" panic.
+                        let join_result = match done_result.take() {
+                            Some(res) => res,
+                            None => done_rx.await,
+                        };
+                        match join_result {
                             Ok(Err(e)) => sink.emit(&AkhMessage::error(
                                 "acp",
                                 format!("turn task failed: {e}"),
@@ -3958,7 +3986,6 @@ fn build_connection(
                                 // before sending — should not happen since it
                                 // is not cancellable from here, but don't
                                 // treat it as a turn failure.
-                            }
                             }
                         }
                         let _ = approver.await;
