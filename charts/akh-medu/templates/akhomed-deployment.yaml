@@ -67,6 +67,20 @@ spec:
             - name: models
               mountPath: /data/akh-medu/models
             {{- end }}
+            {{- if .Values.akhomed.sshKey.enabled }}
+            # SSH key + known_hosts for the remote-exec backend (ADR 082 /
+            # Phase 48c). Mounted read-only; per-workspace `[exec]` sections
+            # in akh.toml point `key`/`known_hosts` under this path.
+            - name: ssh-key
+              mountPath: {{ .Values.akhomed.sshKey.mountPath | default "/etc/akh/ssh" }}
+              readOnly: true
+            {{- if .Values.akhomed.sshKey.knownHosts }}
+            - name: known-hosts
+              mountPath: {{ .Values.akhomed.sshKey.mountPath | default "/etc/akh/ssh" }}/known_hosts
+              subPath: known_hosts
+              readOnly: true
+            {{- end }}
+            {{- end }}
           {{- with .Values.akhomed.probes.liveness }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -89,6 +103,18 @@ spec:
         - name: models
           persistentVolumeClaim:
             claimName: {{ include "akh-medu.fullname" . }}-akhomed-models
+        {{- end }}
+        {{- if .Values.akhomed.sshKey.enabled }}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.akhomed.sshKey.existingSecret | default (printf "%s-akhomed-ssh-key" (include "akh-medu.fullname" .)) }}
+            defaultMode: 0o400
+        {{- if .Values.akhomed.sshKey.knownHosts }}
+        - name: known-hosts
+          configMap:
+            name: {{ include "akh-medu.fullname" . }}-akhomed-known-hosts
+            defaultMode: 0o444
+        {{- end }}
         {{- end }}
       {{- with .Values.akhomed.nodeSelector }}
       nodeSelector:

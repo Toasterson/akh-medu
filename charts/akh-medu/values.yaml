@@ -87,6 +87,33 @@ akhomed:
       initialDelaySeconds: 5
       periodSeconds: 10
 
+  # ── Remote exec backend (ADR 082 / Phase 48c wiring) ─────────────────────
+  # Optional SSH key + known_hosts mounted into the akhomed pod so an
+  # arm64 node that cannot compile locally can route shell_exec/file_io to a
+  # real build host (e.g. `armini`) over SSH. Per-workspace `[exec]` sections
+  # in akh.toml reference these mounted paths (`key` / `known_hosts`).
+  # Leave `sshKey.enabled = false` (the default) for workspaces that run
+  # in-process — no volume is mounted and behaviour is unchanged.
+  sshKey:
+    enabled: false
+    # Mount path inside the container. akh.toml's `[exec] key`/`known_hosts`
+    # should point under this directory.
+    mountPath: /etc/akh/ssh
+    # The SSH private key (OpenSSH format, unencrypted — ADR 086 §1). Set
+    # inline here for dev/eval; for anything real, use `existingSecret` to
+    # reference a pre-provisioned secret you manage out-of-band. The secret
+    # is mounted read-only and (when created here) chmod'd via an init
+    # container to 0600 so other local users on the node can't read it.
+    existingSecret: ""
+    # Inline key material (used only when `existingSecret` is empty). The
+    # chart creates a Secret from this; leave it empty to skip creation.
+    privateKey: ""
+    # Inline known_hosts file content. Mounted as a ConfigMap at
+    # `<mountPath>/known_hosts`. Empty ⇒ no known_hosts is mounted (the
+    # russh default `~/.ssh/known_hosts` is used instead — fine when HOME
+    # is set, but typically you want an explicit known_hosts in a pod).
+    knownHosts: ""
+
 # ── seshd (Seshat's Archive) ──────────────────────────────────────────────
 seshd:
   enabled: true

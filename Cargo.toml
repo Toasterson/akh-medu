@@ -213,7 +213,7 @@ daemon = ["tokio"]
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel"]
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]

@@ -161,6 +161,76 @@ pub struct AutonomyConfig {
     pub tasks: std::collections::BTreeMap<String, bool>,
 }
 
+/// Which execution backend an akh's executor-facing tools
+/// (`shell_exec`/`file_io`/`edit`/`glob`/`grep`) run through (ADR 082 / Phase
+/// 48c wiring).
+///
+/// **Naming trap:** the existing top-level `backend` field is
+/// [`ChatBacking`] — the *LLM* backing. This `exec` table is a different
+/// concept (the *execution* [`crate::backend::Backend`] trait) and is named
+/// `exec` precisely to avoid overloading `backend`.
+///
+/// Default is `InProcess` (today's behaviour — `/bin/sh -c` on the akhomed
+/// host). `Remote` routes the same tools to a build/exec host over SSH via
+/// [`crate::backend::remote::RemoteBackend`], which is what an arm64 akhomed
+/// pod needs to run `cargo build` on a real compile host.
+///
+/// Example TOML:
+/// ```toml
+/// [exec]
+/// kind = "remote"
+/// host = "armini"
+/// user = "toasty"
+/// port = 22
+/// key = "/etc/akh/ssh/id_ed25519"
+/// known_hosts = "/etc/akh/ssh/known_hosts"
+/// workdir = "/home/toasty/akh-workspaces"
+/// ```
+///
+/// A missing `[exec]` section (or `kind = "in-process"`) reproduces today's
+/// behaviour byte-for-byte — the workspace runs `InProcessBackend`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum ExecBackendConfig {
+    /// Default: run `shell_exec`/`file_io`/etc. in the akhomed process
+    /// (`/bin/sh -c` on the daemon host). Byte-identical to pre-48c-wiring
+    /// behaviour.
+    InProcess,
+    /// Run executor-facing tools on a remote host over SSH
+    /// (`crate::backend::remote::RemoteBackend`, Phase 48c / ADR 082).
+    Remote {
+        /// Target host (DNS name or address).
+        host: String,
+        /// Remote OS principal to authenticate as.
+        user: String,
+        /// Target port (default 22).
+        #[serde(default = "default_remote_port")]
+        port: u16,
+        /// Path to an unencrypted OpenSSH-format private key (ADR 086 §1).
+        key: std::path::PathBuf,
+        /// Path to an OpenSSH `known_hosts` file for host-key verification
+        /// (strict by default). Omit to fall back to the russh default
+        /// (`~/.ssh/known_hosts`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known_hosts: Option<std::path::PathBuf>,
+        /// Where the remote workspace tree lives on the target host. Used as
+        /// the advisory read+write root for the `Filesystem` verbs (ADR 082
+        /// §8: advisory only — the OS is the sole security boundary).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<std::path::PathBuf>,
+    },
+}
+
+fn default_remote_port() -> u16 {
+    22
+}
+
+impl Default for ExecBackendConfig {
+    fn default() -> Self {
+        Self::InProcess
+    }
+}
+
 impl AutonomyConfig {
     /// Whether a named daemon task should run. An explicit per-task override
     /// takes precedence; otherwise the task follows the master switch.
@@ -301,6 +371,14 @@ pub struct AkhConfig {
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<DelegationConfig>,
+
+    /// Per-workspace execution backend (ADR 082 / Phase 48c wiring). Default
+    /// `InProcess` reproduces today's behaviour; `Remote` routes
+    /// `shell_exec`/`file_io`/`edit`/`glob`/`grep` to a build host over SSH.
+    /// Named `exec` (not `backend`) to avoid the LLM-`backend` (`ChatBacking`)
+    /// naming collision — see [`ExecBackendConfig`].
+    #[serde(default)]
+    pub exec: ExecBackendConfig,
 }
 
 impl Default for AkhConfig {
@@ -321,6 +399,7 @@ impl Default for AkhConfig {
             ollama_endpoint: OllamaEndpoint::default(),
             autonomy: AutonomyConfig::default(),
             delegation: None,
+            exec: ExecBackendConfig::default(),
         }
     }
 }
@@ -471,6 +550,18 @@ impl AkhConfig {
                     "peers",
                 ],
             ),
+            (
+                "exec",
+                &[
+                    "kind",
+                    "host",
+                    "user",
+                    "port",
+                    "key",
+                    "known_hosts",
+                    "workdir",
+                ],
+            ),
         ]
     }
 
@@ -558,6 +649,50 @@ impl AkhConfig {
         })?;
         restrict_to_owner(path);
         Ok(())
+    }
+
+    /// Whether this akh's `[exec]` config selects a remote SSH executor. The
+    /// daemon uses this to decide whether to construct a `RemoteBackend` and
+    /// pass it as the agent's `backend_override` (Phase 48c wiring).
+    pub fn is_remote_exec(&self) -> bool {
+        matches!(self.exec, ExecBackendConfig::Remote { .. })
+    }
+
+    /// Translate the `[exec]` section into the `RemoteBackendConfig` the
+    /// daemon hands to `RemoteBackend::connect`. Returns `None` unless
+    /// `[exec] kind = "remote"` is set.
+    ///
+    /// `known_hosts = None` (the default) maps to `HostKeyPolicy::KnownHosts`
+    /// with the russh default path (`~/.ssh/known_hosts`); a supplied path
+    /// pins it. The remote `workdir` becomes the advisory read+write root
+    /// (ADR 082 §8: advisory only — the OS is the real boundary).
+    #[cfg(feature = "remote-executor")]
+    pub fn to_remote_backend_config(
+        &self,
+    ) -> Option<crate::backend::remote::RemoteBackendConfig> {
+        use crate::backend::remote::{HostKeyPolicy, RemoteBackendConfig};
+        use std::path::PathBuf;
+        let ExecBackendConfig::Remote {
+            host,
+            user,
+            port,
+            key,
+            known_hosts,
+            workdir,
+        } = &self.exec
+        else {
+            return None;
+        };
+        let mut cfg = RemoteBackendConfig::new(host.clone(), user.clone(), key.clone())
+            .with_port(*port)
+            .with_host_key_policy(match known_hosts {
+                Some(p) => HostKeyPolicy::KnownHosts { path: Some(p.clone()) },
+                None => HostKeyPolicy::KnownHosts { path: None },
+            });
+        if let Some(dir) = workdir {
+            cfg = cfg.with_roots(vec![dir.clone()], vec![dir.clone()]);
+        }
+        Some(cfg)
     }
 
     /// Build the [`ModelManagerConfig`] this akh's model manager should use:
@@ -927,5 +1062,166 @@ mod tests {
         assert_eq!(cfg.name(), "a");
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0].path, "modle");
+    }
+
+    #[test]
+    fn exec_section_defaults_to_in_process() {
+        let cfg = AkhConfig::default();
+        assert!(matches!(cfg.exec, ExecBackendConfig::InProcess));
+        assert!(!cfg.is_remote_exec());
+    }
+
+    #[test]
+    fn exec_section_absent_means_in_process() {
+        // A legacy TOML with no [exec] section loads as InProcess (back-compat).
+        let cfg: AkhConfig = toml::from_str("name = \"a\"").unwrap();
+        assert!(matches!(cfg.exec, ExecBackendConfig::InProcess));
+        assert!(!cfg.is_remote_exec());
+    }
+
+    #[test]
+    fn exec_remote_section_parses() {
+        let toml_src = r#"
+            name = "thoth"
+            [exec]
+            kind = "remote"
+            host = "armini"
+            user = "toasty"
+            port = 2222
+            key = "/etc/akh/ssh/id_ed25519"
+            known_hosts = "/etc/akh/ssh/known_hosts"
+            workdir = "/home/toasty/akh-workspaces"
+        "#;
+        let cfg: AkhConfig = toml::from_str(toml_src).expect("remote exec config parses");
+        let ExecBackendConfig::Remote {
+            host,
+            user,
+            port,
+            key,
+            known_hosts,
+            workdir,
+        } = &cfg.exec
+        else {
+            panic!("expected Remote, got {:?}", cfg.exec);
+        };
+        assert_eq!(host, "armini");
+        assert_eq!(user, "toasty");
+        assert_eq!(*port, 2222);
+        assert_eq!(key, std::path::Path::new("/etc/akh/ssh/id_ed25519"));
+        assert_eq!(
+            known_hosts.as_ref().map(std::path::Path::new),
+            Some(std::path::Path::new("/etc/akh/ssh/known_hosts"))
+        );
+        assert_eq!(
+            workdir.as_ref().map(std::path::Path::new),
+            Some(std::path::Path::new("/home/toasty/akh-workspaces"))
+        );
+        assert!(cfg.is_remote_exec());
+    }
+
+    #[test]
+    fn exec_remote_minimal_uses_default_port() {
+        let toml_src = r#"
+            name = "thoth"
+            [exec]
+            kind = "remote"
+            host = "armini"
+            user = "toasty"
+            key = "/etc/akh/ssh/id_ed25519"
+        "#;
+        let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
+        let ExecBackendConfig::Remote { port, .. } = &cfg.exec else {
+            panic!("expected Remote");
+        };
+        assert_eq!(*port, 22);
+    }
+
+    #[test]
+    fn exec_in_process_parses_explicit() {
+        let toml_src = "name = \"a\"\n[exec]\nkind = \"in-process\"\n";
+        let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
+        assert!(matches!(cfg.exec, ExecBackendConfig::InProcess));
+        assert!(!cfg.is_remote_exec());
+    }
+
+    #[test]
+    fn exec_section_save_load_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let mut cfg = AkhConfig::with_name("thoth");
+        cfg.exec = ExecBackendConfig::Remote {
+            host: "armini".into(),
+            user: "toasty".into(),
+            port: 22,
+            key: "/etc/akh/ssh/id_ed25519".into(),
+            known_hosts: Some("/etc/akh/ssh/known_hosts".into()),
+            workdir: Some("/home/toasty/akh-workspaces".into()),
+        };
+        cfg.save(&path).expect("save");
+        let loaded = AkhConfig::load(&path).expect("load");
+        assert_eq!(loaded.exec, cfg.exec);
+        assert!(loaded.is_remote_exec());
+    }
+
+    #[test]
+    fn exec_section_no_unknown_keys() {
+        let toml_src = r#"
+            name = "thoth"
+            [exec]
+            kind = "remote"
+            host = "armini"
+            user = "toasty"
+            key = "/etc/akh/ssh/id_ed25519"
+        "#;
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        assert!(AkhConfig::unknown_keys(&raw).is_empty());
+    }
+
+    #[test]
+    fn exec_section_unknown_key_is_flagged() {
+        let toml_src = "name = \"a\"\n[exec]\nkind = \"remote\"\nhots = \"armini\"\n";
+        let raw: toml::Value = toml::from_str(toml_src).unwrap();
+        let unknown = AkhConfig::unknown_keys(&raw);
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].path, "exec.hots");
+    }
+
+    #[cfg(feature = "remote-executor")]
+    #[test]
+    fn to_remote_backend_config_translates_full_section() {
+        use crate::backend::remote::{HostKeyPolicy, RemoteBackendConfig};
+        let mut cfg = AkhConfig::with_name("thoth");
+        cfg.exec = ExecBackendConfig::Remote {
+            host: "armini".into(),
+            user: "toasty".into(),
+            port: 2222,
+            key: "/etc/akh/ssh/id_ed25519".into(),
+            known_hosts: Some("/etc/akh/ssh/known_hosts".into()),
+            workdir: Some("/home/toasty/wsd".into()),
+        };
+        let rbc = cfg.to_remote_backend_config().expect("Some");
+        assert_eq!(rbc.host, "armini");
+        assert_eq!(rbc.user, "toasty");
+        assert_eq!(rbc.port, 2222);
+        assert_eq!(rbc.private_key_path, std::path::Path::new("/etc/akh/ssh/id_ed25519"));
+        assert!(matches!(
+            rbc.host_key_policy,
+            HostKeyPolicy::KnownHosts { path: Some(_) }
+        ));
+        assert_eq!(
+            rbc.read_roots,
+            vec![std::path::PathBuf::from("/home/toasty/wsd")]
+        );
+        assert_eq!(
+            rbc.write_roots,
+            vec![std::path::PathBuf::from("/home/toasty/wsd")]
+        );
+    }
+
+    #[cfg(feature = "remote-executor")]
+    #[test]
+    fn to_remote_backend_config_none_for_in_process() {
+        let cfg = AkhConfig::with_name("thoth");
+        assert!(cfg.to_remote_backend_config().is_none());
     }
 }

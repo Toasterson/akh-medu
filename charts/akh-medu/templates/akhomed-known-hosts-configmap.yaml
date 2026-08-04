@@ -1,0 +1,16 @@
+{{- if and .Values.akhomed.enabled .Values.akhomed.sshKey.enabled .Values.akhomed.sshKey.knownHosts }}
+# Optional known_hosts ConfigMap for the akhomed remote-exec backend (ADR 082 /
+# Phase 48c). Mounted read-only at `<sshKey.mountPath>/known_hosts`. Skipped
+# when `sshKey.knownHosts` is empty — then the russh default
+# (`~/.ssh/known_hosts`) is used, which is usually *not* what a pod wants
+# (HOME points at the mounted PVC). Set an explicit known_hosts in values.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-akhomed-known-hosts
+  labels:
+    {{- include "akh-medu.akhomed.labels" . | nindent 4 }}
+data:
+  known_hosts: |-
+    {{- .Values.akhomed.sshKey.knownHosts | nindent 4 }}
+{{- end }}
