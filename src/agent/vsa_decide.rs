@@ -576,6 +576,7 @@ mod tests {
         let mut r = ToolRegistry::new();
         r.register(Box::new(tools::KgQueryTool));
         r.register(Box::new(tools::KgMutateTool));
+        r.register(Box::new(tools::KgDeleteTool));
         r.register(Box::new(tools::ReasonTool));
         r.register(Box::new(tools::SimilaritySearchTool));
         r
