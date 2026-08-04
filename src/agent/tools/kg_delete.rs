@@ -165,6 +165,7 @@ mod tests {
     use crate::engine::{Engine, EngineConfig};
     use crate::graph::Triple;
     use crate::provenance::DerivationKind;
+    use crate::symbol::SymbolId;
     use crate::tms::SupportSet;
 
     /// Fresh engine backed by a temp directory. TMS is enabled by default.
