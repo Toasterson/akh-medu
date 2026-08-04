@@ -3731,8 +3731,23 @@ impl Agent {
     /// Resume an agent from a previously persisted session.
     ///
     /// Restores working memory and cycle count from the durable store, and
-    /// rebuilds goals from the knowledge graph.
+    /// rebuilds goals from the knowledge graph. Reproduces [`Agent::new`]'s
+    /// default in-process backend — pass a custom backend via
+    /// [`Agent::resume_with_backend`] (ADR 082 / Phase 48c wiring).
     pub fn resume(engine: Arc<Engine>, config: AgentConfig) -> AgentResult<Self> {
+        Self::resume_with_backend(engine, config, None)
+    }
+
+    /// Resume an agent from a previously persisted session, routing its
+    /// executor-facing tools (`shell_exec`/`file_io`/`edit`/`glob`/`grep`)
+    /// through a caller-supplied [`Backend`](crate::backend::Backend) instead
+    /// of the default in-process one. Passing `None` reproduces
+    /// [`Agent::resume`] byte-for-byte (ADR 082 / Phase 48c).
+    pub fn resume_with_backend(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
@@ -3751,7 +3766,7 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
-            None,
+            backend,
             #[cfg(feature = "delegation")]
             delegation_pending,
         )?;

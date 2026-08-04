@@ -1409,22 +1409,101 @@ impl ServerState {
 
         // Slow path: create agent (heavy sync work inside spawn_blocking).
         let engine = self.get_engine(name).await?;
+
+        // ADR 082 / Phase 48c wiring: load the per-workspace `akh.toml` *before*
+        // agent construction so its `[exec]` section can select a remote SSH
+        // executor. `RemoteBackend::connect` is a blocking TCP+SSH+auth round
+        // trip, so it stays inside the spawn_blocking that builds the agent.
+        // On any failure — unreachable host, rejected key, host-key mismatch —
+        // the workspace refuses to start with the diagnostic `RemoteBackend`
+        // already produces; there is **no** fallback to local execution
+        // (`feedback_fail_loudly_no_mock_papering` — a Pi quietly compiling
+        // locally is exactly the failure this wiring exists to prevent).
+        //
+        // A missing/legacy akh.toml yields `ExecBackendConfig::InProcess`
+        // (the default), reproducing today's behaviour byte-for-byte.
+        let akh_config = self.get_akh_config(name).await?;
+        let exec_kind = akh_config.exec.clone();
+
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
-            move || {
+            let akh_config = akh_config.clone();
+            let name = name.to_string();
+            move || -> Result<akh_medu::agent::Agent, String> {
                 let config = AgentConfig::default();
+
+                #[cfg(feature = "remote-executor")]
+                let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
+                    use akh_medu::akh_config::ExecBackendConfig;
+                    use akh_medu::backend::remote::RemoteBackend;
+                    match &akh_config.exec {
+                        ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::Remote { host, user, port, .. } => {
+                            let rbc = akh_config
+                                .to_remote_backend_config()
+                                .expect("is_remote_exec implies Some");
+                            // Fail loudly: `RemoteBackend::connect` returns a
+                            // rich `RemoteError` (host, auth, host-key, timeout
+                            // detail); surface it verbatim — never fall back to
+                            // InProcessBackend. Log host+user once at workspace
+                            // start so an operator can see which akh is
+                            // executing where (requirement #4).
+                            tracing::info!(
+                                target: "akh::backend::remote",
+                                workspace = %name,
+                                host = %host,
+                                user = %user,
+                                port = port,
+                                "connecting RemoteBackend for workspace exec"
+                            );
+                            let backend = RemoteBackend::connect(rbc).map_err(|e| {
+                                // Wrap with workspace context so the
+                                // agent-construction error names the workspace
+                                // and the failing host — `RemoteError`'s own
+                                // diagnostic already covers the cause + help.
+                                format!(
+                                    "workspace {name}: remote exec backend failed to connect \
+                                     to {user}@{host}:{port}: {e}"
+                                )
+                            })?;
+                            Some(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+                        }
+                    }
+                };
+                #[cfg(not(feature = "remote-executor"))]
+                let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
+                    use akh_medu::akh_config::ExecBackendConfig;
+                    match &akh_config.exec {
+                        ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::Remote { host, user, port, .. } => {
+                            // The build was not compiled with `remote-executor`
+                            // but the operator asked for it. Refuse to start
+                            // rather than silently executing locally — the
+                            // same fail-loud invariant as a connect failure.
+                            return Err(format!(
+                                "workspace {name}: akh.toml selects [exec] kind = \"remote\" \
+                                 (target {user}@{host}:{port}) but this akhomed was built \
+                                 without the `remote-executor` feature; rebuild with \
+                                 `--features remote-executor` (or `server`, which pulls it in) \
+                                 — refusing to fall back to local execution"
+                            ));
+                        }
+                    }
+                };
+
                 if Agent::has_persisted_session(&engine) {
-                    Agent::resume(engine, config)
+                    Agent::resume_with_backend(engine, config, backend_override)
                 } else {
-                    Agent::new(engine, config)
+                    Agent::with_backend(engine, config, backend_override)
                 }
+                .map_err(|e| format!("failed to create agent: {e}"))
             }
         })
         .await
         .map_err(|e| format!("agent task panicked: {e}"))?
         .map_err(|e| format!("failed to create agent: {e}"))?;
 
-        tracing::info!(workspace = %name, "shared agent created");
+        tracing::info!(workspace = %name, ?exec_kind, "shared agent created");
 
         // Wire the per-akh model manager: pinned model + Ollama endpoint +
         // authoritative system prompt (P1 / ADR-053). Construction is cheap
@@ -1432,7 +1511,6 @@ impl ServerState {
         // shared means the first prompt turn already routes to the akh's pinned
         // model with its own prompt. A missing/legacy akh.toml yields defaults,
         // reproducing today's behaviour.
-        let akh_config = self.get_akh_config(name).await?;
         let manager = Arc::new(AgentModelManager::new(akh_config.to_model_manager_config()));
         agent.set_model_manager(manager);
         agent.register_with_model_manager(name, name);
