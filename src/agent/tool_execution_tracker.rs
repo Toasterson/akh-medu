@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use crate::message::{AkhMessage, MessageSink, ToolKind};
@@ -22,7 +22,21 @@ const SEARCH_COALESCE_WINDOW_MS: u64 = 500;
 /// Tracks active tool executions and emits ToolCall events.
 pub struct ToolExecutionTracker {
     /// Sink to emit ToolCall messages.
-    sink: Arc<dyn MessageSink>,
+    ///
+    /// Held as a [`Weak`] so this tracker — which is `Clone` and which
+    /// outlives the turn worker via in-flight [`ToolCallGuard`]s — never
+    /// keeps the underlying [`MessageSink`] (typically a per-turn
+    /// `ChannelSink` over an `mpsc::UnboundedSender`) alive past the turn.
+    /// The turn worker owns the only strong `Arc`; once it drops, `upgrade`
+    /// returns `None` and `emit` quietly becomes a no-op. This was the
+    /// "leaked `ChannelSink` clone keeps the drain channel open" half of
+    /// work item `019fba6a-dba7-7d01-bd43-fc51a62587b9`: a strong copy here
+    /// held the sender open after the worker joined, so the drain loop
+    /// waited a full idle-timeout for a channel close that never came. The
+    /// `select!` on `done_rx` is the authoritative fix; this `Weak` is the
+    /// defence-in-depth that keeps any future clone from reintroducing the
+    /// same wedge.
+    sink: Weak<dyn MessageSink>,
     /// Active search burst being coalesced (tool_id -> SearchBurst).
     search_bursts: Arc<Mutex<HashMap<String, SearchBurst>>>,
 }
@@ -41,10 +55,26 @@ struct SearchBurst {
 
 impl ToolExecutionTracker {
     /// Create a new tracker bound to the given sink.
+    ///
+    /// The sink is downgraded to a [`Weak`] internally (see [`Self::sink`]),
+    /// so the caller's strong `Arc` remains the sole owner and the tracker
+    /// cannot keep the sink alive past the turn.
     pub fn new(sink: Arc<dyn MessageSink>) -> Self {
         Self {
-            sink,
+            sink: Arc::downgrade(&sink),
             search_bursts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Emit a message through the bound sink, upgrading the [`Weak`] each
+    /// call. After the turn worker drops its strong `Arc`, this becomes a
+    /// no-op — late tool events (e.g. a `Drop` firing after the worker
+    /// returned) are silently dropped, matching the `MessageSink::emit`
+    /// infallible contract that already permits dropping on a closed
+    /// channel.
+    fn emit(&self, msg: &AkhMessage) {
+        if let Some(sink) = self.sink.upgrade() {
+            sink.emit(msg);
         }
     }
 
@@ -159,7 +189,7 @@ impl ToolExecutionTracker {
         } else {
             // Non-search: emit ToolCallStarted immediately.
             let tool_id = Self::generate_tool_id(tool_name);
-            self.sink.emit(&AkhMessage::ToolCallStarted {
+            self.emit(&AkhMessage::ToolCallStarted {
                 tool_id: tool_id.clone(),
                 kind,
                 title,
@@ -195,7 +225,7 @@ impl ToolExecutionTracker {
             format!("{} queries ({})", query_count, burst.queries.join(", "))
         };
 
-        self.sink.emit(&AkhMessage::ToolCallStarted {
+        self.emit(&AkhMessage::ToolCallStarted {
             tool_id: burst.tool_id.clone(),
             kind: ToolKind::Search,
             title,
@@ -209,7 +239,7 @@ impl ToolExecutionTracker {
             format!("{} queries, top results: {}", query_count, preview)
         };
 
-        self.sink.emit(&AkhMessage::ToolCallCompleted {
+        self.emit(&AkhMessage::ToolCallCompleted {
             tool_id: burst.tool_id,
             success: true,
             output: Some(output),
@@ -229,7 +259,7 @@ impl ToolExecutionTracker {
 impl Clone for ToolExecutionTracker {
     fn clone(&self) -> Self {
         Self {
-            sink: Arc::clone(&self.sink),
+            sink: self.sink.clone(),
             search_bursts: Arc::clone(&self.search_bursts),
         }
     }
@@ -253,7 +283,7 @@ impl ToolCallGuard {
         // For search bursts, results are accumulated and flushed at turn end.
         // For other tools, emit the completion event immediately.
         if !self.is_search_burst {
-            self.tracker.sink.emit(&AkhMessage::ToolCallCompleted {
+            self.tracker.emit(&AkhMessage::ToolCallCompleted {
                 tool_id: self.tool_id.clone(),
                 success,
                 output,
@@ -274,7 +304,7 @@ impl Drop for ToolCallGuard {
         // Emit a completion event if one wasn't already emitted via `complete()`.
         // This handles the case where the guard is dropped without calling `complete()`.
         if !self.is_search_burst && self.emitted_start {
-            self.tracker.sink.emit(&AkhMessage::ToolCallCompleted {
+            self.tracker.emit(&AkhMessage::ToolCallCompleted {
                 tool_id: self.tool_id.clone(),
                 success: false,
                 output: Some("tool execution was interrupted".to_string()),
@@ -360,5 +390,72 @@ mod tests {
 
         guard2.complete(true, Some("result2".to_string()), None);
         tracker.flush_all_search_bursts();
+    }
+
+    /// Regression for the "leaked `ChannelSink` clone keeps the drain channel
+    /// open" half of work item `019fba6a-dba7-7d01-bd43-fc51a62587b9`.
+    ///
+    /// The tracker must hold the sink as a `Weak`, not a strong `Arc`, so that
+    /// an in-flight `ToolCallGuard` (which clones the tracker) cannot keep the
+    /// sink alive past the turn. This test constructs the failure shape
+    /// directly: build a tracker bound to a sink, clone the tracker the way a
+    /// `ToolCallGuard` does, then drop the *original* strong `Arc` (the one
+    /// the turn worker would own). With a `Weak`, the surviving tracker
+    /// clone's `sink` field can no longer keep the `Arc` alive —
+    /// `Weak::upgrade()` returns `None`, so the late emits are no-ops. With
+    /// the old strong `Arc` here, the tracker clone would keep the `Arc`'s
+    /// strong count at 1, the `UnboundedSender` inside a real `ChannelSink`
+    /// would stay open, and the drain loop would wait a full idle-timeout
+    /// for a close that never came.
+    #[test]
+    fn tracker_does_not_keep_the_sink_alive_past_its_owner() {
+        let sink = Arc::new(VecSink::new());
+        // Hold a Weak to the *same* allocation so we can observe strong_count
+        // without owning a strong ref ourselves.
+        let probe = Arc::downgrade(&sink);
+        // tracker holds a Weak to this Arc (downgraded inside `new`).
+        let tracker = ToolExecutionTracker::new(sink.clone());
+        // Strong count is 2: our `sink` + the test's `sink.clone()` we passed
+        // to `new`... but `new` drops its parameter after downgrading, so the
+        // count is actually 1 (just our `sink`). The tracker's Weak does not
+        // contribute to strong_count.
+        assert_eq!(
+            Arc::strong_count(&sink),
+            1,
+            "tracker must not hold a strong Arc to the sink; only the caller's \
+             strong ref should keep it alive"
+        );
+
+        // Emit while the strong Arc is live — normal in-turn path. The
+        // ToolCallStarted reaches the sink.
+        tracker.start_tool("shell_exec", "ls".to_string(), vec![]);
+        assert!(
+            !sink.messages().is_empty(),
+            "expected the ToolCallStarted to reach the sink while the strong Arc is live, \
+             got {} messages",
+            sink.messages().len()
+        );
+
+        // Simulate the worker dropping its strong Arc while a ToolCallGuard
+        // clone (and thus a tracker clone) is still in flight.
+        let tracker_clone = tracker.clone();
+        drop(sink);
+
+        // The probe Weak must now fail to upgrade: no strong Arc remains. If
+        // the tracker held a strong Arc, the probe would still resolve here.
+        assert!(
+            probe.upgrade().is_none(),
+            "dropping the worker's strong Arc must release the sink; a tracker \
+             clone (standing in for an in-flight ToolCallGuard) must not keep \
+             it alive. This is the leak that wedged the drain loop."
+        );
+
+        // The surviving tracker clone emits a late completion. With a Weak,
+        // `upgrade()` returns `None` and this is a no-op — no use-after-free,
+        // no silent delivery to a kept-alive sink. (Cannot read `sink` here
+        // because it is dropped; the structural assertion is that the call
+        // returns without touching the freed allocation.)
+        tracker_clone.start_tool("shell_exec", "late".to_string(), vec![]);
+        tracker.start_tool("shell_exec", "also-late".to_string(), vec![]);
     }
 }

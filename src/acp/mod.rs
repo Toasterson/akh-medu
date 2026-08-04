@@ -786,12 +786,28 @@ impl AkhAcpAgent {
             #[allow(unused_mut)]
             let mut guard = SessionToolGuard::new(&mut agent);
 
+            // Wrap the per-turn `ChannelSink` in a single strong `Arc` for the
+            // turn's duration. The `ToolExecutionTracker` below takes a `Weak`
+            // to this same allocation (see `tool_execution_tracker.rs`); keeping
+            // exactly one strong `Arc` here — held until the closure returns —
+            // means the `UnboundedSender` is dropped as soon as the worker
+            // finishes, regardless of how many `ToolCallGuard`s or tracker
+            // clones outlive the worker. This is the "leak fix" half of work
+            // item `019fba6a-dba7-7d01-bd43-fc51a62587b9`: previously a strong
+            // `Arc<dyn MessageSink>` clone was handed to the tracker and kept
+            // alive by in-flight guards, so the drain channel never closed.
+            let sink: Arc<ChannelSink> = Arc::new(sink);
+
             // Install a tool execution tracker for this turn so tool calls emit
             // structured ToolCallStarted/ToolCallCompleted events over ACP.
             // The tracker wraps the same ChannelSink that carries regular
-            // AkhMessages, so ToolCall events stream through the same drain loop.
+            // AkhMessages, so ToolCall events stream through the same drain
+            // loop. `ToolExecutionTracker::new` downgrades the strong `Arc` to
+            // a `Weak`; the strong ref we keep here is what keeps the channel
+            // open while the turn runs, and what drops (closing the channel)
+            // when the worker returns.
             let tracker = Arc::new(crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
-                Arc::new(sink.clone()),
+                Arc::clone(&sink) as Arc<dyn crate::message::MessageSink>,
             ));
             guard.set_tracker(tracker);
 
@@ -825,7 +841,7 @@ impl AkhAcpAgent {
                         // runs inside this `spawn_blocking` closure — but it
                         // only runs once per session; every later prompt hits
                         // the cache above with zero network I/O.
-                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &sink) {
+                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &*sink) {
                             Ok(d) => {
                                 mcp_tool_cache
                                     .lock()
@@ -860,7 +876,7 @@ impl AkhAcpAgent {
                 .unwrap_or(false);
             if guard
                 .agent
-                .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel, is_dispatch)
+                .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
                 .is_none()
             {
                 // Get or create this session's cognitive context. Held across
@@ -880,7 +896,11 @@ impl AkhAcpAgent {
             }
             // `guard` drops here (normal return *or* unwind), unregistering
             // session tools and clearing the permission asker; then the
-            // locks + sink drop, closing the channel.
+            // locks + `sink` Arc drop. Dropping the last strong `Arc` closes
+            // the `UnboundedSender`, which is what signals the drain loop on
+            // the async side — and because the tracker only holds a `Weak`,
+            // no in-flight `ToolCallGuard` clone can keep the channel open
+            // past this point.
             Ok(())
         })
     }
