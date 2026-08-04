@@ -786,12 +786,28 @@ impl AkhAcpAgent {
             #[allow(unused_mut)]
             let mut guard = SessionToolGuard::new(&mut agent);
 
+            // Wrap the per-turn `ChannelSink` in a single strong `Arc` for the
+            // turn's duration. The `ToolExecutionTracker` below takes a `Weak`
+            // to this same allocation (see `tool_execution_tracker.rs`); keeping
+            // exactly one strong `Arc` here — held until the closure returns —
+            // means the `UnboundedSender` is dropped as soon as the worker
+            // finishes, regardless of how many `ToolCallGuard`s or tracker
+            // clones outlive the worker. This is the "leak fix" half of work
+            // item `019fba6a-dba7-7d01-bd43-fc51a62587b9`: previously a strong
+            // `Arc<dyn MessageSink>` clone was handed to the tracker and kept
+            // alive by in-flight guards, so the drain channel never closed.
+            let sink: Arc<ChannelSink> = Arc::new(sink);
+
             // Install a tool execution tracker for this turn so tool calls emit
             // structured ToolCallStarted/ToolCallCompleted events over ACP.
             // The tracker wraps the same ChannelSink that carries regular
-            // AkhMessages, so ToolCall events stream through the same drain loop.
+            // AkhMessages, so ToolCall events stream through the same drain
+            // loop. `ToolExecutionTracker::new` downgrades the strong `Arc` to
+            // a `Weak`; the strong ref we keep here is what keeps the channel
+            // open while the turn runs, and what drops (closing the channel)
+            // when the worker returns.
             let tracker = Arc::new(crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
-                Arc::new(sink.clone()),
+                Arc::clone(&sink) as Arc<dyn crate::message::MessageSink>,
             ));
             guard.set_tracker(tracker);
 
@@ -825,7 +841,7 @@ impl AkhAcpAgent {
                         // runs inside this `spawn_blocking` closure — but it
                         // only runs once per session; every later prompt hits
                         // the cache above with zero network I/O.
-                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &sink) {
+                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &*sink) {
                             Ok(d) => {
                                 mcp_tool_cache
                                     .lock()
@@ -860,7 +876,7 @@ impl AkhAcpAgent {
                 .unwrap_or(false);
             if guard
                 .agent
-                .run_agentic_turn(&engine, &agent_id, &text, &sink, &cancel, is_dispatch)
+                .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
                 .is_none()
             {
                 // Get or create this session's cognitive context. Held across
@@ -880,7 +896,11 @@ impl AkhAcpAgent {
             }
             // `guard` drops here (normal return *or* unwind), unregistering
             // session tools and clearing the permission asker; then the
-            // locks + sink drop, closing the channel.
+            // locks + `sink` Arc drop. Dropping the last strong `Arc` closes
+            // the `UnboundedSender`, which is what signals the drain loop on
+            // the async side — and because the tracker only holds a `Weak`,
+            // no in-flight `ToolCallGuard` clone can keep the channel open
+            // past this point.
             Ok(())
         })
     }
@@ -3637,31 +3657,153 @@ fn build_connection(
                         let tracker = Arc::new(LastStepTracker::new());
                         let turn_start = std::time::Instant::now();
                         let mut stalled = false;
-                        // Track whether done_rx has been consumed (by try_recv on
-                        // the stalled path) to avoid the "called after complete"
-                        // panic when awaiting it a second time.
-                        let mut done_rx_consumed = false;
+                        // The worker's join result, captured the *first* time
+                        // `done_rx` resolves (either by the `done_rx` branch of
+                        // the select below firing, or by `try_recv` on the
+                        // stalled path). Stored here so the post-loop code can
+                        // process it uniformly without re-awaiting the oneshot
+                        // (which would panic with "called after complete"). The
+                        // `Option` is also the "has this been consumed?" flag:
+                        // `None` ⇒ not yet consumed, `Some(_)` ⇒ consumed.
+                        let mut done_result: Option<
+                            Result<
+                                Result<Result<(), TurnStartError>, tokio::task::JoinError>,
+                                tokio::sync::oneshot::error::RecvError,
+                            >,
+                        > = None;
+                        // Worker-finished flag set by the `done_rx` branch of the
+                        // select below, so the post-loop code can tell "the
+                        // oneshot fired" (clean completion, possibly with a stale
+                        // sink clone keeping `msg_rx` open) apart from "the
+                        // drain loop hit the idle timeout" (a real stall that the
+                        // stalled block below must handle). Without this the
+                        // worker-finished case would look identical to the timeout
+                        // case and we'd re-enter the stall-reporting path even
+                        // though the turn succeeded.
+                        let mut worker_finished = false;
                         loop {
-                            let next = if idle.is_zero() {
-                                msg_rx.recv().await
-                            } else {
-                                match tokio::time::timeout(idle, msg_rx.recv()).await {
-                                    Ok(next) => next,
-                                    Err(_) => {
-                                        stalled = true;
+                            // Select on the authoritative completion signal
+                            // (`done_rx`, fired by the bookkeeping task once the
+                            // `spawn_blocking` worker joins) *in parallel* with
+                            // the message stream. The previous shape only
+                            // watched `msg_rx` and relied on the channel closing
+                            // to signal completion — but `ChannelSink` is
+                            // `#[derive(Clone)]` over an unbounded
+                            // `mpsc::UnboundedSender`, and at least one clone
+                            // outlives the worker (`ToolExecutionTracker`'s
+                            // `Arc<dyn MessageSink>` copy, kept alive by every
+                            // in-flight `ToolCallGuard` and, transitively, by
+                            // the `SessionToolGuard` itself until `Drop` runs).
+                            // So `msg_rx.recv()` never returns `None` while the
+                            // turn is live, and the loop would block until the
+                            // idle watchdog fired — reporting a finished turn a
+                            // full idle-timeout late (work item
+                            // `019fba6a-dba7-7d01-bd43-fc51a62587b9`). The
+                            // `done_rx` oneshot is the authoritative signal that
+                            // the worker has joined; selecting on it makes
+                            // correctness independent of how many `ChannelSink`
+                            // clones exist.
+                            //
+                            // The idle watchdog is armed around the message
+                            // branch only — measured from the last received
+                            // message, not from turn start (matches the prior
+                            // semantics — see the work item's note on the
+                            // 2693.8s gap). When the watchdog fires we fall
+                            // through to the stall-handling path below.
+                            if idle.is_zero() {
+                                tokio::select! {
+                                    next = msg_rx.recv() => {
+                                        match next {
+                                            Some(msg) => {
+                                                tracker.observe(
+                                                    &msg,
+                                                    turn_start,
+                                                    std::time::Instant::now(),
+                                                );
+                                                sink.emit(&msg);
+                                            }
+                                            // Channel closed ⇒ every sender
+                                            // (including the leaked clones)
+                                            // dropped and the worker has
+                                            // finished. Drain is done.
+                                            None => {
+                                                worker_finished = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    res = &mut done_rx => {
+                                        done_result = Some(res);
+                                        worker_finished = true;
+                                        while let Ok(msg) = msg_rx.try_recv() {
+                                            tracker.observe(
+                                                &msg,
+                                                turn_start,
+                                                std::time::Instant::now(),
+                                            );
+                                            sink.emit(&msg);
+                                        }
                                         break;
                                     }
                                 }
-                            };
-                            match next {
-                                Some(msg) => {
-                                    tracker.observe(&msg, turn_start, std::time::Instant::now());
-                                    sink.emit(&msg);
+                            } else {
+                                tokio::select! {
+                                    next = tokio::time::timeout(idle, msg_rx.recv()) => {
+                                        match next {
+                                            Ok(Some(msg)) => {
+                                                tracker.observe(
+                                                    &msg,
+                                                    turn_start,
+                                                    std::time::Instant::now(),
+                                                );
+                                                sink.emit(&msg);
+                                            }
+                                            // Channel closed ⇒ every sender
+                                            // (including the leaked clones)
+                                            // dropped and the worker finished.
+                                            Ok(None) => {
+                                                worker_finished = true;
+                                                break;
+                                            }
+                                            // Idle timeout fired — no progress
+                                            // for the whole window. Treat as a
+                                            // stall and let the post-loop code
+                                            // decide (worker may have joined in
+                                            // the meantime; the stalled block
+                                            // below handles that race via
+                                            // `done_rx.try_recv`).
+                                            Err(_) => {
+                                                stalled = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    res = &mut done_rx => {
+                                        done_result = Some(res);
+                                        worker_finished = true;
+                                        while let Ok(msg) = msg_rx.try_recv() {
+                                            tracker.observe(
+                                                &msg,
+                                                turn_start,
+                                                std::time::Instant::now(),
+                                            );
+                                            sink.emit(&msg);
+                                        }
+                                        break;
+                                    }
                                 }
-                                // Channel closed ⇒ the turn finished and dropped
-                                // its sink.
-                                None => break,
                             }
+                        }
+
+                        // If the drain loop exited because the worker joined
+                        // (either branch of the select: oneshot fired, or the
+                        // channel closed because every sink clone dropped), do
+                        // NOT enter the stall-reporting path below — the turn
+                        // completed and the post-loop completion code will surface
+                        // any join error. Without this guard a clean completion
+                        // would be misreported as a stall.
+                        if worker_finished {
+                            stalled = false;
                         }
 
                         if stalled {
@@ -3672,22 +3814,22 @@ fn build_connection(
                             // return normally rather than discarding completed work
                             // (requirement 3: "Never discard completed work").
                             match done_rx.try_recv() {
-                                Ok(Ok(Ok(()))) => {
-                                    // Worker finished successfully. Drain any
-                                    // remaining messages that were queued but not
-                                    // delivered before the timeout fired.
-                                    done_rx_consumed = true;
+                                Ok(ok_val) => {
+                                    // Worker finished (success or failure) while
+                                    // the watchdog was counting down. Store the
+                                    // result so the post-loop code can surface
+                                    // it uniformly, drain any messages that were
+                                    // queued but not yet delivered, and fall
+                                    // through to the normal completion path
+                                    // (requirement 3: "Never discard completed
+                                    // work").
+                                    done_result = Some(Ok(ok_val));
                                     while let Ok(msg) = msg_rx.try_recv() {
                                         tracker.observe(&msg, turn_start, std::time::Instant::now());
                                         sink.emit(&msg);
                                     }
-                                    // Fall through to the normal completion path
-                                    // (awaiting approver, returning EndTurn).
-                                }
-                                Ok(Ok(Err(_))) | Ok(Err(_)) => {
-                                    // Worker failed or panicked — the stall is real.
-                                    // Fall through to report it.
-                                    done_rx_consumed = true;
+                                    // Fall through to the post-loop completion
+                                    // path, which consumes `done_result`.
                                 }
                                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                                     // Worker still running — this is a genuine stall.
@@ -3754,21 +3896,41 @@ fn build_connection(
                                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                                     // Bookkeeping task dropped the sender without
                                     // sending — this shouldn't happen (it's not
-                                    // cancellable from here), but treat as completion.
-                                    done_rx_consumed = true;
+                                    // cancellable from here), but treat as
+                                    // successful completion: the worker is gone
+                                    // and there is nothing to await or surface.
+                                    // The original code fell through to
+                                    // `EndTurn` in this case; preserve that.
+                                    done_result = Some(Ok(Ok(Ok(()))));
                                 }
                             }
                         }
 
-                        // Await the worker's join result (relayed by the
+                        // Surface the worker's join result (relayed by the
                         // bookkeeping task above, which also cleared the busy
                         // tracker) to surface a panicked turn task, and let the
                         // approver (whose Sender was dropped with the asker at
                         // turn-end) drain and finish.
-                        // Skip this if we already consumed done_rx via try_recv
-                        // on the stalled path to avoid "called after complete".
-                        if !done_rx_consumed {
-                            match done_rx.await {
+                        //
+                        // The result was captured the first time `done_rx`
+                        // resolved — either by the `done_rx` branch of the
+                        // select above (clean completion via the authoritative
+                        // signal) or by `try_recv` on the stalled path (worker
+                        // finished while the watchdog was counting down). If
+                        // neither fired (only possible when the drain loop
+                        // exited via the `None` channel-closed branch without
+                        // the oneshot having fired yet, which shouldn't happen
+                        // because the bookkeeping task sends before dropping the
+                        // sender, but is defensive), await the oneshot here.
+                        // `done_result` being `Some` is the "already consumed"
+                        // guard: we never both `try_recv`/select on and then
+                        // `await` the same receiver, so there is no "called
+                        // after complete" panic.
+                        let join_result = match done_result.take() {
+                            Some(res) => res,
+                            None => done_rx.await,
+                        };
+                        match join_result {
                             Ok(Err(e)) => sink.emit(&AkhMessage::error(
                                 "acp",
                                 format!("turn task failed: {e}"),
@@ -3824,7 +3986,6 @@ fn build_connection(
                                 // before sending — should not happen since it
                                 // is not cancellable from here, but don't
                                 // treat it as a turn failure.
-                            }
                             }
                         }
                         let _ = approver.await;
@@ -7037,5 +7198,50 @@ mod tests {
         // If we reach here without a "called after complete" panic, the fix
         // works: the done_rx_consumed flag correctly prevents awaiting the
         // oneshot after try_recv consumed it in the cancel path.
+    }
+
+    /// Regression for `019fba6a-dba7-7d01-bd43-fc51a62587b9`: a turn that
+    /// completes must be reported within seconds of the worker joining, not
+    /// one idle-timeout later. The bug was that the drain loop's only normal
+    /// exit was `msg_rx.recv()` returning `None` (channel closed), which
+    /// requires *every* `ChannelSink` clone to drop — and the
+    /// `ToolExecutionTracker`'s `Arc<dyn MessageSink>` copy outlives the
+    /// worker when a `ToolCallGuard` is still in flight. The fix selects on
+    /// `done_rx` (the authoritative "worker joined" signal) in parallel with
+    /// `msg_rx.recv()`, so correctness no longer depends on the sink refcount.
+    ///
+    /// This test asserts the positive property: a clean prompt turn returns in
+    /// well under the idle timeout. With the old drain loop, a turn whose sink
+    /// clones outlive the worker would block until the idle watchdog fires
+    /// (here 8s); the fixed loop exits as soon as `done_rx` fires. Paired with
+    /// `stalled_prompt_turn_fails_fast_instead_of_hanging` (which covers the
+    /// genuine-stall path), it pins the invariant: prompt turns return
+    /// promptly on completion and the watchdog still fires for real stalls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prompt_turn_returns_well_under_the_idle_timeout_on_clean_completion() {
+        let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(8));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-prompt-fast.sock");
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        let started = std::time::Instant::now();
+        let answer = unix_client_prompt(stream, "What is the Sun?").await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            !answer.trim().is_empty(),
+            "expected non-empty ACP prompt response, got: {answer:?}"
+        );
+        // The bug would push this to ~8s (real work + idle timeout). The fix
+        // returns within milliseconds of the worker joining. 4s is a generous
+        // upper bound that still distinguishes fixed (~ms) from buggy (~8s).
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "expected prompt to return in under 4s (well below the 8s idle \
+             timeout), took {elapsed:?} — the drain loop likely waited for \
+             the idle watchdog instead of the done_rx oneshot"
+        );
     }
 }
