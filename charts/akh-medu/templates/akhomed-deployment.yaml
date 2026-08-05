@@ -17,6 +17,7 @@ spec:
       labels:
         {{- include "akh-medu.akhomed.selectorLabels" . | nindent 8 }}
     spec:
+      terminationGracePeriodSeconds: {{ .Values.akhomed.terminationGracePeriodSeconds | default 30 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -97,7 +98,22 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "akh-medu.fullname" . }}-akhomed-data
           {{- else }}
+          {{- $medium := .Values.akhomed.persistence.medium | default "" }}
+          {{- $sizeLimit := .Values.akhomed.persistence.sizeLimit | default "" }}
+          {{- if and (not $medium) (not $sizeLimit) }}
+          # Plain emptyDir backed by the node's ephemeral storage. On a Pi
+          # this is the SD card — set `persistence.medium: "Memory"` for a
+          # tmpfs (see values.yaml `persistence` comment).
           emptyDir: {}
+          {{- else }}
+          emptyDir:
+            {{- if $medium }}
+            medium: {{ $medium | quote }}
+            {{- end }}
+            {{- if $sizeLimit }}
+            sizeLimit: {{ $sizeLimit | quote }}
+            {{- end }}
+          {{- end }}
           {{- end }}
         {{- if .Values.akhomed.models.enabled }}
         - name: models

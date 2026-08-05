@@ -45,14 +45,76 @@ akhomed:
     OTEL_TRACES_SAMPLER_ARG: "0.1"
 
   # Persistent volume for engine data (KG, HNSW, redb).
+  #
+  # In Postgres mode (ADR 049: PG = truth, redb = cache) the local data dir is
+  # a rebuild cache, not a source of truth. WAL flushes go to Postgres
+  # (`postgres.wal_flush_interval_secs`) and the snapshot ticker persists the
+  # relational state every `postgres.snapshot_interval_secs`; `akh akh wake`
+  # rebuilds KG + HNSW + redb from Postgres into a fresh dir. On a Raspberry
+  # Pi the dir is therefore redundant AND a wear hazard (continuous small
+  # writes to the SD card), so for arm64 nodes set `enabled: false` +
+  # `medium: Memory` to put it on tmpfs.
+  #
+  # Exposure bound: with persistence disabled, an ungraceful exit (power cut,
+  # OOM kill, SIGKILL) drops everything since the last WAL flush. The bound is
+  # `postgres.wal_flush_interval_secs` (default 2s) plus whatever is in the
+  # in-memory WAL buffer up to `postgres.wal_max_buffer_mb` (default 16 MiB),
+  # beyond which the overflow drop policy applies. A graceful pod delete is
+  # safe: `shutdown_wals` takes a final snapshot per workspace and drains the
+  # WAL flusher, so SIGTERM → snapshot → flush → exit loses nothing the PG
+  # copy didn't already have. `terminationGracePeriodSeconds` (below) must be
+  # long enough for that final snapshot to land.
   persistence:
     enabled: true
     storageClass: ""
     size: 30Gi
     accessModes:
       - ReadWriteOnce
+    # Only consulted when `enabled: false`.
+    #
+    # - `medium: ""` (default) → a plain `emptyDir` backed by the node's
+    #   ephemeral storage. On a Pi that IS the SD card — do not use in
+    #   production; it defeats the purpose of disabling persistence.
+    # - `medium: "Memory"` → a real tmpfs (`emptyDir` + `medium: Memory`).
+    #   Lives in RAM, never touches the SD card, and is what arm64 nodes
+    #   want. Set `sizeLimit` to bound the RAM cost: the akh's redb + KG +
+    #   HNSW cache for a small workspace is well under 1 GiB, but the WAL
+    #   buffer adds up to `wal_max_buffer_mb` on top. On a wktiny node
+    #   (1.8 GiB RAM) leave headroom for the container; on a full Pi (8 GiB)
+    #   2Gi is comfortable. tmpfs that exceeds `sizeLimit` evicts to the
+    #   node's ephemeral storage, so keep this above the working set.
+    medium: ""
+    sizeLimit: ""
+
+  # Grace period the kubelet gives the pod on SIGTERM before sending SIGKILL.
+  # Must exceed the worst-case final-snapshot duration: on shutdown
+  # `shutdown_wals` stops the periodic snapshot ticker (5s drain), takes one
+  # final snapshot per loaded workspace (synchronous `persist_snapshot` to
+  # Postgres), then drains each WAL flusher (5s). With one workspace the
+  # floor is ~10s plus the snapshot write; we default to 120s for headroom.
+  # Measure on your workload (look for the `final snapshot written on
+  # shutdown` log line's distance from `Stopped on graceful shutdown`) and
+  # tighten if you want faster evictions. Too short and a SIGKILL mid-snapshot
+  # drops everything since the last WAL flush (see `persistence` comment).
+  terminationGracePeriodSeconds: 120
 
   # NLU models volume (ONNX NER model, LLM GGUF, Candle models).
+  #
+  # Separate concern from the data dir: this is a 5 GiB read-mostly cache of
+  # pre-built model weights. A tmpfs copy would cost real RAM on an 8 GiB Pi
+  # (~1.1 GiB for the LLM GGUF alone), so do NOT set `medium: Memory` here.
+  # Options for an arm64-only deployment that cannot use a zfs PVC (the
+  # zfs pool lives on amd64 storage nodes):
+  #   - Keep `enabled: true` with a `storageClass` that works on arm64
+  #     (e.g. nfs, or a manual PV to a USB-attached SSD). Best if you have
+  #     more than one arm64 akhomed replica or restart often.
+  #   - Set `enabled: false` and let the models re-download on each pod
+  #     start (`akh setup models`). Fine for a single replica with cheap
+  #     egress; painful on a slow Pi uplink.
+  #   - Pin the pod to an amd64 node (override `supportedArchitectures` and
+  #     `nodeSelector`) and keep the zfs PVC. Trades the arm64 win for a
+  #     working models cache.
+  # The chart does not pick for you; decide per deployment.
   models:
     enabled: true
     storageClass: ""

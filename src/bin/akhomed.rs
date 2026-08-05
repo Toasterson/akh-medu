@@ -158,14 +158,29 @@ async fn snapshot_once(
         .await
         .map_err(|e| e.to_string())?;
     // Capture under the lock (sync), release, then persist lock-free.
+    let started = std::time::Instant::now();
     let data = {
         let guard = agent.lock().unwrap_or_else(|e| e.into_inner());
         akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
             .map_err(|e| e.to_string())?
     };
-    akh_medu::snapshot::persist_snapshot(data, pool)
+    let capture_ms = started.elapsed().as_millis();
+    let persist_started = std::time::Instant::now();
+    let result = akh_medu::snapshot::persist_snapshot(data, pool)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    let persist_ms = persist_started.elapsed().as_millis();
+    let total_ms = started.elapsed().as_millis();
+    if result.is_ok() {
+        tracing::info!(
+            workspace = %name,
+            capture_ms,
+            persist_ms,
+            total_ms,
+            "snapshot persisted"
+        );
+    }
+    result
 }
 
 /// Background daemon state for a workspace.
