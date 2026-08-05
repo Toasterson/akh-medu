@@ -339,6 +339,13 @@ pub struct AkhAcpAgent {
     /// the request `cwd` sentinel) so each `session/prompt` routes to the right
     /// akh — the data-plane `-w` for chat.
     sessions: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    /// Chat session → dispatch mode flag. Recorded at `session/new` from the
+    /// request `cwd` pattern (WI-280): if the cwd matches Anima's worktree path
+    /// (`/var/lib/anima-runner/worktrees/<UUID>`), the session is an autonomous
+    /// dispatch; otherwise it's interactive. Each `session/prompt` uses this to
+    /// thread the mode into `run_agentic_turn`, where it gates the WI-249
+    /// post-condition guard.
+    session_is_dispatch: Arc<Mutex<std::collections::HashMap<String, bool>>>,
     /// Chat session → client-pushed MCP servers. Recorded at `session/new` from
     /// `NewSessionRequest.mcp_servers`; each `session/prompt` connects to them,
     /// discovers their tools, and registers namespaced proxies for that turn
@@ -472,6 +479,7 @@ impl AkhAcpAgent {
             processor: Some(Arc::new(Mutex::new(processor))),
             default_ws: "akh-medu".to_string(),
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_is_dispatch: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -499,6 +507,7 @@ impl AkhAcpAgent {
             name: default_ws.clone(),
             default_ws,
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_is_dispatch: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -589,6 +598,36 @@ impl AkhAcpAgent {
         }
     }
 
+    /// Resolve the dispatch mode for a session. Recorded at `session/new` from
+    /// the cwd pattern (WI-280). Returns `(is_dispatch, source)`: `true` for an
+    /// autonomous dispatch (Anima work item), `false` for interactive (CLI/TUI).
+    /// Source is `"session-meta"` when resolved from the session record,
+    /// `"env-default"` when falling back to `AKH_DISPATCH_MODE`, or `"default"`
+    /// when neither applies (defaults to interactive).
+    fn session_dispatch_mode(&self, session_id: &str) -> (bool, &'static str) {
+        let is_dispatch = self
+            .session_is_dispatch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .copied();
+        match is_dispatch {
+            Some(mode) => (mode, "session-meta"),
+            None => {
+                // No session record (shouldn't happen in production), check env
+                // fallback
+                let env_dispatch = std::env::var("AKH_DISPATCH_MODE")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
+                if env_dispatch {
+                    (true, "env-default")
+                } else {
+                    (false, "default")
+                }
+            }
+        }
+    }
+
     /// Bump `session_id` to the most-recently-used end of the eviction
     /// queue. A no-op if the session isn't tracked (e.g. already evicted, or
     /// never registered via [`Self::track_new_session`]).
@@ -622,6 +661,10 @@ impl AkhAcpAgent {
         if order.len() > MAX_TRACKED_SESSIONS {
             if let Some(evicted) = order.pop_front() {
                 self.sessions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_is_dispatch
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
@@ -762,6 +805,8 @@ impl AkhAcpAgent {
         >,
         sink: ChannelSink,
         cancel: Arc<std::sync::atomic::AtomicBool>,
+        is_dispatch: bool,
+        mode_source: &'static str,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: lock, process (emitting via the channel sink), drop —
@@ -870,10 +915,14 @@ impl AkhAcpAgent {
             // which streams directly into `sink`; fall back to the symbolic
             // ChatProcessor when no model backend is reachable, emitting its
             // (batched) output through the same sink so the wire shape matches.
-            // WI-249: Enable dispatch post-condition guard via AKH_DISPATCH_MODE=1.
-            let is_dispatch = std::env::var("AKH_DISPATCH_MODE")
-                .map(|v| v == "1")
-                .unwrap_or(false);
+            // Log the resolved dispatch mode at turn start (WI-280: the mode is a
+            // per-turn property, threaded from the caller, not a process-wide flag).
+            tracing::info!(
+                agent_id,
+                mode = if is_dispatch { "dispatch" } else { "interactive" },
+                source = mode_source,
+                "turn mode resolved"
+            );
             if guard
                 .agent
                 .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
@@ -3440,6 +3489,24 @@ fn build_connection(
                                 .unwrap_or_else(|e| e.into_inner())
                                 .insert(session_id.to_string(), ws.to_string());
                         }
+                        // WI-280: Detect dispatch mode from the session cwd. Anima
+                        // dispatches work from worktree paths matching the pattern
+                        // `/var/lib/anima-runner/worktrees/<UUID>`. The env var
+                        // `AKH_DISPATCH_MODE` is the process-wide fallback for
+                        // backwards compat and for sessions that don't match either
+                        // pattern.
+                        let is_dispatch = if let Some(cwd_str) = req.cwd.to_str() {
+                            cwd_str.starts_with("/var/lib/anima-runner/worktrees/")
+                                && cwd_str.len() > 33 // prefix + at least one char of UUID
+                        } else {
+                            false
+                        } || std::env::var("AKH_DISPATCH_MODE")
+                            .map(|v| v == "1")
+                            .unwrap_or(false);
+                        me.session_is_dispatch
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(session_id.to_string(), is_dispatch);
                         // Honor the MCP servers the client pushes at session
                         // setup (ACP's `mcp_servers`, the equivalent of a CLI's
                         // `--mcp-config`): record them so each prompt in this
@@ -3596,6 +3663,9 @@ fn build_connection(
                         // `agent`'s `Mutex` forever once the watchdog gave up,
                         // wedging every later prompt for the workspace.
                         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        // WI-280: Resolve dispatch mode for this session — the
+                        // mode is a per-turn property, not a process-wide flag.
+                        let (is_dispatch, mode_source) = me.session_dispatch_mode(&session_id.to_string());
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
@@ -3609,6 +3679,8 @@ fn build_connection(
                             me.session_mcp_tools.clone(),
                             ChannelSink { tx: msg_tx },
                             Arc::clone(&cancel),
+                            is_dispatch,
+                            mode_source,
                         );
                         // The busy tracker (`begin_turn` above) must stay set
                         // until the worker actually finishes, which may be
@@ -5069,6 +5141,129 @@ mod tests {
             "survivor-workspace",
             "an actively-used session must survive cap eviction, not fall back to default_ws"
         );
+    }
+
+    // --- WI-280: dispatch mode detection tests ---
+    // These tests manipulate AKH_DISPATCH_MODE and use a static mutex + guard
+    // patterns to ensure sequential access and cleanup, avoiding cross-test env
+    // var pollution in parallel test runs.
+
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn session_dispatch_mode_detects_anima_worktree_path() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        use agent_client_protocol::schema::NewSessionRequest;
+        use std::path::PathBuf;
+
+        // Guard to ensure env cleanup
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("AKH_DISPATCH_MODE");
+                }
+            }
+        }
+        let _guard = EnvGuard;
+
+        let me = workspace();
+        let session_id = "test-dispatch-session";
+
+        // Simulate session/new with an Anima worktree path
+        let req = NewSessionRequest::new(&PathBuf::from(
+            "/var/lib/anima-runner/worktrees/019fcf5b-9789-7bd0-9776-3e7977800403"
+        ));
+
+        // The detection logic from session/new
+        let is_dispatch = if let Some(cwd_str) = req.cwd.to_str() {
+            cwd_str.starts_with("/var/lib/anima-runner/worktrees/")
+                && cwd_str.len() > 33
+        } else {
+            false
+        } || std::env::var("AKH_DISPATCH_MODE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        me.session_is_dispatch
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), is_dispatch);
+
+        let (mode, source) = me.session_dispatch_mode(session_id);
+        assert!(mode, "Anima worktree path must be detected as dispatch");
+        assert_eq!(source, "session-meta", "Source must be session-meta");
+    }
+
+    #[test]
+    fn session_dispatch_mode_detects_interactive_session() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        use agent_client_protocol::schema::NewSessionRequest;
+        use std::path::PathBuf;
+
+        // Guard to ensure env cleanup
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("AKH_DISPATCH_MODE");
+                }
+            }
+        }
+        let _guard = EnvGuard;
+
+        // Ensure AKH_DISPATCH_MODE is not set for this test
+        unsafe {
+            std::env::remove_var("AKH_DISPATCH_MODE");
+        }
+
+        let me = workspace();
+        let session_id = "test-interactive-session";
+
+        // Simulate session/new with a regular user path
+        let req = NewSessionRequest::new(&PathBuf::from("/home/user/projects/my-app"));
+
+        // The detection logic from session/new
+        let is_dispatch = if let Some(cwd_str) = req.cwd.to_str() {
+            cwd_str.starts_with("/var/lib/anima-runner/worktrees/")
+                && cwd_str.len() > 33
+        } else {
+            false
+        } || std::env::var("AKH_DISPATCH_MODE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        me.session_is_dispatch
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), is_dispatch);
+
+        let (mode, source) = me.session_dispatch_mode(session_id);
+        assert!(!mode, "Regular user path must be detected as interactive");
+        assert_eq!(source, "session-meta", "Source must be session-meta");
+    }
+
+    #[test]
+    fn session_dispatch_mode_falls_back_to_env() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        // Test the env var fallback when no session record exists.
+        // Use a guard to ensure cleanup happens even if assertions panic.
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("AKH_DISPATCH_MODE");
+                }
+            }
+        }
+
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::set_var("AKH_DISPATCH_MODE", "1");
+        }
+
+        let me = workspace();
+        let (mode, source) = me.session_dispatch_mode("nonexistent-session");
+        assert!(mode, "Must detect dispatch mode from env var");
+        assert_eq!(source, "env-default", "Source must be env-default");
     }
 
     // --- turn-wedge fix, part (b): the `session/prompt` busy fail-fast guard ---
