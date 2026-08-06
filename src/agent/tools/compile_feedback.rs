@@ -40,7 +40,9 @@
 //!
 //! [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`]: crate::acp::DEFAULT_TURN_IDLE_TIMEOUT_SECS
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -152,6 +154,171 @@ const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Maximum output size to capture.
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
+/// Maximum pre-existing warnings to report before applying the lint budget.
+const MAX_PREEXISTING_WARNINGS: usize = 50;
+
+// ---------------------------------------------------------------------------
+// Blast radius detection
+// ---------------------------------------------------------------------------
+
+/// Get list of changed files from git diff in the worktree.
+fn get_changed_files(workdir: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(workdir)
+        .output()
+        .ok()
+        .and_then(|o| o.status.success().then_some(o))
+        .unwrap_or_default();
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Find the Cargo.toml nearest to a file path and extract the package name.
+fn file_to_crate(workdir: &str, file_path: &str) -> Option<String> {
+    let mut current = PathBuf::from(workdir);
+    current.push(file_path);
+    
+    // Walk up from the file's directory to find Cargo.toml
+    let mut dir = current.parent()?.to_path_buf();
+    
+    loop {
+        let cargo_toml = dir.join("Cargo.toml");
+        if cargo_toml.exists() {
+            if let Some(name) = extract_package_name(&cargo_toml) {
+                return Some(name);
+            }
+        }
+        
+        // Can't go higher than workdir
+        if !dir.pop() {
+            break;
+        }
+        if dir < PathBuf::from(workdir) {
+            break;
+        }
+    }
+    
+    None
+}
+
+/// Extract package name from a Cargo.toml file.
+fn extract_package_name(cargo_toml: &Path) -> Option<String> {
+    let content = fs::read_to_string(cargo_toml).ok()?;
+    
+    // Simple parsing: look for `name = "..."` under [package]
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[package]" {
+            in_package = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_package = false;
+            continue;
+        }
+        if in_package && trimmed.starts_with("name") {
+            if let Some(eq_pos) = trimmed.find('=') {
+                let value = trimmed[eq_pos + 1..].trim();
+                // Remove quotes
+                let name = value.trim_matches('"').trim_matches('\'');
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    
+    // For workspace root without [package], return None
+    None
+}
+
+/// Map file paths to crate names.
+fn files_to_crates(workdir: &str, files: &[String]) -> Vec<String> {
+    let mut crates = HashSet::new();
+    for file in files {
+        if let Some(crate_name) = file_to_crate(workdir, file) {
+            crates.insert(crate_name);
+        }
+    }
+    crates.into_iter().collect()
+}
+
+/// Load baseline diagnostics from a file (JSON format).
+fn load_baseline(baseline_path: &str) -> HashSet<(String, String, Option<String>)> {
+    let content = match fs::read_to_string(baseline_path) {
+        Ok(c) => c,
+        Err(_) => return HashSet::new(),
+    };
+    
+    let mut baseline = HashSet::new();
+    for line in content.lines() {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+            if parsed.get("reason").and_then(|r| r.as_str()) == Some("compiler-message") {
+                if let Some(message) = parsed.get("message") {
+                    let level = message.get("level").and_then(|l| l.as_str()).unwrap_or("").to_string();
+                    let msg = message.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    let code = message
+                        .get("code")
+                        .and_then(|c| c.get("code"))
+                        .and_then(|c| c.as_str())
+                        .map(|s| s.to_string());
+                    
+                    // Skip non-warnings/errors for baseline
+                    if level == "warning" || level == "error" {
+                        baseline.insert((level, msg, code));
+                    }
+                }
+            }
+        }
+    }
+    
+    baseline
+}
+
+/// Filter diagnostics: separate new issues from pre-existing baseline.
+fn filter_by_baseline(
+    diagnostics: Vec<CompilerDiagnostic>,
+    baseline: &HashSet<(String, String, Option<String>)>,
+    blast_radius_crates: Option<&HashSet<String>>,
+) -> (Vec<CompilerDiagnostic>, Vec<CompilerDiagnostic>, usize) {
+    let mut new_diagnostics = Vec::new();
+    let mut preexisting = Vec::new();
+    let mut preexisting_outside_radius = 0;
+    
+    for diag in diagnostics {
+        let key = (diag.level.clone(), diag.message.clone(), diag.code.clone());
+        
+        if baseline.contains(&key) {
+            // Pre-existing
+            if let Some(ref crates) = blast_radius_crates {
+                if let Some(ref file) = diag.file {
+                    // Check if this file is within blast radius crates
+                    let is_inside = crates.iter().any(|c| file.contains(&format!("crates/{c}")) || file.contains(&format!("crates\\{c}")));
+                    if !is_inside {
+                        preexisting_outside_radius += 1;
+                        continue; // Don't report pre-existing outside blast radius
+                    }
+                }
+            }
+            preexisting.push(diag);
+        } else {
+            new_diagnostics.push(diag);
+        }
+    }
+    
+    (new_diagnostics, preexisting, preexisting_outside_radius)
+}
+
+// ---------------------------------------------------------------------------
+// Resolve timeout
+// ---------------------------------------------------------------------------
+
 /// Resolve the per-call timeout: explicit `timeout` parameter wins, then
 /// `AKH_COMPILE_FEEDBACK_TIMEOUT_SECS`, then the built-in default. `0` (or any
 /// parse failure that yields zero) falls back to the default so a malformed
@@ -224,8 +391,40 @@ impl Tool for CompileFeedbackTool {
         let path = input.get("path").unwrap_or(".");
         let command = input.get("command").unwrap_or("check");
         let timeout_secs = resolve_timeout(&input);
+        let workspace_mode = input.get_bool("workspace").unwrap_or(false);
+        let baseline_path = input.get("baseline_path");
 
-        // Build the cargo command
+        // Determine blast radius: which crates to check
+        let blast_radius_crates: Option<HashSet<String>> = if workspace_mode {
+            None // None means check all crates (--workspace)
+        } else {
+            // Blast-radius mode: detect from git diff
+            let changed_files = get_changed_files(path);
+            let crates = files_to_crates(path, &changed_files);
+            
+            // If no changed files, check nothing (skip)
+            if crates.is_empty() && changed_files.is_empty() {
+                return Ok(ToolOutput::ok(
+                    "No changed files detected in worktree; skipping compile check. \
+                     Pass workspace=true to check the entire workspace.".into()
+                ));
+            }
+            
+            // If we have changed files but couldn't map them to crates, 
+            // fall back to checking the root package
+            if crates.is_empty() {
+                Some(HashSet::from(["akh-medu".to_string()]))
+            } else {
+                Some(crates.into_iter().collect())
+            }
+        };
+
+        // Load baseline if provided
+        let baseline = baseline_path
+            .map(|p| load_baseline(p))
+            .unwrap_or_default();
+
+        // Build the cargo command with blast-radius scoping
         let mut cmd = Command::new("cargo");
         match command {
             "check" => {
@@ -242,6 +441,16 @@ impl Tool for CompileFeedbackTool {
                     "Unsupported command: '{other}'. Use 'check', 'clippy', or 'test'."
                 )));
             }
+        }
+
+        // Add crate scoping if not in workspace mode
+        if let Some(ref crates) = blast_radius_crates {
+            for c in crates {
+                cmd.arg("-p").arg(c);
+            }
+        } else {
+            // Workspace mode: check all crates
+            cmd.arg("--workspace");
         }
 
         cmd.current_dir(path)
@@ -267,20 +476,10 @@ impl Tool for CompileFeedbackTool {
         // Progress tracker: no output for timeout_secs = stuck
         let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(timeout_secs));
 
-        // Take the drain threads — this decouples pipe reads from the
-        // supervision loop so is_stuck() is checked on a timer regardless
-        // of whether the child is producing output. This is the fix for
-        // the silent-hang blocker: a child that writes nothing and never
-        // exits will be detected as stuck and killed, instead of blocking
-        // forever on a read().
+        // Take the drain threads
         let drain = exec.take_drain();
 
-        // Wait with drain-based supervision. The drain threads capture
-        // stdout and stderr in the background while the supervision loop
-        // polls is_stuck() on a timer. Stdout is capped incrementally as it
-        // arrives (rather than truncated only after the fact) so a
-        // pathological build emitting gigabytes of JSON diagnostics cannot
-        // grow this buffer unbounded before we get a chance to bound it.
+        // Wait with drain-based supervision
         let (status, output) =
             match exec.wait_with_drain_capped(&mut tracker, drain, MAX_OUTPUT_SIZE * 4) {
                 Ok((s, o)) => (s, o),
@@ -290,7 +489,6 @@ impl Tool for CompileFeedbackTool {
                     partial_stderr,
                     elapsed,
                 }) => {
-                    // Process was killed by the supervisor (stuck detection)
                     let stdout_str = String::from_utf8_lossy(&partial_stdout);
                     let stderr_str = String::from_utf8_lossy(&partial_stderr);
                     let result = format_stuck_result(
@@ -315,9 +513,19 @@ impl Tool for CompileFeedbackTool {
         let exit_code = status.code().unwrap_or(-1);
 
         // Parse JSON diagnostics from stdout
-        let diagnostics = parse_json_diagnostics(&stdout_str);
-        let error_count = diagnostics.iter().filter(|d| d.is_error()).count();
-        let warning_count = diagnostics.iter().filter(|d| d.level == "warning").count();
+        let all_diagnostics = parse_json_diagnostics(&stdout_str);
+
+        // Filter by baseline and blast radius
+        let (new_diagnostics, preexisting, preexisting_outside_radius) = filter_by_baseline(
+            all_diagnostics,
+            &baseline,
+            blast_radius_crates.as_ref(),
+        );
+
+        let new_error_count = new_diagnostics.iter().filter(|d| d.is_error()).count();
+        let new_warning_count = new_diagnostics.iter().filter(|d| d.level == "warning").count();
+        let preexisting_error_count = preexisting.iter().filter(|d| d.is_error()).count();
+        let preexisting_warning_count = preexisting.iter().filter(|d| d.level == "warning").count();
 
         let raw_output = if stderr_str.len() > MAX_OUTPUT_SIZE {
             format!(
@@ -330,38 +538,85 @@ impl Tool for CompileFeedbackTool {
         };
 
         let compilation = CompilationResult {
-            success: exit_code == 0,
-            diagnostics: diagnostics.clone(),
-            error_count,
-            warning_count,
+            success: exit_code == 0 && new_error_count == 0,
+            diagnostics: new_diagnostics.clone(),
+            error_count: new_error_count,
+            warning_count: new_warning_count,
             raw_output: raw_output.clone(),
         };
 
-        // Format output
+        // Format output with blast-radius context
         let elapsed = start.elapsed().as_secs();
         let mut result = String::new();
+        
+        // Report blast radius
+        if let Some(ref crates) = blast_radius_crates {
+            let crate_list: Vec<_> = crates.iter().collect();
+            result.push_str(&format!("BLAST RADIUS: Checking crates [{:?}]\n", crate_list));
+        } else {
+            result.push_str("MODE: Full workspace check (--workspace)\n");
+        }
+
+        // Report pre-existing warnings outside blast radius (lint budget)
+        if preexisting_outside_radius > 0 {
+            let reported = preexisting_outside_radius.min(MAX_PREEXISTING_WARNINGS);
+            result.push_str(&format!(
+                "PRE-EXISTING: {} warning(s) outside blast radius (showing {} of {})\n",
+                preexisting_outside_radius, reported, preexisting_outside_radius
+            ));
+            if preexisting_outside_radius > MAX_PREEXISTING_WARNINGS {
+                result.push_str(&format!(
+                    "  (lint budget exceeded; {} warning(s) suppressed)\n",
+                    preexisting_outside_radius - MAX_PREEXISTING_WARNINGS
+                ));
+            }
+        }
+
+        // Main summary: only count NEW issues as "work"
         result.push_str(&format!(
-            "cargo {command}: exit code {exit_code} ({} error(s), {} warning(s), {elapsed}s)\n",
-            error_count, warning_count
+            "cargo {command}: exit code {exit_code} ({} NEW error(s), {} NEW warning(s), {elapsed}s)\n",
+            new_error_count, new_warning_count
         ));
 
-        if compilation.success {
-            result.push_str("Compilation successful.\n");
-            if warning_count > 0 {
-                result.push_str("\nWarnings:\n");
-                for d in diagnostics.iter().filter(|d| d.level == "warning") {
+        if preexisting_error_count > 0 || preexisting_warning_count > 0 {
+            result.push_str(&format!(
+                "  (plus {} pre-existing error(s), {} pre-existing warning(s) in blast radius)\n",
+                preexisting_error_count, preexisting_warning_count
+            ));
+        }
+
+        if compilation.success && new_error_count == 0 {
+            result.push_str("\n✓ No NEW errors in blast radius.\n");
+            if new_warning_count > 0 {
+                result.push_str("\nNEW Warnings (your change may have introduced these):\n");
+                for d in new_diagnostics.iter().filter(|d| d.level == "warning") {
                     result.push_str(&format!("  {}\n", d.display()));
                 }
             }
+            if preexisting_outside_radius > 0 {
+                result.push_str("\nNote: Pre-existing warnings outside blast radius are not shown. \
+                                 Focus on fixing issues within your blast radius first.\n");
+            }
             Ok(ToolOutput::ok(result))
         } else {
-            result.push_str("\nErrors:\n");
-            for d in diagnostics.iter().filter(|d| d.is_error()) {
+            result.push_str("\nNEW Errors (your change broke this):\n");
+            for d in new_diagnostics.iter().filter(|d| d.is_error()) {
                 result.push_str(&format!("  {}\n", d.display()));
             }
 
+            // Include pre-existing errors in blast radius as context
+            if preexisting_error_count > 0 {
+                result.push_str("\nPre-existing errors in blast radius (not your fault, but blocking):\n");
+                for d in preexisting.iter().filter(|d| d.is_error()).take(10) {
+                    result.push_str(&format!("  {}\n", d.display()));
+                }
+                if preexisting_error_count > 10 {
+                    result.push_str(&format!("  ... and {} more\n", preexisting_error_count - 10));
+                }
+            }
+
             // Include suggestions if available
-            let suggestions: Vec<_> = diagnostics
+            let suggestions: Vec<_> = new_diagnostics
                 .iter()
                 .filter_map(|d| d.suggestion.as_ref())
                 .collect();
@@ -385,7 +640,10 @@ impl Tool for CompileFeedbackTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "compile_feedback".into(),
-            description: "Runs cargo check/clippy/test and parses compiler diagnostics.".into(),
+            description: "Runs cargo check/clippy/test and parses compiler diagnostics. \
+                          By default, scopes to crates affected by the current worktree diff \
+                          (blast-radius mode); pass workspace=true to check the entire workspace."
+                .into(),
             parameters: vec![
                 ToolParamSchema::optional(
                     "path",
@@ -403,6 +661,17 @@ impl Tool for CompileFeedbackTool {
                         "value for a warm-target edit→check loop). Override the ",
                         "process-wide default with AKH_COMPILE_FEEDBACK_TIMEOUT_SECS."
                     ),
+                ),
+                ToolParamSchema::optional(
+                    "workspace",
+                    "Check entire workspace instead of scoping to affected crates. \
+                     Default: false (blast-radius mode).",
+                ),
+                ToolParamSchema::optional(
+                    "baseline_path",
+                    "Optional path to a baseline diagnostics file. If provided, \
+                     pre-existing warnings outside the blast radius are reported \
+                     as context rather than as work.",
                 ),
             ],
             danger: DangerInfo {
