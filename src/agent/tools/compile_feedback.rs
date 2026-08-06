@@ -177,7 +177,9 @@ impl Tool for CompileFeedbackTool {
         ToolSignature {
             name: "compile_feedback".into(),
             description: "Run `cargo check` and return parsed compiler diagnostics. \
-                          Supports JSON output mode for structured error analysis."
+                          Supports JSON output mode for structured error analysis. \
+                          By default, scopes to crates affected by the current worktree diff \
+                          (blast-radius mode); pass `workspace=true` to check the entire workspace."
                 .into(),
             parameters: vec![
                 ToolParam {
@@ -199,6 +201,19 @@ impl Tool for CompileFeedbackTool {
                         "smaller value for a tight edit→check loop on a warm target."
                     )
                     .into(),
+                    required: false,
+                },
+                ToolParam {
+                    name: "workspace".into(),
+                    description: "Check entire workspace instead of scoping to affected crates. \
+                                  Default: false (blast-radius mode).".into(),
+                    required: false,
+                },
+                ToolParam {
+                    name: "baseline_path".into(),
+                    description: "Optional path to a baseline diagnostics file. If provided, \
+                                  pre-existing warnings outside the blast radius are reported \
+                                  as context rather than as work.".into(),
                     required: false,
                 },
             ],
