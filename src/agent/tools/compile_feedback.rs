@@ -4,46 +4,49 @@
 //! Implements a CEGIS-like (Counter-Example Guided Inductive Synthesis) loop:
 //! each compiler error is a counterexample that guides the next generation attempt.
 //!
-//! ## Timeouts (reconciled)
+//! ## Supervision and progress-based liveness
 //!
-//! There are *three* distinct deadlines in the path of a `compile_feedback` call;
-//! confusing them is what produced the WI-255 canary wedges (the agent saw
-//! "timed out at 180s" in one capture and "timed out after 300s" in another and
-//! could not tell which layer fired). They are:
+//! As of this implementation, `compile_feedback` uses **progress-based process
+//! supervision** instead of an elapsed-time timeout. The process is killed only
+//! if it goes silent (no stdout/stderr output) for the configured duration
+//! (default 600s, tunable via `AKH_COMPILE_FEEDBACK_TIMEOUT_SECS` or the
+//! `timeout` parameter). A build that continuously emits output is never killed,
+//! however long it runs.
 //!
-//! 1. **This tool's own budget** — [`DEFAULT_TIMEOUT_SECS`] (600s), overridable
-//!    per-call via the `timeout` parameter or process-wide via
-//!    `AKH_COMPILE_FEEDBACK_TIMEOUT_SECS`. This is the deadline that actually
-//!    kills `cargo` and produces the `TIMEOUT:` result below. The canary's
-//!    "180s" log was the agent's *narration* of an `acp_adapter.py`-side default
-//!    (see (2)); the tool's own historic default was 120s, far too low for a
-//!    cold akh-medu build.
-//! 2. **`acp_adapter.py --timeout`** — the *client-side* ACP adapter's
-//!    `--timeout` (default 180s in `scripts/acp_adapter.py`). This is a
-//!    transport-layer deadline on the ACP session, not anything this crate
-//!    controls; it shows up in operator-side logs as the session ending, not as
-//!    a tool result.
-//! 3. **ACP idle watchdog** — [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`] (300s) in
-//!    `src/acp/mod.rs`, the "no progress for N seconds → abort the turn"
-//!    watchdog. A healthy turn streams tool/answer/audit events; a `cargo check`
-//!    that goes silent for the whole window trips this. This is the "300s" the
-//!    first canary capture hit.
+//! This replaces the historic elapsed-time timeout (which would kill a cold
+//! build at 600s wall time even if it was healthy and emitting diagnostics).
+//! The old timeout confused three distinct deadlines and made slow-but-healthy
+//! builds indistinguishable from hung ones. The new supervision judges liveness
+//! by **progress** (output received), not by wall time.
 //!
-//! The fix here keeps (1) comfortably above a cold build and, crucially, reads
-//! `cargo`'s stdout **incrementally** so the tool emits a `ToolCallStarted` and
-//! then keeps the process draining — which (combined with the tracker's
-//! start event) means the ACP idle watchdog (3) sees activity and does not fire
-//! on a build that is simply slow, not hung.
+//! ### Other timeouts still in play
+//!
+//! Two other timeouts exist outside this tool's control:
+//!
+//! 1. **`acp_adapter.py --timeout`** — the *client-side* ACP adapter's
+//!    transport deadline (default 180s). This is an RPC-level timeout on the
+//!    Python→Rust ACP session; when it fires, the session ends and the operator
+//!    sees it in logs, not as a tool result.
+//! 2. **ACP turn idle watchdog** — [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`] (300s) in
+//!    `src/acp/mod.rs`, which aborts turns that emit no events (tool calls,
+//!    answers, audit records) for N seconds. A healthy turn streams events; a
+//!    completely silent LLM loop trips this. The incremental stdout drain in
+//!    this tool keeps the watchdog fed (each read is visible as progress), so
+//!    a slow build does not trigger it.
+//!
+//! The new supervision makes (1) the tool's own concern (output-based liveness,
+//! reported as `STUCK:` when it fires), while (2) and (3) remain transport and
+//! turn-level guards that should never fire on a healthy, progress-making build.
 //!
 //! [`DEFAULT_TURN_IDLE_TIMEOUT_SECS`]: crate::acp::DEFAULT_TURN_IDLE_TIMEOUT_SECS
 
 use std::collections::HashSet;
-use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
+use crate::backend::{ProgressTracker, SupervisedExecution, SupervisorError};
 use crate::agent::tool_manifest::{
     Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
 };
@@ -230,115 +233,70 @@ impl Tool for CompileFeedbackTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Spawn process
+        // Spawn process under supervision
         let start = Instant::now();
-        let deadline = start + Duration::from_secs(timeout_secs);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+        let mut exec = match SupervisedExecution::spawn(cmd) {
+            Ok(e) => e,
+            Err(SupervisorError::Spawn { source }) => {
+                return Ok(ToolOutput::err(format!(
+                    "Failed to spawn `cargo {command}`: {source}"
+                )));
+            }
             Err(e) => {
                 return Ok(ToolOutput::err(format!(
-                    "Failed to spawn `cargo {command}`: {e}"
+                    "Supervision error spawning `cargo {command}`: {e}"
                 )));
             }
         };
 
-        // Take the stdout pipe so we can drain it incrementally. Draining line
-        // by line (rather than `read_to_end` after the process exits) is what
-        // keeps the ACP idle watchdog from classifying a slow-but-healthy build
-        // as a hung turn: cargo emits JSON compiler-message lines as it goes,
-        // and each line we pull is progress the watchdog can see. We also use
-        // the incremental drain to enforce the deadline — `try_wait` alone would
-        // not fire until the process actually exits, so a build that hangs
-        // without producing output would otherwise block forever.
-        let mut stdout = child.stdout.take().expect("stdout was piped");
-        let mut stdout_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
-        let mut chunk = [0u8; 8 * 1024];
+        // Progress tracker: no output for timeout_secs = stuck
+        let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(timeout_secs));
 
-        let timed_out = loop {
-            // Check the deadline first so a zero-output hang still terminates.
-            if Instant::now() >= deadline {
-                break true;
-            }
-            // Non-blocking read with a short timeout so we can re-check the
-            // deadline and `try_wait` between reads. `read` blocks the worker
-            // thread (we are inside `spawn_blocking`), so a short socket-style
-            // poll keeps us responsive without busy-waiting.
-            match stdout.read(&mut chunk) {
-                Ok(0) => {
-                    // EOF on stdout — the process will be exiting imminently;
-                    // fall through to `try_wait` to collect its status.
-                    break false;
+        // Take the drain threads — this decouples pipe reads from the
+        // supervision loop so is_stuck() is checked on a timer regardless
+        // of whether the child is producing output. This is the fix for
+        // the silent-hang blocker: a child that writes nothing and never
+        // exits will be detected as stuck and killed, instead of blocking
+        // forever on a read().
+        let drain = exec.take_drain();
+
+        // Wait with drain-based supervision. The drain threads capture
+        // stdout and stderr in the background while the supervision loop
+        // polls is_stuck() on a timer. Stdout is capped incrementally as it
+        // arrives (rather than truncated only after the fact) so a
+        // pathological build emitting gigabytes of JSON diagnostics cannot
+        // grow this buffer unbounded before we get a chance to bound it.
+        let (status, output) =
+            match exec.wait_with_drain_capped(&mut tracker, drain, MAX_OUTPUT_SIZE * 4) {
+                Ok((s, o)) => (s, o),
+                Err(SupervisorError::Killed {
+                    reason,
+                    partial_stdout,
+                    partial_stderr,
+                    elapsed,
+                }) => {
+                    // Process was killed by the supervisor (stuck detection)
+                    let stdout_str = String::from_utf8_lossy(&partial_stdout);
+                    let stderr_str = String::from_utf8_lossy(&partial_stderr);
+                    let result = format_stuck_result(
+                        command,
+                        &reason,
+                        elapsed.as_secs(),
+                        &stdout_str,
+                        &stderr_str,
+                    );
+                    return Ok(ToolOutput::err(result));
                 }
-                Ok(n) => {
-                    stdout_buf.extend_from_slice(&chunk[..n]);
-                    // Truncate aggressively so a pathological build cannot OOM
-                    // the worker; we keep at most MAX_OUTPUT_SIZE of stdout for
-                    // diagnostic parsing.
-                    if stdout_buf.len() > MAX_OUTPUT_SIZE * 4 {
-                        stdout_buf.truncate(MAX_OUTPUT_SIZE * 4);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break false,
-            }
-        };
-
-        if timed_out {
-            // Kill the child and drain whatever stderr it had produced so the
-            // timeout result can report partial output (e.g. the compiler had
-            // already emitted the error list before the deadline).
-            let _ = child.kill();
-            // Best-effort: collect any stderr the process had buffered. The
-            // process is being killed, so this may return partial data.
-            let mut stderr_buf = Vec::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_end(&mut stderr_buf);
-            }
-            let _ = child.wait();
-
-            let elapsed = start.elapsed().as_secs();
-            let stdout_str = String::from_utf8_lossy(&stdout_buf);
-            let stderr_str = String::from_utf8_lossy(&stderr_buf);
-            let result = format_timeout_result(command, timeout_secs, elapsed, &stdout_str, &stderr_str);
-            return Ok(ToolOutput::err(result));
-        }
-
-        // Not timed out — wait for the process to finish (it has already
-        // closed stdout, so this is expected to return promptly).
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        // Edge case: stdout closed but the process is still
-                        // alive past the deadline (rare — usually means the
-                        // build is flushing a huge artifact). Kill + report
-                        // as a timeout with the output we have.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let elapsed = start.elapsed().as_secs();
-                        let stdout_str = String::from_utf8_lossy(&stdout_buf);
-                        let result = format_timeout_result(
-                            command, timeout_secs, elapsed, &stdout_str, "",
-                        );
-                        return Ok(ToolOutput::err(result));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                Err(SupervisorError::Wait { source }) => {
+                    return Ok(ToolOutput::err(format!("Failed to wait: {source}")));
                 }
                 Err(e) => {
-                    return Ok(ToolOutput::err(format!("Failed to wait: {e}")));
+                    return Ok(ToolOutput::err(format!("Supervision error: {e}")));
                 }
-            }
-        };
+            };
 
-        // Read stderr (stdout already drained above).
-        let mut stderr_buf = Vec::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let _ = stderr.read_to_end(&mut stderr_buf);
-        }
-
-        let stdout_str = String::from_utf8_lossy(&stdout_buf);
-        let stderr_str = String::from_utf8_lossy(&stderr_buf);
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
         let exit_code = status.code().unwrap_or(-1);
 
         // Parse JSON diagnostics from stdout
@@ -447,25 +405,16 @@ impl Tool for CompileFeedbackTool {
 // JSON diagnostic parsing
 // ---------------------------------------------------------------------------
 
-/// Format a timeout result the model can distinguish from a compile error.
+/// Format a stuck process result distinguishable from both compile errors
+/// and traditional timeouts.
 ///
-/// Factored out of [`CompileFeedbackTool::execute`] so the shape is unit-testable
-/// without driving a real `cargo` past a deadline (which is slow and flaky).
-/// The contract this function upholds, asserted in
-/// [`tests::timeout_result_is_distinguishable_from_compile_error`]:
-///
-/// * starts with `TIMEOUT:` so the model can branch on it,
-/// * names the budget and the elapsed time,
-/// * includes any partial diagnostics cargo had already emitted (so the model
-///   knows whether its code *also* has real errors to fix),
-/// * points at the `timeout` parameter as the retry remedy.
-///
-/// It deliberately does **not** emit an `exit code` line — that's the shape of
-/// a real compile error, and dressing a timeout up as one is exactly the
-/// confusion the WI-255 canary hit.
-fn format_timeout_result(
+/// A stuck process was killed by the progress-based supervisor (no output for
+/// N minutes), not by an elapsed-time timeout. The distinction matters: stuck
+/// usually means a true hang, while the old timeout could fire on slow-but-
+/// healthy builds. The agent should know which one it hit.
+fn format_stuck_result(
     command: &str,
-    timeout_secs: u64,
+    reason: &str,
     elapsed: u64,
     partial_stdout: &str,
     partial_stderr: &str,
@@ -475,14 +424,15 @@ fn format_timeout_result(
 
     let mut result = String::new();
     result.push_str(&format!(
-        "TIMEOUT: cargo {command} exceeded the {timeout_secs}s budget \
-         (elapsed: {elapsed}s). This is distinct from a compile error: \
-         the build was killed before it finished, so the verdict below \
-         is partial, not final.\n"
+        "STUCK: cargo {command} was killed after {elapsed}s: {reason}. \
+         This is distinct from both a compile error and a simple timeout — \
+         the process appeared stuck (no output for an extended period), so \
+         the supervisor terminated it.\n"
     ));
+
     if partial_errors > 0 {
         result.push_str(&format!(
-            "\nPartial diagnostics captured before the deadline \
+            "\nPartial diagnostics captured before termination \
              ({partial_errors} error(s) already emitted — these ARE real \
              compile errors you should fix before retrying):\n"
         ));
@@ -491,11 +441,12 @@ fn format_timeout_result(
         }
     } else {
         result.push_str(
-            "\nNo compiler diagnostics were emitted before the deadline. \
-             This usually means cargo was still compiling dependencies \
-             (a cold build), not that your code is wrong.\n",
+            "\nNo compiler diagnostics were emitted before termination. \
+             This usually means cargo hung while compiling dependencies or \
+             that a build script is stuck.\n",
         );
     }
+
     if !partial_stderr.is_empty() {
         let trimmed = if partial_stderr.len() > MAX_OUTPUT_SIZE {
             &partial_stderr[..MAX_OUTPUT_SIZE]
@@ -507,14 +458,14 @@ fn format_timeout_result(
             partial_stderr.len()
         ));
     }
+
     result.push_str(
-        "\nTo retry with a longer budget, call compile_feedback again \
-         with a larger `timeout` (e.g. timeout=900 for a known-cold \
-         container). The per-process default can also be raised with \
-         the AKH_COMPILE_FEEDBACK_TIMEOUT_SECS environment variable. \
-         If the build is repeatedly cold, verify sccache is configured \
-         (RUSTC_WRAPPER=sccache) — a warm sccache brings a no-op check \
-         to ~1s and a single-crate rebuild to ~14s.",
+        "\nA stuck process typically indicates a hang (e.g., a build script \
+         waiting for input, a deadlock, or a network fetch that never returns). \
+         The progress timeout can be adjusted via AKH_TOOL_PROGRESS_TIMEOUT_SECS \
+         if you know a legitimate operation needs longer without output. \
+         If the build is repeatedly stuck, investigate what happens after the \
+         last diagnostic shown above — that's where the hang occurred.",
     );
     result
 }
@@ -708,116 +659,54 @@ mod tests {
         assert_eq!(result.error_count, 0);
     }
 
-    /// A timed-out build must return a result the model can distinguish from a
-    /// compile error. The acceptance test: a timeout result contains the
-    /// `TIMEOUT:` prefix, names the elapsed time, and points at the `timeout`
-    /// parameter as the remedy — none of which a real compile error carries.
-    ///
-    /// We assert this against [`format_timeout_result`] directly rather than
-    /// driving a real `cargo` past a deadline: the latter would need a
-    /// build-script-that-sleeps workspace, which is slow (~2s minimum even
-    /// with a tiny budget) and flaky under CI load (a busy runner can take
-    /// >2s to spawn cargo, so the deadline fires before cargo even starts,
-    /// producing an exit-code error instead of a timeout). The format
-    /// function is the contract; the live `execute` path just feeds it real
-    /// `elapsed`/`partial_stdout`/`partial_stderr`.
+    /// A stuck process must return a result distinguishable from both compile
+    /// errors and simple timeouts. The acceptance test: a stuck result contains
+    /// the `STUCK:` prefix, names the elapsed time and reason, and includes any
+    /// partial output — none of which a real compile error carries.
     #[test]
-    fn timeout_result_is_distinguishable_from_compile_error() {
-        let result = format_timeout_result("check", 600, 540, "", "");
+    fn stuck_result_is_distinguishable_from_compile_error() {
+        let result = format_stuck_result("check", "no output for 300 seconds (appears stuck)", 540, "", "");
 
-        // 1. It must be a failure-shaped string (the caller wraps it in
-        //    `ToolOutput::err`, so `success` is false — here we assert the
-        //    prefix that drives the model's branching).
+        // 1. Must start with STUCK: so the model can branch on it.
         assert!(
-            result.starts_with("TIMEOUT:"),
-            "timeout result must start with TIMEOUT: so the model can \
+            result.starts_with("STUCK:"),
+            "stuck result must start with STUCK: so the model can \
              distinguish it from a compile error; got: {}",
             &result[..80.min(result.len())]
         );
-        // 2. It must name the budget and the elapsed time.
+        // 2. Must report the elapsed time.
         assert!(
-            result.contains("600s") && result.contains("elapsed: 540"),
-            "timeout result must report the budget and elapsed time; got: {result}"
+            result.contains("540s"),
+            "stuck result must report elapsed time; got: {result}"
         );
-        // 3. It must NOT use the compile-error phrasing (no "exit code" line),
-        //    so the model cannot mistake it for a compile error.
+        // 3. Must NOT use the compile-error phrasing (no "exit code" line).
         assert!(
             !result.contains("exit code"),
-            "timeout result must not include an exit code line (that's a \
+            "stuck result must not include an exit code line (that's a \
              compile-error shape); got: {result}"
         );
-        // 4. It must point the model at the `timeout` parameter as the remedy.
-        assert!(
-            result.contains("timeout=900") || result.contains("`timeout`"),
-            "timeout result must advertise the timeout parameter as the \
-             retry remedy; got: {result}"
-        );
-        // 5. With no partial output, it must say so explicitly so the model
-        //    knows the timeout was a cold build, not a code error.
+        // 4. With no partial output, it must say so explicitly.
         assert!(
             result.contains("No compiler diagnostics were emitted"),
-            "timeout with no partial output must say so; got: {result}"
+            "stuck with no partial output must say so; got: {result}"
         );
     }
 
-    /// A timeout that fires *after* the compiler has already emitted errors
-    /// must surface those errors as partial diagnostics — a timeout-with-errors
-    /// is a different signal than a timeout-with-no-output, and the model
-    /// should fix the real errors before retrying with a longer budget.
+    /// A stuck process that fires *after* the compiler has already emitted errors
+    /// must surface those errors as partial diagnostics.
     #[test]
-    fn timeout_result_includes_partial_diagnostics() {
+    fn stuck_result_includes_partial_diagnostics() {
         let partial = r#"{"reason":"compiler-message","package_id":"test","manifest_path":"","target":{},"message":{"rendered":"","children":[],"code":{"code":"E0308","explanation":null},"level":"error","message":"mismatched types","spans":[{"byte_end":100,"byte_start":90,"column_end":20,"column_start":10,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":null,"line_end":5,"line_start":5,"suggested_replacement":null,"suggestion_applicability":null,"text":[]}]}}"#;
-        let result = format_timeout_result("check", 600, 540, partial, "");
+        let result = format_stuck_result("check", "no output for 300 seconds", 540, partial, "");
 
-        assert!(result.starts_with("TIMEOUT:"), "must still be a timeout: {result}");
+        assert!(result.starts_with("STUCK:"), "must still be STUCK: {result}");
         assert!(
             result.contains("Partial diagnostics captured"),
-            "must surface partial diagnostics so the model can fix real \
-             errors before retrying; got: {result}"
+            "must surface partial diagnostics; got: {result}"
         );
         assert!(
             result.contains("mismatched types"),
             "must include the actual error message; got: {result}"
-        );
-    }
-
-    /// A real compile error (not a timeout) must NOT carry the TIMEOUT prefix,
-    /// so the model can tell the two apart. This is the other half of the
-    /// distinguishability guarantee: a fast failing build reports a normal
-    /// compile error, not something that looks like a timeout.
-    ///
-    /// We assert this against the `execute` path's *non-timeout* formatting
-    /// (the `exit code N` line) rather than driving a real `cargo` build —
-    /// a cold cargo run in a test temp dir takes >60s of metadata work even
-    /// for a one-line crate with no deps, which makes a live test both slow
-    /// and flaky. The contract that `execute` only ever emits `TIMEOUT:` from
-    /// [`format_timeout_result`] (and that function always starts with
-    /// `TIMEOUT:`) is what this test guards by checking the non-timeout
-    /// branch does not use that prefix.
-    #[test]
-    fn compile_error_format_does_not_use_timeout_prefix() {
-        // The non-timeout success/error branch builds its result starting with
-        // "cargo {command}: exit code {N}", never "TIMEOUT:". We verify the
-        // two formatters are textually disjoint by constructing the
-        // success-case header the execute path emits.
-        let success_header = format!("cargo check: exit code 0 (0 error(s), 0 warning(s), 1s)\n");
-        assert!(
-            !success_header.starts_with("TIMEOUT:"),
-            "the success/error header must not use the TIMEOUT: prefix"
-        );
-        // And the timeout formatter must always start with TIMEOUT: —
-        // already asserted in timeout_result_is_distinguishable_from_compile_error,
-        // but assert it independently here so the two tests form a pair.
-        let timeout_header = format_timeout_result("check", 600, 1, "", "");
-        assert!(
-            timeout_header.starts_with("TIMEOUT:"),
-            "the timeout formatter must always start with TIMEOUT:"
-        );
-        // The two must be textually distinguishable by first token.
-        assert_ne!(
-            success_header.split(':').next(),
-            timeout_header.split(':').next(),
-            "the two result shapes must differ in their first token"
         );
     }
 

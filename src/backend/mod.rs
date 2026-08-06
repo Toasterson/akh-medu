@@ -43,8 +43,12 @@ use thiserror::Error;
 
 use crate::fs::{Filesystem, FsResult, LocalFs};
 
+pub mod process_supervisor;
+
 #[cfg(feature = "remote-executor")]
 pub mod remote;
+
+pub use process_supervisor::{DrainedOutput, ProgressTracker, SupervisedExecution, SupervisorError, SupervisorResult};
 
 /// Errors from process execution through a [`Backend`].
 ///
@@ -83,6 +87,36 @@ pub enum ExecError {
         command: String,
         /// The deadline that expired.
         timeout: Duration,
+    },
+
+    /// The command was killed by the progress-based supervisor because it
+    /// appeared stuck (no output for the configured duration). Unlike
+    /// [`Timeout`](Self::Timeout), this carries partial output and the
+    /// stuck-vs-timeout distinction so callers can distinguish a true hang
+    /// from a slow-but-healthy build that was cut off.
+    #[error("command stuck after {elapsed_secs}s: {reason} (command: {command})")]
+    #[diagnostic(
+        code(akh::backend::stuck),
+        help(
+            "The process was killed because it produced no output for an extended \
+             period. This typically indicates a hang (e.g. a build script waiting \
+             for input, a deadlock, or a network fetch that never returns). \
+             Check the partial output for the last thing the process did. \
+             Increase AKH_TOOL_PROGRESS_TIMEOUT_SECS if the operation legitimately \
+             needs longer without output."
+        )
+    )]
+    Stuck {
+        /// The command that was killed.
+        command: String,
+        /// Human-readable reason (e.g. "no output for 300 seconds").
+        reason: String,
+        /// Partial stdout captured before termination.
+        partial_stdout: Vec<u8>,
+        /// Partial stderr captured before termination.
+        partial_stderr: Vec<u8>,
+        /// How long the process ran before being killed.
+        elapsed_secs: u64,
     },
 
     /// Waiting on the child process failed.
@@ -332,59 +366,46 @@ impl Backend for InProcessBackend {
             command.env(key, value);
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|source| ExecError::Spawn { source })?;
+        // Spawn under supervision (includes process group setup for clean kill)
+        let mut exec = SupervisedExecution::spawn(command)
+            .map_err(|e| match e {
+                SupervisorError::Spawn { source } => ExecError::Spawn { source },
+                _ => ExecError::Spawn { source: std::io::Error::new(std::io::ErrorKind::Other, e) },
+            })?;
 
-        // Poll for completion with a timeout loop (historic shell_exec
-        // behavior, preserved verbatim: 50 ms poll cadence, kill at deadline,
-        // no output returned on timeout).
-        let deadline = std::time::Instant::now() + request.timeout;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(ExecError::Timeout {
-                            command: request.command,
-                            timeout: request.timeout,
-                        });
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(source) => return Err(ExecError::Wait { source }),
+        // Progress tracker: use the request timeout as the stuck threshold.
+        // A process that produces no output for `request.timeout` is stuck;
+        // a process that continuously outputs is never killed.
+        let mut tracker = ProgressTracker::with_timeout(request.timeout);
+
+        // Take the drain threads — this decouples pipe reads from the
+        // supervision loop so is_stuck() is checked on a timer regardless
+        // of whether the child is producing output. This is the fix for
+        // the silent-hang blocker: a child that writes nothing and never
+        // exits (e.g. `sleep 3600` with piped stdout) will be detected as
+        // stuck and killed, instead of blocking forever on a read().
+        let drain = exec.take_drain();
+
+        // Wait with drain-based supervision
+        match exec.wait_with_drain(&mut tracker, drain) {
+            Ok((status, output)) => Ok(ExecOutcome {
+                exit_code: status.code().unwrap_or(-1),
+                success: status.success(),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }),
+            Err(SupervisorError::Killed { reason, partial_stdout, partial_stderr, elapsed }) => {
+                Err(ExecError::Stuck {
+                    command: request.command.clone(),
+                    reason,
+                    partial_stdout,
+                    partial_stderr,
+                    elapsed_secs: elapsed.as_secs(),
+                })
             }
-        };
-
-        // Read stdout and stderr after exit (historic behavior).
-        let stdout = child
-            .stdout
-            .take()
-            .and_then(|mut s| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut s, &mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-
-        let stderr = child
-            .stderr
-            .take()
-            .and_then(|mut s| {
-                let mut buf = Vec::new();
-                std::io::Read::read_to_end(&mut s, &mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-
-        Ok(ExecOutcome {
-            exit_code: status.code().unwrap_or(-1),
-            success: status.success(),
-            stdout,
-            stderr,
-        })
+            Err(SupervisorError::Wait { source }) => Err(ExecError::Wait { source }),
+            Err(SupervisorError::Spawn { source }) => Err(ExecError::Spawn { source }),
+        }
     }
 
     fn handshake(&self) -> Posture {
@@ -467,12 +488,16 @@ mod tests {
         let err = backend
             .exec(ExecRequest::shell("sleep 60", Duration::from_secs(1)))
             .unwrap_err();
+        // With drain-based supervision, a silent process is killed as
+        // Stuck (not Timeout) — the distinction matters: Stuck means the
+        // progress-based supervisor detected no output, Timeout was the
+        // old elapsed-time deadline.
         match err {
-            ExecError::Timeout { command, timeout } => {
+            ExecError::Stuck { command, reason, .. } => {
                 assert_eq!(command, "sleep 60");
-                assert_eq!(timeout, Duration::from_secs(1));
+                assert!(reason.contains("stuck"), "reason must mention stuck: {reason}");
             }
-            other => panic!("expected Timeout, got: {other:?}"),
+            other => panic!("expected Stuck, got: {other:?}"),
         }
     }
 

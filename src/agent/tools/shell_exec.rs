@@ -96,10 +96,46 @@ impl Tool for ShellExecTool {
             Err(ExecError::Spawn { source }) => {
                 return Ok(ToolOutput::err(format!("Failed to spawn shell: {source}")));
             }
-            Err(ExecError::Timeout { .. }) => {
+            Err(ExecError::Timeout { timeout, command }) => {
                 return Ok(ToolOutput::err(format!(
-                    "Command timed out after {timeout_secs}s: {command_str}"
+                    "Command timed out after {}s: {command}",
+                    timeout.as_secs()
                 )));
+            }
+            Err(ExecError::Stuck { command, reason, partial_stdout, partial_stderr, elapsed_secs }) => {
+                let stdout_str = String::from_utf8_lossy(&partial_stdout);
+                let stderr_str = String::from_utf8_lossy(&partial_stderr);
+                let mut msg = format!(
+                    "Command stuck after {elapsed_secs}s: {reason} (command: {command})\n"
+                );
+                if !stdout_str.is_empty() {
+                    let trimmed = if stdout_str.len() > MAX_OUTPUT_SIZE {
+                        &stdout_str[..MAX_OUTPUT_SIZE]
+                    } else {
+                        &stdout_str
+                    };
+                    msg.push_str(&format!(
+                        "\nPartial stdout ({} bytes):\n{trimmed}\n",
+                        stdout_str.len()
+                    ));
+                }
+                if !stderr_str.is_empty() {
+                    let trimmed = if stderr_str.len() > MAX_OUTPUT_SIZE {
+                        &stderr_str[..MAX_OUTPUT_SIZE]
+                    } else {
+                        &stderr_str
+                    };
+                    msg.push_str(&format!(
+                        "\nPartial stderr ({} bytes):\n{trimmed}\n",
+                        stderr_str.len()
+                    ));
+                }
+                msg.push_str(
+                    "\nThe process produced no output for an extended period and was \
+                     terminated. Increase the timeout or investigate whether the command \
+                     is waiting for input or stuck on a network operation."
+                );
+                return Ok(ToolOutput::err(msg));
             }
             Err(ExecError::Wait { source }) => {
                 return Ok(ToolOutput::err(format!(
