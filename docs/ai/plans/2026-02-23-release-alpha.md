@@ -2,7 +2,7 @@
 
 > Date: 2026-02-24
 
-- **Status**: Planned
+- **Status**: Superseded — see [2026-08-06 Release Alpha Audit](2026-08-06-release-alpha-audit.md) (WI `019f90cd-7609`)
 - **Phase**: Release milestone (after Phase 14 completion)
 - **Depends on**: Phase 14m (all bootstrap + NLU sub-phases complete)
 
