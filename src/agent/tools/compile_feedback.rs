@@ -161,21 +161,37 @@ const MAX_PREEXISTING_WARNINGS: usize = 50;
 // Blast radius detection
 // ---------------------------------------------------------------------------
 
+/// Error type for git operations.
+#[derive(Debug, thiserror::Error)]
+pub enum GitError {
+    #[error("git command failed to spawn: {0}")]
+    Spawn(#[from] std::io::Error),
+    #[error("git command exited with non-zero status: {0}")]
+    NonZeroExit(String),
+    #[error("git output was not valid UTF-8: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+}
+
 /// Get list of changed files from git diff in the worktree.
-fn get_changed_files(workdir: &str) -> Vec<String> {
+/// Returns Result so callers can fail open to --workspace on git errors.
+fn get_changed_files(workdir: &str) -> Result<Vec<String>, GitError> {
     let output = Command::new("git")
         .args(["diff", "--name-only", "HEAD"])
         .current_dir(workdir)
-        .output()
-        .ok()
-        .and_then(|o| o.status.success().then_some(o))
-        .unwrap_or_default();
+        .output()?;
 
-    String::from_utf8_lossy(&output.stdout)
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GitError::NonZeroExit(stderr));
+    }
+
+    let files = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|l| !l.is_empty())
         .map(|s| s.to_string())
-        .collect()
+        .collect();
+    
+    Ok(files)
 }
 
 /// Find the Cargo.toml nearest to a file path and extract the package name.
@@ -250,7 +266,8 @@ fn files_to_crates(workdir: &str, files: &[String]) -> Vec<String> {
 }
 
 /// Load baseline diagnostics from a file (JSON format).
-fn load_baseline(baseline_path: &str) -> HashSet<(String, String, Option<String>)> {
+/// Key includes file and line to avoid false dedup across locations.
+fn load_baseline(baseline_path: &str) -> HashSet<(Option<String>, Option<u32>, String, String, Option<String>)> {
     let content = match fs::read_to_string(baseline_path) {
         Ok(c) => c,
         Err(_) => return HashSet::new(),
@@ -269,9 +286,22 @@ fn load_baseline(baseline_path: &str) -> HashSet<(String, String, Option<String>
                         .and_then(|c| c.as_str())
                         .map(|s| s.to_string());
                     
+                    // Extract file and line from spans
+                    let (file, line) = message
+                        .get("spans")
+                        .and_then(|s| s.as_array())
+                        .and_then(|arr| arr.first())
+                        .map(|span| {
+                            (
+                                span.get("file_name").and_then(|f| f.as_str()).map(|s| s.to_string()),
+                                span.get("line_start").and_then(|l| l.as_u64()).map(|l| l as u32),
+                            )
+                        })
+                        .unwrap_or((None, None));
+                    
                     // Skip non-warnings/errors for baseline
                     if level == "warning" || level == "error" {
-                        baseline.insert((level, msg, code));
+                        baseline.insert((file, line, level, msg, code));
                     }
                 }
             }
@@ -282,9 +312,12 @@ fn load_baseline(baseline_path: &str) -> HashSet<(String, String, Option<String>
 }
 
 /// Filter diagnostics: separate new issues from pre-existing baseline.
+/// Uses file+line+level+code as dedup key to avoid false matches across locations.
+/// Uses file_to_crate for blast-radius matching instead of hardcoded path prefixes.
 fn filter_by_baseline(
+    workdir: &str,
     diagnostics: Vec<CompilerDiagnostic>,
-    baseline: &HashSet<(String, String, Option<String>)>,
+    baseline: &HashSet<(Option<String>, Option<u32>, String, String, Option<String>)>,
     blast_radius_crates: Option<&HashSet<String>>,
 ) -> (Vec<CompilerDiagnostic>, Vec<CompilerDiagnostic>, usize) {
     let mut new_diagnostics = Vec::new();
@@ -292,18 +325,17 @@ fn filter_by_baseline(
     let mut preexisting_outside_radius = 0;
     
     for diag in diagnostics {
-        let key = (diag.level.clone(), diag.message.clone(), diag.code.clone());
+        let key = (diag.file.clone(), diag.line, diag.level.clone(), diag.message.clone(), diag.code.clone());
         
         if baseline.contains(&key) {
             // Pre-existing
             if let Some(ref crates) = blast_radius_crates {
-                if let Some(ref file) = diag.file {
-                    // Check if this file is within blast radius crates
-                    let is_inside = crates.iter().any(|c| file.contains(&format!("crates/{c}")) || file.contains(&format!("crates\\{c}")));
-                    if !is_inside {
-                        preexisting_outside_radius += 1;
-                        continue; // Don't report pre-existing outside blast radius
-                    }
+                // Use file_to_crate to resolve the file's owning package
+                let file_crate = diag.file.as_ref().and_then(|f| file_to_crate(workdir, f));
+                let is_inside = file_crate.as_ref().map(|c| crates.contains(c)).unwrap_or(false);
+                if !is_inside {
+                    preexisting_outside_radius += 1;
+                    continue; // Don't report pre-existing outside blast radius
                 }
             }
             preexisting.push(diag);
@@ -399,14 +431,24 @@ impl Tool for CompileFeedbackTool {
             None // None means check all crates (--workspace)
         } else {
             // Blast-radius mode: detect from git diff
-            let changed_files = get_changed_files(path);
+            let changed_files = match get_changed_files(path) {
+                Ok(files) => files,
+                Err(e) => {
+                    // Fail open to workspace mode on git errors
+                    // This prevents silently skipping compile check when git fails
+                    return Ok(ToolOutput::ok(format!(
+                        "Git diff failed ({e}); failing open to workspace check. \
+                         Run `cargo check --workspace` manually to verify build health."
+                    )));
+                }
+            };
             let crates = files_to_crates(path, &changed_files);
             
             // If no changed files, check nothing (skip)
             if crates.is_empty() && changed_files.is_empty() {
                 return Ok(ToolOutput::ok(
                     "No changed files detected in worktree; skipping compile check. \
-                     Pass workspace=true to check the entire workspace.".into()
+                     Pass workspace=true to check the entire workspace."
                 ));
             }
             
@@ -517,6 +559,7 @@ impl Tool for CompileFeedbackTool {
 
         // Filter by baseline and blast radius
         let (new_diagnostics, preexisting, preexisting_outside_radius) = filter_by_baseline(
+            path,
             all_diagnostics,
             &baseline,
             blast_radius_crates.as_ref(),
