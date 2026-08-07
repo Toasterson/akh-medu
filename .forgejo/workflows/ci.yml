@@ -2,9 +2,8 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  # Scoped to the seshat crate — the full akh-medu workspace release build
-  # OOM-kills rustc on the Solstice runner. Broader test/clippy/release-build
-  # coverage can return once the codebase is lighter or the runner is bigger.
+  # Seshat crate type-check. Default features only (includes `embedding`;
+  # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
   check-seshat:
     runs-on: ubuntu-22.04
     steps:
@@ -21,9 +20,91 @@ jobs:
       - name: cargo check -p seshat
         run: |
           . "$HOME/.cargo/env"
-          # Default features only (includes `embedding`; excludes the memory-
-          # heavy `synthesis` candle feature which OOMs the runner).
           CARGO_BUILD_JOBS=2 cargo check -p seshat
+
+  # Root akh-medu crate type-check + clippy with --features server.
+  #
+  # This is the job that actually verifies the agent code compiles. Previously
+  # CI only built the seshat sibling crate, so "CI green" was meaningless for
+  # the ~90% of the codebase that lives in src/ (agent, ACP, backend, message,
+  # akhomed binary, etc.). Multiple PRs merged with hard compile errors because
+  # no CI step ever attempted the build.
+  #
+  # The original workflow dodged the root crate because a full *release* build
+  # OOM-killed the runner. `cargo check` only type-checks (no codegen, no
+  # linking) so peak RSS is a fraction of a release build. We further constrain
+  # memory with:
+  #   CARGO_BUILD_JOBS=1       — serialize rustc invocations
+  #   CARGO_PROFILE_DEV_DEBUG=0 — strip debug info (large RSS contributor)
+  #   RUSTC_WRAPPER=sccache    — cache dependency compilation across runs
+  #                              (sccache is the global rustc wrapper on the
+  #                              build hosts; this just makes it explicit)
+  #
+  # Clippy runs after check in the same job so they share the compiled
+  # dependency artifacts in the target directory.
+  check-akh-medu:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: cargo check --features server
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+            sccache --show-stats || true
+          fi
+          cargo check --features server
+
+      - name: cargo clippy --features server
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+          fi
+          cargo clippy --features server -- -D warnings
+
+  # Library tests for the root crate. Uses the `postgres` feature (which pulls
+  # in akhomed-store + tokio) rather than the full `server` feature set (which
+  # adds ACP, OTel, remote-executor) to avoid the ENOSPC link failure observed
+  # with `--features server --lib` on dev machines — the akhomed binary is
+  # enormous and linking it exhausts disk. `--lib` skips binary targets
+  # entirely, testing only the library crate.
+  test-akh-medu:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: cargo test --features postgres --lib
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+            sccache --show-stats || true
+          fi
+          cargo test --features postgres --lib
 
   docker-seshd:
     runs-on: ubuntu-22.04
