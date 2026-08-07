@@ -1220,6 +1220,400 @@ impl ServerState {
         serde_json::to_value(&outcome).map_err(|e| format!("outcome serialization failed: {e}"))
     }
 
+    // ── Goal CRUD handlers (PR #286 follow-up) ────────────────────────────
+    //
+    // Each handler resolves the workspace engine, initializes
+    // `AgentPredicates`, and calls the corresponding `goal.rs` operation.
+    // Goals are soft-deleted (status set to `cancelled`) — never hard-deleted
+    // — so the OODA loop is not wedged by a vanishing goal symbol.
+
+    /// Serialize a `Goal` into the JSON shape returned by `goal/list` and
+    /// embedded in the create/update/cancel responses.
+    fn goal_to_json(engine: &Engine, goal: &akh_medu::agent::goal::Goal) -> serde_json::Value {
+        let parent_label = goal
+            .parent
+            .map(|p| engine.resolve_label(p))
+            .unwrap_or_default();
+        serde_json::json!({
+            "id": goal.symbol_id.get(),
+            "description": goal.description,
+            "status": goal.status.as_label(),
+            "priority": goal.priority,
+            "criteria": goal.success_criteria,
+            "created_at": goal.created_at,
+            "cycles_spent": goal.cycles_worked,
+            "triples_created": 0u64, // not tracked per-goal today
+            "parent_goal": parent_label,
+            "children": goal.children.iter().map(|c| c.get()).collect::<Vec<_>>(),
+        })
+    }
+
+    /// `_akh/goal/create` — create a goal with explicit criteria.
+    async fn goal_create(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let goal_text = params
+            .get("goal_text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: goal_text".to_string())?;
+        let criteria_text = params
+            .get("criteria_text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: criteria_text".to_string())?;
+        let priority = params
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "missing required param: priority".to_string())?
+            as u8;
+        let parent_goal_id = params
+            .get("parent_goal_id")
+            .and_then(serde_json::Value::as_str);
+
+        let engine = self.get_engine(ws).await?;
+
+        // Route the write through the live Agent when one is resident, so the
+        // running OODA loop's `Agent.goals` sees the new goal immediately
+        // instead of only the KG (which the agent won't re-read until the
+        // next resume). Resolve the parent id via the engine first — that's
+        // read-only and safe to do outside the agent lock — then perform the
+        // actual mutation synchronously under the agent's `std::sync::Mutex`
+        // (no `.await` while holding it, per the model/set handler's
+        // convention).
+        let goal = if let Some(agent) = self.resident_agent(ws).await {
+            let parent_sym = parent_goal_id.and_then(|s| engine.resolve_symbol(s).ok());
+            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let goal = a
+                .add_goal_with_parent(goal_text, priority, criteria_text, parent_sym)
+                .map_err(|e| format!("goal creation failed: {e}"))?;
+            // Keep the durable blob in sync with the KG so a later `resume`
+            // (which tries the blob first, see `restore_goals_from_store`)
+            // doesn't discard this write.
+            akh_medu::agent::goal::persist_goals(a.goals(), a.engine())
+                .map_err(|e| format!("goal persist failed: {e}"))?;
+            goal
+        } else {
+            // No agent resident for this workspace yet — write straight to
+            // the engine/KG; a later `get_agent` restores it from there.
+            let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
+                .map_err(|e| format!("predicate init failed: {e}"))?;
+
+            let mut goal = akh_medu::agent::goal::create_goal(
+                &engine,
+                goal_text,
+                priority,
+                criteria_text,
+                &predicates,
+            )
+            .map_err(|e| format!("goal creation failed: {e}"))?;
+
+            // Wire parent→child hierarchy if a parent goal id was supplied.
+            // If the parent id doesn't resolve, we still return the goal —
+            // the parent *lookup* is best-effort, not a hard failure. Once
+            // resolved, though, a failed triple write IS propagated (Defect
+            // 4): a half-wired hierarchy is worse than a clear error.
+            if let Some(parent_str) = parent_goal_id
+                && let Ok(parent_sym) = engine.resolve_symbol(parent_str)
+            {
+                use akh_medu::graph::Triple;
+                engine
+                    .add_triple(&Triple::new(parent_sym, predicates.child_goal, goal.symbol_id))
+                    .map_err(|e| format!("failed to wire parent->child goal relation: {e}"))?;
+                engine
+                    .add_triple(&Triple::new(goal.symbol_id, predicates.parent_goal, parent_sym))
+                    .map_err(|e| format!("failed to wire child->parent goal relation: {e}"))?;
+                goal.parent = Some(parent_sym);
+            }
+            goal
+        };
+
+        tracing::info!(
+            workspace = %ws,
+            goal_id = goal.symbol_id.get(),
+            "goal created via control plane"
+        );
+        Ok(Self::goal_to_json(&engine, &goal))
+    }
+
+    /// `_akh/goal/update` — update a goal's text, criteria, priority, or status.
+    async fn goal_update(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let goal_id_str = params
+            .get("goal_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: goal_id".to_string())?;
+
+        let engine = self.get_engine(ws).await?;
+
+        let goal_sym = engine
+            .resolve_symbol(goal_id_str)
+            .map_err(|e| format!("goal_id resolution failed: {e}"))?;
+
+        let priority = params
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u8);
+        let criteria_text = params.get("criteria_text").and_then(serde_json::Value::as_str);
+        let status = params.get("status").and_then(serde_json::Value::as_str);
+        // goal_text updates the description via a has_description KG triple.
+        let goal_text = params.get("goal_text").and_then(serde_json::Value::as_str);
+
+        let updated = if let Some(agent) = self.resident_agent(ws).await {
+            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            // `Agent::update_goal` validates `status` (Defect 3: an unknown
+            // label is now a hard error, not a silent fallback to Pending)
+            // before applying any field, then mutates `Agent.goals` directly.
+            a.update_goal(goal_sym, priority, status, criteria_text, goal_text)
+                .map_err(|e| format!("goal update failed: {e}"))?;
+            let g = a
+                .goals()
+                .iter()
+                .find(|g| g.symbol_id == goal_sym)
+                .cloned()
+                .ok_or_else(|| format!("goal {goal_id_str} vanished after update"))?;
+            akh_medu::agent::goal::persist_goals(a.goals(), a.engine())
+                .map_err(|e| format!("goal persist failed: {e}"))?;
+            g
+        } else {
+            let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
+                .map_err(|e| format!("predicate init failed: {e}"))?;
+
+            let mut goals = akh_medu::agent::goal::restore_goals(&engine, &predicates)
+                .map_err(|e| format!("goal restore failed: {e}"))?;
+            let goal = goals
+                .iter_mut()
+                .find(|g| g.symbol_id == goal_sym)
+                .ok_or_else(|| format!("goal {goal_id_str} not found"))?;
+
+            // Validate (and parse) the status label up front so a bad value
+            // fails before any other field is mutated (Defect 3).
+            let new_status = status
+                .map(|s| {
+                    akh_medu::agent::goal::GoalStatus::from_label(s).ok_or_else(|| {
+                        format!(
+                            "unknown goal status \"{s}\" (expected one of: pending, active, \
+                             completed, suspended, proposed, dormant, or a parameterized form \
+                             like failed:<reason>, cancelled:<reason>)"
+                        )
+                    })
+                })
+                .transpose()?;
+
+            // Apply optional updates.
+            if let Some(priority) = priority {
+                akh_medu::agent::goal::update_goal_priority(&engine, goal, priority, &predicates)
+                    .map_err(|e| format!("priority update failed: {e}"))?;
+            }
+            if let Some(criteria) = criteria_text {
+                akh_medu::agent::goal::update_goal_criteria(&engine, goal, criteria, &predicates)
+                    .map_err(|e| format!("criteria update failed: {e}"))?;
+            }
+            if let Some(new_status) = new_status {
+                akh_medu::agent::goal::update_goal_status(&engine, goal, new_status, &predicates)
+                    .map_err(|e| format!("status update failed: {e}"))?;
+            }
+            if let Some(text) = goal_text {
+                akh_medu::agent::goal::update_goal_description(&engine, goal, text, &predicates)
+                    .map_err(|e| format!("description update failed: {e}"))?;
+            }
+
+            // Re-read the goal from the KG to get the persisted state.
+            akh_medu::agent::goal::restore_goals(&engine, &predicates)
+                .map_err(|e| format!("goal re-restore failed: {e}"))?
+                .into_iter()
+                .find(|g| g.symbol_id == goal_sym)
+                .ok_or_else(|| format!("goal {goal_id_str} vanished after update"))?
+        };
+        Ok(Self::goal_to_json(&engine, &updated))
+    }
+
+    /// `_akh/goal/cancel` — soft-delete a goal (status = cancelled).
+    async fn goal_cancel(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let goal_id_str = params
+            .get("goal_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: goal_id".to_string())?;
+
+        let engine = self.get_engine(ws).await?;
+
+        let goal_sym = engine
+            .resolve_symbol(goal_id_str)
+            .map_err(|e| format!("goal_id resolution failed: {e}"))?;
+
+        let cancelled = if let Some(agent) = self.resident_agent(ws).await {
+            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            a.cancel_goal(goal_sym, "manual")
+                .map_err(|e| format!("cancel failed: {e}"))?;
+            let g = a
+                .goals()
+                .iter()
+                .find(|g| g.symbol_id == goal_sym)
+                .cloned()
+                .ok_or_else(|| format!("goal {goal_id_str} not found"))?;
+            akh_medu::agent::goal::persist_goals(a.goals(), a.engine())
+                .map_err(|e| format!("goal persist failed: {e}"))?;
+            g
+        } else {
+            let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
+                .map_err(|e| format!("predicate init failed: {e}"))?;
+
+            let mut goals = akh_medu::agent::goal::restore_goals(&engine, &predicates)
+                .map_err(|e| format!("goal restore failed: {e}"))?;
+            let goal = goals
+                .iter_mut()
+                .find(|g| g.symbol_id == goal_sym)
+                .ok_or_else(|| format!("goal {goal_id_str} not found"))?;
+
+            akh_medu::agent::goal::update_goal_status(
+                &engine,
+                goal,
+                akh_medu::agent::goal::GoalStatus::Cancelled {
+                    reason: "manual".into(),
+                },
+                &predicates,
+            )
+            .map_err(|e| format!("cancel failed: {e}"))?;
+            goal.clone()
+        };
+
+        tracing::info!(
+            workspace = %ws,
+            goal_id = cancelled.symbol_id.get(),
+            "goal cancelled via control plane"
+        );
+        Ok(Self::goal_to_json(&engine, &cancelled))
+    }
+
+    /// `_akh/goal/prioritize` — batch re-prioritise goals.
+    async fn goal_prioritize(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+        let goal_ids = params
+            .get("goal_ids")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "missing required param: goal_ids".to_string())?;
+        let priorities = params
+            .get("priorities")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "missing required param: priorities".to_string())?;
+        if goal_ids.len() != priorities.len() {
+            return Err("goal_ids and priorities must have the same length".into());
+        }
+
+        let engine = self.get_engine(ws).await?;
+
+        let mut updated = 0u64;
+        if let Some(agent) = self.resident_agent(ws).await {
+            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            for (id_val, pri_val) in goal_ids.iter().zip(priorities.iter()) {
+                let id_str = id_val
+                    .as_str()
+                    .ok_or_else(|| "goal_ids entries must be strings".to_string())?;
+                let priority = pri_val
+                    .as_u64()
+                    .ok_or_else(|| "priorities entries must be integers".to_string())?
+                    as u8;
+                let goal_sym = engine
+                    .resolve_symbol(id_str)
+                    .map_err(|e| format!("goal_id {id_str} resolution failed: {e}"))?;
+                if a.goals().iter().any(|g| g.symbol_id == goal_sym) {
+                    a.update_goal(goal_sym, Some(priority), None, None, None)
+                        .map_err(|e| format!("priority update failed: {e}"))?;
+                    updated += 1;
+                }
+            }
+            if updated > 0 {
+                akh_medu::agent::goal::persist_goals(a.goals(), a.engine())
+                    .map_err(|e| format!("goal persist failed: {e}"))?;
+            }
+        } else {
+            let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
+                .map_err(|e| format!("predicate init failed: {e}"))?;
+
+            let mut goals = akh_medu::agent::goal::restore_goals(&engine, &predicates)
+                .map_err(|e| format!("goal restore failed: {e}"))?;
+
+            for (id_val, pri_val) in goal_ids.iter().zip(priorities.iter()) {
+                let id_str = id_val
+                    .as_str()
+                    .ok_or_else(|| "goal_ids entries must be strings".to_string())?;
+                let priority = pri_val
+                    .as_u64()
+                    .ok_or_else(|| "priorities entries must be integers".to_string())?
+                    as u8;
+                let goal_sym = engine
+                    .resolve_symbol(id_str)
+                    .map_err(|e| format!("goal_id {id_str} resolution failed: {e}"))?;
+                if let Some(goal) = goals.iter_mut().find(|g| g.symbol_id == goal_sym) {
+                    akh_medu::agent::goal::update_goal_priority(
+                        &engine, goal, priority, &predicates,
+                    )
+                    .map_err(|e| format!("priority update failed: {e}"))?;
+                    updated += 1;
+                }
+            }
+        }
+
+        Ok(serde_json::json!({
+            "updated": updated,
+        }))
+    }
+
+    /// `_akh/goal/list` — list all goals with status, timestamps, and parent chain.
+    async fn goal_list(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ws = params
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "missing required param: workspace".to_string())?;
+
+        let engine = self.get_engine(ws).await?;
+
+        // Read from the resident Agent when one exists, so a list right
+        // after a create/update/cancel through this same process agrees with
+        // what those handlers just wrote (Defect 1: reads and writes must
+        // use the same source of truth).
+        let entries: Vec<serde_json::Value> = if let Some(agent) = self.resident_agent(ws).await {
+            let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            a.goals().iter().map(|g| Self::goal_to_json(&engine, g)).collect()
+        } else {
+            let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
+                .map_err(|e| format!("predicate init failed: {e}"))?;
+
+            let goals = akh_medu::agent::goal::restore_goals(&engine, &predicates)
+                .map_err(|e| format!("goal restore failed: {e}"))?;
+            goals.iter().map(|g| Self::goal_to_json(&engine, g)).collect()
+        };
+        Ok(serde_json::json!({
+            "goals": entries,
+            "count": entries.len(),
+        }))
+    }
+
     /// Phase 38b/38c: stop background Postgres tasks on graceful shutdown.
     ///
     /// Order: stop snapshot tickers, take one final snapshot per loaded
@@ -1661,6 +2055,21 @@ impl ServerState {
             .or_insert(snapshot);
 
         Ok(result)
+    }
+
+    /// Return the cached `Agent` for `name` if one is already resident,
+    /// without triggering `get_agent`'s lazy-construction path.
+    ///
+    /// The goal-CRUD control-plane handlers (`_akh/goal/*`) use this to
+    /// decide whether to route a write through the live Agent — so the
+    /// running OODA loop's `Agent.goals` sees it immediately, instead of
+    /// only the KG, which the agent won't re-read until the next resume —
+    /// or fall back to a KG-only write. Calling `get_agent` unconditionally
+    /// would construct a full Agent (`Agent::resume`, heavy) as a surprising
+    /// side effect of a control-plane call on a workspace nobody has chatted
+    /// with yet; this peek keeps that construction opt-in.
+    async fn resident_agent(&self, name: &str) -> Option<Arc<Mutex<Agent>>> {
+        self.agents.read().await.get(name).cloned()
     }
 
     /// Get or lazily create a shared NLU pipeline for the given workspace.
@@ -2345,6 +2754,13 @@ impl akh_medu::acp::ServerControl for ServerState {
                 "schema/install" => self.schema_install(params).await,
                 "schema/digest" => self.schema_digest(params).await,
                 "schema/promote" => self.schema_promote(params).await,
+
+                // ── goal CRUD (PR #286 follow-up) ─────────────────────────
+                "goal/list" => self.goal_list(params).await,
+                "goal/create" => self.goal_create(params).await,
+                "goal/update" => self.goal_update(params).await,
+                "goal/cancel" => self.goal_cancel(params).await,
+                "goal/prioritize" => self.goal_prioritize(params).await,
 
                 other => Err(format!("unknown control-plane method: _akh/{other}")),
             }
@@ -3513,5 +3929,476 @@ mod control_plane_tests {
         }
         assert_eq!(state.agents.read().await.len(), 1, "exactly one agent cached");
         assert_eq!(state.workspaces.read().await.len(), 1, "and exactly one engine");
+    }
+
+    // ── Goal CRUD tests (PR #286 follow-up) ───────────────────────────────
+
+    /// Create a workspace and return its name for goal tests.
+    async fn goal_workspace(state: &ServerState) -> String {
+        let ws = "goal-test";
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": ws }))
+            .await
+            .expect("create workspace");
+        ws.to_string()
+    }
+
+    #[tokio::test]
+    async fn goal_methods_are_registered_control_methods() {
+        for m in [
+            "_akh/goal/list",
+            "_akh/goal/create",
+            "_akh/goal/update",
+            "_akh/goal/cancel",
+            "_akh/goal/prioritize",
+        ] {
+            assert!(
+                akh_medu::acp::is_control_method(m),
+                "{m} must route to the control-plane",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_create_update_cancel_lifecycle() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+
+        // ── create ──────────────────────────────────────────────────────
+        let created = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "investigate Tecton",
+                    "criteria_text": "understand its architecture",
+                    "priority": 128u64,
+                }),
+            )
+            .await
+            .expect("create ok");
+        assert_eq!(created["status"], "active");
+        assert_eq!(created["priority"], 128u64);
+        assert_eq!(created["description"], "investigate Tecton");
+        assert_eq!(created["criteria"], "understand its architecture");
+        assert_eq!(created["parent_goal"], "");
+        let goal_id = created["id"].as_u64().expect("id is u64");
+
+        // ── update priority ─────────────────────────────────────────────
+        let updated = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "priority": 200u64,
+                }),
+            )
+            .await
+            .expect("update ok");
+        assert_eq!(updated["priority"], 200u64);
+
+        // ── update criteria ─────────────────────────────────────────────
+        let updated = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "criteria_text": "understand its full architecture and topology",
+                }),
+            )
+            .await
+            .expect("update criteria ok");
+        assert_eq!(
+            updated["criteria"],
+            "understand its full architecture and topology"
+        );
+
+        // ── update goal_text (description) ───────────────────────────────
+        let updated = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "goal_text": "investigate Tecton's full architecture",
+                }),
+            )
+            .await
+            .expect("update goal_text ok");
+        assert_eq!(
+            updated["description"],
+            "investigate Tecton's full architecture",
+            "description should reflect the goal_text update after re-read from KG",
+        );
+
+        // ── update status to suspended ──────────────────────────────────
+        let updated = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "status": "suspended",
+                }),
+            )
+            .await
+            .expect("update status ok");
+        assert_eq!(updated["status"], "suspended");
+
+        // ── cancel (soft-delete) ────────────────────────────────────────
+        let cancelled = state
+            .dispatch(
+                "_akh/goal/cancel",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                }),
+            )
+            .await
+            .expect("cancel ok");
+        assert!(
+            cancelled["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("cancelled"),
+            "status should start with 'cancelled', got {cancelled}",
+        );
+
+        // ── list shows the cancelled goal (soft-delete, not hard-delete) ─
+        let list = state
+            .dispatch("_akh/goal/list", &json!({ "workspace": ws }))
+            .await
+            .expect("list ok");
+        let goals = list["goals"].as_array().expect("goals is an array");
+        assert_eq!(goals.len(), 1, "cancelled goal must still appear in list");
+        assert_eq!(goals[0]["id"], goal_id);
+        assert!(
+            goals[0]["status"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("cancelled"),
+            "list should show cancelled status",
+        );
+    }
+
+    /// Regression test for the PR review finding: the five goal-CRUD
+    /// handlers must route writes through a *resident* `Agent` (not only
+    /// `get_engine`/the KG), or a goal created over ACP is invisible to the
+    /// running OODA loop's `Agent.goals` until the process restarts.
+    ///
+    /// Forces the `Agent` to be constructed and cached BEFORE any goal call
+    /// (mirroring a real akhomed process where chat/daemon traffic has
+    /// already brought the agent up), then re-reads that SAME in-memory
+    /// `Agent` directly via `get_agent` — not through `dispatch` — after a
+    /// create + cancel round trip through the control plane. If the
+    /// handlers only wrote to the engine/KG, this agent's `goals` would
+    /// still be empty (create) and, once fixed, the fix must also refresh
+    /// the entry the cancel found (not create a duplicate untouched by the
+    /// cancel).
+    #[tokio::test]
+    async fn goal_create_cancel_routes_through_resident_agent() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+
+        // Force a resident Agent for this workspace BEFORE any goal call.
+        let agent = state.get_agent(&ws).await.expect("get_agent");
+        assert!(
+            agent.lock().unwrap_or_else(|e| e.into_inner()).goals().is_empty(),
+            "sanity: freshly-constructed agent starts with no goals",
+        );
+
+        let created = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "resident agent visibility",
+                    "criteria_text": "goal appears in the live agent, not just the KG",
+                    "priority": 128u64,
+                }),
+            )
+            .await
+            .expect("create ok");
+        let goal_id = created["id"].as_u64().expect("id is u64");
+
+        state
+            .dispatch(
+                "_akh/goal/cancel",
+                &json!({ "workspace": ws, "goal_id": goal_id.to_string() }),
+            )
+            .await
+            .expect("cancel ok");
+
+        // Re-read the SAME in-memory agent directly (not through dispatch) —
+        // this is what the running OODA loop actually sees.
+        let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
+        let g = a.goals().iter().find(|g| g.symbol_id == sym).unwrap_or_else(|| {
+            panic!(
+                "goal {goal_id} must be visible on the resident agent after create — \
+                 handlers must route writes through get_agent, not only get_engine"
+            )
+        });
+        assert!(
+            matches!(g.status, akh_medu::agent::goal::GoalStatus::Cancelled { .. }),
+            "resident agent's goal must reflect the cancel, got {:?}",
+            g.status,
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_create_with_parent_wires_hierarchy() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+
+        // Create parent.
+        let parent = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "parent goal",
+                    "criteria_text": "top-level",
+                    "priority": 128u64,
+                }),
+            )
+            .await
+            .expect("parent create ok");
+        let parent_id = parent["id"].as_u64().expect("parent id");
+
+        // Create child with parent_goal_id.
+        let child = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "child goal",
+                    "criteria_text": "sub-objective",
+                    "priority": 100u64,
+                    "parent_goal_id": parent_id.to_string(),
+                }),
+            )
+            .await
+            .expect("child create ok");
+        assert!(
+            child["parent_goal"].as_str().unwrap_or_default()
+                .starts_with("goal:"),
+            "child should have a parent_goal label, got {child}",
+        );
+
+        // List should show both, and the child's parent_goal should be non-empty.
+        let list = state
+            .dispatch("_akh/goal/list", &json!({ "workspace": ws }))
+            .await
+            .expect("list ok");
+        let goals = list["goals"].as_array().expect("goals is an array");
+        assert_eq!(goals.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn goal_prioritize_batch_updates_multiple() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+
+        // Create three goals.
+        let mut ids = Vec::new();
+        for i in 0..3u64 {
+            let g = state
+                .dispatch(
+                    "_akh/goal/create",
+                    &json!({
+                        "workspace": ws,
+                        "goal_text": format!("goal {i}"),
+                        "criteria_text": "criteria",
+                        "priority": 128u64,
+                    }),
+                )
+                .await
+                .expect("create ok");
+            ids.push(g["id"].as_u64().expect("id"));
+        }
+
+        // Batch re-prioritize.
+        let result = state
+            .dispatch(
+                "_akh/goal/prioritize",
+                &json!({
+                    "workspace": ws,
+                    "goal_ids": ids.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+                    "priorities": [10u64, 20, 30],
+                }),
+            )
+            .await
+            .expect("prioritize ok");
+        assert_eq!(result["updated"], 3u64);
+
+        // Verify priorities landed.
+        let list = state
+            .dispatch("_akh/goal/list", &json!({ "workspace": ws }))
+            .await
+            .expect("list ok");
+        let goals = list["goals"].as_array().expect("goals is an array");
+        let by_id: std::collections::HashMap<u64, u64> = goals
+            .iter()
+            .map(|g| {
+                (
+                    g["id"].as_u64().expect("id"),
+                    g["priority"].as_u64().expect("priority"),
+                )
+            })
+            .collect();
+        assert_eq!(by_id[&ids[0]], 10);
+        assert_eq!(by_id[&ids[1]], 20);
+        assert_eq!(by_id[&ids[2]], 30);
+    }
+
+    #[tokio::test]
+    async fn goal_prioritize_mismatched_lengths_errors() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+
+        let r = state
+            .dispatch(
+                "_akh/goal/prioritize",
+                &json!({
+                    "workspace": ws,
+                    "goal_ids": ["1"],
+                    "priorities": [10u64, 20],
+                }),
+            )
+            .await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("same length")),
+            "mismatched arrays must error, got {r:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_ops_require_workspace_param() {
+        let (_tmp, state) = temp_state();
+        for method in [
+            "_akh/goal/list",
+            "_akh/goal/create",
+            "_akh/goal/update",
+            "_akh/goal/cancel",
+            "_akh/goal/prioritize",
+        ] {
+            let r = state.dispatch(method, &json!({})).await;
+            assert!(
+                r.as_ref().is_err_and(|e| e.contains("workspace")),
+                "{method} without workspace must error, got {r:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_cancel_unknown_id_errors() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+        let r = state
+            .dispatch(
+                "_akh/goal/cancel",
+                &json!({ "workspace": ws, "goal_id": "999999" }),
+            )
+            .await;
+        assert!(r.is_err(), "cancelling a non-existent goal must error");
+    }
+
+    /// Defect 3: an unrecognized `status` value must be a client error, not
+    /// a silent fallback to `Pending` — exercised on the KG-only fallback
+    /// path (no resident agent).
+    #[tokio::test]
+    async fn goal_update_unknown_status_errors_kg_only_path() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+        let created = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "status validation",
+                    "criteria_text": "criteria",
+                    "priority": 128u64,
+                }),
+            )
+            .await
+            .expect("create ok");
+        let goal_id = created["id"].as_u64().expect("id");
+
+        let r = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "status": "cancled",
+                }),
+            )
+            .await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("unknown goal status")),
+            "a typo'd status must error instead of silently becoming pending, got {r:?}",
+        );
+
+        // The goal's status must be untouched (still active), not Pending.
+        let list = state
+            .dispatch("_akh/goal/list", &json!({ "workspace": ws }))
+            .await
+            .expect("list ok");
+        let goals = list["goals"].as_array().expect("goals is an array");
+        assert_eq!(
+            goals[0]["status"], "active",
+            "a rejected status update must not mutate the goal",
+        );
+    }
+
+    /// Same as above, but with a resident agent forced first so the
+    /// `Agent::update_goal` validation path (not the KG-only fallback) is
+    /// exercised.
+    #[tokio::test]
+    async fn goal_update_unknown_status_errors_resident_agent_path() {
+        let (_tmp, state) = temp_state();
+        let ws = goal_workspace(&state).await;
+        let agent = state.get_agent(&ws).await.expect("get_agent");
+
+        let created = state
+            .dispatch(
+                "_akh/goal/create",
+                &json!({
+                    "workspace": ws,
+                    "goal_text": "status validation resident",
+                    "criteria_text": "criteria",
+                    "priority": 128u64,
+                }),
+            )
+            .await
+            .expect("create ok");
+        let goal_id = created["id"].as_u64().expect("id");
+
+        let r = state
+            .dispatch(
+                "_akh/goal/update",
+                &json!({
+                    "workspace": ws,
+                    "goal_id": goal_id.to_string(),
+                    "status": "cancled",
+                }),
+            )
+            .await;
+        assert!(
+            r.as_ref().is_err_and(|e| e.contains("unknown goal status")),
+            "a typo'd status must error instead of silently becoming pending, got {r:?}",
+        );
+
+        let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
+        let g = a.goals().iter().find(|g| g.symbol_id == sym).expect("goal present");
+        assert!(
+            matches!(g.status, akh_medu::agent::goal::GoalStatus::Active),
+            "a rejected status update must not mutate the resident agent's goal, got {:?}",
+            g.status,
+        );
     }
 }

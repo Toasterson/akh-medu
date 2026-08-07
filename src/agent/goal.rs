@@ -49,38 +49,47 @@ impl GoalStatus {
     }
 
     /// Parse from a KG label string.
-    pub fn from_label(label: &str) -> Self {
+    ///
+    /// Returns `None` for a label that does not match any recognized status
+    /// (including a malformed parameterized form, e.g. `"reformulated:abc"`
+    /// with a non-numeric id) — callers that trust the input (KG restore,
+    /// where a legacy/corrupt label should degrade gracefully rather than
+    /// fail the whole restore) should fall back explicitly with
+    /// `.unwrap_or(GoalStatus::Pending)`; callers that surface a client's
+    /// literal status string (e.g. the `_akh/goal/update` ACP handler) should
+    /// propagate `None` as an error instead of silently defaulting.
+    pub fn from_label(label: &str) -> Option<Self> {
         if let Some(reason) = label.strip_prefix("failed:") {
-            Self::Failed {
+            Some(Self::Failed {
                 reason: reason.into(),
-            }
+            })
         } else if let Some(id_str) = label.strip_prefix("reformulated:") {
             if let Ok(id) = id_str.parse::<u64>()
                 && let Some(sym) = SymbolId::new(id)
             {
-                return Self::Reformulated { replacement: sym };
+                return Some(Self::Reformulated { replacement: sym });
             }
-            Self::Pending
+            None
         } else if let Some(reason) = label.strip_prefix("cancelled:") {
-            Self::Cancelled {
+            Some(Self::Cancelled {
                 reason: reason.into(),
-            }
+            })
         } else if let Some(id_str) = label.strip_prefix("duplicate:") {
             if let Ok(id) = id_str.parse::<u64>()
                 && let Some(sym) = SymbolId::new(id)
             {
-                return Self::Duplicate { primary: sym };
+                return Some(Self::Duplicate { primary: sym });
             }
-            Self::Pending
+            None
         } else {
             match label {
-                "pending" => Self::Pending,
-                "active" => Self::Active,
-                "completed" => Self::Completed,
-                "suspended" => Self::Suspended,
-                "proposed" => Self::Proposed,
-                "dormant" => Self::Dormant,
-                _ => Self::Pending,
+                "pending" => Some(Self::Pending),
+                "active" => Some(Self::Active),
+                "completed" => Some(Self::Completed),
+                "suspended" => Some(Self::Suspended),
+                "proposed" => Some(Self::Proposed),
+                "dormant" => Some(Self::Dormant),
+                _ => None,
             }
         }
     }
@@ -527,6 +536,48 @@ pub fn update_goal_criteria(
     Ok(())
 }
 
+/// Update a goal's description (goal_text) by writing a `has_description`
+/// triple to the KG.
+///
+/// The goal's Entity label (e.g. `goal:investigate Tecton`) is immutable —
+/// it was set at creation time and is used as the lookup key by
+/// `restore_goals`.  However, `restore_goals` checks for a
+/// `has_description` triple first and uses that over the label-derived
+/// description when present (lines 587–591).  So we persist the updated
+/// description as a `desc:{text}` entity linked via `has_description`,
+/// which the restore path will pick up on the next read.
+pub fn update_goal_description(
+    engine: &Engine,
+    goal: &mut Goal,
+    description: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<()> {
+    let normalized = normalize_goal_description(description);
+    // Remove any existing has_description triples for this goal. Propagate
+    // failures instead of swallowing them: a partially-removed old
+    // description followed by a silently-skipped new one would leave the
+    // goal in an inconsistent state that `restore_goals` can't distinguish
+    // from success.
+    let old: Vec<_> = engine
+        .knowledge_graph()
+        .triples_from(goal.symbol_id)
+        .into_iter()
+        .filter(|t| t.predicate == predicates.has_description)
+        .collect();
+    for t in old {
+        engine.remove_triple(t.subject, t.predicate, t.object)?;
+    }
+    // Store the new description as a desc: entity.
+    let desc_sym = engine.resolve_or_create_entity(&format!("desc:{normalized}"))?;
+    engine.add_triple(&Triple::new(
+        goal.symbol_id,
+        predicates.has_description,
+        desc_sym,
+    ))?;
+    goal.description = normalized.to_string();
+    Ok(())
+}
+
 /// Filter active goals, sorted by computed priority (highest first).
 ///
 /// Uses argumentation-based priority when available, else raw priority.
@@ -595,7 +646,11 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
                 let dominated = status_sym_id.is_some_and(|prev| triple.object > prev);
                 if status_sym_id.is_none() || dominated {
                     let status_str = obj_label.trim_start_matches("status:");
-                    status = GoalStatus::from_label(status_str);
+                    // Lenient: a legacy/corrupt label from an older session
+                    // should degrade to Pending rather than fail the whole
+                    // restore. Unlike the client-facing update path, there is
+                    // no caller here to report an error to.
+                    status = GoalStatus::from_label(status_str).unwrap_or(GoalStatus::Pending);
                     status_sym_id = Some(triple.object);
                 }
             } else if triple.predicate == predicates.has_priority {
@@ -619,7 +674,8 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             let key = format!("goal_status:{}", meta.id.get());
             if let Ok(Some(bytes)) = engine.store().get_meta(key.as_bytes()) {
                 if let Ok(label) = std::str::from_utf8(&bytes) {
-                    status = GoalStatus::from_label(label);
+                    // Lenient fallback, same reasoning as above.
+                    status = GoalStatus::from_label(label).unwrap_or(GoalStatus::Pending);
                 }
             }
         }
@@ -817,9 +873,20 @@ mod tests {
         ];
         for status in statuses {
             let label = status.as_label();
-            let restored = GoalStatus::from_label(&label);
+            let restored = GoalStatus::from_label(&label)
+                .unwrap_or_else(|| panic!("from_label should recognize its own as_label output: {label}"));
             assert_eq!(restored, status);
         }
+    }
+
+    #[test]
+    fn from_label_rejects_unknown_status() {
+        assert_eq!(GoalStatus::from_label("cancled"), None);
+        assert_eq!(GoalStatus::from_label("bogus"), None);
+        assert_eq!(GoalStatus::from_label(""), None);
+        // Malformed parameterized forms are unknown too, not silently Pending.
+        assert_eq!(GoalStatus::from_label("reformulated:not-a-number"), None);
+        assert_eq!(GoalStatus::from_label("duplicate:not-a-number"), None);
     }
 
     /// Standalone validation matching `restore_goals` filtering logic.
@@ -1076,7 +1143,7 @@ mod tests {
         let status = GoalStatus::Reformulated { replacement: sym };
         let label = status.as_label();
         assert_eq!(label, "reformulated:42");
-        let restored = GoalStatus::from_label(&label);
+        let restored = GoalStatus::from_label(&label).expect("reformulated:42 should parse");
         assert_eq!(restored, status);
     }
 

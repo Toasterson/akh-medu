@@ -131,7 +131,7 @@ pub struct AgentPredicates {
 
 impl AgentPredicates {
     /// Resolve or create all well-known predicates in the engine.
-    pub(crate) fn init(engine: &Engine) -> AgentResult<Self> {
+    pub fn init(engine: &Engine) -> AgentResult<Self> {
         Ok(Self {
             has_status: engine.resolve_or_create_relation("agent:has_status")?,
             has_priority: engine.resolve_or_create_relation("agent:has_priority")?,
@@ -1061,6 +1061,77 @@ impl Agent {
         let id = g.symbol_id;
         self.goals.push(g);
         Ok(id)
+    }
+
+    /// Add a new goal and, when `parent` is given, wire it as that goal's
+    /// child in both the KG and this agent's in-memory goal list.
+    ///
+    /// This is the control-plane (`_akh/goal/create`) entry point: unlike
+    /// [`Agent::add_goal`], it accepts an already-resolved parent
+    /// [`SymbolId`] and returns the full [`goal::Goal`] (not just its id) so
+    /// the caller can serialize a response without a second lookup.
+    ///
+    /// Parent-wiring triple writes are propagated as errors once `parent` is
+    /// `Some` — a half-wired hierarchy (child linked but parent's reverse
+    /// edge missing, or vice versa) is worse than a clear failure the client
+    /// can retry. Resolving `parent` from a client-supplied string, and
+    /// deciding whether an unresolvable parent id is fatal, is the caller's
+    /// job (mirrors the existing "best-effort parent lookup" contract).
+    pub fn add_goal_with_parent(
+        &mut self,
+        description: &str,
+        priority: u8,
+        criteria: &str,
+        parent: Option<SymbolId>,
+    ) -> AgentResult<goal::Goal> {
+        let mut g = goal::create_goal(
+            &self.engine,
+            description,
+            priority,
+            criteria,
+            &self.predicates,
+        )?;
+
+        if let Some(parent_id) = parent {
+            self.engine.add_triple(&crate::graph::Triple::new(
+                parent_id,
+                self.predicates.child_goal,
+                g.symbol_id,
+            ))?;
+            self.engine.add_triple(&crate::graph::Triple::new(
+                g.symbol_id,
+                self.predicates.parent_goal,
+                parent_id,
+            ))?;
+            g.parent = Some(parent_id);
+            if let Some(p) = self.goals.iter_mut().find(|x| x.symbol_id == parent_id) {
+                p.children.push(g.symbol_id);
+            }
+        }
+
+        self.goals.push(g.clone());
+        Ok(g)
+    }
+
+    /// Cancel a goal (soft-delete: status becomes `Cancelled`, never removed
+    /// from the KG or the in-memory list — mirrors [`Agent::complete_goal`] /
+    /// [`Agent::fail_goal`]).
+    pub fn cancel_goal(&mut self, goal_id: SymbolId, reason: &str) -> AgentResult<()> {
+        let goal = self
+            .goals
+            .iter_mut()
+            .find(|g| g.symbol_id == goal_id)
+            .ok_or(AgentError::GoalNotFound {
+                goal_id: goal_id.get(),
+            })?;
+        goal::update_goal_status(
+            &self.engine,
+            goal,
+            GoalStatus::Cancelled {
+                reason: reason.into(),
+            },
+            &self.predicates,
+        )
     }
 
     /// Run a single OODA cycle using the default (LLM-driven) decide mode.
@@ -2428,16 +2499,22 @@ impl Agent {
         Ok(())
     }
 
-    /// Update mutable fields of a goal: priority, status, and/or success criteria.
+    /// Update mutable fields of a goal: priority, status, success criteria,
+    /// and/or description.
     ///
     /// Only fields with `Some` values are changed. Status is parsed from a
-    /// string label using [`GoalStatus::from_label`].
+    /// string label using [`GoalStatus::from_label`]; an unrecognized label
+    /// is a hard [`AgentError::InvalidGoalStatus`] error — it does NOT
+    /// silently fall back to `Pending` — and is checked before any field is
+    /// mutated, so a bad status value fails the whole call instead of
+    /// partially applying the other updates.
     pub fn update_goal(
         &mut self,
         goal_id: SymbolId,
         priority: Option<u8>,
         status: Option<&str>,
         criteria: Option<&str>,
+        description: Option<&str>,
     ) -> AgentResult<()> {
         // Find index first to avoid borrow issues when calling goal::* helpers.
         let idx = self
@@ -2448,11 +2525,21 @@ impl Agent {
                 goal_id: goal_id.get(),
             })?;
 
+        // Parse (and validate) the status label up front, before mutating
+        // anything, so an invalid status doesn't leave priority/criteria/
+        // description partially applied.
+        let new_status = status
+            .map(|s| {
+                GoalStatus::from_label(s).ok_or_else(|| AgentError::InvalidGoalStatus {
+                    value: s.to_string(),
+                })
+            })
+            .transpose()?;
+
         if let Some(p) = priority {
             goal::update_goal_priority(&self.engine, &mut self.goals[idx], p, &self.predicates)?;
         }
-        if let Some(s) = status {
-            let new_status = GoalStatus::from_label(s);
+        if let Some(new_status) = new_status {
             goal::update_goal_status(
                 &self.engine,
                 &mut self.goals[idx],
@@ -2462,6 +2549,9 @@ impl Agent {
         }
         if let Some(c) = criteria {
             goal::update_goal_criteria(&self.engine, &mut self.goals[idx], c, &self.predicates)?;
+        }
+        if let Some(d) = description {
+            goal::update_goal_description(&self.engine, &mut self.goals[idx], d, &self.predicates)?;
         }
         Ok(())
     }

@@ -280,6 +280,25 @@ pub enum AgentError {
         )
     )]
     PromotionNotPending { predicate: String, status: String },
+
+    /// A caller (typically the `_akh/goal/update` ACP control-plane handler)
+    /// passed a status label that [`super::goal::GoalStatus::from_label`]
+    /// does not recognize. Previously this silently became `Pending`; now it
+    /// is a hard client error so a typo (e.g. `"cancled"`) is reported
+    /// instead of quietly corrupting the goal's status.
+    #[error(
+        "unknown goal status \"{value}\" (expected one of: pending, active, completed, \
+         suspended, proposed, dormant, or a parameterized form like failed:<reason>, \
+         cancelled:<reason>, reformulated:<goal-id>, duplicate:<goal-id>)"
+    )]
+    #[diagnostic(
+        code(akh::agent::invalid_goal_status),
+        help(
+            "Use one of the recognized goal status labels. See \
+             `GoalStatus::as_label` for the exact spelling of each variant."
+        )
+    )]
+    InvalidGoalStatus { value: String },
 }
 
 impl From<crate::error::AkhError> for AgentError {

@@ -122,6 +122,12 @@ pub const CONTROL_METHODS: &[&str] = &[
     // (`_akh/schema/proposals` and `_akh/schema/reject` are engine-only
     // data-plane ops and stay out of this list — see `dispatch_akh`).
     "_akh/schema/promote",
+    // Goal CRUD over the ACP control plane (PR #286 follow-up).
+    "_akh/goal/list",
+    "_akh/goal/create",
+    "_akh/goal/update",
+    "_akh/goal/cancel",
+    "_akh/goal/prioritize",
 ];
 
 /// Whether `method` is a control-plane method (a member of [`CONTROL_METHODS`]).
