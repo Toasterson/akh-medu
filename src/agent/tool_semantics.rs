@@ -438,6 +438,9 @@ mod tests {
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
         registry.register(Box::new(tools::KgDeleteTool));
+        registry.register(Box::new(tools::EntitySchemaTool));
+        registry.register(Box::new(tools::EntityTypesTool));
+        registry.register(Box::new(tools::EntityTypeFilterTool));
         registry.register(Box::new(tools::ReasonTool));
         registry.register(Box::new(tools::SimilaritySearchTool));
 

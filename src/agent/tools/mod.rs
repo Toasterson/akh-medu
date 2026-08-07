@@ -5,6 +5,7 @@
 //! and MCP client for remote tool access.
 
 pub mod audit_log;
+pub mod entity_schema;
 pub mod code_gen;
 pub mod core_memory;
 pub mod delegate;
@@ -76,5 +77,6 @@ pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, Age
 pub use tool_query::ToolQueryTool;
 pub use trigger_manage::TriggerManageTool;
 pub use audit_log::AuditLogTool;
+pub use entity_schema::{EntitySchemaTool, EntityTypesTool, EntityTypeFilterTool};
 pub use delegate::DelegateTool;
 pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};

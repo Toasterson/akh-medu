@@ -577,6 +577,9 @@ mod tests {
         r.register(Box::new(tools::KgQueryTool));
         r.register(Box::new(tools::KgMutateTool));
         r.register(Box::new(tools::KgDeleteTool));
+        r.register(Box::new(tools::EntitySchemaTool));
+        r.register(Box::new(tools::EntityTypesTool));
+        r.register(Box::new(tools::EntityTypeFilterTool));
         r.register(Box::new(tools::ReasonTool));
         r.register(Box::new(tools::SimilaritySearchTool));
         r

@@ -315,6 +315,9 @@ impl Agent {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
         registry.register(Box::new(tools::KgMutateTool));
+        registry.register(Box::new(tools::EntitySchemaTool));
+        registry.register(Box::new(tools::EntityTypesTool));
+        registry.register(Box::new(tools::EntityTypeFilterTool));
         registry.register(Box::new(tools::MemoryRecallTool::new(predicates.clone())));
         registry.register(Box::new(tools::ReasonTool));
         registry.register(Box::new(tools::SimilaritySearchTool));
