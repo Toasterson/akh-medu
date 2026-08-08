@@ -56,9 +56,24 @@ pub struct AkhPaths {
     pub cache_dir: PathBuf,
 }
 
+/// Environment variable selecting the system-daemon layout.
+///
+/// Opt-in and explicit rather than inferred from `euid == 0`: a developer who
+/// happens to run under `sudo` must not silently get a different set of
+/// directories than the one their config and workspaces live in.
+pub const SYSTEM_PATHS_ENV: &str = "AKH_SYSTEM_PATHS";
+
 impl AkhPaths {
     /// Resolve XDG directories from environment variables with standard fallbacks.
+    ///
+    /// When [`SYSTEM_PATHS_ENV`] is set to `1`, returns [`AkhPaths::system_daemon`]
+    /// instead — the layout for an akhomed running as a system service, whose
+    /// state must not live in a user's home directory.
     pub fn resolve() -> PathResult<Self> {
+        if std::env::var(SYSTEM_PATHS_ENV).is_ok_and(|v| v == "1") {
+            return Ok(Self::system_daemon());
+        }
+
         let home = std::env::var("HOME")
             .map(PathBuf::from)
             .map_err(|_| PathError::NoHome)?;
@@ -94,6 +109,80 @@ impl AkhPaths {
             runtime_dir,
             cache_dir,
         })
+    }
+
+    /// Directories for an akhomed running as a **system service**, owned by the
+    /// system rather than by a user.
+    ///
+    /// A daemon must not keep its state in someone's home directory. Doing so
+    /// couples the service's lifetime to an account, leaves root-owned files
+    /// scattered through a user's tree (where that user then cannot rewrite
+    /// them), and on macOS drags the whole daemon inside per-user privacy
+    /// (TCC) and FileVault scope.
+    ///
+    /// Each platform's own convention is used rather than one invented layout:
+    ///
+    /// **macOS** — Apple's File System Programming Guide puts system-wide
+    /// support files in `/Library/Application Support/<name>`; caches belong in
+    /// `/Library/Caches`; `/var/run` is BSD runtime state, cleared on boot,
+    /// which is exactly a PID file's lifetime; `/var/db` is where BSD/macOS
+    /// daemons keep mutable databases.
+    ///
+    /// ```text
+    /// config   /Library/Application Support/akh-medu
+    /// data     /Library/Application Support/akh-medu/data
+    /// state    /var/db/akh-medu
+    /// runtime  /var/run/akh-medu
+    /// cache    /Library/Caches/akh-medu
+    /// ```
+    ///
+    /// **Linux / illumos** — the FHS equivalents:
+    ///
+    /// ```text
+    /// config   /etc/akh-medu
+    /// data     /var/lib/akh-medu
+    /// state    /var/lib/akh-medu/state
+    /// runtime  /run/akh-medu
+    /// cache    /var/cache/akh-medu
+    /// ```
+    #[cfg(target_os = "macos")]
+    pub fn system_daemon() -> Self {
+        let support = PathBuf::from("/Library/Application Support/akh-medu");
+        Self {
+            data_dir: support.join("data"),
+            config_dir: support,
+            state_dir: PathBuf::from("/var/db/akh-medu"),
+            runtime_dir: Self::system_runtime_dir(),
+            cache_dir: PathBuf::from("/Library/Caches/akh-medu"),
+        }
+    }
+
+    /// System-service directories on Linux and illumos (FHS). See the macOS
+    /// variant for the rationale.
+    #[cfg(not(target_os = "macos"))]
+    pub fn system_daemon() -> Self {
+        let lib = PathBuf::from("/var/lib/akh-medu");
+        Self {
+            config_dir: PathBuf::from("/etc/akh-medu"),
+            state_dir: lib.join("state"),
+            data_dir: lib,
+            runtime_dir: Self::system_runtime_dir(),
+            cache_dir: PathBuf::from("/var/cache/akh-medu"),
+        }
+    }
+
+    /// Where a system-service akhomed advertises itself (PID file, sockets).
+    ///
+    /// Exposed on its own because *clients* need it without adopting the whole
+    /// system layout: an unprivileged `akh` looks in the user's runtime
+    /// directory first and falls back here, so it can find a daemon that does
+    /// not share its home.
+    pub fn system_runtime_dir() -> PathBuf {
+        if cfg!(target_os = "macos") {
+            PathBuf::from("/var/run/akh-medu")
+        } else {
+            PathBuf::from("/run/akh-medu")
+        }
     }
 
     /// Get workspace paths for a named workspace.
@@ -355,5 +444,74 @@ mod tests {
             cache_dir: PathBuf::from("/nonexistent"),
         };
         assert!(paths.list_workspaces().is_empty());
+    }
+
+    /// A system daemon must keep nothing in a user's home.
+    ///
+    /// This is the property that matters, independent of which platform's
+    /// convention is in play: state under `/Users` or `/home` re-creates the
+    /// coupling the system layout exists to remove.
+    #[test]
+    fn system_daemon_paths_escape_every_home_directory() {
+        let p = AkhPaths::system_daemon();
+        for dir in [
+            &p.config_dir,
+            &p.data_dir,
+            &p.state_dir,
+            &p.runtime_dir,
+            &p.cache_dir,
+        ] {
+            let s = dir.display().to_string();
+            assert!(
+                !s.starts_with("/Users/") && !s.starts_with("/home/"),
+                "system daemon path must not live in a user home: {s}"
+            );
+            assert!(dir.is_absolute(), "system daemon path must be absolute: {s}");
+        }
+    }
+
+    /// config and data must not collide.
+    ///
+    /// The obvious way to relocate — pointing several `XDG_*` variables at one
+    /// parent — makes `config_dir` and `data_dir` the same directory, because
+    /// each appends `akh-medu`. Workspaces would then write `<name>.toml` and
+    /// `<name>/` side by side in one directory. Hence an explicit layout.
+    #[test]
+    fn system_daemon_config_and_data_are_distinct() {
+        let p = AkhPaths::system_daemon();
+        assert_ne!(p.config_dir, p.data_dir);
+        assert_ne!(p.config_dir, p.state_dir);
+        assert_ne!(p.data_dir, p.state_dir);
+    }
+
+    /// The runtime dir a client falls back to must be the one the daemon uses.
+    ///
+    /// If these ever drift, an unprivileged `akh` silently stops finding the
+    /// system daemon — the failure looks like "no daemon running" rather than
+    /// like a path bug.
+    #[test]
+    fn client_fallback_runtime_dir_matches_the_daemon_layout() {
+        assert_eq!(
+            AkhPaths::system_daemon().runtime_dir,
+            AkhPaths::system_runtime_dir()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_system_layout_uses_apple_locations() {
+        let p = AkhPaths::system_daemon();
+        assert_eq!(
+            p.config_dir,
+            PathBuf::from("/Library/Application Support/akh-medu")
+        );
+        assert_eq!(p.state_dir, PathBuf::from("/var/db/akh-medu"));
+        assert_eq!(p.runtime_dir, PathBuf::from("/var/run/akh-medu"));
+        assert_eq!(p.cache_dir, PathBuf::from("/Library/Caches/akh-medu"));
+        // The PID file lands where the installer and the client both expect.
+        assert_eq!(
+            p.pid_file(),
+            PathBuf::from("/var/run/akh-medu/akhomed.pid")
+        );
     }
 }

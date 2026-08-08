@@ -94,8 +94,32 @@ impl ServerInfo {
 /// separate CLI invocations, since the ACP bind takes milliseconds once a
 /// daemon is actually up — have failed. Until then it warns once per episode
 /// rather than on every command.
+/// Tries the caller's own runtime directory first, then the system-service one
+/// ([`AkhPaths::system_runtime_dir`]).
+///
+/// The fallback is what lets an unprivileged `akh` find an akhomed running as a
+/// system daemon: the daemon advertises itself in `/var/run/akh-medu` (or
+/// `/run/akh-medu`), which is nowhere near the user's `~/.local/state`. Without
+/// it, every CLI command against a system daemon reports "No running akhomed
+/// daemon found" while the daemon is serving normally.
+///
+/// User-first ordering is deliberate: a developer running their own akhomed in
+/// the foreground must keep talking to *theirs*, not to the system service.
 pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
-    let pid_path = paths.pid_file();
+    let user_pid = paths.pid_file();
+    if let Some(info) = discover_at(&user_pid) {
+        return Some(info);
+    }
+    let system_pid = AkhPaths::system_runtime_dir().join("akhomed.pid");
+    if system_pid != user_pid {
+        return discover_at(&system_pid);
+    }
+    None
+}
+
+/// [`discover_server`] against one specific PID file.
+fn discover_at(pid_path: &std::path::Path) -> Option<ServerInfo> {
+    let pid_path = pid_path.to_path_buf();
     let contents = match std::fs::read_to_string(&pid_path) {
         Ok(c) => c,
         Err(e) => {
@@ -292,11 +316,36 @@ pub fn remove_pid_file(paths: &AkhPaths) {
     let _ = std::fs::remove_file(paths.pid_file());
 }
 
+/// Whether `pid` names a live process.
+///
+/// `kill(pid, 0)` sends no signal; it only asks whether the process exists and
+/// whether we could signal it. Those are two different questions, and
+/// conflating them breaks the daemon deployment:
+///
+/// - `0`      — exists, and we may signal it
+/// - `EPERM`  — **exists**, but it belongs to another user
+/// - `ESRCH`  — no such process
+///
+/// A `== 0` test reports `EPERM` as dead. When akhomed runs as a system
+/// LaunchDaemon (root) and the `akh` CLI runs as an ordinary user, every
+/// probe takes the `EPERM` path — so the client concluded the daemon was
+/// stale, **deleted its PID file**, and reported "No running akhomed daemon
+/// found" while the daemon was serving ACP on its port the whole time. The
+/// deletion also made the failure sticky: the next invocation had no PID file
+/// to read at all.
+///
+/// Only `ESRCH` means dead. Anything else means the process is there.
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill with signal 0 doesn't actually send a signal;
-    // it only checks whether the process exists.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // SAFETY: `kill` with signal 0 delivers nothing; it performs existence and
+    // permission checks only, and cannot affect memory.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    !matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    )
 }
 
 #[cfg(not(unix))]
@@ -420,6 +469,37 @@ mod tests {
     }
 
     /// A live ACP Unix socket ⇒ discovery succeeds: the probe connects to the
+    /// A process owned by another user is alive, not dead.
+    ///
+    /// pid 1 (`launchd`/`init`) is always running and always root-owned, so on
+    /// any non-root test run `kill(1, 0)` takes the `EPERM` path — the exact
+    /// path an unprivileged `akh` CLI takes when probing a root akhomed
+    /// LaunchDaemon. Reporting that as dead made the client delete the live
+    /// daemon's PID file.
+    #[cfg(unix)]
+    #[test]
+    fn process_owned_by_another_user_counts_as_alive() {
+        // SAFETY: argument-less credential read.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // as root the probe succeeds outright; nothing to distinguish
+        }
+        assert!(
+            process_alive(1),
+            "pid 1 is root-owned and always running; EPERM must not read as dead"
+        );
+    }
+
+    /// Only ESRCH means dead.
+    #[cfg(unix)]
+    #[test]
+    fn a_pid_that_does_not_exist_counts_as_dead() {
+        // Well above any real pid; `kill` returns ESRCH rather than EPERM.
+        assert!(
+            !process_alive(0x7FFF_FFFE),
+            "a nonexistent pid must be reported dead so stale PID files are cleaned up"
+        );
+    }
+
     /// advertised socket and confirms the listener is accepting.
     #[cfg(unix)]
     #[test]
@@ -436,7 +516,7 @@ mod tests {
 
         write_pid_file(&paths, 8200, "127.0.0.1", Some(sock_str), None).expect("write pid");
 
-        let found = discover_server(&paths).expect("live ACP socket should be discovered");
+        let found = discover_at(&paths.pid_file()).expect("live ACP socket should be discovered");
         assert_eq!(found.acp_socket.as_deref(), Some(sock_str));
     }
 
@@ -456,7 +536,7 @@ mod tests {
             .expect("write pid");
 
         assert!(
-            discover_server(&paths).is_none(),
+            discover_at(&paths.pid_file()).is_none(),
             "a dead ACP socket must not be discovered even with a live PID"
         );
     }
@@ -479,7 +559,7 @@ mod tests {
             .expect("write pid");
 
         for _ in 0..STALE_ACP_PROBE_THRESHOLD - 1 {
-            assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+            assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
             assert!(
                 paths.pid_file().exists(),
                 "PID file must survive fewer than {STALE_ACP_PROBE_THRESHOLD} failed probes"
@@ -487,7 +567,7 @@ mod tests {
         }
 
         // The threshold-th consecutive failure retires the artifact.
-        assert!(discover_server(&paths).is_none());
+        assert!(discover_at(&paths.pid_file()).is_none());
         assert!(
             !paths.pid_file().exists(),
             "PID file must be removed after {STALE_ACP_PROBE_THRESHOLD} consecutive \
@@ -513,7 +593,7 @@ mod tests {
         let dead = tmp.path().join("nobody.sock");
         write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
             .expect("write pid");
-        assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+        assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
         assert!(
             stale_probe_marker_path(&paths.pid_file()).exists(),
             "one failed probe must record a marker"
@@ -525,7 +605,7 @@ mod tests {
         write_pid_file(&paths, 8200, "127.0.0.1", Some(sock.to_str().unwrap()), None)
             .expect("rewrite pid");
 
-        assert!(discover_server(&paths).is_some(), "live transport ⇒ Some");
+        assert!(discover_at(&paths.pid_file()).is_some(), "live transport ⇒ Some");
         assert!(
             !stale_probe_marker_path(&paths.pid_file()).exists(),
             "a successful probe must clear the stale-probe marker"

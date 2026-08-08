@@ -135,6 +135,60 @@ struct SnapshotTicker {
 }
 
 /// Capture + persist one snapshot of `name`'s agent (Phase 38c).
+/// Build the privilege-dropping executor for a workspace whose `[exec]` selects
+/// `kind = "local-drop"` (Phase 48b / ADR 082).
+///
+/// Fails the workspace rather than degrading to [`InProcessBackend`]. That
+/// choice is the whole point of the backend: silently executing as akhomed's
+/// own principal what an operator asked to run as `build` would hand out the
+/// daemon's privilege — under a config that claims otherwise. A misconfigured
+/// drop must stop the akh from starting, loudly, at start-up rather than at the
+/// first tool call.
+///
+/// Logs the resolved principal once per workspace so an operator can see which
+/// akh executes as whom without reading config.
+fn build_local_drop_backend(
+    exec: &akh_medu::akh_config::ExecBackendConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    use akh_medu::backend::LocalDropBackend;
+    use akh_medu::fs::LocalFs;
+
+    let cfg = exec
+        .to_local_drop_config()
+        .expect("LocalDrop variant implies Some");
+    let user = cfg.user.clone();
+
+    // A configured `workdir` is both the default cwd and the advisory
+    // read+write root. With none configured the file verbs fail closed
+    // (`LocalFs::denied`) rather than exposing the whole host: the daemon runs
+    // privileged, so an unbounded root here would be the file-side equivalent
+    // of not dropping at all.
+    let fs: Arc<dyn akh_medu::fs::Filesystem> = match cfg.workdir.as_ref() {
+        Some(dir) => Arc::new(LocalFs::sandbox(dir.clone())),
+        None => Arc::new(LocalFs::denied()),
+    };
+
+    let backend = LocalDropBackend::new(cfg, fs).map_err(|e| {
+        format!(
+            "workspace {workspace}: local-drop exec backend could not bind to user \
+             `{user}`: {e}"
+        )
+    })?;
+
+    tracing::info!(
+        target: "akh::backend::local_drop",
+        workspace = %workspace,
+        user = %backend.user(),
+        uid = backend.uid(),
+        gid = backend.gid(),
+        drops_privilege = backend.drops_privilege(),
+        "workspace exec runs as a dropped principal"
+    );
+
+    Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+}
+
 ///
 /// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
@@ -1829,14 +1883,20 @@ impl ServerState {
         // (`feedback_fail_loudly_no_mock_papering` — a Pi quietly compiling
         // locally is exactly the failure this wiring exists to prevent).
         //
-        // A missing/legacy akh.toml yields `ExecBackendConfig::InProcess`
-        // (the default), reproducing today's behaviour byte-for-byte.
+        // The executor is resolved per-akh-override → host-level `[exec]`
+        // (daemon config) → `InProcess`. The host level is what guarantees a
+        // *lazily loaded* workspace — e.g. a relocated akh someone probes with
+        // `acp status` — gets this host's privilege drop even though its own
+        // travelling config says nothing about executors (executors are host
+        // properties; see `AkhomedConfig::exec`).
         let akh_config = self.get_akh_config(name).await?;
-        let exec_kind = akh_config.exec.clone();
+        let host_exec = self.config.read().await.exec.clone();
+        let exec_kind = akh_config.effective_exec(host_exec.as_ref());
 
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             let akh_config = akh_config.clone();
+            let exec_kind = exec_kind.clone();
             let name = name.to_string();
             move || -> Result<akh_medu::agent::Agent, String> {
                 let config = AgentConfig::default();
@@ -1845,12 +1905,15 @@ impl ServerState {
                 let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
                     use akh_medu::akh_config::ExecBackendConfig;
                     use akh_medu::backend::remote::RemoteBackend;
-                    match &akh_config.exec {
+                    match &exec_kind {
                         ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::LocalDrop { .. } => {
+                            Some(build_local_drop_backend(&exec_kind, &name)?)
+                        }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
-                            let rbc = akh_config
+                            let rbc = exec_kind
                                 .to_remote_backend_config()
-                                .expect("is_remote_exec implies Some");
+                                .expect("Remote variant implies Some");
                             // Fail loudly: `RemoteBackend::connect` returns a
                             // rich `RemoteError` (host, auth, host-key, timeout
                             // detail); surface it verbatim — never fall back to
@@ -1882,8 +1945,11 @@ impl ServerState {
                 #[cfg(not(feature = "remote-executor"))]
                 let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
                     use akh_medu::akh_config::ExecBackendConfig;
-                    match &akh_config.exec {
+                    match &exec_kind {
                         ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::LocalDrop { .. } => {
+                            Some(build_local_drop_backend(&exec_kind, &name)?)
+                        }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
                             // but the operator asked for it. Refuse to start

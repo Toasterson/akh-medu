@@ -43,10 +43,13 @@ use thiserror::Error;
 
 use crate::fs::{Filesystem, FsResult, LocalFs};
 
+pub mod local_drop;
 pub mod process_supervisor;
 
 #[cfg(feature = "remote-executor")]
 pub mod remote;
+
+pub use local_drop::{LocalDropBackend, LocalDropConfig, LocalDropError};
 
 pub use process_supervisor::{DrainedOutput, ProgressTracker, SupervisedExecution, SupervisorError, SupervisorResult};
 
@@ -213,6 +216,20 @@ pub enum Confinement {
     /// process/user with full access. Tools riding this posture keep their
     /// `Critical` danger gating.
     Unconfined,
+
+    /// The executor runs on this host as a distinct, less-privileged, already-
+    /// provisioned local OS principal ([`local_drop::LocalDropBackend`], Phase
+    /// 48b): akhomed keeps whatever privilege it needs for its own job, and
+    /// every executed command has had its uid, gid **and supplementary groups**
+    /// replaced before `exec`.
+    ///
+    /// Strictly stronger than [`Confinement::Unconfined`] — a real OS
+    /// credential boundary, verified in the child before the command runs — and
+    /// strictly weaker than a jail, zone or container: the target is an ordinary
+    /// user, so it keeps that user's filesystem reach and unrestricted network
+    /// access. Policy should treat it as "a different principal", not as "a
+    /// sandbox".
+    PrivilegeDropped,
 
     /// The executor authenticated as a distinct, already-provisioned remote
     /// OS principal over SSH ([`remote::RemoteBackend`], Phase 48c) rather
