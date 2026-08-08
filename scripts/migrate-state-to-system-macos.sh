@@ -104,7 +104,11 @@ echo "  creating system directories"
 run install -d -o root -g wheel -m 0755 "$SUPPORT"
 run install -d -o root -g wheel -m 0755 "$SYS_CACHE"
 run install -d -o root -g wheel -m 0755 "$SYS_RUN"
-run install -d -o root -g wheel -m 0755 /var/db
+# /var/db already exists on macOS and carries SIP's `restricted` flag, so
+# `install -d` on it fails with "Operation not permitted" even as root — it
+# tries to chown/chmod an existing system directory. We only ever need it to
+# exist, and it always does; creating it is for the non-macOS path.
+[ -d /var/db ] || run install -d -o root -g wheel -m 0755 /var/db
 
 # --- 4. config: copy ---------------------------------------------------------
 if [ -d "$OLD_CONFIG" ]; then
