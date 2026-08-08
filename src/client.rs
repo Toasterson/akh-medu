@@ -94,8 +94,32 @@ impl ServerInfo {
 /// separate CLI invocations, since the ACP bind takes milliseconds once a
 /// daemon is actually up — have failed. Until then it warns once per episode
 /// rather than on every command.
+/// Tries the caller's own runtime directory first, then the system-service one
+/// ([`AkhPaths::system_runtime_dir`]).
+///
+/// The fallback is what lets an unprivileged `akh` find an akhomed running as a
+/// system daemon: the daemon advertises itself in `/var/run/akh-medu` (or
+/// `/run/akh-medu`), which is nowhere near the user's `~/.local/state`. Without
+/// it, every CLI command against a system daemon reports "No running akhomed
+/// daemon found" while the daemon is serving normally.
+///
+/// User-first ordering is deliberate: a developer running their own akhomed in
+/// the foreground must keep talking to *theirs*, not to the system service.
 pub fn discover_server(paths: &AkhPaths) -> Option<ServerInfo> {
-    let pid_path = paths.pid_file();
+    let user_pid = paths.pid_file();
+    if let Some(info) = discover_at(&user_pid) {
+        return Some(info);
+    }
+    let system_pid = AkhPaths::system_runtime_dir().join("akhomed.pid");
+    if system_pid != user_pid {
+        return discover_at(&system_pid);
+    }
+    None
+}
+
+/// [`discover_server`] against one specific PID file.
+fn discover_at(pid_path: &std::path::Path) -> Option<ServerInfo> {
+    let pid_path = pid_path.to_path_buf();
     let contents = match std::fs::read_to_string(&pid_path) {
         Ok(c) => c,
         Err(e) => {

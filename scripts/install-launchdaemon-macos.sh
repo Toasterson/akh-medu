@@ -147,6 +147,24 @@ else
   echo "  secrets   : no ~/env-file found; $ETC/daemon.env left as-is"
 fi
 
+# --- layout: system or home? -------------------------------------------------
+# Prefer the system layout (AkhPaths::system_daemon), but only when the state is
+# actually there. Setting AKH_SYSTEM_PATHS=1 against empty system directories
+# would start the daemon with no workspaces and quietly mint fresh ones, while
+# the real state sat unreferenced in the user's home — a data-loss-shaped
+# failure that looks like "the akh forgot everything".
+SUPPORT="/Library/Application Support/akh-medu"
+if [ -f "$SUPPORT/config.toml" ]; then
+  AKH_PATHS_MODE="system"
+  DAEMON_HOME="/var/root"
+  echo "  layout    : system ($SUPPORT)"
+else
+  AKH_PATHS_MODE="home"
+  DAEMON_HOME="$USER_HOME"
+  echo "  layout    : home ($USER_HOME) — state still lives in the user's tree"
+  echo "              run scripts/migrate-state-to-system-macos.sh to move it"
+fi
+
 # --- wrapper -----------------------------------------------------------------
 cat > "$LIBEXEC/akhomed-daemon.sh" <<WRAPPER
 #!/bin/bash
@@ -159,16 +177,22 @@ set +a
 # The per-akh config resolves \`api_key = "env:OLLAMA_CLOUD_KEY"\`.
 export OLLAMA_CLOUD_KEY="\${OLLAMA_CLOUD_KEY:-\${OLLAMA_KEY:-}}"
 
-# HOME points at the exec user so the daemon reads the *existing* config,
-# certs, and workspace state rather than root's empty tree. Paths in this
-# codebase resolve through HOME/XDG (see src/paths.rs).
+# Path layout, resolved by the installer (see AkhPaths in src/paths.rs):
 #
-# Consequence worth knowing: files the daemon writes under
-# \$HOME/.local/share/akh-medu are root-owned. The daemon is their only writer,
-# so this is benign in practice — but running the \`akh\` CLI as $EXEC_USER
-# against that state will hit permission errors on write. Postgres, not the
-# local tree, is the durable truth (ADR 049).
-export HOME="$USER_HOME"
+#   system — AKH_SYSTEM_PATHS=1 selects the macOS daemon locations
+#            (/Library/Application Support/akh-medu, /var/db, /var/run) and HOME
+#            is root's own. Nothing the daemon owns lives in a user's tree.
+#
+#   home   — the pre-migration arrangement: paths resolve through a user's HOME.
+#            Works, but the daemon leaves root-owned files in that user's
+#            directories, which they then cannot rewrite.
+#
+# Child processes are unaffected either way: the local-drop executor sets HOME
+# to the *exec principal's* home for every command it runs, so builds still see
+# the user's caches and dotfiles.
+export AKH_PATHS_MODE="$AKH_PATHS_MODE"
+[ "\$AKH_PATHS_MODE" = "system" ] && export AKH_SYSTEM_PATHS=1
+export HOME="$DAEMON_HOME"
 
 exec "$LIBEXEC/akhomed"
 WRAPPER
