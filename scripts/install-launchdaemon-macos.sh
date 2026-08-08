@@ -91,6 +91,20 @@ echo "  binary    : $BIN_SRC"
 if launchctl print "system/$LABEL" >/dev/null 2>&1; then
   echo "  unloading existing daemon"
   launchctl bootout "system/$LABEL" 2>/dev/null || true
+  # `bootout` returns before the service is actually gone. Bootstrapping into a
+  # domain that still holds the label fails with the famously unhelpful
+  # `Bootstrap failed: 5: Input/output error`, and because the old daemon has
+  # already stopped by then, the machine is left with no akhomed at all. Wait
+  # for the label to actually disappear.
+  for _ in $(seq 1 50); do
+    launchctl print "system/$LABEL" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  if launchctl print "system/$LABEL" >/dev/null 2>&1; then
+    echo "ERROR: '$LABEL' is still loaded 10s after bootout; refusing to continue" >&2
+    echo "       inspect with: sudo launchctl print system/$LABEL" >&2
+    exit 1
+  fi
 fi
 AGENT_PLIST="$USER_HOME/Library/LaunchAgents/${LABEL}.plist"
 if [ -f "$AGENT_PLIST" ]; then
@@ -199,11 +213,14 @@ cat > "$PLIST" <<PLISTEOF
         <string>0</string>
         <key>AKH_AUTO_START</key>
         <string>thoth-mac,gemma-mac</string>
-        <!-- The executor backends log under the `akh::backend::*` target, not
-             `akh_medu::backend::*` (see build_local_drop_backend in
+        <!-- The executor backends log under the akh::backend::* target, not
+             akh_medu::backend::* (see build_local_drop_backend in
              src/bin/akhomed.rs). Naming the crate path here instead silently
              filters out the one line that tells an operator which principal
-             the akh executes as. -->
+             the akh executes as.
+             NOTE: this heredoc is unquoted so it can interpolate $LABEL and
+             $LIBEXEC, which means backticks here would be run as commands and
+             would corrupt the plist. Keep this comment backtick-free. -->
         <key>RUST_LOG</key>
         <string>akhomed=info,akhomed_store=info,akh_medu=warn,akh_medu::engine=error,akh::backend=info</string>
     </dict>
@@ -219,12 +236,44 @@ PLISTEOF
 chown root:wheel "$PLIST"
 chmod 0644 "$PLIST"
 
+# Validate before loading. The heredoc above is unquoted (it interpolates
+# $LABEL and $LIBEXEC), so any shell-active character that sneaks into it —
+# a backtick in a comment did exactly this once — silently produces malformed
+# XML. launchctl's response to that is `Bootstrap failed: 5: Input/output
+# error`, which names neither the file nor the problem, and by then the old
+# daemon has already been unloaded. Catch it here, while the operator still
+# has a useful error and the previous state is recoverable.
+if ! plutil -lint "$PLIST" >/dev/null 2>&1; then
+  echo "ERROR: generated plist is not valid XML — refusing to load it" >&2
+  plutil -lint "$PLIST" >&2 || true
+  echo "       (the daemon is currently unloaded; fix this script and re-run)" >&2
+  exit 1
+fi
+
 touch /var/log/akhomed.out.log /var/log/akhomed.err.log
 chown root:wheel /var/log/akhomed.out.log /var/log/akhomed.err.log
 
 # --- load --------------------------------------------------------------------
-launchctl bootstrap system "$PLIST"
+if ! launchctl bootstrap system "$PLIST"; then
+  echo "ERROR: launchctl bootstrap failed. Common causes:" >&2
+  echo "  - the label is still loaded (see the bootout wait above)" >&2
+  echo "  - the plist is not root-owned, or is group/world-writable" >&2
+  echo "  - $LIBEXEC/akhomed-daemon.sh is not executable" >&2
+  echo "Diagnose with: sudo launchctl print system/$LABEL" >&2
+  exit 1
+fi
 launchctl enable "system/$LABEL" 2>/dev/null || true
+
+# Bootstrap succeeding only means launchd accepted the job. Confirm it actually
+# came up rather than crash-looping — the LaunchAgent this replaces spent three
+# weeks "installed" while exiting 78 on every spawn.
+sleep 2
+if launchctl print "system/$LABEL" 2>/dev/null | grep -q "state = running"; then
+  echo "  daemon state: running"
+else
+  echo "  WARNING: bootstrapped but not yet running — check /var/log/akhomed.err.log" >&2
+  launchctl print "system/$LABEL" 2>/dev/null | grep -E "state =|last exit" >&2 || true
+fi
 
 echo
 echo "loaded. verify with:"
