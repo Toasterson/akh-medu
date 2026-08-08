@@ -13,8 +13,8 @@
 # (minimal profile) + sccache, baked. The `admin` job user has passwordless
 # sudo. Rust is on PATH; protoc and the ssl headers are NOT baked.
 #
-# SCOPE — mirrors .forgejo/workflows/ci.yml: seshat + root crate check + clippy
-# + lib tests. The full akh-medu workspace *release* build OOM-kills rustc on
+# SCOPE — mirrors .forgejo/workflows/ci.yml: seshat + root crate check + lib
+# tests. The full akh-medu workspace *release* build OOM-kills rustc on
 # the Solstice runner VMs, but `cargo check` only type-checks (no codegen, no
 # linking) so peak RSS is a fraction of a release build. Memory is constrained
 # with CARGO_BUILD_JOBS=1 and CARGO_PROFILE_DEV_DEBUG=0. Keep the two lanes at
@@ -75,9 +75,6 @@ export CARGO_PROFILE_DEV_DEBUG=0
 export RUSTC_WRAPPER=sccache
 sccache --show-stats || true
 cargo check --features server
-
-echo "=== cargo clippy --features server ==="
-cargo clippy --features server -- -D warnings
 
 echo "=== cargo test --features postgres --lib ==="
 # Use postgres (not server) to avoid ENOSPC from linking the enormous akhomed

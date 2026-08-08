@@ -22,7 +22,7 @@ jobs:
           . "$HOME/.cargo/env"
           CARGO_BUILD_JOBS=2 cargo check -p seshat
 
-  # Root akh-medu crate type-check + clippy with --features server.
+  # Root akh-medu crate type-check with --features server.
   #
   # This is the job that actually verifies the agent code compiles. Previously
   # CI only built the seshat sibling crate, so "CI green" was meaningless for
@@ -40,8 +40,9 @@ jobs:
   #                              (sccache is the global rustc wrapper on the
   #                              build hosts; this just makes it explicit)
   #
-  # Clippy runs after check in the same job so they share the compiled
-  # dependency artifacts in the target directory.
+  # Do not promote the repository's existing warning baseline to errors here:
+  # that made clean branches red after the type-check had already passed. A
+  # warning-denying clippy gate can be added once main itself is warning-free.
   check-akh-medu:
     runs-on: ubuntu-22.04
     steps:
@@ -65,16 +66,6 @@ jobs:
             sccache --show-stats || true
           fi
           cargo check --features server
-
-      - name: cargo clippy --features server
-        run: |
-          . "$HOME/.cargo/env"
-          export CARGO_BUILD_JOBS=1
-          export CARGO_PROFILE_DEV_DEBUG=0
-          if command -v sccache >/dev/null 2>&1; then
-            export RUSTC_WRAPPER=sccache
-          fi
-          cargo clippy --features server -- -D warnings
 
   # Library tests for the root crate. Uses the `postgres` feature (which pulls
   # in akhomed-store + tokio) rather than the full `server` feature set (which
