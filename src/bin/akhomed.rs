@@ -148,15 +148,15 @@ struct SnapshotTicker {
 /// Logs the resolved principal once per workspace so an operator can see which
 /// akh executes as whom without reading config.
 fn build_local_drop_backend(
-    akh_config: &akh_medu::akh_config::AkhConfig,
+    exec: &akh_medu::akh_config::ExecBackendConfig,
     workspace: &str,
 ) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
     use akh_medu::backend::LocalDropBackend;
     use akh_medu::fs::LocalFs;
 
-    let cfg = akh_config
+    let cfg = exec
         .to_local_drop_config()
-        .expect("is_local_drop_exec implies Some");
+        .expect("LocalDrop variant implies Some");
     let user = cfg.user.clone();
 
     // A configured `workdir` is both the default cwd and the advisory
@@ -1883,14 +1883,20 @@ impl ServerState {
         // (`feedback_fail_loudly_no_mock_papering` — a Pi quietly compiling
         // locally is exactly the failure this wiring exists to prevent).
         //
-        // A missing/legacy akh.toml yields `ExecBackendConfig::InProcess`
-        // (the default), reproducing today's behaviour byte-for-byte.
+        // The executor is resolved per-akh-override → host-level `[exec]`
+        // (daemon config) → `InProcess`. The host level is what guarantees a
+        // *lazily loaded* workspace — e.g. a relocated akh someone probes with
+        // `acp status` — gets this host's privilege drop even though its own
+        // travelling config says nothing about executors (executors are host
+        // properties; see `AkhomedConfig::exec`).
         let akh_config = self.get_akh_config(name).await?;
-        let exec_kind = akh_config.exec.clone();
+        let host_exec = self.config.read().await.exec.clone();
+        let exec_kind = akh_config.effective_exec(host_exec.as_ref());
 
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
             let akh_config = akh_config.clone();
+            let exec_kind = exec_kind.clone();
             let name = name.to_string();
             move || -> Result<akh_medu::agent::Agent, String> {
                 let config = AgentConfig::default();
@@ -1899,15 +1905,15 @@ impl ServerState {
                 let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
                     use akh_medu::akh_config::ExecBackendConfig;
                     use akh_medu::backend::remote::RemoteBackend;
-                    match &akh_config.exec {
+                    match &exec_kind {
                         ExecBackendConfig::InProcess => None,
                         ExecBackendConfig::LocalDrop { .. } => {
-                            Some(build_local_drop_backend(&akh_config, &name)?)
+                            Some(build_local_drop_backend(&exec_kind, &name)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
-                            let rbc = akh_config
+                            let rbc = exec_kind
                                 .to_remote_backend_config()
-                                .expect("is_remote_exec implies Some");
+                                .expect("Remote variant implies Some");
                             // Fail loudly: `RemoteBackend::connect` returns a
                             // rich `RemoteError` (host, auth, host-key, timeout
                             // detail); surface it verbatim — never fall back to
@@ -1939,10 +1945,10 @@ impl ServerState {
                 #[cfg(not(feature = "remote-executor"))]
                 let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
                     use akh_medu::akh_config::ExecBackendConfig;
-                    match &akh_config.exec {
+                    match &exec_kind {
                         ExecBackendConfig::InProcess => None,
                         ExecBackendConfig::LocalDrop { .. } => {
-                            Some(build_local_drop_backend(&akh_config, &name)?)
+                            Some(build_local_drop_backend(&exec_kind, &name)?)
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`

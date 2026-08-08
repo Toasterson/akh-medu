@@ -516,7 +516,7 @@ mod tests {
 
         write_pid_file(&paths, 8200, "127.0.0.1", Some(sock_str), None).expect("write pid");
 
-        let found = discover_server(&paths).expect("live ACP socket should be discovered");
+        let found = discover_at(&paths.pid_file()).expect("live ACP socket should be discovered");
         assert_eq!(found.acp_socket.as_deref(), Some(sock_str));
     }
 
@@ -536,7 +536,7 @@ mod tests {
             .expect("write pid");
 
         assert!(
-            discover_server(&paths).is_none(),
+            discover_at(&paths.pid_file()).is_none(),
             "a dead ACP socket must not be discovered even with a live PID"
         );
     }
@@ -559,7 +559,7 @@ mod tests {
             .expect("write pid");
 
         for _ in 0..STALE_ACP_PROBE_THRESHOLD - 1 {
-            assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+            assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
             assert!(
                 paths.pid_file().exists(),
                 "PID file must survive fewer than {STALE_ACP_PROBE_THRESHOLD} failed probes"
@@ -567,7 +567,7 @@ mod tests {
         }
 
         // The threshold-th consecutive failure retires the artifact.
-        assert!(discover_server(&paths).is_none());
+        assert!(discover_at(&paths.pid_file()).is_none());
         assert!(
             !paths.pid_file().exists(),
             "PID file must be removed after {STALE_ACP_PROBE_THRESHOLD} consecutive \
@@ -593,7 +593,7 @@ mod tests {
         let dead = tmp.path().join("nobody.sock");
         write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
             .expect("write pid");
-        assert!(discover_server(&paths).is_none(), "dead transport ⇒ None");
+        assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
         assert!(
             stale_probe_marker_path(&paths.pid_file()).exists(),
             "one failed probe must record a marker"
@@ -605,7 +605,7 @@ mod tests {
         write_pid_file(&paths, 8200, "127.0.0.1", Some(sock.to_str().unwrap()), None)
             .expect("rewrite pid");
 
-        assert!(discover_server(&paths).is_some(), "live transport ⇒ Some");
+        assert!(discover_at(&paths.pid_file()).is_some(), "live transport ⇒ Some");
         assert!(
             !stale_probe_marker_path(&paths.pid_file()).exists(),
             "a successful probe must clear the stale-probe marker"

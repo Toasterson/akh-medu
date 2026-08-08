@@ -90,6 +90,28 @@ pub struct AkhomedConfig {
     /// local-only mode (oxigraph + redb on disk, no WAL / relocation).
     #[serde(default)]
     pub postgres: Option<PostgresConfig>,
+
+    /// **Host-level** execution backend, applied to every workspace this
+    /// daemon runs unless an akh's own config overrides it
+    /// ([`crate::akh_config::AkhConfig::exec`]).
+    ///
+    /// This lives here — in the daemon's config, which never leaves the host —
+    /// because an executor is a host property: which OS users exist, which
+    /// workdir is on this disk, which build host is reachable. Akh configs
+    /// travel with the akh on relocation (ADR 049), so an executor defined
+    /// per-akh follows it to hosts where none of that holds. Concretely: a
+    /// relocated akh lazily loaded on a root daemon came up `InProcess` — no
+    /// privilege drop — because the drop lived in the other akhs' configs and
+    /// nothing carried it. A host default cannot miss a workspace.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "local-drop"
+    /// user = "toasty"
+    /// workdir = "/Users/toasty/ws"
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec: Option<crate::akh_config::ExecBackendConfig>,
 }
 
 /// ACP transport configuration. Effective only when the daemon is built with the

@@ -70,11 +70,32 @@ enum Commands {
         action: ConfigAction,
     },
 
-    /// Snapshot or wake an akh's state to/from Postgres (over ACP `_akh/akh/*`).
+    /// Deprecated spelling of the lifecycle verbs (`akh akh wake` reads as a
+    /// stutter). Hidden from help; use the top-level `sleep`/`wake`/
+    /// `snapshot`/`relocate` instead. Kept so existing scripts and the ops
+    /// runbooks keep working until they migrate.
+    #[command(hide = true)]
     Akh {
         #[command(subcommand)]
         action: AkhAction,
     },
+
+    /// Snapshot the akh's relational state to Postgres now (ACP
+    /// `_akh/akh/snapshot`; targets the global `-w` workspace).
+    Snapshot,
+
+    /// Wake a cold akh from its Postgres snapshot into the local workspace
+    /// (ACP `_akh/akh/wake`). Refuses if another host holds the akh (advisory
+    /// lock / fresh `last_seen`) — see docs/ops/relocate-akh.md.
+    Wake,
+
+    /// Deep-sleep the akh: snapshot + flush, then free its in-memory engine
+    /// and stop its background tasks. Wake later with `akh wake`.
+    Sleep,
+
+    /// Prepare the akh to move hosts: snapshot + flush so another host can
+    /// `akh wake` it. Requires a Postgres backing store.
+    Relocate,
 
     /// Refresh the AGE graph projection (read-model) over ACP
     /// (`_akh/projection/*`). The projection is the queryable graph view of the
@@ -1172,6 +1193,10 @@ fn main() -> Result<()> {
         },
 
         Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
+        Commands::Snapshot => run_akh_acp(&cli.workspace, AkhAction::Snapshot)?,
+        Commands::Wake => run_akh_acp(&cli.workspace, AkhAction::Wake)?,
+        Commands::Sleep => run_akh_acp(&cli.workspace, AkhAction::Sleep)?,
+        Commands::Relocate => run_akh_acp(&cli.workspace, AkhAction::Relocate)?,
 
         Commands::Projection { action } => run_projection_acp(&cli.workspace, action)?,
 
