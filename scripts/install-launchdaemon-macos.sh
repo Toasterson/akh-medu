@@ -199,8 +199,13 @@ cat > "$PLIST" <<PLISTEOF
         <string>0</string>
         <key>AKH_AUTO_START</key>
         <string>thoth-mac,gemma-mac</string>
+        <!-- The executor backends log under the `akh::backend::*` target, not
+             `akh_medu::backend::*` (see build_local_drop_backend in
+             src/bin/akhomed.rs). Naming the crate path here instead silently
+             filters out the one line that tells an operator which principal
+             the akh executes as. -->
         <key>RUST_LOG</key>
-        <string>akhomed=info,akhomed_store=info,akh_medu=warn,akh_medu::engine=error,akh_medu::backend::local_drop=info</string>
+        <string>akhomed=info,akhomed_store=info,akh_medu=warn,akh_medu::engine=error,akh::backend=info</string>
     </dict>
 
     <key>SoftResourceLimits</key>

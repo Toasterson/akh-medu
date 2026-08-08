@@ -292,11 +292,36 @@ pub fn remove_pid_file(paths: &AkhPaths) {
     let _ = std::fs::remove_file(paths.pid_file());
 }
 
+/// Whether `pid` names a live process.
+///
+/// `kill(pid, 0)` sends no signal; it only asks whether the process exists and
+/// whether we could signal it. Those are two different questions, and
+/// conflating them breaks the daemon deployment:
+///
+/// - `0`      — exists, and we may signal it
+/// - `EPERM`  — **exists**, but it belongs to another user
+/// - `ESRCH`  — no such process
+///
+/// A `== 0` test reports `EPERM` as dead. When akhomed runs as a system
+/// LaunchDaemon (root) and the `akh` CLI runs as an ordinary user, every
+/// probe takes the `EPERM` path — so the client concluded the daemon was
+/// stale, **deleted its PID file**, and reported "No running akhomed daemon
+/// found" while the daemon was serving ACP on its port the whole time. The
+/// deletion also made the failure sticky: the next invocation had no PID file
+/// to read at all.
+///
+/// Only `ESRCH` means dead. Anything else means the process is there.
 #[cfg(unix)]
 fn process_alive(pid: u32) -> bool {
-    // SAFETY: kill with signal 0 doesn't actually send a signal;
-    // it only checks whether the process exists.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    // SAFETY: `kill` with signal 0 delivers nothing; it performs existence and
+    // permission checks only, and cannot affect memory.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    !matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    )
 }
 
 #[cfg(not(unix))]
@@ -420,6 +445,37 @@ mod tests {
     }
 
     /// A live ACP Unix socket ⇒ discovery succeeds: the probe connects to the
+    /// A process owned by another user is alive, not dead.
+    ///
+    /// pid 1 (`launchd`/`init`) is always running and always root-owned, so on
+    /// any non-root test run `kill(1, 0)` takes the `EPERM` path — the exact
+    /// path an unprivileged `akh` CLI takes when probing a root akhomed
+    /// LaunchDaemon. Reporting that as dead made the client delete the live
+    /// daemon's PID file.
+    #[cfg(unix)]
+    #[test]
+    fn process_owned_by_another_user_counts_as_alive() {
+        // SAFETY: argument-less credential read.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // as root the probe succeeds outright; nothing to distinguish
+        }
+        assert!(
+            process_alive(1),
+            "pid 1 is root-owned and always running; EPERM must not read as dead"
+        );
+    }
+
+    /// Only ESRCH means dead.
+    #[cfg(unix)]
+    #[test]
+    fn a_pid_that_does_not_exist_counts_as_dead() {
+        // Well above any real pid; `kill` returns ESRCH rather than EPERM.
+        assert!(
+            !process_alive(0x7FFF_FFFE),
+            "a nonexistent pid must be reported dead so stale PID files are cleaned up"
+        );
+    }
+
     /// advertised socket and confirms the listener is accepting.
     #[cfg(unix)]
     #[test]
