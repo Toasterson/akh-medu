@@ -310,9 +310,20 @@ echo "loaded. verify with:"
 echo "  sudo launchctl print system/$LABEL | grep -E 'state|pid|last exit'"
 echo "  tail -f /var/log/akhomed.out.log"
 echo
-echo "REMAINING MANUAL STEP: set the executor to drop privilege, in each akh's config:"
-echo "  [exec]"
-echo "  kind = \"local-drop\""
-echo "  user = \"$EXEC_USER\""
-echo "  workdir = \"$USER_HOME/ws\""
-echo "Until that is set, [exec] defaults to in-process and commands run as ROOT."
+# The executor policy is HOST-level (daemon config.toml [exec]) — executors are
+# host properties and must not travel with per-akh configs. Verify it is set;
+# without it, every workspace on this root daemon executes as ROOT.
+DAEMON_CFG="$SUPPORT/config.toml"
+[ "$AKH_PATHS_MODE" = "home" ] && DAEMON_CFG="$USER_HOME/.config/akh-medu/config.toml"
+if grep -q '^\[exec\]' "$DAEMON_CFG" 2>/dev/null; then
+  echo "host [exec] policy: present in $DAEMON_CFG"
+else
+  echo "WARNING: no host-level [exec] in $DAEMON_CFG."
+  echo "  This daemon runs as root; without a host executor policy, any"
+  echo "  workspace lacking its own [exec] runs commands AS ROOT. Add:"
+  echo "    [exec]"
+  echo "    kind = \"local-drop\""
+  echo "    user = \"$EXEC_USER\""
+  echo "    workdir = \"$USER_HOME/ws\""
+  echo "  then restart: sudo launchctl kickstart -k system/$LABEL"
+fi
