@@ -54,9 +54,15 @@ BIN_SRC="${BIN_SRC:-$(cd "$(dirname "$0")/.." && pwd)/target/release/akhomed}"
 # The user commands run as, and whose config/state the daemon uses. Defaults to
 # the owner of the invoking sudo session, which is almost always right.
 EXEC_USER="${SUDO_USER:-}"
+# Workspaces the daemon brings up at boot. Kept as a flag rather than hardcoded
+# because relocating an akh between hosts (ADR 049) means changing exactly this
+# list on two machines, and editing an installer to move an akh is how the two
+# ends drift apart.
+AUTO_START="${AKH_AUTO_START:-thoth-mac,gemma-mac}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --user) EXEC_USER="$2"; shift 2 ;;
+    --autostart) AUTO_START="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -236,7 +242,7 @@ cat > "$PLIST" <<PLISTEOF
         <key>AKH_NLU_LLM</key>
         <string>0</string>
         <key>AKH_AUTO_START</key>
-        <string>thoth-mac,gemma-mac</string>
+        <string>$AUTO_START</string>
         <!-- The executor backends log under the akh::backend::* target, not
              akh_medu::backend::* (see build_local_drop_backend in
              src/bin/akhomed.rs). Naming the crate path here instead silently
