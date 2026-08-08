@@ -13,13 +13,14 @@
 # (minimal profile) + sccache, baked. The `admin` job user has passwordless
 # sudo. Rust is on PATH; protoc and the ssl headers are NOT baked.
 #
-# SCOPE — deliberately identical to .forgejo/workflows/ci.yml `check-seshat`:
-# the full akh-medu workspace release build OOM-kills rustc on the Solstice
-# runner VMs, so CI checks the seshat crate only (default features: includes
-# `embedding`, excludes the memory-heavy `synthesis` candle feature). Keep the
-# two lanes at the SAME scope: a native verdict must never be red for work the
-# Actions lane would call green, or the CI-red loop starts parking work items
-# on phantom failures again. Widen both lanes together or neither.
+# SCOPE — mirrors .forgejo/workflows/ci.yml: seshat + root crate check + lib
+# tests. The full akh-medu workspace *release* build OOM-kills rustc on
+# the Solstice runner VMs, but `cargo check` only type-checks (no codegen, no
+# linking) so peak RSS is a fraction of a release build. Memory is constrained
+# with CARGO_BUILD_JOBS=1 and CARGO_PROFILE_DEV_DEBUG=0. Keep the two lanes at
+# the SAME scope: a native verdict must never be red for work the Actions lane
+# would call green, or the CI-red loop starts parking work items on phantom
+# failures again. Widen both lanes together or neither.
 set -euo pipefail
 
 # The image bakes CARGO_HOME=/opt/rust/cargo (root-owned); jobs run as an
@@ -62,5 +63,22 @@ echo "=== cargo check -p seshat (default features) ==="
 # CARGO_BUILD_JOBS=2 mirrors ci.yml — parallel rustc on the CI VM profile
 # swaps/OOMs above this.
 CARGO_BUILD_JOBS=2 cargo check -p seshat
+
+echo "=== cargo check --features server (root crate) ==="
+# This is the check that actually matters for agent code. cargo check only
+# type-checks (no codegen/linking) so peak RSS is far below a release build.
+# CARGO_BUILD_JOBS=1 serializes rustc; CARGO_PROFILE_DEV_DEBUG=0 strips
+# debug info (large RSS contributor). sccache is the global wrapper on the
+# build hosts; RUSTC_WRAPPER is set explicitly for clarity.
+export CARGO_BUILD_JOBS=1
+export CARGO_PROFILE_DEV_DEBUG=0
+export RUSTC_WRAPPER=sccache
+sccache --show-stats || true
+cargo check --features server
+
+echo "=== cargo test --features postgres --lib ==="
+# Use postgres (not server) to avoid ENOSPC from linking the enormous akhomed
+# binary. --lib skips binary targets, testing only the library crate.
+cargo test --features postgres --lib
 
 echo "=== done: native lane green at Actions-lane scope ==="

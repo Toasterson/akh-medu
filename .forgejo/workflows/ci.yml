@@ -1,10 +1,38 @@
 name: CI
-on: [push, pull_request]
+# Each event is claimed by exactly one lane, so a commit never runs the same
+# job twice.
+#
+# `on: [push, pull_request]` fired BOTH events for every push to a PR branch,
+# so each commit started two identical copies of every job. With five jobs
+# that is ten concurrent runs per commit, all contending for the same Solstice
+# runner pool on archibald (16 cores, also hosting Forgejo, the akh daemons
+# and the Anima runners). The duplicates did not fail on their merits — they
+# starved. Measured on 96b255d: `check-akh-medu (push)` succeeded in 38m33s
+# while `check-akh-medu (pull_request)` — same job, same commit, same code —
+# failed after 1h3m42s. Job durations across the branch climbed monotonically
+# with contention: 18m → 20m → 32m → 38m → 49m → 1h3m → 1h18m.
+#
+# Those phantom timeouts are what feeds Anima's CI-red corrective loop, which
+# parks a work item after three strikes. Halving the load is therefore a
+# correctness fix for the signal, not just a speed optimisation: a lane that
+# times out under its own duplicate is not evidence of anything.
+#
+# Feature branches are covered by the pull_request lane (Anima opens a PR for
+# every work item, and the ci_green exit bar binds to the PR head). main and
+# develop are covered by the push lane, which is the one that publishes the
+# seshd image and the Helm chart.
+#
+# Deliberately no `concurrency:` block — it requires ${{ github.* }} expression
+# support, which Solstice evaluates inconsistently (see the resolve-branch.sh
+# note on docker-seshd below). This change needs no expression support at all.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
 
 jobs:
-  # Scoped to the seshat crate — the full akh-medu workspace release build
-  # OOM-kills rustc on the Solstice runner. Broader test/clippy/release-build
-  # coverage can return once the codebase is lighter or the runner is bigger.
+  # Seshat crate type-check. Default features only (includes `embedding`;
+  # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
   check-seshat:
     runs-on: ubuntu-22.04
     steps:
@@ -21,9 +49,82 @@ jobs:
       - name: cargo check -p seshat
         run: |
           . "$HOME/.cargo/env"
-          # Default features only (includes `embedding`; excludes the memory-
-          # heavy `synthesis` candle feature which OOMs the runner).
           CARGO_BUILD_JOBS=2 cargo check -p seshat
+
+  # Root akh-medu crate type-check with --features server.
+  #
+  # This is the job that actually verifies the agent code compiles. Previously
+  # CI only built the seshat sibling crate, so "CI green" was meaningless for
+  # the ~90% of the codebase that lives in src/ (agent, ACP, backend, message,
+  # akhomed binary, etc.). Multiple PRs merged with hard compile errors because
+  # no CI step ever attempted the build.
+  #
+  # The original workflow dodged the root crate because a full *release* build
+  # OOM-killed the runner. `cargo check` only type-checks (no codegen, no
+  # linking) so peak RSS is a fraction of a release build. We further constrain
+  # memory with:
+  #   CARGO_BUILD_JOBS=1       — serialize rustc invocations
+  #   CARGO_PROFILE_DEV_DEBUG=0 — strip debug info (large RSS contributor)
+  #   RUSTC_WRAPPER=sccache    — cache dependency compilation across runs
+  #                              (sccache is the global rustc wrapper on the
+  #                              build hosts; this just makes it explicit)
+  #
+  # Do not promote the repository's existing warning baseline to errors here:
+  # that made clean branches red after the type-check had already passed. A
+  # warning-denying clippy gate can be added once main itself is warning-free.
+  check-akh-medu:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: cargo check --features server
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+            sccache --show-stats || true
+          fi
+          cargo check --features server
+
+  # Library tests for the root crate. Uses the `postgres` feature (which pulls
+  # in akhomed-store + tokio) rather than the full `server` feature set (which
+  # adds ACP, OTel, remote-executor) to avoid the ENOSPC link failure observed
+  # with `--features server --lib` on dev machines — the akhomed binary is
+  # enormous and linking it exhausts disk. `--lib` skips binary targets
+  # entirely, testing only the library crate.
+  test-akh-medu:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: cargo test --features postgres --lib
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+            sccache --show-stats || true
+          fi
+          cargo test --features postgres --lib
 
   docker-seshd:
     runs-on: ubuntu-22.04
