@@ -135,6 +135,60 @@ struct SnapshotTicker {
 }
 
 /// Capture + persist one snapshot of `name`'s agent (Phase 38c).
+/// Build the privilege-dropping executor for a workspace whose `[exec]` selects
+/// `kind = "local-drop"` (Phase 48b / ADR 082).
+///
+/// Fails the workspace rather than degrading to [`InProcessBackend`]. That
+/// choice is the whole point of the backend: silently executing as akhomed's
+/// own principal what an operator asked to run as `build` would hand out the
+/// daemon's privilege — under a config that claims otherwise. A misconfigured
+/// drop must stop the akh from starting, loudly, at start-up rather than at the
+/// first tool call.
+///
+/// Logs the resolved principal once per workspace so an operator can see which
+/// akh executes as whom without reading config.
+fn build_local_drop_backend(
+    akh_config: &akh_medu::akh_config::AkhConfig,
+    workspace: &str,
+) -> Result<Arc<dyn akh_medu::backend::Backend>, String> {
+    use akh_medu::backend::LocalDropBackend;
+    use akh_medu::fs::LocalFs;
+
+    let cfg = akh_config
+        .to_local_drop_config()
+        .expect("is_local_drop_exec implies Some");
+    let user = cfg.user.clone();
+
+    // A configured `workdir` is both the default cwd and the advisory
+    // read+write root. With none configured the file verbs fail closed
+    // (`LocalFs::denied`) rather than exposing the whole host: the daemon runs
+    // privileged, so an unbounded root here would be the file-side equivalent
+    // of not dropping at all.
+    let fs: Arc<dyn akh_medu::fs::Filesystem> = match cfg.workdir.as_ref() {
+        Some(dir) => Arc::new(LocalFs::sandbox(dir.clone())),
+        None => Arc::new(LocalFs::denied()),
+    };
+
+    let backend = LocalDropBackend::new(cfg, fs).map_err(|e| {
+        format!(
+            "workspace {workspace}: local-drop exec backend could not bind to user \
+             `{user}`: {e}"
+        )
+    })?;
+
+    tracing::info!(
+        target: "akh::backend::local_drop",
+        workspace = %workspace,
+        user = %backend.user(),
+        uid = backend.uid(),
+        gid = backend.gid(),
+        drops_privilege = backend.drops_privilege(),
+        "workspace exec runs as a dropped principal"
+    );
+
+    Ok(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+}
+
 ///
 /// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
@@ -1847,6 +1901,9 @@ impl ServerState {
                     use akh_medu::backend::remote::RemoteBackend;
                     match &akh_config.exec {
                         ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::LocalDrop { .. } => {
+                            Some(build_local_drop_backend(&akh_config, &name)?)
+                        }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             let rbc = akh_config
                                 .to_remote_backend_config()
@@ -1884,6 +1941,9 @@ impl ServerState {
                     use akh_medu::akh_config::ExecBackendConfig;
                     match &akh_config.exec {
                         ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::LocalDrop { .. } => {
+                            Some(build_local_drop_backend(&akh_config, &name)?)
+                        }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
                             // but the operator asked for it. Refuse to start

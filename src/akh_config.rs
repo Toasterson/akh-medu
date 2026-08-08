@@ -196,6 +196,36 @@ pub enum ExecBackendConfig {
     /// (`/bin/sh -c` on the daemon host). Byte-identical to pre-48c-wiring
     /// behaviour.
     InProcess,
+    /// Run executor-facing tools on **this** host, but as a distinct, less
+    /// privileged OS user ([`crate::backend::LocalDropBackend`], Phase 48b).
+    ///
+    /// This is the deployment for a system daemon: akhomed keeps the privilege
+    /// it needs for its own job (binding ports, reading system-owned config and
+    /// TLS material, surviving logout) while every command it executes has its
+    /// uid, gid and supplementary groups replaced first. Without it, a
+    /// root-owned akhomed hands root to every tool call.
+    ///
+    /// The user must already exist — akh-medu never provisions principals.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "local-drop"
+    /// user = "toasty"
+    /// workdir = "/Users/toasty/akh-workspaces"
+    /// ```
+    LocalDrop {
+        /// Existing OS user every executed command runs as. Refused if it
+        /// resolves to root, which would make the drop a no-op.
+        user: String,
+        /// Default cwd for executed commands and the advisory read+write root
+        /// for the file verbs (ADR 082 §8: advisory only — the OS is the real
+        /// boundary). Omit to inherit akhomed's cwd and filesystem sandbox.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<std::path::PathBuf>,
+        /// Shell used to interpret command lines. Defaults to `/bin/sh`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<std::path::PathBuf>,
+    },
     /// Run executor-facing tools on a remote host over SSH
     /// (`crate::backend::remote::RemoteBackend`, Phase 48c / ADR 082).
     Remote {
@@ -656,6 +686,34 @@ impl AkhConfig {
     /// pass it as the agent's `backend_override` (Phase 48c wiring).
     pub fn is_remote_exec(&self) -> bool {
         matches!(self.exec, ExecBackendConfig::Remote { .. })
+    }
+
+    /// Whether this akh's `[exec]` config selects the privilege-dropping local
+    /// executor (Phase 48b).
+    pub fn is_local_drop_exec(&self) -> bool {
+        matches!(self.exec, ExecBackendConfig::LocalDrop { .. })
+    }
+
+    /// Translate the `[exec]` section into the `LocalDropConfig` the daemon
+    /// hands to `LocalDropBackend::new`. Returns `None` unless
+    /// `[exec] kind = "local-drop"` is set.
+    pub fn to_local_drop_config(&self) -> Option<crate::backend::LocalDropConfig> {
+        let ExecBackendConfig::LocalDrop {
+            user,
+            workdir,
+            shell,
+        } = &self.exec
+        else {
+            return None;
+        };
+        let mut cfg = crate::backend::LocalDropConfig::new(user.clone());
+        if let Some(dir) = workdir {
+            cfg = cfg.with_workdir(dir.clone());
+        }
+        if let Some(sh) = shell {
+            cfg = cfg.with_shell(sh.clone());
+        }
+        Some(cfg)
     }
 
     /// Translate the `[exec]` section into the `RemoteBackendConfig` the
@@ -1223,5 +1281,67 @@ mod tests {
     fn to_remote_backend_config_none_for_in_process() {
         let cfg = AkhConfig::with_name("thoth");
         assert!(cfg.to_remote_backend_config().is_none());
+    }
+
+    /// The exact TOML shape an operator writes, parsed end to end.
+    ///
+    /// Worth a test of its own because the failure mode is silent: a
+    /// mis-tagged `[exec]` section does not error, it falls back to
+    /// `InProcess` — which under a root daemon means every command runs as
+    /// root while the config says otherwise.
+    #[test]
+    fn local_drop_exec_section_parses_from_operator_toml() {
+        let toml = r#"
+name = "thoth-mac"
+
+[exec]
+kind = "local-drop"
+user = "toasty"
+workdir = "/Users/toasty/ws"
+"#;
+        let cfg: AkhConfig = toml::from_str(toml).expect("operator TOML must parse");
+        assert!(
+            cfg.is_local_drop_exec(),
+            "`kind = \"local-drop\"` must select LocalDrop, not fall back to InProcess"
+        );
+        let drop = cfg
+            .to_local_drop_config()
+            .expect("is_local_drop_exec implies Some");
+        assert_eq!(drop.user, "toasty");
+        assert_eq!(
+            drop.workdir.as_deref(),
+            Some(std::path::Path::new("/Users/toasty/ws"))
+        );
+        // Unset `shell` must default rather than deserialize to empty.
+        assert_eq!(drop.shell, std::path::Path::new("/bin/sh"));
+    }
+
+    #[test]
+    fn exec_kind_is_kebab_case_on_the_wire() {
+        // Guards the serde rename: `LocalDrop` must round-trip as `local-drop`,
+        // which is what the docs and the installer script tell operators to write.
+        let cfg = AkhConfig {
+            exec: ExecBackendConfig::LocalDrop {
+                user: "build".into(),
+                workdir: None,
+                shell: None,
+            },
+            ..AkhConfig::with_name("thoth")
+        };
+        let rendered = toml::to_string(&cfg).expect("config must serialize");
+        assert!(
+            rendered.contains(r#"kind = "local-drop""#),
+            "expected kebab-case tag in:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn missing_exec_section_still_means_in_process() {
+        // The default must not drift: an akh.toml with no [exec] is the
+        // overwhelming majority, and must keep byte-identical behaviour.
+        let cfg: AkhConfig = toml::from_str("name = \"thoth\"\n").expect("must parse");
+        assert!(!cfg.is_local_drop_exec());
+        assert!(!cfg.is_remote_exec());
+        assert!(cfg.to_local_drop_config().is_none());
     }
 }
