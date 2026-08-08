@@ -141,6 +141,12 @@ RUN apt-get update && \
       git curl build-essential pkg-config libssl-dev nodejs npm \
       protobuf-compiler libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/* && \
+    # Debian puts well-known protos at /usr/include/google/protobuf; symlink
+    # them into /usr/local/include so protoc's default search path resolves
+    # them there too (acceptance: /usr/local/include/google/protobuf/
+    # timestamp.proto must exist).
+    mkdir -p /usr/local/include/google && \
+    ln -sfn /usr/include/google/protobuf /usr/local/include/google/protobuf && \
     curl -fsSL https://sh.rustup.rs | sh -s -- -y \
       --default-toolchain stable --profile minimal -c rustfmt -c clippy && \
     chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" && \
