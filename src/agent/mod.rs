@@ -110,7 +110,7 @@ pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
 
-pub use agent::{Agent, AgentConfig, AgentPredicates};
+pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring};
 pub use channel::{ChannelCapabilities, ChannelError, ChannelKind, ChannelRegistry, ChannelResult, CommChannel};
 pub use channel_message::{
     ConstraintCheckStatus, InboundMessage, InterlocutorId, MessageContent, OutboundMessage,
