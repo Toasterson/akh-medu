@@ -16,15 +16,37 @@ spec:
     metadata:
       labels:
         {{- include "akh-medu.akhomed.selectorLabels" . | nindent 8 }}
+      {{- if or .Values.akhomed.configToml .Values.akhomed.workspaces }}
+      annotations:
+        # Force a rollout when the config ConfigMap content changes. A
+        # ConfigMap volume update propagates to the mounted files eventually
+        # (kubelet sync period), but config.toml is mounted via `subPath`
+        # (see the volumeMount comment below) which NEVER sees ConfigMap
+        # updates at all — the file is copied in at pod creation and frozen.
+        # Bumping this annotation on every content change is what actually
+        # rolls the pod.
+        checksum/akh-config: {{ include (print $.Template.BasePath "/akhomed-config-configmap.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.akhomed.terminationGracePeriodSeconds | default 30 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # The runtime image declares `USER akh` by NAME. The kubelet cannot
+      # verify a non-numeric user is non-root, so `runAsNonRoot: true` alone
+      # fails the container with "image has non-numeric user (akh), cannot
+      # verify user is non-root". Pin the numeric ids explicitly.
+      #
+      # akh is uid 999 / gid 999 in the image (`id akh` in
+      # docker/akhomed.Dockerfile's runtime stage). fsGroup MUST match that
+      # gid or the mounted PVCs are group-owned by a group the process is not
+      # in, and akhomed cannot write its own data volume.
       securityContext:
         runAsNonRoot: true
-        fsGroup: 1000
+        runAsUser: {{ .Values.akhomed.securityContext.runAsUser | default 999 }}
+        runAsGroup: {{ .Values.akhomed.securityContext.runAsGroup | default 999 }}
+        fsGroup: {{ .Values.akhomed.securityContext.fsGroup | default 999 }}
       containers:
         - name: akhomed
           image: {{ include "akh-medu.akhomed.image" . }}
@@ -60,6 +82,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # Extras render AFTER the built-ins above so `$(VAR)` references
+            # inside an extraEnv entry can expand an earlier extraEnv entry
+            # in list order (e.g. DATABASE_URL composed from a Secret-injected
+            # password: PGPASSWORD from secretKeyRef, then DATABASE_URL =
+            # "postgres://user:$(PGPASSWORD)@host/db" referencing it).
+            {{- with .Values.akhomed.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.akhomed.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data
@@ -81,6 +115,28 @@ spec:
               subPath: known_hosts
               readOnly: true
             {{- end }}
+            {{- end }}
+            {{- if .Values.akhomed.configToml }}
+            # subPath mounts never see ConfigMap updates — the file is copied
+            # in once at pod creation, not kept live-synced like a whole-dir
+            # mount. The checksum/akh-config annotation on the pod template
+            # above is what actually rolls the pod on a content change.
+            - name: akh-config
+              mountPath: /data/config/akh-medu/config.toml
+              subPath: config.toml
+              readOnly: true
+            {{- end }}
+            {{- if .Values.akhomed.workspaces }}
+            # Whole-dir mount, so it stays live-synced — but that also makes
+            # workspaces/ read-only as a whole. Workspace definitions here are
+            # declarative; imperative `akh workspace create` against a
+            # k8s-resident akhomed is not supported while this is mounted.
+            - name: akh-workspaces
+              mountPath: /data/config/akh-medu/workspaces
+              readOnly: true
+            {{- end }}
+            {{- with .Values.akhomed.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
           {{- with .Values.akhomed.probes.liveness }}
           livenessProbe:
@@ -131,6 +187,29 @@ spec:
             name: {{ include "akh-medu.fullname" . }}-akhomed-known-hosts
             defaultMode: 0o444
         {{- end }}
+        {{- end }}
+        {{- if .Values.akhomed.configToml }}
+        - name: akh-config
+          configMap:
+            name: {{ include "akh-medu.fullname" . }}-akhomed-config
+            items:
+              - key: config.toml
+                path: config.toml
+        {{- end }}
+        {{- if .Values.akhomed.workspaces }}
+        - name: akh-workspaces
+          configMap:
+            name: {{ include "akh-medu.fullname" . }}-akhomed-config
+            items:
+              # Strips the "ws-" prefix (see akhomed-config-configmap.yaml)
+              # so each key lands as workspaces/<name>.toml.
+              {{- range $name, $toml := .Values.akhomed.workspaces }}
+              - key: ws-{{ $name }}.toml
+                path: {{ $name }}.toml
+              {{- end }}
+        {{- end }}
+        {{- with .Values.akhomed.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.akhomed.nodeSelector }}
       nodeSelector:

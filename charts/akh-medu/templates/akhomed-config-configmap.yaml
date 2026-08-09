@@ -1,0 +1,32 @@
+{{- if and .Values.akhomed.enabled (or .Values.akhomed.configToml .Values.akhomed.workspaces) }}
+# Declarative config surface for a k8s-resident akhomed: the host-wide
+# config.toml ([daemon]/[acp]/[postgres] — daemon-wide settings, not
+# per-workspace) plus per-akh workspace TOMLs. akhomed resolves its config
+# dir from XDG_CONFIG_HOME (set to /data/config in the deployment env), so
+# these keys land at /data/config/akh-medu/{config.toml,workspaces/*.toml}.
+#
+# Secrets (DATABASE_URL, OLLAMA_CLOUD_KEY, ...) must NOT go in either value
+# below — ConfigMaps are neither encrypted nor access-restricted the way
+# Secrets are. Inject those via `akhomed.extraEnv` sourced from a Secret
+# instead; akhomed's config loader already lets env override config.toml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-akhomed-config
+  labels:
+    {{- include "akh-medu.akhomed.labels" . | nindent 4 }}
+data:
+  {{- if .Values.akhomed.configToml }}
+  config.toml: |
+    {{- .Values.akhomed.configToml | nindent 4 }}
+  {{- end }}
+  {{- /*
+  The "ws-" prefix keeps workspace keys from ever colliding with the
+  "config.toml" key above; the volume mount in akhomed-deployment.yaml
+  strips it back off so each file lands as workspaces/<name>.toml.
+  */}}
+  {{- range $name, $toml := .Values.akhomed.workspaces }}
+  ws-{{ $name }}.toml: |
+    {{- $toml | nindent 4 }}
+  {{- end }}
+{{- end }}
