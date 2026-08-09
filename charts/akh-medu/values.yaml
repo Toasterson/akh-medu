@@ -25,6 +25,13 @@ akhomed:
     type: ClusterIP
     port: 8201
 
+  # Numeric uid/gid overrides for the pod securityContext. Defaults (999 /
+  # 999 / 999) match the `akh` user baked into the runtime image — see the
+  # comment on `securityContext` in akhomed-deployment.yaml for why these
+  # must be numeric rather than the image's `USER akh` name. Override only if
+  # you rebuild the image with a different uid/gid.
+  securityContext: {}
+
   # ACP transport — the daemon's only inbound surface (ADR-061). TCP must bind
   # 0.0.0.0 (not the config default 127.0.0.1) so the kubelet probe and the
   # Service can reach it. Injected as AKH_ACP_TCP_{PORT,BIND} env (see deployment).
@@ -175,6 +182,26 @@ akhomed:
     # russh default `~/.ssh/known_hosts` is used instead — fine when HOME
     # is set, but typically you want an explicit known_hosts in a pod).
     knownHosts: ""
+
+  # ── Declarative config (akhomed-config-configmap.yaml) ───────────────────
+  # A k8s-resident akhomed has no operator attached to run `akh workspace
+  # create` / edit config.toml by hand, so the host config and workspace
+  # definitions have to arrive declaratively. Both render into one ConfigMap
+  # mounted under $XDG_CONFIG_HOME/akh-medu (see the deployment's env). Only
+  # non-secret config belongs here — DATABASE_URL, OLLAMA_CLOUD_KEY etc. go
+  # through `extraEnv` sourced from a Secret, never inlined in these strings.
+  configToml: ""      # host-wide config.toml content ([daemon]/[acp]/[postgres] sections)
+  workspaces: {}      # map: workspace name -> workspace TOML content, lands at
+                       # /data/config/akh-medu/workspaces/<name>.toml (read-only)
+
+  # ── Generic passthroughs ──────────────────────────────────────────────────
+  # Escape hatches for cases the chart doesn't model explicitly (e.g. a
+  # DATABASE_URL composed from a Secret-injected password, or an extra
+  # sidecar volume). Prefer the typed values above when they cover your case.
+  extraEnv: []           # []EnvVar, appended after the built-in env vars
+  extraEnvFrom: []        # []EnvFromSource
+  extraVolumes: []        # []Volume, appended to the pod's volumes
+  extraVolumeMounts: []   # []VolumeMount, appended to the container's volumeMounts
 
 # ── seshd (Seshat's Archive) ──────────────────────────────────────────────
 seshd:
