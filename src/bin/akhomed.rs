@@ -2422,6 +2422,10 @@ impl ServerState {
             .unwrap_or_default();
 
         let pool = self.pg_pool();
+        let global_cfg = self.config.read().await;
+        let seshat_upstream = global_cfg.upstreams.seshat.clone();
+        let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
+        drop(global_cfg);
         let handle = tokio::task::spawn(async move {
             run_daemon_task(
                 shared_agent,
@@ -2432,6 +2436,8 @@ impl ServerState {
                 daemon_ws_name,
                 task_handle,
                 pool,
+                seshat_upstream,
+                heka_url,
             )
             .await;
         });
@@ -2563,6 +2569,10 @@ async fn run_daemon_task(
     // ADR 091: Postgres pool for the sleep-cycle transcript-harvest phase.
     // `None` in local-only mode — harvest is then a no-op.
     pool: Option<Arc<akhomed_store::DatabaseConnection>>,
+    // `[upstreams.seshat]`, for the seshat_curation task. `None` skips it.
+    seshat_upstream: Option<akh_medu::config::UpstreamEndpointConfig>,
+    // `[heka]` connection URL, for the heka_curation task. `None` skips it.
+    heka_url: Option<String>,
 ) {
     use akh_medu::agent::AgentDaemon;
 
@@ -2574,6 +2584,12 @@ async fn run_daemon_task(
     if let Some(pool) = pool {
         let akh_id = akh_medu::wal::akh_id_for(&ws_name);
         daemon = daemon.with_db((*pool).clone(), akh_id);
+    }
+    if let Some(seshat_upstream) = seshat_upstream {
+        daemon = daemon.with_seshat_upstream(seshat_upstream);
+    }
+    if let Some(heka_url) = heka_url {
+        daemon = daemon.with_heka(heka_url);
     }
 
     if let Err(e) = daemon.run().await {
@@ -3506,6 +3522,10 @@ async fn main() {
                     state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
                     let pool = state.pg_pool();
+                    let global_cfg = state.config.read().await;
+                    let seshat_upstream = global_cfg.upstreams.seshat.clone();
+                    let heka_url = global_cfg.heka.as_ref().map(|h| h.url.clone());
+                    drop(global_cfg);
                     let handle = tokio::task::spawn(async move {
                         run_daemon_task(
                             shared_agent,
@@ -3516,6 +3536,8 @@ async fn main() {
                             daemon_ws,
                             task_handle,
                             pool,
+                            seshat_upstream,
+                            heka_url,
                         )
                         .await;
                     });

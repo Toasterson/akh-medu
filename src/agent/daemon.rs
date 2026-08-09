@@ -18,6 +18,7 @@ use super::Agent;
 use super::error::AgentResult;
 use crate::akh_config::AutonomyConfig;
 use crate::client::DaemonStatus;
+use crate::config::UpstreamEndpointConfig;
 use crate::message::AkhMessage;
 
 /// Current unix timestamp in seconds.
@@ -27,6 +28,101 @@ fn now_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+/// Assert a "singleton" fact `(subject, predicate, value)` into the KG,
+/// retracting any previous value for the same `(subject, predicate)` first
+/// so re-assertion **updates** the fact rather than accumulating a trail of
+/// stale ones.
+///
+/// [`crate::graph::index::KnowledgeGraph::insert_triple`] only dedupes when
+/// the *entire* triple (subject, predicate, *and* object) is identical — an
+/// object literal that changes tick to tick (a chunk count, a timestamp)
+/// gets a fresh object symbol every time, so without the explicit retract
+/// here a curation pass would leave behind
+/// `(seshat-archive, has-pending-embeddings, "3")`,
+/// `(seshat-archive, has-pending-embeddings, "5")`, ... forever.
+///
+/// Best-effort: engine errors are logged at WARN and swallowed — this is
+/// background bookkeeping, not worth failing an otherwise-successful
+/// curation pass over.
+fn assert_singleton_fact(engine: &crate::engine::Engine, subject: &str, predicate: &str, value: &str) {
+    let s = match engine.resolve_or_create_entity(subject) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, subject, "daemon: failed to resolve curation subject symbol");
+            return;
+        }
+    };
+    let p = match engine.resolve_or_create_relation(predicate) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, predicate, "daemon: failed to resolve curation predicate symbol");
+            return;
+        }
+    };
+    let o = match engine.resolve_or_create_entity(value) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, value, "daemon: failed to resolve curation value symbol");
+            return;
+        }
+    };
+
+    // Retract any prior value(s) for this (subject, predicate) that differ
+    // from the new one — supersede rather than accumulate. A no-op when the
+    // value hasn't changed since the last pass (the matching triple is left
+    // alone, and `add_triple` below dedupes it).
+    for existing in engine.triples_from(s) {
+        if existing.predicate == p
+            && existing.object != o
+            && let Err(e) = engine.remove_triple(s, p, existing.object)
+        {
+            tracing::warn!(error = %e, subject, predicate, "daemon: failed to retract stale curation fact");
+        }
+    }
+
+    if let Err(e) = engine.add_triple(&crate::graph::Triple::new(s, p, o)) {
+        tracing::warn!(error = %e, subject, predicate, value, "daemon: failed to assert curation fact");
+    }
+}
+
+/// Every daemon task name consulted via [`AgentDaemon::task_enabled`].
+///
+/// Task names are free-form strings — [`AutonomyConfig::task_enabled`]
+/// silently falls back to the akh's master `[autonomy] enabled` switch on an
+/// unrecognized one rather than erroring, so a typo in a new
+/// `tokio::select!` arm (`self.task_enabled("seshat_curaton")`, say) would
+/// otherwise fail quietly. **Extend this list whenever a new arm in
+/// [`AgentDaemon::run`] gates itself with `task_enabled(..)`.** Purely
+/// documentation/test fixture — has no runtime effect on gating.
+///
+/// Does *not* include `"librarian"`: that arm is gated by the
+/// `AKH_LIBRARIAN` env var instead, so it never consults `[autonomy]`.
+// Only consumed by `tests::known_task_names_includes_curation_tasks` today —
+// a documentation/test fixture, not runtime-referenced, hence `dead_code`
+// is expected outside `#[cfg(test)]` builds.
+#[allow(dead_code)]
+const KNOWN_TASK_NAMES: &[&str] = &[
+    "equivalence",
+    "reflection",
+    "consolidation",
+    "schema_discovery",
+    "rule_inference",
+    "gap_analysis",
+    "idle_cycle",
+    "continuous_learning",
+    "goal_generation",
+    "sleep_cycle",
+    "knowledge_extraction",
+    "bridge_training",
+    "openclaw_sync",
+    "knowledge_elicitation",
+    "kg_compaction",
+    "delegation",
+    "relation_enrichment",
+    "seshat_curation",
+    "heka_curation",
+];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -124,6 +220,21 @@ pub struct DaemonConfig {
     /// always-on harvest phase's pure KG bookkeeping) and a Postgres store is
     /// configured (turn material lives only in the WAL).
     pub librarian_interval: Duration,
+    /// Seshat's Archive curation-pass interval (default: 6 h).
+    ///
+    /// Surveys the configured `[upstreams.seshat]` endpoint's corpus status,
+    /// forces an embedding pass when chunks are pending, and asserts the
+    /// resulting counts into the KG. Gated by `task_enabled("seshat_curation")`
+    /// (P5 autonomy), unlike `librarian_interval` which is env-gated.
+    pub seshat_curation_interval: Duration,
+    /// Heka long-term-memory store curation-pass interval (default: 24 h).
+    ///
+    /// v1 is surveillance-only: reports unembedded-chunk and untagged-drawer
+    /// counts from the configured `[heka]` Postgres database into the KG.
+    /// Real curation (backfill embeddings, tag drawers, prune) needs the
+    /// Phase 42 service layer, which doesn't exist yet. No-op without the
+    /// `postgres` feature or a `[heka]` section.
+    pub heka_curation_interval: Duration,
     /// Maximum OODA cycles (0 = unlimited).
     pub max_cycles: usize,
 }
@@ -151,6 +262,8 @@ impl Default for DaemonConfig {
             delegation_interval: Duration::from_secs(10),
             relation_enrichment_interval: Duration::from_secs(3600), // 60 min
             librarian_interval: Duration::from_secs(86400), // 24 hours
+            seshat_curation_interval: Duration::from_secs(21600), // 6 hours
+            heka_curation_interval: Duration::from_secs(86400), // 24 hours
             max_cycles: 0,
         }
     }
@@ -193,6 +306,21 @@ pub struct AgentDaemon {
     /// every other store-backed background task's local-only degradation.
     #[cfg(feature = "postgres")]
     db: Option<(akhomed_store::DatabaseConnection, akhomed_store::uuid::Uuid)>,
+    /// Seshat's Archive upstream endpoint, for `run_seshat_curation`. `None`
+    /// when no `[upstreams.seshat]` is configured — the task then no-ops.
+    /// Unconditional (unlike `db`/`heka_url`): `upstream_client` has no
+    /// Postgres dependency.
+    seshat_upstream: Option<UpstreamEndpointConfig>,
+    /// Heka Postgres URL, for `run_heka_curation`. `None` when no `[heka]`
+    /// section is configured — the task then no-ops.
+    #[cfg(feature = "postgres")]
+    heka_url: Option<String>,
+    /// Whether `run_heka_curation` has already WARNed about a nonzero
+    /// unembedded-chunk backlog. Reset to `false` once the backlog clears —
+    /// tracked so the WARN fires once per backlog episode instead of every
+    /// tick until the Phase 42 service layer can act on it.
+    #[cfg(feature = "postgres")]
+    heka_warned_unembedded: AtomicBool,
 }
 
 impl AgentDaemon {
@@ -209,6 +337,11 @@ impl AgentDaemon {
             autonomy: AutonomyConfig::default(),
             #[cfg(feature = "postgres")]
             db: None,
+            seshat_upstream: None,
+            #[cfg(feature = "postgres")]
+            heka_url: None,
+            #[cfg(feature = "postgres")]
+            heka_warned_unembedded: AtomicBool::new(false),
         }
     }
 
@@ -220,6 +353,11 @@ impl AgentDaemon {
 
     /// Whether a gated background task is enabled for this akh. Always-on infra
     /// tasks (persist, trigger evaluation) do not consult this.
+    ///
+    /// Task names are free-form strings ([`AutonomyConfig::task_enabled`]
+    /// falls back to the master switch on an unrecognized one, silently) —
+    /// see [`KNOWN_TASK_NAMES`] for the full registry consulted by this
+    /// method across every gated `tokio::select!` arm in [`Self::run`].
     fn task_enabled(&self, task: &str) -> bool {
         self.autonomy.task_enabled(task)
     }
@@ -265,6 +403,23 @@ impl AgentDaemon {
         akh_id: akhomed_store::uuid::Uuid,
     ) -> Self {
         self.db = Some((db, akh_id));
+        self
+    }
+
+    /// Attach the Seshat's Archive upstream endpoint, enabling
+    /// `run_seshat_curation`. Omit to leave that task a no-op. Unconditional
+    /// — no Postgres dependency, unlike `with_db`/`with_heka`.
+    pub fn with_seshat_upstream(mut self, upstream: UpstreamEndpointConfig) -> Self {
+        self.seshat_upstream = Some(upstream);
+        self
+    }
+
+    /// Attach the Heka Postgres connection URL, enabling the v1
+    /// surveillance-only `run_heka_curation` pass. Omit (no `[heka]`
+    /// section) to leave it a no-op.
+    #[cfg(feature = "postgres")]
+    pub fn with_heka(mut self, url: String) -> Self {
+        self.heka_url = Some(url);
         self
     }
 
@@ -323,6 +478,8 @@ impl AgentDaemon {
         let mut delegation_tick = interval(self.config.delegation_interval);
         let mut relation_enrichment_tick = interval(self.config.relation_enrichment_interval);
         let mut librarian_tick = interval(self.config.librarian_interval);
+        let mut seshat_curation_tick = interval(self.config.seshat_curation_interval);
+        let mut heka_curation_tick = interval(self.config.heka_curation_interval);
 
         tokio::task::block_in_place(|| {
             self.lock_agent().sink().emit(&AkhMessage::system(
@@ -469,6 +626,16 @@ impl AgentDaemon {
                     // `postgres` feature (turn material lives only in the WAL).
                     #[cfg(feature = "postgres")]
                     tokio::task::block_in_place(|| self.run_librarian_task());
+                }
+                _ = seshat_curation_tick.tick() => {
+                    if self.task_enabled("seshat_curation") {
+                        tokio::task::block_in_place(|| self.run_seshat_curation());
+                    }
+                }
+                _ = heka_curation_tick.tick() => {
+                    if self.task_enabled("heka_curation") {
+                        self.run_heka_curation().await;
+                    }
                 }
                 _ = self.wait_for_shutdown() => {
                     tokio::task::block_in_place(|| {
@@ -999,6 +1166,242 @@ impl AgentDaemon {
             }
             Err(e) => tracing::warn!(error = %e, "daemon: librarian pass failed"),
         }
+    }
+
+    /// Periodic Seshat's Archive curation pass.
+    ///
+    /// Surveys the configured `[upstreams.seshat]` endpoint's corpus status,
+    /// forces an embedding pass when chunks are pending, and asserts the
+    /// resulting counts into the KG so the akh can reason about its own
+    /// library. Gated by `task_enabled("seshat_curation")` — see
+    /// [`KNOWN_TASK_NAMES`].
+    ///
+    /// Deliberately **not** in v1: pushing KG summaries back into Seshat via
+    /// `seshat_ingest`. That tool appends to an ever-growing corpus with no
+    /// delete/dedupe support — doing this safely needs slug-idempotency
+    /// verified first (re-ingesting the same summary on every tick would
+    /// otherwise flood the archive).
+    fn run_seshat_curation(&self) {
+        let Some(cfg) = self.seshat_upstream.clone() else {
+            tracing::debug!("daemon: seshat curation skipped — no [upstreams.seshat] configured");
+            return;
+        };
+
+        use crate::upstream_client::UpstreamMcpClient;
+
+        // `UpstreamEndpointConfig::url` is a base; the `/mcp` transport path
+        // is appended here the same way `UpstreamMcpClient::new` does it, but
+        // with a longer timeout — `seshat_embed_now` over a real backlog can
+        // run well past the client's 30s default.
+        let base = cfg.url.trim_end_matches('/');
+        let client = UpstreamMcpClient::from_endpoint_with_timeout(
+            format!("{base}/mcp"),
+            cfg.resolved_auth(),
+            Duration::from_secs(120),
+        );
+
+        let status_text = match client.call_tool_text("seshat_status", serde_json::json!({})) {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: seshat_status call failed, skipping curation pass");
+                return;
+            }
+        };
+        let status: serde_json::Value = match serde_json::from_str(&status_text) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::debug!(error = %e, "daemon: seshat_status response was not valid JSON");
+                return;
+            }
+        };
+
+        let total_documents = status["total_documents"].as_u64().unwrap_or(0);
+        let total_chunks = status["total_chunks"].as_u64().unwrap_or(0);
+        let embedded_chunks = status["embedded_chunks"].as_u64().unwrap_or(0);
+        let pending_embedding = status["pending_embedding"].as_u64().unwrap_or(0);
+        let cached_microtheories = status["cached_microtheories"].as_u64().unwrap_or(0);
+
+        let mut chunks_processed = 0u64;
+        let mut embeddings_created = 0u64;
+        if pending_embedding > 0 {
+            match client.call_tool_text("seshat_embed_now", serde_json::json!({})) {
+                Ok(text) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        chunks_processed = v["chunks_processed"].as_u64().unwrap_or(0);
+                        embeddings_created = v["embeddings_created"].as_u64().unwrap_or(0);
+                    }
+                }
+                Err(e) => {
+                    // A seshd built without its `embedding` feature hard-errors
+                    // on every `seshat_embed_now` call — DEBUG (not WARN) so an
+                    // akh pointed at such a build doesn't spam its logs on every
+                    // curation tick.
+                    tracing::debug!(
+                        error = %e,
+                        "daemon: seshat_embed_now failed (upstream may be built without the `embedding` feature)"
+                    );
+                }
+            }
+        }
+
+        // Assert corpus stats into the KG so the akh can reason about its
+        // library. The engine Arc is cloned under a brief lock *after* all
+        // upstream I/O above has completed — never held across a network call.
+        let engine = { self.lock_agent().engine.clone() };
+        let now = now_secs().to_string();
+        assert_singleton_fact(
+            &engine,
+            "seshat-archive",
+            "has-document-count",
+            &total_documents.to_string(),
+        );
+        assert_singleton_fact(
+            &engine,
+            "seshat-archive",
+            "has-pending-embeddings",
+            &pending_embedding.to_string(),
+        );
+        assert_singleton_fact(&engine, "seshat-archive", "last-curated-at", &now);
+
+        if let Ok(agent) = self.agent.lock() {
+            agent.sink().emit(&AkhMessage::system(format!(
+                "[daemon:seshat_curation] {total_documents} doc(s), {embedded_chunks}/{total_chunks} \
+                 chunk(s) embedded, {pending_embedding} pending, {cached_microtheories} cached \
+                 microtheor{plural}; embed_now: +{chunks_processed} chunk(s), +{embeddings_created} \
+                 embedding(s)",
+                plural = if cached_microtheories == 1 { "y" } else { "ies" },
+            )));
+        }
+        tracing::info!(
+            total_documents,
+            total_chunks,
+            embedded_chunks,
+            pending_embedding,
+            cached_microtheories,
+            chunks_processed,
+            embeddings_created,
+            "daemon: seshat curation pass complete",
+        );
+    }
+
+    /// Periodic Heka long-term-memory store curation pass.
+    ///
+    /// **v1 is surveillance-only.** It reports unembedded-chunk and
+    /// untagged-drawer counts from the configured `[heka]` Postgres database
+    /// into the KG; it does not (yet) backfill embeddings, tag drawers, or
+    /// prune anything. Heka has no ingest/query/embed service today (Phase 42
+    /// hasn't landed) — there is nothing this pass could call to *act* on a
+    /// backlog even if it wanted to, so it only measures one.
+    ///
+    /// A thin dispatcher (mirroring `run_delegation_tick`): the real body
+    /// lives in `run_heka_curation_inner`, compiled only under the
+    /// `postgres` feature (raw SQL against `akhomed_store`'s sea_orm
+    /// connection type — see the branch's commit message for why this reuses
+    /// that instead of depending on the `heka` crate directly).
+    async fn run_heka_curation(&self) {
+        #[cfg(feature = "postgres")]
+        self.run_heka_curation_inner().await;
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn run_heka_curation_inner(&self) {
+        use akhomed_store::sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let Some(url) = self.heka_url.clone() else {
+            tracing::debug!("daemon: heka curation skipped — no [heka] configured");
+            return;
+        };
+
+        let opts = akhomed_store::PoolOptions::new(url);
+        let db = match akhomed_store::connect(&opts).await {
+            Ok(db) => db,
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: failed to connect to heka Postgres");
+                return;
+            }
+        };
+
+        // Matches the partial index `idx_heka_chunks_unembedded` predicate
+        // exactly (crates/heka/migrations/20260427_000001_init.sql) so the
+        // planner can use it.
+        let unembedded = match db
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM heka_drawer_chunks WHERE embedded_at IS NULL".to_owned(),
+            ))
+            .await
+        {
+            Ok(Some(row)) => row.try_get::<i64>("", "n").unwrap_or(0),
+            Ok(None) => 0,
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: heka unembedded-chunk count query failed");
+                return;
+            }
+        };
+
+        // Matches the partial index `idx_heka_drawers_untagged` predicate
+        // exactly (same migration).
+        let untagged = match db
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT count(*) AS n FROM heka_drawers WHERE array_length(tags::text[], 1) IS NULL"
+                    .to_owned(),
+            ))
+            .await
+        {
+            Ok(Some(row)) => row.try_get::<i64>("", "n").unwrap_or(0),
+            Ok(None) => 0,
+            Err(e) => {
+                tracing::warn!(error = %e, "daemon: heka untagged-drawer count query failed");
+                return;
+            }
+        };
+
+        let engine = { self.lock_agent().engine.clone() };
+        let now = now_secs().to_string();
+        assert_singleton_fact(
+            &engine,
+            "heka-store",
+            "has-unembedded-chunks",
+            &unembedded.to_string(),
+        );
+        assert_singleton_fact(
+            &engine,
+            "heka-store",
+            "has-untagged-drawers",
+            &untagged.to_string(),
+        );
+        assert_singleton_fact(&engine, "heka-store", "last-curated-at", &now);
+
+        if unembedded > 0 {
+            // WARN once per backlog episode, not every tick — nothing can
+            // embed these until the Phase 42 service layer lands.
+            if !self
+                .heka_warned_unembedded
+                .swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    unembedded_chunks = unembedded,
+                    "daemon: heka has unembedded chunks, but no Phase 42 service exists yet \
+                     to embed them — this is a standing backlog until that lands",
+                );
+            }
+        } else {
+            self.heka_warned_unembedded
+                .store(false, Ordering::Relaxed);
+        }
+
+        if let Ok(agent) = self.agent.lock() {
+            agent.sink().emit(&AkhMessage::system(format!(
+                "[daemon:heka_curation] {unembedded} unembedded chunk(s), {untagged} untagged drawer(s) \
+                 (surveillance only — v1)",
+            )));
+        }
+        tracing::info!(
+            unembedded,
+            untagged,
+            "daemon: heka curation pass complete",
+        );
     }
 
     fn run_trigger_evaluation(&mut self) {
@@ -1793,6 +2196,20 @@ mod tests {
             Duration::from_secs(3600)
         );
         assert_eq!(config.librarian_interval, Duration::from_secs(86400));
+        assert_eq!(
+            config.seshat_curation_interval,
+            Duration::from_secs(21600)
+        );
+        assert_eq!(config.heka_curation_interval, Duration::from_secs(86400));
         assert_eq!(config.max_cycles, 0);
+    }
+
+    #[test]
+    fn known_task_names_includes_curation_tasks() {
+        // Regression guard for the typo-falls-back-to-master-switch trap
+        // documented on `KNOWN_TASK_NAMES`: the two curation tasks added
+        // alongside this test must be registered here.
+        assert!(KNOWN_TASK_NAMES.contains(&"seshat_curation"));
+        assert!(KNOWN_TASK_NAMES.contains(&"heka_curation"));
     }
 }

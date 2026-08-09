@@ -91,6 +91,13 @@ pub struct AkhomedConfig {
     #[serde(default)]
     pub postgres: Option<PostgresConfig>,
 
+    /// Heka long-term-memory store (separate Postgres database). `None`
+    /// (default) means `run_heka_curation` no-ops — matching every other
+    /// store-backed background task's degrade-quietly-when-unconfigured
+    /// convention.
+    #[serde(default)]
+    pub heka: Option<HekaConfig>,
+
     /// **Host-level** execution backend, applied to every workspace this
     /// daemon runs unless an akh's own config overrides it
     /// ([`crate::akh_config::AkhConfig::exec`]).
@@ -252,6 +259,29 @@ fn default_snapshot_interval_secs() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Heka backing store (Phase 42 schema; v1 curation is surveillance-only)
+// ---------------------------------------------------------------------------
+
+/// Heka long-term-memory store configuration.
+///
+/// A **separate** Postgres database from `[postgres]` — Heka
+/// (`crates/heka`) is its own evaluation store, not the akhomed backing
+/// store. Only a connection URL today; `run_heka_curation` opens a fresh
+/// connection per pass rather than holding a pool, since the default
+/// interval is 24h and the query is two `COUNT(*)`s.
+///
+/// Example TOML:
+/// ```toml
+/// [heka]
+/// url = "postgres://heka:heka@heka-pg.cluster:5432/heka"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HekaConfig {
+    /// Connection URL, e.g. `postgres://user:pass@host:5432/heka`.
+    pub url: String,
+}
+
+// ---------------------------------------------------------------------------
 // Upstream config
 // ---------------------------------------------------------------------------
 
@@ -379,6 +409,10 @@ pub struct IntervalOverrides {
     pub knowledge_extraction_secs: Option<u64>,
     /// Phase 32: LLM knowledge elicitation interval (default: 30 min).
     pub knowledge_elicitation_secs: Option<u64>,
+    /// Seshat's Archive curation-pass interval (default: 6 h = 21600s).
+    pub seshat_curation_secs: Option<u64>,
+    /// Heka curation-pass interval (default: 24 h = 86400s).
+    pub heka_curation_secs: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +474,12 @@ impl DaemonSection {
             delegation_interval: defaults.delegation_interval,
             relation_enrichment_interval: defaults.relation_enrichment_interval,
             librarian_interval: defaults.librarian_interval,
+            seshat_curation_interval: ov
+                .seshat_curation_secs
+                .map_or(defaults.seshat_curation_interval, Duration::from_secs),
+            heka_curation_interval: ov
+                .heka_curation_secs
+                .map_or(defaults.heka_curation_interval, Duration::from_secs),
             max_cycles: self.max_cycles,
         }
     }
