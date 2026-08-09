@@ -114,11 +114,17 @@ CMD ["akhomed"]
 
 # ── Stage 3: Implementer runtime (akhomed + coding toolchain) ───────────────
 # For implementer akhs that build/test what they edit (Anima worktrees under
-# their scratch/): git + Node/npm + a Rust toolchain + sccache, so `cargo
-# build`/`npm test` work inside the akh's shell tool. sccache shares the same
-# S3 compile cache as the anima-runner fleet — inject SCCACHE_BUCKET/ENDPOINT/
-# REGION + AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and RUSTC_WRAPPER=sccache
-# at run time (see anima's docker-compose.runner.yml runner-env for values).
+# their scratch/): git + Node/npm + a Rust toolchain + sccache + protoc, so
+# `cargo build`/`npm test` work inside the akh's shell tool. protoc +
+# libprotobuf-dev are required because Anima's crate graph (anima-proto,
+# vendored solstice-ci/common) runs proto build scripts that invoke `protoc`;
+# without it, the pre-push test gate fails before compiling a single line of
+# Rust. Debian bookworm's protobuf-compiler (3.21.12) satisfies protoc >= 3.15
+# (Anima's protos use proto3 `optional` fields, which older protoc rejects).
+# sccache shares the same S3 compile cache as the anima-runner fleet — inject
+# SCCACHE_BUCKET/ENDPOINT/REGION + AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY and
+# RUSTC_WRAPPER=sccache at run time (see anima's
+# docker-compose.runner.yml runner-env for values).
 # The default `runtime` stage stays lean; build this variant with
 #   docker buildx build -f docker/akhomed-cloud.Dockerfile --target implementer \
 #     -t akhomed:cloud-tools --load .
@@ -132,8 +138,15 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git curl build-essential pkg-config libssl-dev nodejs npm && \
+      git curl build-essential pkg-config libssl-dev nodejs npm \
+      protobuf-compiler libprotobuf-dev && \
     rm -rf /var/lib/apt/lists/* && \
+    # Debian puts well-known protos at /usr/include/google/protobuf; symlink
+    # them into /usr/local/include so protoc's default search path resolves
+    # them there too (acceptance: /usr/local/include/google/protobuf/
+    # timestamp.proto must exist).
+    mkdir -p /usr/local/include/google && \
+    ln -sfn /usr/include/google/protobuf /usr/local/include/google/protobuf && \
     curl -fsSL https://sh.rustup.rs | sh -s -- -y \
       --default-toolchain stable --profile minimal -c rustfmt -c clippy && \
     chmod -R a+rX "${RUSTUP_HOME}" "${CARGO_HOME}" && \
