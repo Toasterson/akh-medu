@@ -620,6 +620,8 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
         EnvVarSpec { name: "AKH_KV_CTX", description: "Override KV-cache context length for quantized Gemma models.", default: "unset: model default" },
         EnvVarSpec { name: "AKH_LIBRARIAN", description: "Enable the librarian daemon task.", default: "off by default; \"1\" enables" },
         EnvVarSpec { name: "AKH_LIBRARIAN_MODEL", description: "Model tag the librarian task uses.", default: "unset: built-in default tag" },
+        EnvVarSpec { name: "AKH_LIBRARIAN_OLLAMA_URL", description: "Ollama endpoint for the librarian task (e.g. https://ollama.com on hosts with no local Ollama).", default: "unset: local Ollama" },
+        EnvVarSpec { name: "AKH_LIBRARIAN_OLLAMA_API_KEY", description: "Auth for the librarian's Ollama endpoint; supports env:VAR indirection (secret-looking, masked).", default: "unset: no auth header" },
         EnvVarSpec { name: "AKH_LLM_MODEL", description: "Model hint for the Candle NLU backend.", default: "unset: backend default" },
         EnvVarSpec { name: "AKH_LLM_VERBALIZE", description: "Verbalization strategy override for chat responses.", default: "unset: built-in default strategy" },
         EnvVarSpec { name: "AKH_NLU_LLM", description: "Enable LLM-backed NLU.", default: "on by default; \"0\" disables" },
