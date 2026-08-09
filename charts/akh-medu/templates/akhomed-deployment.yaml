@@ -29,6 +29,32 @@ spec:
       {{- end }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.akhomed.terminationGracePeriodSeconds | default 30 }}
+      {{- if .Values.akhomed.workspaces }}
+      initContainers:
+        # Seed the per-akh workspace TOMLs from the ConfigMap into the
+        # WRITABLE data volume. A whole-dir ConfigMap mount (chart 0.1.9)
+        # made /data/config/akh-medu/workspaces read-only, and akhomed's
+        # ensure-workspace path writes <name>.toml even when the file
+        # already exists — so auto-start and wake both failed with
+        # "failed to write workspace config". Copying at pod start keeps
+        # the definitions declarative (the ConfigMap is the source of
+        # truth, re-copied on every boot, and the checksum annotation
+        # rolls the pod on change) while letting the daemon write.
+        - name: seed-workspaces
+          image: {{ include "akh-medu.akhomed.image" . }}
+          imagePullPolicy: {{ .Values.akhomed.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mkdir -p /data/config/akh-medu/workspaces
+              cp -v /workspace-seed/*.toml /data/config/akh-medu/workspaces/
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: akh-workspaces
+              mountPath: /workspace-seed
+              readOnly: true
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -126,15 +152,10 @@ spec:
               subPath: config.toml
               readOnly: true
             {{- end }}
-            {{- if .Values.akhomed.workspaces }}
-            # Whole-dir mount, so it stays live-synced — but that also makes
-            # workspaces/ read-only as a whole. Workspace definitions here are
-            # declarative; imperative `akh workspace create` against a
-            # k8s-resident akhomed is not supported while this is mounted.
-            - name: akh-workspaces
-              mountPath: /data/config/akh-medu/workspaces
-              readOnly: true
-            {{- end }}
+            {{- /* The workspace TOMLs are NOT mounted here — the
+            seed-workspaces initContainer copies them from the akh-workspaces
+            volume into the writable data volume instead. See the
+            initContainers block for why a ro mount cannot work. */}}
             {{- with .Values.akhomed.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
