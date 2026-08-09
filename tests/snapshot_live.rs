@@ -225,6 +225,91 @@ async fn wake_reconstructs_identical_akh() {
     assert_eq!(woken_agent.cycle_count(), 42, "cycle_count must be restored");
 }
 
+/// Lazy-open hydration (Anima WI 019fe636-94e1): a k8s tmpfs pod boots with an
+/// empty `kg_dir` on every restart. `akhomed`'s `get_engine` must hydrate from
+/// Postgres before constructing the engine a plain open would otherwise hand
+/// back seed-pack-empty. `ServerState::try_hydrate_from_store` lives in the
+/// `akhomed` binary crate (not exported from the library), so this test can't
+/// call it directly; instead it exercises the same two-step composition that
+/// function performs — `wake` into the cold dir, drop that engine handle
+/// (redb is single-writer), then reopen via `Engine::new` exactly as
+/// `get_engine` does afterwards — and asserts the reopened engine sees the
+/// full source KG rather than an empty/seed-pack-only one.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn open_hydrates_cold_workspace_from_store() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+
+    // --- Populate + snapshot an akh, as if it had lived on some host before. ---
+    let src = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(src.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
+    let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+    let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
+    engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+    ensure_akh(&db, akh_id, "open-hydrate-test", None).await.unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+
+    let src_labels = label_set(&engine);
+    let src_triples = triple_set(&engine);
+
+    // --- Cold pod: a fresh dir with no redb (the tmpfs-restart scenario). ---
+    let cold = tempfile::tempdir().unwrap();
+    let kg_dir = cold.path().join("kg");
+    assert!(
+        !kg_dir.join("akh-medu.redb").exists(),
+        "precondition: cold dir must have no redb yet"
+    );
+
+    // Step 1 of try_hydrate_from_store: the store has state for this akh
+    // (mirrors its `load_akh_state` gate), so hydrate — `wake` populates the
+    // redb in `kg_dir`, then its engine handle must be dropped before anyone
+    // reopens the same redb file.
+    let hydrating = wake(&kg_dir, akh_id, workspace_id, &db)
+        .await
+        .expect("hydration wake");
+    drop(hydrating);
+
+    // Step 2: what `get_engine` does immediately afterwards — open the now-
+    // populated redb as a normal Engine, exactly like a plain lazy open would.
+    let reopened = Engine::new(EngineConfig {
+        data_dir: Some(kg_dir),
+        ..Default::default()
+    })
+    .expect("reopen hydrated redb");
+
+    assert_eq!(
+        label_set(&reopened),
+        src_labels,
+        "reopened engine must see the source akh's symbols, not a seed-pack-empty one"
+    );
+    assert_eq!(
+        triple_set(&reopened),
+        src_triples,
+        "reopened engine must see the source akh's triples"
+    );
+    assert!(
+        !reopened.all_triples().is_empty(),
+        "hydrated-then-reopened engine must not be empty"
+    );
+}
+
 /// A missing optional cognitive table must not abort wake — the Akh still comes
 /// back with its KG and symbols, just with that subsystem at defaults.
 #[tokio::test]

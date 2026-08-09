@@ -478,11 +478,44 @@ impl ServerState {
         if loaded.is_empty() {
             return;
         }
+        let pool = self.pg_pool();
         for (name, engine) in loaded {
             // Wire the WAL first so mutations from here on are captured, then
             // snapshot the full current state (idempotent; materialises into the
             // relational tables what was accumulated while local-only).
             self.wire_wal(&name, &engine).await;
+
+            // Guard: an in-memory engine that came up empty (e.g. a k8s tmpfs
+            // pod that booted cold and hasn't been hydrated yet) must never
+            // overwrite durable Postgres state with an empty snapshot.
+            if engine.all_triples().is_empty()
+                && let Some(p) = pool.as_ref()
+            {
+                let akh_id = akh_medu::wal::akh_id_for(&name);
+                match akhomed_store::snapshots::load_akh_state(p, akh_id).await {
+                    Ok(Some(_)) => {
+                        tracing::warn!(
+                            workspace = %name,
+                            "refusing post-reconnect snapshot: in-memory engine is empty but \
+                             the store has state for this akh — snapshot would destroy the \
+                             durable copy; wake/hydrate instead"
+                        );
+                        continue;
+                    }
+                    Ok(None) => {} // genuinely fresh akh with an empty engine: safe to snapshot
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace = %name,
+                            error = %e,
+                            "could not check Postgres state before post-reconnect snapshot of \
+                             an empty in-memory engine; skipping this snapshot to avoid a \
+                             possible destructive overwrite"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             match self.snapshot_workspace(&name).await {
                 Ok(()) => tracing::info!(
                     workspace = %name,
@@ -637,6 +670,108 @@ impl ServerState {
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
         snapshot_once(pool, &self.agents, name, akh_id, workspace_id).await
+    }
+
+    /// Hydrate a lazily-opened workspace from its Postgres snapshot before
+    /// `get_engine` builds a fresh `Engine` over it.
+    ///
+    /// K8s tmpfs pods boot with an empty `kg_dir` on every restart. Without
+    /// this, a plain open (a chat/ACP call reaching `get_engine`, not an
+    /// explicit `_akh/akh/wake`) would silently construct a seed-pack-empty
+    /// engine over a cold dir even though Postgres holds the akh's real state
+    /// — and then `_akh/akh/wake` refuses because the workspace looks
+    /// "already loaded".
+    ///
+    /// Returns `Ok(true)` when hydration happened — the caller must skip
+    /// seed-pack application, since the redb now holds the real akh. Returns
+    /// `Ok(false)` when hydration does not apply: no Postgres pool, an
+    /// explicit `_akh/akh/wake` is already hydrating this workspace, the redb
+    /// already exists, or this is a genuinely fresh akh with no store state
+    /// (normal seed-pack birth). Returns `Err` to **fail the open closed**:
+    /// once we know Postgres has state for this akh, we must not fall back to
+    /// a cold empty engine — that is exactly the split-brain window the
+    /// advisory lock exists to prevent.
+    async fn try_hydrate_from_store(
+        &self,
+        name: &str,
+        ws_paths: &akh_medu::paths::WorkspacePaths,
+    ) -> Result<bool, String> {
+        let pool = self.pg_pool();
+        let Some(pool) = pool.as_ref() else {
+            return Ok(false);
+        };
+
+        // Single-flight against an explicit `_akh/akh/wake`: if one is already
+        // in flight for this workspace it owns the hydration (and will have
+        // populated the redb itself by the time it calls into `get_engine`),
+        // so just defer to it instead of racing on the redb file.
+        let _wake_guard = {
+            let mut waking = self.waking.lock().unwrap_or_else(|e| e.into_inner());
+            if !waking.insert(name.to_string()) {
+                return Ok(false);
+            }
+            WakeGuard {
+                set: Arc::clone(&self.waking),
+                name: name.to_string(),
+            }
+        };
+
+        // Cold check: a redb already on disk means this workspace was already
+        // hydrated (or born locally) — nothing to do here.
+        if ws_paths.kg_dir.join("akh-medu.redb").exists() {
+            return Ok(false);
+        }
+
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let Some(_state) = akhomed_store::snapshots::load_akh_state(pool, akh_id)
+            .await
+            .map_err(|e| {
+                format!("could not check Postgres for existing state of \"{name}\": {e}")
+            })?
+        else {
+            // No store state at all: this is a genuinely fresh akh. Let
+            // `get_engine` proceed with its normal seed-pack birth.
+            return Ok(false);
+        };
+
+        // 38g split-brain guard: refuse — do not fall back to a cold empty
+        // engine — if another host already holds the akh's advisory lock.
+        self.acquire_akh_lock_or_refuse(name, akh_id, "open").await?;
+
+        std::fs::create_dir_all(&ws_paths.kg_dir)
+            .map_err(|e| format!("cannot create workspace kg dir for \"{name}\": {e}"))?;
+
+        // Reconstruct the local redb from Postgres. `wake` opens its own
+        // Engine over `kg_dir` and must be dropped before `get_engine` reopens
+        // the same redb file — redb is single-writer.
+        let engine = akh_medu::snapshot::wake(
+            &ws_paths.kg_dir,
+            akh_id,
+            akh_medu::wal::workspace_id_for(name),
+            pool,
+        )
+        .await
+        .map_err(|e| format!("hydration on open failed for \"{name}\": {e}"))?;
+        let triples = engine.all_triples().len();
+        let symbols = engine.all_symbols().len();
+        drop(engine);
+
+        // Heartbeat: mark this host as the akh's live owner (best-effort — the
+        // akh row is guaranteed to exist already, since `akh_state` FKs to it).
+        if let Err(e) =
+            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
+        {
+            tracing::warn!(workspace = %name, error = %e, "could not update last_seen after hydrate-on-open");
+        }
+
+        tracing::info!(
+            workspace = %name,
+            %akh_id,
+            triples,
+            symbols,
+            "hydrated workspace from Postgres on open"
+        );
+        Ok(true)
     }
 
     /// Wake a cold workspace from its Postgres snapshot (control-plane
@@ -1768,6 +1903,12 @@ impl ServerState {
             }
         }
 
+        // Phase 38h: hydrate from Postgres if this is a cold workspace with
+        // durable state in the store (e.g. a k8s tmpfs pod that just
+        // restarted). Must run before `Engine::new` opens the redb below —
+        // that's the file hydration populates.
+        let hydrated = self.try_hydrate_from_store(name, &ws_paths).await?;
+
         // Honour the akh's read-root unlock (ADR 076 §4): when `openclaw_import`
         // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
         // `LocalFs` can read the akh's own OpenClaw past life (read-only; writes
@@ -1799,8 +1940,9 @@ impl ServerState {
 
         // Apply seed packs listed in the workspace config (idempotent — seeds
         // track themselves via akh:seed-applied triples so re-opening a fully
-        // seeded workspace is a no-op).
-        {
+        // seeded workspace is a no-op). Skipped when this open hydrated from
+        // Postgres: the redb already holds the real akh, not a blank one.
+        if !hydrated {
             let config_path = self.paths.workspace_config_file(name);
             let ws_config = if config_path.exists() {
                 akh_medu::workspace::WorkspaceConfig::load(&config_path)
