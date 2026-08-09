@@ -326,6 +326,13 @@ impl OllamaLibrarianModel {
             model: model_tag.clone(),
             ..Default::default()
         };
+        Self::with_ollama(ollama, model_tag)
+    }
+
+    /// Build a Librarian model from an explicit [`OllamaConfig`] — the
+    /// escape hatch for hosts with no local Ollama (a k8s pod pointing at
+    /// ollama.com cloud).
+    pub fn with_ollama(ollama: super::ollama::OllamaConfig, model_tag: String) -> Self {
         let mgr = super::model_manager::AgentModelManager::new(
             super::model_manager::ModelManagerConfig {
                 ollama,
@@ -337,12 +344,32 @@ impl OllamaLibrarianModel {
         Self { mgr, model_tag }
     }
 
-    /// Read the model tag from `AKH_LIBRARIAN_MODEL`, defaulting to
-    /// [`DEFAULT_LIBRARIAN_MODEL_TAG`].
+    /// Read the model tag from `AKH_LIBRARIAN_MODEL` (default
+    /// [`DEFAULT_LIBRARIAN_MODEL_TAG`]), the endpoint from
+    /// `AKH_LIBRARIAN_OLLAMA_URL` (default the local Ollama), and the auth
+    /// key from `AKH_LIBRARIAN_OLLAMA_API_KEY` (optional; supports the
+    /// `env:VAR` indirection [`OllamaConfig::api_key`] documents — on a
+    /// cloud host set it to `env:OLLAMA_CLOUD_KEY`). Without the URL
+    /// override a host with no local Ollama has no librarian backend at
+    /// all — the daily pass fails with `NoBackendAvailable` every tick.
     pub fn from_env() -> Self {
         let tag = std::env::var("AKH_LIBRARIAN_MODEL")
             .unwrap_or_else(|_| DEFAULT_LIBRARIAN_MODEL_TAG.to_string());
-        Self::new(tag)
+        let mut ollama = super::ollama::OllamaConfig {
+            model: tag.clone(),
+            ..Default::default()
+        };
+        if let Ok(url) = std::env::var("AKH_LIBRARIAN_OLLAMA_URL")
+            && !url.trim().is_empty()
+        {
+            ollama.base_url = url.trim().to_string();
+        }
+        if let Ok(key) = std::env::var("AKH_LIBRARIAN_OLLAMA_API_KEY")
+            && !key.trim().is_empty()
+        {
+            ollama.api_key = Some(key.trim().to_string());
+        }
+        Self::with_ollama(ollama, tag)
     }
 }
 
