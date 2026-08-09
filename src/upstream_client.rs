@@ -223,6 +223,31 @@ impl UpstreamMcpClient {
             Ok((sid, json)) => {
                 // Non-fatal RPC errors during init are ignored; proceed anyway.
                 if !json["error"].is_object() {
+                    // MCP requires the client to follow a successful
+                    // `initialize` with a `notifications/initialized`
+                    // notification before issuing requests. rmcp-based
+                    // servers (seshd's streamable-http) enforce this: a
+                    // `tools/call` on a session that never sent it gets an
+                    // SSE stream that closes with no data event — which
+                    // surfaced as "SSE data JSON parse error: EOF" in the
+                    // seshat_curation task. Errors are non-fatal (lenient
+                    // servers work either way); some servers answer the
+                    // notification with 202/empty, which send_rpc treats as
+                    // an error — hence best-effort.
+                    let mut req = self.post_mcp();
+                    if let Some(ref s) = sid {
+                        req = req.set("Mcp-Session-Id", s);
+                    }
+                    let notif = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized"
+                    });
+                    if let Err(e) = self.send_rpc(req, notif) {
+                        tracing::debug!(
+                            error = %e,
+                            "notifications/initialized send failed (non-fatal; server may not require it)"
+                        );
+                    }
                     sid
                 } else {
                     tracing::debug!(
