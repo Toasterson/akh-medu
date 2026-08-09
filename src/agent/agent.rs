@@ -302,13 +302,48 @@ pub struct Agent {
     pub(crate) capture_transcripts: bool,
 }
 
+/// How an agent's executor-facing tools (`shell_exec`/`file_io`/`edit`/`glob`/
+/// `grep`) are wired at construction time (ADR 082 / Phase 48c, extended by
+/// the `exec kind = "none"` backend of `ExecBackendConfig`).
+///
+/// This is strictly about *tool registration*, not about who a running
+/// backend executes as — `Backend` (`Default`/`Backend(..)`) is where and as
+/// whom a command runs. `None` is a different axis entirely: the tools do
+/// not exist in the registry at all, for akhs (manager/backend-role, e.g. a
+/// cluster-resident thoth or gemma) that must never gain an executor surface,
+/// in-process or otherwise.
+#[derive(Clone)]
+pub enum ExecToolWiring {
+    /// Register the executor-facing tools against the default in-process
+    /// backend (today's behaviour, byte-identical to `Agent::new`).
+    Default,
+    /// Register the executor-facing tools against a caller-supplied
+    /// [`Backend`](crate::backend::Backend) — privilege-dropped or remote
+    /// (ADR 082 / Phase 48b/48c).
+    Backend(Arc<dyn crate::backend::Backend>),
+    /// Register **no** executor-facing tools. `shell_exec`, `file_io`,
+    /// `edit`, `glob`, `grep` are absent from the registry; network tools
+    /// (`http_fetch`, `web_search`) and every KG/memory/reasoning tool are
+    /// unaffected.
+    None,
+}
+
+impl From<Option<Arc<dyn crate::backend::Backend>>> for ExecToolWiring {
+    fn from(backend: Option<Arc<dyn crate::backend::Backend>>) -> Self {
+        match backend {
+            Some(b) => Self::Backend(b),
+            None => Self::Default,
+        }
+    }
+}
+
 impl Agent {
     /// Register all built-in tools (core + external).
     fn register_builtin_tools(
         registry: &mut ToolRegistry,
         predicates: &AgentPredicates,
         engine: &Engine,
-        backend_override: Option<Arc<dyn crate::backend::Backend>>,
+        exec_wiring: ExecToolWiring,
         #[cfg(feature = "delegation")]
         delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
     ) -> AgentResult<()> {
@@ -352,19 +387,31 @@ impl Agent {
         // write and a shell command are guaranteed coherent. Phase 48a: the
         // in-process backend by default; 48c: `Agent::with_backend` lets a
         // caller swap in a privilege-dropped / remote executor here.
-        let backend: std::sync::Arc<dyn crate::backend::Backend> = backend_override
-            .unwrap_or_else(|| std::sync::Arc::new(crate::backend::InProcessBackend::new(fs.clone())));
-        registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
-        // Claude-Code-parity coding tools, sharing the same sandbox so reads
-        // and writes stay confined to the akh's roots.
-        registry.register(Box::new(tools::EditTool::with_backend(backend.clone())));
-        registry.register(Box::new(tools::GlobTool::with_backend(backend.clone())));
-        registry.register(Box::new(tools::GrepTool::with_backend(backend.clone())));
+        // `ExecToolWiring::None` (exec kind = "none") skips this block
+        // entirely: no `Backend` is even constructed, and the five
+        // executor-facing tools never enter the registry. `http_fetch` /
+        // `web_search` are network, not executor, tools — they stay
+        // registered regardless.
+        match exec_wiring {
+            ExecToolWiring::None => {}
+            other => {
+                let backend: std::sync::Arc<dyn crate::backend::Backend> = match other {
+                    ExecToolWiring::Backend(b) => b,
+                    _ => std::sync::Arc::new(crate::backend::InProcessBackend::new(fs.clone())),
+                };
+                registry.register(Box::new(tools::FileIoTool::with_backend(backend.clone())));
+                // Claude-Code-parity coding tools, sharing the same sandbox so
+                // reads and writes stay confined to the akh's roots.
+                registry.register(Box::new(tools::EditTool::with_backend(backend.clone())));
+                registry.register(Box::new(tools::GlobTool::with_backend(backend.clone())));
+                registry.register(Box::new(tools::GrepTool::with_backend(backend.clone())));
+                registry.register(Box::new(tools::ShellExecTool::with_backend(
+                    backend.clone(),
+                )));
+            }
+        }
         registry.register(Box::new(tools::HttpFetchTool));
         registry.register(Box::new(tools::WebSearchTool));
-        registry.register(Box::new(tools::ShellExecTool::with_backend(
-            backend.clone(),
-        )));
         registry.register(Box::new(tools::UserInteractTool));
         // Structured task list (TodoWrite-style working state).
         registry.register(Box::new(tools::TaskListTool::new(std::sync::Arc::new(
@@ -741,10 +788,25 @@ impl Agent {
     /// run through a caller-supplied [`Backend`](crate::backend::Backend) instead of
     /// the default in-process one (ADR 082 / Phase 48c). Passing `None` reproduces
     /// [`Agent::new`] byte-for-byte.
+    ///
+    /// Thin wrapper over [`Agent::with_exec_wiring`] — kept for existing callers
+    /// that only ever swap a `Backend`, never ask for no executor tools at all.
     pub fn with_backend(
         engine: Arc<Engine>,
         config: AgentConfig,
         backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
+        Self::with_exec_wiring(engine, config, backend.into())
+    }
+
+    /// Build an agent with full control over how its executor-facing tools
+    /// are wired: the default in-process backend, a caller-supplied
+    /// [`Backend`](crate::backend::Backend) (ADR 082 / Phase 48c), or no
+    /// executor tools at all ([`ExecToolWiring::None`], `exec kind = "none"`).
+    pub fn with_exec_wiring(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        exec_wiring: ExecToolWiring,
     ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
@@ -763,7 +825,7 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
-            backend,
+            exec_wiring,
             #[cfg(feature = "delegation")]
             delegation_pending,
         )?;
@@ -3836,10 +3898,25 @@ impl Agent {
     /// through a caller-supplied [`Backend`](crate::backend::Backend) instead
     /// of the default in-process one. Passing `None` reproduces
     /// [`Agent::resume`] byte-for-byte (ADR 082 / Phase 48c).
+    ///
+    /// Thin wrapper over [`Agent::resume_with_exec_wiring`] — kept for existing
+    /// callers that only ever swap a `Backend`, never ask for no executor
+    /// tools at all.
     pub fn resume_with_backend(
         engine: Arc<Engine>,
         config: AgentConfig,
         backend: Option<Arc<dyn crate::backend::Backend>>,
+    ) -> AgentResult<Self> {
+        Self::resume_with_exec_wiring(engine, config, backend.into())
+    }
+
+    /// Resume an agent from a previously persisted session with full control
+    /// over how its executor-facing tools are wired — see
+    /// [`Agent::with_exec_wiring`] for the wiring semantics.
+    pub fn resume_with_exec_wiring(
+        engine: Arc<Engine>,
+        config: AgentConfig,
+        exec_wiring: ExecToolWiring,
     ) -> AgentResult<Self> {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
@@ -3859,7 +3936,7 @@ impl Agent {
             &mut tool_registry,
             &predicates,
             &engine,
-            backend,
+            exec_wiring,
             #[cfg(feature = "delegation")]
             delegation_pending,
         )?;
@@ -4322,6 +4399,35 @@ mod backend_seam_tests {
             agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
         );
+    }
+
+    /// `ExecToolWiring::None` (`exec kind = "none"`) must register **zero**
+    /// executor-facing tools — `shell_exec`, `file_io`, `edit`, `glob`, `grep`
+    /// are all absent — while the network tools (`http_fetch`, `web_search`)
+    /// and everything else stay registered. This is the manager/backend-role
+    /// akh case: strictly stronger than an empty `LocalDrop`, which still
+    /// serves a shell under a dropped-privilege user.
+    #[test]
+    fn with_exec_wiring_none_registers_no_executor_tools() {
+        let agent = Agent::with_exec_wiring(test_engine(), AgentConfig::default(), ExecToolWiring::None)
+            .expect("Agent::with_exec_wiring(.., ExecToolWiring::None) should construct");
+
+        let tools = agent.tool_registry.list();
+        let names: std::collections::HashSet<&str> =
+            tools.iter().map(|sig| sig.name.as_str()).collect();
+
+        for executor_tool in ["shell_exec", "file_io", "edit", "glob", "grep"] {
+            assert!(
+                !names.contains(executor_tool),
+                "{executor_tool} must not be registered under ExecToolWiring::None"
+            );
+        }
+        // Network tools are not executor tools — they survive.
+        assert!(names.contains("http_fetch"), "http_fetch should remain registered");
+        assert!(names.contains("web_search"), "web_search should remain registered");
+        // A KG/reasoning tool should also still be there, proving the rest of
+        // register_builtin_tools ran normally.
+        assert!(names.contains("kg_query"), "kg_query should remain registered");
     }
 
     /// Regression: `Agent::resume` (the production path for any akh with

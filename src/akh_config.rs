@@ -249,6 +249,23 @@ pub enum ExecBackendConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<std::path::PathBuf>,
     },
+    /// Register **no executor-facing tools at all** — not even in-process
+    /// ones. `shell_exec`, `file_io`, `edit`, `glob`, `grep` simply do not
+    /// exist in this akh's tool registry; the KG/memory/reasoning tools and
+    /// the network tools (`http_fetch`, `web_search`) are unaffected.
+    ///
+    /// Intended for manager/backend-role akhs that only reason over the KG
+    /// and delegate execution elsewhere (e.g. a cluster-resident thoth or
+    /// gemma) — strictly stronger than an empty [`ExecBackendConfig::LocalDrop`],
+    /// which still serves a shell under a dropped-privilege user. Container
+    /// isolation is not tool absence: a sandboxed pod still hands out a full
+    /// executor surface unless this kind says otherwise.
+    ///
+    /// ```toml
+    /// [exec]
+    /// kind = "none"
+    /// ```
+    None,
 }
 
 impl ExecBackendConfig {
@@ -1213,6 +1230,47 @@ mod tests {
         assert!(matches!(
             cfg.effective_exec(Some(&host)),
             ExecBackendConfig::InProcess
+        ));
+    }
+
+    #[test]
+    fn exec_none_section_parses() {
+        let toml_src = "name = \"thoth\"\n[exec]\nkind = \"none\"\n";
+        let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
+        assert!(matches!(cfg.exec, Some(ExecBackendConfig::None)));
+        assert!(matches!(
+            cfg.effective_exec(None),
+            ExecBackendConfig::None
+        ));
+    }
+
+    #[test]
+    fn explicit_per_akh_exec_none_beats_host_local_drop_default() {
+        // A manager/backend-role akh (kind = "none") must keep zero executor
+        // tools even on a host whose default policy is local-drop — the
+        // per-akh override always wins over the host default.
+        let cfg: AkhConfig = toml::from_str("name = \"thoth\"\n[exec]\nkind = \"none\"\n").unwrap();
+        let host = ExecBackendConfig::LocalDrop {
+            user: "build".into(),
+            workdir: None,
+            shell: None,
+        };
+        assert!(matches!(
+            cfg.effective_exec(Some(&host)),
+            ExecBackendConfig::None
+        ));
+    }
+
+    #[test]
+    fn host_level_exec_none_applies_to_workspace_with_no_exec_section() {
+        // A workspace that says nothing about [exec] defers to the host
+        // default (the relocated-akh case) — including a host default of
+        // "none" for a cluster of manager/backend-role akhs.
+        let cfg: AkhConfig = toml::from_str("name = \"thoth\"").unwrap();
+        assert!(cfg.exec.is_none());
+        assert!(matches!(
+            cfg.effective_exec(Some(&ExecBackendConfig::None)),
+            ExecBackendConfig::None
         ));
     }
 

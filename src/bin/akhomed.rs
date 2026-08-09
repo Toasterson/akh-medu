@@ -1902,13 +1902,22 @@ impl ServerState {
                 let config = AgentConfig::default();
 
                 #[cfg(feature = "remote-executor")]
-                let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
+                let exec_wiring: akh_medu::agent::ExecToolWiring = {
+                    use akh_medu::agent::ExecToolWiring;
                     use akh_medu::akh_config::ExecBackendConfig;
                     use akh_medu::backend::remote::RemoteBackend;
                     match &exec_kind {
-                        ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::InProcess => ExecToolWiring::Default,
                         ExecBackendConfig::LocalDrop { .. } => {
-                            Some(build_local_drop_backend(&exec_kind, &name)?)
+                            ExecToolWiring::Backend(build_local_drop_backend(&exec_kind, &name)?)
+                        }
+                        ExecBackendConfig::None => {
+                            tracing::info!(
+                                target: "akh::backend::none",
+                                workspace = %name,
+                                "executor disabled for workspace (exec kind = none): no shell/file tools registered"
+                            );
+                            ExecToolWiring::None
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             let rbc = exec_kind
@@ -1938,17 +1947,28 @@ impl ServerState {
                                      to {user}@{host}:{port}: {e}"
                                 )
                             })?;
-                            Some(Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>)
+                            ExecToolWiring::Backend(
+                                Arc::new(backend) as Arc<dyn akh_medu::backend::Backend>
+                            )
                         }
                     }
                 };
                 #[cfg(not(feature = "remote-executor"))]
-                let backend_override: Option<Arc<dyn akh_medu::backend::Backend>> = {
+                let exec_wiring: akh_medu::agent::ExecToolWiring = {
+                    use akh_medu::agent::ExecToolWiring;
                     use akh_medu::akh_config::ExecBackendConfig;
                     match &exec_kind {
-                        ExecBackendConfig::InProcess => None,
+                        ExecBackendConfig::InProcess => ExecToolWiring::Default,
                         ExecBackendConfig::LocalDrop { .. } => {
-                            Some(build_local_drop_backend(&exec_kind, &name)?)
+                            ExecToolWiring::Backend(build_local_drop_backend(&exec_kind, &name)?)
+                        }
+                        ExecBackendConfig::None => {
+                            tracing::info!(
+                                target: "akh::backend::none",
+                                workspace = %name,
+                                "executor disabled for workspace (exec kind = none): no shell/file tools registered"
+                            );
+                            ExecToolWiring::None
                         }
                         ExecBackendConfig::Remote { host, user, port, .. } => {
                             // The build was not compiled with `remote-executor`
@@ -1967,9 +1987,9 @@ impl ServerState {
                 };
 
                 if Agent::has_persisted_session(&engine) {
-                    Agent::resume_with_backend(engine, config, backend_override)
+                    Agent::resume_with_exec_wiring(engine, config, exec_wiring)
                 } else {
-                    Agent::with_backend(engine, config, backend_override)
+                    Agent::with_exec_wiring(engine, config, exec_wiring)
                 }
                 .map_err(|e| format!("failed to create agent: {e}"))
             }
