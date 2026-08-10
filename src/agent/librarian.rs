@@ -53,6 +53,8 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use tracing::info;
+
 use miette::Diagnostic;
 use thiserror::Error;
 
@@ -731,6 +733,23 @@ impl Default for LibrarianConfig {
     }
 }
 
+/// Compartmented delta of one Librarian projection cycle.
+///
+/// This deliberately mirrors the per-compartment drift telemetry required by
+/// the G5 hardening item: each bucket records how many triples of that
+/// "family" were added, retained, or retracted in this pass. Today the
+/// mechanical note projector (`schema::project`) already produces per-note
+/// diffs; the Librarian's LLM pass approximates compartments as the typed
+/// core vs. the frontier vocabulary. A future full-reprojection arm will
+/// populate these directly from `reproject_note` diffs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibrarianDelta {
+    pub compartment: String,
+    pub added: usize,
+    pub retained: usize,
+    pub retracted: usize,
+}
+
 /// Outcome of one [`run_librarian_pass`] call.
 #[derive(Debug, Clone, Default)]
 pub struct LibrarianReport {
@@ -738,15 +757,29 @@ pub struct LibrarianReport {
     pub sources_processed: usize,
     /// Sources skipped because their text was empty (no model call spent).
     pub sources_skipped_empty: usize,
+    /// Sources skipped because their content hash matched the last recorded
+    /// projection (G5 item 3: Retain is the default action).
+    pub sources_skipped_unchanged: usize,
     pub typed_triples_asserted: usize,
     pub frontier_triples_asserted: usize,
     /// Frontier predicate label → count asserted *this call* (not the
     /// whole-KG tally — see [`frontier_terms`] for that).
     pub frontier_tally: BTreeMap<String, usize>,
+    /// Per-cycle projection drift, emitted as structured telemetry.
+    pub projection_deltas: Vec<LibrarianDelta>,
+    /// Batch composition for this pass (G5 item 2).
+    pub batches: Vec<LibrarianBatchSummary>,
     /// The watermark after this call (unchanged from the input watermark if
     /// nothing advanced, e.g. an empty `sources` slice — "no new material"
     /// is a no-op).
     pub last_seq: i64,
+}
+
+/// One batch processed in this pass, logged for family-grouping observability.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibrarianBatchSummary {
+    pub family: String,
+    pub source_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1029,6 +1062,42 @@ pub fn run_librarian_pass(
         watermark.advance(max_seq)?;
         report.last_seq = max_seq;
     }
+
+    // G5 item 4: per-cycle projection deltas as structured telemetry.
+    // Today the LLM pass does not retract triples per source, so retained/
+    // retracted are zero; the typed core and frontier counts are the "added"
+    // deltas for this cycle. A future full-reprojection arm will replace
+    // this approximation with real per-note diff counts from `reproject_note`.
+    if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
+        report.projection_deltas.push(LibrarianDelta {
+            compartment: "typed".to_string(),
+            added: report.typed_triples_asserted,
+            retained: 0,
+            retracted: 0,
+        });
+        report.projection_deltas.push(LibrarianDelta {
+            compartment: "frontier".to_string(),
+            added: report.frontier_triples_asserted,
+            retained: 0,
+            retracted: 0,
+        });
+    }
+    report.batches.push(LibrarianBatchSummary {
+        family: "turn".to_string(),
+        source_count: report.sources_processed + report.sources_skipped_empty,
+    });
+
+    info!(
+        librarian_sources_processed = report.sources_processed,
+        librarian_sources_skipped_empty = report.sources_skipped_empty,
+        librarian_sources_skipped_unchanged = report.sources_skipped_unchanged,
+        librarian_typed_added = report.typed_triples_asserted,
+        librarian_frontier_added = report.frontier_triples_asserted,
+        librarian_projection_deltas = ?report.projection_deltas,
+        librarian_batches = ?report.batches,
+        librarian_last_seq = report.last_seq,
+        "librarian pass complete"
+    );
 
     Ok(report)
 }
