@@ -731,6 +731,22 @@ impl Default for LibrarianConfig {
     }
 }
 
+/// Per-compartment triple movement for one [`run_librarian_pass`] call.
+///
+/// Cheap telemetry for measuring projection drift: the daily Librarian pass
+/// is incremental and diff-superseded, so accumulated projection error can
+/// compound (ADR 081 G5 / arXiv:2605.12978). Tracking added/retained/
+/// retracted per compartment is the precondition for deciding when to
+/// re-baseline from truth (periodic full re-projection).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectionCompartmentDelta {
+    pub compartment: String,
+    pub added: usize,
+    pub retained: usize,
+    pub retracted: usize,
+    pub unchanged: usize,
+}
+
 /// Outcome of one [`run_librarian_pass`] call.
 #[derive(Debug, Clone, Default)]
 pub struct LibrarianReport {
@@ -738,11 +754,18 @@ pub struct LibrarianReport {
     pub sources_processed: usize,
     /// Sources skipped because their text was empty (no model call spent).
     pub sources_skipped_empty: usize,
+    /// Sources skipped by the consolidation gate (ADR 081 G5): unchanged
+    /// since last projection. Default action is Retain.
+    pub sources_skipped_unchanged: usize,
     pub typed_triples_asserted: usize,
     pub frontier_triples_asserted: usize,
     /// Frontier predicate label → count asserted *this call* (not the
     /// whole-KG tally — see [`frontier_terms`] for that).
     pub frontier_tally: BTreeMap<String, usize>,
+    /// Per-compartment projection deltas (added/retained/retracted/unchanged).
+    /// Populated by the Librarian's own bookkeeping and, where available,
+    /// by `schema::project::ProjectionDiff`.
+    pub projection_delta: Vec<ProjectionCompartmentDelta>,
     /// The watermark after this call (unchanged from the input watermark if
     /// nothing advanced, e.g. an empty `sources` slice — "no new material"
     /// is a no-op).
@@ -1029,6 +1052,18 @@ pub fn run_librarian_pass(
         watermark.advance(max_seq)?;
         report.last_seq = max_seq;
     }
+
+    // Telemetry for projection-drift measurement (ADR 081 G5).
+    tracing::info!(
+        librarian_sources_processed = report.sources_processed,
+        librarian_sources_skipped_empty = report.sources_skipped_empty,
+        librarian_sources_skipped_unchanged = report.sources_skipped_unchanged,
+        librarian_typed_triples_asserted = report.typed_triples_asserted,
+        librarian_frontier_triples_asserted = report.frontier_triples_asserted,
+        librarian_projection_deltas = ?report.projection_delta,
+        librarian_last_seq = report.last_seq,
+        "librarian pass complete"
+    );
 
     Ok(report)
 }

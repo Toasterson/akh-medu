@@ -648,7 +648,13 @@ impl ServerState {
                         if let Err(e) =
                             snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await
                         {
-                            tracing::warn!(workspace = %name, error = %e, "periodic snapshot failed");
+                            tracing::error!(
+                                workspace = %name, error = %e,
+                                "periodic snapshot failed (ADR-049: if this akh is \
+                                 resident on another host, this host should not have \
+                                 a snapshot ticker — check whether the split-brain \
+                                 guard was bypassed)"
+                            );
                         }
                     }
                     _ = shutdown_rx.changed() => break,
@@ -2012,6 +2018,42 @@ impl ServerState {
             }
         }
 
+        // ADR-049 split-brain guard: a cold lazy load must not silently
+        // attach a WAL + snapshot ticker to an akh another host owns.
+        // Same guards as wake_workspace, applied to the accidental path
+        // (e.g. `akh -w <name> acp status` on a non-owning host).
+        if let Some(pool) = self.pg_pool().as_ref() {
+            let akh_id = akh_medu::wal::akh_id_for(name);
+            // Skip the lock re-acquisition if a wake on this host already
+            // holds it — SeaORM uses a pool, so a second pg_try_advisory_lock
+            // on the same key may land on a different connection and fail
+            // spuriously. The `waking` set proves this host initiated the wake.
+            let waking_holds = self
+                .waking
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(name);
+            if !waking_holds {
+                self.acquire_akh_lock_or_refuse(name, akh_id, "lazy-load")
+                    .await?;
+            }
+            // Freshness: refuse if another host heartbeated recently.
+            if let Ok(Some(last_seen)) =
+                akhomed_store::get_last_seen(pool, akh_id).await
+            {
+                let age =
+                    (akhomed_store::chrono::Utc::now() - last_seen).num_seconds();
+                if age < 60 {
+                    return Err(format!(
+                        "workspace \"{name}\" was seen alive on another host \
+                         {age}s ago (last_seen < 60s). Refusing lazy-load to \
+                         prevent split-brain (ADR-049). Run `akh akh relocate` \
+                         on the owning host or wait for last_seen to age out."
+                    ));
+                }
+            }
+        }
+
         // Slow path: create agent (heavy sync work inside spawn_blocking).
         let engine = self.get_engine(name).await?;
 
@@ -2633,6 +2675,16 @@ impl akh_medu::acp::ServerControl for ServerState {
                 agent,
                 processor: std::sync::Arc::new(std::sync::Mutex::new(processor)),
             })
+        })
+    }
+
+    fn resolve_engine_only<'a>(
+        &'a self,
+        workspace: &'a str,
+    ) -> akh_medu::acp::ResolveEngineFuture<'a> {
+        Box::pin(async move {
+            let engine = self.get_engine(workspace).await?;
+            Ok(akh_medu::acp::EngineHandle { engine })
         })
     }
 

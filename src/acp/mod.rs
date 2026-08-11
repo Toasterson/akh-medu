@@ -74,8 +74,8 @@ use crate::message::{AkhMessage, MessageSink};
 pub mod control;
 pub mod mcp_bridge;
 pub use control::{
-    is_control_method, ControlFuture, ResolveFuture, ServerControl, WorkspaceHandles,
-    CONTROL_METHODS,
+    is_control_method, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
+    ServerControl, WorkspaceHandles, CONTROL_METHODS,
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -569,6 +569,30 @@ impl AkhAcpAgent {
         match (&self.engine, &self.agent, &self.processor) {
             (Some(e), Some(a), Some(p)) => Ok((Arc::clone(e), Arc::clone(a), Arc::clone(p))),
             _ => Err("no workspace handles available (no engine held and no control backend)".into()),
+        }
+    }
+
+    /// Engine-only resolution for read-only ACP verbs (ADR-049 split-brain guard).
+    ///
+    /// Returns just the engine — never triggers agent construction (no WAL,
+    /// no snapshot ticker, no NLU pipeline). Used for data-plane methods that
+    /// only need engine-derivable data (symbol/triple counts, KG queries,
+    /// skills, health). Falls back to the held engine when no control backend
+    /// is wired (same pattern as `resolve_handles`).
+    async fn resolve_engine_only_handles(
+        &self,
+        workspace: &str,
+    ) -> Result<Arc<Engine>, String> {
+        if let Some(ctrl) = &self.control {
+            match ctrl.resolve_engine_only(workspace).await {
+                Ok(h) => return Ok(h.engine),
+                Err(e) if self.engine.is_none() => return Err(e),
+                Err(_) => {}
+            }
+        }
+        match &self.engine {
+            Some(e) => Ok(Arc::clone(e)),
+            None => Err("no engine available (no engine held and no control backend)".into()),
         }
     }
 
@@ -1503,6 +1527,61 @@ fn diag_err<E: std::error::Error + miette::Diagnostic>(
 /// the control-plane methods, dispatched *before* this function). It only
 /// affects `_akh/meta/capabilities`, which advertises the control groups +
 /// methods so a client never offers an op the server can't honour.
+/// Data-plane methods that only need the engine, not the agent.
+///
+/// Routing these through `resolve()` would lazily construct a full
+/// write-capable agent (WAL + snapshot ticker) — the split-brain vector
+/// from the 2026-08-08 incident (ADR-049). These methods answer from
+/// engine-derivable data only: symbol/triple counts, KG queries, skills,
+/// schema, health.
+const ENGINE_ONLY_METHODS: &[&str] = &[
+    "_akh/health",
+    "_akh/workspace/status",
+    "_akh/symbols/list",
+    "_akh/symbols/create",
+    "_akh/triples/from",
+    "_akh/triples/add",
+    "_akh/triples/remove",
+    "_akh/query/sparql",
+    "_akh/memory/recall",
+    "_akh/infer/activate",
+    "_akh/skills",
+    "_akh/skills/inspect",
+    "_akh/skills/activate",
+    "_akh/skills/deactivate",
+    "_akh/schema/coverage",
+    "_akh/schema/proposals",
+    "_akh/schema/reject",
+    "_akh/schema/digest",
+    "_akh/meta/capabilities",
+    "_akh/microtheory/list",
+    "_akh/microtheory/create",
+    "_akh/microtheory/inspect",
+    "_akh/microtheory/activate",
+    "_akh/microtheory/deactivate",
+    "_akh/argue",
+    "_akh/explain",
+    "_akh/provenance",
+    "_akh/identity",
+];
+
+/// Agent-read methods that need the agent for full responses but degrade
+/// gracefully (stale=true, engine fields present) when the agent is not
+/// resident. When the ADR-049 guard refuses lazy construction, these are
+/// served as degraded responses with engine-derivable data + a diagnostic.
+const AGENT_READ_METHODS: &[&str] = &[
+    "_akh/goals",
+    "_akh/tools",
+    "_akh/projects",
+    "_akh/status",
+    "_akh/usage",
+    "_akh/reasoning",
+    "_akh/evidence",
+    "_akh/psyche",
+    "_akh/evidence/assess",
+    "_akh/trust",
+];
+
 fn dispatch_akh(
     engine: &Arc<Engine>,
     workspace: &str,
@@ -4122,6 +4201,130 @@ fn build_connection(
                                         .and_then(serde_json::Value::as_str)
                                         .map(str::to_string)
                                         .unwrap_or_else(|| default_ws.clone());
+
+                                    // ADR-049 split-brain guard: read-only
+                                    // engine methods must not trigger lazy agent
+                                    // construction (WAL + snapshot ticker). Route
+                                    // them through engine-only resolution so a
+                                    // `akh -w <name> acp health` on a non-owning
+                                    // host never silently wakes the workspace.
+                                    if ENGINE_ONLY_METHODS.contains(&method) {
+                                        match me.resolve_engine_only_handles(&workspace).await {
+                                            Ok(engine) => {
+                                                return match dispatch_akh(
+                                                    &engine, &workspace, has_control,
+                                                    &req.method, &req.params,
+                                                ) {
+                                                    Ok(value) => responder.respond(AkhExtResponse(value)),
+                                                    Err(e) => responder.respond_with_error(
+                                                        agent_client_protocol::Error::method_not_found()
+                                                            .data(e.into_json()),
+                                                    ),
+                                                };
+                                            }
+                                            Err(e) => {
+                                                return responder.respond_with_error(
+                                                    agent_client_protocol::Error::internal_error()
+                                                        .data(serde_json::json!({ "message": e })),
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    // Agent-read methods (goals/tools/projects/
+                                    // status/etc.) need the agent for full
+                                    // responses, but `dispatch_akh_agent` already
+                                    // degrades gracefully (stale=true, engine
+                                    // fields present). Try full resolution — on a
+                                    // resident workspace this hits the fast path
+                                    // (no construction). On a cold workspace the
+                                    // ADR-049 guard in get_agent refuses, and we
+                                    // fall back to engine-only with a degraded
+                                    // response so the client gets engine-derivable
+                                    // data + a clear diagnostic instead of a
+                                    // silent split-brain wake.
+                                    if AGENT_READ_METHODS.contains(&method) {
+                                        match me.resolve_handles(&workspace).await {
+                                            Ok((engine, agent, _processor)) => {
+                                                // Agent is resident — serve the
+                                                // full agent-read response.
+                                                if let Some(result) = dispatch_akh_agent(
+                                                    &engine, &agent, &workspace,
+                                                    &req.method, &req.params,
+                                                ) {
+                                                    return match result {
+                                                        Ok(value) => responder.respond(AkhExtResponse(value)),
+                                                        Err(e) => responder.respond_with_error(
+                                                            agent_client_protocol::Error::internal_error()
+                                                                .data(e.into_json()),
+                                                        ),
+                                                    };
+                                                }
+                                                // Method wasn't handled by
+                                                // dispatch_akh_agent — fall through
+                                                // to dispatch_akh below using these
+                                                // resolved handles.
+                                                return match dispatch_akh(
+                                                    &engine, &workspace, has_control,
+                                                    &req.method, &req.params,
+                                                ) {
+                                                    Ok(value) => responder.respond(AkhExtResponse(value)),
+                                                    Err(e) => responder.respond_with_error(
+                                                        agent_client_protocol::Error::method_not_found()
+                                                            .data(e.into_json()),
+                                                    ),
+                                                };
+                                            }
+                                            Err(_resolve_err) => {
+                                                // Agent is not resident (guard
+                                                // refused or construction failed).
+                                                // Serve a degraded engine-only
+                                                // response with stale=true so the
+                                                // client knows data is partial.
+                                                match me.resolve_engine_only_handles(&workspace).await {
+                                                    Ok(engine) => {
+                                                        let degraded = serde_json::json!({
+                                                            "workspace": workspace,
+                                                            "stale": true,
+                                                            "degraded": "workspace not resident on \
+                                                                this host (ADR-049 split-brain guard). \
+                                                                Engine data is live; agent fields are \
+                                                                empty. Use `akh akh wake` or run on \
+                                                                the owning host.",
+                                                            "skills": dispatch_akh(
+                                                                &engine, &workspace, has_control,
+                                                                "_akh/skills", &serde_json::json!({}),
+                                                            ).ok().unwrap_or(serde_json::json!([])),
+                                                            "kg": {
+                                                                "symbols": engine.all_symbols().len(),
+                                                                "triples": engine.all_triples().len(),
+                                                            },
+                                                            "goals": serde_json::json!([]),
+                                                            "tools": serde_json::json!([]),
+                                                            "projects": serde_json::json!([]),
+                                                            "cycle": null,
+                                                            "plan": null,
+                                                            "active_project": null,
+                                                            "reasoning": serde_json::json!([]),
+                                                            "evidence": serde_json::Value::Null,
+                                                            "usage": serde_json::Value::Null,
+                                                            "context": serde_json::Value::Null,
+                                                            "deferred": serde_json::json!([]),
+                                                            "limits": limits_json(),
+                                                        });
+                                                        return responder.respond(AkhExtResponse(degraded));
+                                                    }
+                                                    Err(e) => {
+                                                        return responder.respond_with_error(
+                                                            agent_client_protocol::Error::internal_error()
+                                                                .data(serde_json::json!({ "message": e })),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     let (engine, agent, _processor) =
                                         match me.resolve_handles(&workspace).await {
                                             Ok(h) => h,

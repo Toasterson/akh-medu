@@ -36,6 +36,20 @@ pub struct WorkspaceHandles {
 pub type ResolveFuture<'a> =
     Pin<Box<dyn Future<Output = Result<WorkspaceHandles, String>> + Send + 'a>>;
 
+/// Engine-only handle for read-only ACP verbs (ADR-049 split-brain guard).
+///
+/// Contains just the engine — no agent, no processor, no WAL, no snapshot
+/// ticker. Used by data-plane methods that only need engine-derivable data
+/// (symbol/triple counts, KG queries, skills, health) so a read on a
+/// non-owning host never triggers lazy agent construction.
+pub struct EngineHandle {
+    pub engine: Arc<crate::engine::Engine>,
+}
+
+/// The future returned by [`ServerControl::resolve_engine_only`].
+pub type ResolveEngineFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<EngineHandle, String>> + Send + 'a>>;
+
 /// The future returned by [`ServerControl::dispatch`].
 ///
 /// `Ok(value)` is the operation's JSON result (surfaced as the JSON-RPC
@@ -79,6 +93,22 @@ pub trait ServerControl: Send + Sync {
     fn resolve<'a>(&'a self, _workspace: &'a str) -> ResolveFuture<'a> {
         Box::pin(async move {
             Err("workspace resolution not supported by this backend".to_string())
+        })
+    }
+
+    /// Resolve only the engine for a workspace — never constructs a full
+    /// agent (no WAL, no snapshot ticker, no NLU pipeline). Used by
+    /// read-only ACP verbs to avoid the split-brain vector from the
+    /// 2026-08-08 incident (ADR-049).
+    ///
+    /// Default: unsupported — in-process embeds/tests without a
+    /// multi-workspace backend keep their single held engine instead.
+    fn resolve_engine_only<'a>(
+        &'a self,
+        _workspace: &'a str,
+    ) -> ResolveEngineFuture<'a> {
+        Box::pin(async move {
+            Err("engine-only resolution not supported by this backend".to_string())
         })
     }
 }

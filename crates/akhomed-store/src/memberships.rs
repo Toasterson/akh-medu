@@ -158,3 +158,19 @@ pub async fn touch_last_seen(
         .await?;
     Ok(())
 }
+
+/// Read an Akh's `last_seen` heartbeat (ADR-049 split-brain guard). Returns
+/// `None` if the row has no heartbeat (never touched) or the row doesn't exist.
+///
+/// Used by the lazy-load guard in `get_agent` to check whether another host
+/// recently heartbeated for this akh — a fresh `last_seen` means another host
+/// owns the akh and a cold lazy-load must refuse to construct a write-capable
+/// agent (WAL + snapshot ticker) to prevent split-brain.
+pub async fn get_last_seen(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+) -> StoreResult<Option<chrono::DateTime<chrono::Utc>>> {
+    use crate::entity::akh;
+    let row = akh::Entity::find_by_id(akh_id).one(db).await?;
+    Ok(row.and_then(|m| m.last_seen))
+}
