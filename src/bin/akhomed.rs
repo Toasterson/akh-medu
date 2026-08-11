@@ -64,6 +64,29 @@ struct ServerState {
     /// a startup that fell back to local-only. Consumed by the mutation WAL
     /// flusher and snapshot writer (sub-phases 38b/38c).
     pg_pool: std::sync::RwLock<Option<Arc<akhomed_store::DatabaseConnection>>>,
+    /// ADR-049: the akh advisory lock, pinned to a **dedicated single
+    /// connection** per loaded workspace.
+    ///
+    /// `pg_try_advisory_lock` is *session*-scoped, so taking it on a pooled
+    /// connection is wrong in both directions and was observed failing both
+    /// ways in production:
+    ///
+    /// * **False refusal.** A later re-check (the ACP open right after
+    ///   auto-start) draws a different pooled connection, sees a lock held by
+    ///   another session, and refuses — the daemon locking out *itself*. This
+    ///   is what made a two-workspace pod crashloop: no ACP port, liveness
+    ///   kill, repeat.
+    /// * **Silent loss.** An idle pooled connection gets recycled and closed,
+    ///   which releases the lock while the akh is still very much resident —
+    ///   the guard quietly stops guarding.
+    ///
+    /// Holding one connection per akh for as long as the akh is loaded fixes
+    /// both: the session outlives every re-check, and dropping the connection
+    /// on eviction releases the lock deterministically even if the explicit
+    /// unlock never runs (crash, network drop). Same pattern
+    /// [`akhomed_store::run_migrations_locked`] already uses for the migration
+    /// lock. Keyed by workspace name.
+    akh_lock_conns: RwLock<HashMap<String, Arc<akhomed_store::DatabaseConnection>>>,
     /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
     /// Drained on graceful shutdown so the final batch reaches Postgres.
     wal_flushers: RwLock<HashMap<String, WalFlusher>>,
@@ -344,6 +367,7 @@ impl ServerState {
             audit_broadcast: audit_tx,
             daemon_pauses: RwLock::new(HashMap::new()),
             pg_pool: std::sync::RwLock::new(pg_pool),
+            akh_lock_conns: RwLock::new(HashMap::new()),
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -860,18 +884,59 @@ impl ServerState {
     /// closed) rather than silently proceeding — split-brain is worse than a
     /// retry. No-op when there is no Postgres pool (local-only mode has a single
     /// host by construction, so there is nothing to guard against).
+    /// Build single-connection pool options from the live `[postgres]` config.
+    ///
+    /// Returns `None` in local-only mode (no `[postgres]`). `DATABASE_URL`
+    /// overrides the configured URL, matching the migrate path.
+    async fn akh_lock_pool_options(&self) -> Option<akhomed_store::PoolOptions> {
+        let cfg = self.config.read().await;
+        let pg = cfg.postgres.as_ref()?;
+        Some(akhomed_store::PoolOptions {
+            url: std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone()),
+            // One connection, by construction: it *is* the lock's session.
+            max_connections: 1,
+            connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
+        })
+    }
+
     async fn acquire_akh_lock_or_refuse(
         &self,
         name: &str,
         akh_id: akhomed_store::uuid::Uuid,
         op: &str,
     ) -> Result<(), String> {
-        let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        if self.pg_pool().is_none() {
+            return Ok(());
+        }
+        // Serialize the check-then-acquire: two concurrent opens of the same
+        // workspace must not each dial a connection, or the loser's lock
+        // attempt fails against the winner and we report a split-brain that is
+        // really just us.
+        let mut held = self.akh_lock_conns.write().await;
+
+        // Already ours. Re-entrant by design: auto-start takes the lock, then
+        // the ACP open re-checks the same akh moments later. Re-dialing there
+        // would draw a second session and refuse against our own lock — the
+        // deadlock this map exists to prevent.
+        if held.contains_key(name) {
+            return Ok(());
+        }
+
+        let Some(opts) = self.akh_lock_pool_options().await else {
             return Ok(());
         };
-        match akhomed_store::try_acquire_akh_lock(pool, akh_id).await {
-            Ok(true) => Ok(()),
+        let conn = akhomed_store::connect(&opts).await.map_err(|e| {
+            format!(
+                "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
+                 refusing to {op} to avoid split-brain. Check the Postgres backing store."
+            )
+        })?;
+
+        match akhomed_store::try_acquire_akh_lock(&conn, akh_id).await {
+            Ok(true) => {
+                held.insert(name.to_string(), Arc::new(conn));
+                Ok(())
+            }
             Ok(false) => Err(format!(
                 "refusing to {op} \"{name}\": another host already holds the akh's \
                  advisory lock (split-brain guard). Confirm no other akhomed is \
@@ -884,17 +949,27 @@ impl ServerState {
         }
     }
 
-    /// Release the Akh's advisory lock (best-effort) — paired with
+    /// Release the Akh's advisory lock — paired with
     /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
-    /// re-acquire. No-op without a pool. Logs (does not error) on failure.
+    /// re-acquire. No-op when this daemon does not hold it.
+    ///
+    /// Dropping the connection is what actually guarantees the release: the
+    /// explicit `pg_advisory_unlock` is a courtesy so the lock frees before
+    /// the socket teardown completes, but a failed unlock (or a dead socket)
+    /// no longer strands the lock the way a pooled release did.
     async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
-        let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        let conn = self.akh_lock_conns.write().await.remove(name);
+        let Some(conn) = conn else {
             return;
         };
-        if let Err(e) = akhomed_store::release_akh_lock(pool, akh_id).await {
-            tracing::warn!(workspace = %name, error = %e, "could not release akh advisory lock");
+        if let Err(e) = akhomed_store::release_akh_lock(&conn, akh_id).await {
+            tracing::warn!(
+                workspace = %name, error = %e,
+                "explicit akh advisory-lock unlock failed; dropping the connection \
+                 releases the session lock regardless"
+            );
         }
+        drop(conn);
     }
 
     /// Evict a workspace's cached engine + agent and stop its background tasks
