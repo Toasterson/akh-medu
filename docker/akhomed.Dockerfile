@@ -33,8 +33,10 @@ RUN apt-get update && \
         # branch did not, which is why multi-arch builds only ever worked from
         # an amd64 host.
         if [ "$BUILDPLATFORM" != "linux/amd64" ]; then \
+          dpkg --add-architecture amd64 && apt-get update && \
           apt-get install -y --no-install-recommends \
-            gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross ; \
+            gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross \
+            libssl-dev:amd64 ; \
         fi ;; \
     esac && \
     rm -rf /var/lib/apt/lists/*
@@ -65,7 +67,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
         if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then \
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
                  CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
-                 CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ ; \
+                 CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ \
+                 PKG_CONFIG_ALLOW_CROSS=1 \
+                 PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig \
+                 PKG_CONFIG_SYSROOT_DIR=/ ; \
         fi && \
         cargo build --release --features "${FEATURES}" --bin akhomed \
           --target x86_64-unknown-linux-gnu ;; \
@@ -93,7 +98,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
         if command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then \
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
                  CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
-                 CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ ; \
+                 CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++ \
+                 PKG_CONFIG_ALLOW_CROSS=1 \
+                 PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig \
+                 PKG_CONFIG_SYSROOT_DIR=/ ; \
         fi && \
         rm -f target/x86_64-unknown-linux-gnu/release/akhomed && \
         cargo build --release --features "${FEATURES}" --bin akhomed \
