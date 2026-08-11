@@ -286,6 +286,11 @@ pub struct AgentDaemon {
     /// When true, cycle/learning methods skip their work without acquiring
     /// the agent lock — allowing external writers to acquire it uncontended.
     paused: Arc<AtomicBool>,
+    /// Triple-count watermark for equivalence learning. The task only runs
+    /// when the KG triple count has advanced since the last pass, preventing
+    /// the "learn-on-new-triples" trigger from firing uselessly on an idle
+    /// akh and drowning the logs in zero-result INFO lines.
+    last_equivalence_triple_count: std::sync::atomic::AtomicUsize,
     /// Notified after each cycle completes. The suspend handler waits on
     /// this to ensure the daemon has released the agent lock.
     cycle_done: Arc<tokio::sync::Notify>,
@@ -335,6 +340,7 @@ impl AgentDaemon {
             shutdown: None,
             status: None,
             autonomy: AutonomyConfig::default(),
+            last_equivalence_triple_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "postgres")]
             db: None,
             seshat_upstream: None,
@@ -694,6 +700,19 @@ impl AgentDaemon {
 
     fn run_equivalence_learning(&mut self) {
         let engine = self.lock_agent().engine.clone();
+        let current = engine.triple_count();
+        let last = self
+            .last_equivalence_triple_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if current == last {
+            tracing::debug!(
+                current,
+                last,
+                "daemon: equivalence learning skipped, no new triples"
+            );
+            return;
+        }
+
         match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
@@ -702,8 +721,12 @@ impl AgentDaemon {
                             "[daemon:equivalence] {count} new equivalences discovered",
                         )));
                     }
+                    tracing::info!(count, "daemon: equivalence learning complete");
+                } else {
+                    tracing::debug!("daemon: equivalence learning complete: 0 equivalences");
                 }
-                tracing::info!(count, "daemon: equivalence learning complete");
+                self.last_equivalence_triple_count
+                    .store(current, std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => {
                 tracing::warn!(error = %e, "daemon: equivalence learning failed");
