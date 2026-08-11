@@ -137,6 +137,15 @@ akhomed:
       cpu: "2"
       memory: 4Gi
 
+  # Pod security context. The runtime image's `USER akh` is uid/gid 999, and
+  # the kubelet cannot verify a NON-NUMERIC user against `runAsNonRoot` — it
+  # fails with "image has non-numeric user (akh)". These must stay numeric.
+  # fsGroup must equal the gid or akhomed cannot write its own PVCs.
+  securityContext:
+    runAsUser: 999
+    runAsGroup: 999
+    fsGroup: 999
+
   nodeSelector: {}
   tolerations: []
   affinity: {}
