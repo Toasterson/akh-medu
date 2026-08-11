@@ -211,6 +211,13 @@ pub struct ProjectionDiff {
     pub retracted: usize,
 }
 
+impl ProjectionDiff {
+    /// True when this reprojection changed nothing — an ideal Retain outcome.
+    pub fn is_unchanged(&self) -> bool {
+        self.added == 0 && self.retracted == 0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Projection
 // ---------------------------------------------------------------------------
