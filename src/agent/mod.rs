@@ -19,6 +19,7 @@ pub mod channel;
 pub mod counterfactual;
 pub mod agentic_chat;
 pub mod chat_backend;
+pub mod openai_backend;
 pub mod organ;
 pub mod event_calculus;
 pub mod channel_message;

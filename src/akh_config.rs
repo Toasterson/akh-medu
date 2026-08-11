@@ -69,6 +69,24 @@ pub enum AkhConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("akh \"{akh}\" selects backend = \"openai\" but `{field}` is missing")]
+    #[diagnostic(
+        code(akh::akh_config::missing_openai_endpoint),
+        help(
+            "An OpenAI-backed akh needs both a pinned `model` and an \
+             `[openai_endpoint]` table with at least `base_url` (version segment \
+             included, e.g. \"https://inference.hetzner.com/api/v1\"). Two ways \
+             forward: add the missing field, or switch the akh back to \
+             `backend = \"ollama\"`. The daemon refuses rather than falling back, \
+             because silently answering from a different model than the one \
+             configured would invalidate any measurement taken against this akh."
+        )
+    )]
+    MissingOpenAiEndpoint {
+        akh: String,
+        field: &'static str,
+    },
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -409,6 +427,63 @@ pub enum ChatBacking {
     Ollama,
     /// In-process Candle GGUF model.
     Candle,
+    /// Any host serving the OpenAI `/chat/completions` contract — vLLM, SGLang,
+    /// llama.cpp's server, OpenRouter, DeepSeek, Hetzner's inference experiment.
+    /// Configured by the `[openai_endpoint]` table, which is **required** for
+    /// this backing (an akh that selects it without one is a config error).
+    #[serde(rename = "openai")]
+    OpenAi,
+}
+
+/// An OpenAI-compatible inference endpoint (`backend = "openai"`).
+///
+/// Deliberately a separate table from [`OllamaEndpoint`] rather than a third
+/// `kind` on it: the two speak different wire protocols, and folding a non-Ollama
+/// provider into a field named `ollama_endpoint` would mislead every future
+/// reader. `base_url` must include the version segment.
+///
+/// ```toml
+/// backend = "openai"
+/// model = "DeepSeek-V4-Flash-0731"
+///
+/// [openai_endpoint]
+/// base_url = "https://inference.hetzner.com/api/v1"
+/// api_key = "env:HETZNER_INFERENCE_KEY"
+/// context_window = 131072
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenAiEndpoint {
+    /// API root **including** the version segment (e.g. `.../api/v1`). The
+    /// client appends `/chat/completions` and `/models`.
+    pub base_url: String,
+
+    /// Bearer token. Supports `env:VAR` (resolved at call time) so the secret
+    /// need never be written into this file; a literal token also works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Context window in tokens. The OpenAI contract exposes no way to discover
+    /// this (unlike Ollama's `/api/show`), so the Phase-44 context budget needs
+    /// it stated here. `None` leaves the budget on its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+
+    /// Per-request timeout. Agentic coding turns are long-running; defaults to
+    /// 600 s.
+    #[serde(default = "default_openai_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Cap on generated tokens per turn. `None` ⇒ the server's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+
+    /// Sampling temperature. `None` ⇒ the server's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+}
+
+fn default_openai_timeout_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,10 +564,33 @@ pub struct AkhConfig {
     #[serde(default = "default_true")]
     pub capture_transcripts: bool,
 
+    /// Which Phase-44 context-assembly strategy this akh runs:
+    /// `"compacting"` (the daemon default), `"passive"`, `"virtual"` (MemGPT
+    /// tiers + self-edit tools), or `"passthrough"` (the A/B control).
+    ///
+    /// Per-akh because the strategies are meant to be *compared*: the daemon
+    /// hosts several akhs in one process, so a single `AKH_CONTEXT_STRATEGY`
+    /// env var could only ever move all of them together, leaving no control
+    /// group. Precedence is: this field → `AKH_CONTEXT_STRATEGY` → `compacting`.
+    ///
+    /// Note this is also the **tier gate** (ADR 081 slice 7 decision 4): only
+    /// akhs on `virtual` receive the memory self-edit tools, so setting it is a
+    /// statement about the model's capability, not just its bookkeeping.
+    ///
+    /// Kept above the first `[table]` header so it serializes as a top-level
+    /// scalar (see the TOML nesting footgun documented on `capture_transcripts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_strategy: Option<String>,
+
     // ── tables (must be serialized after all values for TOML) ───────────────
     /// Where the pinned model runs (local Ollama or cloud).
     #[serde(default)]
     pub ollama_endpoint: OllamaEndpoint,
+
+    /// The OpenAI-compatible endpoint, required when `backend = "openai"` and
+    /// ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_endpoint: Option<OpenAiEndpoint>,
 
     /// Background-automation gating (P5). Defaults to fully disabled.
     #[serde(default)]
@@ -535,7 +633,9 @@ impl Default for AkhConfig {
             openclaw_import: false,
             extra_read_roots: Vec::new(),
             capture_transcripts: true,
+            context_strategy: None,
             ollama_endpoint: OllamaEndpoint::default(),
+            openai_endpoint: None,
             autonomy: AutonomyConfig::default(),
             delegation: None,
             exec: None,
@@ -667,6 +767,7 @@ impl AkhConfig {
             "openclaw_import",
             "extra_read_roots",
             "capture_transcripts",
+            "context_strategy",
         ]
     }
 
@@ -675,6 +776,17 @@ impl AkhConfig {
     fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
         &[
             ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            (
+                "openai_endpoint",
+                &[
+                    "base_url",
+                    "api_key",
+                    "context_window",
+                    "timeout_secs",
+                    "max_tokens",
+                    "temperature",
+                ],
+            ),
             ("autonomy", &["enabled", "tasks"]),
             (
                 "delegation",
@@ -863,6 +975,49 @@ impl AkhConfig {
             system_prompt: self.system_prompt.clone(),
             ..Default::default()
         }
+    }
+
+    /// Build the [`OpenAiConfig`](crate::agent::openai_backend::OpenAiConfig)
+    /// for an `backend = "openai"` akh.
+    ///
+    /// Returns `Err` with a diagnosable reason when the akh selects the OpenAI
+    /// backing but is not actually configured for it, so the daemon can refuse
+    /// loudly instead of silently falling back to a *different model than the
+    /// operator asked for* — a fallback that would quietly invalidate any
+    /// benchmark run against this akh.
+    ///
+    /// Callers that merely want to know whether this akh is OpenAI-backed
+    /// should compare [`Self::backend`] against [`ChatBacking::OpenAi`]; this
+    /// returns `Ok(None)` for every other backing.
+    pub fn to_openai_config(
+        &self,
+    ) -> Result<Option<crate::agent::openai_backend::OpenAiConfig>, AkhConfigError> {
+        if self.backend != ChatBacking::OpenAi {
+            return Ok(None);
+        }
+        let endpoint = self.openai_endpoint.as_ref().ok_or_else(|| {
+            AkhConfigError::MissingOpenAiEndpoint {
+                akh: self.workspace.name.clone(),
+                field: "openai_endpoint",
+            }
+        })?;
+        let model = self.model.clone().ok_or_else(|| {
+            AkhConfigError::MissingOpenAiEndpoint {
+                akh: self.workspace.name.clone(),
+                field: "model",
+            }
+        })?;
+
+        Ok(Some(crate::agent::openai_backend::OpenAiConfig {
+            base_url: endpoint.base_url.clone(),
+            api_key: endpoint.api_key.clone(),
+            model,
+            timeout_secs: endpoint.timeout_secs,
+            context_window: endpoint.context_window,
+            max_tokens: endpoint.max_tokens,
+            temperature: endpoint.temperature,
+            reasoning_effort: self.reasoning_effort.clone(),
+        }))
     }
 }
 
@@ -1130,6 +1285,144 @@ mod tests {
             scalar_at < table_at,
             "capture_transcripts must serialize before the first [table]:\n{content}"
         );
+    }
+
+    /// Every shipped example workspace config must load cleanly and carry no
+    /// unrecognized keys.
+    ///
+    /// These files are what operators copy when standing up an akh, so a key
+    /// that serde silently drops here propagates into real fleets — and the
+    /// TOML nesting footgun (a scalar written below a `[table]` header) is
+    /// invisible without exactly this check.
+    #[test]
+    fn shipped_example_workspace_configs_are_valid() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/three-akhs/workspaces");
+        let entries = std::fs::read_dir(&dir).expect("example workspace dir exists");
+        let mut checked = 0;
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let unknown = AkhConfig::load_checked(&path)
+                .unwrap_or_else(|e| panic!("{} failed to load: {e}", path.display()))
+                .1;
+            assert!(
+                unknown.is_empty(),
+                "{} has unrecognized keys: {unknown:?}",
+                path.display()
+            );
+            checked += 1;
+        }
+        assert!(checked >= 4, "expected the example akhs to be checked, saw {checked}");
+    }
+
+    #[test]
+    fn context_strategy_serializes_before_first_table() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let mut cfg = AkhConfig::with_name("deepseek");
+        cfg.context_strategy = Some("virtual".into());
+        cfg.save(&path).expect("save");
+        let content = std::fs::read_to_string(&path).expect("read");
+        let scalar_at = content.find("context_strategy").expect("scalar present");
+        let table_at = content
+            .lines()
+            .find(|line| line.starts_with('['))
+            .and_then(|line| content.find(line))
+            .expect("a table header present");
+        assert!(
+            scalar_at < table_at,
+            "context_strategy must serialize before the first [table]:\n{content}"
+        );
+    }
+
+    #[test]
+    fn openai_backend_parses_and_translates_to_client_config() {
+        let toml_src = r#"
+            name = "deepseek"
+            backend = "openai"
+            model = "DeepSeek-V4-Flash-0731"
+            context_strategy = "virtual"
+
+            [openai_endpoint]
+            base_url = "https://inference.hetzner.com/api/v1"
+            api_key = "env:HETZNER_INFERENCE_KEY"
+            context_window = 131072
+        "#;
+        let cfg: AkhConfig = toml::from_str(toml_src).expect("parse");
+        assert_eq!(cfg.backend, ChatBacking::OpenAi);
+        assert_eq!(cfg.context_strategy.as_deref(), Some("virtual"));
+
+        let openai = cfg
+            .to_openai_config()
+            .expect("valid config")
+            .expect("openai-backed akh yields a config");
+        assert_eq!(openai.base_url, "https://inference.hetzner.com/api/v1");
+        assert_eq!(openai.model, "DeepSeek-V4-Flash-0731");
+        assert_eq!(openai.context_window, Some(131072));
+        // Unset default, not a hardcoded value.
+        assert_eq!(openai.timeout_secs, 600);
+        // No unknown keys: the new table is registered in the schema.
+        let raw: toml::Value = toml::from_str(toml_src).expect("raw parse");
+        assert!(
+            AkhConfig::unknown_keys(&raw).is_empty(),
+            "openai_endpoint keys must be recognized: {:?}",
+            AkhConfig::unknown_keys(&raw)
+        );
+    }
+
+    #[test]
+    fn openai_backend_without_its_endpoint_is_refused_not_silently_downgraded() {
+        let cfg: AkhConfig =
+            toml::from_str("name = \"d\"\nbackend = \"openai\"\nmodel = \"m\"\n").expect("parse");
+        let err = cfg.to_openai_config().expect_err("must refuse");
+        assert!(
+            matches!(err, AkhConfigError::MissingOpenAiEndpoint { field: "openai_endpoint", .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn openai_backend_without_a_pinned_model_is_refused() {
+        let toml_src = "name = \"d\"\nbackend = \"openai\"\n\n[openai_endpoint]\nbase_url = \"https://x/v1\"\n";
+        let cfg: AkhConfig = toml::from_str(toml_src).expect("parse");
+        let err = cfg.to_openai_config().expect_err("must refuse");
+        assert!(
+            matches!(err, AkhConfigError::MissingOpenAiEndpoint { field: "model", .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_openai_akhs_yield_no_openai_config() {
+        let cfg = AkhConfig::with_name("tecton");
+        assert_eq!(cfg.backend, ChatBacking::Ollama);
+        assert!(cfg.to_openai_config().expect("ok").is_none());
+    }
+
+    #[test]
+    fn openai_config_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("akh.toml");
+        let mut cfg = AkhConfig::with_name("deepseek");
+        cfg.backend = ChatBacking::OpenAi;
+        cfg.model = Some("DeepSeek-V4-Flash-0731".into());
+        cfg.context_strategy = Some("virtual".into());
+        cfg.openai_endpoint = Some(OpenAiEndpoint {
+            base_url: "https://inference.hetzner.com/api/v1".into(),
+            api_key: Some("env:HETZNER_INFERENCE_KEY".into()),
+            context_window: Some(131072),
+            timeout_secs: 600,
+            max_tokens: None,
+            temperature: None,
+        });
+        cfg.save(&path).expect("save");
+        let loaded = AkhConfig::load(&path).expect("load");
+        assert_eq!(loaded.backend, ChatBacking::OpenAi);
+        assert_eq!(loaded.openai_endpoint, cfg.openai_endpoint);
+        assert_eq!(loaded.context_strategy.as_deref(), Some("virtual"));
     }
 
     #[cfg(unix)]

@@ -1,0 +1,89 @@
+# DeepSeek — third implementer lane on the Mac mini, alongside tecton and
+# imhotep. Awakened 2026-08-11.
+#
+# Two things make this akh different from its two lane-mates, and both are the
+# point of it:
+#
+#   1. Backing: `backend = "openai"` (ADR 070's third peer) against Hetzner's
+#      free inference experiment, which serves the OpenAI /chat/completions
+#      contract rather than Ollama's /api/chat. See [openai_endpoint] below.
+#
+#   2. Context: `context_strategy = "virtual"` — the Phase 44i MemGPT manager
+#      (core/recall/archival tiers + the core_memory_append/replace and
+#      archival_search self-edit tools). tecton and imhotep stay on
+#      `compacting`, so the three lanes working the same queue form a live A/B:
+#      same tasks, same tools, different context assembly.
+#
+# Because `virtual` is also the ADR 081 slice-7 tier gate, this akh is the only
+# one of the three that gets memory self-edit tools at all.
+#
+# TOML NOTE: every key below a `[table]` header belongs to that table. All
+# top-level akh fields (scalars + arrays) MUST appear before the first table
+# ([openai_endpoint]); otherwise they are silently nested under it and dropped.
+
+name = "deepseek"
+is_main = true
+
+# ── chat/agentic backing (ADR 070) ─────────────────────────────────────────
+backend = "openai"
+model = "DeepSeek-V4-Flash-0731"
+
+# MemGPT tiers. Precedence is: this field → AKH_CONTEXT_STRATEGY → "compacting".
+# Set here rather than in sweep.env precisely so tecton and imhotep are NOT
+# moved with it — an env var would take all three lanes at once and leave no
+# control group.
+context_strategy = "virtual"
+
+system_prompt = """
+You are DeepSeek, an implementer akh on the Mac mini working the same queue as
+tecton and imhotep. You take coding tasks end to end: read the code before
+changing it, make the smallest change that fully solves the problem, and run
+the build or tests to prove it. State plainly what you verified and what you
+did not.
+
+You have memory you edit yourself. Put durable facts about the repo, the fleet,
+and the operator's preferences into core memory as you learn them; search
+archival memory before asking a question you have likely already answered.
+"""
+
+# ── per-workspace engine config (flattened WorkspaceConfig fields) ──────────
+dimension = 10000
+encoding = "bipolar"
+language = "auto"
+max_memory_mb = 1024
+max_symbols = 1000000
+max_triples = 500000
+seed_packs = [
+    "identity",
+    "ontology",
+    "common-sense",
+    "computing",
+    "architecture",
+]
+shared_partitions = []
+
+# ── tables (must come AFTER every top-level key above) ──────────────────────
+
+# Hetzner's inference experiment (https://experiments.hetzner.com/docs/inference).
+# `base_url` MUST include the version segment: the client appends
+# `/chat/completions` and `/models` to it verbatim, so dropping `/api/v1` here
+# surfaces as a 404 rather than a config error.
+[openai_endpoint]
+base_url = "https://inference.hetzner.com/api/v1"
+# The LaunchDaemon wrapper (akhomed-daemon.sh) exports HETZNER_INFERENCE_KEY
+# from /usr/local/etc/akh-medu/daemon.env; resolved at call time, so the token
+# never lands in this file.
+api_key = "env:HETZNER_INFERENCE_KEY"
+# The OpenAI contract exposes no way to discover the context window (unlike
+# Ollama's /api/show), so the Phase 44 budget needs it stated. 131072 is the
+# DeepSeek V3/R1-family window and is an ASSUMPTION for V4-Flash — confirm
+# against Hetzner's model listing and correct it here if it differs. Too high
+# and the budget over-fills the prompt; too low and it wastes the window.
+context_window = 131072
+# Agentic coding turns are long; 10 minutes per request.
+timeout_secs = 600
+
+# No [exec] table on purpose: this akh inherits the host-level [exec] from
+# /Library/Application Support/akh-medu/config.toml (local-drop as `toasty`),
+# exactly as tecton and imhotep do. An executor pinned per-akh travels with the
+# akh when it relocates, to a host where that user may not exist.

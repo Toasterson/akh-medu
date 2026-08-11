@@ -2246,6 +2246,32 @@ impl ServerState {
             }
         }
 
+        // ADR 070 third peer: an OpenAI-compatible backing (vLLM/SGLang/OpenRouter/
+        // DeepSeek/Hetzner inference). Unlike the Candle branch above, a failure
+        // here is **fatal for this akh** rather than a fallback: Candle falls back
+        // to the same akh's Ollama endpoint, but an OpenAI-backed akh has no
+        // second endpoint to fall back *to* — it would silently answer from
+        // whatever the default Ollama model is, which is a different model than
+        // the operator configured. Refusing keeps "which model answered this?"
+        // answerable, which is a precondition for benchmarking the akh.
+        match akh_config.to_openai_config() {
+            Ok(Some(openai_cfg)) => {
+                let backend =
+                    std::sync::Arc::new(akh_medu::agent::openai_backend::OpenAiChatBackend::new(
+                        openai_cfg.clone(),
+                        akh_config.system_prompt.clone(),
+                    ));
+                agent.set_chat_backend(backend);
+                tracing::info!(
+                    workspace = %name, backend = "openai",
+                    base_url = %openai_cfg.base_url, model = %openai_cfg.model,
+                    "OpenAI-compatible chat backing attached"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("workspace {name}: {e}")),
+        }
+
         // Phase 44b/c/h/i (extended ADR 081 slice 7): assemble each turn through
         // a curating context manager, guarded by `SafetyEnforced` so eviction can
         // never drop a safety-pinned span. `AKH_CONTEXT_STRATEGY` selects the
@@ -2269,8 +2295,14 @@ impl ServerState {
                 CompactingManager, ContextManager, PassThroughManager, PassiveManager,
                 SafetyEnforced, VirtualContextManager,
             };
-            let strategy =
-                std::env::var("AKH_CONTEXT_STRATEGY").unwrap_or_else(|_| "compacting".to_string());
+            // Precedence: the akh's own `context_strategy` → the daemon-wide
+            // `AKH_CONTEXT_STRATEGY` → `compacting`. The per-akh field has to win,
+            // because one daemon process hosts several akhs: an env var alone can
+            // only move all of them together, which makes running one akh on
+            // `virtual` against a `compacting` control impossible.
+            let strategy = akh_config.context_strategy.clone().unwrap_or_else(|| {
+                std::env::var("AKH_CONTEXT_STRATEGY").unwrap_or_else(|_| "compacting".to_string())
+            });
             let manager: Box<dyn ContextManager> = match strategy.as_str() {
                 // Byte-identical no-op (ADR 065): the "harness off" control for
                 // A/B benchmarking — no history/KG/recall pre-loaded into the
@@ -2295,7 +2327,18 @@ impl ServerState {
                     agent.register_tool(Box::new(akh_medu::agent::tools::QueryGraphTool));
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
-                _ => Box::new(SafetyEnforced::new(CompactingManager)),
+                "compacting" => Box::new(SafetyEnforced::new(CompactingManager)),
+                other => {
+                    // Loud, because a typo here silently downgrades the akh to a
+                    // different strategy than the operator selected — which would
+                    // quietly invalidate an A/B comparison rather than fail it.
+                    tracing::warn!(
+                        workspace = %name, strategy = %other,
+                        "unrecognized context strategy; falling back to `compacting`. \
+                         Valid values: compacting | passive | virtual | passthrough"
+                    );
+                    Box::new(SafetyEnforced::new(CompactingManager))
+                }
             };
             tracing::info!(workspace = %name, %strategy, "context manager attached");
             agent.set_context_manager(manager);
