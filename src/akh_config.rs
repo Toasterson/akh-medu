@@ -225,6 +225,16 @@ pub enum ExecBackendConfig {
         /// Shell used to interpret command lines. Defaults to `/bin/sh`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<std::path::PathBuf>,
+        /// `PATH` for executed commands.
+        ///
+        /// Omit (the default) to derive one from the exec principal's home
+        /// plus the platform's conventional prefixes — `~/.local/bin`,
+        /// `~/.cargo/bin`, `~/go/bin`, Homebrew/pkgsrc, then the POSIX base.
+        /// Set a literal value to pin it, or the sentinel `"inherit"` to hand
+        /// down akhomed's own `PATH`, which under an init system is a minimal
+        /// default with none of the exec user's toolchain on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// Run executor-facing tools on a remote host over SSH
     /// (`crate::backend::remote::RemoteBackend`, Phase 48c / ADR 082).
@@ -271,11 +281,25 @@ pub enum ExecBackendConfig {
 impl ExecBackendConfig {
     /// Translate `kind = "local-drop"` into the config
     /// [`crate::backend::LocalDropBackend::new`] takes. `None` for other kinds.
+    /// Map the TOML `path` string onto the typed policy.
+    ///
+    /// One sentinel, `"inherit"`, selects akhomed's own `PATH`; anything else
+    /// is taken literally. A literal `PATH` is a colon-joined list of absolute
+    /// directories, so `"inherit"` can never collide with a real value.
+    fn parse_exec_path(raw: &str) -> crate::backend::ExecPath {
+        if raw.trim().eq_ignore_ascii_case("inherit") {
+            crate::backend::ExecPath::Inherit
+        } else {
+            crate::backend::ExecPath::Explicit(raw.into())
+        }
+    }
+
     pub fn to_local_drop_config(&self) -> Option<crate::backend::LocalDropConfig> {
         let Self::LocalDrop {
             user,
             workdir,
             shell,
+            path,
         } = self
         else {
             return None;
@@ -286,6 +310,9 @@ impl ExecBackendConfig {
         }
         if let Some(sh) = shell {
             cfg = cfg.with_shell(sh.clone());
+        }
+        if let Some(p) = path {
+            cfg = cfg.with_path(Self::parse_exec_path(p));
         }
         Some(cfg)
     }
@@ -672,6 +699,8 @@ impl AkhConfig {
                     "key",
                     "known_hosts",
                     "workdir",
+                    "shell",
+                    "path",
                 ],
             ),
         ]
@@ -1209,6 +1238,7 @@ mod tests {
             user: "build".into(),
             workdir: None,
             shell: None,
+            path: None,
         };
         assert!(matches!(
             cfg.effective_exec(Some(&host)),
@@ -1224,6 +1254,7 @@ mod tests {
             user: "build".into(),
             workdir: None,
             shell: None,
+            path: None,
         };
         // An akh that explicitly pins in-process keeps it even under a host
         // local-drop policy: overrides exist for the one-akh-differs case.
@@ -1254,6 +1285,7 @@ mod tests {
             user: "build".into(),
             workdir: None,
             shell: None,
+            path: None,
         };
         assert!(matches!(
             cfg.effective_exec(Some(&host)),
@@ -1462,6 +1494,7 @@ workdir = "/Users/toasty/ws"
                 user: "build".into(),
                 workdir: None,
                 shell: None,
+                path: None,
             }),
             ..AkhConfig::with_name("thoth")
         };

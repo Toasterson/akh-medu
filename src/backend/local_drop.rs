@@ -57,7 +57,7 @@
 //! [`setgid(2)`]: https://man7.org/linux/man-pages/man2/setgid.2.html
 //! [`setuid(2)`]: https://man7.org/linux/man-pages/man2/setuid.2.html
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -168,6 +168,93 @@ struct Principal {
     groups: Vec<libc::gid_t>,
 }
 
+/// How the `PATH` handed to executed commands is decided.
+///
+/// This is a real decision, not a detail. akhomed as a LaunchDaemon (or an SMF
+/// service, or a systemd unit) is started by an init system with a deliberately
+/// minimal environment: launchd's default is `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// with nothing from any user's login shell. Letting that leak to the child is
+/// the file-side mistake in reverse — the command runs *as* the target user,
+/// with the target user's `HOME`, and then cannot find the target user's
+/// toolchain. `~/.cargo/bin/cargo` is the canonical casualty: present, owned by
+/// the exec principal, pointed at by `HOME`, and invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ExecPath {
+    /// Build a `PATH` from the exec principal's own home plus the platform's
+    /// conventional prefixes. The default, and what an interactive login for
+    /// that user would approximate.
+    #[default]
+    Derived,
+    /// Use exactly this value. For deployments that pin a toolchain, or that
+    /// want a deliberately narrow `PATH`.
+    Explicit(OsString),
+    /// Inherit akhomed's own `PATH`. This is pre-Phase-48b behaviour and is
+    /// almost always wrong for a daemon deployment; it exists so an operator
+    /// can reproduce the old semantics knowingly rather than by accident.
+    Inherit,
+}
+
+impl ExecPath {
+    /// Resolve to the value to set, or `None` to leave the child's `PATH`
+    /// inherited from akhomed.
+    ///
+    /// `home` is the *exec principal's* home as resolved by `getpwnam_r(3)` —
+    /// not akhomed's — so the derived value tracks whoever commands actually
+    /// run as.
+    pub fn resolve(&self, home: &Path) -> Option<OsString> {
+        match self {
+            Self::Inherit => None,
+            Self::Explicit(value) => Some(value.clone()),
+            Self::Derived => Some(Self::derive(home)),
+        }
+    }
+
+    /// Per-user tool directories first (so a rustup/pipx/npm shim wins over a
+    /// system copy, which is what the user's own shell would do), then the
+    /// platform prefixes, then the POSIX base that is always present.
+    fn derive(home: &Path) -> OsString {
+        let mut parts: Vec<PathBuf> = vec![
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join("go/bin"),
+        ];
+
+        // Where third-party packages land differs per platform and getting it
+        // wrong is silent: the entry simply never matches.
+        #[cfg(target_os = "macos")]
+        parts.extend([
+            // Apple silicon Homebrew, then the Intel/MacPorts location.
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/opt/homebrew/sbin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+        ]);
+        #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+        parts.extend([
+            PathBuf::from("/opt/local/bin"),
+            PathBuf::from("/opt/local/sbin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+        ]);
+        #[cfg(not(any(target_os = "macos", target_os = "illumos", target_os = "solaris")))]
+        parts.extend([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/local/sbin"),
+        ]);
+
+        parts.extend([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+        ]);
+
+        let joined: Vec<&OsStr> = parts.iter().map(|p| p.as_os_str()).collect();
+        std::env::join_paths(joined)
+            .expect("derived PATH components contain no ':' — they are fixed literals and a home dir")
+    }
+}
+
 /// Configuration for a [`LocalDropBackend`].
 #[derive(Debug, Clone)]
 pub struct LocalDropConfig {
@@ -178,6 +265,8 @@ pub struct LocalDropConfig {
     pub workdir: Option<PathBuf>,
     /// Shell used to interpret command lines. Defaults to `/bin/sh`.
     pub shell: PathBuf,
+    /// `PATH` policy for executed commands. Defaults to [`ExecPath::Derived`].
+    pub path: ExecPath,
 }
 
 impl LocalDropConfig {
@@ -187,6 +276,7 @@ impl LocalDropConfig {
             user: user.into(),
             workdir: None,
             shell: PathBuf::from("/bin/sh"),
+            path: ExecPath::default(),
         }
     }
 
@@ -199,6 +289,12 @@ impl LocalDropConfig {
     /// Override the shell used to interpret command lines.
     pub fn with_shell(mut self, shell: impl Into<PathBuf>) -> Self {
         self.shell = shell.into();
+        self
+    }
+
+    /// Override the `PATH` policy for executed commands.
+    pub fn with_path(mut self, path: ExecPath) -> Self {
+        self.path = path;
         self
     }
 }
@@ -398,6 +494,13 @@ impl Backend for LocalDropBackend {
             .env("HOME", &self.principal.home)
             .env("USER", &self.principal.name)
             .env("LOGNAME", &self.principal.name);
+        // `PATH` belongs to the same set: akhomed's own is the init system's
+        // minimal default (launchd hands down `/usr/bin:/bin:/usr/sbin:/sbin`
+        // and nothing else), so inheriting it gives the child a `HOME` full of
+        // tools it cannot resolve. Resolved from the *principal's* home.
+        if let Some(path) = self.config.path.resolve(&self.principal.home) {
+            command.env("PATH", path);
+        }
         for (key, value) in &request.env {
             command.env(key, value);
         }
@@ -853,5 +956,92 @@ mod tests {
             String::from_utf8_lossy(&outcome.stdout),
             "/tmp/akh-explicit-home"
         );
+    }
+
+    #[test]
+    fn derived_path_leads_with_the_principals_own_tool_dirs() {
+        let path = ExecPath::Derived
+            .resolve(Path::new("/home/build"))
+            .expect("Derived always resolves to a value");
+        let rendered = path.to_string_lossy().into_owned();
+        let entries: Vec<&str> = rendered.split(':').collect();
+
+        // The user's own toolchain must precede any system copy, which is what
+        // that user's login shell would do — this is the whole point of the
+        // policy: `cargo` lives in `~/.cargo/bin` and nowhere else.
+        assert_eq!(entries[0], "/home/build/.local/bin");
+        assert!(entries.contains(&"/home/build/.cargo/bin"));
+        let cargo_at = entries.iter().position(|e| *e == "/home/build/.cargo/bin");
+        let usr_bin_at = entries.iter().position(|e| *e == "/usr/bin");
+        assert!(
+            cargo_at < usr_bin_at,
+            "principal tool dirs must precede the system base, got: {rendered}"
+        );
+
+        // The POSIX base is always reachable, or the child cannot run `sh`
+        // builtins' external counterparts.
+        for base in ["/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+            assert!(entries.contains(&base), "missing {base} in: {rendered}");
+        }
+    }
+
+    #[test]
+    fn explicit_and_inherit_path_policies_are_distinguishable() {
+        let home = Path::new("/home/build");
+        assert_eq!(
+            ExecPath::Explicit("/opt/toolchain/bin:/usr/bin".into()).resolve(home),
+            Some(OsString::from("/opt/toolchain/bin:/usr/bin")),
+            "an explicit PATH must be passed through verbatim"
+        );
+        assert_eq!(
+            ExecPath::Inherit.resolve(home),
+            None,
+            "Inherit must set nothing so the child keeps akhomed's PATH"
+        );
+    }
+
+    #[test]
+    fn exec_puts_the_principals_bin_dirs_on_path_not_the_daemons() {
+        let Some(user) = current_user() else { return };
+        let Ok(backend) = LocalDropBackend::new(
+            LocalDropConfig::new(&user),
+            Arc::new(LocalFs::denied()),
+        ) else {
+            return;
+        };
+        let outcome = backend
+            .exec(ExecRequest::shell(
+                "printf '%s' \"$PATH\"",
+                std::time::Duration::from_secs(30),
+            ))
+            .expect("printf must run");
+        let path = String::from_utf8_lossy(&outcome.stdout).into_owned();
+        let expected_cargo = backend.principal.home.join(".cargo/bin");
+        assert!(
+            path.split(':').any(|e| Path::new(e) == expected_cargo),
+            "the exec principal's ~/.cargo/bin must be on PATH — a daemon-inherited \
+             PATH is why `cargo` was unfindable despite HOME being correct. got: {path}"
+        );
+    }
+
+    #[test]
+    fn explicit_env_path_still_wins_over_the_derived_default() {
+        let Some(user) = current_user() else { return };
+        let Ok(backend) = LocalDropBackend::new(
+            LocalDropConfig::new(&user),
+            Arc::new(LocalFs::denied()),
+        ) else {
+            return;
+        };
+        let outcome = backend
+            .exec(
+                ExecRequest::shell(
+                    "printf '%s' \"$PATH\"",
+                    std::time::Duration::from_secs(30),
+                )
+                .with_env("PATH", "/opt/pinned/bin"),
+            )
+            .expect("printf must run");
+        assert_eq!(String::from_utf8_lossy(&outcome.stdout), "/opt/pinned/bin");
     }
 }

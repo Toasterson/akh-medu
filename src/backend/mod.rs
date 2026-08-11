@@ -49,7 +49,7 @@ pub mod process_supervisor;
 #[cfg(feature = "remote-executor")]
 pub mod remote;
 
-pub use local_drop::{LocalDropBackend, LocalDropConfig, LocalDropError};
+pub use local_drop::{ExecPath, LocalDropBackend, LocalDropConfig, LocalDropError};
 
 pub use process_supervisor::{DrainedOutput, ProgressTracker, SupervisedExecution, SupervisorError, SupervisorResult};
 
