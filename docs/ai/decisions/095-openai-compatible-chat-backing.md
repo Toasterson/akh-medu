@@ -41,7 +41,7 @@ model = "DeepSeek-V4-Flash-0731"
 [openai_endpoint]
 base_url = "https://inference.hetzner.com/api/v1"
 api_key = "env:HETZNER_INFERENCE_KEY"
-context_window = 131072
+context_window = 512000
 ```
 
 `base_url` includes the version segment; the client appends `/chat/completions`
@@ -74,6 +74,16 @@ no equivalent. Rather than guess from the model name, the window is stated in
 `[openai_endpoint].context_window` and feeds the Phase 44 budget directly.
 `None` leaves the budget on its own default. This is a knob an operator must
 set correctly — too high over-fills the prompt, too low wastes the window.
+
+Worth checking per provider rather than assuming: vLLM-family servers report a
+non-standard `max_model_len` on `GET /models`, which many OpenAI-compatible
+hosts omit. Hetzner does expose it, and it caught a real error — this ADR
+originally shipped `deepseek` with `context_window = 131072`, carried over from
+the DeepSeek V3/R1 family. The endpoint reports **512000** for
+`DeepSeek-V4-Flash-0731`, so the first deployment was quietly using a quarter of
+the available window. Nothing failed; it simply under-filled. That is exactly
+the failure mode this field's "configuration, not discovery" design invites, and
+the argument for probing `/models` when standing up any new OpenAI-backed akh.
 
 ### 4. Misconfiguration is fatal for the akh, not a fallback
 

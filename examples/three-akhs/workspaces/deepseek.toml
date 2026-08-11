@@ -74,12 +74,18 @@ base_url = "https://inference.hetzner.com/api/v1"
 # from /usr/local/etc/akh-medu/daemon.env; resolved at call time, so the token
 # never lands in this file.
 api_key = "env:HETZNER_INFERENCE_KEY"
-# The OpenAI contract exposes no way to discover the context window (unlike
-# Ollama's /api/show), so the Phase 44 budget needs it stated. 131072 is the
-# DeepSeek V3/R1-family window and is an ASSUMPTION for V4-Flash — confirm
-# against Hetzner's model listing and correct it here if it differs. Too high
-# and the budget over-fills the prompt; too low and it wastes the window.
-context_window = 131072
+# The OpenAI contract exposes no way to *discover* the context window (unlike
+# Ollama's /api/show), so the Phase 44 budget needs it stated here. Too high and
+# the budget over-fills the prompt; too low and it silently wastes the window.
+#
+# 512000 is not a guess — it is what the endpoint reports for this model:
+#   curl -sH "Authorization: Bearer $KEY" \
+#     https://inference.hetzner.com/api/v1/models \
+#     | jq '.data[] | select(.id=="DeepSeek-V4-Flash-0731") | .max_model_len'
+# Re-check it when pinning a different model: `max_model_len` is a non-standard
+# field that vLLM-family servers expose and many OpenAI-compatible hosts do not,
+# so it is worth confirming rather than assuming per provider.
+context_window = 512000
 # Agentic coding turns are long; 10 minutes per request.
 timeout_secs = 600
 

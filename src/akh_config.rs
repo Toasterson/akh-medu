@@ -449,7 +449,7 @@ pub enum ChatBacking {
 /// [openai_endpoint]
 /// base_url = "https://inference.hetzner.com/api/v1"
 /// api_key = "env:HETZNER_INFERENCE_KEY"
-/// context_window = 131072
+/// context_window = 512000
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenAiEndpoint {
