@@ -159,6 +159,33 @@ pub async fn touch_last_seen(
     Ok(())
 }
 
+/// Clear an Akh's `last_seen` heartbeat — it is no longer resident anywhere.
+///
+/// `last_seen` answers "was this akh alive recently?", and the guard refuses a
+/// wake while it is under 60s old. After a **graceful** sleep/evict that answer
+/// is definitively *no*: the snapshot is written, the WAL flushed, the engine
+/// dropped and the advisory lock released. Leaving a fresh timestamp behind
+/// makes the akh un-wakeable for a minute — including by the very host that
+/// just put it down, which is the ordinary config-reload path (`akh sleep`
+/// then `akh wake`).
+///
+/// Clearing here does not weaken the guard: it *sharpens* it. The 60s window
+/// exists for hosts that died without releasing anything, and those never reach
+/// this call, so their stale heartbeat still blocks a competing wake.
+pub async fn clear_last_seen(db: &DatabaseConnection, akh_id: Uuid) -> StoreResult<()> {
+    use crate::entity::akh;
+    let model = akh::ActiveModel {
+        id: sea_orm::ActiveValue::Set(akh_id),
+        last_seen: sea_orm::ActiveValue::Set(None),
+        ..Default::default()
+    };
+    akh::Entity::update(model)
+        .filter(akh::Column::Id.eq(akh_id))
+        .exec(db)
+        .await?;
+    Ok(())
+}
+
 /// Read an Akh's `last_seen` heartbeat (ADR-049 split-brain guard). Returns
 /// `None` if the row has no heartbeat (never touched) or the row doesn't exist.
 ///

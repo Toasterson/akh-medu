@@ -1014,8 +1014,24 @@ impl ServerState {
 
         // Release the advisory lock so this host (or another) can re-acquire on
         // the next wake (no-op in local-only mode).
-        self.release_akh_lock(name, akh_medu::wal::akh_id_for(name))
-            .await;
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        self.release_akh_lock(name, akh_id).await;
+
+        // ADR-049: and clear the heartbeat. The akh is provably not resident —
+        // snapshot written, WAL flushed, engine dropped, lock released — so a
+        // `last_seen` under 60s old would block the next wake for no reason,
+        // including the `akh sleep` + `akh wake` config-reload path on this very
+        // host. Only ungraceful exits leave a stale heartbeat behind now, which
+        // is exactly the case the 60s window is for.
+        if let Some(pool) = self.pg_pool().as_ref() {
+            if let Err(e) = akhomed_store::clear_last_seen(pool, akh_id).await {
+                tracing::warn!(
+                    workspace = %name, error = %e,
+                    "could not clear the akh heartbeat on evict; the next wake may be \
+                     refused for up to 60s by the last_seen freshness guard"
+                );
+            }
+        }
     }
 
     /// Deep-sleep a workspace (control-plane `_akh/akh/sleep`).
