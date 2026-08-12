@@ -62,7 +62,7 @@ use crate::engine::Engine;
 
 /// A single parsed compiler diagnostic.
 #[derive(Debug, Clone)]
-pub struct CompilerDiagnostic {
+pub(crate) struct CompilerDiagnostic {
     /// Error level: "error", "warning", "note", "help".
     pub level: String,
     /// The error message.
@@ -81,7 +81,7 @@ pub struct CompilerDiagnostic {
 
 impl CompilerDiagnostic {
     /// Whether this is an error (vs warning/note).
-    pub fn is_error(&self) -> bool {
+    pub(crate) fn is_error(&self) -> bool {
         self.level == "error"
     }
 
