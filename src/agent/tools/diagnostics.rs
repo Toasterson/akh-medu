@@ -184,7 +184,7 @@ impl Tool for DiagnosticsTool {
 mod tests {
     use super::*;
     use crate::agent::tool::ToolInput;
-    use crate::engine::Engine;
+    use crate::engine::{Engine, EngineConfig};
 
     // --- Kind/scope mapping tests (no cargo needed) ---
 
@@ -192,7 +192,7 @@ mod tests {
     fn invalid_kind_rejected() {
         let input = ToolInput::default().with_param("kind", "bogus");
         let output = DiagnosticsTool
-            .execute(&Engine::default(), input)
+            .execute(&Engine::new(EngineConfig::default()).unwrap(), input)
             .unwrap();
         assert!(!output.success, "invalid kind must fail");
         assert!(
@@ -206,7 +206,7 @@ mod tests {
     fn invalid_scope_rejected() {
         let input = ToolInput::default().with_param("scope", "everything");
         let output = DiagnosticsTool
-            .execute(&Engine::default(), input)
+            .execute(&Engine::new(EngineConfig::default()).unwrap(), input)
             .unwrap();
         assert!(!output.success, "invalid scope must fail");
         assert!(
@@ -227,7 +227,7 @@ mod tests {
         init_test_repo(root, "pub fn initial() {}\n", "diag-default-kind");
         let input = ToolInput::default().with_param("path", root.to_str().unwrap());
         let output = DiagnosticsTool
-            .execute(&Engine::default(), input)
+            .execute(&Engine::new(EngineConfig::default()).unwrap(), input)
             .unwrap();
         assert!(
             output.result.contains("BLAST RADIUS") || output.result.contains("cargo check"),
@@ -248,7 +248,7 @@ mod tests {
         fs::write(root.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
         let input = ToolInput::default().with_param("path", root.to_str().unwrap());
         let output = DiagnosticsTool
-            .execute(&Engine::default(), input)
+            .execute(&Engine::new(EngineConfig::default()).unwrap(), input)
             .unwrap();
         // If scope discovery succeeds, the output should say "BLAST RADIUS"
         // (not "MODE: full workspace"). If it fails, the fallback notice
