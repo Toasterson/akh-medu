@@ -114,7 +114,7 @@ impl CompilerDiagnostic {
 
 /// Summary of a compilation attempt.
 #[derive(Debug, Clone)]
-pub struct CompilationResult {
+pub(crate) struct CompilationResult {
     /// Whether compilation succeeded.
     pub success: bool,
     /// Parsed diagnostics.
@@ -151,18 +151,18 @@ pub struct CompileFeedbackTool;
 /// event, so the two budgets are independent. The caller can still request a
 /// larger budget via the `timeout` parameter (e.g. 900–1200s for a known-cold
 /// container) or a smaller one for a fast `cargo check` in a tight loop.
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// Maximum output size to capture.
-const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
 /// Maximum pre-existing warnings kept in the feedback context. The total is
 /// always reported; warnings above the budget are deliberately not presented
 /// as work for the implementer.
-const PREEXISTING_WARNING_BUDGET: usize = 50;
+pub(crate) const PREEXISTING_WARNING_BUDGET: usize = 50;
 
 /// Maximum individual baseline diagnostics rendered in one response.
-const MAX_BASELINE_DIAGNOSTICS_SHOWN: usize = 10;
+pub(crate) const MAX_BASELINE_DIAGNOSTICS_SHOWN: usize = 10;
 
 /// Bound state retained by a long-lived daemon across sessions.
 const MAX_BASELINE_CACHE_ENTRIES: usize = 64;
@@ -188,20 +188,20 @@ enum ScopeDiscoveryError {
 }
 
 #[derive(Debug, Clone)]
-struct BaseRevision {
+pub(crate) struct BaseRevision {
     display_ref: String,
     sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CompileScope {
+pub(crate) enum CompileScope {
     Packages(Vec<String>),
     Workspace,
     NoRustChanges,
 }
 
 #[derive(Debug, Clone)]
-struct ScopePlan {
+pub(crate) struct ScopePlan {
     repo_root: PathBuf,
     relative_workdir: PathBuf,
     base: BaseRevision,
@@ -210,19 +210,19 @@ struct ScopePlan {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspacePackage {
+pub(crate) struct WorkspacePackage {
     name: String,
     root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceIndex {
+pub(crate) struct WorkspaceIndex {
     root: PathBuf,
     packages: Vec<WorkspacePackage>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct DiagnosticKey {
+pub(crate) struct DiagnosticKey {
     level: String,
     message: String,
     code: Option<String>,
@@ -246,7 +246,7 @@ impl From<&CompilerDiagnostic> for DiagnosticKey {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct BaselineKey {
+pub(crate) struct BaselineKey {
     repo_root: PathBuf,
     base_sha: String,
     relative_workdir: PathBuf,
@@ -255,7 +255,7 @@ struct BaselineKey {
 }
 
 #[derive(Debug, Clone)]
-struct BaselineSnapshot {
+pub(crate) struct BaselineSnapshot {
     diagnostics: HashMap<DiagnosticKey, usize>,
     error_count: usize,
     warning_count: usize,
@@ -384,7 +384,7 @@ fn remote_base_candidates(workdir: &Path) -> Vec<String> {
 /// Resolve the immutable revision the worktree was cut from. Anima clones the
 /// configured base and creates an `agent/*` branch; `origin/HEAD` is the normal
 /// path. The explicit/environment override covers non-default project lanes.
-fn resolve_base_revision(
+pub(crate) fn resolve_base_revision(
     workdir: &Path,
     explicit: Option<&str>,
 ) -> Result<BaseRevision, ScopeDiscoveryError> {
@@ -451,7 +451,7 @@ fn resolve_base_revision(
 /// Union committed branch changes, staged edits, unstaged edits, and untracked
 /// paths. Looking only at `git diff HEAD` loses prior Anima turns after the
 /// runner commits them.
-fn changed_files_since_base(
+pub(crate) fn changed_files_since_base(
     workdir: &Path,
     base_sha: &str,
 ) -> Result<Vec<String>, ScopeDiscoveryError> {
@@ -471,7 +471,7 @@ fn changed_files_since_base(
     Ok(files.into_iter().collect())
 }
 
-fn load_workspace_index(workdir: &Path) -> Result<WorkspaceIndex, ScopeDiscoveryError> {
+pub(crate) fn load_workspace_index(workdir: &Path) -> Result<WorkspaceIndex, ScopeDiscoveryError> {
     let mut command = Command::new("cargo");
     command
         .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -531,7 +531,7 @@ fn package_for_path(index: &WorkspaceIndex, absolute_path: &Path) -> Option<Stri
     Some(package.name.clone())
 }
 
-fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String]) -> CompileScope {
+pub(crate) fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String]) -> CompileScope {
     if files.is_empty() {
         return CompileScope::NoRustChanges;
     }
@@ -573,7 +573,7 @@ fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String])
     }
 }
 
-fn discover_scope(
+pub(crate) fn discover_scope(
     workdir: &Path,
     explicit_base: Option<&str>,
 ) -> Result<ScopePlan, ScopeDiscoveryError> {
@@ -597,7 +597,7 @@ fn discover_scope(
     })
 }
 
-fn scope_label(scope: &CompileScope) -> String {
+pub(crate) fn scope_label(scope: &CompileScope) -> String {
     match scope {
         CompileScope::Packages(packages) => packages.join(","),
         CompileScope::Workspace => "--workspace".into(),
@@ -605,7 +605,7 @@ fn scope_label(scope: &CompileScope) -> String {
     }
 }
 
-fn append_scope_args(command: &mut Command, scope: &CompileScope) {
+pub(crate) fn append_scope_args(command: &mut Command, scope: &CompileScope) {
     match scope {
         CompileScope::Packages(packages) => {
             for package in packages {
@@ -619,7 +619,7 @@ fn append_scope_args(command: &mut Command, scope: &CompileScope) {
     }
 }
 
-fn cargo_command(command: &str, workdir: &Path, scope: &CompileScope) -> Result<Command, String> {
+pub(crate) fn cargo_command(command: &str, workdir: &Path, scope: &CompileScope) -> Result<Command, String> {
     let mut cargo = Command::new("cargo");
     match command {
         "check" => {
@@ -655,7 +655,7 @@ struct CargoRun {
     elapsed_secs: u64,
 }
 
-fn run_cargo_supervised(
+pub(crate) fn run_cargo_supervised(
     command_name: &str,
     command: Command,
     timeout_secs: u64,
@@ -757,7 +757,7 @@ impl Drop for DetachedBaselineWorktree {
     }
 }
 
-fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKey, usize> {
+pub(crate) fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKey, usize> {
     let mut counts = HashMap::new();
     for diagnostic in diagnostics {
         *counts.entry(DiagnosticKey::from(diagnostic)).or_insert(0) += 1;
@@ -768,7 +768,7 @@ fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKe
 /// Multiset comparison preserves duplicate diagnostics while tolerating line
 /// shifts. A set would incorrectly hide a second occurrence introduced by the
 /// task; a line-sensitive key would incorrectly blame every shifted warning.
-fn classify_against_baseline(
+pub(crate) fn classify_against_baseline(
     diagnostics: Vec<CompilerDiagnostic>,
     baseline: Option<&BaselineSnapshot>,
 ) -> (Vec<CompilerDiagnostic>, Vec<CompilerDiagnostic>) {
@@ -791,7 +791,7 @@ fn classify_against_baseline(
     (task, preexisting)
 }
 
-fn capture_baseline(
+pub(crate) fn capture_baseline(
     plan: &ScopePlan,
     command_name: &str,
     timeout_secs: u64,
@@ -849,7 +849,7 @@ fn capture_baseline(
     Ok((snapshot, false))
 }
 
-fn truncate_text(text: &str, limit: usize) -> String {
+pub(crate) fn truncate_text(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
@@ -868,7 +868,7 @@ fn truncate_text(text: &str, limit: usize) -> String {
 /// `AKH_COMPILE_FEEDBACK_TIMEOUT_SECS`, then the built-in default. `0` (or any
 /// parse failure that yields zero) falls back to the default so a malformed
 /// caller argument cannot disable the deadline entirely.
-fn resolve_timeout(input: &ToolInput) -> u64 {
+pub(crate) fn resolve_timeout(input: &ToolInput) -> u64 {
     if let Some(secs) = input.get_u64("timeout") {
         if secs > 0 {
             return secs;
@@ -1233,7 +1233,7 @@ impl Tool for CompileFeedbackTool {
 /// N minutes), not by an elapsed-time timeout. The distinction matters: stuck
 /// usually means a true hang, while the old timeout could fire on slow-but-
 /// healthy builds. The agent should know which one it hit.
-fn format_stuck_result(
+pub(crate) fn format_stuck_result(
     command: &str,
     reason: &str,
     elapsed: u64,
@@ -1295,7 +1295,7 @@ fn format_stuck_result(
 ///
 /// Cargo outputs one JSON object per line when `--message-format=json` is used.
 /// We extract `compiler-message` entries which contain diagnostic information.
-fn parse_json_diagnostics(json_output: &str) -> Vec<CompilerDiagnostic> {
+pub(crate) fn parse_json_diagnostics(json_output: &str) -> Vec<CompilerDiagnostic> {
     let mut diagnostics = Vec::new();
 
     for line in json_output.lines() {
