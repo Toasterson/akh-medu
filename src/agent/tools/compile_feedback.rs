@@ -62,7 +62,7 @@ use crate::engine::Engine;
 
 /// A single parsed compiler diagnostic.
 #[derive(Debug, Clone)]
-pub struct CompilerDiagnostic {
+pub(crate) struct CompilerDiagnostic {
     /// Error level: "error", "warning", "note", "help".
     pub level: String,
     /// The error message.
@@ -81,7 +81,7 @@ pub struct CompilerDiagnostic {
 
 impl CompilerDiagnostic {
     /// Whether this is an error (vs warning/note).
-    pub fn is_error(&self) -> bool {
+    pub(crate) fn is_error(&self) -> bool {
         self.level == "error"
     }
 
@@ -114,7 +114,7 @@ impl CompilerDiagnostic {
 
 /// Summary of a compilation attempt.
 #[derive(Debug, Clone)]
-pub struct CompilationResult {
+pub(crate) struct CompilationResult {
     /// Whether compilation succeeded.
     pub success: bool,
     /// Parsed diagnostics.
@@ -151,18 +151,18 @@ pub struct CompileFeedbackTool;
 /// event, so the two budgets are independent. The caller can still request a
 /// larger budget via the `timeout` parameter (e.g. 900–1200s for a known-cold
 /// container) or a smaller one for a fast `cargo check` in a tight loop.
-const DEFAULT_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// Maximum output size to capture.
-const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 
 /// Maximum pre-existing warnings kept in the feedback context. The total is
 /// always reported; warnings above the budget are deliberately not presented
 /// as work for the implementer.
-const PREEXISTING_WARNING_BUDGET: usize = 50;
+pub(crate) const PREEXISTING_WARNING_BUDGET: usize = 50;
 
 /// Maximum individual baseline diagnostics rendered in one response.
-const MAX_BASELINE_DIAGNOSTICS_SHOWN: usize = 10;
+pub(crate) const MAX_BASELINE_DIAGNOSTICS_SHOWN: usize = 10;
 
 /// Bound state retained by a long-lived daemon across sessions.
 const MAX_BASELINE_CACHE_ENTRIES: usize = 64;
@@ -188,20 +188,20 @@ enum ScopeDiscoveryError {
 }
 
 #[derive(Debug, Clone)]
-struct BaseRevision {
+pub(crate) struct BaseRevision {
     display_ref: String,
     sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CompileScope {
+pub(crate) enum CompileScope {
     Packages(Vec<String>),
     Workspace,
     NoRustChanges,
 }
 
 #[derive(Debug, Clone)]
-struct ScopePlan {
+pub(crate) struct ScopePlan {
     repo_root: PathBuf,
     relative_workdir: PathBuf,
     base: BaseRevision,
@@ -210,19 +210,19 @@ struct ScopePlan {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspacePackage {
+pub(crate) struct WorkspacePackage {
     name: String,
     root: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceIndex {
+pub(crate) struct WorkspaceIndex {
     root: PathBuf,
     packages: Vec<WorkspacePackage>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct DiagnosticKey {
+pub(crate) struct DiagnosticKey {
     level: String,
     message: String,
     code: Option<String>,
@@ -246,7 +246,7 @@ impl From<&CompilerDiagnostic> for DiagnosticKey {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct BaselineKey {
+pub(crate) struct BaselineKey {
     repo_root: PathBuf,
     base_sha: String,
     relative_workdir: PathBuf,
@@ -255,7 +255,7 @@ struct BaselineKey {
 }
 
 #[derive(Debug, Clone)]
-struct BaselineSnapshot {
+pub(crate) struct BaselineSnapshot {
     diagnostics: HashMap<DiagnosticKey, usize>,
     error_count: usize,
     warning_count: usize,
@@ -384,7 +384,7 @@ fn remote_base_candidates(workdir: &Path) -> Vec<String> {
 /// Resolve the immutable revision the worktree was cut from. Anima clones the
 /// configured base and creates an `agent/*` branch; `origin/HEAD` is the normal
 /// path. The explicit/environment override covers non-default project lanes.
-fn resolve_base_revision(
+pub(crate) fn resolve_base_revision(
     workdir: &Path,
     explicit: Option<&str>,
 ) -> Result<BaseRevision, ScopeDiscoveryError> {
@@ -451,7 +451,7 @@ fn resolve_base_revision(
 /// Union committed branch changes, staged edits, unstaged edits, and untracked
 /// paths. Looking only at `git diff HEAD` loses prior Anima turns after the
 /// runner commits them.
-fn changed_files_since_base(
+pub(crate) fn changed_files_since_base(
     workdir: &Path,
     base_sha: &str,
 ) -> Result<Vec<String>, ScopeDiscoveryError> {
@@ -471,7 +471,7 @@ fn changed_files_since_base(
     Ok(files.into_iter().collect())
 }
 
-fn load_workspace_index(workdir: &Path) -> Result<WorkspaceIndex, ScopeDiscoveryError> {
+pub(crate) fn load_workspace_index(workdir: &Path) -> Result<WorkspaceIndex, ScopeDiscoveryError> {
     let mut command = Command::new("cargo");
     command
         .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -531,7 +531,7 @@ fn package_for_path(index: &WorkspaceIndex, absolute_path: &Path) -> Option<Stri
     Some(package.name.clone())
 }
 
-fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String]) -> CompileScope {
+pub(crate) fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String]) -> CompileScope {
     if files.is_empty() {
         return CompileScope::NoRustChanges;
     }
@@ -573,7 +573,7 @@ fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String])
     }
 }
 
-fn discover_scope(
+pub(crate) fn discover_scope(
     workdir: &Path,
     explicit_base: Option<&str>,
 ) -> Result<ScopePlan, ScopeDiscoveryError> {
@@ -597,7 +597,7 @@ fn discover_scope(
     })
 }
 
-fn scope_label(scope: &CompileScope) -> String {
+pub(crate) fn scope_label(scope: &CompileScope) -> String {
     match scope {
         CompileScope::Packages(packages) => packages.join(","),
         CompileScope::Workspace => "--workspace".into(),
@@ -605,7 +605,7 @@ fn scope_label(scope: &CompileScope) -> String {
     }
 }
 
-fn append_scope_args(command: &mut Command, scope: &CompileScope) {
+pub(crate) fn append_scope_args(command: &mut Command, scope: &CompileScope) {
     match scope {
         CompileScope::Packages(packages) => {
             for package in packages {
@@ -619,7 +619,7 @@ fn append_scope_args(command: &mut Command, scope: &CompileScope) {
     }
 }
 
-fn cargo_command(command: &str, workdir: &Path, scope: &CompileScope) -> Result<Command, String> {
+pub(crate) fn cargo_command(command: &str, workdir: &Path, scope: &CompileScope) -> Result<Command, String> {
     let mut cargo = Command::new("cargo");
     match command {
         "check" => {
@@ -655,7 +655,7 @@ struct CargoRun {
     elapsed_secs: u64,
 }
 
-fn run_cargo_supervised(
+pub(crate) fn run_cargo_supervised(
     command_name: &str,
     command: Command,
     timeout_secs: u64,
@@ -757,7 +757,7 @@ impl Drop for DetachedBaselineWorktree {
     }
 }
 
-fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKey, usize> {
+pub(crate) fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKey, usize> {
     let mut counts = HashMap::new();
     for diagnostic in diagnostics {
         *counts.entry(DiagnosticKey::from(diagnostic)).or_insert(0) += 1;
@@ -768,7 +768,7 @@ fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKe
 /// Multiset comparison preserves duplicate diagnostics while tolerating line
 /// shifts. A set would incorrectly hide a second occurrence introduced by the
 /// task; a line-sensitive key would incorrectly blame every shifted warning.
-fn classify_against_baseline(
+pub(crate) fn classify_against_baseline(
     diagnostics: Vec<CompilerDiagnostic>,
     baseline: Option<&BaselineSnapshot>,
 ) -> (Vec<CompilerDiagnostic>, Vec<CompilerDiagnostic>) {
@@ -791,7 +791,7 @@ fn classify_against_baseline(
     (task, preexisting)
 }
 
-fn capture_baseline(
+pub(crate) fn capture_baseline(
     plan: &ScopePlan,
     command_name: &str,
     timeout_secs: u64,
@@ -849,7 +849,7 @@ fn capture_baseline(
     Ok((snapshot, false))
 }
 
-fn truncate_text(text: &str, limit: usize) -> String {
+pub(crate) fn truncate_text(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_string();
     }
@@ -868,7 +868,7 @@ fn truncate_text(text: &str, limit: usize) -> String {
 /// `AKH_COMPILE_FEEDBACK_TIMEOUT_SECS`, then the built-in default. `0` (or any
 /// parse failure that yields zero) falls back to the default so a malformed
 /// caller argument cannot disable the deadline entirely.
-fn resolve_timeout(input: &ToolInput) -> u64 {
+pub(crate) fn resolve_timeout(input: &ToolInput) -> u64 {
     if let Some(secs) = input.get_u64("timeout") {
         if secs > 0 {
             return secs;
@@ -882,6 +882,251 @@ fn resolve_timeout(input: &ToolInput) -> u64 {
         }
     }
     DEFAULT_TIMEOUT_SECS
+}
+
+// ---------------------------------------------------------------------------
+// Shared pipeline (used by both CompileFeedbackTool and DiagnosticsTool)
+// ---------------------------------------------------------------------------
+
+/// The core diagnostic pipeline: discover scope, capture baseline, run cargo,
+/// parse diagnostics, classify against baseline, and format the result.
+///
+/// Both `CompileFeedbackTool` and `DiagnosticsTool` delegate here. The
+/// `command` parameter is the cargo subcommand (`check`, `clippy`, `test`).
+/// `workspace_mode` forces `CompileScope::Workspace` when true (explicit
+/// opt-in; the default is blast-radius).
+pub(crate) fn run_diagnostics_pipeline(
+    path: &str,
+    command: &str,
+    timeout_secs: u64,
+    workspace_mode: bool,
+    explicit_base: Option<&str>,
+) -> AgentResult<ToolOutput> {
+    // Discover both the committed and uncommitted work-item delta. On any
+    // failure, expand to an actual workspace build and carry the reason in
+    // the result; never return a false green/manual instruction.
+    let (plan, scope, discovery_notice) = match discover_scope(Path::new(path), explicit_base) {
+        Ok(mut plan) => {
+            if workspace_mode {
+                plan.scope = CompileScope::Workspace;
+            }
+            let scope = plan.scope.clone();
+            (Some(plan), scope, None)
+        }
+        Err(error) => (
+            None,
+            CompileScope::Workspace,
+            Some(format!(
+                "scope discovery failed ({error}); expanded to a real --workspace check"
+            )),
+        ),
+    };
+
+    if scope == CompileScope::NoRustChanges {
+        let plan = plan.expect("NoRustChanges is only produced by successful discovery");
+        return Ok(ToolOutput::ok(format!(
+            "BLAST RADIUS: no Rust package changes among {} changed path(s) since {}@{}; \
+             no compile invocation is needed. Pass workspace=true to validate everything.",
+            plan.changed_files.len(),
+            plan.base.display_ref,
+            &plan.base.sha[..12.min(plan.base.sha.len())],
+        )));
+    }
+
+    // Materialise the immutable worktree base once per command/scope and
+    // cache its diagnostic multiset. This is session-start semantics even
+    // when the Akh calls the tool after several committed turns.
+    let (baseline, baseline_cached, baseline_error) = match plan
+        .as_ref()
+        .map(|plan| capture_baseline(plan, command, timeout_secs))
+    {
+        Some(Ok((snapshot, cached))) => (Some(snapshot), cached, None),
+        Some(Err(error)) => (None, false, Some(error)),
+        None => (None, false, Some("base revision unavailable".into())),
+    };
+
+    let cargo = match cargo_command(command, Path::new(path), &scope) {
+        Ok(command) => command,
+        Err(error) => return Ok(ToolOutput::err(error)),
+    };
+    let run = match run_cargo_supervised(command, cargo, timeout_secs) {
+        Ok(run) => run,
+        Err(error) => return Ok(ToolOutput::err(error)),
+    };
+    let all_diagnostics = parse_json_diagnostics(&run.stdout);
+    let (task_diagnostics, preexisting) =
+        classify_against_baseline(all_diagnostics, baseline.as_ref());
+
+    let task_error_count = task_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .count();
+    let task_warning_count = task_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level == "warning")
+        .count();
+    let preexisting_error_count = preexisting
+        .iter()
+        .filter(|diagnostic| diagnostic.is_error())
+        .count();
+    let preexisting_warning_count = preexisting
+        .iter()
+        .filter(|diagnostic| diagnostic.level == "warning")
+        .count();
+
+    // A non-zero build made entirely of diagnostics already present on a
+    // non-zero base is context, not a new task. Any unclassified failure
+    // still fails closed (build scripts and linker failures may emit no
+    // compiler diagnostic at all).
+    let blocked_only_by_baseline = run.exit_code != 0
+        && task_error_count == 0
+        && preexisting_error_count > 0
+        && baseline
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.exit_code != 0);
+    let unexplained_failure = run.exit_code != 0 && !blocked_only_by_baseline;
+    let raw_output = truncate_text(&run.stderr, MAX_OUTPUT_SIZE);
+    let compilation = CompilationResult {
+        success: task_error_count == 0 && !unexplained_failure,
+        diagnostics: task_diagnostics.clone(),
+        error_count: task_error_count,
+        warning_count: task_warning_count,
+        raw_output: raw_output.clone(),
+    };
+
+    // Format output with work-item scope and baseline context.
+    let mut result = String::new();
+    match &scope {
+        CompileScope::Packages(packages) => result.push_str(&format!(
+            "BLAST RADIUS: {} changed package(s): [{}]\n",
+            packages.len(),
+            packages.join(", ")
+        )),
+        CompileScope::Workspace => result.push_str("MODE: full workspace (--workspace)\n"),
+        CompileScope::NoRustChanges => unreachable!("handled before cargo invocation"),
+    }
+    if let Some(plan) = &plan {
+        result.push_str(&format!(
+            "WORKTREE DELTA: {} path(s) since {}@{} (committed + staged + unstaged + untracked)\n",
+            plan.changed_files.len(),
+            plan.base.display_ref,
+            &plan.base.sha[..12.min(plan.base.sha.len())]
+        ));
+    }
+    if let Some(notice) = &discovery_notice {
+        result.push_str(&format!("SCOPE FALLBACK: {notice}\n"));
+    }
+    match (&baseline, &baseline_error) {
+        (Some(snapshot), _) => result.push_str(&format!(
+            "BASELINE: {}{} (exit {}, {} error(s), {} warning(s))\n",
+            if baseline_cached { "cached " } else { "captured " },
+            plan.as_ref()
+                .map(|plan| format!(
+                    "{}@{}",
+                    plan.base.display_ref,
+                    &plan.base.sha[..12.min(plan.base.sha.len())]
+                ))
+                .unwrap_or_else(|| "worktree base".into()),
+            snapshot.exit_code,
+            snapshot.error_count,
+            snapshot.warning_count,
+        )),
+        (None, Some(error)) => result.push_str(&format!(
+            "BASELINE UNAVAILABLE: {error}; current diagnostics are conservatively treated as task work.\n"
+        )),
+        (None, None) => {}
+    }
+    result.push_str(&format!(
+        "cargo {command}: exit code {} ({} task error(s), {} task warning(s), {}s)\n",
+        run.exit_code, task_error_count, task_warning_count, run.elapsed_secs
+    ));
+
+    if preexisting_error_count > 0 || preexisting_warning_count > 0 {
+        result.push_str(&format!(
+            "BASELINE CONTEXT: {} pre-existing error(s), {} pre-existing warning(s); not assigned as task work.\n",
+            preexisting_error_count, preexisting_warning_count
+        ));
+        if preexisting_warning_count > PREEXISTING_WARNING_BUDGET {
+            result.push_str(&format!(
+                "LINT BUDGET: {} baseline warning(s) exceed the {}-warning context budget; {} suppressed.\n",
+                preexisting_warning_count,
+                PREEXISTING_WARNING_BUDGET,
+                preexisting_warning_count - PREEXISTING_WARNING_BUDGET
+            ));
+        }
+    }
+
+    if compilation.success {
+        result
+            .push_str("\n✓ No task-introduced compile errors in the selected blast radius.\n");
+        if blocked_only_by_baseline {
+            result.push_str(
+                "The command remains non-zero only because the same errors exist on the immutable base. \
+                 Treat them as lane context, not cleanup assigned to this work item.\n",
+            );
+        }
+        if task_warning_count > 0 {
+            result.push_str("\nTask warnings:\n");
+            for diagnostic in task_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.level == "warning")
+            {
+                result.push_str(&format!("  {}\n", diagnostic.display()));
+            }
+        }
+        if preexisting_error_count > 0 {
+            result.push_str("\nRepresentative baseline errors (context only):\n");
+            for diagnostic in preexisting
+                .iter()
+                .filter(|diagnostic| diagnostic.is_error())
+                .take(MAX_BASELINE_DIAGNOSTICS_SHOWN)
+            {
+                result.push_str(&format!("  {}\n", diagnostic.display()));
+            }
+        }
+        Ok(ToolOutput::ok(truncate_text(&result, MAX_OUTPUT_SIZE)))
+    } else {
+        if task_error_count > 0 {
+            result.push_str("\nTask-introduced errors:\n");
+            for diagnostic in task_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.is_error())
+            {
+                result.push_str(&format!("  {}\n", diagnostic.display()));
+            }
+        } else {
+            result.push_str(
+                "\nCargo failed without an error attributable to the baseline. \
+                 This is a task blocker (for example a build-script/linker failure).\n",
+            );
+            if !raw_output.trim().is_empty() {
+                result.push_str(&format!("\nstderr:\n{}\n", raw_output.trim()));
+            }
+        }
+
+        if preexisting_error_count > 0 {
+            result.push_str("\nRepresentative baseline errors (context only):\n");
+            for diagnostic in preexisting
+                .iter()
+                .filter(|diagnostic| diagnostic.is_error())
+                .take(MAX_BASELINE_DIAGNOSTICS_SHOWN)
+            {
+                result.push_str(&format!("  {}\n", diagnostic.display()));
+            }
+        }
+
+        let suggestions: Vec<_> = task_diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.suggestion.as_ref())
+            .collect();
+        if !suggestions.is_empty() {
+            result.push_str("\nSuggested fixes:\n");
+            for suggestion in suggestions {
+                result.push_str(&format!("  - {suggestion}\n"));
+            }
+        }
+        Ok(ToolOutput::err(truncate_text(&result, MAX_OUTPUT_SIZE)))
+    }
 }
 
 impl Tool for CompileFeedbackTool {
@@ -946,232 +1191,7 @@ impl Tool for CompileFeedbackTool {
                 "Unsupported command: '{command}'. Use 'check', 'clippy', or 'test'."
             )));
         }
-
-        // Discover both the committed and uncommitted work-item delta. On any
-        // failure, expand to an actual workspace build and carry the reason in
-        // the result; never return a false green/manual instruction.
-        let (plan, scope, discovery_notice) = match discover_scope(Path::new(path), explicit_base) {
-            Ok(mut plan) => {
-                if workspace_mode {
-                    plan.scope = CompileScope::Workspace;
-                }
-                let scope = plan.scope.clone();
-                (Some(plan), scope, None)
-            }
-            Err(error) => (
-                None,
-                CompileScope::Workspace,
-                Some(format!(
-                    "scope discovery failed ({error}); expanded to a real --workspace check"
-                )),
-            ),
-        };
-
-        if scope == CompileScope::NoRustChanges {
-            let plan = plan.expect("NoRustChanges is only produced by successful discovery");
-            return Ok(ToolOutput::ok(format!(
-                "BLAST RADIUS: no Rust package changes among {} changed path(s) since {}@{}; \
-                 no compile invocation is needed. Pass workspace=true to validate everything.",
-                plan.changed_files.len(),
-                plan.base.display_ref,
-                &plan.base.sha[..12.min(plan.base.sha.len())],
-            )));
-        }
-
-        // Materialise the immutable worktree base once per command/scope and
-        // cache its diagnostic multiset. This is session-start semantics even
-        // when the Akh calls the tool after several committed turns.
-        let (baseline, baseline_cached, baseline_error) = match plan
-            .as_ref()
-            .map(|plan| capture_baseline(plan, command, timeout_secs))
-        {
-            Some(Ok((snapshot, cached))) => (Some(snapshot), cached, None),
-            Some(Err(error)) => (None, false, Some(error)),
-            None => (None, false, Some("base revision unavailable".into())),
-        };
-
-        let cargo = match cargo_command(command, Path::new(path), &scope) {
-            Ok(command) => command,
-            Err(error) => return Ok(ToolOutput::err(error)),
-        };
-        let run = match run_cargo_supervised(command, cargo, timeout_secs) {
-            Ok(run) => run,
-            Err(error) => return Ok(ToolOutput::err(error)),
-        };
-        let all_diagnostics = parse_json_diagnostics(&run.stdout);
-        let (task_diagnostics, preexisting) =
-            classify_against_baseline(all_diagnostics, baseline.as_ref());
-
-        let task_error_count = task_diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.is_error())
-            .count();
-        let task_warning_count = task_diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.level == "warning")
-            .count();
-        let preexisting_error_count = preexisting
-            .iter()
-            .filter(|diagnostic| diagnostic.is_error())
-            .count();
-        let preexisting_warning_count = preexisting
-            .iter()
-            .filter(|diagnostic| diagnostic.level == "warning")
-            .count();
-
-        // A non-zero build made entirely of diagnostics already present on a
-        // non-zero base is context, not a new task. Any unclassified failure
-        // still fails closed (build scripts and linker failures may emit no
-        // compiler diagnostic at all).
-        let blocked_only_by_baseline = run.exit_code != 0
-            && task_error_count == 0
-            && preexisting_error_count > 0
-            && baseline
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.exit_code != 0);
-        let unexplained_failure = run.exit_code != 0 && !blocked_only_by_baseline;
-        let raw_output = truncate_text(&run.stderr, MAX_OUTPUT_SIZE);
-        let compilation = CompilationResult {
-            success: task_error_count == 0 && !unexplained_failure,
-            diagnostics: task_diagnostics.clone(),
-            error_count: task_error_count,
-            warning_count: task_warning_count,
-            raw_output: raw_output.clone(),
-        };
-
-        // Format output with work-item scope and baseline context.
-        let mut result = String::new();
-        match &scope {
-            CompileScope::Packages(packages) => result.push_str(&format!(
-                "BLAST RADIUS: {} changed package(s): [{}]\n",
-                packages.len(),
-                packages.join(", ")
-            )),
-            CompileScope::Workspace => result.push_str("MODE: full workspace (--workspace)\n"),
-            CompileScope::NoRustChanges => unreachable!("handled before cargo invocation"),
-        }
-        if let Some(plan) = &plan {
-            result.push_str(&format!(
-                "WORKTREE DELTA: {} path(s) since {}@{} (committed + staged + unstaged + untracked)\n",
-                plan.changed_files.len(),
-                plan.base.display_ref,
-                &plan.base.sha[..12.min(plan.base.sha.len())]
-            ));
-        }
-        if let Some(notice) = &discovery_notice {
-            result.push_str(&format!("SCOPE FALLBACK: {notice}\n"));
-        }
-        match (&baseline, &baseline_error) {
-            (Some(snapshot), _) => result.push_str(&format!(
-                "BASELINE: {}{} (exit {}, {} error(s), {} warning(s))\n",
-                if baseline_cached { "cached " } else { "captured " },
-                plan.as_ref()
-                    .map(|plan| format!(
-                        "{}@{}",
-                        plan.base.display_ref,
-                        &plan.base.sha[..12.min(plan.base.sha.len())]
-                    ))
-                    .unwrap_or_else(|| "worktree base".into()),
-                snapshot.exit_code,
-                snapshot.error_count,
-                snapshot.warning_count,
-            )),
-            (None, Some(error)) => result.push_str(&format!(
-                "BASELINE UNAVAILABLE: {error}; current diagnostics are conservatively treated as task work.\n"
-            )),
-            (None, None) => {}
-        }
-        result.push_str(&format!(
-            "cargo {command}: exit code {} ({} task error(s), {} task warning(s), {}s)\n",
-            run.exit_code, task_error_count, task_warning_count, run.elapsed_secs
-        ));
-
-        if preexisting_error_count > 0 || preexisting_warning_count > 0 {
-            result.push_str(&format!(
-                "BASELINE CONTEXT: {} pre-existing error(s), {} pre-existing warning(s); not assigned as task work.\n",
-                preexisting_error_count, preexisting_warning_count
-            ));
-            if preexisting_warning_count > PREEXISTING_WARNING_BUDGET {
-                result.push_str(&format!(
-                    "LINT BUDGET: {} baseline warning(s) exceed the {}-warning context budget; {} suppressed.\n",
-                    preexisting_warning_count,
-                    PREEXISTING_WARNING_BUDGET,
-                    preexisting_warning_count - PREEXISTING_WARNING_BUDGET
-                ));
-            }
-        }
-
-        if compilation.success {
-            result
-                .push_str("\n✓ No task-introduced compile errors in the selected blast radius.\n");
-            if blocked_only_by_baseline {
-                result.push_str(
-                    "The command remains non-zero only because the same errors exist on the immutable base. \
-                     Treat them as lane context, not cleanup assigned to this work item.\n",
-                );
-            }
-            if task_warning_count > 0 {
-                result.push_str("\nTask warnings:\n");
-                for diagnostic in task_diagnostics
-                    .iter()
-                    .filter(|diagnostic| diagnostic.level == "warning")
-                {
-                    result.push_str(&format!("  {}\n", diagnostic.display()));
-                }
-            }
-            if preexisting_error_count > 0 {
-                result.push_str("\nRepresentative baseline errors (context only):\n");
-                for diagnostic in preexisting
-                    .iter()
-                    .filter(|diagnostic| diagnostic.is_error())
-                    .take(MAX_BASELINE_DIAGNOSTICS_SHOWN)
-                {
-                    result.push_str(&format!("  {}\n", diagnostic.display()));
-                }
-            }
-            Ok(ToolOutput::ok(truncate_text(&result, MAX_OUTPUT_SIZE)))
-        } else {
-            if task_error_count > 0 {
-                result.push_str("\nTask-introduced errors:\n");
-                for diagnostic in task_diagnostics
-                    .iter()
-                    .filter(|diagnostic| diagnostic.is_error())
-                {
-                    result.push_str(&format!("  {}\n", diagnostic.display()));
-                }
-            } else {
-                result.push_str(
-                    "\nCargo failed without an error attributable to the baseline. \
-                     This is a task blocker (for example a build-script/linker failure).\n",
-                );
-                if !raw_output.trim().is_empty() {
-                    result.push_str(&format!("\nstderr:\n{}\n", raw_output.trim()));
-                }
-            }
-
-            if preexisting_error_count > 0 {
-                result.push_str("\nRepresentative baseline errors (context only):\n");
-                for diagnostic in preexisting
-                    .iter()
-                    .filter(|diagnostic| diagnostic.is_error())
-                    .take(MAX_BASELINE_DIAGNOSTICS_SHOWN)
-                {
-                    result.push_str(&format!("  {}\n", diagnostic.display()));
-                }
-            }
-
-            let suggestions: Vec<_> = task_diagnostics
-                .iter()
-                .filter_map(|diagnostic| diagnostic.suggestion.as_ref())
-                .collect();
-            if !suggestions.is_empty() {
-                result.push_str("\nSuggested fixes:\n");
-                for suggestion in suggestions {
-                    result.push_str(&format!("  - {suggestion}\n"));
-                }
-            }
-            Ok(ToolOutput::err(truncate_text(&result, MAX_OUTPUT_SIZE)))
-        }
+        run_diagnostics_pipeline(path, command, timeout_secs, workspace_mode, explicit_base)
     }
 
     fn manifest(&self) -> ToolManifest {
@@ -1233,7 +1253,7 @@ impl Tool for CompileFeedbackTool {
 /// N minutes), not by an elapsed-time timeout. The distinction matters: stuck
 /// usually means a true hang, while the old timeout could fire on slow-but-
 /// healthy builds. The agent should know which one it hit.
-fn format_stuck_result(
+pub(crate) fn format_stuck_result(
     command: &str,
     reason: &str,
     elapsed: u64,
@@ -1295,7 +1315,7 @@ fn format_stuck_result(
 ///
 /// Cargo outputs one JSON object per line when `--message-format=json` is used.
 /// We extract `compiler-message` entries which contain diagnostic information.
-fn parse_json_diagnostics(json_output: &str) -> Vec<CompilerDiagnostic> {
+pub(crate) fn parse_json_diagnostics(json_output: &str) -> Vec<CompilerDiagnostic> {
     let mut diagnostics = Vec::new();
 
     for line in json_output.lines() {
