@@ -346,6 +346,12 @@ impl KnowledgeGraph {
     /// Returns the number of triples successfully loaded.
     ///
     /// Holds the write lock for the entire batch to avoid per-triple lock overhead.
+    ///
+    /// Idempotent: duplicate `(subject, predicate, object)` edges are skipped, so
+    /// waking from a snapshot twice (or loading data that already exists in-memory)
+    /// does not create parallel edges. This keeps `all_triples()` output stable and
+    /// avoids unique-key violations when the snapshot writer re-persists the same
+    /// fact set to a table whose primary key is the triple itself.
     pub fn bulk_load(&self, triples: &[Triple]) -> GraphResult<usize> {
         let mut graph = self.graph.write().expect("graph lock poisoned");
         let mut count = 0;
@@ -361,6 +367,17 @@ impl KnowledgeGraph {
             self.node_index
                 .entry(triple.predicate)
                 .or_insert_with(|| graph.add_node(triple.predicate));
+
+            // Skip duplicates rather than creating parallel edges. The predicate
+            // index must also stay deduplicated so downstream snapshot/restore paths
+            // do not re-emit identical rows and collide on their content-addressed
+            // primary keys.
+            let already_exists = graph
+                .edges_directed(subj_idx, Direction::Outgoing)
+                .any(|e| e.target() == obj_idx && e.weight().predicate == triple.predicate);
+            if already_exists {
+                continue;
+            }
 
             graph.add_edge(subj_idx, obj_idx, EdgeData::from(triple));
             self.predicate_index

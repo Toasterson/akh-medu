@@ -46,6 +46,7 @@ pub enum StoreError {
     )]
     Db {
         #[from]
+        #[source]
         source: sea_orm::DbErr,
     },
 
