@@ -214,7 +214,7 @@ pub struct Agent {
     /// Communication channel registry (Phase 12a).
     pub(crate) channel_registry: ChannelRegistry,
     /// Conversation state for grounded dialogue (Phase 12b).
-    pub(crate) conversation_state: ConversationState,
+    pub(crate) conversation_state: std::sync::Mutex<ConversationState>,
     /// Pre-communication constraint checker (Phase 12c).
     pub(crate) constraint_checker: ConstraintChecker,
     /// Interlocutor registry — social KG and theory of mind (Phase 12d).
@@ -275,7 +275,7 @@ pub struct Agent {
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
-    pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
+    pub(crate) context_manager: Option<std::sync::Arc<dyn super::context::ContextManager>>,
     /// Last [`ContextWindowStats`] committed by `run_agentic_turn`, behind its
     /// own `Mutex` so the ACP `_akh/usage` handler can read it **without** the
     /// agent lock (Phase 44m, ADR 065 D12.1). `None` until the first turn.
@@ -931,7 +931,7 @@ impl Agent {
             method_index: MethodIndex::new(),
             chunking_config,
             channel_registry: ChannelRegistry::new(),
-            conversation_state: ConversationState::default(),
+            conversation_state: std::sync::Mutex::new(ConversationState::default()),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
@@ -1047,7 +1047,7 @@ impl Agent {
 
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
-            agent.conversation_state.active_topic = Some(topic_id);
+            agent.conversation_state().active_topic = Some(topic_id);
         }
 
         // Load tools from active skills.
@@ -2276,19 +2276,19 @@ impl Agent {
 
     // ── Conversation state (Phase 12b) ─────────────────────────────────
 
-    /// Get a shared reference to the conversation state.
-    pub fn conversation_state(&self) -> &ConversationState {
-        &self.conversation_state
-    }
-
-    /// Get a mutable reference to the conversation state.
-    pub fn conversation_state_mut(&mut self) -> &mut ConversationState {
-        &mut self.conversation_state
+    /// Lock the conversation state for shared or mutable access.
+    ///
+    /// Returns a `MutexGuard` that derefs to `&ConversationState` (and
+    /// `&mut ConversationState` via `DerefMut`), so all existing call sites
+    /// work by replacing `self.conversation_state_mut()` with
+    /// `self.conversation_state()` — the guard is mutable.
+    pub fn conversation_state(&self) -> std::sync::MutexGuard<'_, ConversationState> {
+        self.conversation_state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set the response detail level for grounded dialogue.
-    pub fn set_response_detail(&mut self, detail: ResponseDetail) {
-        self.conversation_state.response_detail = detail;
+    pub fn set_response_detail(&self, detail: ResponseDetail) {
+        self.conversation_state().response_detail = detail;
     }
 
     // ── Dialogue manager ─────────────────────────────────────────────
@@ -4238,7 +4238,7 @@ impl Agent {
             method_index,
             chunking_config,
             channel_registry: ChannelRegistry::new(),
-            conversation_state: ConversationState::default(),
+            conversation_state: std::sync::Mutex::new(ConversationState::default()),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
@@ -4294,7 +4294,7 @@ impl Agent {
 
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
-            agent.conversation_state.active_topic = Some(topic_id);
+            agent.conversation_state().active_topic = Some(topic_id);
         }
 
         // Load tools from active skills.
