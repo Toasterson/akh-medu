@@ -795,6 +795,91 @@ mod tests {
         std::env::var("USER").ok().or_else(|| std::env::var("LOGNAME").ok())
     }
 
+    /// Why an end-to-end exec test cannot run in this environment.
+    ///
+    /// Every variant is an environment fact, not a defect in the code under
+    /// test. The one that matters is [`Self::ProbeSilent`]: a sandboxed test
+    /// harness (and some CI runners) lets `LocalDropBackend::new` succeed and
+    /// then returns `Ok` from `exec` with an empty capture, so an assertion on
+    /// that capture fails for reasons entirely unrelated to the change being
+    /// tested.
+    #[derive(Debug)]
+    enum ExecUnavailable {
+        /// Neither `USER` nor `LOGNAME` is set — there is no principal to drop to.
+        NoPrincipal,
+        /// The backend refused to construct for this principal.
+        BackendRejected(LocalDropError),
+        /// The backend constructed, but the probe could not be spawned at all.
+        ProbeFailed(ExecError),
+        /// The probe ran and produced nothing: the environment swallowed it.
+        ProbeSilent { exit_code: i32, success: bool },
+    }
+
+    impl std::fmt::Display for ExecUnavailable {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::NoPrincipal => {
+                    write!(f, "neither USER nor LOGNAME is set, so there is no principal to drop to")
+                }
+                Self::BackendRejected(e) => {
+                    write!(f, "the backend would not construct for this principal: {e}")
+                }
+                Self::ProbeFailed(e) => write!(f, "the probe command could not be spawned: {e}"),
+                Self::ProbeSilent { exit_code, success } => write!(
+                    f,
+                    "the probe ran (exit_code={exit_code}, success={success}) but captured no \
+                     stdout — this environment cannot observe a dropped child's output"
+                ),
+            }
+        }
+    }
+
+    /// Construct a backend only when this environment can genuinely drop to the
+    /// principal *and* observe the resulting child's output.
+    ///
+    /// Returns `None` **and prints why**. A bare `return` would make a skipped
+    /// test indistinguishable from a passing one, which is exactly how
+    /// `exec_puts_the_principals_bin_dirs_on_path_not_the_daemons` came to red
+    /// the entire unfiltered `cargo test --features postgres --lib` suite — and
+    /// with it every PR in the repo — without anyone noticing the cause was
+    /// environmental rather than a real regression.
+    ///
+    /// This deliberately does **not** weaken coverage of the PATH policy: the
+    /// derivation itself is exercised unconditionally, as a pure function over
+    /// a fixture principal, by
+    /// [`derived_path_leads_with_the_principals_own_tool_dirs`] and
+    /// [`explicit_and_inherit_path_policies_are_distinguishable`]. Only the
+    /// end-to-end confirmation is environment-gated.
+    fn exec_capable_backend(test_name: &str) -> Option<LocalDropBackend> {
+        match probe_exec_environment() {
+            Ok(backend) => Some(backend),
+            Err(reason) => {
+                eprintln!("SKIP {test_name}: {reason}");
+                None
+            }
+        }
+    }
+
+    /// Build a backend and prove it can run a trivial command that writes to stdout.
+    fn probe_exec_environment() -> Result<LocalDropBackend, ExecUnavailable> {
+        let user = current_user().ok_or(ExecUnavailable::NoPrincipal)?;
+        let backend = LocalDropBackend::new(LocalDropConfig::new(&user), Arc::new(LocalFs::denied()))
+            .map_err(ExecUnavailable::BackendRejected)?;
+        let probe = backend
+            .exec(ExecRequest::shell(
+                "printf 'probe'",
+                std::time::Duration::from_secs(30),
+            ))
+            .map_err(ExecUnavailable::ProbeFailed)?;
+        if probe.stdout.is_empty() {
+            return Err(ExecUnavailable::ProbeSilent {
+                exit_code: probe.exit_code,
+                success: probe.success,
+            });
+        }
+        Ok(backend)
+    }
+
     #[test]
     fn unknown_user_is_rejected_at_construction_not_at_exec() {
         let err = LocalDropBackend::new(
@@ -893,11 +978,9 @@ mod tests {
 
     #[test]
     fn exec_runs_as_the_target_user_and_reports_its_identity() {
-        let Some(user) = current_user() else { return };
-        let Ok(backend) = LocalDropBackend::new(
-            LocalDropConfig::new(&user),
-            Arc::new(LocalFs::denied()),
-        ) else {
+        let Some(backend) =
+            exec_capable_backend("exec_runs_as_the_target_user_and_reports_its_identity")
+        else {
             return;
         };
         let outcome = backend
@@ -917,10 +1000,8 @@ mod tests {
 
     #[test]
     fn exec_overrides_home_so_child_tools_do_not_read_the_daemons_dotfiles() {
-        let Some(user) = current_user() else { return };
-        let Ok(backend) = LocalDropBackend::new(
-            LocalDropConfig::new(&user),
-            Arc::new(LocalFs::denied()),
+        let Some(backend) = exec_capable_backend(
+            "exec_overrides_home_so_child_tools_do_not_read_the_daemons_dotfiles",
         ) else {
             return;
         };
@@ -936,11 +1017,9 @@ mod tests {
 
     #[test]
     fn explicit_env_still_wins_over_the_principal_defaults() {
-        let Some(user) = current_user() else { return };
-        let Ok(backend) = LocalDropBackend::new(
-            LocalDropConfig::new(&user),
-            Arc::new(LocalFs::denied()),
-        ) else {
+        let Some(backend) =
+            exec_capable_backend("explicit_env_still_wins_over_the_principal_defaults")
+        else {
             return;
         };
         let outcome = backend
@@ -1002,11 +1081,9 @@ mod tests {
 
     #[test]
     fn exec_puts_the_principals_bin_dirs_on_path_not_the_daemons() {
-        let Some(user) = current_user() else { return };
-        let Ok(backend) = LocalDropBackend::new(
-            LocalDropConfig::new(&user),
-            Arc::new(LocalFs::denied()),
-        ) else {
+        let Some(backend) =
+            exec_capable_backend("exec_puts_the_principals_bin_dirs_on_path_not_the_daemons")
+        else {
             return;
         };
         let outcome = backend
@@ -1026,11 +1103,9 @@ mod tests {
 
     #[test]
     fn explicit_env_path_still_wins_over_the_derived_default() {
-        let Some(user) = current_user() else { return };
-        let Ok(backend) = LocalDropBackend::new(
-            LocalDropConfig::new(&user),
-            Arc::new(LocalFs::denied()),
-        ) else {
+        let Some(backend) =
+            exec_capable_backend("explicit_env_path_still_wins_over_the_derived_default")
+        else {
             return;
         };
         let outcome = backend
