@@ -40,6 +40,7 @@ pub mod web_search;
 pub mod agent_management;
 pub mod tool_query;
 pub mod mcp;
+pub mod triage_dispatch_traps;
 pub mod trigger_manage;
 
 pub use code_gen::CodeGenTool;
