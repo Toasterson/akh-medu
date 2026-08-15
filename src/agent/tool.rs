@@ -4,7 +4,7 @@
 //! Each tool implements the [`Tool`] trait and is registered in a [`ToolRegistry`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::audit::{AuditEntry, AuditKind, AuditLedger};
 use crate::engine::Engine;
@@ -266,34 +266,34 @@ pub trait Tool: Send + Sync {
 
 /// Registry of available tools.
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
-    manifests: HashMap<String, ToolManifest>,
+    tools: Mutex<HashMap<String, Arc<dyn Tool>>>,
+    manifests: Mutex<HashMap<String, ToolManifest>>,
     /// Names of tools suppressed from the LLM catalog (`advertise_to_llm()` is
     /// `false`). They stay registered and dispatchable; only the catalog hides
     /// them. Recorded at registration so the catalog filter is a cheap lookup.
-    unadvertised: std::collections::HashSet<String>,
+    unadvertised: Mutex<std::collections::HashSet<String>>,
     audit_ledger: Option<Arc<AuditLedger>>,
     /// Permission policy consulted before every dispatch. Defaults to
     /// [`PermissionMode::Bypass`] (allow all) so a standalone akh is unaffected.
-    policy: super::permission::PermissionPolicy,
+    policy: Mutex<super::permission::PermissionPolicy>,
     /// Optional approver for [`PermissionDecision::Ask`] tools (e.g. an ACP
     /// client bridge). With none attached, `Ask` fails closed.
-    asker: Option<Arc<dyn super::permission::PermissionAsker>>,
+    asker: Mutex<Option<Arc<dyn super::permission::PermissionAsker>>>,
     /// Optional execution tracker for emitting ToolCall events over ACP.
-    tracker: Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>,
+    tracker: Mutex<Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>>,
 }
 
 impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
-            manifests: HashMap::new(),
-            unadvertised: std::collections::HashSet::new(),
+            tools: Mutex::new(HashMap::new()),
+            manifests: Mutex::new(HashMap::new()),
+            unadvertised: Mutex::new(std::collections::HashSet::new()),
             audit_ledger: None,
-            policy: super::permission::PermissionPolicy::default(),
-            asker: None,
-            tracker: None,
+            policy: Mutex::new(super::permission::PermissionPolicy::default()),
+            asker: Mutex::new(None),
+            tracker: Mutex::new(None),
         }
     }
 
@@ -303,92 +303,98 @@ impl ToolRegistry {
     }
 
     /// Attach a tool execution tracker for emitting ToolCall events (for ACP).
-    pub fn set_tracker(&mut self, tracker: Arc<super::tool_execution_tracker::ToolExecutionTracker>) {
-        self.tracker = Some(tracker);
+    pub fn set_tracker(&self, tracker: Arc<super::tool_execution_tracker::ToolExecutionTracker>) {
+        *self.tracker.lock().unwrap() = Some(tracker);
     }
 
     /// Remove any attached tracker.
-    pub fn clear_tracker(&mut self) {
-        self.tracker = None;
+    pub fn clear_tracker(&self) {
+        *self.tracker.lock().unwrap() = None;
     }
 
     /// Set the permission mode gating tool execution.
-    pub fn set_permission_mode(&mut self, mode: super::permission::PermissionMode) {
-        self.policy = super::permission::PermissionPolicy::new(mode);
+    pub fn set_permission_mode(&self, mode: super::permission::PermissionMode) {
+        *self.policy.lock().unwrap() = super::permission::PermissionPolicy::new(mode);
     }
 
     /// The active permission mode.
     pub fn permission_mode(&self) -> super::permission::PermissionMode {
-        self.policy.mode
+        self.policy.lock().unwrap().mode
     }
 
     /// Attach an approver that resolves `Ask` decisions (e.g. an ACP
     /// `session/request_permission` bridge).
-    pub fn set_permission_asker(&mut self, asker: Arc<dyn super::permission::PermissionAsker>) {
-        self.asker = Some(asker);
+    pub fn set_permission_asker(&self, asker: Arc<dyn super::permission::PermissionAsker>) {
+        *self.asker.lock().unwrap() = Some(asker);
     }
 
     /// Remove any attached approver. `Ask` decisions then fail closed (deny).
-    pub fn clear_permission_asker(&mut self) {
-        self.asker = None;
+    pub fn clear_permission_asker(&self) {
+        *self.asker.lock().unwrap() = None;
     }
 
     /// Register a tool. Caches its manifest on registration.
     /// If a tool with the same name exists, it is replaced.
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    pub fn register(&self, tool: Box<dyn Tool>) {
         let manifest = tool.manifest();
         let name = manifest.name.clone();
+        let mut unadv = self.unadvertised.lock().unwrap();
         if tool.advertise_to_llm() {
-            self.unadvertised.remove(&name);
+            unadv.remove(&name);
         } else {
-            self.unadvertised.insert(name.clone());
+            unadv.insert(name.clone());
         }
-        self.manifests.insert(name.clone(), manifest);
-        self.tools.insert(name, tool);
+        drop(unadv);
+        self.manifests.lock().unwrap().insert(name.clone(), manifest);
+        self.tools.lock().unwrap().insert(name, Arc::from(tool));
     }
 
     /// Remove a previously-registered tool by name. Returns `true` if a tool was
     /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
     /// over ACP at `session/new`) after a prompt turn completes.
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.manifests.remove(name);
-        self.unadvertised.remove(name);
-        self.tools.remove(name).is_some()
+    pub fn remove(&self, name: &str) -> bool {
+        self.manifests.lock().unwrap().remove(name);
+        self.unadvertised.lock().unwrap().remove(name);
+        self.tools.lock().unwrap().remove(name).is_some()
     }
 
     /// Get a tool by name.
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(|b| b.as_ref())
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.lock().unwrap().get(name).cloned()
     }
 
     /// Get a tool's manifest by name.
-    pub fn manifest(&self, name: &str) -> Option<&ToolManifest> {
-        self.manifests.get(name)
+    pub fn manifest(&self, name: &str) -> Option<ToolManifest> {
+        self.manifests.lock().unwrap().get(name).cloned()
     }
 
     /// List all registered tool manifests.
-    pub fn list_manifests(&self) -> Vec<&ToolManifest> {
-        self.manifests.values().collect()
+    pub fn list_manifests(&self) -> Vec<ToolManifest> {
+        self.manifests.lock().unwrap().values().cloned().collect()
     }
 
     /// Whether a tool is advertised to the LLM catalog (ADR 076 §1). Unknown
     /// names are treated as advertised (the default).
     pub fn is_advertised(&self, name: &str) -> bool {
-        !self.unadvertised.contains(name)
+        !self.unadvertised.lock().unwrap().contains(name)
     }
 
     /// List manifests for tools advertised to the LLM catalog — i.e. excluding
     /// those whose `advertise_to_llm()` returned `false`.
-    pub fn list_advertised_manifests(&self) -> Vec<&ToolManifest> {
+    pub fn list_advertised_manifests(&self) -> Vec<ToolManifest> {
+        let unadv = self.unadvertised.lock().unwrap();
         self.manifests
+            .lock()
+            .unwrap()
             .values()
-            .filter(|m| !self.unadvertised.contains(&m.name))
+            .filter(|m| !unadv.contains(&m.name))
+            .cloned()
             .collect()
     }
 
     /// List all registered tool signatures.
     pub fn list(&self) -> Vec<ToolSignature> {
-        self.tools.values().map(|t| t.signature()).collect()
+        self.tools.lock().unwrap().values().map(|t| t.signature()).collect()
     }
 
     /// Would executing `name` right now stop at an **Ask** permission prompt?
@@ -400,9 +406,11 @@ impl ToolRegistry {
     /// The retry path skips such tools instead — the first approved failure
     /// stands, exactly as it would without repair.
     pub fn would_ask(&self, name: &str) -> bool {
-        self.manifests.get(name).is_some_and(|m| {
+        let manifests = self.manifests.lock().unwrap();
+        let policy = self.policy.lock().unwrap();
+        manifests.get(name).is_some_and(|m| {
             matches!(
-                self.policy.decide(m),
+                policy.decide(m),
                 super::permission::PermissionDecision::Ask(_)
             )
         })
@@ -427,9 +435,10 @@ impl ToolRegistry {
         // Permission gate (no-op under the default Bypass mode). A denied or
         // unapproved tool returns a failed ToolOutput rather than Err, so the
         // OODA loop's tool-error isolation is preserved.
-        if let Some(manifest) = self.manifests.get(name) {
+        if let Some(manifest) = self.manifests.lock().unwrap().get(name).cloned() {
             use super::permission::PermissionDecision;
-            match self.policy.decide(manifest) {
+            let policy = self.policy.lock().unwrap();
+            match policy.decide(&manifest) {
                 PermissionDecision::Allow => {}
                 PermissionDecision::Deny(reason) => {
                     return Ok(ToolOutput::err(format!("permission denied: {reason}")));
@@ -438,8 +447,10 @@ impl ToolRegistry {
                     let summary = truncate_summary(&format!("{:?}", input.params), 200);
                     let approved = self
                         .asker
+                        .lock()
+                        .unwrap()
                         .as_ref()
-                        .map(|a| a.ask(manifest, &summary))
+                        .map(|a| a.ask(&manifest, &summary))
                         .unwrap_or(false);
                     if !approved {
                         return Ok(ToolOutput::err(format!(
@@ -451,7 +462,7 @@ impl ToolRegistry {
         }
 
         // Start tracking this tool execution for ACP ToolCall events.
-        let guard = self.tracker.as_ref().map(|tracker| {
+        let guard = self.tracker.lock().unwrap().as_ref().map(|tracker| {
             let title = build_tool_title(name, &input);
             let locations = extract_tool_locations(name, &input);
             tracker.start_tool(name, title, locations)
@@ -509,12 +520,12 @@ impl ToolRegistry {
 
     /// Number of registered tools.
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.lock().unwrap().len()
     }
 
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.tools.lock().unwrap().is_empty()
     }
 }
 
@@ -527,7 +538,7 @@ impl Default for ToolRegistry {
 impl std::fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRegistry")
-            .field("tools", &self.tools.keys().collect::<Vec<_>>())
+            .field("tools", &self.tools.lock().unwrap().keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -679,7 +690,7 @@ mod tests {
         .unwrap();
 
         // Default (Bypass) → the write tool runs.
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Box::new(WriteTool));
         assert!(
             reg.execute("w", ToolInput::new(), &engine).unwrap().success,
@@ -733,7 +744,7 @@ mod tests {
 
     #[test]
     fn register_and_list() {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Box::new(DummyTool));
         assert_eq!(reg.len(), 1);
         let sigs = reg.list();
@@ -742,7 +753,7 @@ mod tests {
 
     #[test]
     fn manifest_cached_on_register() {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Box::new(DummyTool));
         let m = reg.manifest("dummy").unwrap();
         assert_eq!(m.name, "dummy");
@@ -751,7 +762,7 @@ mod tests {
 
     #[test]
     fn list_manifests() {
-        let mut reg = ToolRegistry::new();
+        let reg = ToolRegistry::new();
         reg.register(Box::new(DummyTool));
         let manifests = reg.list_manifests();
         assert_eq!(manifests.len(), 1);
