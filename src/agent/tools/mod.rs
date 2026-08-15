@@ -83,3 +83,4 @@ pub use audit_log::AuditLogTool;
 pub use entity_schema::{EntitySchemaTool, EntityTypesTool, EntityTypeFilterTool};
 pub use delegate::DelegateTool;
 pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};
+pub use triage_dispatch_traps::TriageDispatchTrapsTool;
