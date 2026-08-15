@@ -719,6 +719,7 @@ impl ServerState {
                                             workspace = %name,
                                             consecutive_failures,
                                             error = %error_string,
+                                            error_debug = ?e,
                                             "periodic snapshot failed (ADR-049: if this akh is \
                                              resident on another host, this host should not have \
                                              a snapshot ticker — check whether the split-brain \
