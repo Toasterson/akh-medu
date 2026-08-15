@@ -183,6 +183,20 @@ fn print_summary_table(label: &str, s: &ReasonEvalSummary) {
         s.diversity.distinct_answer_ratio,
         s.diversity.answer_entropy,
     );
+    // P3-RL A1: the reward-hacking surfaces replay cannot see. `looping` is
+    // directly comparable to SRaR's 48.1% (arXiv 2605.17291); `wasted` is the
+    // headroom a ratio-based executability reward would hand to a farming
+    // policy.
+    let q = &s.quality;
+    println!(
+        "{:<32}: looping={:.3} redundancy={:.3} drift={:.3} hop_cov={:.3} wasted={:.2}",
+        format!("{label} [quality]"),
+        q.looping_fraction,
+        q.mean_redundancy_rate,
+        q.mean_drift_rate,
+        q.mean_hop_coverage,
+        q.mean_wasted_valid_steps,
+    );
     let mut depths: Vec<&usize> = s.per_depth.keys().collect();
     depths.sort();
     for depth in depths {
@@ -216,6 +230,13 @@ fn summary_to_json(s: &ReasonEvalSummary) -> serde_json::Value {
         "trace_valid_rate": s.trace_valid_rate,
         "distinct_answer_ratio": s.diversity.distinct_answer_ratio,
         "answer_entropy": s.diversity.answer_entropy,
+        "quality": {
+            "looping_fraction": s.quality.looping_fraction,
+            "mean_redundancy_rate": s.quality.mean_redundancy_rate,
+            "mean_drift_rate": s.quality.mean_drift_rate,
+            "mean_hop_coverage": s.quality.mean_hop_coverage,
+            "mean_wasted_valid_steps": s.quality.mean_wasted_valid_steps,
+        },
         "abstention": {
             "n_expected": s.abstention.n_expected,
             "n_emitted": s.abstention.n_emitted,

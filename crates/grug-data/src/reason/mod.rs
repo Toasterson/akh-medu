@@ -32,6 +32,7 @@ mod corpus;
 mod error;
 mod handoff;
 mod kg;
+mod quality;
 pub mod register;
 mod replay;
 pub mod rule;
@@ -41,6 +42,9 @@ pub use corpus::{ReasonConfig, ReasonDataset, ReasonExample, TraceArm};
 pub use error::ReasonError;
 pub use handoff::{HandoffOutcome, handoff};
 pub use kg::{EntityId, EntityType, Fact, RelationKind, SyntheticKg, query_name, random_path};
+pub use quality::{
+    TraceQualityReport, TraceQualitySummary, score_trace_quality, summarize_trace_quality,
+};
 pub use replay::{ReplayReport, replay_trace};
 pub use score::{
     AbstentionStats, DepthStats, ReasonDiversityReport, ReasonEvalSummary, score_reason_outputs,

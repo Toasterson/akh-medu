@@ -55,6 +55,10 @@ pub struct ReasonEvalSummary {
     pub per_depth: HashMap<usize, DepthStats>,
     pub abstention: AbstentionStats,
     pub diversity: ReasonDiversityReport,
+    /// Whole-trace quality (Phase 51 P3-RL A1): redundancy, drift, and
+    /// padding — the reward-hacking surfaces that per-statement replay is
+    /// blind to. See [`super::quality`] and ADR 096.
+    pub quality: super::quality::TraceQualitySummary,
 }
 
 /// Score a batch of raw model `outputs` against their source `examples`
@@ -83,6 +87,7 @@ pub fn score_reason_outputs(examples: &[ReasonExample], outputs: &[String]) -> R
                 distinct_answer_ratio: 0.0,
                 answer_entropy: 0.0,
             },
+            quality: super::quality::summarize_trace_quality(&[], &[]),
         };
     }
 
@@ -102,6 +107,9 @@ pub fn score_reason_outputs(examples: &[ReasonExample], outputs: &[String]) -> R
     let per_depth = per_depth_breakdown(&reports);
     let abstention = abstention_stats(&reports);
     let diversity = diversity_report(examples, &reports, n);
+    // Scored over the same common prefix replay used, so the quality means
+    // and the replay rates always describe the identical example set.
+    let quality = super::quality::summarize_trace_quality(&examples[..n], &outputs[..n]);
 
     ReasonEvalSummary {
         n,
@@ -111,6 +119,7 @@ pub fn score_reason_outputs(examples: &[ReasonExample], outputs: &[String]) -> R
         per_depth,
         abstention,
         diversity,
+        quality,
     }
 }
 

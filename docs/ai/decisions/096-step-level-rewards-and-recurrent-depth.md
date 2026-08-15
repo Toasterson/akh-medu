@@ -42,6 +42,24 @@ Separately, the rubric-RL literature was reviewed for transferable method. Its c
 - **Negative / risks.** Recurrent depth costs wall-clock linearly in `R` (partly offset: Kohli et al. report `R=4` converging in less absolute wall-clock than `R=2`, on their task). Three-stage grokking means runs must not be killed early, which is expensive to get wrong. Kohli et al.'s task is **implicit** — a single tail-entity prediction, no emitted chain — so it is evidence for B-reason only and must not be allowed to substitute for B0. LOTUS ([2606.31779](https://arxiv.org/abs/2606.31779)) is the closest bridge to trace supervision in latent space but is a 3B result with no evidence at 13M. Weight-tied stacks are unstable without the zero-init discipline.
 - **Rejected alternatives.** *(a)* LLM-judge rubric rewards on the reasoning corpus — strictly worse than a deterministic verifier, and imports a hacking taxonomy we are free of. *(b)* VSA as semantic judge — contradicts the degenerate-analogy finding that motivates the organ. *(c)* POW3R-style criterion reweighting as the anti-hacking measure — measured *below* no intervention at all, with the worst overclaim fraction in its sweep. *(d)* Jumping straight to the Goyal/Bengio slot — its trigger did not fire, and recurrent depth is now better evidenced for our exact failure. *(e)* Treating axis-A as a single failure and reaching for architecture first — would spend GPU weeks on B-reason while a learned-APE table plausibly explains the 0.000.
 
+## Amendments
+
+### 2026-08-15 — A1 built: the lab criteria are structural, not VSA
+
+Implementing A1 (`crates/grug-data/src/reason/quality.rs`) showed **decision 2's assignment of these criteria to the VSA kernel was wrong for the lab corpus**. The criteria themselves stand; the substrate changes. Two reasons, the second decisive:
+
+1. **Isolation.** `grug-data` declares "No ML dependency" and the workspace dependency direction is one-way — the engine depends on `grug-data` (`Cargo.toml:176`), never the reverse. Reaching `src/vsa/` from there would invert it and pull the 113K-LOC engine (oxigraph, redb, hnsw, candle) into the isolated data crate, breaking the isolation ADR 087 §3 established for exactly this reason.
+2. **VSA is the wrong instrument here.** Hypervector similarity is what you reach for with no ground truth and a need for *graded* resemblance. In the lab every entity is already a discrete symbol and `ReasonExample::gold_chain` **is** the ground truth, so exact set membership answers all three questions directly — no dimension, no seed, no false-match rate. A cleanup step would only add approximation error to a comparison that is currently exact.
+
+**The split this establishes, which is the durable point:**
+
+- **Lab** (`grug-data`, gold chain available) → structural scorers. Exact, dependency-free, deterministic.
+- **Production** (engine, Phase 41/P6, no gold chain — only a goal vector and a trace) → VSA geometry via the real kernel and `CompositeVerifier`. Unchanged, and still the only option there.
+
+Decision 2 is therefore **narrowed, not withdrawn**: VSA judges geometry, never semantics, *and only where ground truth is absent*.
+
+Delivered: `TraceQualityReport` / `TraceQualitySummary` with redundancy, `max_claim_repeats`, drift, `hop_coverage` (the required-hop denominator decision 4 mandates) and `wasted_valid_steps` (the padding exploit, counted). Wired into `ReasonEvalSummary`, so every `eval_reason` run reports it and the retro-score is a re-run rather than a new tool. `is_looping()` thresholds at ≥3 repeats of one claim or >25% redundancy, so ordinary single-repeat backtracking is not flagged. A test asserts the load-bearing property directly: a 3×-duplicated gold trace scores `executability == 1.0` under replay while quality reports `redundancy_rate == 2/3` and `is_looping()`.
+
 ## Open questions
 
 - Does redundancy actually occur in our traces? A1 is a no-GPU retro-score over `runs/p3r-trace` and settles it before any guard is built.

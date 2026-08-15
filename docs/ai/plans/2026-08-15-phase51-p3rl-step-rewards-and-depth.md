@@ -59,6 +59,12 @@ Three criteria `replay_trace` structurally cannot check, all expressible in the 
 
 **Deliverable:** a `reason::geometric` scorer alongside `score_reason_outputs`, plus a retro-scoring pass over `runs/p3r-trace/` step-16000 outputs. Measurable with **no GPU run** — this is the cheapest information in the plan and should land first.
 
+> **✅ BUILT 2026-08-15 — `crates/grug-data/src/reason/quality.rs`.** Shipped as `TraceQualityReport` / `TraceQualitySummary`, wired into `ReasonEvalSummary` so every `eval_reason` run reports `looping / redundancy / drift / hop_cov / wasted` and the retro-score is a re-run, not a new tool. 7 tests, all green.
+>
+> **Correction to §1.2 above and ADR 096 decision 2:** the scorer is **structural, not VSA** (see the ADR's 2026-08-15 amendment). `grug-data` is dependency-isolated from the engine and cannot reach `src/vsa/` without inverting the workspace dependency; more importantly, hypervector similarity is for graded resemblance *without* ground truth, and here `gold_chain` **is** ground truth, so exact set membership is both simpler and strictly more accurate. VSA keeps the judging role in production (Phase 41/P6), where a goal vector and a trace are all there is. The criteria are unchanged; only the substrate moved.
+>
+> **⛔ Retro-score is BLOCKED on data, not code.** `runs/` is gitignored (`.gitignore:15`) and lives at `/home/toasty/ws/agi/akh-medu/runs/` on the gfx1100 factory box — a Linux path, not on the Mac workbench. Copy `runs/p3r-trace/` (step-16000 checkpoint outputs) over, or run `eval_reason` on the factory box directly; either way the numbers come out of the existing harness.
+
 ### 1.3 A2/A3 — the RL stage
 
 `rg` over `crates/grug-train/` and `crates/grug-data/` for reward/GRPO/rollout returns nothing. ADR 087 §4 puts RL after SFT with executable rewards; that stage is unbuilt. Build it in the SRaR shape:
