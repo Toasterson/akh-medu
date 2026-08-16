@@ -18,7 +18,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Per-workspace runtime handles the ACP data-plane + chat turn need.
 ///

@@ -12,7 +12,7 @@
 
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::Duration;
 
 use miette::Diagnostic;
@@ -42,7 +42,7 @@ struct ServerState {
     daemons: RwLock<HashMap<String, WorkspaceDaemon>>,
     /// One shared Agent per workspace — daemon, HTTP handlers, and WS sessions
     /// all operate on the same instance. See ADR-027.
-    agents: Arc<RwLock<HashMap<String, Arc<RwLock<Agent>>>>>,
+    agents: Arc<RwLock<HashMap<String, Arc<StdRwLock<Agent>>>>>,
     /// Non-blocking psyche snapshots.  Populated at agent creation time so
     /// monitoring reads never block on the agent mutex.
     psyche_snapshots: PsycheSnapshotMap,
@@ -218,7 +218,7 @@ fn build_local_drop_backend(
 /// agent is a quiet no-op (the ticker fires before the first interaction).
 async fn snapshot_once(
     pool: &akhomed_store::DatabaseConnection,
-    agents: &RwLock<HashMap<String, Arc<RwLock<Agent>>>>,
+    agents: &RwLock<HashMap<String, Arc<StdRwLock<Agent>>>>,
     name: &str,
     akh_id: akhomed_store::uuid::Uuid,
     workspace_id: akhomed_store::uuid::Uuid,
@@ -2146,7 +2146,7 @@ impl ServerState {
     /// One Agent per workspace — daemon, HTTP handlers, and WS sessions all
     /// share the same instance. Construction is heavy (Agent::resume
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
-    async fn get_agent(&self, name: &str) -> Result<Arc<RwLock<Agent>>, String> {
+    async fn get_agent(&self, name: &str) -> Result<Arc<StdRwLock<Agent>>, String> {
         // Fast path: already cached.
         {
             let agents = self.agents.read().await;
@@ -2533,7 +2533,7 @@ impl ServerState {
     /// would construct a full Agent (`Agent::resume`, heavy) as a surprising
     /// side effect of a control-plane call on a workspace nobody has chatted
     /// with yet; this peek keeps that construction opt-in.
-    async fn resident_agent(&self, name: &str) -> Option<Arc<RwLock<Agent>>> {
+    async fn resident_agent(&self, name: &str) -> Option<Arc<StdRwLock<Agent>>> {
         self.agents.read().await.get(name).cloned()
     }
 
@@ -2796,7 +2796,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 /// learning, reflection, consolidation, schema discovery, rule inference,
 /// gap analysis, continuous learning, sleep cycles, and trigger evaluation).
 async fn run_daemon_task(
-    shared_agent: Arc<RwLock<Agent>>,
+    shared_agent: Arc<StdRwLock<Agent>>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     daemon_config: akh_medu::agent::DaemonConfig,

@@ -1007,14 +1007,14 @@ enum TurnStartError {
 /// leaving another client's bearer-credentialed `mcp__*` proxies registered
 /// on the shared workspace `Agent` for whichever session ran next.
 struct SessionToolGuard<'a> {
-    agent: &'a mut Agent,
+    agent: &'a Agent,
     tool_names: Vec<String>,
     /// The tracker we installed (if any), for teardown.
     tracker: Option<Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>>,
 }
 
 impl<'a> SessionToolGuard<'a> {
-    fn new(agent: &'a mut Agent) -> Self {
+    fn new(agent: &'a Agent) -> Self {
         Self {
             agent,
             tool_names: Vec::new(),
