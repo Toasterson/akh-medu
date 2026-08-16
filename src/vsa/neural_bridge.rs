@@ -18,6 +18,47 @@
 //! - Quality gate: if encoded vector is far from all known concepts, LLM may
 //!   be hallucinating
 //! - Interpretability: which KG concepts activate when processing text?
+//!
+//! ## Design Decision: Random Init + Online Training (P26.4)
+//!
+//! **Question**: Are projection weights pre-trained (loaded from disk) or
+//! randomly initialised and trained online?
+//!
+//! **Answer**: Randomly initialised, trained online via `BridgeTrainer`.
+//!
+//! **Justification**:
+//! - Pre-training would require a labelled corpus mapping prompts to KG
+//!   symbols — we don't have one yet, and constructing one is Phase 27 work.
+//! - Online training is lightweight (~15M params, CPU-feasible) and can run
+//!   continuously as the system processes prompts and receives feedback.
+//! - Random init with Xavier uniform gives a valid identity behaviour: the
+//!   untrained encoder produces a deterministic (seeded) hypervector that is
+//!   testable for shape, determinism, and round-trip properties. The encoder
+//!   is NOT useful for concept identification until trained, but it IS
+//!   testable and Phase 27 is NOT a prerequisite for merging.
+//! - The `from_encoder` constructor + `from_weights` on `LinearProjection`
+//!   provide the load-from-disk path for when pre-trained weights become
+//!   available (Phase 27+ or external training pipelines).
+//!
+//! ## Published Contract (for Phase 27 `TrainingVerifier`)
+//!
+//! `NeuralVsaBridge` exposes a stable interface that Phase 27 depends on:
+//! - `new_seeded(hidden_dim, vsa_dim, seed)` — deterministic construction
+//! - `encode(&[f32]) -> HyperVec` — the core projection
+//! - `encode_with_raw(&[f32]) -> (HyperVec, Vec<f32>)` — for training
+//! - `BridgeTrainer` — SGD alignment to grounded vectors
+//! - `from_encoder(LinearProjection, Dimension)` — load pre-trained weights
+//!
+//! ## Phase 39 (Remote Backend) Projection Contract
+//!
+//! A remote LLM backend (Phase 39) feeds this bridge by providing hidden
+//! states as `&[f32]` slices. The bridge does not care where the f32 values
+//! came from — in-process candle extraction or a remote RPC both produce the
+//! same `Vec<f32>`. The contract is:
+//! 1. Backend extracts hidden state at the layer fixed in P26.2
+//! 2. Backend serialises as `Vec<f32>` (hidden_dim elements)
+//! 3. Caller invokes `bridge.encode(&hidden_state)` → `HyperVec`
+//! No backend-specific types leak into the bridge interface.
 
 use super::{Dimension, Encoding, HyperVec};
 
@@ -43,17 +84,32 @@ pub struct LinearProjection {
 impl LinearProjection {
     /// Create a new projection with the given dimensions.
     ///
-    /// Weights are initialized to small random values (Xavier uniform).
+    /// Weights are initialised to small random values (Xavier uniform).
+    /// **Non-deterministic**: uses `thread_rng()`. Use [`new_seeded`] for
+    /// deterministic construction (required by P26.4 acceptance).
     pub fn new(in_dim: usize, out_dim: usize) -> Self {
-        use rand::Rng;
         let mut rng = rand::thread_rng();
-        let limit = (6.0 / (in_dim + out_dim) as f32).sqrt();
+        Self::new_with_rng(in_dim, out_dim, &mut rng)
+    }
 
+    /// Create a new projection with a seeded RNG for deterministic init.
+    ///
+    /// This is the primary constructor for P26.4: the same seed always
+    /// produces the same weights, satisfying the determinism acceptance
+    /// criterion.
+    pub fn new_seeded(in_dim: usize, out_dim: usize, seed: u64) -> Self {
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        Self::new_with_rng(in_dim, out_dim, &mut rng)
+    }
+
+    /// Internal: create with an arbitrary RNG.
+    fn new_with_rng(in_dim: usize, out_dim: usize, rng: &mut impl rand::Rng) -> Self {
+        let limit = (6.0 / (in_dim + out_dim) as f32).sqrt();
         let weight: Vec<f32> = (0..out_dim * in_dim)
             .map(|_| rng.gen_range(-limit..limit))
             .collect();
         let bias = vec![0.0f32; out_dim];
-
         Self {
             weight,
             bias,
@@ -133,11 +189,32 @@ pub struct NeuralVsaBridge {
 impl NeuralVsaBridge {
     /// Create a new bridge with random initialization.
     ///
+    /// **Non-deterministic**. Use [`new_seeded`] for deterministic construction.
+    ///
     /// - `hidden_dim`: LLM hidden state dimension (e.g., 1536 for Qwen2.5-1.5B)
     /// - `vsa_dim`: target VSA dimension (e.g., Dimension::DEFAULT = 10,000)
     pub fn new(hidden_dim: usize, vsa_dim: Dimension) -> Self {
         Self {
             encoder: LinearProjection::new(hidden_dim, vsa_dim.0),
+            decoder: None,
+            threshold: 0.0,
+            vsa_dim,
+        }
+    }
+
+    /// Create a new bridge with deterministic seeded initialization.
+    ///
+    /// This is the primary constructor for P26.4: the same seed always
+    /// produces the same encoder weights, satisfying the determinism
+    /// acceptance criterion ("deterministic for a fixed model + prompt +
+    /// seed").
+    ///
+    /// - `hidden_dim`: LLM hidden state dimension
+    /// - `vsa_dim`: target VSA dimension
+    /// - `seed`: RNG seed for reproducible weight initialisation
+    pub fn new_seeded(hidden_dim: usize, vsa_dim: Dimension, seed: u64) -> Self {
+        Self {
+            encoder: LinearProjection::new_seeded(hidden_dim, vsa_dim.0, seed),
             decoder: None,
             threshold: 0.0,
             vsa_dim,
@@ -493,5 +570,225 @@ mod tests {
         assert!(!hv.get_bit(5)); // -2.0
         assert!(hv.get_bit(6)); // 2.0
         assert!(hv.get_bit(7)); // 0.1
+    }
+
+    // -----------------------------------------------------------------------
+    // P26.4 Acceptance tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: compute Hamming similarity in [0.0, 1.0] between two HyperVecs.
+    fn hamming_similarity(a: &HyperVec, b: &HyperVec) -> f32 {
+        use crate::simd::best_kernel;
+        let kernel = best_kernel();
+        let dist = kernel.hamming_distance(a.data(), b.data());
+        let total = a.dim().0 as f32;
+        1.0 - (dist as f32 / total)
+    }
+
+    /// P26.4 acceptance: deterministic for a fixed seed.
+    ///
+    /// Two bridges constructed with the same seed must produce identical
+    /// encodings for the same input.
+    #[test]
+    fn deterministic_for_fixed_seed() {
+        let dim = Dimension::TEST;
+        let hidden = vec![0.5f32; 64];
+
+        let bridge1 = NeuralVsaBridge::new_seeded(64, dim, 42);
+        let bridge2 = NeuralVsaBridge::new_seeded(64, dim, 42);
+
+        let hv1 = bridge1.encode(&hidden);
+        let hv2 = bridge2.encode(&hidden);
+
+        // Must be identical — same seed, same input → same output.
+        assert_eq!(
+            hv1.data(),
+            hv2.data(),
+            "same seed must produce identical encodings"
+        );
+    }
+
+    /// P26.4 acceptance: different seeds produce different encodings.
+    #[test]
+    fn different_seeds_produce_different_encodings() {
+        let dim = Dimension::TEST;
+        let hidden = vec![0.5f32; 64];
+
+        let bridge1 = NeuralVsaBridge::new_seeded(64, dim, 1);
+        let bridge2 = NeuralVsaBridge::new_seeded(64, dim, 2);
+
+        let hv1 = bridge1.encode(&hidden);
+        let hv2 = bridge2.encode(&hidden);
+
+        // Should NOT be identical — different seeds → different weights.
+        assert_ne!(
+            hv1.data(),
+            hv2.data(),
+            "different seeds should produce different encodings"
+        );
+    }
+
+    /// P26.4 acceptance: trained encoder maps hidden states closer to
+    /// target KG symbols than to unrelated symbols.
+    ///
+    /// This is the minimum bar: "the produced HyperVec is measurably closer
+    /// (Hamming/cosine) to those symbols than to unrelated ones."
+    ///
+    /// Strategy:
+    /// 1. Create a target symbol vector (grounded in ItemMemory-style).
+    /// 2. Create an unrelated symbol vector (different random seed).
+    /// 3. Train the bridge on (hidden_state → target) pairs.
+    /// 4. After training, verify encoded hidden is MORE similar to target
+    ///    than to unrelated.
+    #[test]
+    fn trained_encoder_closer_to_target_than_unrelated() {
+        use crate::simd::best_kernel;
+        use crate::symbol::SymbolId;
+        use crate::vsa::encode::encode_symbol;
+        use crate::vsa::ops::VsaOps;
+
+        let dim = Dimension::TEST; // 1000
+        let hidden_dim = 64;
+
+        // Set up VSA ops for symbol encoding.
+        let ops = VsaOps::new(best_kernel(), dim, Encoding::Bipolar);
+
+        // Create two symbols: target (concept the prompt is "about") and
+        // unrelated (a completely different concept).
+        let target_sym = SymbolId::new(1001).unwrap();
+        let unrelated_sym = SymbolId::new(9999).unwrap();
+
+        let target_hv = encode_symbol(&ops, target_sym);
+        let unrelated_hv = encode_symbol(&ops, unrelated_sym);
+
+        // Sanity: target and unrelated should be ~0.5 similarity (random).
+        let baseline_sim = hamming_similarity(&target_hv, &unrelated_hv);
+        assert!(
+            baseline_sim < 0.7,
+            "unrelated symbols should not be too similar: {baseline_sim}"
+        );
+
+        // Create a bridge with a fixed seed.
+        let mut bridge = NeuralVsaBridge::new_seeded(hidden_dim, dim, 42);
+
+        // Simulate a "hidden state" from the LLM processing a prompt about
+        // the target concept. Use varied values so gradient signal differs
+        // across input dimensions (uniform inputs cause identical gradient
+        // rows, making convergence fragile across FP precision differences).
+        let hidden: Vec<f32> = (0..hidden_dim)
+            .map(|i| {
+                let v = (i as f32 * 0.137).sin() * 0.8;
+                if i % 3 == 0 { v } else { -v }
+            })
+            .collect();
+
+        // Measure pre-training similarity to target vs unrelated.
+        let pre_encoded = bridge.encode(&hidden);
+        let pre_target_sim = hamming_similarity(&pre_encoded, &target_hv);
+        let pre_unrelated_sim = hamming_similarity(&pre_encoded, &unrelated_hv);
+
+        // Train: align hidden state → target symbol.
+        // Use moderate lr (0.5) and enough iterations (500) for robust
+        // convergence across x86_64 and arm64 FP precision differences.
+        let mut trainer = BridgeTrainer::new(hidden_dim, dim.0, 0.5);
+        for _ in 0..500 {
+            trainer.accumulate(&bridge, &hidden, &target_hv);
+            trainer.step(&mut bridge);
+        }
+
+        // Measure post-training similarity to target vs unrelated.
+        let post_encoded = bridge.encode(&hidden);
+        let post_target_sim = hamming_similarity(&post_encoded, &target_hv);
+        let post_unrelated_sim = hamming_similarity(&post_encoded, &unrelated_hv);
+
+        // The core assertion: after training, the encoded vector is measurably
+        // closer to the target than to the unrelated symbol, with a minimum
+        // margin of 0.01 to be robust to tiny FP-driven flips.
+        assert!(
+            post_target_sim > post_unrelated_sim + 0.01,
+            "trained encoder should be closer to target ({post_target_sim}) \
+             than to unrelated ({post_unrelated_sim}) by at least 0.01"
+        );
+
+        // And training should have improved target similarity.
+        assert!(
+            post_target_sim > pre_target_sim,
+            "training should improve target similarity: \
+             {pre_target_sim} → {post_target_sim}"
+        );
+
+        // And the gap (target - unrelated) should have grown.
+        let pre_gap = pre_target_sim - pre_unrelated_sim;
+        let post_gap = post_target_sim - post_unrelated_sim;
+        assert!(
+            post_gap > pre_gap,
+            "training should widen the gap: pre={pre_gap}, post={post_gap}"
+        );
+    }
+
+    /// P26.4 acceptance: untrained bridge has meaningful identity behaviour.
+    ///
+    /// An untrained (random init) bridge must still produce valid HyperVecs
+    /// that are deterministic for a fixed seed. This ensures the bridge is
+    /// testable without Phase 27's training loop.
+    #[test]
+    fn untrained_bridge_identity_behaviour() {
+        let dim = Dimension::TEST;
+        let bridge = NeuralVsaBridge::new_seeded(128, dim, 7);
+
+        let hidden_a = vec![1.0f32; 128];
+        let hidden_b = vec![-1.0f32; 128];
+
+        let hv_a = bridge.encode(&hidden_a);
+        let hv_b = bridge.encode(&hidden_b);
+
+        // Must produce valid HyperVecs of the right dimension.
+        assert_eq!(hv_a.dim(), dim);
+        assert_eq!(hv_b.dim(), dim);
+        assert_eq!(hv_a.encoding(), Encoding::Bipolar);
+
+        // Different inputs must produce different encodings (identity behaviour:
+        // the projection is non-degenerate for a reasonable seed).
+        assert_ne!(
+            hv_a.data(),
+            hv_b.data(),
+            "different inputs should produce different encodings"
+        );
+
+        // Same input must produce same encoding (determinism).
+        let hv_a2 = bridge.encode(&hidden_a);
+        assert_eq!(
+            hv_a.data(),
+            hv_a2.data(),
+            "same input must produce same encoding"
+        );
+    }
+
+    /// P26.4 acceptance: the projection contract works with any f32 slice,
+    /// regardless of source (in-process or remote backend).
+    ///
+    /// This validates the Phase 39 contract: the bridge only cares about
+    /// the f32 content, not where it came from.
+    #[test]
+    fn projection_contract_agnostic_to_source() {
+        let dim = Dimension::TEST;
+        let bridge = NeuralVsaBridge::new_seeded(32, dim, 99);
+
+        // Simulate hidden states from different "backends" — same values,
+        // different construction paths. The bridge must not care.
+        // from_json uses the same computation as from_candle/from_remote,
+        // standing in for a JSON-deserialised remote payload (Phase 39).
+        let from_candle: Vec<f32> = (0..32).map(|i| i as f32 * 0.01).collect();
+        let from_remote: Vec<f32> = (0..32).map(|i| i as f32 * 0.01).collect();
+        let from_json: Vec<f32> = (0..32).map(|i| i as f32 * 0.01).collect();
+
+        let hv_candle = bridge.encode(&from_candle);
+        let hv_remote = bridge.encode(&from_remote);
+        let hv_json = bridge.encode(&from_json);
+
+        // All three must produce identical HyperVecs — same f32 content,
+        // different provenance.
+        assert_eq!(hv_candle.data(), hv_remote.data());
+        assert_eq!(hv_candle.data(), hv_json.data());
     }
 }
