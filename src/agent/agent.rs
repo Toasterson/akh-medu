@@ -212,7 +212,7 @@ pub struct Agent {
     /// Procedural learning configuration (Phase 11h).
     pub(crate) chunking_config: ChunkingConfig,
     /// Communication channel registry (Phase 12a).
-    pub(crate) channel_registry: ChannelRegistry,
+    pub(crate) channel_registry: std::sync::Mutex<ChannelRegistry>,
     /// Conversation state for grounded dialogue (Phase 12b).
     pub(crate) conversation_state: std::sync::Mutex<ConversationState>,
     /// Pre-communication constraint checker (Phase 12c).
@@ -275,7 +275,7 @@ pub struct Agent {
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
-    pub(crate) context_manager: Option<std::sync::Arc<dyn super::context::ContextManager>>,
+    pub(crate) context_manager: std::sync::Mutex<Option<std::sync::Arc<dyn super::context::ContextManager>>>,
     /// Last [`ContextWindowStats`] committed by `run_agentic_turn`, behind its
     /// own `Mutex` so the ACP `_akh/usage` handler can read it **without** the
     /// agent lock (Phase 44m, ADR 065 D12.1). `None` until the first turn.
@@ -930,7 +930,7 @@ impl Agent {
             improvement_history: ImprovementHistory::default(),
             method_index: MethodIndex::new(),
             chunking_config,
-            channel_registry: ChannelRegistry::new(),
+            channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
             conversation_state: std::sync::Mutex::new(ConversationState::default()),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
@@ -960,7 +960,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
-            context_manager: None,
+            context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -2238,37 +2238,33 @@ impl Agent {
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
 
-    /// Get a shared reference to the channel registry.
-    pub fn channel_registry(&self) -> &ChannelRegistry {
-        &self.channel_registry
-    }
-
-    /// Get a mutable reference to the channel registry.
-    pub fn channel_registry_mut(&mut self) -> &mut ChannelRegistry {
-        &mut self.channel_registry
+    /// Get a locked reference to the channel registry.
+    pub fn channel_registry(&self) -> std::sync::MutexGuard<'_, ChannelRegistry> {
+        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Register a communication channel.
     pub fn register_channel(
-        &mut self,
+        &self,
         channel: Box<dyn super::channel::CommChannel>,
     ) -> ChannelResult<()> {
-        self.channel_registry.register(channel)
+        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(channel)
     }
 
     /// Create and register an operator channel wrapping the current sink,
     /// and return an `InboundHandle` for the UI event loop.
-    pub fn setup_operator_channel(&mut self) -> InboundHandle {
+    pub fn setup_operator_channel(&self) -> InboundHandle {
         let op = super::operator_channel::OperatorChannel::new(Arc::clone(&self.sink));
         let handle = op.inbound_handle();
         // Registration cannot fail here: we are creating the first operator channel.
-        let _ = self.channel_registry.register(Box::new(op));
+        let _ = self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(op));
         handle
     }
 
     /// Drain all pending inbound messages from all registered channels.
-    pub fn drain_inbound(&mut self) -> Vec<InboundMessage> {
+    pub fn drain_inbound(&self) -> Vec<InboundMessage> {
         self.channel_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .drain_all()
             .into_iter()
             .map(|(_id, msg)| msg)
@@ -4238,7 +4234,7 @@ impl Agent {
             improvement_history,
             method_index,
             chunking_config,
-            channel_registry: ChannelRegistry::new(),
+            channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
             conversation_state: std::sync::Mutex::new(ConversationState::default()),
             constraint_checker: ConstraintChecker::new(),
             interlocutor_registry: InterlocutorRegistry::new(),
@@ -4268,7 +4264,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
-            context_manager: None,
+            context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -4367,7 +4363,7 @@ impl std::fmt::Debug for Agent {
             )
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
-            .field("channels", &self.channel_registry)
+            .field("channels", &self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).len())
             .field("response_detail", &self.conversation_state().response_detail)
             .field("constraint_checker", &self.constraint_checker)
             .field("interlocutors", &self.interlocutor_registry.len())
