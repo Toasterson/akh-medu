@@ -1,25 +1,49 @@
 //! `hekad` — Heka daemon CLI.
 //!
-//! Phase 42a: only the `migrate` subcommand is implemented. It loads
-//! `heka.toml`, connects to PostgreSQL, and runs the SeaORM migrator to
-//! create the 5 `heka_*` tables + HNSW index.
+//! Phase 42a: `migrate` creates the heka_* schema.
+//! Phase 42b: `eval` runs the LongMemEval / LoCoMo retrieval harness.
 //!
 //! Usage:
 //!   hekad migrate [config_path]
-//!   hekad migrate           # uses default config path ~/.config/heka/heka.toml
+//!   hekad eval longmemeval --mode raw
+//!   hekad eval locomo --top-k auto
 
 use std::path::PathBuf;
 
+use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, WrapErr};
 use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 
 use heka::config::HekaConfig;
+use heka::eval::EvalCommand;
 use heka::migration::Migrator;
+
+/// Heka daemon CLI.
+#[derive(Debug, Parser)]
+#[command(name = "hekad", about = "Heka — Postgres+pgvector evaluation store")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Create the heka_* schema on the target PostgreSQL database.
+    Migrate {
+        /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
+        config_path: Option<PathBuf>,
+    },
+
+    /// Run the long-term memory evaluation harness.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommand,
+    },
+}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
-    // Initialize tracing.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -27,30 +51,16 @@ async fn main() -> miette::Result<()> {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Parse subcommand.
-    if args.len() < 2 || args[1] == "help" || args[1] == "--help" {
-        print_usage();
-        return Ok(());
-    }
-
-    match args[1].as_str() {
-        "migrate" => run_migrate(&args[2..]).await,
-        cmd => {
-            eprintln!("unknown subcommand: {cmd}");
-            print_usage();
-            std::process::exit(2);
-        }
+    match cli.command {
+        Commands::Migrate { config_path } => run_migrate(config_path).await,
+        Commands::Eval { command } => heka::eval::run(&command).await,
     }
 }
 
-async fn run_migrate(args: &[String]) -> miette::Result<()> {
-    let config_path = if let Some(p) = args.first() {
-        PathBuf::from(p)
-    } else {
-        default_config_path()
-    };
+async fn run_migrate(config_path: Option<PathBuf>) -> miette::Result<()> {
+    let config_path = config_path.unwrap_or_else(default_config_path);
 
     let config = HekaConfig::from_file(&config_path)
         .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
@@ -69,16 +79,6 @@ async fn run_migrate(args: &[String]) -> miette::Result<()> {
 
     tracing::info!("Heka migrations complete — 5 tables + HNSW index created");
     Ok(())
-}
-
-fn print_usage() {
-    eprintln!("hekad — Heka daemon\n");
-    eprintln!("USAGE:");
-    eprintln!("  hekad migrate [config_path]   Create the heka_* schema on the target DB");
-    eprintln!("  hekad help                     Show this message");
-    eprintln!();
-    eprintln!("Config defaults to ~/.config/heka/heka.toml");
-    eprintln!("DATABASE_URL env var overrides [database] url in the config");
 }
 
 /// Default config file path: `~/.config/heka/heka.toml`.

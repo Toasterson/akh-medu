@@ -39,6 +39,12 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# CLI (Phase 42b — eval harness)
+clap = { version = "4.5", features = ["derive"] }
+
+# Hardware/system metadata for eval reports (Phase 42b)
+sysinfo = "0.33"
+
 [features]
 default = []
 

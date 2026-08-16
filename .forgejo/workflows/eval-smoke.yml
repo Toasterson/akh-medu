@@ -1,0 +1,127 @@
+name: eval-smoke
+#
+# Phase 42b: non-blocking evaluation smoke test.
+#
+# Runs the LongMemEval 10-session raw subset on every PR, captures the JSON
+# report as an artifact, and emits a delta vs the main-branch baseline.  This
+# job is intentionally non-blocking (continue-on-error: true) because the
+# harness retrieval is currently a stub and recall is expected to be 0.0 until
+# Phase 42c lands.
+#
+# The baseline is stored in `.forgejo/baselines/eval_smoke_baseline.json`.  When
+# it is missing, the job still runs and records the current metrics so the next
+# run can compute a delta.
+#
+# This workflow runs only on pull_request to avoid duplicating the lane with
+# the push event (see ci.yml for the rationale on avoiding duplicate jobs).
+on:
+  pull_request:
+
+jobs:
+  eval-smoke:
+    runs-on: ubuntu-22.04
+    # Non-blocking: failures here do not block merging.
+    continue-on-error: true
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev unzip
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo '. "$HOME/.cargo/env"' >> ~/.profile
+
+      - name: Build hekad
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=1
+          export CARGO_PROFILE_DEV_DEBUG=0
+          if command -v sccache >/dev/null 2>&1; then
+            export RUSTC_WRAPPER=sccache
+            sccache --show-stats || true
+          fi
+          cargo build -p heka --bin hekad
+
+      - name: Run LongMemEval smoke (10 sessions, raw mode)
+        run: |
+          . "$HOME/.cargo/env"
+          mkdir -p eval_reports
+          cargo run -p heka --bin hekad -- eval longmemeval --mode raw --sessions 10 --output eval_reports
+
+      - name: Compute delta vs baseline
+        id: delta
+        run: |
+          set -eu
+          REPORT="eval_reports/longmemeval_report.json"
+          BASELINE=".forgejo/baselines/eval_smoke_baseline.json"
+          DELTA_MD="eval_reports/longmemeval_delta.md"
+
+          if [ ! -f "$REPORT" ]; then
+            echo "Report not found at $REPORT" >&2
+            exit 0
+          fi
+
+          echo "## LongMemEval smoke delta" > "$DELTA_MD"
+          echo "" >> "$DELTA_MD"
+
+          RECALL=$(jq -r '.metrics.recall_at_k // "N/A"' "$REPORT")
+          P50=$(jq -r '.metrics.p50_latency_secs // "N/A"' "$REPORT")
+          P99=$(jq -r '.metrics.p99_latency_secs // "N/A"' "$REPORT")
+          SESSIONS=$(jq -r '.sessions // "N/A"' "$REPORT")
+          HARDWARE=$(jq -r '.hardware.hostname // "unknown"' "$REPORT")
+
+          echo "| Metric | This PR |" >> "$DELTA_MD"
+          echo "|---|---|" >> "$DELTA_MD"
+          echo "| Sessions | $SESSIONS |" >> "$DELTA_MD"
+          echo "| Recall@K | $RECALL |" >> "$DELTA_MD"
+          echo "| p50 latency | ${P50}s |" >> "$DELTA_MD"
+          echo "| p99 latency | ${P99}s |" >> "$DELTA_MD"
+          echo "| Host | $HARDWARE |" >> "$DELTA_MD"
+          echo "" >> "$DELTA_MD"
+
+          if [ -f "$BASELINE" ]; then
+            BASE_RECALL=$(jq -r '.metrics.recall_at_k // "N/A"' "$BASELINE")
+            BASE_P50=$(jq -r '.metrics.p50_latency_secs // "N/A"' "$BASELINE")
+            BASE_P99=$(jq -r '.metrics.p99_latency_secs // "N/A"' "$BASELINE")
+
+            if command -v python3 >/dev/null 2>&1 && [ "$RECALL" != "N/A" ] && [ "$BASE_RECALL" != "N/A" ]; then
+              DELTA_RECALL=$(python3 -c "print(f'{float('$RECALL') - float('$BASE_RECALL'):+.4f}')")
+              DELTA_P50=$(python3 -c "print(f'{float('$P50') - float('$BASE_P50'):+.6f}')")
+              DELTA_P99=$(python3 -c "print(f'{float('$P99') - float('$BASE_P99'):+.6f}')")
+            else
+              DELTA_RECALL="N/A"
+              DELTA_P50="N/A"
+              DELTA_P99="N/A"
+            fi
+
+            echo "### Delta vs baseline (main)" >> "$DELTA_MD"
+            echo "" >> "$DELTA_MD"
+            echo "| Metric | Δ (PR - baseline) |" >> "$DELTA_MD"
+            echo "|---|---|" >> "$DELTA_MD"
+            echo "| Recall@K | $DELTA_RECALL |" >> "$DELTA_MD"
+            echo "| p50 latency | ${DELTA_P50}s |" >> "$DELTA_MD"
+            echo "| p99 latency | ${DELTA_P99}s |" >> "$DELTA_MD"
+            echo "" >> "$DELTA_MD"
+          else
+            echo "### Baseline" >> "$DELTA_MD"
+            echo "" >> "$DELTA_MD"
+            echo "No baseline found at \`$BASELINE\`.  This is expected on the first run;" >> "$DELTA_MD"
+            echo "commit a baseline after Phase 42c lands to enable delta reporting." >> "$DELTA_MD"
+            echo "" >> "$DELTA_MD"
+          fi
+
+          echo "### Notes" >> "$DELTA_MD"
+          echo "" >> "$DELTA_MD"
+          echo "- Retrieval is currently a stub (Phase 42b), so recall is expected to be 0.0." >> "$DELTA_MD"
+          echo "- This job is non-blocking." >> "$DELTA_MD"
+
+          cat "$DELTA_MD"
+
+      - name: Upload eval reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-reports
+          path: eval_reports/

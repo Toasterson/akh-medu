@@ -24,6 +24,7 @@
 pub mod config;
 pub mod entity;
 pub mod error;
+pub mod eval;
 pub mod migration;
 
 pub use config::HekaConfig;
