@@ -216,7 +216,7 @@ pub struct Agent {
     /// Conversation state for grounded dialogue (Phase 12b).
     pub(crate) conversation_state: std::sync::Mutex<ConversationState>,
     /// Pre-communication constraint checker (Phase 12c).
-    pub(crate) constraint_checker: ConstraintChecker,
+    pub(crate) constraint_checker: std::sync::Mutex<ConstraintChecker>,
     /// Interlocutor registry — social KG and theory of mind (Phase 12d).
     pub(crate) interlocutor_registry: InterlocutorRegistry,
     /// Capability token registry for multi-agent communication (Phase 12g).
@@ -932,7 +932,7 @@ impl Agent {
             chunking_config,
             channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
             conversation_state: std::sync::Mutex::new(ConversationState::default()),
-            constraint_checker: ConstraintChecker::new(),
+            constraint_checker: std::sync::Mutex::new(ConstraintChecker::new()),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager: super::pim::PimManager::default(),
@@ -2191,7 +2191,7 @@ impl Agent {
     /// no manager set behaves exactly as before. Shipped managers should be
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
     pub fn set_context_manager(&self, manager: std::sync::Arc<dyn super::context::ContextManager>) {
-        self.context_manager = Some(manager);
+        *self.context_manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
     }
 
     /// Set whether completed agentic turns are captured to the WAL as raw
@@ -2452,7 +2452,7 @@ impl Agent {
         let grammar = self.conversation_state().grammar.clone();
 
         // Run the constraint pipeline.
-        let outcome = self.constraint_checker.check_grounded(
+        let outcome = self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).check_grounded(
             response, channel_id, channel_kind, &self.engine,
         );
 
@@ -2464,7 +2464,7 @@ impl Agent {
 
         // Record emission in the budget.
         if decision == EmissionDecision::Emit {
-            self.constraint_checker.record_emission(channel_id);
+            self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).record_emission(channel_id);
         }
 
         (msg, decision)
@@ -4236,7 +4236,7 @@ impl Agent {
             chunking_config,
             channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
             conversation_state: std::sync::Mutex::new(ConversationState::default()),
-            constraint_checker: ConstraintChecker::new(),
+            constraint_checker: std::sync::Mutex::new(ConstraintChecker::new()),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager,
@@ -4365,7 +4365,7 @@ impl std::fmt::Debug for Agent {
             .field("learned_methods", &self.method_index.len())
             .field("channels", &self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).len())
             .field("response_detail", &self.conversation_state().response_detail)
-            .field("constraint_checker", &self.constraint_checker)
+            .field("constraint_checker", &self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()))
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
     }

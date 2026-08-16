@@ -439,8 +439,8 @@ impl AgentDaemon {
     ///
     /// Locking discipline: each per-workspace `Arc<RwLock<Agent>>` is independent.
     /// A panic (and subsequent poison) in workspace A cannot affect workspace B.
-    fn lock_agent(&self) -> std::sync::MutexGuard<'_, Agent> {
-        self.agent.lock().unwrap_or_else(|e| {
+    fn lock_agent(&self) -> std::sync::RwLockWriteGuard<'_, Agent> {
+        self.agent.write().unwrap_or_else(|e| {
             tracing::warn!("agent mutex was poisoned; recovering (a previous task may have panicked while holding the lock)");
             e.into_inner()
         })
