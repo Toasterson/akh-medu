@@ -40,6 +40,11 @@ pub mod web_search;
 pub mod agent_management;
 pub mod tool_query;
 pub mod mcp;
+// Dispatch-trap triage reads `[upstreams.anima]` via `crate::config::AkhomedConfig`
+// and calls out through `crate::upstream_client::UpstreamMcpClient`, both of
+// which are themselves `#[cfg(feature = "daemon")]` in `src/lib.rs`. Gate the
+// whole tool the same way rather than sprinkling cfgs inside the file.
+#[cfg(feature = "daemon")]
 pub mod triage_dispatch_traps;
 pub mod trigger_manage;
 
@@ -83,4 +88,5 @@ pub use audit_log::AuditLogTool;
 pub use entity_schema::{EntitySchemaTool, EntityTypesTool, EntityTypeFilterTool};
 pub use delegate::DelegateTool;
 pub use mcp::{McpCallTool, McpClient, McpDiscoverTool, McpError, McpServerConfig};
+#[cfg(feature = "daemon")]
 pub use triage_dispatch_traps::TriageDispatchTrapsTool;
