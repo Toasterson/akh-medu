@@ -341,7 +341,7 @@ impl Agent {
     /// with no cancellation source (e.g. tests, the symbolic pipeline's
     /// callers) passes a flag that is never set.
     pub fn run_agentic_turn(
-        &mut self,
+        &self,
         engine: &Engine,
         agent_id: &str,
         user_prompt: &str,
@@ -420,7 +420,7 @@ impl Agent {
         // turns directly (the agent turn is recorded at the end). The symbolic
         // path already records both speakers; this closes the gap for the agentic
         // path so multi-turn context works (measure-first Q1).
-        self.conversation_state_mut().record_operator_turn(user_prompt);
+        self.conversation_state().record_operator_turn(user_prompt);
 
         // Phase 44d/44g: retrieve the input's KG context + relevant past episodes
         // for the working-context manager. The agent owns the engine + predicates;
@@ -431,7 +431,7 @@ impl Agent {
             // 44d delta refresh: inject only facts not already shown this session
             // (the activation frontier that moved), trusting retained history to
             // hold the rest. Opt-in; the default re-sends the full relevant block.
-            let seen = self.conversation_state_mut().kg_seen_mut();
+            let seen = self.conversation_state().kg_seen_mut();
             crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
         } else {
             let mut cache = crate::nlu::kg_context::KgContextCache::default();
@@ -722,7 +722,7 @@ impl Agent {
                     mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
                     "completion check → returning: turn complete with answer"
                 );
-                self.conversation_state_mut().record_agent_turn(answer);
+                self.conversation_state().record_agent_turn(answer);
                 // ADR 091: capture the completed turn to the WAL (raw
                 // staging; a no-op if no sink is installed or capture is
                 // opted out).
@@ -949,7 +949,7 @@ impl Agent {
     /// the normal-completion path in [`Self::run_agentic_turn`].
     #[allow(clippy::too_many_arguments)]
     fn force_final_answer(
-        &mut self,
+        &self,
         backend: &dyn super::chat_backend::ChatBackend,
         engine: &Engine,
         agent_id: &str,
@@ -1029,7 +1029,7 @@ impl Agent {
             )));
             return;
         }
-        self.conversation_state_mut().record_agent_turn(answer);
+        self.conversation_state().record_agent_turn(answer);
         // ADR 091: same capture hook as the normal-completion turn-end site.
         self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
         if used_fallback {

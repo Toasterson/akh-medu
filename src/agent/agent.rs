@@ -504,7 +504,7 @@ impl Agent {
     ///
     /// For each Hot skill, reads `cli_tools` paths as `CliToolManifest` JSONs
     /// and (if the `wasm-tools` feature is enabled) `wasm_tools` paths as WASM modules.
-    fn load_skill_tools(&mut self) {
+    fn load_skill_tools(&self) {
         let hot_skills: Vec<_> = self
             .engine
             .list_skills()
@@ -1851,7 +1851,7 @@ impl Agent {
     /// ("which tools may agent X invoke?", answered from the KG — see
     /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
     /// per-turn session tools, only its durable ones.
-    pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
+    pub fn register_tool(&self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(tool);
         self.sync_live_tools();
     }
@@ -1859,7 +1859,7 @@ impl Agent {
     /// Remove a previously-registered tool by name. Returns `true` if one was
     /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
     /// over ACP for one prompt turn) once the turn completes.
-    pub fn unregister_tool(&mut self, name: &str) -> bool {
+    pub fn unregister_tool(&self, name: &str) -> bool {
         let removed = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         self.sync_live_tools();
         removed
@@ -1906,6 +1906,7 @@ impl Agent {
         }
         let tools = self
             .tool_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .list_manifests()
             .into_iter()
             .map(|m| crate::engine::LiveTool {
@@ -1923,7 +1924,7 @@ impl Agent {
     }
 
     /// Set the permission mode gating this agent's tool execution.
-    pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
+    pub fn set_permission_mode(&self, mode: crate::agent::permission::PermissionMode) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_mode(mode);
     }
 
@@ -1935,27 +1936,27 @@ impl Agent {
     /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
     /// `session/request_permission` bridge) for the duration of a turn.
     pub fn set_permission_asker(
-        &mut self,
+        &self,
         asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
     ) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_asker(asker);
     }
 
     /// Remove the permission approver (`Ask` then fails closed).
-    pub fn clear_permission_asker(&mut self) {
+    pub fn clear_permission_asker(&self) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_permission_asker();
     }
 
     /// Install a tool execution tracker (for ACP ToolCall events).
     pub fn set_tool_tracker(
-        &mut self,
+        &self,
         tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
     ) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_tracker(tracker);
     }
 
     /// Remove the tool execution tracker.
-    pub fn clear_tool_tracker(&mut self) {
+    pub fn clear_tool_tracker(&self) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_tracker();
     }
 
@@ -2189,7 +2190,7 @@ impl Agent {
     /// (the default) uses the byte-identical pass-through manager, so an akh with
     /// no manager set behaves exactly as before. Shipped managers should be
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
-    pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
+    pub fn set_context_manager(&self, manager: std::sync::Arc<dyn super::context::ContextManager>) {
         self.context_manager = Some(manager);
     }
 
@@ -2446,13 +2447,13 @@ impl Agent {
     /// Returns `(OutboundMessage, EmissionDecision)` — the caller should
     /// respect the decision (emit or suppress) based on channel kind.
     pub fn check_and_wrap_grounded(
-        &mut self,
+        &self,
         response: &super::conversation::GroundedResponse,
         channel_id: &str,
         channel_kind: super::channel::ChannelKind,
     ) -> (super::channel_message::OutboundMessage, EmissionDecision) {
-        let detail = self.conversation_state.response_detail;
-        let grammar = self.conversation_state.grammar.clone();
+        let detail = self.conversation_state().response_detail;
+        let grammar = self.conversation_state().grammar.clone();
 
         // Run the constraint pipeline.
         let outcome = self.constraint_checker.check_grounded(
@@ -4367,7 +4368,7 @@ impl std::fmt::Debug for Agent {
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
             .field("channels", &self.channel_registry)
-            .field("response_detail", &self.conversation_state.response_detail)
+            .field("response_detail", &self.conversation_state().response_detail)
             .field("constraint_checker", &self.constraint_checker)
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
