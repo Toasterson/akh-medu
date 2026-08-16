@@ -275,12 +275,12 @@ impl Default for DaemonConfig {
 
 /// Long-running daemon that schedules background learning tasks.
 ///
-/// The agent is shared via `Arc<Mutex<Agent>>` so that HTTP handlers,
+/// The agent is shared via `Arc<RwLock<Agent>>` so that HTTP handlers,
 /// WebSocket sessions, and the daemon all operate on the same agent
 /// instance. Each daemon method locks briefly, does synchronous work,
 /// and releases — near-zero contention since ticks are 15s–2h apart.
 pub struct AgentDaemon {
-    agent: Arc<Mutex<Agent>>,
+    agent: Arc<RwLock<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
     /// When true, cycle/learning methods skip their work without acquiring
@@ -330,7 +330,7 @@ pub struct AgentDaemon {
 
 impl AgentDaemon {
     /// Create a new daemon wrapping the given shared agent.
-    pub fn new(agent: Arc<Mutex<Agent>>, config: DaemonConfig) -> Self {
+    pub fn new(agent: Arc<RwLock<Agent>>, config: DaemonConfig) -> Self {
         Self {
             agent,
             config,
@@ -437,7 +437,7 @@ impl AgentDaemon {
     /// the prior panic left a write half-applied, but that is still preferable
     /// to permanently blocking every future operation on this workspace.
     ///
-    /// Locking discipline: each per-workspace `Arc<Mutex<Agent>>` is independent.
+    /// Locking discipline: each per-workspace `Arc<RwLock<Agent>>` is independent.
     /// A panic (and subsequent poison) in workspace A cannot affect workspace B.
     fn lock_agent(&self) -> std::sync::MutexGuard<'_, Agent> {
         self.agent.lock().unwrap_or_else(|e| {

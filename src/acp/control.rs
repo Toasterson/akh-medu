@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 /// store and block a same-host `sleep` → `wake`.
 pub struct WorkspaceHandles {
     pub engine: Arc<crate::engine::Engine>,
-    pub agent: Arc<Mutex<crate::agent::Agent>>,
+    pub agent: Arc<RwLock<crate::agent::Agent>>,
     pub processor: Arc<Mutex<crate::chat::ChatProcessor>>,
 }
 

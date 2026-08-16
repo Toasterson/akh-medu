@@ -40,7 +40,7 @@
 //! [`TcpStream`]: tokio::net::TcpStream
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::Instrument;
 
@@ -317,7 +317,7 @@ fn tcp_connect_help(target: &str) -> String {
 /// One in-process ACP workspace: the engine, the shared agent, and the chat
 /// processor that turns text prompts into [`AkhMessage`]s.
 ///
-/// Per ADR-027, the [`Agent`] is shared as `Arc<std::sync::Mutex<Agent>>`. The
+/// Per ADR-027, the [`Agent`] is shared as `Arc<RwLock<Agent>>`. The
 /// [`ChatProcessor`] requires `&mut self` for [`ChatProcessor::process_input`],
 /// so it is likewise wrapped in a `Mutex`. Both guards are acquired and dropped
 /// **inside** a [`tokio::task::spawn_blocking`] closure and never held across an
@@ -330,7 +330,7 @@ pub struct AkhAcpAgent {
     /// [`ServerControl::resolve`], so the server serves any akh per request and
     /// pins no engine (a permanent hold would block same-host sleep/wake).
     engine: Option<Arc<Engine>>,
-    agent: Option<Arc<Mutex<Agent>>>,
+    agent: Option<Arc<RwLock<Agent>>>,
     processor: Option<Arc<Mutex<ChatProcessor>>>,
     /// Default workspace used when a request names none (the daemon's bound
     /// `[acp].workspace`; the held workspace's name in embedded mode).
@@ -470,7 +470,7 @@ impl AkhAcpAgent {
     /// store).
     pub fn new(
         engine: Arc<Engine>,
-        agent: Arc<Mutex<Agent>>,
+        agent: Arc<RwLock<Agent>>,
         processor: ChatProcessor,
     ) -> Self {
         Self {
@@ -554,7 +554,7 @@ impl AkhAcpAgent {
     async fn resolve_handles(
         &self,
         workspace: &str,
-    ) -> Result<(Arc<Engine>, Arc<Mutex<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
+    ) -> Result<(Arc<Engine>, Arc<RwLock<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
         if let Some(ctrl) = &self.control {
             match ctrl.resolve(workspace).await {
                 Ok(h) => return Ok((h.engine, h.agent, h.processor)),
@@ -816,7 +816,7 @@ impl AkhAcpAgent {
     /// [`JoinHandle`]: tokio::task::JoinHandle
     fn run_turn(
         engine: Arc<Engine>,
-        agent: Arc<Mutex<Agent>>,
+        agent: Arc<RwLock<Agent>>,
         processor: Arc<Mutex<ChatProcessor>>,
         session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
         agent_id: String,
@@ -2640,7 +2640,7 @@ fn derivation_node_json(node: &crate::agent::explain::DerivationNode) -> serde_j
 /// through to [`dispatch_akh`].
 fn dispatch_akh_agent(
     engine: &Engine,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<RwLock<Agent>>,
     workspace: &str,
     method: &str,
     params: &serde_json::Value,
@@ -2843,14 +2843,14 @@ fn context_json(agent: &Agent) -> serde_json::Value {
 /// stats cache is on the `Agent`, so we still need *some* lock — but it's the
 /// cache's own `Mutex`, not the agent's, so it never contends with a live
 /// turn. Returns `null` if no turn has ever run (truly no data yet).
-fn context_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+fn context_json_stale(agent: &Arc<RwLock<Agent>>) -> serde_json::Value {
     // The cache Arc is on the agent; we still need to lock the agent once to
     // clone the Arc. But try_lock already failed — so this is a re-attempt
     // with a blocking lock, which is what ADR 063 forbids. Instead, we rely
     // on the fact that `last_context_stats` is `pub(crate)` and the agent
     // shares it as an `Arc` — but the Arc itself is inside the agent struct.
     //
-    // The cleanest resolution: the caller already has the `Arc<Mutex<Agent>>`
+    // The cleanest resolution: the caller already has the `Arc<RwLock<Agent>>`
     // (the workspace's shared handle). The cache Arc is on the Agent. We
     // can't get it without the agent lock. So for the stale path, we return
     // null — the panel shows the last successful snapshot's `context` block
@@ -2891,7 +2891,7 @@ fn deferred_json(agent: &Agent) -> serde_json::Value {
 
 /// Stale-path variant of [`deferred_json`] — same reasoning as
 /// [`context_json_stale`]: returns empty when the agent lock is busy.
-fn deferred_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+fn deferred_json_stale(agent: &Arc<RwLock<Agent>>) -> serde_json::Value {
     let _ = agent;
     serde_json::json!([])
 }
@@ -5149,7 +5149,7 @@ mod tests {
 
     /// Build a bare engine + shared agent (no ACP wrapper) for exercising the
     /// agent-read dispatch helpers directly.
-    fn engine_and_agent() -> (Arc<Engine>, Arc<Mutex<Agent>>) {
+    fn engine_and_agent() -> (Arc<Engine>, Arc<RwLock<Agent>>) {
         let engine = Engine::new(EngineConfig {
             dimension: Dimension::TEST,
             ..Default::default()
