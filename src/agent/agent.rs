@@ -163,7 +163,7 @@ pub struct Agent {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: AgentConfig,
     pub(crate) working_memory: WorkingMemory,
-    pub(crate) tool_registry: ToolRegistry,
+    pub(crate) tool_registry: std::sync::Mutex<ToolRegistry>,
     pub(crate) goals: Vec<Goal>,
     pub(crate) predicates: AgentPredicates,
     pub(crate) cycle_count: u64,
@@ -541,7 +541,7 @@ impl Agent {
                                         cli_manifest,
                                         Some(info.id.clone()),
                                     );
-                                    self.tool_registry.register(Box::new(tool));
+                                    self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(tool));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -574,7 +574,7 @@ impl Agent {
                             manifest.tool_config.clone(),
                         ) {
                             Ok(wasm_tool) => {
-                                self.tool_registry.register(Box::new(wasm_tool));
+                                self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(wasm_tool));
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -905,7 +905,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry,
+            tool_registry: std::sync::Mutex::new(tool_registry),
             goals,
             predicates,
             cycle_count: 0,
@@ -1060,7 +1060,7 @@ impl Agent {
         // Runs after load_skill_tools() so skill-contributed tools are included.
         // Existing schemas (manually tuned or restored from disk) are preserved.
         {
-            let signatures = agent.tool_registry.list();
+            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -1852,7 +1852,7 @@ impl Agent {
     /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
     /// per-turn session tools, only its durable ones.
     pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
-        self.tool_registry.register(tool);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(tool);
         self.sync_live_tools();
     }
 
@@ -1860,7 +1860,7 @@ impl Agent {
     /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
     /// over ACP for one prompt turn) once the turn completes.
     pub fn unregister_tool(&mut self, name: &str) -> bool {
-        let removed = self.tool_registry.remove(name);
+        let removed = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         self.sync_live_tools();
         removed
     }
@@ -1880,7 +1880,7 @@ impl Agent {
     pub(crate) fn seed_tool_graph_and_live_view(&self) {
         if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&self.engine) {
             let (registered, pruned) =
-                registrar.reconcile(&self.tool_registry, "akhomed", &["agent:any"]);
+                registrar.reconcile(&*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()), "akhomed", &["agent:any"]);
             tracing::debug!(registered, pruned, "tool_graph: reconciled tool manifests in KG");
         } else {
             tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
@@ -1919,17 +1919,17 @@ impl Agent {
 
     /// List all registered tool signatures.
     pub fn list_tools(&self) -> Vec<ToolSignature> {
-        self.tool_registry.list()
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list()
     }
 
     /// Set the permission mode gating this agent's tool execution.
     pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
-        self.tool_registry.set_permission_mode(mode);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_mode(mode);
     }
 
     /// The active tool-permission mode.
     pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
-        self.tool_registry.permission_mode()
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).permission_mode()
     }
 
     /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
@@ -1938,12 +1938,12 @@ impl Agent {
         &mut self,
         asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
     ) {
-        self.tool_registry.set_permission_asker(asker);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_asker(asker);
     }
 
     /// Remove the permission approver (`Ask` then fails closed).
     pub fn clear_permission_asker(&mut self) {
-        self.tool_registry.clear_permission_asker();
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_permission_asker();
     }
 
     /// Install a tool execution tracker (for ACP ToolCall events).
@@ -1951,12 +1951,12 @@ impl Agent {
         &mut self,
         tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
     ) {
-        self.tool_registry.set_tracker(tracker);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_tracker(tracker);
     }
 
     /// Remove the tool execution tracker.
     pub fn clear_tool_tracker(&mut self) {
-        self.tool_registry.clear_tracker();
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_tracker();
     }
 
     /// Get a reference to the wrapped engine.
@@ -2214,7 +2214,7 @@ impl Agent {
         let Some(ref mgr) = self.model_manager else {
             return false;
         };
-        let manifests = self.tool_registry.list_advertised_manifests();
+        let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
         mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifests);
         true
     }
@@ -4212,7 +4212,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry,
+            tool_registry: std::sync::Mutex::new(tool_registry),
             goals,
             predicates,
             cycle_count,
@@ -4304,7 +4304,7 @@ impl Agent {
 
         // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
         {
-            let signatures = agent.tool_registry.list();
+            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -4351,7 +4351,7 @@ impl std::fmt::Debug for Agent {
         f.debug_struct("Agent")
             .field("goals", &self.goals.len())
             .field("working_memory", &self.working_memory)
-            .field("tools", &self.tool_registry)
+            .field("tools", &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()))
             .field("cycle_count", &self.cycle_count)
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
@@ -4404,7 +4404,7 @@ mod backend_seam_tests {
         // Sanity: the executor-facing tools registered by register_builtin_tools
         // are present, proving the in-process default backend path still ran.
         assert!(
-            agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
+            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().iter().any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
         );
     }
@@ -4420,7 +4420,7 @@ mod backend_seam_tests {
         let agent = Agent::with_exec_wiring(test_engine(), AgentConfig::default(), ExecToolWiring::None)
             .expect("Agent::with_exec_wiring(.., ExecToolWiring::None) should construct");
 
-        let tools = agent.tool_registry.list();
+        let tools = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
         let names: std::collections::HashSet<&str> =
             tools.iter().map(|sig| sig.name.as_str()).collect();
 
