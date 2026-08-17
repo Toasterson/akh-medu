@@ -833,18 +833,21 @@ impl AkhAcpAgent {
         mode_source: &'static str,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
-            // ── ADR-027: lock, process (emitting via the channel sink), drop —
-            // all synchronous, no await while a guard is held. ──
-            let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
-            let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
+            // ── ADR-027: take a *read* lock for the agentic path (concurrent
+            // turns proceed in parallel). Only the symbolic fallback needs
+            // `&mut Agent`; it drops the read lock and acquires a write lock
+            // (serialising, but rare — the agentic path covers the common case).
+            // ──
+            let agent_r = agent.read().unwrap_or_else(|e| e.into_inner());
+            let processor_g = processor.lock().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
             // made during the turn — by the LLM loop or the symbolic pipeline —
             // can prompt the client.
             if let Some(asker) = asker {
-                agent.set_permission_asker(asker);
+                agent_r.set_permission_asker(asker);
             }
-            // `guard` owns the exclusive `&mut Agent` for the rest of the turn
-            // (accessed as `guard.agent`) so its `Drop` — which unregisters any
+            // `guard` holds `&Agent` for the rest of the turn (accessed as
+            // `guard.agent`) so its `Drop` — which unregisters any
             // session-scoped MCP proxy tools and clears the permission asker —
             // is guaranteed to run even if `run_agentic_turn` /
             // `process_input` panics, instead of being skipped by an unwind
@@ -853,7 +856,7 @@ impl AkhAcpAgent {
             // `daemon` feature (session MCP tools need the HTTP client); a
             // non-daemon build never calls it, hence the blanket allow.
             #[allow(unused_mut)]
-            let mut guard = SessionToolGuard::new(&mut agent);
+            let mut guard = SessionToolGuard::new(&agent_r);
 
             // Wrap the per-turn `ChannelSink` in a single strong `Arc` for the
             // turn's duration. The `ToolExecutionTracker` below takes a `Weak`
@@ -952,6 +955,17 @@ impl AkhAcpAgent {
                 .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
                 .is_none()
             {
+                // Symbolic fallback needs `&mut Agent` (it calls
+                // `dispatch_abstree` / `escalate_to_goal` which mutate goals,
+                // working memory, cycle_count). Drop the read lock and all
+                // borrows, then acquire a write lock. This serialises the
+                // rare symbolic fallback, but the agentic path (common case)
+                // proceeds concurrently under read locks.
+                drop(guard);
+                drop(agent_r);
+                drop(processor_g);
+                let mut agent_w = agent.write().unwrap_or_else(|e| e.into_inner());
+                let mut processor_g2 = processor.lock().unwrap_or_else(|e| e.into_inner());
                 // Get or create this session's cognitive context. Held across
                 // `process_input` so per-session state (kg_cache, eliza,
                 // trajectory) is mutated in place — no clone-and-writeback
@@ -964,7 +978,7 @@ impl AkhAcpAgent {
                 let ctx = ctx_map
                     .entry(session_id.clone())
                     .or_default();
-                let out = processor.process_input(ctx, &text, guard.agent, &engine);
+                let out = processor_g2.process_input(ctx, &text, &mut agent_w, &engine);
                 sink.emit_batch(&out);
             }
             // `guard` drops here (normal return *or* unwind), unregistering
@@ -2654,7 +2668,7 @@ fn dispatch_akh_agent(
 
     // Non-blocking acquire: a held lock (turn in flight) ⇒ no agent snapshot.
     // Poisoned ⇒ recover the inner agent (a prior panic left it valid to read).
-    let guard = match agent.try_lock() {
+    let guard = match agent.try_read() {
         Ok(g) => Some(g),
         Err(std::sync::TryLockError::WouldBlock) => None,
         Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),

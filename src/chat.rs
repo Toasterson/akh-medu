@@ -170,7 +170,7 @@ impl ChatProcessor {
         &mut self,
         ctx: &mut SessionContext,
         text: &str,
-        agent: &Agent,
+        agent: &mut Agent,
         engine: &Arc<Engine>,
     ) -> Vec<AkhMessage> {
         let trimmed = text.trim();
