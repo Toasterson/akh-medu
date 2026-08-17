@@ -2303,13 +2303,13 @@ impl Agent {
     // ── Constraint checking (Phase 12c) ────────────────────────────────
 
     /// Get a shared reference to the constraint checker.
-    pub fn constraint_checker(&self) -> &ConstraintChecker {
-        &self.constraint_checker
+    pub fn constraint_checker(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
+        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a mutable reference to the constraint checker.
-    pub fn constraint_checker_mut(&mut self) -> &mut ConstraintChecker {
-        &mut self.constraint_checker
+    pub fn constraint_checker_mut(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
+        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a reference to the interlocutor registry.
