@@ -479,7 +479,7 @@ fn decide(
                 &agent.engine,
                 &agent.working_memory,
                 agent.psyche.as_ref(),
-                &agent.tool_registry,
+                &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
                 &config,
             );
             tracing::debug!(
@@ -499,7 +499,7 @@ fn decide(
             &agent.engine,
             &agent.working_memory,
             agent.psyche.as_ref(),
-            &agent.tool_registry,
+            &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
             Some(&agent.affective_system),
         ),
     };

@@ -1629,8 +1629,10 @@ mod tests {
             .register(Box::new(FlakyBookTool { calls: calls.clone() }));
         let known_tools: std::collections::HashSet<String> =
             agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
-        let reg = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
-        let full_catalog = ollama_tool_catalog(&*reg);
+        let full_catalog = {
+            let reg = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
+            ollama_tool_catalog(&*reg)
+        };
         (agent, known_tools, full_catalog, calls)
     }
 

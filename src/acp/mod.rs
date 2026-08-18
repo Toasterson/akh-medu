@@ -5171,7 +5171,7 @@ mod tests {
         .expect("engine");
         let engine = Arc::new(engine);
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        (engine, Arc::new(Mutex::new(agent)))
+        (engine, Arc::new(RwLock::new(agent)))
     }
 
     // ── SessionToolGuard (Breakage #1: cross-client MCP tool leak on panic) ──
@@ -5885,16 +5885,14 @@ mod tests {
 
         let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(2));
 
-        // Wedge the workspace: hold the agent lock on another thread, so the
-        // prompt turn blocks at `agent.lock()` and never emits a message. The
-        // lock is released after the assertion (via the release flag): the
-        // wedged turn thread must be allowed to finish, because dropping the
-        // test runtime waits for in-flight blocking tasks.
+        // Wedge the workspace: hold the agent write lock on another thread, so
+        // the prompt turn blocks at `agent.write()` and never emits a message.
+        // The lock is released after the assertion (via the release flag).
         let blocker = Arc::clone(me.agent.as_ref().expect("held-mode agent"));
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release_flag = Arc::clone(&release);
         let blocker_thread = std::thread::spawn(move || {
-            let _guard = blocker.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = blocker.write().unwrap_or_else(|e| e.into_inner());
             while !release_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::park_timeout(std::time::Duration::from_millis(25));
             }
@@ -7570,13 +7568,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("akh-cancel.sock");
 
-        // Wedge the workspace by holding the agent lock, forcing the worker
-        // into the Empty state when try_recv is called.
+        // Wedge the workspace by holding the agent write lock, forcing the
+        // worker into the Empty state when try_recv is called.
         let blocker = Arc::clone(me.agent.as_ref().expect("held-mode agent"));
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release_flag = Arc::clone(&release);
         let blocker_thread = std::thread::spawn(move || {
-            let _guard = blocker.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = blocker.write().unwrap_or_else(|e| e.into_inner());
             while !release_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::park_timeout(std::time::Duration::from_millis(25));
             }

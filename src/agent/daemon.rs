@@ -1490,9 +1490,18 @@ impl AgentDaemon {
             return;
         }
 
-        // Borrow only the `agent` field (not all of `&self`) so the
-        // `self.total_cycles += 1` below does not conflict with the live guard.
-        let mut agent = self.agent.write().unwrap_or_else(|e| e.into_inner());
+        // Try to acquire a write lock without blocking. If a live ACP turn
+        // holds a read lock (or another background task holds the write lock),
+        // skip this cycle instead of blocking the turn. This satisfies the
+        // acceptance criterion that a turn proceeds while the daemon is active.
+        let mut agent = match self.try_write_agent() {
+            Some(g) => g,
+            None => {
+                tracing::debug!("daemon: agent lock contended; skipping idle cycle");
+                self.cycle_done.notify_one();
+                return;
+            }
+        };
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();
