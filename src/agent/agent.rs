@@ -460,6 +460,13 @@ impl Agent {
         // Tool-graph query (peer/federation discovery).
         registry.register(Box::new(tools::ToolQueryTool));
 
+        // Dispatch-trap triage (post-ADR-061): detect Anima work items stuck
+        // with a captured agent_diff but no advancing change record. Daemon-only:
+        // it depends on `crate::config::AkhomedConfig` and
+        // `crate::upstream_client::UpstreamMcpClient`, both `#[cfg(feature = "daemon")]`.
+        #[cfg(feature = "daemon")]
+        registry.register(Box::new(tools::TriageDispatchTrapsTool));
+
         // Delegation tool (Phase 36) — wired to pending task queue.
         #[cfg(feature = "delegation")]
         registry.register(Box::new(tools::DelegateTool::new(delegation_pending)));
