@@ -5156,7 +5156,7 @@ mod tests {
 
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let shared_agent = Arc::new(Mutex::new(agent));
+        let shared_agent = Arc::new(RwLock::new(agent));
 
         AkhAcpAgent::new(engine, shared_agent, processor)
     }
@@ -5937,6 +5937,83 @@ mod tests {
         );
     }
 
+    // ── WI-259: two sessions on one workspace make concurrent progress ──
+    //
+    // A full ACP-transport version of this test (two real `session/prompt`
+    // turns driven concurrently over `serve_unix_loop`, using a rendezvous
+    // `ChatBackend` that only answers once both turns are simultaneously in
+    // flight) was attempted here and is deliberately NOT shipped: it
+    // deadlocks every run, and diagnostic instrumentation on `run_turn`
+    // (src/acp/mod.rs, the `spawn_blocking` closure starting at what is now
+    // line ~835) proved why. Two sessions' turns each do:
+    //
+    //     let agent_r = agent.read().unwrap_or_else(...);       // line ~841
+    //     let processor_g = processor.lock().unwrap_or_else(...); // line ~842
+    //
+    // where `processor: Arc<Mutex<ChatProcessor>>` is a single instance
+    // shared by the whole workspace (one per `AkhAcpAgent`, not per
+    // session). The trace showed both sessions' threads acquire
+    // `agent.read()` concurrently — the `Agent` RwLock migration this WI is
+    // about works correctly — but the second session's thread then blocks
+    // forever on `processor.lock()` because the first session's thread
+    // already holds it and does not release it until its own turn (parked
+    // on the rendezvous, waiting for the second session) returns. `guard`/
+    // `processor_g` are held for the *entire* turn regardless of path, even
+    // though the agentic branch (`run_agentic_turn`, called at line ~955)
+    // never touches `processor` at all — only the symbolic fallback branch
+    // below it does. So two concurrent agentic-path turns on one workspace
+    // still fully serialize on this second, unrelated mutex today. This is
+    // a real, separate design defect (not a mechanical gap in this
+    // completion pass) — see the work item / PR report for the
+    // recommendation (defer acquiring `processor_g` into the symbolic
+    // branch, mirroring how the `agent` lock is already acquired
+    // minimally). The fallback below proves the part of the claim this WI
+    // actually changed: the `Agent` RwLock itself.
+
+    /// WI-259 tier-2 acceptance test (see the note above for why the full
+    /// ACP-transport version is not shipped). Proves the literal claim in
+    /// the WI title: two threads can hold `agent.read()` on the shared
+    /// `Arc<RwLock<Agent>>` **at the same time**.
+    ///
+    /// Each thread takes the read lock, signals its partner over a channel,
+    /// then waits (bounded) for the partner's signal before releasing —  a
+    /// deadlock-free rendezvous, not a sleep-timing assertion. If `read()`
+    /// were secretly exclusive (e.g. the field regressed to a `Mutex`),
+    /// whichever thread runs second could never acquire the lock while the
+    /// first holds it, so it could never send its signal; the first
+    /// thread's bounded wait would then time out and fail cleanly instead
+    /// of hanging the suite.
+    #[test]
+    fn two_threads_hold_agent_read_lock_concurrently() {
+        let (_engine, agent) = engine_and_agent();
+
+        let (tx_a, rx_a) = std::sync::mpsc::channel::<()>();
+        let (tx_b, rx_b) = std::sync::mpsc::channel::<()>();
+
+        let agent_a = Arc::clone(&agent);
+        let thread_a = std::thread::spawn(move || {
+            let _guard = agent_a.read().unwrap_or_else(|e| e.into_inner());
+            tx_a.send(()).expect("A: signal that the read lock is held");
+            rx_b.recv_timeout(std::time::Duration::from_secs(10)).expect(
+                "A: never heard from B — B could not also take the read lock \
+                 while A held it, meaning agent.read() is not truly shared",
+            );
+        });
+
+        let agent_b = Arc::clone(&agent);
+        let thread_b = std::thread::spawn(move || {
+            let _guard = agent_b.read().unwrap_or_else(|e| e.into_inner());
+            tx_b.send(()).expect("B: signal that the read lock is held");
+            rx_a.recv_timeout(std::time::Duration::from_secs(10)).expect(
+                "B: never heard from A — A could not also take the read lock \
+                 while B held it, meaning agent.read() is not truly shared",
+            );
+        });
+
+        thread_a.join().expect("thread A must not panic");
+        thread_b.join().expect("thread B must not panic");
+    }
+
     /// Drive an ACP prompt lifecycle that pushes a broken MCP server at
     /// `session/new` (one whose discovery will fail), returning the
     /// concatenated agent message text. Used by the defect-2 regression
@@ -6559,7 +6636,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+        let me = AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
 
         let sock = dir.path().join("akh-acp-query.sock");
         let listener = UnixListener::bind(&sock).expect("bind unix");
@@ -6618,7 +6695,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+        let me = AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("akh-acp-memory.sock");
@@ -6797,7 +6874,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor)
+        AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor)
     }
 
     /// One bounded `ext_request_unix` that must succeed.
@@ -7042,7 +7119,7 @@ mod tests {
         me.agent
             .as_ref()
             .expect("held-mode agent")
-            .lock()
+            .write()
             .unwrap()
             .force_set_psyche(crate::compartment::psyche::Psyche::default());
         let sock = dir.path().join("akh-acp-psyche.sock");

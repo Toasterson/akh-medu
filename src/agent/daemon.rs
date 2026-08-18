@@ -1494,9 +1494,16 @@ impl AgentDaemon {
         // holds a read lock (or another background task holds the write lock),
         // skip this cycle instead of blocking the turn. This satisfies the
         // acceptance criterion that a turn proceeds while the daemon is active.
-        let mut agent = match self.try_write_agent() {
-            Some(g) => g,
-            None => {
+        //
+        // Borrow only the `agent` field directly (not through the
+        // `try_write_agent` method) so the `self.total_cycles += 1` below
+        // does not conflict with the live guard: a method call's elided
+        // lifetime ties the returned guard to all of `&self`, defeating the
+        // disjoint-field borrow that direct field access gets for free —
+        // same reasoning as `self.agent.lock()` before this migration.
+        let mut agent = match self.agent.try_write() {
+            Ok(g) => g,
+            Err(_) => {
                 tracing::debug!("daemon: agent lock contended; skipping idle cycle");
                 self.cycle_done.notify_one();
                 return;
@@ -2252,5 +2259,104 @@ mod tests {
         // alongside this test must be registered here.
         assert!(KNOWN_TASK_NAMES.contains(&"seshat_curation"));
         assert!(KNOWN_TASK_NAMES.contains(&"heka_curation"));
+    }
+
+    // ── WI-259: the daemon must yield to a live turn, never block it ──
+
+    fn test_shared_agent() -> Arc<RwLock<Agent>> {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+        let agent = Agent::new(Arc::new(engine), crate::agent::AgentConfig::default())
+            .expect("agent");
+        Arc::new(RwLock::new(agent))
+    }
+
+    /// `try_write_agent` must yield (return `None`) rather than block when a
+    /// live ACP turn holds the agentic-path read lock — this is the exact
+    /// primitive `run_idle_cycle` calls to decide whether to skip its cycle.
+    /// Deterministic by construction: `RwLock::try_write` never blocks, so
+    /// this needs no timing threshold and cannot flake under load.
+    #[test]
+    fn try_write_agent_yields_instead_of_blocking_under_a_live_read_lock() {
+        let shared = test_shared_agent();
+        let daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+
+        let turn_guard = shared.read().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            daemon.try_write_agent().is_none(),
+            "try_write_agent must yield to a held read lock instead of blocking"
+        );
+        drop(turn_guard);
+
+        assert!(
+            daemon.try_write_agent().is_some(),
+            "sanity: once the read lock is released, try_write_agent must succeed"
+        );
+    }
+
+    /// End-to-end version of the same guarantee through the real call site:
+    /// `run_idle_cycle` (the daemon's idle-cycle entry) must skip its cycle
+    /// instead of blocking when a turn — simulated here on its own thread,
+    /// exactly like a real in-flight `session/prompt` — holds `agent.read()`.
+    ///
+    /// Bounded on a helper thread rather than asserted via elapsed time: if
+    /// `run_idle_cycle` ever regressed to a blocking `agent.write()`, this
+    /// would hang against the still-held reader instead of returning, and
+    /// the `recv_timeout` below turns that hang into a clean test failure
+    /// instead of wedging the suite — the same technique
+    /// `stalled_prompt_turn_fails_fast_instead_of_hanging` uses in the ACP
+    /// tests for the equivalent turn-side guarantee.
+    #[test]
+    fn run_idle_cycle_skips_instead_of_blocking_when_a_turn_holds_the_read_lock() {
+        let shared = test_shared_agent();
+
+        let reader_agent = Arc::clone(&shared);
+        let release = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::clone(&release);
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let reader_thread = std::thread::spawn(move || {
+            let _guard = reader_agent.read().unwrap_or_else(|e| e.into_inner());
+            holding_tx.send(()).expect("signal lock held");
+            while !release_flag.load(Ordering::Relaxed) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        });
+        holding_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reader thread never took the read lock");
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let cycle_thread = std::thread::spawn(move || {
+            daemon.run_idle_cycle();
+            let _ = done_tx.send(());
+        });
+        let skipped_promptly = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        release.store(true, Ordering::Relaxed);
+        reader_thread.thread().unpark();
+        let _ = reader_thread.join();
+        // Only join the cycle thread once we know it actually finished: if
+        // `run_idle_cycle` regressed to a blocking write lock, that thread is
+        // parked on the (now-released) reader forever-ish, and joining it
+        // unconditionally here would just relocate the hang from the
+        // assertion below into this line instead of failing cleanly.
+        if skipped_promptly {
+            let _ = cycle_thread.join();
+        } else {
+            drop(cycle_thread);
+        }
+
+        assert!(
+            skipped_promptly,
+            "run_idle_cycle must skip its cycle when the agent read lock is \
+             held by a live turn, not block waiting for the write lock"
+        );
     }
 }

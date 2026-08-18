@@ -2493,7 +2493,7 @@ impl ServerState {
                 }
             };
             tracing::info!(workspace = %name, %strategy, "context manager attached");
-            agent.set_context_manager(manager);
+            agent.set_context_manager(manager.into());
         }
 
         // ADR 091: per-akh transcript-capture opt-out (default on). The
@@ -2502,10 +2502,10 @@ impl ServerState {
         // only wires the config-file default.
         agent.set_capture_transcripts(akh_config.capture_transcripts);
 
-        // Extract the snapshot Arc before moving agent into Mutex so it can be
-        // registered without ever re-acquiring the agent lock.
+        // Extract the snapshot Arc before moving agent into the RwLock so it
+        // can be registered without ever re-acquiring the agent lock.
         let snapshot = agent.psyche_snapshot();
-        let shared = Arc::new(Mutex::new(agent));
+        let shared = Arc::new(StdRwLock::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
         let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));

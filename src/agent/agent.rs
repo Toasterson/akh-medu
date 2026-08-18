@@ -2216,7 +2216,8 @@ impl Agent {
             return false;
         };
         let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
-        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifests);
+        let manifest_refs: Vec<&crate::agent::tool_manifest::ToolManifest> = manifests.iter().collect();
+        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifest_refs);
         true
     }
 

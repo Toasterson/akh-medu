@@ -367,10 +367,19 @@ impl Agent {
 
         // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
         let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
-        backend.prepare(agent_id, self.psyche.as_ref(), &manifests);
+        let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests.iter().collect();
+        backend.prepare(agent_id, self.psyche.as_ref(), &manifest_refs);
 
         let reg = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut tools = ollama_tool_catalog(&*reg);
+        // Release the registry lock now — it is not used again in this
+        // function, and the `compute_deferred_groups` call below re-locks
+        // the same `std::sync::Mutex` on this thread. `std::sync::Mutex` is
+        // not reentrant, so holding `reg` past this point deadlocks every
+        // agentic turn (100% reproducible, not a race — this was caught by
+        // running the agentic_chat test suite, where every test hung on
+        // exactly this second `.lock()` call).
+        drop(reg);
         // ADR 089 task A/B: the FULL pre-retrieval-scoping catalog, captured
         // before M1 (below) narrows `tools` to what's actually offered this
         // round. Task A's param-repair-retry and task B's value grounding
@@ -432,7 +441,8 @@ impl Agent {
             // 44d delta refresh: inject only facts not already shown this session
             // (the activation frontier that moved), trusting retained history to
             // hold the rest. Opt-in; the default re-sends the full relevant block.
-            let seen = self.conversation_state().kg_seen_mut();
+            let mut conv_guard = self.conversation_state();
+            let seen = conv_guard.kg_seen_mut();
             crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
         } else {
             let mut cache = crate::nlu::kg_context::KgContextCache::default();
@@ -464,8 +474,9 @@ impl Agent {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
+            let conv_guard = self.conversation_state();
             let episode = EpisodeState::new(agent_id, user_prompt, engine)
-                .with_conversation(Some(&*self.conversation_state()))
+                .with_conversation(Some(&*conv_guard))
                 .with_context(kg_context.as_deref(), &recalled, session_seed.as_deref())
                 .with_tools(&tools);
             let cm_guard = self.context_manager.lock().unwrap_or_else(|e| e.into_inner());
@@ -865,7 +876,14 @@ impl Agent {
         let input = tool_input_from_args(&exec_args);
         let mut param_repaired = false;
         let mut a_note: Option<String> = None;
-        let (success, result) = match self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, input, engine) {
+        // Bind the lock result to an owned `AgentResult` *before* matching on
+        // it: a `match self.tool_registry.lock()....execute(..) { .. }` keeps
+        // the `MutexGuard` temporary alive for the scrutinee's entire match
+        // expression (a well-known Rust footgun), and the `Err` arm below
+        // re-locks the same `std::sync::Mutex` on this thread — a guaranteed
+        // self-deadlock on every failed tool call otherwise.
+        let exec_result = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, input, engine);
+        let (success, result) = match exec_result {
             Ok(o) => (o.success, o.result),
             Err(e) => {
                 // Task A: retry once, but only against the structurally
