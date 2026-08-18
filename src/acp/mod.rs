@@ -4356,7 +4356,7 @@ fn build_connection(
                                         let params = req.params.clone();
                                         let result = tokio::task::spawn_blocking(move || {
                                             let mut a =
-                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                                agent.write().unwrap_or_else(|e| e.into_inner());
                                             if let Some(mode_str) = params
                                                 .get("mode")
                                                 .and_then(serde_json::Value::as_str)
@@ -4403,7 +4403,7 @@ fn build_connection(
                                         let engine = Arc::clone(&engine);
                                         let result = tokio::task::spawn_blocking(move || {
                                             let mut a =
-                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                                agent.write().unwrap_or_else(|e| e.into_inner());
                                             set_archetype_weights(&engine, &mut a, &params)
                                         })
                                         .await;
@@ -5217,7 +5217,7 @@ mod tests {
     #[test]
     fn session_tool_guard_unregisters_tools_on_normal_drop() {
         let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
         {
             let mut guard = SessionToolGuard::new(&mut locked);
             guard.register(Box::new(EchoTool));
@@ -5238,7 +5238,7 @@ mod tests {
         // `Drop` must still fire while the stack unwinds through the panic.
         let (_engine, agent) = engine_and_agent();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
             let mut guard = SessionToolGuard::new(&mut locked);
             guard.register(Box::new(EchoTool));
             assert!(has_tool(guard.agent, "mcp__pushed__echo"));
@@ -5248,7 +5248,7 @@ mod tests {
 
         // The mutex is poisoned by the panic-while-held, matching every other
         // lock site in this module; recover it the same way (`into_inner`).
-        let locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
         assert!(
             !has_tool(&locked, "mcp__pushed__echo"),
             "SessionToolGuard::drop must unregister session tools even on unwind"
@@ -5268,7 +5268,7 @@ mod tests {
         }
 
         let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
         locked.set_permission_asker(Arc::new(NeverAsker));
         {
             let _guard = SessionToolGuard::new(&mut locked);
@@ -5639,8 +5639,8 @@ mod tests {
     fn agent_read_reports_stale_when_agent_is_busy() {
         let (engine, agent) = engine_and_agent();
 
-        // Simulate a turn holding the agent lock; try_lock must not block.
-        let _busy = agent.lock().expect("hold the agent lock");
+        // Simulate a turn holding the agent write lock; try_read must not block.
+        let _busy = agent.write().expect("hold the agent write lock");
         let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
             .unwrap()
             .unwrap();
@@ -5675,7 +5675,7 @@ mod tests {
         // stats directly into the agent's cache, then read via `_akh/usage`.
         let (engine, agent) = engine_and_agent();
         {
-            let mut a = agent.lock().unwrap();
+            let mut a = agent.write().unwrap();
             // Synthesize a stats with one section (UserPrompt) of 100 tokens
             // in a 10_000-token window.
             use crate::agent::context::{
@@ -5726,9 +5726,9 @@ mod tests {
 
     #[test]
     fn usage_context_is_stale_when_agent_busy() {
-        // Acceptance #5: a busy agent lock returns stale=true and never blocks.
+        // Acceptance #5: a busy agent write lock returns stale=true and never blocks.
         let (engine, agent) = engine_and_agent();
-        let _busy = agent.lock().expect("hold the agent lock");
+        let _busy = agent.write().expect("hold the agent write lock");
         let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
             .unwrap()
             .unwrap();
@@ -5744,7 +5744,7 @@ mod tests {
         // Acceptance #5: deferred rows carry tokens and count but no pct.
         let (engine, agent) = engine_and_agent();
         {
-            let mut a = agent.lock().unwrap();
+            let mut a = agent.write().unwrap();
             use crate::agent::context::{DeferredReason, DeferredToolGroup};
             *a.last_deferred_tools.lock().unwrap() = vec![DeferredToolGroup {
                 id: "tools",
