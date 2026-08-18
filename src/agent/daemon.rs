@@ -446,6 +446,15 @@ impl AgentDaemon {
         })
     }
 
+    /// Try to acquire a write lock on the agent without blocking.
+    /// Returns `None` if the lock is currently held (by a live ACP turn
+    /// or another background task). The daemon uses this to yield to
+    /// session work: if a turn is in progress, the daemon skips its
+    /// cycle rather than blocking the turn.
+    fn try_write_agent(&self) -> Option<std::sync::RwLockWriteGuard<'_, Agent>> {
+        self.agent.try_write().ok()
+    }
+
     /// Run the main daemon loop.
     ///
     /// Schedules all background tasks as tokio intervals and selects on them.
@@ -1747,7 +1756,7 @@ impl AgentDaemon {
 
         // Brief lock: clone the engine Arc, then release.
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.engine.clone()
         };
 
@@ -2033,13 +2042,13 @@ impl AgentDaemon {
 
         // --- Phase 1: Drain pending queue and dispatch ---
         let pending = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.delegation_manager().drain_pending()
         };
 
         for task in pending {
             let hint = task.target_hint.clone();
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             match agent.delegation_manager().dispatch(task, hint.as_deref()) {
                 Ok(id) => {
                     tracing::info!(delegation_id = %id, "delegation dispatched");
@@ -2055,7 +2064,7 @@ impl AgentDaemon {
 
         // --- Phase 2: Process completed results ---
         let completed: Vec<DelegationOutcome> = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             let mut results = Vec::new();
             while let Some(outcome) = agent.delegation_manager().try_recv() {
                 results.push(outcome);
@@ -2087,7 +2096,7 @@ impl AgentDaemon {
 
             // Assert result triples into KG.
             if let Some(ref structured) = outcome.structured {
-                let engine = self.agent.lock().unwrap().engine.clone();
+                let engine = self.agent.read().unwrap().engine.clone();
                 let tuples: Vec<(String, String, String, f32)> = structured
                     .triples
                     .iter()
@@ -2118,7 +2127,7 @@ impl AgentDaemon {
                         wall_time_ms: outcome.wall_time.as_millis() as u64,
                     },
                 );
-                if let Ok(agent) = self.agent.lock() {
+                if let Ok(agent) = self.agent.read() {
                     if let Err(e) = agent.engine.store_provenance(&mut prov) {
                         tracing::debug!(error = %e, "delegation: failed to store provenance");
                     }
@@ -2132,19 +2141,19 @@ impl AgentDaemon {
             }
 
             // Remove from active tracking.
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.delegation_manager().complete(outcome.id);
             }
         }
 
         // --- Phase 3: Check timeouts ---
         let timed_out = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.delegation_manager().check_timeouts()
         };
         for id in timed_out {
             tracing::warn!(delegation_id = %id, "delegation timed out");
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.delegation_manager().complete(id);
             }
         }
