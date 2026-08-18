@@ -892,7 +892,7 @@ impl Agent {
                             retry_note = format!("{retry_note}; {}", g.note);
                         }
                         let retry_input = tool_input_from_args(&retry_args);
-                        match self.tool_registry.execute(&exec_name, retry_input, engine) {
+                        match self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, retry_input, engine) {
                             Ok(o) => {
                                 tracing::info!(
                                     tool = %exec_name,
@@ -1625,10 +1625,12 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent
             .tool_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .register(Box::new(FlakyBookTool { calls: calls.clone() }));
         let known_tools: std::collections::HashSet<String> =
-            agent.tool_registry.list().into_iter().map(|s| s.name).collect();
-        let full_catalog = ollama_tool_catalog(&agent.tool_registry);
+            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
+        let reg = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
+        let full_catalog = ollama_tool_catalog(&*reg);
         (agent, known_tools, full_catalog, calls)
     }
 
@@ -1814,7 +1816,7 @@ mod tests {
     fn run_agentic_turn_returns_immediately_when_cancel_already_set() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
             calls: calls.clone(),
@@ -1841,7 +1843,7 @@ mod tests {
     fn run_agentic_turn_stops_at_next_round_boundary_once_cancelled() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
@@ -1913,7 +1915,7 @@ mod tests {
     fn dispatch_mode_retries_when_model_declares_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -1938,7 +1940,7 @@ mod tests {
     fn interactive_mode_accepts_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -2006,7 +2008,7 @@ mod tests {
     fn empty_answer_forces_final_synthesis_instead_of_wedge() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2031,7 +2033,7 @@ mod tests {
     fn dispatch_mode_empty_answer_also_forces_synthesis() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2116,7 +2118,7 @@ mod tests {
     fn dispatch_mode_exhausts_retry_budget_when_model_keeps_declaring_completion() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(AlwaysIdleBackend {
             calls: calls.clone(),
@@ -2242,8 +2244,8 @@ mod tests {
     fn dispatch_mode_accepts_completion_with_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
-        agent.tool_registry.register(Box::new(FakeFileIoTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(FakeFileIoTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         // Backend that does work (calls a tool) and then declares completion
         agent.set_chat_backend(std::sync::Arc::new(WorkThenCompleteBackend {
