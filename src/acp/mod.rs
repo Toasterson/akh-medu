@@ -834,12 +834,16 @@ impl AkhAcpAgent {
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
-            // turns proceed in parallel). Only the symbolic fallback needs
-            // `&mut Agent`; it drops the read lock and acquires a write lock
-            // (serialising, but rare — the agentic path covers the common case).
+            // turns proceed in parallel). The agentic path never touches
+            // `ChatProcessor` at all — it holds only `agent.read()` for the
+            // turn's duration, so two turns on the same workspace run their
+            // `run_agentic_turn` calls concurrently with no shared-mutex
+            // serialization. Only the symbolic fallback needs `&mut Agent`
+            // *and* `&mut ChatProcessor`; it drops the read lock and acquires
+            // a write lock plus the processor mutex (serialising, but rare —
+            // the agentic path covers the common case).
             // ──
             let agent_r = agent.read().unwrap_or_else(|e| e.into_inner());
-            let processor_g = processor.lock().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
             // made during the turn — by the LLM loop or the symbolic pipeline —
             // can prompt the client.
@@ -963,7 +967,6 @@ impl AkhAcpAgent {
                 // proceeds concurrently under read locks.
                 drop(guard);
                 drop(agent_r);
-                drop(processor_g);
                 let mut agent_w = agent.write().unwrap_or_else(|e| e.into_inner());
                 let mut processor_g2 = processor.lock().unwrap_or_else(|e| e.into_inner());
                 // Get or create this session's cognitive context. Held across
@@ -5942,38 +5945,39 @@ mod tests {
     // A full ACP-transport version of this test (two real `session/prompt`
     // turns driven concurrently over `serve_unix_loop`, using a rendezvous
     // `ChatBackend` that only answers once both turns are simultaneously in
-    // flight) was attempted here and is deliberately NOT shipped: it
-    // deadlocks every run, and diagnostic instrumentation on `run_turn`
-    // (src/acp/mod.rs, the `spawn_blocking` closure starting at what is now
-    // line ~835) proved why. Two sessions' turns each do:
+    // flight) was first attempted here and deadlocked every run. Diagnostic
+    // instrumentation on `run_turn` (the `spawn_blocking` closure) found why:
+    // both sessions' turns did
     //
-    //     let agent_r = agent.read().unwrap_or_else(...);       // line ~841
-    //     let processor_g = processor.lock().unwrap_or_else(...); // line ~842
+    //     let agent_r = agent.read().unwrap_or_else(...);
+    //     let processor_g = processor.lock().unwrap_or_else(...);
     //
-    // where `processor: Arc<Mutex<ChatProcessor>>` is a single instance
-    // shared by the whole workspace (one per `AkhAcpAgent`, not per
-    // session). The trace showed both sessions' threads acquire
-    // `agent.read()` concurrently — the `Agent` RwLock migration this WI is
-    // about works correctly — but the second session's thread then blocks
-    // forever on `processor.lock()` because the first session's thread
-    // already holds it and does not release it until its own turn (parked
-    // on the rendezvous, waiting for the second session) returns. `guard`/
-    // `processor_g` are held for the *entire* turn regardless of path, even
-    // though the agentic branch (`run_agentic_turn`, called at line ~955)
-    // never touches `processor` at all — only the symbolic fallback branch
-    // below it does. So two concurrent agentic-path turns on one workspace
-    // still fully serialize on this second, unrelated mutex today. This is
-    // a real, separate design defect (not a mechanical gap in this
-    // completion pass) — see the work item / PR report for the
-    // recommendation (defer acquiring `processor_g` into the symbolic
-    // branch, mirroring how the `agent` lock is already acquired
-    // minimally). The fallback below proves the part of the claim this WI
-    // actually changed: the `Agent` RwLock itself.
+    // unconditionally, where `processor: Arc<Mutex<ChatProcessor>>` is a
+    // single instance shared by the whole workspace (one per `AkhAcpAgent`,
+    // not per session). Both sessions' threads acquired `agent.read()`
+    // concurrently — the `Agent` RwLock migration itself worked correctly —
+    // but the second session's thread then blocked forever on
+    // `processor.lock()` because the first session's thread already held it
+    // and would not release it until its own turn (parked on the rendezvous,
+    // waiting for the second session) returned. That lock was held for the
+    // *entire* turn regardless of path, even though the agentic branch
+    // (`run_agentic_turn`) never dereferenced `processor_g` at all — only the
+    // symbolic fallback branch below it does. So two concurrent agentic-path
+    // turns on one workspace fully serialized on this second, unrelated
+    // mutex despite the RwLock migration.
+    //
+    // Fix: `run_turn` no longer acquires `processor_g` on the agentic path at
+    // all — the lock is taken only inside the symbolic-fallback branch (which
+    // already needs `&mut Agent` too, so it was serializing anyway). With
+    // that gone, the full ACP-transport version below is exactly what was
+    // "attempted and not shipped" above — it now passes, and is shipped.
 
-    /// WI-259 tier-2 acceptance test (see the note above for why the full
-    /// ACP-transport version is not shipped). Proves the literal claim in
-    /// the WI title: two threads can hold `agent.read()` on the shared
-    /// `Arc<RwLock<Agent>>` **at the same time**.
+    /// WI-259 tier-2 acceptance test — a narrower, lock-only complement to
+    /// the full transport-level tier-1 test below
+    /// (`two_session_prompt_turns_on_one_workspace_progress_concurrently`).
+    /// Proves the literal claim in the WI title in isolation from the rest
+    /// of the turn machinery: two threads can hold `agent.read()` on the
+    /// shared `Arc<RwLock<Agent>>` **at the same time**.
     ///
     /// Each thread takes the read lock, signals its partner over a channel,
     /// then waits (bounded) for the partner's signal before releasing —  a
@@ -6012,6 +6016,141 @@ mod tests {
 
         thread_a.join().expect("thread A must not panic");
         thread_b.join().expect("thread B must not panic");
+    }
+
+    // ── WI-259 tier-1: two full ACP `session/prompt` turns, same workspace,
+    // same time — the transport-level version of the concurrency claim ──
+
+    /// A fake [`ChatBackend`](crate::agent::chat_backend::ChatBackend) whose
+    /// `chat_with_tools` blocks on a two-party rendezvous
+    /// ([`std::sync::Barrier`]) before returning a final answer. The call
+    /// runs inside `run_turn`'s `spawn_blocking` closure (via
+    /// `Agent::run_agentic_turn`), so blocking synchronously here is fine —
+    /// the point is that this call can only *complete* once a second,
+    /// independent turn's model call has *also* arrived at the barrier. If
+    /// the two turns are serialized behind any shared exclusive lock (the
+    /// pre-fix `processor_g`, or a regression to one), the second turn's
+    /// model call never starts while the first is parked here, so the first
+    /// blocks forever and the whole test times out instead of completing.
+    struct RendezvousBackend {
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for RendezvousBackend {
+        fn label(&self) -> &str {
+            "fake-rendezvous"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[serde_json::Value],
+            _tools: &[serde_json::Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            // Blocks until a second, independent call also reaches this point.
+            self.barrier.wait();
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "rendezvous reached".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Same fixture as [`workspace`] (one seeded fact, one shared
+    /// `Arc<RwLock<Agent>>`), but with `backend` installed as the agent's
+    /// chat backing (ADR 070) so `run_agentic_turn` takes the agentic path
+    /// — never the symbolic `ChatProcessor` fallback — for every turn.
+    fn workspace_with_chat_backend(
+        backend: std::sync::Arc<dyn crate::agent::chat_backend::ChatBackend>,
+    ) -> AkhAcpAgent {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+
+        engine
+            .ingest_label_triples(&[(
+                "Sun".to_string(),
+                "is-a".to_string(),
+                "Star".to_string(),
+                1.0,
+            )])
+            .expect("seed triple");
+
+        let engine = Arc::new(engine);
+
+        let processor = ChatProcessor::new(&engine, NluPipeline::new());
+        let mut agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        agent.set_chat_backend(backend);
+        let shared_agent = Arc::new(RwLock::new(agent));
+
+        AkhAcpAgent::new(engine, shared_agent, processor)
+    }
+
+    /// WI-259 tier-1 acceptance test: the full ACP-transport claim. Two real
+    /// `session/prompt` turns, each over its own Unix-socket connection but
+    /// against the SAME shared workspace `Agent` (`serve_unix_loop` clones
+    /// the cheap `Arc`-backed `AkhAcpAgent` per connection — see its doc
+    /// comment — so both connections resolve to the one `agent`/`processor`
+    /// pair `workspace_with_chat_backend` built), are driven **concurrently**
+    /// with `tokio::join!`.
+    ///
+    /// Both turns' model calls are forced through [`RendezvousBackend`],
+    /// which can only return once two independent, simultaneously in-flight
+    /// callers have both reached it. Sequential execution — whether from a
+    /// still-exclusive `agent` lock or from a leftover shared mutex on the
+    /// agentic path — would leave one call sitting alone at the barrier
+    /// forever while the other never starts; the outer 20s timeout turns
+    /// that into a clean test failure instead of a hung suite. Passing is
+    /// therefore direct evidence that both turns had their
+    /// `run_agentic_turn` model call in flight at the same instant, not
+    /// just that both eventually completed one after another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_session_prompt_turns_on_one_workspace_progress_concurrently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-concurrent.sock");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let me = workspace_with_chat_backend(std::sync::Arc::new(RendezvousBackend {
+            barrier: std::sync::Arc::clone(&barrier),
+        }));
+
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let stream_a = connect_with_retry(&sock).await;
+        let stream_b = connect_with_retry(&sock).await;
+
+        let fut_a = unix_client_prompt(stream_a, "What is the Sun?");
+        let fut_b = unix_client_prompt(stream_b, "What is the Sun, once more?");
+
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(fut_a, fut_b)
+        })
+        .await
+        .expect(
+            "two concurrent session/prompt turns on one workspace timed out — \
+             one turn's model call never reached the rendezvous, meaning the \
+             two turns were serialized instead of running concurrently",
+        );
+
+        assert!(
+            a.contains("rendezvous reached"),
+            "session A did not receive the rendezvous answer: {a:?}"
+        );
+        assert!(
+            b.contains("rendezvous reached"),
+            "session B did not receive the rendezvous answer: {b:?}"
+        );
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task).await;
     }
 
     /// Drive an ACP prompt lifecycle that pushes a broken MCP server at
