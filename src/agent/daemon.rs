@@ -663,7 +663,7 @@ impl AgentDaemon {
         }
         tokio::task::block_in_place(|| {
             self.agent
-                .lock()
+                .read()
                 .unwrap()
                 .sink()
                 .emit(&AkhMessage::system("daemon stopped"));
@@ -716,7 +716,7 @@ impl AgentDaemon {
         match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:equivalence] {count} new equivalences discovered",
                         )));
@@ -801,7 +801,7 @@ impl AgentDaemon {
                 let types = result.types.len();
                 let hierarchies = result.relation_hierarchies.len();
                 if types > 0 || hierarchies > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
                         )));
@@ -859,7 +859,7 @@ impl AgentDaemon {
             Ok(result) => {
                 let gaps = result.gaps.len();
                 if gaps > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
                         )));
@@ -890,7 +890,7 @@ impl AgentDaemon {
         {
             Ok(result) => {
                 // Re-acquire lock briefly just for the status message.
-                if let Ok(agent) = self.agent.lock() {
+                if let Ok(agent) = self.agent.read() {
                     agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
                         result.targets_found,
@@ -1169,7 +1169,7 @@ impl AgentDaemon {
         match super::librarian::run_librarian_pass_over_wal(db, &engine, &model, *akh_id, &[], &config) {
             Ok(report) => {
                 if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:librarian] {} source(s): +{} typed, +{} frontier triple(s)",
                             report.sources_processed,
@@ -1286,7 +1286,7 @@ impl AgentDaemon {
         );
         assert_singleton_fact(&engine, "seshat-archive", "last-curated-at", &now);
 
-        if let Ok(agent) = self.agent.lock() {
+        if let Ok(agent) = self.agent.read() {
             agent.sink().emit(&AkhMessage::system(format!(
                 "[daemon:seshat_curation] {total_documents} doc(s), {embedded_chunks}/{total_chunks} \
                  chunk(s) embedded, {pending_embedding} pending, {cached_microtheories} cached \
@@ -1414,7 +1414,7 @@ impl AgentDaemon {
                 .store(false, Ordering::Relaxed);
         }
 
-        if let Ok(agent) = self.agent.lock() {
+        if let Ok(agent) = self.agent.read() {
             agent.sink().emit(&AkhMessage::system(format!(
                 "[daemon:heka_curation] {unembedded} unembedded chunk(s), {untagged} untagged drawer(s) \
                  (surveillance only — v1)",
@@ -1483,7 +1483,7 @@ impl AgentDaemon {
 
         // Borrow only the `agent` field (not all of `&self`) so the
         // `self.total_cycles += 1` below does not conflict with the live guard.
-        let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut agent = self.agent.write().unwrap_or_else(|e| e.into_inner());
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();
@@ -1614,7 +1614,7 @@ impl AgentDaemon {
 
         if total_extracted > 0 {
             let _ = engine.persist();
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:extraction] {total_extracted} triples extracted from {} paragraphs",
                     extraction_targets.len(),
@@ -1695,7 +1695,7 @@ impl AgentDaemon {
         };
 
         let (engine, predicates, cycle_count) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             (
                 agent.engine.clone(),
                 agent.predicates.clone(),
@@ -1714,7 +1714,7 @@ impl AgentDaemon {
         ) {
             Ok(result) => {
                 if result.journals_fetched > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:openclaw] fetched {}, ingested {}, skipped {}",
                             result.journals_fetched, result.ingested, result.skipped,
@@ -1795,7 +1795,7 @@ impl AgentDaemon {
 
         // Brief lock: clone the engine Arc, then release.
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.engine.clone()
         };
 
@@ -1803,7 +1803,7 @@ impl AgentDaemon {
         match run_relation_enrichment(&engine, &config) {
             Ok(metrics) => {
                 if metrics.relations_added > 0 || metrics.triples_added > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:relation-enrichment] +{} predicates, +{} links, ratio {:.2}→{:.2} ({}x under-represented)",
                             metrics.relations_added,
@@ -1842,7 +1842,7 @@ impl AgentDaemon {
 
         // Extract engine + data_dir without holding the agent lock.
         let (engine, data_dir) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             let dir = agent.engine.config().data_dir.clone();
             (agent.engine.clone(), dir)
         };
@@ -1942,7 +1942,7 @@ impl AgentDaemon {
 
         if total_inserted > 0 {
             let _ = engine.persist();
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:elicitation] {} triples generated across {} domain(s)",
                     total_inserted,
@@ -1974,8 +1974,8 @@ impl AgentDaemon {
     /// immediately reflected in the world model.  Existing schemas are not
     /// overwritten, so learned success rates are preserved.
     fn bootstrap_causal_schemas(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
-        let signatures = agent.tool_registry.list();
+        let mut agent = self.agent.write().unwrap();
+        let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
         if signatures.is_empty() {
             return;
         }
