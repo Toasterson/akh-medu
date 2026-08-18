@@ -822,7 +822,7 @@ impl AgentDaemon {
             Ok(result) => {
                 let derived_count = result.derived.len();
                 if derived_count > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:rules] {} new triples from {} iterations",
                             derived_count, result.iterations,
@@ -1663,7 +1663,7 @@ impl AgentDaemon {
             let result = session.train_from_grounded_symbols(&mut bridge, &engine);
 
             if result.improved {
-                if let Ok(agent) = agent_ref.lock() {
+                if let Ok(agent) = agent_ref.read() {
                     agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
                         result.steps,
@@ -1755,7 +1755,7 @@ impl AgentDaemon {
         match run_kg_compaction(&engine, &config) {
             Ok(metrics) => {
                 if metrics.scaffolding_removed > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:compaction] removed {}/{} scaffolding triples, density {:.1}%",
                             metrics.scaffolding_removed,

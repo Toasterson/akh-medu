@@ -842,7 +842,7 @@ impl ChatProcessor {
             original_input,
             engine,
             capability_signal,
-            Some(agent.conversation_state()),
+            Some(&*agent.conversation_state()),
             Some(&self.lexicon),
         );
 
