@@ -1490,7 +1490,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         );
         if let Some(manifest) = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).manifest(&decision.chosen_tool) {
             // Structured veto check using manifest.
-            if let Some(veto) = psyche.check_veto(manifest, &action_desc) {
+            if let Some(veto) = psyche.check_veto(&manifest, &action_desc) {
                 // Clone veto data before releasing the immutable borrow.
                 let veto_name = veto.name.clone();
                 let veto_explanation = veto.explanation.clone();
@@ -1551,7 +1551,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             }
 
             // Structured bias check (non-blocking, just note it in reasoning).
-            let bias = psyche.check_bias(manifest, &action_desc);
+            let bias = psyche.check_bias(&manifest, &action_desc);
             if bias > 0.0 {
                 tracing::debug!(
                     tool = %decision.chosen_tool,

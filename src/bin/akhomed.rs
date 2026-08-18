@@ -237,7 +237,7 @@ async fn snapshot_once(
     // Capture under the lock (sync), release, then persist lock-free.
     let started = std::time::Instant::now();
     let data = {
-        let guard = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = agent.read().unwrap_or_else(|e| e.into_inner());
         akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
             .map_err(|e| e.to_string())?
     };
@@ -1633,7 +1633,7 @@ impl ServerState {
         // convention).
         let goal = if let Some(agent) = self.resident_agent(ws).await {
             let parent_sym = parent_goal_id.and_then(|s| engine.resolve_symbol(s).ok());
-            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
             let goal = a
                 .add_goal_with_parent(goal_text, priority, criteria_text, parent_sym)
                 .map_err(|e| format!("goal creation failed: {e}"))?;
@@ -1716,7 +1716,7 @@ impl ServerState {
         let goal_text = params.get("goal_text").and_then(serde_json::Value::as_str);
 
         let updated = if let Some(agent) = self.resident_agent(ws).await {
-            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
             // `Agent::update_goal` validates `status` (Defect 3: an unknown
             // label is now a hard error, not a silent fallback to Pending)
             // before applying any field, then mutates `Agent.goals` directly.
@@ -1805,7 +1805,7 @@ impl ServerState {
             .map_err(|e| format!("goal_id resolution failed: {e}"))?;
 
         let cancelled = if let Some(agent) = self.resident_agent(ws).await {
-            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
             a.cancel_goal(goal_sym, "manual")
                 .map_err(|e| format!("cancel failed: {e}"))?;
             let g = a
@@ -1873,7 +1873,7 @@ impl ServerState {
 
         let mut updated = 0u64;
         if let Some(agent) = self.resident_agent(ws).await {
-            let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
             for (id_val, pri_val) in goal_ids.iter().zip(priorities.iter()) {
                 let id_str = id_val
                     .as_str()
@@ -1945,7 +1945,7 @@ impl ServerState {
         // what those handlers just wrote (Defect 1: reads and writes must
         // use the same source of truth).
         let entries: Vec<serde_json::Value> = if let Some(agent) = self.resident_agent(ws).await {
-            let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let a = agent.read().unwrap_or_else(|e| e.into_inner());
             a.goals().iter().map(|g| Self::goal_to_json(&engine, g)).collect()
         } else {
             let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
@@ -3149,7 +3149,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                     //     held across the lock).
                     let agent = self.get_agent(&ws).await?;
                     {
-                        let mut a = agent.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
                         a.set_model_manager(Arc::new(AgentModelManager::new(mm_config)));
                         a.register_with_model_manager(&ws, &ws);
                     }
@@ -4602,7 +4602,7 @@ mod control_plane_tests {
         // Force a resident Agent for this workspace BEFORE any goal call.
         let agent = state.get_agent(&ws).await.expect("get_agent");
         assert!(
-            agent.lock().unwrap_or_else(|e| e.into_inner()).goals().is_empty(),
+            agent.read().unwrap_or_else(|e| e.into_inner()).goals().is_empty(),
             "sanity: freshly-constructed agent starts with no goals",
         );
 
@@ -4630,7 +4630,7 @@ mod control_plane_tests {
 
         // Re-read the SAME in-memory agent directly (not through dispatch) —
         // this is what the running OODA loop actually sees.
-        let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let a = agent.read().unwrap_or_else(|e| e.into_inner());
         let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
         let g = a.goals().iter().find(|g| g.symbol_id == sym).unwrap_or_else(|| {
             panic!(
@@ -4889,7 +4889,7 @@ mod control_plane_tests {
             "a typo'd status must error instead of silently becoming pending, got {r:?}",
         );
 
-        let a = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let a = agent.read().unwrap_or_else(|e| e.into_inner());
         let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
         let g = a.goals().iter().find(|g| g.symbol_id == sym).expect("goal present");
         assert!(
