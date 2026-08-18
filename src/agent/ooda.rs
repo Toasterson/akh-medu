@@ -479,7 +479,7 @@ fn decide(
                 &agent.engine,
                 &agent.working_memory,
                 agent.psyche.as_ref(),
-                &agent.tool_registry,
+                &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
                 &config,
             );
             tracing::debug!(
@@ -499,7 +499,7 @@ fn decide(
             &agent.engine,
             &agent.working_memory,
             agent.psyche.as_ref(),
-            &agent.tool_registry,
+            &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
             Some(&agent.affective_system),
         ),
     };
@@ -1488,9 +1488,9 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             "tool={} input={:?}",
             decision.chosen_tool, decision.tool_input
         );
-        if let Some(manifest) = agent.tool_registry.manifest(&decision.chosen_tool) {
+        if let Some(manifest) = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).manifest(&decision.chosen_tool) {
             // Structured veto check using manifest.
-            if let Some(veto) = psyche.check_veto(manifest, &action_desc) {
+            if let Some(veto) = psyche.check_veto(&manifest, &action_desc) {
                 // Clone veto data before releasing the immutable borrow.
                 let veto_name = veto.name.clone();
                 let veto_explanation = veto.explanation.clone();
@@ -1551,7 +1551,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             }
 
             // Structured bias check (non-blocking, just note it in reasoning).
-            let bias = psyche.check_bias(manifest, &action_desc);
+            let bias = psyche.check_bias(&manifest, &action_desc);
             if bias > 0.0 {
                 tracing::debug!(
                     tool = %decision.chosen_tool,
@@ -1564,7 +1564,7 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
 
     // Tool errors should NOT be fatal to the OODA loop — convert them into a
     // failed ToolOutput so the agent can adapt (retry, switch tools, etc.).
-    let tool_output = match agent.tool_registry.execute(
+    let tool_output = match agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(
         &decision.chosen_tool,
         decision.tool_input.clone(),
         &agent.engine,

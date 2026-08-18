@@ -361,7 +361,7 @@ mod tests {
     use crate::message::AkhMessage;
     use crate::nlu::NluPipeline;
     use crate::vsa::Dimension;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
 
     /// The ACP `RemoteChat` backend relays a user prompt to an in-process ACP
     /// server over a real Unix socket and surfaces the akh's answer back through
@@ -398,7 +398,7 @@ mod tests {
                 let engine = Arc::new(engine);
                 let processor = ChatProcessor::new(&engine, NluPipeline::new());
                 let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-                let me = crate::acp::AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+                let me = crate::acp::AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
                 let listener = tokio::net::UnixListener::bind(&sock_for_server).expect("bind");
                 let _ = crate::acp::serve_unix_loop(me, listener, shutdown_rx).await;
             });

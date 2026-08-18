@@ -421,7 +421,7 @@ impl ChatProcessor {
                     .handle_greeting(engine, &name, &traits)
             });
         msgs.push(AkhMessage::narrative(&text, grammar));
-        agent.conversation_state_mut().record_agent_turn(&text);
+        agent.conversation_state().record_agent_turn(&text);
     }
 
     fn handle_dialogue_farewell(
@@ -440,7 +440,7 @@ impl ChatProcessor {
             .generate_dialogue("farewell", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_farewell(&name));
         msgs.push(AkhMessage::narrative(&text, grammar));
-        agent.conversation_state_mut().record_agent_turn(&text);
+        agent.conversation_state().record_agent_turn(&text);
     }
 
     fn handle_dialogue_ack(
@@ -459,7 +459,7 @@ impl ChatProcessor {
             .generate_dialogue("acknowledgment", &name, &traits, None, kg_ctx.as_deref())
             .unwrap_or_else(|| agent.dialogue_manager().handle_ack(&traits));
         msgs.push(AkhMessage::narrative(&text, grammar));
-        agent.conversation_state_mut().record_agent_turn(&text);
+        agent.conversation_state().record_agent_turn(&text);
     }
 
     fn handle_dialogue_follow_up(
@@ -474,7 +474,7 @@ impl ChatProcessor {
             Some(text) => {
                 // No active topic — inform the user.
                 msgs.push(AkhMessage::narrative(&text, grammar));
-                agent.conversation_state_mut().record_agent_turn(&text);
+                agent.conversation_state().record_agent_turn(&text);
             }
             None => {
                 // Active topic exists in KG — resolve and re-query at Full detail.
@@ -489,7 +489,7 @@ impl ChatProcessor {
                             crate::agent::conversation::ResponseDetail::Full,
                         );
                         msgs.push(AkhMessage::narrative(&rendered, grammar));
-                        agent.conversation_state_mut().record_agent_turn(&rendered);
+                        agent.conversation_state().record_agent_turn(&rendered);
                     }
                 }
             }
@@ -796,15 +796,15 @@ impl ChatProcessor {
             if decision == crate::agent::constraint_check::EmissionDecision::Emit {
                 let detail = agent.conversation_state().response_detail;
                 let rendered = gr.render(detail);
-                agent.conversation_state_mut().record_agent_turn(&rendered);
+                agent.conversation_state().record_agent_turn(&rendered);
                 agent
-                    .conversation_state_mut()
+                    .conversation_state()
                     .track_referent(subject.to_string());
 
                 // Persist active topic to KG via dialogue manager.
                 if let Ok(sym_id) = engine.resolve_symbol(subject) {
                     let _ = agent.dialogue_manager().set_active_topic(engine, sym_id);
-                    agent.conversation_state_mut().active_topic = Some(sym_id);
+                    agent.conversation_state().active_topic = Some(sym_id);
                 }
 
                 // Conversational boundary: rephrase the grounded answer into
@@ -842,7 +842,7 @@ impl ChatProcessor {
             original_input,
             engine,
             capability_signal,
-            Some(agent.conversation_state()),
+            Some(&*agent.conversation_state()),
             Some(&self.lexicon),
         );
 
@@ -1399,7 +1399,7 @@ impl ChatProcessor {
             .generate_open_ended(original_input, &name, &traits, kg_context_opt)
         {
             if !text.trim().is_empty() {
-                agent.conversation_state_mut().record_agent_turn(&text);
+                agent.conversation_state().record_agent_turn(&text);
                 msgs.push(AkhMessage::narrative(&text, &grammar));
                 return msgs;
             }

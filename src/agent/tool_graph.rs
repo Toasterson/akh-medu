@@ -159,7 +159,7 @@ impl<'e> ToolGraphRegistrar<'e> {
     ) -> usize {
         let mut registered = 0usize;
         for manifest in registry.list_manifests() {
-            match self.register_tool(manifest, provider, access_agents) {
+            match self.register_tool(&manifest, provider, access_agents) {
                 Ok(()) => registered += 1,
                 Err(e) => tracing::warn!(
                     tool = %manifest.name,

@@ -40,7 +40,7 @@
 //! [`TcpStream`]: tokio::net::TcpStream
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracing::Instrument;
 
@@ -317,7 +317,7 @@ fn tcp_connect_help(target: &str) -> String {
 /// One in-process ACP workspace: the engine, the shared agent, and the chat
 /// processor that turns text prompts into [`AkhMessage`]s.
 ///
-/// Per ADR-027, the [`Agent`] is shared as `Arc<std::sync::Mutex<Agent>>`. The
+/// Per ADR-027, the [`Agent`] is shared as `Arc<RwLock<Agent>>`. The
 /// [`ChatProcessor`] requires `&mut self` for [`ChatProcessor::process_input`],
 /// so it is likewise wrapped in a `Mutex`. Both guards are acquired and dropped
 /// **inside** a [`tokio::task::spawn_blocking`] closure and never held across an
@@ -330,7 +330,7 @@ pub struct AkhAcpAgent {
     /// [`ServerControl::resolve`], so the server serves any akh per request and
     /// pins no engine (a permanent hold would block same-host sleep/wake).
     engine: Option<Arc<Engine>>,
-    agent: Option<Arc<Mutex<Agent>>>,
+    agent: Option<Arc<RwLock<Agent>>>,
     processor: Option<Arc<Mutex<ChatProcessor>>>,
     /// Default workspace used when a request names none (the daemon's bound
     /// `[acp].workspace`; the held workspace's name in embedded mode).
@@ -470,7 +470,7 @@ impl AkhAcpAgent {
     /// store).
     pub fn new(
         engine: Arc<Engine>,
-        agent: Arc<Mutex<Agent>>,
+        agent: Arc<RwLock<Agent>>,
         processor: ChatProcessor,
     ) -> Self {
         Self {
@@ -554,7 +554,7 @@ impl AkhAcpAgent {
     async fn resolve_handles(
         &self,
         workspace: &str,
-    ) -> Result<(Arc<Engine>, Arc<Mutex<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
+    ) -> Result<(Arc<Engine>, Arc<RwLock<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
         if let Some(ctrl) = &self.control {
             match ctrl.resolve(workspace).await {
                 Ok(h) => return Ok((h.engine, h.agent, h.processor)),
@@ -816,7 +816,7 @@ impl AkhAcpAgent {
     /// [`JoinHandle`]: tokio::task::JoinHandle
     fn run_turn(
         engine: Arc<Engine>,
-        agent: Arc<Mutex<Agent>>,
+        agent: Arc<RwLock<Agent>>,
         processor: Arc<Mutex<ChatProcessor>>,
         session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
         agent_id: String,
@@ -833,18 +833,25 @@ impl AkhAcpAgent {
         mode_source: &'static str,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
-            // ── ADR-027: lock, process (emitting via the channel sink), drop —
-            // all synchronous, no await while a guard is held. ──
-            let mut agent = agent.lock().unwrap_or_else(|e| e.into_inner());
-            let mut processor = processor.lock().unwrap_or_else(|e| e.into_inner());
+            // ── ADR-027: take a *read* lock for the agentic path (concurrent
+            // turns proceed in parallel). The agentic path never touches
+            // `ChatProcessor` at all — it holds only `agent.read()` for the
+            // turn's duration, so two turns on the same workspace run their
+            // `run_agentic_turn` calls concurrently with no shared-mutex
+            // serialization. Only the symbolic fallback needs `&mut Agent`
+            // *and* `&mut ChatProcessor`; it drops the read lock and acquires
+            // a write lock plus the processor mutex (serialising, but rare —
+            // the agentic path covers the common case).
+            // ──
+            let agent_r = agent.read().unwrap_or_else(|e| e.into_inner());
             // Install the per-turn permission approver (if any) so tool calls
             // made during the turn — by the LLM loop or the symbolic pipeline —
             // can prompt the client.
             if let Some(asker) = asker {
-                agent.set_permission_asker(asker);
+                agent_r.set_permission_asker(asker);
             }
-            // `guard` owns the exclusive `&mut Agent` for the rest of the turn
-            // (accessed as `guard.agent`) so its `Drop` — which unregisters any
+            // `guard` holds `&Agent` for the rest of the turn (accessed as
+            // `guard.agent`) so its `Drop` — which unregisters any
             // session-scoped MCP proxy tools and clears the permission asker —
             // is guaranteed to run even if `run_agentic_turn` /
             // `process_input` panics, instead of being skipped by an unwind
@@ -853,7 +860,7 @@ impl AkhAcpAgent {
             // `daemon` feature (session MCP tools need the HTTP client); a
             // non-daemon build never calls it, hence the blanket allow.
             #[allow(unused_mut)]
-            let mut guard = SessionToolGuard::new(&mut agent);
+            let mut guard = SessionToolGuard::new(&agent_r);
 
             // Wrap the per-turn `ChannelSink` in a single strong `Arc` for the
             // turn's duration. The `ToolExecutionTracker` below takes a `Weak`
@@ -952,6 +959,16 @@ impl AkhAcpAgent {
                 .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
                 .is_none()
             {
+                // Symbolic fallback needs `&mut Agent` (it calls
+                // `dispatch_abstree` / `escalate_to_goal` which mutate goals,
+                // working memory, cycle_count). Drop the read lock and all
+                // borrows, then acquire a write lock. This serialises the
+                // rare symbolic fallback, but the agentic path (common case)
+                // proceeds concurrently under read locks.
+                drop(guard);
+                drop(agent_r);
+                let mut agent_w = agent.write().unwrap_or_else(|e| e.into_inner());
+                let mut processor_g2 = processor.lock().unwrap_or_else(|e| e.into_inner());
                 // Get or create this session's cognitive context. Held across
                 // `process_input` so per-session state (kg_cache, eliza,
                 // trajectory) is mutated in place — no clone-and-writeback
@@ -964,7 +981,7 @@ impl AkhAcpAgent {
                 let ctx = ctx_map
                     .entry(session_id.clone())
                     .or_default();
-                let out = processor.process_input(ctx, &text, guard.agent, &engine);
+                let out = processor_g2.process_input(ctx, &text, &mut agent_w, &engine);
                 sink.emit_batch(&out);
             }
             // `guard` drops here (normal return *or* unwind), unregistering
@@ -1007,14 +1024,14 @@ enum TurnStartError {
 /// leaving another client's bearer-credentialed `mcp__*` proxies registered
 /// on the shared workspace `Agent` for whichever session ran next.
 struct SessionToolGuard<'a> {
-    agent: &'a mut Agent,
+    agent: &'a Agent,
     tool_names: Vec<String>,
     /// The tracker we installed (if any), for teardown.
     tracker: Option<Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>>,
 }
 
 impl<'a> SessionToolGuard<'a> {
-    fn new(agent: &'a mut Agent) -> Self {
+    fn new(agent: &'a Agent) -> Self {
         Self {
             agent,
             tool_names: Vec::new(),
@@ -2640,7 +2657,7 @@ fn derivation_node_json(node: &crate::agent::explain::DerivationNode) -> serde_j
 /// through to [`dispatch_akh`].
 fn dispatch_akh_agent(
     engine: &Engine,
-    agent: &Arc<Mutex<Agent>>,
+    agent: &Arc<RwLock<Agent>>,
     workspace: &str,
     method: &str,
     params: &serde_json::Value,
@@ -2654,7 +2671,7 @@ fn dispatch_akh_agent(
 
     // Non-blocking acquire: a held lock (turn in flight) ⇒ no agent snapshot.
     // Poisoned ⇒ recover the inner agent (a prior panic left it valid to read).
-    let guard = match agent.try_lock() {
+    let guard = match agent.try_read() {
         Ok(g) => Some(g),
         Err(std::sync::TryLockError::WouldBlock) => None,
         Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
@@ -2843,14 +2860,14 @@ fn context_json(agent: &Agent) -> serde_json::Value {
 /// stats cache is on the `Agent`, so we still need *some* lock — but it's the
 /// cache's own `Mutex`, not the agent's, so it never contends with a live
 /// turn. Returns `null` if no turn has ever run (truly no data yet).
-fn context_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+fn context_json_stale(agent: &Arc<RwLock<Agent>>) -> serde_json::Value {
     // The cache Arc is on the agent; we still need to lock the agent once to
     // clone the Arc. But try_lock already failed — so this is a re-attempt
     // with a blocking lock, which is what ADR 063 forbids. Instead, we rely
     // on the fact that `last_context_stats` is `pub(crate)` and the agent
     // shares it as an `Arc` — but the Arc itself is inside the agent struct.
     //
-    // The cleanest resolution: the caller already has the `Arc<Mutex<Agent>>`
+    // The cleanest resolution: the caller already has the `Arc<RwLock<Agent>>`
     // (the workspace's shared handle). The cache Arc is on the Agent. We
     // can't get it without the agent lock. So for the stale path, we return
     // null — the panel shows the last successful snapshot's `context` block
@@ -2891,7 +2908,7 @@ fn deferred_json(agent: &Agent) -> serde_json::Value {
 
 /// Stale-path variant of [`deferred_json`] — same reasoning as
 /// [`context_json_stale`]: returns empty when the agent lock is busy.
-fn deferred_json_stale(agent: &Arc<std::sync::Mutex<Agent>>) -> serde_json::Value {
+fn deferred_json_stale(agent: &Arc<RwLock<Agent>>) -> serde_json::Value {
     let _ = agent;
     serde_json::json!([])
 }
@@ -4342,7 +4359,7 @@ fn build_connection(
                                         let params = req.params.clone();
                                         let result = tokio::task::spawn_blocking(move || {
                                             let mut a =
-                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                                agent.write().unwrap_or_else(|e| e.into_inner());
                                             if let Some(mode_str) = params
                                                 .get("mode")
                                                 .and_then(serde_json::Value::as_str)
@@ -4389,7 +4406,7 @@ fn build_connection(
                                         let engine = Arc::clone(&engine);
                                         let result = tokio::task::spawn_blocking(move || {
                                             let mut a =
-                                                agent.lock().unwrap_or_else(|e| e.into_inner());
+                                                agent.write().unwrap_or_else(|e| e.into_inner());
                                             set_archetype_weights(&engine, &mut a, &params)
                                         })
                                         .await;
@@ -5142,14 +5159,14 @@ mod tests {
 
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let shared_agent = Arc::new(Mutex::new(agent));
+        let shared_agent = Arc::new(RwLock::new(agent));
 
         AkhAcpAgent::new(engine, shared_agent, processor)
     }
 
     /// Build a bare engine + shared agent (no ACP wrapper) for exercising the
     /// agent-read dispatch helpers directly.
-    fn engine_and_agent() -> (Arc<Engine>, Arc<Mutex<Agent>>) {
+    fn engine_and_agent() -> (Arc<Engine>, Arc<RwLock<Agent>>) {
         let engine = Engine::new(EngineConfig {
             dimension: Dimension::TEST,
             ..Default::default()
@@ -5157,7 +5174,7 @@ mod tests {
         .expect("engine");
         let engine = Arc::new(engine);
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        (engine, Arc::new(Mutex::new(agent)))
+        (engine, Arc::new(RwLock::new(agent)))
     }
 
     // ── SessionToolGuard (Breakage #1: cross-client MCP tool leak on panic) ──
@@ -5203,7 +5220,7 @@ mod tests {
     #[test]
     fn session_tool_guard_unregisters_tools_on_normal_drop() {
         let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
         {
             let mut guard = SessionToolGuard::new(&mut locked);
             guard.register(Box::new(EchoTool));
@@ -5224,7 +5241,7 @@ mod tests {
         // `Drop` must still fire while the stack unwinds through the panic.
         let (_engine, agent) = engine_and_agent();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+            let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
             let mut guard = SessionToolGuard::new(&mut locked);
             guard.register(Box::new(EchoTool));
             assert!(has_tool(guard.agent, "mcp__pushed__echo"));
@@ -5234,7 +5251,7 @@ mod tests {
 
         // The mutex is poisoned by the panic-while-held, matching every other
         // lock site in this module; recover it the same way (`into_inner`).
-        let locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
         assert!(
             !has_tool(&locked, "mcp__pushed__echo"),
             "SessionToolGuard::drop must unregister session tools even on unwind"
@@ -5254,7 +5271,7 @@ mod tests {
         }
 
         let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
         locked.set_permission_asker(Arc::new(NeverAsker));
         {
             let _guard = SessionToolGuard::new(&mut locked);
@@ -5625,8 +5642,8 @@ mod tests {
     fn agent_read_reports_stale_when_agent_is_busy() {
         let (engine, agent) = engine_and_agent();
 
-        // Simulate a turn holding the agent lock; try_lock must not block.
-        let _busy = agent.lock().expect("hold the agent lock");
+        // Simulate a turn holding the agent write lock; try_read must not block.
+        let _busy = agent.write().expect("hold the agent write lock");
         let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
             .unwrap()
             .unwrap();
@@ -5661,7 +5678,7 @@ mod tests {
         // stats directly into the agent's cache, then read via `_akh/usage`.
         let (engine, agent) = engine_and_agent();
         {
-            let mut a = agent.lock().unwrap();
+            let mut a = agent.write().unwrap();
             // Synthesize a stats with one section (UserPrompt) of 100 tokens
             // in a 10_000-token window.
             use crate::agent::context::{
@@ -5712,9 +5729,9 @@ mod tests {
 
     #[test]
     fn usage_context_is_stale_when_agent_busy() {
-        // Acceptance #5: a busy agent lock returns stale=true and never blocks.
+        // Acceptance #5: a busy agent write lock returns stale=true and never blocks.
         let (engine, agent) = engine_and_agent();
-        let _busy = agent.lock().expect("hold the agent lock");
+        let _busy = agent.write().expect("hold the agent write lock");
         let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
             .unwrap()
             .unwrap();
@@ -5730,7 +5747,7 @@ mod tests {
         // Acceptance #5: deferred rows carry tokens and count but no pct.
         let (engine, agent) = engine_and_agent();
         {
-            let mut a = agent.lock().unwrap();
+            let mut a = agent.write().unwrap();
             use crate::agent::context::{DeferredReason, DeferredToolGroup};
             *a.last_deferred_tools.lock().unwrap() = vec![DeferredToolGroup {
                 id: "tools",
@@ -5871,16 +5888,14 @@ mod tests {
 
         let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(2));
 
-        // Wedge the workspace: hold the agent lock on another thread, so the
-        // prompt turn blocks at `agent.lock()` and never emits a message. The
-        // lock is released after the assertion (via the release flag): the
-        // wedged turn thread must be allowed to finish, because dropping the
-        // test runtime waits for in-flight blocking tasks.
+        // Wedge the workspace: hold the agent write lock on another thread, so
+        // the prompt turn blocks at `agent.write()` and never emits a message.
+        // The lock is released after the assertion (via the release flag).
         let blocker = Arc::clone(me.agent.as_ref().expect("held-mode agent"));
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release_flag = Arc::clone(&release);
         let blocker_thread = std::thread::spawn(move || {
-            let _guard = blocker.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = blocker.write().unwrap_or_else(|e| e.into_inner());
             while !release_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::park_timeout(std::time::Duration::from_millis(25));
             }
@@ -5923,6 +5938,219 @@ mod tests {
             answer.contains("_akh_stalled"),
             "stall message should carry the `_akh_stalled` marker for Anima, got: {answer:?}"
         );
+    }
+
+    // ── WI-259: two sessions on one workspace make concurrent progress ──
+    //
+    // A full ACP-transport version of this test (two real `session/prompt`
+    // turns driven concurrently over `serve_unix_loop`, using a rendezvous
+    // `ChatBackend` that only answers once both turns are simultaneously in
+    // flight) was first attempted here and deadlocked every run. Diagnostic
+    // instrumentation on `run_turn` (the `spawn_blocking` closure) found why:
+    // both sessions' turns did
+    //
+    //     let agent_r = agent.read().unwrap_or_else(...);
+    //     let processor_g = processor.lock().unwrap_or_else(...);
+    //
+    // unconditionally, where `processor: Arc<Mutex<ChatProcessor>>` is a
+    // single instance shared by the whole workspace (one per `AkhAcpAgent`,
+    // not per session). Both sessions' threads acquired `agent.read()`
+    // concurrently — the `Agent` RwLock migration itself worked correctly —
+    // but the second session's thread then blocked forever on
+    // `processor.lock()` because the first session's thread already held it
+    // and would not release it until its own turn (parked on the rendezvous,
+    // waiting for the second session) returned. That lock was held for the
+    // *entire* turn regardless of path, even though the agentic branch
+    // (`run_agentic_turn`) never dereferenced `processor_g` at all — only the
+    // symbolic fallback branch below it does. So two concurrent agentic-path
+    // turns on one workspace fully serialized on this second, unrelated
+    // mutex despite the RwLock migration.
+    //
+    // Fix: `run_turn` no longer acquires `processor_g` on the agentic path at
+    // all — the lock is taken only inside the symbolic-fallback branch (which
+    // already needs `&mut Agent` too, so it was serializing anyway). With
+    // that gone, the full ACP-transport version below is exactly what was
+    // "attempted and not shipped" above — it now passes, and is shipped.
+
+    /// WI-259 tier-2 acceptance test — a narrower, lock-only complement to
+    /// the full transport-level tier-1 test below
+    /// (`two_session_prompt_turns_on_one_workspace_progress_concurrently`).
+    /// Proves the literal claim in the WI title in isolation from the rest
+    /// of the turn machinery: two threads can hold `agent.read()` on the
+    /// shared `Arc<RwLock<Agent>>` **at the same time**.
+    ///
+    /// Each thread takes the read lock, signals its partner over a channel,
+    /// then waits (bounded) for the partner's signal before releasing —  a
+    /// deadlock-free rendezvous, not a sleep-timing assertion. If `read()`
+    /// were secretly exclusive (e.g. the field regressed to a `Mutex`),
+    /// whichever thread runs second could never acquire the lock while the
+    /// first holds it, so it could never send its signal; the first
+    /// thread's bounded wait would then time out and fail cleanly instead
+    /// of hanging the suite.
+    #[test]
+    fn two_threads_hold_agent_read_lock_concurrently() {
+        let (_engine, agent) = engine_and_agent();
+
+        let (tx_a, rx_a) = std::sync::mpsc::channel::<()>();
+        let (tx_b, rx_b) = std::sync::mpsc::channel::<()>();
+
+        let agent_a = Arc::clone(&agent);
+        let thread_a = std::thread::spawn(move || {
+            let _guard = agent_a.read().unwrap_or_else(|e| e.into_inner());
+            tx_a.send(()).expect("A: signal that the read lock is held");
+            rx_b.recv_timeout(std::time::Duration::from_secs(10)).expect(
+                "A: never heard from B — B could not also take the read lock \
+                 while A held it, meaning agent.read() is not truly shared",
+            );
+        });
+
+        let agent_b = Arc::clone(&agent);
+        let thread_b = std::thread::spawn(move || {
+            let _guard = agent_b.read().unwrap_or_else(|e| e.into_inner());
+            tx_b.send(()).expect("B: signal that the read lock is held");
+            rx_a.recv_timeout(std::time::Duration::from_secs(10)).expect(
+                "B: never heard from A — A could not also take the read lock \
+                 while B held it, meaning agent.read() is not truly shared",
+            );
+        });
+
+        thread_a.join().expect("thread A must not panic");
+        thread_b.join().expect("thread B must not panic");
+    }
+
+    // ── WI-259 tier-1: two full ACP `session/prompt` turns, same workspace,
+    // same time — the transport-level version of the concurrency claim ──
+
+    /// A fake [`ChatBackend`](crate::agent::chat_backend::ChatBackend) whose
+    /// `chat_with_tools` blocks on a two-party rendezvous
+    /// ([`std::sync::Barrier`]) before returning a final answer. The call
+    /// runs inside `run_turn`'s `spawn_blocking` closure (via
+    /// `Agent::run_agentic_turn`), so blocking synchronously here is fine —
+    /// the point is that this call can only *complete* once a second,
+    /// independent turn's model call has *also* arrived at the barrier. If
+    /// the two turns are serialized behind any shared exclusive lock (the
+    /// pre-fix `processor_g`, or a regression to one), the second turn's
+    /// model call never starts while the first is parked here, so the first
+    /// blocks forever and the whole test times out instead of completing.
+    struct RendezvousBackend {
+        barrier: std::sync::Arc<std::sync::Barrier>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for RendezvousBackend {
+        fn label(&self) -> &str {
+            "fake-rendezvous"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[serde_json::Value],
+            _tools: &[serde_json::Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            // Blocks until a second, independent call also reaches this point.
+            self.barrier.wait();
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "rendezvous reached".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Same fixture as [`workspace`] (one seeded fact, one shared
+    /// `Arc<RwLock<Agent>>`), but with `backend` installed as the agent's
+    /// chat backing (ADR 070) so `run_agentic_turn` takes the agentic path
+    /// — never the symbolic `ChatProcessor` fallback — for every turn.
+    fn workspace_with_chat_backend(
+        backend: std::sync::Arc<dyn crate::agent::chat_backend::ChatBackend>,
+    ) -> AkhAcpAgent {
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+
+        engine
+            .ingest_label_triples(&[(
+                "Sun".to_string(),
+                "is-a".to_string(),
+                "Star".to_string(),
+                1.0,
+            )])
+            .expect("seed triple");
+
+        let engine = Arc::new(engine);
+
+        let processor = ChatProcessor::new(&engine, NluPipeline::new());
+        let mut agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+        agent.set_chat_backend(backend);
+        let shared_agent = Arc::new(RwLock::new(agent));
+
+        AkhAcpAgent::new(engine, shared_agent, processor)
+    }
+
+    /// WI-259 tier-1 acceptance test: the full ACP-transport claim. Two real
+    /// `session/prompt` turns, each over its own Unix-socket connection but
+    /// against the SAME shared workspace `Agent` (`serve_unix_loop` clones
+    /// the cheap `Arc`-backed `AkhAcpAgent` per connection — see its doc
+    /// comment — so both connections resolve to the one `agent`/`processor`
+    /// pair `workspace_with_chat_backend` built), are driven **concurrently**
+    /// with `tokio::join!`.
+    ///
+    /// Both turns' model calls are forced through [`RendezvousBackend`],
+    /// which can only return once two independent, simultaneously in-flight
+    /// callers have both reached it. Sequential execution — whether from a
+    /// still-exclusive `agent` lock or from a leftover shared mutex on the
+    /// agentic path — would leave one call sitting alone at the barrier
+    /// forever while the other never starts; the outer 20s timeout turns
+    /// that into a clean test failure instead of a hung suite. Passing is
+    /// therefore direct evidence that both turns had their
+    /// `run_agentic_turn` model call in flight at the same instant, not
+    /// just that both eventually completed one after another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_session_prompt_turns_on_one_workspace_progress_concurrently() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-concurrent.sock");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let me = workspace_with_chat_backend(std::sync::Arc::new(RendezvousBackend {
+            barrier: std::sync::Arc::clone(&barrier),
+        }));
+
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let stream_a = connect_with_retry(&sock).await;
+        let stream_b = connect_with_retry(&sock).await;
+
+        let fut_a = unix_client_prompt(stream_a, "What is the Sun?");
+        let fut_b = unix_client_prompt(stream_b, "What is the Sun, once more?");
+
+        let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(fut_a, fut_b)
+        })
+        .await
+        .expect(
+            "two concurrent session/prompt turns on one workspace timed out — \
+             one turn's model call never reached the rendezvous, meaning the \
+             two turns were serialized instead of running concurrently",
+        );
+
+        assert!(
+            a.contains("rendezvous reached"),
+            "session A did not receive the rendezvous answer: {a:?}"
+        );
+        assert!(
+            b.contains("rendezvous reached"),
+            "session B did not receive the rendezvous answer: {b:?}"
+        );
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task).await;
     }
 
     /// Drive an ACP prompt lifecycle that pushes a broken MCP server at
@@ -6547,7 +6775,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+        let me = AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
 
         let sock = dir.path().join("akh-acp-query.sock");
         let listener = UnixListener::bind(&sock).expect("bind unix");
@@ -6606,7 +6834,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+        let me = AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("akh-acp-memory.sock");
@@ -6785,7 +7013,7 @@ mod tests {
         let engine = Arc::new(engine);
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-        AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor)
+        AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor)
     }
 
     /// One bounded `ext_request_unix` that must succeed.
@@ -7030,7 +7258,7 @@ mod tests {
         me.agent
             .as_ref()
             .expect("held-mode agent")
-            .lock()
+            .write()
             .unwrap()
             .force_set_psyche(crate::compartment::psyche::Psyche::default());
         let sock = dir.path().join("akh-acp-psyche.sock");
@@ -7556,13 +7784,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("akh-cancel.sock");
 
-        // Wedge the workspace by holding the agent lock, forcing the worker
-        // into the Empty state when try_recv is called.
+        // Wedge the workspace by holding the agent write lock, forcing the
+        // worker into the Empty state when try_recv is called.
         let blocker = Arc::clone(me.agent.as_ref().expect("held-mode agent"));
         let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let release_flag = Arc::clone(&release);
         let blocker_thread = std::thread::spawn(move || {
-            let _guard = blocker.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = blocker.write().unwrap_or_else(|e| e.into_inner());
             while !release_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::park_timeout(std::time::Duration::from_millis(25));
             }

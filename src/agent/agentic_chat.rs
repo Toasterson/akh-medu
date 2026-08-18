@@ -341,7 +341,7 @@ impl Agent {
     /// with no cancellation source (e.g. tests, the symbolic pipeline's
     /// callers) passes a flag that is never set.
     pub fn run_agentic_turn(
-        &mut self,
+        &self,
         engine: &Engine,
         agent_id: &str,
         user_prompt: &str,
@@ -366,10 +366,20 @@ impl Agent {
         }
 
         // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
-        let manifests = self.tool_registry.list_advertised_manifests();
-        backend.prepare(agent_id, self.psyche.as_ref(), &manifests);
+        let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
+        let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests.iter().collect();
+        backend.prepare(agent_id, self.psyche.as_ref(), &manifest_refs);
 
-        let mut tools = ollama_tool_catalog(&self.tool_registry);
+        let reg = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tools = ollama_tool_catalog(&*reg);
+        // Release the registry lock now — it is not used again in this
+        // function, and the `compute_deferred_groups` call below re-locks
+        // the same `std::sync::Mutex` on this thread. `std::sync::Mutex` is
+        // not reentrant, so holding `reg` past this point deadlocks every
+        // agentic turn (100% reproducible, not a race — this was caught by
+        // running the agentic_chat test suite, where every test hung on
+        // exactly this second `.lock()` call).
+        drop(reg);
         // ADR 089 task A/B: the FULL pre-retrieval-scoping catalog, captured
         // before M1 (below) narrows `tools` to what's actually offered this
         // round. Task A's param-repair-retry and task B's value grounding
@@ -409,7 +419,7 @@ impl Agent {
         // block a sidebar poll.
         {
             let deferred_groups =
-                compute_deferred_groups(&full_catalog, &tools, &self.tool_registry);
+                compute_deferred_groups(&full_catalog, &tools, &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()));
             if let Ok(mut slot) = self.last_deferred_tools.lock() {
                 *slot = deferred_groups;
             }
@@ -420,7 +430,7 @@ impl Agent {
         // turns directly (the agent turn is recorded at the end). The symbolic
         // path already records both speakers; this closes the gap for the agentic
         // path so multi-turn context works (measure-first Q1).
-        self.conversation_state_mut().record_operator_turn(user_prompt);
+        self.conversation_state().record_operator_turn(user_prompt);
 
         // Phase 44d/44g: retrieve the input's KG context + relevant past episodes
         // for the working-context manager. The agent owns the engine + predicates;
@@ -431,7 +441,8 @@ impl Agent {
             // 44d delta refresh: inject only facts not already shown this session
             // (the activation frontier that moved), trusting retained history to
             // hold the rest. Opt-in; the default re-sends the full relevant block.
-            let seen = self.conversation_state_mut().kg_seen_mut();
+            let mut conv_guard = self.conversation_state();
+            let seen = conv_guard.kg_seen_mut();
             crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
         } else {
             let mut cache = crate::nlu::kg_context::KgContextCache::default();
@@ -463,12 +474,14 @@ impl Agent {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
+            let conv_guard = self.conversation_state();
             let episode = EpisodeState::new(agent_id, user_prompt, engine)
-                .with_conversation(Some(self.conversation_state()))
+                .with_conversation(Some(&*conv_guard))
                 .with_context(kg_context.as_deref(), &recalled, session_seed.as_deref())
                 .with_tools(&tools);
+            let cm_guard = self.context_manager.lock().unwrap_or_else(|e| e.into_inner());
             let manager: &dyn ContextManager =
-                self.context_manager.as_deref().unwrap_or(&PASS_THROUGH);
+                cm_guard.as_deref().unwrap_or(&PASS_THROUGH);
             match manager.assemble(&episode, &budget, &counter) {
                 Ok(assembled) => {
                     // Phase 44m (ADR 065 D12): cache the normalized stats
@@ -508,7 +521,7 @@ impl Agent {
         // emitted name outside this set is a guaranteed `unknown tool` failure,
         // which is exactly (and only) when the organ's repair pass may fire.
         let known_tools: std::collections::HashSet<String> =
-            self.tool_registry.list().into_iter().map(|s| s.name).collect();
+            self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
 
         // Govern the tool loop with a frontier-style budget — a model-scaled
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
@@ -722,7 +735,7 @@ impl Agent {
                     mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
                     "completion check → returning: turn complete with answer"
                 );
-                self.conversation_state_mut().record_agent_turn(answer);
+                self.conversation_state().record_agent_turn(answer);
                 // ADR 091: capture the completed turn to the WAL (raw
                 // staging; a no-op if no sink is installed or capture is
                 // opted out).
@@ -863,7 +876,14 @@ impl Agent {
         let input = tool_input_from_args(&exec_args);
         let mut param_repaired = false;
         let mut a_note: Option<String> = None;
-        let (success, result) = match self.tool_registry.execute(&exec_name, input, engine) {
+        // Bind the lock result to an owned `AgentResult` *before* matching on
+        // it: a `match self.tool_registry.lock()....execute(..) { .. }` keeps
+        // the `MutexGuard` temporary alive for the scrutinee's entire match
+        // expression (a well-known Rust footgun), and the `Err` arm below
+        // re-locks the same `std::sync::Mutex` on this thread — a guaranteed
+        // self-deadlock on every failed tool call otherwise.
+        let exec_result = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, input, engine);
+        let (success, result) = match exec_result {
             Ok(o) => (o.success, o.result),
             Err(e) => {
                 // Task A: retry once, but only against the structurally
@@ -874,7 +894,7 @@ impl Agent {
                 // the first approved failure stands instead.
                 let opted_out = std::env::var("AKH_AGENT_PARAM_REPAIR").is_ok_and(|v| v == "0");
                 let repairable = matches!(e, super::error::AgentError::ToolExecution { .. });
-                let retry = if opted_out || !repairable || self.tool_registry.would_ask(&exec_name) {
+                let retry = if opted_out || !repairable || self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).would_ask(&exec_name) {
                     None
                 } else {
                     super::organ::repair_known_call_args(&exec_name, &exec_args, full_catalog)
@@ -890,7 +910,7 @@ impl Agent {
                             retry_note = format!("{retry_note}; {}", g.note);
                         }
                         let retry_input = tool_input_from_args(&retry_args);
-                        match self.tool_registry.execute(&exec_name, retry_input, engine) {
+                        match self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, retry_input, engine) {
                             Ok(o) => {
                                 tracing::info!(
                                     tool = %exec_name,
@@ -949,7 +969,7 @@ impl Agent {
     /// the normal-completion path in [`Self::run_agentic_turn`].
     #[allow(clippy::too_many_arguments)]
     fn force_final_answer(
-        &mut self,
+        &self,
         backend: &dyn super::chat_backend::ChatBackend,
         engine: &Engine,
         agent_id: &str,
@@ -1029,7 +1049,7 @@ impl Agent {
             )));
             return;
         }
-        self.conversation_state_mut().record_agent_turn(answer);
+        self.conversation_state().record_agent_turn(answer);
         // ADR 091: same capture hook as the normal-completion turn-end site.
         self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
         if used_fallback {
@@ -1623,10 +1643,14 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent
             .tool_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .register(Box::new(FlakyBookTool { calls: calls.clone() }));
         let known_tools: std::collections::HashSet<String> =
-            agent.tool_registry.list().into_iter().map(|s| s.name).collect();
-        let full_catalog = ollama_tool_catalog(&agent.tool_registry);
+            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
+        let full_catalog = {
+            let reg = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
+            ollama_tool_catalog(&*reg)
+        };
         (agent, known_tools, full_catalog, calls)
     }
 
@@ -1812,7 +1836,7 @@ mod tests {
     fn run_agentic_turn_returns_immediately_when_cancel_already_set() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
             calls: calls.clone(),
@@ -1839,7 +1863,7 @@ mod tests {
     fn run_agentic_turn_stops_at_next_round_boundary_once_cancelled() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
@@ -1911,7 +1935,7 @@ mod tests {
     fn dispatch_mode_retries_when_model_declares_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -1936,7 +1960,7 @@ mod tests {
     fn interactive_mode_accepts_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -2004,7 +2028,7 @@ mod tests {
     fn empty_answer_forces_final_synthesis_instead_of_wedge() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2029,7 +2053,7 @@ mod tests {
     fn dispatch_mode_empty_answer_also_forces_synthesis() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2114,7 +2138,7 @@ mod tests {
     fn dispatch_mode_exhausts_retry_budget_when_model_keeps_declaring_completion() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(AlwaysIdleBackend {
             calls: calls.clone(),
@@ -2240,8 +2264,8 @@ mod tests {
     fn dispatch_mode_accepts_completion_with_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.register(Box::new(DummyTool));
-        agent.tool_registry.register(Box::new(FakeFileIoTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(FakeFileIoTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         // Backend that does work (calls a tool) and then declares completion
         agent.set_chat_backend(std::sync::Arc::new(WorkThenCompleteBackend {

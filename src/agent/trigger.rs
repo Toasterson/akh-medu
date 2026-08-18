@@ -339,7 +339,7 @@ pub fn execute_trigger(trigger: &Trigger, agent: &mut Agent) -> AgentResult<Stri
             for (k, v) in params {
                 input = input.with_param(k, v);
             }
-            let output = agent.tool_registry.execute(name, input, &agent.engine)?;
+            let output = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(name, input, &agent.engine)?;
             Ok(format!(
                 "trigger \"{}\": tool {} → success={}",
                 trigger.name, name, output.success

@@ -163,7 +163,7 @@ pub struct Agent {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: AgentConfig,
     pub(crate) working_memory: WorkingMemory,
-    pub(crate) tool_registry: ToolRegistry,
+    pub(crate) tool_registry: std::sync::Mutex<ToolRegistry>,
     pub(crate) goals: Vec<Goal>,
     pub(crate) predicates: AgentPredicates,
     pub(crate) cycle_count: u64,
@@ -212,11 +212,11 @@ pub struct Agent {
     /// Procedural learning configuration (Phase 11h).
     pub(crate) chunking_config: ChunkingConfig,
     /// Communication channel registry (Phase 12a).
-    pub(crate) channel_registry: ChannelRegistry,
+    pub(crate) channel_registry: std::sync::Mutex<ChannelRegistry>,
     /// Conversation state for grounded dialogue (Phase 12b).
-    pub(crate) conversation_state: ConversationState,
+    pub(crate) conversation_state: std::sync::Mutex<ConversationState>,
     /// Pre-communication constraint checker (Phase 12c).
-    pub(crate) constraint_checker: ConstraintChecker,
+    pub(crate) constraint_checker: std::sync::Mutex<ConstraintChecker>,
     /// Interlocutor registry — social KG and theory of mind (Phase 12d).
     pub(crate) interlocutor_registry: InterlocutorRegistry,
     /// Capability token registry for multi-agent communication (Phase 12g).
@@ -275,7 +275,7 @@ pub struct Agent {
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
-    pub(crate) context_manager: Option<Box<dyn super::context::ContextManager>>,
+    pub(crate) context_manager: std::sync::Mutex<Option<std::sync::Arc<dyn super::context::ContextManager>>>,
     /// Last [`ContextWindowStats`] committed by `run_agentic_turn`, behind its
     /// own `Mutex` so the ACP `_akh/usage` handler can read it **without** the
     /// agent lock (Phase 44m, ADR 065 D12.1). `None` until the first turn.
@@ -504,7 +504,7 @@ impl Agent {
     ///
     /// For each Hot skill, reads `cli_tools` paths as `CliToolManifest` JSONs
     /// and (if the `wasm-tools` feature is enabled) `wasm_tools` paths as WASM modules.
-    fn load_skill_tools(&mut self) {
+    fn load_skill_tools(&self) {
         let hot_skills: Vec<_> = self
             .engine
             .list_skills()
@@ -541,7 +541,7 @@ impl Agent {
                                         cli_manifest,
                                         Some(info.id.clone()),
                                     );
-                                    self.tool_registry.register(Box::new(tool));
+                                    self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(tool));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -574,7 +574,7 @@ impl Agent {
                             manifest.tool_config.clone(),
                         ) {
                             Ok(wasm_tool) => {
-                                self.tool_registry.register(Box::new(wasm_tool));
+                                self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(wasm_tool));
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -905,7 +905,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry,
+            tool_registry: std::sync::Mutex::new(tool_registry),
             goals,
             predicates,
             cycle_count: 0,
@@ -930,9 +930,9 @@ impl Agent {
             improvement_history: ImprovementHistory::default(),
             method_index: MethodIndex::new(),
             chunking_config,
-            channel_registry: ChannelRegistry::new(),
-            conversation_state: ConversationState::default(),
-            constraint_checker: ConstraintChecker::new(),
+            channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
+            conversation_state: std::sync::Mutex::new(ConversationState::default()),
+            constraint_checker: std::sync::Mutex::new(ConstraintChecker::new()),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager: super::pim::PimManager::default(),
@@ -960,7 +960,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
-            context_manager: None,
+            context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -1047,7 +1047,7 @@ impl Agent {
 
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
-            agent.conversation_state.active_topic = Some(topic_id);
+            agent.conversation_state().active_topic = Some(topic_id);
         }
 
         // Load tools from active skills.
@@ -1060,7 +1060,7 @@ impl Agent {
         // Runs after load_skill_tools() so skill-contributed tools are included.
         // Existing schemas (manually tuned or restored from disk) are preserved.
         {
-            let signatures = agent.tool_registry.list();
+            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -1851,16 +1851,16 @@ impl Agent {
     /// ("which tools may agent X invoke?", answered from the KG — see
     /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
     /// per-turn session tools, only its durable ones.
-    pub fn register_tool(&mut self, tool: Box<dyn super::tool::Tool>) {
-        self.tool_registry.register(tool);
+    pub fn register_tool(&self, tool: Box<dyn super::tool::Tool>) {
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(tool);
         self.sync_live_tools();
     }
 
     /// Remove a previously-registered tool by name. Returns `true` if one was
     /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
     /// over ACP for one prompt turn) once the turn completes.
-    pub fn unregister_tool(&mut self, name: &str) -> bool {
-        let removed = self.tool_registry.remove(name);
+    pub fn unregister_tool(&self, name: &str) -> bool {
+        let removed = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         self.sync_live_tools();
         removed
     }
@@ -1880,7 +1880,7 @@ impl Agent {
     pub(crate) fn seed_tool_graph_and_live_view(&self) {
         if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&self.engine) {
             let (registered, pruned) =
-                registrar.reconcile(&self.tool_registry, "akhomed", &["agent:any"]);
+                registrar.reconcile(&*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()), "akhomed", &["agent:any"]);
             tracing::debug!(registered, pruned, "tool_graph: reconciled tool manifests in KG");
         } else {
             tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
@@ -1906,6 +1906,7 @@ impl Agent {
         }
         let tools = self
             .tool_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .list_manifests()
             .into_iter()
             .map(|m| crate::engine::LiveTool {
@@ -1919,44 +1920,44 @@ impl Agent {
 
     /// List all registered tool signatures.
     pub fn list_tools(&self) -> Vec<ToolSignature> {
-        self.tool_registry.list()
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list()
     }
 
     /// Set the permission mode gating this agent's tool execution.
-    pub fn set_permission_mode(&mut self, mode: crate::agent::permission::PermissionMode) {
-        self.tool_registry.set_permission_mode(mode);
+    pub fn set_permission_mode(&self, mode: crate::agent::permission::PermissionMode) {
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_mode(mode);
     }
 
     /// The active tool-permission mode.
     pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
-        self.tool_registry.permission_mode()
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).permission_mode()
     }
 
     /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
     /// `session/request_permission` bridge) for the duration of a turn.
     pub fn set_permission_asker(
-        &mut self,
+        &self,
         asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
     ) {
-        self.tool_registry.set_permission_asker(asker);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_asker(asker);
     }
 
     /// Remove the permission approver (`Ask` then fails closed).
-    pub fn clear_permission_asker(&mut self) {
-        self.tool_registry.clear_permission_asker();
+    pub fn clear_permission_asker(&self) {
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_permission_asker();
     }
 
     /// Install a tool execution tracker (for ACP ToolCall events).
     pub fn set_tool_tracker(
-        &mut self,
+        &self,
         tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
     ) {
-        self.tool_registry.set_tracker(tracker);
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_tracker(tracker);
     }
 
     /// Remove the tool execution tracker.
-    pub fn clear_tool_tracker(&mut self) {
-        self.tool_registry.clear_tracker();
+    pub fn clear_tool_tracker(&self) {
+        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_tracker();
     }
 
     /// Get a reference to the wrapped engine.
@@ -2189,8 +2190,8 @@ impl Agent {
     /// (the default) uses the byte-identical pass-through manager, so an akh with
     /// no manager set behaves exactly as before. Shipped managers should be
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
-    pub fn set_context_manager(&mut self, manager: Box<dyn super::context::ContextManager>) {
-        self.context_manager = Some(manager);
+    pub fn set_context_manager(&self, manager: std::sync::Arc<dyn super::context::ContextManager>) {
+        *self.context_manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
     }
 
     /// Set whether completed agentic turns are captured to the WAL as raw
@@ -2214,8 +2215,9 @@ impl Agent {
         let Some(ref mgr) = self.model_manager else {
             return false;
         };
-        let manifests = self.tool_registry.list_advertised_manifests();
-        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifests);
+        let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
+        let manifest_refs: Vec<&crate::agent::tool_manifest::ToolManifest> = manifests.iter().collect();
+        mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifest_refs);
         true
     }
 
@@ -2237,37 +2239,33 @@ impl Agent {
 
     // ── Channel registry (Phase 12a) ────────────────────────────────────
 
-    /// Get a shared reference to the channel registry.
-    pub fn channel_registry(&self) -> &ChannelRegistry {
-        &self.channel_registry
-    }
-
-    /// Get a mutable reference to the channel registry.
-    pub fn channel_registry_mut(&mut self) -> &mut ChannelRegistry {
-        &mut self.channel_registry
+    /// Get a locked reference to the channel registry.
+    pub fn channel_registry(&self) -> std::sync::MutexGuard<'_, ChannelRegistry> {
+        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Register a communication channel.
     pub fn register_channel(
-        &mut self,
+        &self,
         channel: Box<dyn super::channel::CommChannel>,
     ) -> ChannelResult<()> {
-        self.channel_registry.register(channel)
+        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(channel)
     }
 
     /// Create and register an operator channel wrapping the current sink,
     /// and return an `InboundHandle` for the UI event loop.
-    pub fn setup_operator_channel(&mut self) -> InboundHandle {
+    pub fn setup_operator_channel(&self) -> InboundHandle {
         let op = super::operator_channel::OperatorChannel::new(Arc::clone(&self.sink));
         let handle = op.inbound_handle();
         // Registration cannot fail here: we are creating the first operator channel.
-        let _ = self.channel_registry.register(Box::new(op));
+        let _ = self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(op));
         handle
     }
 
     /// Drain all pending inbound messages from all registered channels.
-    pub fn drain_inbound(&mut self) -> Vec<InboundMessage> {
+    pub fn drain_inbound(&self) -> Vec<InboundMessage> {
         self.channel_registry
+            .lock().unwrap_or_else(|e| e.into_inner())
             .drain_all()
             .into_iter()
             .map(|(_id, msg)| msg)
@@ -2276,19 +2274,19 @@ impl Agent {
 
     // ── Conversation state (Phase 12b) ─────────────────────────────────
 
-    /// Get a shared reference to the conversation state.
-    pub fn conversation_state(&self) -> &ConversationState {
-        &self.conversation_state
-    }
-
-    /// Get a mutable reference to the conversation state.
-    pub fn conversation_state_mut(&mut self) -> &mut ConversationState {
-        &mut self.conversation_state
+    /// Lock the conversation state for shared or mutable access.
+    ///
+    /// Returns a `MutexGuard` that derefs to `&ConversationState` (and
+    /// `&mut ConversationState` via `DerefMut`), so all existing call sites
+    /// work by replacing `self.conversation_state_mut()` with
+    /// `self.conversation_state()` — the guard is mutable.
+    pub fn conversation_state(&self) -> std::sync::MutexGuard<'_, ConversationState> {
+        self.conversation_state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set the response detail level for grounded dialogue.
-    pub fn set_response_detail(&mut self, detail: ResponseDetail) {
-        self.conversation_state.response_detail = detail;
+    pub fn set_response_detail(&self, detail: ResponseDetail) {
+        self.conversation_state().response_detail = detail;
     }
 
     // ── Dialogue manager ─────────────────────────────────────────────
@@ -2306,13 +2304,13 @@ impl Agent {
     // ── Constraint checking (Phase 12c) ────────────────────────────────
 
     /// Get a shared reference to the constraint checker.
-    pub fn constraint_checker(&self) -> &ConstraintChecker {
-        &self.constraint_checker
+    pub fn constraint_checker(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
+        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a mutable reference to the constraint checker.
-    pub fn constraint_checker_mut(&mut self) -> &mut ConstraintChecker {
-        &mut self.constraint_checker
+    pub fn constraint_checker_mut(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
+        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a reference to the interlocutor registry.
@@ -2446,16 +2444,16 @@ impl Agent {
     /// Returns `(OutboundMessage, EmissionDecision)` — the caller should
     /// respect the decision (emit or suppress) based on channel kind.
     pub fn check_and_wrap_grounded(
-        &mut self,
+        &self,
         response: &super::conversation::GroundedResponse,
         channel_id: &str,
         channel_kind: super::channel::ChannelKind,
     ) -> (super::channel_message::OutboundMessage, EmissionDecision) {
-        let detail = self.conversation_state.response_detail;
-        let grammar = self.conversation_state.grammar.clone();
+        let detail = self.conversation_state().response_detail;
+        let grammar = self.conversation_state().grammar.clone();
 
         // Run the constraint pipeline.
-        let outcome = self.constraint_checker.check_grounded(
+        let outcome = self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).check_grounded(
             response, channel_id, channel_kind, &self.engine,
         );
 
@@ -2467,7 +2465,7 @@ impl Agent {
 
         // Record emission in the budget.
         if decision == EmissionDecision::Emit {
-            self.constraint_checker.record_emission(channel_id);
+            self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).record_emission(channel_id);
         }
 
         (msg, decision)
@@ -4212,7 +4210,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry,
+            tool_registry: std::sync::Mutex::new(tool_registry),
             goals,
             predicates,
             cycle_count,
@@ -4237,9 +4235,9 @@ impl Agent {
             improvement_history,
             method_index,
             chunking_config,
-            channel_registry: ChannelRegistry::new(),
-            conversation_state: ConversationState::default(),
-            constraint_checker: ConstraintChecker::new(),
+            channel_registry: std::sync::Mutex::new(ChannelRegistry::new()),
+            conversation_state: std::sync::Mutex::new(ConversationState::default()),
+            constraint_checker: std::sync::Mutex::new(ConstraintChecker::new()),
             interlocutor_registry: InterlocutorRegistry::new(),
             token_registry: super::multi_agent::TokenRegistry::new(),
             pim_manager,
@@ -4267,7 +4265,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
-            context_manager: None,
+            context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -4294,7 +4292,7 @@ impl Agent {
 
         // Restore KG dialogue state into ConversationState.
         if let Some(topic_id) = agent.dialogue_manager.query_active_topic(&agent.engine) {
-            agent.conversation_state.active_topic = Some(topic_id);
+            agent.conversation_state().active_topic = Some(topic_id);
         }
 
         // Load tools from active skills.
@@ -4304,7 +4302,7 @@ impl Agent {
 
         // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
         {
-            let signatures = agent.tool_registry.list();
+            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -4351,7 +4349,7 @@ impl std::fmt::Debug for Agent {
         f.debug_struct("Agent")
             .field("goals", &self.goals.len())
             .field("working_memory", &self.working_memory)
-            .field("tools", &self.tool_registry)
+            .field("tools", &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()))
             .field("cycle_count", &self.cycle_count)
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
@@ -4366,9 +4364,9 @@ impl std::fmt::Debug for Agent {
             )
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
-            .field("channels", &self.channel_registry)
-            .field("response_detail", &self.conversation_state.response_detail)
-            .field("constraint_checker", &self.constraint_checker)
+            .field("channels", &self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).len())
+            .field("response_detail", &self.conversation_state().response_detail)
+            .field("constraint_checker", &self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()))
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
     }
@@ -4404,7 +4402,7 @@ mod backend_seam_tests {
         // Sanity: the executor-facing tools registered by register_builtin_tools
         // are present, proving the in-process default backend path still ran.
         assert!(
-            agent.tool_registry.list().iter().any(|sig| sig.name == "shell_exec"),
+            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().iter().any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
         );
     }
@@ -4420,7 +4418,7 @@ mod backend_seam_tests {
         let agent = Agent::with_exec_wiring(test_engine(), AgentConfig::default(), ExecToolWiring::None)
             .expect("Agent::with_exec_wiring(.., ExecToolWiring::None) should construct");
 
-        let tools = agent.tool_registry.list();
+        let tools = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
         let names: std::collections::HashSet<&str> =
             tools.iter().map(|sig| sig.name.as_str()).collect();
 

@@ -11,7 +11,7 @@
 //! in both deployment modes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use super::Agent;
@@ -275,12 +275,12 @@ impl Default for DaemonConfig {
 
 /// Long-running daemon that schedules background learning tasks.
 ///
-/// The agent is shared via `Arc<Mutex<Agent>>` so that HTTP handlers,
+/// The agent is shared via `Arc<RwLock<Agent>>` so that HTTP handlers,
 /// WebSocket sessions, and the daemon all operate on the same agent
 /// instance. Each daemon method locks briefly, does synchronous work,
 /// and releases — near-zero contention since ticks are 15s–2h apart.
 pub struct AgentDaemon {
-    agent: Arc<Mutex<Agent>>,
+    agent: Arc<RwLock<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
     /// When true, cycle/learning methods skip their work without acquiring
@@ -330,7 +330,7 @@ pub struct AgentDaemon {
 
 impl AgentDaemon {
     /// Create a new daemon wrapping the given shared agent.
-    pub fn new(agent: Arc<Mutex<Agent>>, config: DaemonConfig) -> Self {
+    pub fn new(agent: Arc<RwLock<Agent>>, config: DaemonConfig) -> Self {
         Self {
             agent,
             config,
@@ -437,13 +437,22 @@ impl AgentDaemon {
     /// the prior panic left a write half-applied, but that is still preferable
     /// to permanently blocking every future operation on this workspace.
     ///
-    /// Locking discipline: each per-workspace `Arc<Mutex<Agent>>` is independent.
+    /// Locking discipline: each per-workspace `Arc<RwLock<Agent>>` is independent.
     /// A panic (and subsequent poison) in workspace A cannot affect workspace B.
-    fn lock_agent(&self) -> std::sync::MutexGuard<'_, Agent> {
-        self.agent.lock().unwrap_or_else(|e| {
+    fn lock_agent(&self) -> std::sync::RwLockWriteGuard<'_, Agent> {
+        self.agent.write().unwrap_or_else(|e| {
             tracing::warn!("agent mutex was poisoned; recovering (a previous task may have panicked while holding the lock)");
             e.into_inner()
         })
+    }
+
+    /// Try to acquire a write lock on the agent without blocking.
+    /// Returns `None` if the lock is currently held (by a live ACP turn
+    /// or another background task). The daemon uses this to yield to
+    /// session work: if a turn is in progress, the daemon skips its
+    /// cycle rather than blocking the turn.
+    fn try_write_agent(&self) -> Option<std::sync::RwLockWriteGuard<'_, Agent>> {
+        self.agent.try_write().ok()
     }
 
     /// Run the main daemon loop.
@@ -663,7 +672,7 @@ impl AgentDaemon {
         }
         tokio::task::block_in_place(|| {
             self.agent
-                .lock()
+                .read()
                 .unwrap()
                 .sink()
                 .emit(&AkhMessage::system("daemon stopped"));
@@ -716,7 +725,7 @@ impl AgentDaemon {
         match engine.learn_equivalences() {
             Ok(count) => {
                 if count > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:equivalence] {count} new equivalences discovered",
                         )));
@@ -801,7 +810,7 @@ impl AgentDaemon {
                 let types = result.types.len();
                 let hierarchies = result.relation_hierarchies.len();
                 if types > 0 || hierarchies > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:schema] discovered {types} types, {hierarchies} relation hierarchies",
                         )));
@@ -822,7 +831,7 @@ impl AgentDaemon {
             Ok(result) => {
                 let derived_count = result.derived.len();
                 if derived_count > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:rules] {} new triples from {} iterations",
                             derived_count, result.iterations,
@@ -859,7 +868,7 @@ impl AgentDaemon {
             Ok(result) => {
                 let gaps = result.gaps.len();
                 if gaps > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:gaps] {gaps} knowledge gaps identified around active goals",
                         )));
@@ -890,7 +899,7 @@ impl AgentDaemon {
         {
             Ok(result) => {
                 // Re-acquire lock briefly just for the status message.
-                if let Ok(agent) = self.agent.lock() {
+                if let Ok(agent) = self.agent.read() {
                     agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:learning] {} targets, {} resources, {} ingested, Dreyfus: {}",
                         result.targets_found,
@@ -1169,7 +1178,7 @@ impl AgentDaemon {
         match super::librarian::run_librarian_pass_over_wal(db, &engine, &model, *akh_id, &[], &config) {
             Ok(report) => {
                 if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:librarian] {} source(s): +{} typed, +{} frontier triple(s)",
                             report.sources_processed,
@@ -1286,7 +1295,7 @@ impl AgentDaemon {
         );
         assert_singleton_fact(&engine, "seshat-archive", "last-curated-at", &now);
 
-        if let Ok(agent) = self.agent.lock() {
+        if let Ok(agent) = self.agent.read() {
             agent.sink().emit(&AkhMessage::system(format!(
                 "[daemon:seshat_curation] {total_documents} doc(s), {embedded_chunks}/{total_chunks} \
                  chunk(s) embedded, {pending_embedding} pending, {cached_microtheories} cached \
@@ -1414,7 +1423,7 @@ impl AgentDaemon {
                 .store(false, Ordering::Relaxed);
         }
 
-        if let Ok(agent) = self.agent.lock() {
+        if let Ok(agent) = self.agent.read() {
             agent.sink().emit(&AkhMessage::system(format!(
                 "[daemon:heka_curation] {unembedded} unembedded chunk(s), {untagged} untagged drawer(s) \
                  (surveillance only — v1)",
@@ -1481,9 +1490,25 @@ impl AgentDaemon {
             return;
         }
 
-        // Borrow only the `agent` field (not all of `&self`) so the
-        // `self.total_cycles += 1` below does not conflict with the live guard.
-        let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
+        // Try to acquire a write lock without blocking. If a live ACP turn
+        // holds a read lock (or another background task holds the write lock),
+        // skip this cycle instead of blocking the turn. This satisfies the
+        // acceptance criterion that a turn proceeds while the daemon is active.
+        //
+        // Borrow only the `agent` field directly (not through the
+        // `try_write_agent` method) so the `self.total_cycles += 1` below
+        // does not conflict with the live guard: a method call's elided
+        // lifetime ties the returned guard to all of `&self`, defeating the
+        // disjoint-field borrow that direct field access gets for free —
+        // same reasoning as `self.agent.lock()` before this migration.
+        let mut agent = match self.agent.try_write() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::debug!("daemon: agent lock contended; skipping idle cycle");
+                self.cycle_done.notify_one();
+                return;
+            }
+        };
         if goal::active_goals(agent.goals()).is_empty() {
             drop(agent);
             self.cycle_done.notify_one();
@@ -1614,7 +1639,7 @@ impl AgentDaemon {
 
         if total_extracted > 0 {
             let _ = engine.persist();
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:extraction] {total_extracted} triples extracted from {} paragraphs",
                     extraction_targets.len(),
@@ -1663,7 +1688,7 @@ impl AgentDaemon {
             let result = session.train_from_grounded_symbols(&mut bridge, &engine);
 
             if result.improved {
-                if let Ok(agent) = agent_ref.lock() {
+                if let Ok(agent) = agent_ref.read() {
                     agent.sink().emit(&AkhMessage::system(format!(
                         "[daemon:bridge-training] {} steps, match rate {:.1}% → {:.1}% ({} symbols)",
                         result.steps,
@@ -1695,7 +1720,7 @@ impl AgentDaemon {
         };
 
         let (engine, predicates, cycle_count) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             (
                 agent.engine.clone(),
                 agent.predicates.clone(),
@@ -1714,7 +1739,7 @@ impl AgentDaemon {
         ) {
             Ok(result) => {
                 if result.journals_fetched > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:openclaw] fetched {}, ingested {}, skipped {}",
                             result.journals_fetched, result.ingested, result.skipped,
@@ -1747,7 +1772,7 @@ impl AgentDaemon {
 
         // Brief lock: clone the engine Arc, then release.
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.engine.clone()
         };
 
@@ -1755,7 +1780,7 @@ impl AgentDaemon {
         match run_kg_compaction(&engine, &config) {
             Ok(metrics) => {
                 if metrics.scaffolding_removed > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:compaction] removed {}/{} scaffolding triples, density {:.1}%",
                             metrics.scaffolding_removed,
@@ -1795,7 +1820,7 @@ impl AgentDaemon {
 
         // Brief lock: clone the engine Arc, then release.
         let engine = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.engine.clone()
         };
 
@@ -1803,7 +1828,7 @@ impl AgentDaemon {
         match run_relation_enrichment(&engine, &config) {
             Ok(metrics) => {
                 if metrics.relations_added > 0 || metrics.triples_added > 0 {
-                    if let Ok(agent) = self.agent.lock() {
+                    if let Ok(agent) = self.agent.read() {
                         agent.sink().emit(&AkhMessage::system(format!(
                             "[daemon:relation-enrichment] +{} predicates, +{} links, ratio {:.2}→{:.2} ({}x under-represented)",
                             metrics.relations_added,
@@ -1842,7 +1867,7 @@ impl AgentDaemon {
 
         // Extract engine + data_dir without holding the agent lock.
         let (engine, data_dir) = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             let dir = agent.engine.config().data_dir.clone();
             (agent.engine.clone(), dir)
         };
@@ -1942,7 +1967,7 @@ impl AgentDaemon {
 
         if total_inserted > 0 {
             let _ = engine.persist();
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.sink().emit(&AkhMessage::system(format!(
                     "[daemon:elicitation] {} triples generated across {} domain(s)",
                     total_inserted,
@@ -1974,8 +1999,8 @@ impl AgentDaemon {
     /// immediately reflected in the world model.  Existing schemas are not
     /// overwritten, so learned success rates are preserved.
     fn bootstrap_causal_schemas(&mut self) {
-        let mut agent = self.agent.lock().unwrap();
-        let signatures = agent.tool_registry.list();
+        let mut agent = self.agent.write().unwrap();
+        let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
         if signatures.is_empty() {
             return;
         }
@@ -2033,13 +2058,13 @@ impl AgentDaemon {
 
         // --- Phase 1: Drain pending queue and dispatch ---
         let pending = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.delegation_manager().drain_pending()
         };
 
         for task in pending {
             let hint = task.target_hint.clone();
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             match agent.delegation_manager().dispatch(task, hint.as_deref()) {
                 Ok(id) => {
                     tracing::info!(delegation_id = %id, "delegation dispatched");
@@ -2055,7 +2080,7 @@ impl AgentDaemon {
 
         // --- Phase 2: Process completed results ---
         let completed: Vec<DelegationOutcome> = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             let mut results = Vec::new();
             while let Some(outcome) = agent.delegation_manager().try_recv() {
                 results.push(outcome);
@@ -2087,7 +2112,7 @@ impl AgentDaemon {
 
             // Assert result triples into KG.
             if let Some(ref structured) = outcome.structured {
-                let engine = self.agent.lock().unwrap().engine.clone();
+                let engine = self.agent.read().unwrap().engine.clone();
                 let tuples: Vec<(String, String, String, f32)> = structured
                     .triples
                     .iter()
@@ -2118,7 +2143,7 @@ impl AgentDaemon {
                         wall_time_ms: outcome.wall_time.as_millis() as u64,
                     },
                 );
-                if let Ok(agent) = self.agent.lock() {
+                if let Ok(agent) = self.agent.read() {
                     if let Err(e) = agent.engine.store_provenance(&mut prov) {
                         tracing::debug!(error = %e, "delegation: failed to store provenance");
                     }
@@ -2132,19 +2157,19 @@ impl AgentDaemon {
             }
 
             // Remove from active tracking.
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.delegation_manager().complete(outcome.id);
             }
         }
 
         // --- Phase 3: Check timeouts ---
         let timed_out = {
-            let agent = self.agent.lock().unwrap();
+            let agent = self.agent.read().unwrap();
             agent.delegation_manager().check_timeouts()
         };
         for id in timed_out {
             tracing::warn!(delegation_id = %id, "delegation timed out");
-            if let Ok(agent) = self.agent.lock() {
+            if let Ok(agent) = self.agent.read() {
                 agent.delegation_manager().complete(id);
             }
         }
@@ -2234,5 +2259,104 @@ mod tests {
         // alongside this test must be registered here.
         assert!(KNOWN_TASK_NAMES.contains(&"seshat_curation"));
         assert!(KNOWN_TASK_NAMES.contains(&"heka_curation"));
+    }
+
+    // ── WI-259: the daemon must yield to a live turn, never block it ──
+
+    fn test_shared_agent() -> Arc<RwLock<Agent>> {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            ..Default::default()
+        })
+        .expect("engine");
+        let agent = Agent::new(Arc::new(engine), crate::agent::AgentConfig::default())
+            .expect("agent");
+        Arc::new(RwLock::new(agent))
+    }
+
+    /// `try_write_agent` must yield (return `None`) rather than block when a
+    /// live ACP turn holds the agentic-path read lock — this is the exact
+    /// primitive `run_idle_cycle` calls to decide whether to skip its cycle.
+    /// Deterministic by construction: `RwLock::try_write` never blocks, so
+    /// this needs no timing threshold and cannot flake under load.
+    #[test]
+    fn try_write_agent_yields_instead_of_blocking_under_a_live_read_lock() {
+        let shared = test_shared_agent();
+        let daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+
+        let turn_guard = shared.read().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            daemon.try_write_agent().is_none(),
+            "try_write_agent must yield to a held read lock instead of blocking"
+        );
+        drop(turn_guard);
+
+        assert!(
+            daemon.try_write_agent().is_some(),
+            "sanity: once the read lock is released, try_write_agent must succeed"
+        );
+    }
+
+    /// End-to-end version of the same guarantee through the real call site:
+    /// `run_idle_cycle` (the daemon's idle-cycle entry) must skip its cycle
+    /// instead of blocking when a turn — simulated here on its own thread,
+    /// exactly like a real in-flight `session/prompt` — holds `agent.read()`.
+    ///
+    /// Bounded on a helper thread rather than asserted via elapsed time: if
+    /// `run_idle_cycle` ever regressed to a blocking `agent.write()`, this
+    /// would hang against the still-held reader instead of returning, and
+    /// the `recv_timeout` below turns that hang into a clean test failure
+    /// instead of wedging the suite — the same technique
+    /// `stalled_prompt_turn_fails_fast_instead_of_hanging` uses in the ACP
+    /// tests for the equivalent turn-side guarantee.
+    #[test]
+    fn run_idle_cycle_skips_instead_of_blocking_when_a_turn_holds_the_read_lock() {
+        let shared = test_shared_agent();
+
+        let reader_agent = Arc::clone(&shared);
+        let release = Arc::new(AtomicBool::new(false));
+        let release_flag = Arc::clone(&release);
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel::<()>();
+        let reader_thread = std::thread::spawn(move || {
+            let _guard = reader_agent.read().unwrap_or_else(|e| e.into_inner());
+            holding_tx.send(()).expect("signal lock held");
+            while !release_flag.load(Ordering::Relaxed) {
+                std::thread::park_timeout(Duration::from_millis(10));
+            }
+        });
+        holding_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("reader thread never took the read lock");
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let cycle_thread = std::thread::spawn(move || {
+            daemon.run_idle_cycle();
+            let _ = done_tx.send(());
+        });
+        let skipped_promptly = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        release.store(true, Ordering::Relaxed);
+        reader_thread.thread().unpark();
+        let _ = reader_thread.join();
+        // Only join the cycle thread once we know it actually finished: if
+        // `run_idle_cycle` regressed to a blocking write lock, that thread is
+        // parked on the (now-released) reader forever-ish, and joining it
+        // unconditionally here would just relocate the hang from the
+        // assertion below into this line instead of failing cleanly.
+        if skipped_promptly {
+            let _ = cycle_thread.join();
+        } else {
+            drop(cycle_thread);
+        }
+
+        assert!(
+            skipped_promptly,
+            "run_idle_cycle must skip its cycle when the agent read lock is \
+             held by a live turn, not block waiting for the write lock"
+        );
     }
 }
