@@ -73,20 +73,56 @@ akh_scoped_ops!(competence_calibration, replace_competence_calibration, load_com
 akh_scoped_ops!(sleep_metric, replace_sleep_metrics, load_sleep_metrics);
 
 /// Replace all facts for a workspace (DELETE-by-workspace + insert, one txn).
+///
+/// The `akhomed_facts` primary key is `(workspace_id, subject, predicate,
+/// object)`, so duplicate triples in the captured snapshot would otherwise
+/// raise a unique-key violation on every write after the first. We
+/// deduplicate the input here as a belt-and-suspenders guard and use
+/// `ON CONFLICT DO NOTHING` at the database boundary.
 pub async fn replace_workspace_facts(
     db: &DatabaseConnection,
     workspace_id: Uuid,
     rows: Vec<fact::Model>,
 ) -> StoreResult<()> {
+    let input_len = rows.len();
+    let mut seen = std::collections::HashSet::with_capacity(input_len);
+    let mut unique_rows = Vec::with_capacity(input_len);
+    for row in rows {
+        let key = (row.subject, row.predicate, row.object);
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+    if unique_rows.len() < input_len {
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            total = input_len,
+            unique = unique_rows.len(),
+            "deduplicated duplicate facts before snapshot insert"
+        );
+    }
+
     let txn = db.begin().await?;
     fact::Entity::delete_many()
         .filter(fact::Column::WorkspaceId.eq(workspace_id))
         .exec(&txn)
         .await?;
-    if !rows.is_empty() {
-        fact::Entity::insert_many(rows.into_iter().map(IntoActiveModel::into_active_model))
-            .exec(&txn)
-            .await?;
+    if !unique_rows.is_empty() {
+        fact::Entity::insert_many(
+            unique_rows.into_iter().map(IntoActiveModel::into_active_model),
+        )
+        .on_conflict(
+            OnConflict::columns([
+                fact::Column::WorkspaceId,
+                fact::Column::Subject,
+                fact::Column::Predicate,
+                fact::Column::Object,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&txn)
+        .await?;
     }
     txn.commit().await?;
     Ok(())

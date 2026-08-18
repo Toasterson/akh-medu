@@ -39,13 +39,14 @@ pub enum StoreError {
     },
 
     /// A query or mutation against the store failed.
-    #[error("akhomed-store database operation failed")]
+    #[error("akhomed-store database operation failed: {source}")]
     #[diagnostic(
         code(akhomed_store::db),
         help("This is an unexpected database error; see the source for details.")
     )]
     Db {
         #[from]
+        #[source]
         source: sea_orm::DbErr,
     },
 
@@ -64,3 +65,32 @@ pub enum StoreError {
 
 /// Convenience result alias for store operations.
 pub type StoreResult<T> = std::result::Result<T, StoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_error_display_includes_source() {
+        let inner = sea_orm::DbErr::Custom(
+            "unique constraint \"akhomed_snapshot_pkey\"".into(),
+        );
+        let err = StoreError::from(inner);
+        let text = err.to_string();
+        assert!(
+            text.contains("unique constraint"),
+            "display should surface the source error, got: {text}"
+        );
+    }
+
+    #[test]
+    fn db_error_debug_keeps_source_chain() {
+        let inner = sea_orm::DbErr::Custom("sqlstate 23505".into());
+        let err = StoreError::from(inner);
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("sqlstate 23505"),
+            "debug should retain source chain, got: {debug}"
+        );
+    }
+}

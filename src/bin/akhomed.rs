@@ -666,19 +666,80 @@ impl ServerState {
             let mut tick = tokio::time::interval(interval);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             tick.tick().await; // consume the immediate first tick
+
+            // Rate-limit repeated identical snapshot failures.  The bug that
+            // caused the 2026-08-08 flood is fixed (duplicate facts no longer
+            // re-enter the graph), but if a new failure mode appears we must
+            // not emit ~390 identical error lines per day.  We log the first
+            // occurrence at error level with the full chained cause, then
+            // summarize repeats at warn level.
+            let mut consecutive_failures: u64 = 0;
+            let mut last_error: Option<String> = None;
+            let mut last_log_time: Option<std::time::Instant> = None;
+            let mut suppressed_count: u64 = 0;
+            const SUMMARY_EVERY: u64 = 10;
+            const SUMMARY_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        if let Err(e) =
-                            snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await
-                        {
-                            tracing::error!(
-                                workspace = %name, error = %e,
-                                "periodic snapshot failed (ADR-049: if this akh is \
-                                 resident on another host, this host should not have \
-                                 a snapshot ticker — check whether the split-brain \
-                                 guard was bypassed)"
-                            );
+                        match snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await {
+                            Ok(()) => {
+                                if consecutive_failures > 0 {
+                                    tracing::info!(
+                                        workspace = %name,
+                                        consecutive_failures,
+                                        "periodic snapshot recovered"
+                                    );
+                                }
+                                consecutive_failures = 0;
+                                last_error = None;
+                                last_log_time = None;
+                                suppressed_count = 0;
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                let error_string = e.to_string();
+                                let is_new_error = last_error.as_ref() != Some(&error_string);
+                                let is_first_ever = last_error.is_none();
+                                suppressed_count += 1;
+
+                                let now = std::time::Instant::now();
+                                let due_to_window = last_log_time
+                                    .map_or(false, |t| now.duration_since(t) >= SUMMARY_WINDOW);
+                                let due_to_count = suppressed_count >= SUMMARY_EVERY;
+                                let should_log = is_first_ever
+                                    || is_new_error
+                                    || due_to_window
+                                    || due_to_count;
+
+                                if should_log {
+                                    if is_first_ever || is_new_error {
+                                        tracing::error!(
+                                            workspace = %name,
+                                            consecutive_failures,
+                                            error = %error_string,
+                                            error_debug = ?e,
+                                            "periodic snapshot failed (ADR-049: if this akh is \
+                                             resident on another host, this host should not have \
+                                             a snapshot ticker — check whether the split-brain \
+                                             guard was bypassed)"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            workspace = %name,
+                                            consecutive_failures,
+                                            suppressed_since_last_log = suppressed_count,
+                                            error = %error_string,
+                                            "periodic snapshot still failing"
+                                        );
+                                    }
+                                    last_log_time = Some(now);
+                                    suppressed_count = 0;
+                                }
+
+                                last_error = Some(error_string);
+                            }
                         }
                     }
                     _ = shutdown_rx.changed() => break,
