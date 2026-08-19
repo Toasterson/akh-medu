@@ -15,13 +15,73 @@
 
 use candle_core as candle;
 
-use candle_transformers::{quantized_nn::RmsNorm, utils::repeat_kv};
+use candle_transformers::utils::repeat_kv;
 use candle::{
-    quantized::{gguf_file, QMatMul},
-    DType, Device, IndexOp, Result, Tensor,
+    quantized::{gguf_file, QMatMul, QTensor},
+    D, DType, Device, IndexOp, Result, Tensor,
 };
 use candle_nn::{Embedding, Module};
 use std::collections::HashMap;
+
+// --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
+// candle-transformers' `RmsNorm::forward` calls candle-nn's `rms_norm`, a custom
+// op whose GPU path is only compiled when candle-nn itself is built with its
+// `cuda` feature. Here we drive candle's cuda slot through `candle-core/hip` (a
+// *fork*; candle-nn's cuda feature is off), so on a HIP device that custom op has
+// no `cuda_fwd` and would error. The same idiom as `GemmaRmsNorm` in
+// quantized_gemma3: on a CUDA/HIP device use candle's fused single-kernel
+// `rms_norm_fused` (or the public `rms_norm_slow` decomposition when not built
+// with the `hip` feature), and on CPU keep the fast custom op byte-for-byte.
+/// RMSNorm matching `candle_transformers::quantized_nn::RmsNorm` (dequantized
+/// weight applied directly, computed in f32), but device-aware on the HIP device.
+#[derive(Debug, Clone)]
+struct Qwen2RmsNorm {
+    weight: Tensor,
+    eps: f64,
+}
+
+impl Qwen2RmsNorm {
+    fn from_qtensor(weight: QTensor, eps: f64) -> Result<Self> {
+        let weight = weight.dequantize(&weight.device())?;
+        Ok(Self { weight, eps })
+    }
+}
+
+impl Module for Qwen2RmsNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let eps = self.eps as f32;
+        if x.device().is_cuda() {
+            // Fused single-kernel RMSNorm on the HIP device (mirrors GemmaRmsNorm).
+            #[cfg(feature = "hip")]
+            return candle::cuda::rms_norm_fused(x, &self.weight, eps);
+            #[cfg(not(feature = "hip"))]
+            return candle_nn::ops::rms_norm_slow(x, &self.weight, eps);
+        }
+        candle_nn::ops::rms_norm(x, &self.weight, eps)
+    }
+}
+
+/// Last-dim softmax: generic on-device form on the HIP device, fast custom op on CPU.
+/// (45h: a fused single-kernel softmax was built + parity-passed but gave no decode
+/// speedup — outside GEMV the decode is launch/dispatch-bound on tiny kernels, so
+/// collapsing softmax's 5 launches → 1 just redistributes the idle. Reverted.)
+fn softmax_last_dim_dev(x: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::ops::softmax(x, D::Minus1)
+    } else {
+        candle_nn::ops::softmax_last_dim(x)
+    }
+}
+
+/// Rotary embedding: `rope_slow` (narrow/cat/broadcast-mul) on the HIP device, fast
+/// custom op on CPU. Same interleaving as `candle_nn::rotary_emb::rope`.
+fn rope_dev(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    if x.device().is_cuda() {
+        candle_nn::rotary_emb::rope_slow(x, cos, sin)
+    } else {
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Mlp {
@@ -61,9 +121,9 @@ struct LayerWeights {
     /// When present (`AKH_GPU_MATMUL=1`), the q/k/v/o projections run on the AMD GPU.
     #[cfg(feature = "rocm")]
     gpu_attn: Option<crate::nlu::hip::GpuAttnProj>,
-    attention_norm: RmsNorm,
+    attention_norm: Qwen2RmsNorm,
     mlp: Mlp,
-    ffn_norm: RmsNorm,
+    ffn_norm: Qwen2RmsNorm,
     n_head: usize,
     n_kv_head: usize,
     head_dim: usize,
@@ -88,7 +148,7 @@ impl LayerWeights {
         let (_b_sz, _n_head, seq_len, _n_embd) = x.dims4()?;
         let cos = self.cos.narrow(0, index_pos, seq_len)?;
         let sin = self.sin.narrow(0, index_pos, seq_len)?;
-        candle_nn::rotary_emb::rope(&x.contiguous()?, &cos, &sin)
+        rope_dev(&x.contiguous()?, &cos, &sin)
     }
 
     fn forward_attn(
@@ -174,7 +234,7 @@ impl LayerWeights {
                 masked_fill(&att, &mask, &self.neg_inf)?
             }
         };
-        let att = candle_nn::ops::softmax_last_dim(&att)?;
+        let att = softmax_last_dim_dev(&att)?;
         // Convert to contiguous as matmul doesn't support strided vs for now.
         let y = att.matmul(&v.contiguous()?)?;
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
@@ -195,7 +255,7 @@ impl LayerWeights {
 pub struct ModelWeights {
     tok_embeddings: Embedding,
     layers: Vec<LayerWeights>,
-    norm: RmsNorm,
+    norm: Qwen2RmsNorm,
     output: QMatMul,
     /// When present (`AKH_GPU_MATMUL=1`), the lm_head projection runs on the AMD GPU.
     #[cfg(feature = "rocm")]
@@ -276,7 +336,7 @@ impl ModelWeights {
 
         let tok_embeddings = ct.tensor(reader, "token_embd.weight", device)?;
         let tok_embeddings = tok_embeddings.dequantize(device)?;
-        let norm = RmsNorm::from_qtensor(
+        let norm = Qwen2RmsNorm::from_qtensor(
             ct.tensor(reader, "output_norm.weight", device)?,
             rms_norm_eps,
         )?;
@@ -382,11 +442,11 @@ impl ModelWeights {
                 attention_wo: QMatMul::from_qtensor(attention_wo)?,
                 #[cfg(feature = "rocm")]
                 gpu_attn,
-                attention_norm: RmsNorm::from_qtensor(attention_norm, rms_norm_eps)?,
+                attention_norm: Qwen2RmsNorm::from_qtensor(attention_norm, rms_norm_eps)?,
                 cos: cos.clone(),
                 sin: sin.clone(),
                 mlp,
-                ffn_norm: RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)?,
+                ffn_norm: Qwen2RmsNorm::from_qtensor(ffn_norm, rms_norm_eps)?,
                 n_head: head_count,
                 n_kv_head: head_count_kv,
                 head_dim,
