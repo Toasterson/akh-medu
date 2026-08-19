@@ -2051,18 +2051,28 @@ impl CandleBackend {
     /// Emit one freshly-chosen `token` into `st` and apply the `StopMode` stopping rules,
     /// returning `true` when generation should stop. An EOS in any non-`Fixed` mode stops
     /// *before* the token is counted or detokenized (so the marker never reaches the output),
-    /// matching plain greedy decode. Shared by [`decode_loop`](Self::decode_loop) and
+    /// matching plain greedy decode. `eos` is the **full set** of stop-token ids for the loaded
+    /// family (see [`find_eos_token`](Self::find_eos_token)) — checking membership rather than a
+    /// single id matters because a family can have more than one live stop marker (e.g. Qwen2.5's
+    /// chat template ends turns with `<|im_end|>`, but its vocab also always defines
+    /// `<|endoftext|>`; picking only one by lookup precedence let the other slip through the
+    /// pre-decode check and leak into the output — see `find_eos_token`'s doc comment for the
+    /// full story). The `StopMode::Text` string match below is a second, defense-in-depth net
+    /// for any marker that still isn't caught by id (e.g. emitted as part of a multi-token
+    /// piece); it truncates the marker back out of `generated_text` rather than merely
+    /// detecting it, so a miss there still
+    /// can't leak text to the caller. Shared by [`decode_loop`](Self::decode_loop) and
     /// [`spec_decode_loop`](Self::spec_decode_loop) so their detokenization and stop semantics
     /// are byte-identical — the speculative loop just calls this once per accepted/bonus token.
     #[cfg(feature = "candle-backend")]
     fn process_token(
         &self,
         token: u32,
-        eos: Option<u32>,
+        eos: &[u32],
         stop: StopMode,
         st: &mut DecodeState,
     ) -> bool {
-        if !matches!(stop, StopMode::Fixed) && Some(token) == eos {
+        if !matches!(stop, StopMode::Fixed) && eos.contains(&token) {
             return true;
         }
         st.n_generated += 1;
@@ -2083,10 +2093,15 @@ impl CandleBackend {
                 }
             }
             StopMode::Text => {
-                if st.generated_text.contains("<|im_end|>")
-                    || st.generated_text.contains("<end_of_turn>")
-                {
-                    return true;
+                // Defense-in-depth: the id-based check above is primary. This string match
+                // catches a stop marker that reached `generated_text` some other way (e.g.
+                // decoded as part of a multi-token piece) — and *removes* it before stopping,
+                // so the marker never survives into the returned text either way.
+                for marker in ["<|im_end|>", "<end_of_turn>"] {
+                    if let Some(idx) = st.generated_text.find(marker) {
+                        st.generated_text.truncate(idx);
+                        return true;
+                    }
                 }
                 for ch in piece.chars() {
                     if ch == '\n' {
@@ -2175,7 +2190,7 @@ impl CandleBackend {
             };
 
             // Emit the token + apply the StopMode rules (EOS / brace / newline / markers).
-            if self.process_token(next_token, eos_token, stop, &mut st) {
+            if self.process_token(next_token, &eos_token, stop, &mut st) {
                 break;
             }
 
@@ -2308,7 +2323,7 @@ impl CandleBackend {
             .ok_or_else(|| fail("empty prefill argmax".to_string()))?;
         all.push(cur0);
         let mut cur = cur0;
-        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+        let mut stop_now = self.process_token(cur0, &eos, stop, &mut st);
 
         while !stop_now && st.n_generated < max_tokens {
             // Draft from the history, then verify [cur, drafts..] at [pos, ..] in ONE forward.
@@ -2340,7 +2355,7 @@ impl CandleBackend {
             for i in 0..=k {
                 let tok = if i < k { drafts[i] } else { argmaxes[k] };
                 all.push(tok);
-                if self.process_token(tok, eos, stop, &mut st) {
+                if self.process_token(tok, &eos, stop, &mut st) {
                     stop_now = true;
                     break;
                 }
@@ -2437,7 +2452,7 @@ impl CandleBackend {
         let cur0 = categorical(&to_probs(&logits)?, rng.r#gen::<f32>());
         all.push(cur0);
         let mut cur = cur0;
-        let mut stop_now = self.process_token(cur0, eos, stop, &mut st);
+        let mut stop_now = self.process_token(cur0, &eos, stop, &mut st);
 
         while !stop_now && st.n_generated < max_tokens {
             // Draft + verify in one forward; pull the per-position probabilities. Scope the
@@ -2485,7 +2500,7 @@ impl CandleBackend {
             // Emit the k accepted drafts + the bonus, each through the shared per-token path.
             for i in 0..k {
                 all.push(drafts[i]);
-                if self.process_token(drafts[i], eos, stop, &mut st) {
+                if self.process_token(drafts[i], &eos, stop, &mut st) {
                     stop_now = true;
                     break;
                 }
@@ -2496,7 +2511,7 @@ impl CandleBackend {
             }
             if !stop_now {
                 all.push(bonus);
-                if self.process_token(bonus, eos, stop, &mut st) || st.n_generated >= max_tokens {
+                if self.process_token(bonus, &eos, stop, &mut st) || st.n_generated >= max_tokens {
                     stop_now = true;
                 }
             }
@@ -2605,7 +2620,7 @@ impl CandleBackend {
             // Highest-logit token whose decoded text keeps the JSON valid.
             let mut chosen: Option<(u32, String)> = None;
             for id in top_k_indices(&scores, 96) {
-                if Some(id) == eos {
+                if eos.contains(&id) {
                     continue;
                 }
                 let piece = self.tokenizer.decode(&[id], false).unwrap_or_default();
@@ -2726,30 +2741,23 @@ impl CandleBackend {
         }
     }
 
-    /// Find the EOS token ID for the loaded model (family-aware).
+    /// Find the **full set** of EOS token IDs for the loaded model (family-aware).
+    ///
+    /// A family can have more than one live stop marker at once — e.g. Qwen2.5's
+    /// vocab always defines `<|endoftext|>` *and* its ChatML template ends every
+    /// assistant turn with `<|im_end|>`. An earlier version of this used
+    /// `Option<u32>` with `or_else` fallback, so it returned only the
+    /// first-resolving id in lookup-precedence order (`<|endoftext|>`, since it's
+    /// always present) and never even looked up `<|im_end|>`. The chat model then
+    /// emits `<|im_end|>` to end its turn, the pre-decode id check in
+    /// [`process_token`](Self::process_token) compared it against the wrong single
+    /// id and missed, and the token got decoded and appended to the output before
+    /// the string-level `StopMode::Text` fallback caught it one token too late —
+    /// the literal `<|im_end|>` leaking into the visible reply. Returning every id
+    /// that resolves, not just the first, closes that gap.
     #[cfg(feature = "candle-backend")]
-    fn find_eos_token(&self) -> Option<u32> {
-        match self.family {
-            // Gemma 2/3: <end_of_turn> (chat) or <eos>.
-            ModelFamily::Gemma => self
-                .tokenizer
-                .token_to_id("<end_of_turn>")
-                .or_else(|| self.tokenizer.token_to_id("<eos>"))
-                .or_else(|| self.tokenizer.token_to_id("</s>")),
-            // Gemma 4: the turn-end marker `<turn|>` (id 106) is the chat EOS;
-            // fall back to <eos> for raw completion.
-            ModelFamily::Gemma4 => self
-                .tokenizer
-                .token_to_id("<turn|>")
-                .or_else(|| self.tokenizer.token_to_id("<eos>"))
-                .or_else(|| self.tokenizer.token_to_id("</s>")),
-            // Qwen2.5: <|endoftext|> (151643) or <|im_end|> (151645).
-            ModelFamily::Qwen2 => self
-                .tokenizer
-                .token_to_id("<|endoftext|>")
-                .or_else(|| self.tokenizer.token_to_id("<|im_end|>"))
-                .or_else(|| self.tokenizer.token_to_id("</s>")),
-        }
+    fn find_eos_token(&self) -> Vec<u32> {
+        eos_ids_for_family(self.family, |s| self.tokenizer.token_to_id(s))
     }
 
     /// Access the config.
@@ -2807,6 +2815,29 @@ struct DecodeState {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Resolve the family-aware EOS/stop-marker id set: every marker string the family can end a
+/// turn or completion with, mapped through `token_to_id` and kept when it resolves. Split out
+/// of [`CandleBackend::find_eos_token`] as a pure function (vocab lookup injected via `token_to_id`)
+/// so the marker→id resolution — the actual root cause of the EOS-leak bug (see
+/// [`find_eos_token`](CandleBackend::find_eos_token)) — is unit-testable against a synthetic
+/// vocab without a real tokenizer/model.
+#[cfg_attr(not(feature = "candle-backend"), allow(dead_code))]
+fn eos_ids_for_family(family: ModelFamily, token_to_id: impl Fn(&str) -> Option<u32>) -> Vec<u32> {
+    let markers: &[&str] = match family {
+        // Gemma 2/3: <end_of_turn> (chat) or <eos>.
+        ModelFamily::Gemma => &["<end_of_turn>", "<eos>", "</s>"],
+        // Gemma 4: the turn-end marker `<turn|>` is the chat EOS; <eos> covers raw completion.
+        ModelFamily::Gemma4 => &["<turn|>", "<eos>", "</s>"],
+        // Qwen2.5: <|endoftext|> (base EOS, always present) *and* <|im_end|> (ChatML turn end) —
+        // both are live stop markers, not alternatives, so both must resolve when present.
+        ModelFamily::Qwen2 => &["<|endoftext|>", "<|im_end|>", "</s>"],
+    };
+    let mut ids: Vec<u32> = markers.iter().filter_map(|m| token_to_id(m)).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
 
 /// Extract the first JSON object from a string (find first `{`, match to closing `}`).
 fn extract_json_object(raw: &str) -> &str {
@@ -2933,6 +2964,48 @@ Some trailing text."#;
         let raw = "This is a response. #hashtag #spam";
         let cleaned = clean_generated_text(raw);
         assert_eq!(cleaned, "This is a response.");
+    }
+
+    /// Regression test for the EOS-leak bug: Qwen2.5's vocab always defines the base
+    /// `<|endoftext|>` EOS *and* its ChatML template ends assistant turns with `<|im_end|>`.
+    /// The old `Option<u32>`/`or_else` version of this lookup stopped at the first-resolving
+    /// id (`<|endoftext|>`) and never checked `<|im_end|>` at all, so the actual chat-template
+    /// stop token was invisible to the pre-decode id check and leaked into decoded output. A
+    /// synthetic vocab that defines both must resolve to *both* ids.
+    #[test]
+    fn qwen2_eos_ids_include_both_endoftext_and_im_end() {
+        let vocab = [("<|endoftext|>", 151643u32), ("<|im_end|>", 151645u32)];
+        let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
+        let ids = eos_ids_for_family(ModelFamily::Qwen2, lookup);
+        assert!(
+            ids.contains(&151643),
+            "must still resolve <|endoftext|>: {ids:?}"
+        );
+        assert!(
+            ids.contains(&151645),
+            "must also resolve <|im_end|> — the actual ChatML turn-end token: {ids:?}"
+        );
+        assert_eq!(ids.len(), 2, "no duplicates, no phantom ids: {ids:?}");
+    }
+
+    /// A vocab that only defines the base EOS (no ChatML `<|im_end|>` — e.g. a raw-completion
+    /// tokenizer) should resolve to just that one id, not error or panic.
+    #[test]
+    fn qwen2_eos_ids_falls_back_when_im_end_absent() {
+        let vocab = [("<|endoftext|>", 151643u32)];
+        let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
+        let ids = eos_ids_for_family(ModelFamily::Qwen2, lookup);
+        assert_eq!(ids, vec![151643]);
+    }
+
+    /// Gemma's marker set resolves independently of Qwen2's — sanity check that family
+    /// dispatch doesn't cross-contaminate the candidate lists.
+    #[test]
+    fn gemma_eos_ids_resolve_family_specific_markers() {
+        let vocab = [("<end_of_turn>", 107u32), ("<eos>", 1u32)];
+        let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
+        let ids = eos_ids_for_family(ModelFamily::Gemma, lookup);
+        assert_eq!(ids, vec![1, 107]);
     }
 
     #[test]
