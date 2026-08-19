@@ -228,6 +228,39 @@ pub enum StreamEvent {
     Keepalive,
 }
 
+/// Append the exact wire body to `/tmp/akh_ollama_debug.log` when
+/// `AKH_OLLAMA_DEBUG_DUMP=1` (default off; same idiom as `AKH_AGENT_DEBUG`
+/// for the Candle backing) — the tool that pinned down the ollama
+/// `Qwen35Renderer` "no user query found in messages" 500 (a request-shape
+/// bug that reproduces intermittently and leaves no server-side trace once
+/// the request has already failed) by correlating the literal `messages`
+/// array to the failure. Kept as a permanent, opt-in diagnostic for the next
+/// time a request-shape issue needs the exact wire body. File (not stderr):
+/// journald splits multi-line `eprintln!` output across separate unprefixed
+/// entries, which makes a pretty-printed JSON body unreadable in
+/// `journalctl`.
+fn debug_dump_request(label: &str, request_seq: usize, body: &serde_json::Value) {
+    if std::env::var("AKH_OLLAMA_DEBUG_DUMP").as_deref() != Ok("1") {
+        return;
+    }
+    use std::io::Write;
+    let epoch_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "\n=== [t={epoch_secs}] {label} request_seq={request_seq} ===\n{}\n",
+        serde_json::to_string_pretty(body).unwrap_or_default()
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/akh_ollama_debug.log")
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -474,6 +507,9 @@ impl OllamaClient {
             }
         }
 
+        // See `debug_dump_request` — AKH_OLLAMA_DEBUG_DUMP=1 to capture.
+        debug_dump_request("chat (non-streaming)", request_seq, &body);
+
         let mut req = self
             .chat_agent()
             .post(&url)
@@ -630,6 +666,9 @@ impl OllamaClient {
                 );
             }
         }
+
+        // See `debug_dump_request` — AKH_OLLAMA_DEBUG_DUMP=1 to capture.
+        debug_dump_request("chat_stream", request_seq, &body);
 
         let mut req = self
             .chat_agent()

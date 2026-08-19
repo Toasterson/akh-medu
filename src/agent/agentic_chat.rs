@@ -538,6 +538,12 @@ impl Agent {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 break TurnStop::Cancelled;
             }
+            // Re-check on every round, not just round 0: this is exactly the
+            // "tool-result continuation" shape (assistant + tool appended,
+            // nothing since) that the live 500 was hit on. See
+            // `ensure_real_user_turn` for why this can't just be asserted
+            // once at assembly time.
+            ensure_real_user_turn(&mut conversation, user_prompt);
             // Stream this round. Content deltas become live answer text, thinking
             // deltas become live reasoning. `used_fallback` records whether the
             // streaming path failed and we silently retried non-streaming — in
@@ -1310,6 +1316,66 @@ fn preview_args(args: &Value) -> String {
     }
 }
 
+/// Whether `content` is a *rendered tool result*, not a real user query.
+///
+/// Mirrors the exact shape ollama's dedicated Qwen3.8 renderer treats as
+/// "not a query" (`Qwen35Renderer.validateMessages`, `model/renderers/qwen35.go`
+/// upstream): a `role:"user"` message whose trimmed content is wrapped in
+/// `<tool_response>...</tool_response>`. That renderer is what some tool
+/// backends (e.g. Qwen-Agent-style harnesses) use to carry tool results under
+/// `role:"user"` instead of a dedicated `role:"tool"` — akhomed always uses
+/// `role:"tool"` for results, so this should never match our own traffic, but
+/// checking it (not just presence of *any* `role:"user"` message) matches
+/// upstream's own definition of "a query" precisely.
+fn is_tool_response_wrapped(content: &str) -> bool {
+    let t = content.trim();
+    t.starts_with("<tool_response>") && t.ends_with("</tool_response>")
+}
+
+/// Guarantee `conversation` carries at least one real user turn.
+///
+/// Background: ollama's dedicated Qwen3.8 renderer (`RENDERER qwen3.8`, the
+/// tokenizer-verified port of froggeric's Qwen-Fixed-Chat-Templates that
+/// `ptah-qwen3.8:sharp` uses to retain thinking-block fidelity) hard-fails a
+/// request whose `messages` contains no qualifying `role:"user"` turn —
+/// `HTTP 500 {"error":"no user query found in messages"}`. The same check
+/// ships wherever the template does (ollama#17778, vllm#36432,
+/// lmstudio-bug-tracker#1586, opencode#25168): it is a property of the
+/// Qwen3.8 chat template itself, not an ollama- or akhomed-specific bug.
+///
+/// `PassThroughManager` and `CompactingManager` are both designed to always
+/// carry the current turn's real user query (compacting.rs pins the most
+/// recent turn first and keeps it unconditionally — see
+/// `discourse::rank_turns_keep_first`), and the round loop below only ever
+/// *appends* to `conversation`, never removes from it — so in the paths this
+/// code can see, the invariant already holds. It has nonetheless been
+/// observed failing live on a tool-loop continuation (round 2, right after
+/// the first tool result), which is exactly the shape upstream's own bug
+/// reports describe. Rather than chase every conceivable assembly path (or
+/// every future `ContextManager` strategy) that could violate it, enforce it
+/// once, right where every backend actually sends from: cheap (a linear scan
+/// over what is typically a handful of messages), backend-agnostic (ollama,
+/// candle, and openai_backend's `to_openai_messages` all translate this same
+/// `conversation`, and vllm#36432 shows the OpenAI-contract path is not
+/// immune either), and a no-op whenever the invariant already holds — which
+/// is the overwhelming common case.
+///
+/// `user_prompt` is the turn's own triggering query — always a valid choice
+/// to re-inject, and already in scope at every call site.
+fn ensure_real_user_turn(conversation: &mut Vec<Value>, user_prompt: &str) {
+    let has_real_user_turn = conversation.iter().any(|m| {
+        m.get("role").and_then(Value::as_str) == Some("user")
+            && !is_tool_response_wrapped(m.get("content").and_then(Value::as_str).unwrap_or(""))
+    });
+    if !has_real_user_turn {
+        tracing::debug!(
+            "conversation had no qualifying user turn before an ollama request; \
+             re-injecting the triggering query (Qwen3.8 renderer compatibility)"
+        );
+        conversation.push(json!({"role": "user", "content": user_prompt}));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,6 +1389,82 @@ mod tests {
 
     fn call(name: &str, args: &str) -> (String, Value) {
         (name.to_string(), json!({ "q": args }))
+    }
+
+    // ── ensure_real_user_turn (Qwen3.8 "no user query" 500 hardening) ──────
+
+    #[test]
+    fn ensure_real_user_turn_is_a_noop_when_the_original_query_is_present() {
+        // The exact shape a tool-loop continuation sends: the current
+        // question, then an assistant tool call, then its result — nothing
+        // since. The original query is still there (just not last), so
+        // nothing should be appended.
+        let mut conv = vec![
+            json!({"role": "user", "content": "what's the weather?"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "weather", "arguments": {}}}
+            ]}),
+            json!({"role": "tool", "content": "72F, sunny"}),
+        ];
+        let before = conv.len();
+        ensure_real_user_turn(&mut conv, "what's the weather?");
+        assert_eq!(conv.len(), before, "already-present query must not be duplicated");
+    }
+
+    #[test]
+    fn ensure_real_user_turn_reinjects_when_missing() {
+        // Simulates whatever assembly path could (now or in the future) hand
+        // the loop a conversation with no user turn at all.
+        let mut conv = vec![
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "weather", "arguments": {}}}
+            ]}),
+            json!({"role": "tool", "content": "72F, sunny"}),
+        ];
+        ensure_real_user_turn(&mut conv, "what's the weather?");
+        assert_eq!(conv.len(), 3);
+        assert_eq!(conv[2]["role"], "user");
+        assert_eq!(conv[2]["content"], "what's the weather?");
+    }
+
+    #[test]
+    fn ensure_real_user_turn_does_not_count_tool_response_wrapped_user_messages() {
+        // Some harnesses (not akhomed — it always uses role:"tool" — but the
+        // upstream template is defined generically) carry tool results under
+        // role:"user" wrapped in <tool_response>...</tool_response>. Per
+        // ollama's own `validateMessages`, that does NOT count as a real
+        // query, so neither should ours.
+        let mut conv = vec![
+            json!({"role": "user", "content": "<tool_response>\n72F, sunny\n</tool_response>"}),
+        ];
+        ensure_real_user_turn(&mut conv, "what's the weather?");
+        assert_eq!(conv.len(), 2, "the wrapped message must not satisfy the check");
+        assert_eq!(conv[1]["role"], "user");
+        assert_eq!(conv[1]["content"], "what's the weather?");
+    }
+
+    #[test]
+    fn ensure_real_user_turn_accepts_a_historical_user_turn_anywhere_in_the_array() {
+        // The check (like upstream's) scans the whole array, not just the
+        // tail — an earlier real user turn (e.g. from compacted history)
+        // still counts even though several assistant/tool turns follow it.
+        let mut conv = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "user", "content": "first question"}),
+            json!({"role": "assistant", "content": "answer"}),
+            json!({"role": "user", "content": "second question"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "a", "arguments": {}}}
+            ]}),
+            json!({"role": "tool", "content": "result a"}),
+            json!({"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "b", "arguments": {}}}
+            ]}),
+            json!({"role": "tool", "content": "result b"}),
+        ];
+        let before = conv.len();
+        ensure_real_user_turn(&mut conv, "second question");
+        assert_eq!(conv.len(), before);
     }
 
     #[test]
