@@ -45,9 +45,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use tracing::Instrument;
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, ClientCapabilities, ContentBlock, ContentChunk, InitializeRequest,
-    InitializeResponse, McpCapabilities, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse,
+    AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
+    InitializeRequest, InitializeResponse, McpCapabilities, Meta, NewSessionRequest,
+    NewSessionResponse, PromptRequest, PromptResponse,
     ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::util::{json_cast, MatchDispatch};
@@ -357,6 +357,16 @@ pub struct AkhAcpAgent {
     /// `Tool`s from these cached descriptors with zero network I/O instead of
     /// re-running `initialize` + `tools/list` against each pushed server.
     session_mcp_tools: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>>,
+    /// Chat session → the in-flight turn's cancel flag. Populated for the
+    /// duration of one `session/prompt` turn (inserted where the turn's
+    /// `cancel: Arc<AtomicBool>` is created, removed by the bookkeeping task
+    /// once the turn's worker joins) so a client's `session/cancel`
+    /// notification — which names only a `session_id`, not a turn — has
+    /// something to set. Empty between turns: a `session/cancel` for a
+    /// session with no turn in flight (already finished, or never started)
+    /// is a no-op, matching the ACP spec's "cancellation is a courtesy, not
+    /// a guarantee" contract.
+    session_cancels: Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     /// Per-session cognitive context (KG cache, ELIZA router, discourse
     /// trajectory). One [`SessionContext`] per ACP session so per-session
     /// cognitive state doesn't bleed across sessions sharing the workspace's
@@ -461,6 +471,21 @@ fn socket_read_timeout_from_env() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// FIX2: whether a `session/prompt` turn must fail when a client-pushed MCP
+/// server does not come back from discovery ("strict"), rather than
+/// degrading gracefully (the default). `per_workspace_default` is the
+/// resolved workspace's `AkhConfig.mcp.require_pushed_mcp`;
+/// `AKH_REQUIRE_PUSHED_MCP` ("1"/"true" ⇒ strict, "0"/"false" ⇒ graceful)
+/// overrides it process-wide when set, mirroring the
+/// `*_from_env`/config-default pattern used by the idle-watchdog and
+/// socket-read-timeout settings above.
+fn require_pushed_mcp_effective(per_workspace_default: bool) -> bool {
+    std::env::var("AKH_REQUIRE_PUSHED_MCP")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(per_workspace_default)
+}
+
 impl AkhAcpAgent {
     /// Build a new ACP agent wrapper for a single workspace.
     ///
@@ -482,6 +507,7 @@ impl AkhAcpAgent {
             session_is_dispatch: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             name: "akh-medu".to_string(),
@@ -510,6 +536,7 @@ impl AkhAcpAgent {
             session_is_dispatch: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             client_caps: Arc::new(Mutex::new(None)),
@@ -551,13 +578,21 @@ impl AkhAcpAgent {
     /// Resolve a workspace's runtime handles for one request. In provider mode
     /// (daemon) this loads them on demand via [`ServerControl::resolve`]; in
     /// held mode (embedded/tests) it returns the single held workspace.
+    ///
+    /// The trailing `bool` is `require_pushed_mcp` (FIX2): the workspace's
+    /// `AkhConfig.mcp.require_pushed_mcp` policy for client-pushed MCP
+    /// servers, threaded through so `session/prompt` can choose strict vs.
+    /// graceful discovery. Held/embedded mode has no `AkhConfig` to read
+    /// (tests, single-workspace embeds) and defaults to `false` (graceful) —
+    /// the same default a provider-mode workspace gets from an absent/default
+    /// `akh.toml`.
     async fn resolve_handles(
         &self,
         workspace: &str,
-    ) -> Result<(Arc<Engine>, Arc<RwLock<Agent>>, Arc<Mutex<ChatProcessor>>), String> {
+    ) -> Result<(Arc<Engine>, Arc<RwLock<Agent>>, Arc<Mutex<ChatProcessor>>, bool), String> {
         if let Some(ctrl) = &self.control {
             match ctrl.resolve(workspace).await {
-                Ok(h) => return Ok((h.engine, h.agent, h.processor)),
+                Ok(h) => return Ok((h.engine, h.agent, h.processor, h.require_pushed_mcp)),
                 // A control wired only for the control-plane (e.g. tests, or an
                 // embed that keeps a single held engine) returns the default
                 // "not supported" — fall back to the held workspace if there is
@@ -567,7 +602,7 @@ impl AkhAcpAgent {
             }
         }
         match (&self.engine, &self.agent, &self.processor) {
-            (Some(e), Some(a), Some(p)) => Ok((Arc::clone(e), Arc::clone(a), Arc::clone(p))),
+            (Some(e), Some(a), Some(p)) => Ok((Arc::clone(e), Arc::clone(a), Arc::clone(p), false)),
             _ => Err("no workspace handles available (no engine held and no control backend)".into()),
         }
     }
@@ -670,11 +705,11 @@ impl AkhAcpAgent {
     /// tracked session's state once [`MAX_TRACKED_SESSIONS`] is exceeded.
     ///
     /// `sessions`, `session_mcp` (which holds any client-pushed bearer
-    /// tokens), `session_mcp_tools`, and `session_contexts` (per-session
-    /// cognitive state) are otherwise append-only with no session-end signal
-    /// in ACP, so without this a long-lived daemon would retain every
-    /// client's credentials, discovered tool set, and per-session cognitive
-    /// state forever — an unbounded memory leak. Eviction is true LRU-by-use
+    /// tokens), `session_mcp_tools`, `session_cancels`, and `session_contexts`
+    /// (per-session cognitive state) are otherwise append-only with no
+    /// session-end signal in ACP, so without this a long-lived daemon would
+    /// retain every client's credentials, discovered tool set, and per-session
+    /// cognitive state forever — an unbounded memory leak. Eviction is true LRU-by-use
     /// (see [`Self::touch_session`], called from [`Self::session_workspace`]
     /// on every prompt): a session only becomes the eviction victim once it
     /// is both the oldest tracked *and* has gone unused since every other
@@ -697,6 +732,10 @@ impl AkhAcpAgent {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
                 self.session_mcp_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_cancels
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
@@ -831,6 +870,7 @@ impl AkhAcpAgent {
         cancel: Arc<std::sync::atomic::AtomicBool>,
         is_dispatch: bool,
         mode_source: &'static str,
+        require_pushed_mcp: bool,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
@@ -893,16 +933,27 @@ impl AkhAcpAgent {
             // namespaced proxies for this turn only. Daemon-only: the HTTP MCP
             // client is behind the `daemon` feature.
             //
-            // **Defect-2 fix**: a session that loses any pushed MCP server
-            // **fails the turn** instead of continuing tool-less. The strict
-            // discovery variant retries once (short backoff) to ride through
-            // the intermittent HTTP 401s the work item documents, then
-            // surfaces the upstream status in an `error[acp]` message and
-            // returns [`TurnStartError::McpDiscoveryFailed`] so the prompt
-            // handler can end the turn with a stop reason Anima can
-            // distinguish from a clean completion. The cache is only written
-            // on a fully-successful pass, so a later prompt in the same
-            // session does not inherit a half-discovered tool set.
+            // FIX2: default is graceful degradation — a client-pushed MCP
+            // server is an OPTIONAL capability the host offers (the akh still
+            // has all its own tools), so a server that doesn't come back from
+            // discovery is skipped (with a visible warning streamed into the
+            // turn, see `discover_session_tools`), not fatal to the session.
+            // `require_pushed_mcp` (per-workspace `AkhConfig.mcp`, or the
+            // `AKH_REQUIRE_PUSHED_MCP` override — see
+            // `require_pushed_mcp_effective`) opts a workspace back into the
+            // old "unsafe" strict stance for dispatch contexts that genuinely
+            // cannot proceed without a specific pushed tool: the strict
+            // variant retries once (short backoff) to ride through
+            // intermittent HTTP 401s, then surfaces the upstream status in an
+            // `error[acp]` message and returns
+            // [`TurnStartError::McpDiscoveryFailed`] so the prompt handler
+            // can end the turn with a stop reason Anima can distinguish from
+            // a clean completion. Either way, the cache is only written on a
+            // discovery pass that actually ran (not the cache hit), so a
+            // later prompt in the same session does not re-run discovery —
+            // in graceful mode this also means a server that failed once
+            // stays skipped for the rest of the session (discovery is a
+            // once-per-session pass, not a per-prompt retry).
             #[cfg(feature = "daemon")]
             if !mcp_cfgs.is_empty() {
                 let cached = mcp_tool_cache
@@ -917,23 +968,26 @@ impl AkhAcpAgent {
                         // runs inside this `spawn_blocking` closure — but it
                         // only runs once per session; every later prompt hits
                         // the cache above with zero network I/O.
-                        match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &*sink) {
-                            Ok(d) => {
-                                mcp_tool_cache
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .insert(session_id.clone(), d.clone());
-                                d
+                        let discovered = if require_pushed_mcp {
+                            match mcp_bridge::discover_session_tools_strict(&mcp_cfgs, &*sink) {
+                                Ok(d) => d,
+                                Err(failure) => {
+                                    // The strict variant already streamed a
+                                    // per-server `error[acp]` message through
+                                    // `sink`; surface the aggregate failure to
+                                    // the prompt handler so it can end the
+                                    // turn with a distinct stop reason.
+                                    return Err(TurnStartError::McpDiscoveryFailed(failure));
+                                }
                             }
-                            Err(failure) => {
-                                // The strict variant already streamed a per-
-                                // server `error[acp]` message through `sink`;
-                                // surface the aggregate failure to the prompt
-                                // handler so it can end the turn with a
-                                // distinct stop reason.
-                                return Err(TurnStartError::McpDiscoveryFailed(failure));
-                            }
-                        }
+                        } else {
+                            mcp_bridge::discover_session_tools(&mcp_cfgs, &*sink)
+                        };
+                        mcp_tool_cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(session_id.clone(), discovered.clone());
+                        discovered
                     }
                 };
                 for tool in mcp_bridge::build_tools_from_discovered(&discovered) {
@@ -941,7 +995,7 @@ impl AkhAcpAgent {
                 }
             }
             #[cfg(not(feature = "daemon"))]
-            let _ = (&session_id, &mcp_cfgs, &mcp_tool_cache);
+            let _ = (&session_id, &mcp_cfgs, &mcp_tool_cache, require_pushed_mcp);
             // Prefer the LLM agentic loop (the akh's pinned Ollama model + tools),
             // which streams directly into `sink`; fall back to the symbolic
             // ChatProcessor when no model backend is reachable, emitting its
@@ -1285,8 +1339,11 @@ impl MessageSink for AcpSink {
 /// collects it; introspective content (reasoning steps, knowledge gaps, goal
 /// progress, audit entries) becomes an `AgentThoughtChunk` so it is surfaced as
 /// agent "thinking" rather than the answer. Structured fields beyond the text
-/// (confidence, provenance, tool-call lifecycle) are folded into the rendered
-/// text for now; richer `ToolCallUpdate`/`Plan` mappings are a later increment.
+/// (confidence, provenance) are folded into the rendered text. Tool-call
+/// lifecycle (`ToolCallStarted`/`ToolCallCompleted`) maps to the ACP
+/// `ToolCall`/`ToolCallUpdate` variants directly (see the match arms below) so
+/// a conformant client renders a real tool-call UI element instead of a prose
+/// thought line; a richer `Plan` mapping is still a later increment.
 fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
     let chunk = |text: String| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
     match msg {
@@ -1300,8 +1357,23 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         AkhMessage::Narrative { text, .. } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::System { text } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::ToolResult { tool, success, output } => {
-            // Tool calls + their results are turn "steps", not the answer — map
-            // them to thought chunks so the client folds them into the
+            // Kept as a thought chunk (not folded into the ToolCall* mapping
+            // above): as of this change, nothing in the live turn path
+            // constructs `ToolResult` any more — `ToolExecutionTracker` (the
+            // `ToolCallStarted`/`ToolCallCompleted` pair mapped above) is now
+            // the sole source of ACP tool-call narration for both the
+            // agentic LLM loop and the symbolic `ChatProcessor` fallback (see
+            // `run_turn`, which installs the tracker before either path
+            // runs). `ToolResult` survives only as a variant the TUI and
+            // `oxifed` renderers still match on for other producers (e.g. a
+            // future symbolic-only caller); should one ever emit it again
+            // over ACP, this stays a plain thought line rather than a second
+            // (and un-correlated — no `tool_id`) `ToolCall` update, so it
+            // degrades to redundant narration instead of a conflicting or
+            // orphaned tool-call UI element.
+            //
+            // Tool calls + their results are turn "steps", not the answer —
+            // map them to thought chunks so the client folds them into the
             // collapsible thinking section rather than the response body.
             // Trailing newline keeps each tool step on its own line when the
             // client coalesces a turn's thought chunks into one block.
@@ -1332,43 +1404,61 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         AkhMessage::AuditLog { kind, summary, .. } => {
             SessionUpdate::AgentThoughtChunk(chunk(format!("audit[{kind}]: {summary}")))
         }
-        AkhMessage::ToolCallStarted { .. } | AkhMessage::ToolCallCompleted { .. } => {
-            // These are mapped to SessionUpdate::ToolCall* variants below, not
-            // thought chunks. This arm is a temporary stub while the ACP protocol
-            // update lands — for now they still go through AgentThoughtChunk.
-            use crate::message::ToolKind;
-            match msg {
-                AkhMessage::ToolCallStarted { tool_id, kind, title, locations } => {
-                    let loc_str = if locations.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", locations.join(", "))
-                    };
-                    let kind_str = match kind {
-                        ToolKind::Execute => "exec",
-                        ToolKind::Edit => "edit",
-                        ToolKind::Fetch => "fetch",
-                        ToolKind::Search => "search",
-                        ToolKind::Other => "tool",
-                    };
-                    SessionUpdate::AgentThoughtChunk(chunk(format!(
-                        "[{kind_str}:{tool_id}] {title}{loc_str}\n"
-                    )))
-                }
-                AkhMessage::ToolCallCompleted { tool_id, success, output, diff } => {
-                    let status = if *success { "ok" } else { "failed" };
-                    let mut text = format!("[{tool_id}:{status}]");
-                    if let Some(out) = output {
-                        text.push_str(&format!(" {out}"));
-                    }
-                    if let Some(d) = diff {
-                        text.push_str(&format!("\n{d}"));
-                    }
-                    text.push('\n');
-                    SessionUpdate::AgentThoughtChunk(chunk(text))
-                }
-                _ => unreachable!(),
+        AkhMessage::ToolCallStarted { tool_id, kind, title, locations } => {
+            use agent_client_protocol::schema::{
+                ToolCall, ToolCallLocation, ToolCallStatus, ToolKind as AcpToolKind,
+            };
+            // 1:1 mapping — every `crate::message::ToolKind` variant has a
+            // same-named counterpart in the ACP schema's (larger, `#[non_exhaustive]`)
+            // `ToolKind` enum; we just never produce the schema's other variants
+            // (Read/Delete/Move/Think/SwitchMode) from this tracker today.
+            let acp_kind = match kind {
+                crate::message::ToolKind::Execute => AcpToolKind::Execute,
+                crate::message::ToolKind::Edit => AcpToolKind::Edit,
+                crate::message::ToolKind::Fetch => AcpToolKind::Fetch,
+                crate::message::ToolKind::Search => AcpToolKind::Search,
+                crate::message::ToolKind::Other => AcpToolKind::Other,
+            };
+            let acp_locations = locations
+                .iter()
+                .map(|p| ToolCallLocation::new(p.clone()))
+                .collect::<Vec<_>>();
+            SessionUpdate::ToolCall(
+                ToolCall::new(tool_id.clone(), title.clone())
+                    .kind(acp_kind)
+                    .status(ToolCallStatus::InProgress)
+                    .locations(acp_locations),
+            )
+        }
+        AkhMessage::ToolCallCompleted { tool_id, success, output, diff } => {
+            use agent_client_protocol::schema::{
+                Content, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
+            };
+            let status = if *success { ToolCallStatus::Completed } else { ToolCallStatus::Failed };
+            let mut content = Vec::new();
+            if let Some(out) = output {
+                content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
+                    TextContent::new(out.clone()),
+                ))));
             }
+            if let Some(d) = diff {
+                // TODO(diff-content): `AkhMessage::ToolCallCompleted.diff` is a
+                // plain rendered `String` today, not a structured
+                // `{path, old_text, new_text}` triple, so we can't build a real
+                // `ToolCallContent::Diff` here (it needs the path + before/after
+                // text, not a unified-diff string). Upgrading the tool layer
+                // (`ToolExecutionTracker`/`ToolCallGuard::complete`) to carry a
+                // structured diff would let this become
+                // `ToolCallContent::Diff(Diff::new(path, new_text).old_text(old_text))`
+                // instead of stuffing the rendered diff into an extra text block.
+                content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
+                    TextContent::new(d.clone()),
+                ))));
+            }
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                tool_id.clone(),
+                ToolCallUpdateFields::new().status(status).content(content),
+            ))
         }
     }
 }
@@ -3570,20 +3660,36 @@ fn build_connection(
                         // Track + cap-evict session state before recording
                         // anything for this session — see `track_new_session`.
                         me.track_new_session(&session_id.to_string());
-                        // The client encodes the target workspace in the session
-                        // `cwd` as the sentinel `akh-ws:<name>` (akhomed otherwise
-                        // ignores the client cwd). Record session → workspace so
-                        // each prompt routes to that akh — the chat half of `-w`.
-                        if let Some(ws) = req
-                            .cwd
-                            .to_str()
-                            .and_then(|s| s.strip_prefix("akh-ws:"))
-                            .filter(|s| !s.is_empty())
-                        {
+                        // Resolve the target workspace, in precedence order:
+                        // (1) an explicit `_meta["akh/workspace"]` string —
+                        //     additive (A4): a client that can't/won't stuff
+                        //     the workspace into `cwd` (e.g. one that treats
+                        //     `cwd` as a real filesystem path) can name it
+                        //     directly instead.
+                        // (2) the existing `akh-ws:<name>` `cwd` sentinel —
+                        //     every prior client keeps working unchanged.
+                        // (3) unset — `session_workspace` falls back to the
+                        //     daemon's configured default.
+                        // `req.cwd` is logged either way (even when it wasn't
+                        // used for routing) so the follow-up session-cwd pass
+                        // (explicitly NOT done in this change) has a paper
+                        // trail of what clients actually send.
+                        tracing::debug!(
+                            session = %session_id,
+                            cwd = %req.cwd.display(),
+                            meta_akh_workspace = req
+                                .meta
+                                .as_ref()
+                                .and_then(|m| m.get("akh/workspace"))
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(""),
+                            "session/new: cwd + _meta observed"
+                        );
+                        if let Some(ws) = resolve_session_workspace(req.meta.as_ref(), &req.cwd) {
                             me.sessions
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .insert(session_id.to_string(), ws.to_string());
+                                .insert(session_id.to_string(), ws);
                         }
                         // WI-280: Detect dispatch mode from the session cwd. Anima
                         // dispatches work from worktree paths matching the pattern
@@ -3641,6 +3747,28 @@ fn build_connection(
                       cx: ConnectionTo<Client>| {
                     let me = me.clone();
                     async move {
+                        // A2 / "Handlers Must Not Block" (see this crate's
+                        // `HandleDispatchFrom` docs): a connection processes
+                        // messages on a single async task, and does not read
+                        // the next one until this handler's future resolves.
+                        // A prompt turn can run for the whole
+                        // `turn_idle_timeout` (5 min by default) — if that ran
+                        // inline here, a `session/cancel` notification sent on
+                        // THIS SAME connection while the turn is in flight
+                        // would sit unprocessed until the turn already ended,
+                        // making cancellation impossible for exactly the
+                        // client shape that needs it most (one connection per
+                        // session, request + out-of-band notification
+                        // interleaved). `cx.spawn` — the crate's documented
+                        // fix for "expensive operations" — detaches the turn
+                        // onto its own task so this connection keeps
+                        // dispatching incoming messages (including
+                        // session/cancel) while it runs; the client still
+                        // receives exactly one `PromptResponse`, sent by
+                        // `responder.respond(...)` at the spawned task's tail,
+                        // same as before.
+                        let cx_for_spawn = cx.clone();
+                        cx_for_spawn.spawn(async move {
                         let session_id = req.session_id.clone();
                         let text = concat_prompt(&req.prompt);
 
@@ -3691,7 +3819,7 @@ fn build_connection(
                                 )),
                             }
                         };
-                        let (engine, agent, processor) = match resolved {
+                        let (engine, agent, processor, require_pushed_mcp) = match resolved {
                             Ok(h) => h,
                             Err(e) => {
                                 me.end_turn(&ws);
@@ -3722,6 +3850,11 @@ fn build_connection(
                             .unwrap_or_else(|e| e.into_inner())
                             .nlu_pipeline()
                             .tier_status();
+
+                        // FIX2: `AKH_REQUIRE_PUSHED_MCP` overrides the
+                        // workspace's `AkhConfig.mcp.require_pushed_mcp`
+                        // policy process-wide, when set.
+                        let require_pushed_mcp = require_pushed_mcp_effective(require_pushed_mcp);
 
                         // Per-turn permission bridge: a sync asker (consulted
                         // inside the blocking chat turn when the policy says
@@ -3758,7 +3891,22 @@ fn build_connection(
                         // without this, the `spawn_blocking` worker held
                         // `agent`'s `Mutex` forever once the watchdog gave up,
                         // wedging every later prompt for the workspace.
+                        //
+                        // Also the client-cancellation flag (A2): a
+                        // `session/cancel` notification for this session
+                        // (see the `.on_receive_notification_from` handler
+                        // below) sets the SAME flag via `session_cancels`, so
+                        // `run_agentic_turn`'s round-boundary poll can't tell
+                        // watchdog-timeout and client-requested cancellation
+                        // apart — which is fine, since either way the correct
+                        // action is "stop at the next round boundary". The
+                        // two paths diverge only in which `StopReason` this
+                        // handler reports once the worker actually returns.
                         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                        me.session_cancels
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(session_id.to_string(), Arc::clone(&cancel));
                         // WI-280: Resolve dispatch mode for this session — the
                         // mode is a per-turn property, not a process-wide flag.
                         let (is_dispatch, mode_source) = me.session_dispatch_mode(&session_id.to_string());
@@ -3777,6 +3925,7 @@ fn build_connection(
                             Arc::clone(&cancel),
                             is_dispatch,
                             mode_source,
+                            require_pushed_mcp,
                         );
                         // The busy tracker (`begin_turn` above) must stay set
                         // until the worker actually finishes, which may be
@@ -3796,6 +3945,16 @@ fn build_connection(
                                 async move {
                                     let result = handle.await;
                                     end_me.end_turn(&end_ws);
+                                    // A2: the turn is over — a `session/cancel`
+                                    // notification arriving after this point has
+                                    // nothing to set (no in-flight turn), so drop
+                                    // the flag rather than let it linger for the
+                                    // session's remaining lifetime.
+                                    end_me
+                                        .session_cancels
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .remove(&end_session.to_string());
                                     let _ = done_tx.send(result);
                                 }
                                 .instrument(tracing::info_span!(
@@ -4158,7 +4317,22 @@ fn build_connection(
                         }
                         let _ = approver.await;
 
-                        responder.respond(PromptResponse::new(StopReason::EndTurn))
+                        // A2: distinguish a client-requested cancellation from
+                        // a clean completion. The watchdog-stall path above
+                        // already returned early with `StopReason::Refusal`
+                        // (a distinct outcome), so reaching here with `cancel`
+                        // set means a `session/cancel` notification (not the
+                        // watchdog) asked the worker to stop, and it did so
+                        // cleanly at its next round boundary — report the
+                        // spec-mandated `Cancelled` stop reason rather than
+                        // `EndTurn`.
+                        let stop_reason = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            StopReason::Cancelled
+                        } else {
+                            StopReason::EndTurn
+                        };
+                        responder.respond(PromptResponse::new(stop_reason))
+                        }) // end cx_for_spawn.spawn — see the A2 note at the top of this handler
                     }
                 }
             },
@@ -4262,7 +4436,7 @@ fn build_connection(
                                     // silent split-brain wake.
                                     if AGENT_READ_METHODS.contains(&method) {
                                         match me.resolve_handles(&workspace).await {
-                                            Ok((engine, agent, _processor)) => {
+                                            Ok((engine, agent, _processor, _require_pushed_mcp)) => {
                                                 // Agent is resident — serve the
                                                 // full agent-read response.
                                                 if let Some(result) = dispatch_akh_agent(
@@ -4342,7 +4516,7 @@ fn build_connection(
                                         }
                                     }
 
-                                    let (engine, agent, _processor) =
+                                    let (engine, agent, _processor, _require_pushed_mcp) =
                                         match me.resolve_handles(&workspace).await {
                                             Ok(h) => h,
                                             Err(e) => {
@@ -4470,6 +4644,64 @@ fn build_connection(
             },
             agent_client_protocol::on_receive_dispatch!(),
         )
+        // ── session/cancel ──────────────────────────────────────────────
+        //
+        // A2: the client's "stop" action. ACP delivers this as a
+        // notification (fire-and-forget, no response expected), so the
+        // handler's only job is to set the matching turn's cancel flag (if
+        // one is still in flight — see `session_cancels`) and return;
+        // `run_agentic_turn`'s existing round-boundary poll (previously only
+        // ever set by the idle watchdog) does the actual unwinding, and the
+        // `session/prompt` handler reports `StopReason::Cancelled` once the
+        // worker returns with the flag set.
+        .on_receive_notification_from(
+            Client,
+            {
+                let me = me.clone();
+                move |n: CancelNotification, _cx: ConnectionTo<Client>| {
+                    let me = me.clone();
+                    async move {
+                        let session_id = n.session_id.to_string();
+                        let found = me
+                            .session_cancels
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&session_id)
+                            .map(|flag| flag.store(true, std::sync::atomic::Ordering::Relaxed))
+                            .is_some();
+                        if found {
+                            tracing::info!(session = %session_id, "session/cancel: turn signalled to stop");
+                        } else {
+                            tracing::debug!(
+                                session = %session_id,
+                                "session/cancel for a session with no turn in flight (already \
+                                 finished, or never started) — no-op"
+                            );
+                        }
+                        Ok(())
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+}
+
+/// Resolve the workspace a new ACP session should route to (A4), in
+/// precedence order: an explicit `_meta["akh/workspace"]` string, then the
+/// legacy `akh-ws:<name>` `cwd` sentinel, then `None` (the caller falls back
+/// to the daemon's configured default workspace). Pure and side-effect-free
+/// so it's unit-testable without a live session.
+fn resolve_session_workspace(meta: Option<&Meta>, cwd: &Path) -> Option<String> {
+    meta.and_then(|m| m.get("akh/workspace"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            cwd.to_str()
+                .and_then(|s| s.strip_prefix("akh-ws:"))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Concatenate the text content of a prompt's content blocks.
@@ -4758,7 +4990,13 @@ where
 {
     // Encode the target workspace in the session `cwd` as `akh-ws:<name>`; the
     // daemon reads it at `session/new` to route this session's prompts to that
-    // akh (the chat half of `-w`). akhomed otherwise ignores the client cwd.
+    // akh (the chat half of `-w`). Kept consistent with A4's resolution
+    // precedence (`resolve_session_workspace`): the daemon now ALSO accepts
+    // `_meta["akh/workspace"]`, checked before this `cwd` sentinel, for
+    // clients that can't/won't repurpose `cwd` — but this is akhomed's own
+    // reference client, `cwd` already works end-to-end, and the daemon still
+    // honors it as the second-priority route, so there's nothing to change
+    // here; this note exists so the two don't silently drift apart.
     let cwd = format!("akh-ws:{workspace}");
     Client
         .builder()
@@ -6153,6 +6391,116 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task).await;
     }
 
+    // ── A2: session/cancel ───────────────────────────────────────────────
+
+    /// Connect, `initialize`, and send a bare `session/cancel` notification
+    /// for `session_id` — no `session/new` first, since the daemon's cancel
+    /// handler only needs to find (or not find) an entry in
+    /// `session_cancels` keyed by session id; it doesn't validate the
+    /// session exists. Sleeps briefly after sending so the connection's
+    /// write task has a chance to flush before the closure returns and the
+    /// connection tears down.
+    async fn unix_client_send_cancel(stream: UnixStream, session_id: &str) {
+        let session_id = session_id.to_string();
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let lifecycle = Client
+            .builder()
+            .name("akh-acp-test-client-cancel")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                cx.send_notification(CancelNotification::new(session_id))?;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                Ok(())
+            });
+        tokio::time::timeout(std::time::Duration::from_secs(10), lifecycle)
+            .await
+            .expect("unix client cancel lifecycle timed out")
+            .expect("unix client cancel lifecycle completed");
+    }
+
+    /// A `session/cancel` notification for a session with a turn in flight
+    /// must set that turn's cancel flag. This drives the ACTUAL wire path
+    /// (real Unix socket, real JSON-RPC notification, real
+    /// `.on_receive_notification_from(Client, ...)` handler) rather than
+    /// calling the handler logic directly — the only thing it doesn't
+    /// exercise end-to-end is a live agentic round loop actually noticing
+    /// the flag mid-turn, which needs a real chat backend (Ollama) this test
+    /// sandbox does not have. The flag is pre-registered the same way
+    /// `session/prompt` registers it (see `AkhAcpAgent::session_cancels`),
+    /// standing in for "a turn is in flight for this session".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cancel_notification_sets_the_matching_turns_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-cancel.sock");
+        let me = workspace();
+
+        let session_id = "akh-cancel-test-session";
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        me.session_cancels
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), Arc::clone(&flag));
+
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        unix_client_send_cancel(stream, session_id).await;
+
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "session/cancel must set the matching in-flight turn's cancel flag"
+        );
+    }
+
+    /// A `session/cancel` for a session with NO turn in flight (unknown, or
+    /// already finished) must be a quiet no-op — it must not error the
+    /// connection or panic the daemon. Asserted by sending the notification
+    /// and then a normal `_akh/health` request over the SAME connection
+    /// (`serve_unix` accepts exactly one connection, so this must reuse it
+    /// rather than dialing a second time) and checking both succeed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_cancel_for_unknown_session_is_a_safe_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-cancel-unknown.sock");
+        let me = workspace();
+
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let lifecycle = Client
+            .builder()
+            .name("akh-acp-test-client-cancel-unknown")
+            .connect_with(transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                // No entry was ever registered for this session id.
+                cx.send_notification(CancelNotification::new("akh-never-existed"))?;
+                // The connection must still be healthy afterward — a normal
+                // `_akh/*` data-plane request on the SAME connection succeeds.
+                let resp: AkhExtResponse = cx
+                    .send_request(AkhExtRequest {
+                        method: "_akh/health".to_string(),
+                        params: serde_json::json!({}),
+                    })
+                    .block_task()
+                    .await?;
+                Ok(resp.0)
+            });
+        let health = tokio::time::timeout(std::time::Duration::from_secs(10), lifecycle)
+            .await
+            .expect("lifecycle timed out after an unknown-session cancel")
+            .expect("lifecycle completed after an unknown-session cancel");
+        assert_eq!(health["status"], "ok");
+    }
+
     /// Drive an ACP prompt lifecycle that pushes a broken MCP server at
     /// `session/new` (one whose discovery will fail), returning the
     /// concatenated agent message text. Used by the defect-2 regression
@@ -6195,23 +6543,91 @@ mod tests {
             .expect("unix client lifecycle completed")
     }
 
-    /// Defect-2 regression: a session whose MCP discovery fails must terminate
-    /// with that failure visible in its thread, instead of running without
-    /// tools. Pushes a broken MCP server (port 1 — nothing binds it on the
-    /// test runner), sends a prompt, and asserts the turn output carries the
-    /// `_akh_mcp_discovery_failed` marker and a per-server `error[acp]` line.
+    /// FIX2 (default policy change): a session whose MCP discovery fails now
+    /// degrades gracefully BY DEFAULT — the broken server is skipped (with a
+    /// visible warning streamed into the turn) and the session continues,
+    /// instead of aborting the whole turn. Pushes a broken MCP server (port
+    /// 1 — nothing binds it on the test runner), sends a prompt, and asserts
+    /// the turn output carries a "skipped" notice naming the broken server
+    /// but NOT the `_akh_mcp_discovery_failed` marker.
     ///
-    /// Before the fix, `discover_session_tools` logged "skipping" and the
-    /// session continued with zero Anima tools — indistinguishable from an
-    /// agent that simply chose not to act.
+    /// This replaces the old default-strict behavior (see the sibling
+    /// `..._when_strict_mode_is_forced` test below for that opt-in path):
+    /// the reported motivation was a real t3 GUI turn dying with
+    /// `_akh_mcp_discovery_failed` over an MCP protocol-version mismatch
+    /// (fixed separately — see `upstream_client.rs`), which surfaced that
+    /// ANY flaky client-pushed MCP server — an OPTIONAL host capability, not
+    /// a hard akh dependency — was aborting turns outright, plausibly
+    /// including Anima dispatches.
     ///
-    /// Gated on the `daemon` feature: the MCP bridge's strict-discovery path
-    /// is `#[cfg(feature = "daemon")]`-only (the HTTP MCP client lives
-    /// behind that gate), so without `daemon` the session has no bridge to
-    /// fail and the assertion would be meaningless.
+    /// Gated on the `daemon` feature: the MCP bridge lives behind that gate,
+    /// so without `daemon` the session has no bridge to exercise and the
+    /// assertion would be meaningless.
     #[cfg(feature = "daemon")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn mcp_discovery_failure_fails_the_session_instead_of_continuing() {
+    async fn mcp_discovery_failure_degrades_gracefully_by_default() {
+        // `AKH_REQUIRE_PUSHED_MCP` is process-wide state, and Rust tests run
+        // concurrently in the same process — without this lock (shared with
+        // every other test that mutates env vars in this module), this test
+        // can race the sibling `..._when_strict_mode_is_forced` test, observe
+        // its `AKH_REQUIRE_PUSHED_MCP=1`, and flake into the strict path.
+        // Also proactively ensure the var is absent: a prior test panicking
+        // before its `EnvGuard::drop` ran (unlikely, since Rust unwinds
+        // through `Drop` on a test panic, but this is cheap insurance) would
+        // otherwise leak `1` into every later test.
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("AKH_REQUIRE_PUSHED_MCP");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-mcp-graceful.sock");
+
+        let me = workspace().with_turn_idle_timeout(std::time::Duration::from_secs(10));
+
+        let server_sock = sock.clone();
+        let _server = tokio::spawn(async move { serve_unix(me, &server_sock).await });
+
+        let stream = connect_with_retry(&sock).await;
+        let answer = unix_client_prompt_with_broken_mcp(stream).await;
+
+        assert!(
+            !answer.contains("_akh_mcp_discovery_failed"),
+            "default policy must NOT fail the session over a broken pushed \
+             server, got: {answer:?}"
+        );
+        assert!(
+            answer.contains("skipped") && answer.contains("anima"),
+            "expected a visible 'skipped' notice naming the broken server, \
+             got: {answer:?}"
+        );
+    }
+
+    /// FIX2 opt-in: with `require_pushed_mcp` forced on (here via the
+    /// `AKH_REQUIRE_PUSHED_MCP` env override — a real deployment would set
+    /// this via a workspace's `akh.toml` `[mcp] require_pushed_mcp = true`
+    /// instead), the pre-FIX2 strict behavior is still available: a session
+    /// whose MCP discovery fails aborts the turn with the
+    /// `_akh_mcp_discovery_failed` marker. This is the original defect-2
+    /// regression test, now scoped to the strict opt-in rather than the
+    /// (former) default.
+    #[cfg(feature = "daemon")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mcp_discovery_failure_fails_the_session_when_strict_mode_is_forced() {
+        let _lock = ENV_TEST_LOCK.lock().unwrap();
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("AKH_REQUIRE_PUSHED_MCP");
+                }
+            }
+        }
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::set_var("AKH_REQUIRE_PUSHED_MCP", "1");
+        }
+
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("akh-mcp-fail.sock");
 
@@ -7531,6 +7947,184 @@ mod tests {
             entity: "E".into(),
             description: "missing".into(),
         })));
+    }
+
+    /// `ToolCallStarted` must map to a real `SessionUpdate::ToolCall`, not a
+    /// thought chunk — the whole point of A1 (the ACP tool-call structured
+    /// mapping) is that a conformant client renders a first-class tool-call
+    /// UI element instead of parsing `[exec:id] title` out of prose.
+    #[test]
+    fn to_session_update_maps_tool_call_started_to_tool_call() {
+        let update = to_session_update(&AkhMessage::ToolCallStarted {
+            tool_id: "exec_1".into(),
+            kind: crate::message::ToolKind::Execute,
+            title: "ls /tmp".into(),
+            locations: vec!["/tmp".into()],
+        });
+        match update {
+            SessionUpdate::ToolCall(tc) => {
+                assert_eq!(tc.tool_call_id.to_string(), "exec_1");
+                assert_eq!(tc.title, "ls /tmp");
+                assert_eq!(tc.kind, agent_client_protocol::schema::ToolKind::Execute);
+                assert_eq!(tc.status, agent_client_protocol::schema::ToolCallStatus::InProgress);
+                assert_eq!(tc.locations.len(), 1);
+                assert_eq!(tc.locations[0].path, std::path::PathBuf::from("/tmp"));
+            }
+            other => panic!("expected SessionUpdate::ToolCall, got {other:?}"),
+        }
+    }
+
+    /// Every `crate::message::ToolKind` variant round-trips to its
+    /// same-named ACP schema `ToolKind` counterpart (the mapping this change
+    /// documents as 1:1).
+    #[test]
+    fn to_session_update_tool_kind_mapping_is_1to1() {
+        use agent_client_protocol::schema::ToolKind as AcpToolKind;
+        let cases = [
+            (crate::message::ToolKind::Execute, AcpToolKind::Execute),
+            (crate::message::ToolKind::Edit, AcpToolKind::Edit),
+            (crate::message::ToolKind::Fetch, AcpToolKind::Fetch),
+            (crate::message::ToolKind::Search, AcpToolKind::Search),
+            (crate::message::ToolKind::Other, AcpToolKind::Other),
+        ];
+        for (msg_kind, expected) in cases {
+            let update = to_session_update(&AkhMessage::ToolCallStarted {
+                tool_id: "t".into(),
+                kind: msg_kind,
+                title: "t".into(),
+                locations: vec![],
+            });
+            let SessionUpdate::ToolCall(tc) = update else {
+                panic!("expected ToolCall");
+            };
+            assert_eq!(tc.kind, expected, "{msg_kind:?} should map to {expected:?}");
+        }
+    }
+
+    /// `ToolCallCompleted` maps to `SessionUpdate::ToolCallUpdate` with the
+    /// right status and carries both `output` and `diff` as content blocks
+    /// (the diff as an extra text block — see the TODO(diff-content) note in
+    /// `to_session_update` — until `AkhMessage::ToolCallCompleted.diff`
+    /// carries structured path/old/new text).
+    #[test]
+    fn to_session_update_maps_tool_call_completed_to_tool_call_update() {
+        let update = to_session_update(&AkhMessage::ToolCallCompleted {
+            tool_id: "exec_1".into(),
+            success: true,
+            output: Some("done".into()),
+            diff: Some("--- a\n+++ b\n".into()),
+        });
+        match update {
+            SessionUpdate::ToolCallUpdate(u) => {
+                assert_eq!(u.tool_call_id.to_string(), "exec_1");
+                assert_eq!(
+                    u.fields.status,
+                    Some(agent_client_protocol::schema::ToolCallStatus::Completed)
+                );
+                let content = u.fields.content.expect("content set");
+                assert_eq!(content.len(), 2, "expected output + diff as two content blocks");
+            }
+            other => panic!("expected SessionUpdate::ToolCallUpdate, got {other:?}"),
+        }
+    }
+
+    /// A failed tool call reports `ToolCallStatus::Failed`, not `Completed`.
+    #[test]
+    fn to_session_update_maps_failed_tool_call_completed_to_failed_status() {
+        let update = to_session_update(&AkhMessage::ToolCallCompleted {
+            tool_id: "exec_2".into(),
+            success: false,
+            output: Some("boom".into()),
+            diff: None,
+        });
+        match update {
+            SessionUpdate::ToolCallUpdate(u) => {
+                assert_eq!(
+                    u.fields.status,
+                    Some(agent_client_protocol::schema::ToolCallStatus::Failed)
+                );
+                assert_eq!(u.fields.content.expect("content set").len(), 1, "output only, no diff");
+            }
+            other => panic!("expected SessionUpdate::ToolCallUpdate, got {other:?}"),
+        }
+    }
+
+    /// `AkhMessage::ToolResult` (the legacy, no-longer-constructed variant —
+    /// see the reasoning comment in `to_session_update`) still routes to a
+    /// thought chunk, not a `ToolCall*` update.
+    #[test]
+    fn to_session_update_tool_result_stays_a_thought_chunk() {
+        let update = to_session_update(&AkhMessage::ToolResult {
+            tool: "shell_exec".into(),
+            success: true,
+            output: "ok".into(),
+        });
+        assert!(matches!(update, SessionUpdate::AgentThoughtChunk(_)));
+    }
+
+    // ── A4: session/new workspace resolution precedence ─────────────────────
+
+    /// `_meta["akh/workspace"]` wins over the `cwd` sentinel when both are
+    /// present.
+    #[test]
+    fn resolve_session_workspace_prefers_meta_over_cwd() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("akh/workspace".to_string(), serde_json::Value::from("from-meta"));
+        let cwd = Path::new("akh-ws:from-cwd");
+        assert_eq!(
+            resolve_session_workspace(Some(&meta), cwd),
+            Some("from-meta".to_string())
+        );
+    }
+
+    /// With no `_meta` (or no matching key), the legacy `akh-ws:<name>` `cwd`
+    /// sentinel is still honored — every pre-A4 client keeps working.
+    #[test]
+    fn resolve_session_workspace_falls_back_to_cwd_sentinel() {
+        let cwd = Path::new("akh-ws:from-cwd");
+        assert_eq!(resolve_session_workspace(None, cwd), Some("from-cwd".to_string()));
+
+        let mut meta = serde_json::Map::new();
+        meta.insert("some/other/key".to_string(), serde_json::Value::from("irrelevant"));
+        assert_eq!(
+            resolve_session_workspace(Some(&meta), cwd),
+            Some("from-cwd".to_string())
+        );
+    }
+
+    /// Neither `_meta` nor a `cwd` sentinel present ⇒ `None`, so the caller
+    /// falls back to the daemon's configured default workspace.
+    #[test]
+    fn resolve_session_workspace_none_when_neither_present() {
+        let cwd = Path::new("/home/user/projects/my-app");
+        assert_eq!(resolve_session_workspace(None, cwd), None);
+    }
+
+    /// An empty `_meta["akh/workspace"]` string is treated as absent (falls
+    /// through to `cwd`), matching the existing "empty cwd sentinel is
+    /// ignored" behavior — an empty workspace name is never a valid route.
+    #[test]
+    fn resolve_session_workspace_empty_meta_value_falls_through_to_cwd() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("akh/workspace".to_string(), serde_json::Value::from(""));
+        let cwd = Path::new("akh-ws:from-cwd");
+        assert_eq!(
+            resolve_session_workspace(Some(&meta), cwd),
+            Some("from-cwd".to_string())
+        );
+    }
+
+    /// A non-string `_meta["akh/workspace"]` value is ignored (falls through
+    /// to `cwd`) rather than panicking or silently stringifying the JSON.
+    #[test]
+    fn resolve_session_workspace_non_string_meta_value_falls_through_to_cwd() {
+        let mut meta = serde_json::Map::new();
+        meta.insert("akh/workspace".to_string(), serde_json::Value::from(42));
+        let cwd = Path::new("akh-ws:from-cwd");
+        assert_eq!(
+            resolve_session_workspace(Some(&meta), cwd),
+            Some("from-cwd".to_string())
+        );
     }
 
     // ── control-plane routing (the ServerControl seam) ──────────────────────

@@ -2865,10 +2865,21 @@ impl akh_medu::acp::ServerControl for ServerState {
                 let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
                 akh_medu::chat::ChatProcessor::new(&engine, p.clone())
             };
+            // `get_akh_config` never fails in practice (a missing/malformed
+            // akh.toml falls back to name-only defaults — see its doc), so a
+            // real Err here is unexpected; fall back to the graceful-degrade
+            // default rather than let a config hiccup fail workspace
+            // resolution entirely.
+            let require_pushed_mcp = self
+                .get_akh_config(workspace)
+                .await
+                .map(|cfg| cfg.mcp.require_pushed_mcp)
+                .unwrap_or(false);
             Ok(akh_medu::acp::WorkspaceHandles {
                 engine,
                 agent,
                 processor: std::sync::Arc::new(std::sync::Mutex::new(processor)),
+                require_pushed_mcp,
             })
         })
     }

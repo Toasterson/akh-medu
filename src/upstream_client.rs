@@ -4,9 +4,23 @@
 //! context from Anima (project management) and Seshat (document corpus) into the
 //! local knowledge graph.
 //!
-//! Implements the MCP Streamable HTTP transport (2025-03-26): sends an initialize
-//! request to establish a session, then calls the requested tool. All I/O uses
-//! `ureq` (blocking) and must be invoked from within `tokio::task::spawn_blocking`.
+//! Implements the MCP Streamable HTTP transport: sends an `initialize` request
+//! (requesting `rmcp::model::ProtocolVersion::LATEST`) to establish a session,
+//! adopts whatever version the upstream negotiates back, then calls the
+//! requested tool. All I/O uses `ureq` (blocking) and must be invoked from
+//! within `tokio::task::spawn_blocking`.
+//!
+//! Protocol version: we request the latest version this SDK knows
+//! ([`rmcp::model::ProtocolVersion::LATEST`]) and log whatever the server
+//! names back in its `InitializeResult` — per the MCP spec the server may
+//! answer with a different (older) version than requested, and clients are
+//! expected to adopt it. This is a real split in practice: `seshd` (our own
+//! `rmcp`-based server) always answers with its fixed, older
+//! `V_2025_03_26`, while `t3-code`'s MCP server only accepts the newest
+//! `V_2025_06_18` and rejects anything else at the transport level (HTTP
+//! 400) — requesting `LATEST` satisfies both, since seshd's `initialize`
+//! handler ignores the requested version entirely and t3 wants exactly this
+//! one.
 //!
 //! # Example
 //!
@@ -22,6 +36,7 @@
 use std::time::Duration;
 
 use miette::Diagnostic;
+use rmcp::model::ProtocolVersion;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -205,24 +220,49 @@ impl UpstreamMcpClient {
     /// treated as "no session" — callers then attempt a direct call/list
     /// without a session ID, matching upstreams that don't require one.
     fn init_session(&self) -> Option<String> {
-        let init_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "akhomed-bridge",
-                    "version": env!("CARGO_PKG_VERSION")
-                }
-            }
-        });
+        let init_payload = initialize_payload(ProtocolVersion::LATEST);
 
         match self.send_rpc(self.post_mcp(), init_payload) {
             Ok((sid, json)) => {
                 // Non-fatal RPC errors during init are ignored; proceed anyway.
                 if !json["error"].is_object() {
+                    // Adopt whatever protocol version the upstream negotiated
+                    // back in its InitializeResult — the MCP spec lets the
+                    // server name a different version than we requested (see
+                    // the module doc: seshd always answers with its own
+                    // fixed, older version). We don't yet gate any wire-shape
+                    // decision on the negotiated version, so an unknown one
+                    // is logged loudly (not silently accepted) rather than
+                    // failing the call outright.
+                    match json["result"]["protocolVersion"].as_str() {
+                        Some(v) => {
+                            let negotiated: ProtocolVersion = serde_json::from_value(
+                                Value::String(v.to_string()),
+                            )
+                            .unwrap_or(ProtocolVersion::LATEST);
+                            if ProtocolVersion::KNOWN_VERSIONS.contains(&negotiated) {
+                                tracing::info!(
+                                    endpoint = %self.endpoint,
+                                    version = %negotiated,
+                                    "MCP protocol version negotiated"
+                                );
+                            } else {
+                                tracing::error!(
+                                    endpoint = %self.endpoint,
+                                    version = %negotiated,
+                                    "upstream negotiated an MCP protocol version this SDK \
+                                     does not know; proceeding, but the wire format may not \
+                                     match what we expect"
+                                );
+                            }
+                        }
+                        None => {
+                            tracing::debug!(
+                                endpoint = %self.endpoint,
+                                "upstream initialize response carried no protocolVersion field"
+                            );
+                        }
+                    }
                     // MCP requires the client to follow a successful
                     // `initialize` with a `notifications/initialized`
                     // notification before issuing requests. rmcp-based
@@ -370,6 +410,25 @@ impl UpstreamMcpClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Build the `initialize` JSON-RPC request body, requesting `version` as the
+/// MCP protocol version. Extracted so the requested version is unit-testable
+/// without a network call.
+fn initialize_payload(version: ProtocolVersion) -> Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": version,
+            "capabilities": {},
+            "clientInfo": {
+                "name": "akhomed-bridge",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        }
+    })
+}
+
 fn check_rpc_error(json: &Value) -> UpstreamResult<()> {
     if json["error"].is_object() {
         Err(UpstreamError::RpcError {
@@ -422,6 +481,17 @@ fn parse_sse_last_data(body: &str) -> UpstreamResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_payload_requests_the_latest_known_protocol_version() {
+        // Regression for the t3-code MCP discovery HTTP 400: t3's server only
+        // accepts `2025-06-18` and hard-rejects anything else at the
+        // transport level. `ProtocolVersion::LATEST` must resolve to exactly
+        // that string, or the handshake breaks again.
+        let payload = initialize_payload(ProtocolVersion::LATEST);
+        assert_eq!(payload["params"]["protocolVersion"], "2025-06-18");
+        assert_eq!(ProtocolVersion::LATEST, ProtocolVersion::V_2025_06_18);
+    }
 
     #[test]
     fn new_appends_mcp_path_to_base_url() {

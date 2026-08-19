@@ -341,10 +341,17 @@ mod proxy {
     /// reading as if the server never existed. Output order matches `cfgs`
     /// (independent of which thread finishes first).
     ///
-    /// **Legacy behaviour**: callers that want a tool-less session to *fail
-    /// the turn* rather than silently continue should use
-    /// [`discover_session_tools_strict`] instead — see the work item
-    /// "Turns die quietly: … MCP discovery that 401s and 'skips'".
+    /// **This is the default policy (FIX2)**: a client-pushed MCP server is
+    /// an OPTIONAL host capability, not a hard akh dependency, so its
+    /// absence degrades the session rather than aborting it. Callers that
+    /// need the pre-FIX2 "unsafe" stance — a tool-less session *fails the
+    /// turn* instead — opt in via [`discover_session_tools_strict`]
+    /// (`AkhConfig.mcp.require_pushed_mcp` / `AKH_REQUIRE_PUSHED_MCP` in
+    /// `acp::mod::run_turn`) — see the work item "Turns die quietly: … MCP
+    /// discovery that 401s and 'skips'", which is what motivated
+    /// `discover_session_tools_strict` as the *original* default before a
+    /// real t3 GUI turn dying over a routine MCP protocol-version mismatch
+    /// showed that default was too aggressive for an optional capability.
     pub fn discover_session_tools(
         cfgs: &[SessionMcpServerCfg],
         sink: &dyn MessageSink,
@@ -373,6 +380,10 @@ mod proxy {
 
     /// Strict variant of [`discover_session_tools`]: a session that loses any
     /// pushed MCP server **fails the turn** rather than continuing tool-less.
+    /// Opt-in only (FIX2) — the caller selects this over the default
+    /// graceful [`discover_session_tools`] via `AkhConfig.mcp.require_pushed_mcp`
+    /// / `AKH_REQUIRE_PUSHED_MCP`, for dispatch contexts that genuinely
+    /// cannot proceed without a specific pushed tool.
     ///
     /// Each failing server gets one bounded retry (after a short backoff) to
     /// ride through the intermittent HTTP 401s the work item documents — a

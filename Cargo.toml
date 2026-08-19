@@ -81,6 +81,17 @@ epub = "2"
 # HTTP (sync)
 ureq = { version = "2", features = ["json"] }
 
+# MCP protocol version vocabulary (`ProtocolVersion`, `KNOWN_VERSIONS`) for the
+# hand-rolled Streamable HTTP client in `src/upstream_client.rs` — reuses
+# rmcp's own negotiation types instead of hand-rolling a version list.
+# `default-features = false` pulls in only the base model/schema types, not
+# rmcp's client/server/macro machinery (that would duplicate what our
+# hand-rolled transport already does). Already in the lockfile at this exact
+# version via `crates/seshat`'s `rmcp = { features = ["server", ...] }`, so
+# this adds no new/duplicate version to the tree. Unconditional, matching
+# `upstream_client`'s own unconditional module (not gated behind a feature).
+rmcp = { version = "0.17", default-features = false }
+
 # Process management (Unix PID checks)
 libc = "0.2"
 

@@ -161,6 +161,25 @@ impl Default for OllamaEndpoint {
     }
 }
 
+/// Per-akh MCP bridge policy (client-pushed servers at ACP `session/new`).
+///
+/// A client-pushed MCP server (e.g. a t3 GUI session's `t3-code` server) is
+/// an OPTIONAL capability the host offers, not a hard dependency of the akh
+/// itself — the akh still has all its own tools. Default policy is therefore
+/// graceful degradation: a server that fails discovery is skipped (with a
+/// visible warning in the turn), not fatal to the session.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpConfig {
+    /// Opt-in "unsafe" stance: fail the whole turn if any client-pushed MCP
+    /// server does not come back from discovery, instead of continuing with
+    /// the servers that did. Off by default. Intended for dispatch contexts
+    /// (e.g. an Anima-driven akh) that genuinely cannot proceed without a
+    /// specific pushed tool. `AKH_REQUIRE_PUSHED_MCP` ("1"/"0") overrides
+    /// this at the ACP layer regardless of what is set here.
+    #[serde(default)]
+    pub require_pushed_mcp: bool,
+}
+
 /// Per-akh background-automation gating (consumed by P5).
 ///
 /// `enabled` is the master switch and defaults to **off** — a fresh akh runs no
@@ -596,6 +615,11 @@ pub struct AkhConfig {
     #[serde(default)]
     pub autonomy: AutonomyConfig,
 
+    /// MCP bridge policy for client-pushed servers (`session/new`). Defaults
+    /// to graceful degradation (`require_pushed_mcp = false`).
+    #[serde(default)]
+    pub mcp: McpConfig,
+
     /// Delegation / external scheduling (Phase 36). Parsed now; the
     /// `DelegationManager` is wired behind the `delegation` feature in its phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -637,6 +661,7 @@ impl Default for AkhConfig {
             ollama_endpoint: OllamaEndpoint::default(),
             openai_endpoint: None,
             autonomy: AutonomyConfig::default(),
+            mcp: McpConfig::default(),
             delegation: None,
             exec: None,
         }

@@ -30,6 +30,12 @@ pub struct WorkspaceHandles {
     pub engine: Arc<crate::engine::Engine>,
     pub agent: Arc<RwLock<crate::agent::Agent>>,
     pub processor: Arc<Mutex<crate::chat::ChatProcessor>>,
+    /// This workspace's `AkhConfig::mcp.require_pushed_mcp` — whether a
+    /// `session/prompt` turn must fail when a client-pushed MCP server does
+    /// not come back from discovery, rather than degrading gracefully.
+    /// Threaded from the akh's persisted config so the ACP layer (which has
+    /// no direct `AkhConfig` access of its own) can honor the per-akh policy.
+    pub require_pushed_mcp: bool,
 }
 
 /// The future returned by [`ServerControl::resolve`].

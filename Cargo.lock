@@ -237,6 +237,7 @@ dependencies = [
  "rayon",
  "redb",
  "regex",
+ "rmcp",
  "russh",
  "safetensors 0.7.0",
  "scraper",
