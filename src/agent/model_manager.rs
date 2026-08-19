@@ -661,19 +661,33 @@ impl AgentModelManager {
 ///
 /// Single authoritative system-prompt assembly entry point.
 ///
-/// Composition (ADR-053, revised):
-/// 1. **Operator section**: An explicit, non-empty `explicit` prompt (from
-///    `AkhConfig.system_prompt`) takes precedence as the persona/voice authority;
-///    otherwise the psyche-derived text from [`build_system_prompt`] is used.
-/// 2. **Machine-owned sections** (always appended):
+/// Composition (ADR-053, re-revised — "the akhomed trap" fix):
+/// 1. **Psyche-derived identity** (always present): the machine-owned body
+///    from [`build_system_prompt_body`], reflecting the akh's actual state
+///    (persona, tone, archetypes). An operator prompt is a voice/policy
+///    layer on top of this identity, never a replacement for it — an akh
+///    with a configured `system_prompt` must not silently lose its psyche.
+/// 2. **Operator section** (additive, optional): an explicit, non-empty
+///    `explicit` prompt (from `AkhConfig.system_prompt`) is appended under
+///    its own heading. Absent or blank ⇒ this section is omitted entirely,
+///    and the output is byte-identical to having no operator prompt at all
+///    (no workspace without a `system_prompt` — e.g. the cluster's thoth —
+///    changes behavior from this fix).
+/// 3. **Machine-owned sections** (always appended):
 ///    - Tool-operations section (generated from `manifests` registry)
 ///    - Operating conventions block
-/// 3. **Mode constraints**: [`PromptMode::Terse`] brevity constraints compose
-///    after both.
+/// 4. **Mode constraints**: [`PromptMode::Terse`] brevity constraints compose
+///    after all of the above.
 ///
-/// The explicit prompt no longer **replaces** the entire assembly — it composes
-/// with the machine-owned sections. This ensures every akh receives tool
-/// documentation regardless of whether an operator-written prompt is present.
+/// Ordering rationale: psyche establishes *who the akh is* (derived, not
+/// operator-authored) and comes first; the operator section — human-owned
+/// voice/persona/policy — comes second, so it wins on tone conflicts (later
+/// instructions generally dominate a model's attention) without the akh's
+/// identity ever being silently dropped. Several operator prompts open with
+/// their own "You are <Name>, ..." line, which now sits next to the psyche
+/// body's own identity statement — that's accepted redundancy (harmless),
+/// not contradiction; this function does not attempt to de-duplicate by
+/// parsing the operator text.
 ///
 /// This collapses the previously-scattered prompt-assembly logic so callers on
 /// the inference path go through exactly one function.
@@ -685,23 +699,28 @@ pub fn assemble_system_prompt(
     mode: PromptMode,
     manifests: &[&crate::agent::tool_manifest::ToolManifest],
 ) -> String {
-    // 1. Operator section (persona/voice authority)
-    let operator_section = if let Some(text) = explicit {
-        if !text.trim().is_empty() {
-            text.to_string()
-        } else {
-            build_system_prompt_body(agent_id, agent_name, psyche)
+    // 1. Psyche-derived identity — always present, never replaced.
+    let psyche_body = build_system_prompt_body(agent_id, agent_name, psyche);
+
+    // 2. Operator section — additive, present only when `explicit` is
+    //    non-blank. `text` (not its trimmed form) is used verbatim once the
+    //    blank check passes, matching this function's historical handling of
+    //    leading/trailing whitespace in an operator-authored prompt.
+    let operator_section = match explicit {
+        Some(text) if !text.trim().is_empty() => {
+            format!("\n\n# Operator Instructions\n\n{text}")
         }
-    } else {
-        build_system_prompt_body(agent_id, agent_name, psyche)
+        _ => String::new(),
     };
 
-    // 2. Machine-owned sections (always appended)
+    // 3. Machine-owned sections (always appended)
     let tool_section = generate_tool_operations_section(manifests);
     let conventions = OPERATING_CONVENTIONS;
 
-    // 3. Assemble with mode-specific constraints
-    let base = format!("{operator_section}\n\n{tool_section}\n\n{conventions}");
+    // 4. Assemble with mode-specific constraints. When `operator_section` is
+    //    empty (no `explicit` prompt configured) this is byte-identical to
+    //    the pre-fix output: `psyche_body\n\n{tool_section}\n\n{conventions}`.
+    let base = format!("{psyche_body}{operator_section}\n\n{tool_section}\n\n{conventions}");
     match mode {
         PromptMode::Standard => base,
         PromptMode::Terse => format!("{base}\n\n{TERSE_CONSTRAINTS}"),
@@ -1111,7 +1130,9 @@ mod tests {
     #[test]
     fn assemble_composes_explicit_with_tool_section() {
         let explicit = "You are Thoth, keeper of records.";
-        // The explicit prompt is now composed with machine-owned sections.
+        // The explicit prompt is composed as an ADDITIONAL section, not a
+        // replacement — the "akhomed trap" fix: psyche identity must survive
+        // alongside an operator prompt, not be silently dropped by one.
         let prompt = assemble_system_prompt(
             "t1",
             "Thoth",
@@ -1120,10 +1141,44 @@ mod tests {
             PromptMode::Standard,
             &[], // No tools for this test
         );
-        assert!(prompt.starts_with(explicit), "explicit prompt is the operator section");
+        assert!(
+            prompt.starts_with("You are Thoth (id: t1)"),
+            "psyche-derived identity leads the assembly, got: {prompt:?}"
+        );
+        assert!(prompt.contains("archetype"), "psyche framing survives when explicit is set");
+        assert!(
+            prompt.contains("# Operator Instructions"),
+            "operator section is clearly delimited"
+        );
+        assert!(prompt.contains(explicit), "explicit prompt text is present");
+        // Operator text must come AFTER the psyche body (wins on tone
+        // conflicts) but BEFORE the machine-owned tool/conventions sections.
+        let psyche_at = prompt.find("archetype").unwrap();
+        let operator_at = prompt.find(explicit).unwrap();
+        let tools_at = prompt.find("Available Tools").unwrap();
+        assert!(psyche_at < operator_at, "psyche body precedes the operator section");
+        assert!(operator_at < tools_at, "operator section precedes the tool section");
         assert!(prompt.contains("Available Tools"), "tool section is appended");
         assert!(prompt.contains("Operating Conventions"), "conventions are appended");
-        assert!(!prompt.contains("archetype"), "psyche framing is NOT used when explicit is set");
+    }
+
+    #[test]
+    fn assemble_is_byte_identical_to_psyche_plus_machine_sections_when_no_explicit_prompt() {
+        // No workspace without a `system_prompt` (e.g. the cluster's thoth)
+        // may change behavior from the "akhomed trap" fix: with `explicit`
+        // absent, the assembly must be EXACTLY `psyche_body + tool_section +
+        // conventions`, with no operator section inserted at all.
+        let assembled = assemble_system_prompt(
+            "t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard, &[],
+        );
+        let expected = format!(
+            "{}\n\n{}\n\n{}",
+            build_system_prompt_body("t1", "Thoth", Some(&thoth_psyche())),
+            generate_tool_operations_section(&[]),
+            OPERATING_CONVENTIONS,
+        );
+        assert_eq!(assembled, expected);
+        assert!(!assembled.contains("# Operator Instructions"));
     }
 
     #[test]
@@ -1164,10 +1219,20 @@ mod tests {
             ..Default::default()
         };
         let mgr = AgentModelManager::new(cfg);
-        // Even with a psyche, the configured explicit prompt is authoritative for the operator section.
+        // The "akhomed trap" fix: even with an explicit configured prompt,
+        // the psyche identity is not dropped — the explicit text composes as
+        // an additional, clearly-delimited operator section.
         mgr.load_agent("a1", "Alice", Some(&thoth_psyche()), &[]);
         let prompt = mgr.system_prompt_for("a1").unwrap();
-        assert!(prompt.starts_with("You are a pinned akh."), "explicit prompt is operator section");
+        assert!(
+            prompt.starts_with("You are Alice (id: a1)"),
+            "psyche-derived identity leads the assembly, got: {prompt:?}"
+        );
+        assert!(prompt.contains("archetype"), "psyche framing survives");
+        assert!(
+            prompt.contains("# Operator Instructions\n\nYou are a pinned akh."),
+            "explicit prompt composes as a delimited operator section"
+        );
         assert!(prompt.contains("Available Tools"), "tool section is composed");
     }
 
