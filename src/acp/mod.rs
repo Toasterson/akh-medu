@@ -1358,19 +1358,27 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         AkhMessage::System { text } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::ToolResult { tool, success, output } => {
             // Kept as a thought chunk (not folded into the ToolCall* mapping
-            // above): as of this change, nothing in the live turn path
-            // constructs `ToolResult` any more — `ToolExecutionTracker` (the
-            // `ToolCallStarted`/`ToolCallCompleted` pair mapped above) is now
-            // the sole source of ACP tool-call narration for both the
-            // agentic LLM loop and the symbolic `ChatProcessor` fallback (see
-            // `run_turn`, which installs the tracker before either path
-            // runs). `ToolResult` survives only as a variant the TUI and
-            // `oxifed` renderers still match on for other producers (e.g. a
-            // future symbolic-only caller); should one ever emit it again
-            // over ACP, this stays a plain thought line rather than a second
-            // (and un-correlated — no `tool_id`) `ToolCall` update, so it
-            // degrades to redundant narration instead of a conflicting or
-            // orphaned tool-call UI element.
+            // above), but this IS genuine, confirmed duplication, not a
+            // hypothetical: `Agent::run_agentic_turn`
+            // (`agent/agentic_chat.rs`, via the `AkhMessage::tool_result(..)`
+            // helper) still emits one of these for every tool call, on top
+            // of — not instead of — the `ToolExecutionTracker`'s
+            // `ToolCallStarted`/`ToolCallCompleted` pair mapped above, which
+            // fires from a separate path (installed on the turn's tool
+            // registry in `run_turn`). Verified live on hephaistos (2026-08-19):
+            // a single `pwd` tool call produced THREE `session/update`
+            // messages — `tool_call`, `tool_call_update`, and this thought
+            // chunk repeating the same result in the old `[tool:status]
+            // output` prose format. Left in place for this change (A1 was
+            // scoped to `to_session_update`'s mapping, not the emission call
+            // sites in `agentic_chat.rs`/`chat.rs`, and `ToolResult` carries
+            // an arg preview (`outcome.note_prefix`/`preview_args`) the
+            // tracker's `title`/`output` may not exactly reproduce, so
+            // dropping the call site needs its own look, not a
+            // rebase-pressure decision) — flagged here as a real follow-up:
+            // silence `AkhMessage::tool_result(..)` at its `agentic_chat.rs`
+            // call site (and the analogous ones in `chat.rs`) now that the
+            // tracker covers the same event.
             //
             // Tool calls + their results are turn "steps", not the answer —
             // map them to thought chunks so the client folds them into the
@@ -8049,9 +8057,10 @@ mod tests {
         }
     }
 
-    /// `AkhMessage::ToolResult` (the legacy, no-longer-constructed variant —
-    /// see the reasoning comment in `to_session_update`) still routes to a
-    /// thought chunk, not a `ToolCall*` update.
+    /// `AkhMessage::ToolResult` (still emitted alongside the tracker's
+    /// `ToolCall*` pair — confirmed-redundant, see the reasoning comment in
+    /// `to_session_update`) still routes to a thought chunk, not a
+    /// `ToolCall*` update.
     #[test]
     fn to_session_update_tool_result_stays_a_thought_chunk() {
         let update = to_session_update(&AkhMessage::ToolResult {
