@@ -38,14 +38,35 @@ pub struct OllamaConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Reasoning-effort hint for the agentic `chat` path. When `Some(level)`
-    /// (one of `"low"`/`"medium"`/`"high"`), [`OllamaClient::chat`] sets
-    /// `think: "<level>"` in the request body — accepted by Ollama's reasoning
-    /// cloud models (gpt-oss/glm). `None` (the default) omits the field, leaving
-    /// the model's own default in effect. The plain [`OllamaClient::generate`]
+    /// (one of `"low"`/`"medium"`/`"high"`/`"max"` — Ollama's `/api/chat`
+    /// `think` enum, see [`Self::validated_think_level`]),
+    /// [`OllamaClient::chat`]/[`OllamaClient::chat_stream`] set `think:
+    /// "<level>"` in the request body. Omitting `think` entirely leaves
+    /// Ollama's own route-handler default (`Think = true`, which renders as
+    /// `"medium"` — no reasoning-effort text injected) in effect; only
+    /// `"low"` (and `"high"`/`"max"`, which the dedicated Qwen3.8 renderer
+    /// both map to its "xhigh" instructions) actually change the rendered
+    /// prompt, so this is a real latency/depth tradeoff, not just metadata.
+    /// `None` (the default) omits the field. An unrecognized string is
+    /// **rejected** (logged, field omitted) rather than sent verbatim — see
+    /// [`Self::validated_think_level`]. The plain [`OllamaClient::generate`]
     /// path is intentionally unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }
+
+/// The `think` values Ollama's `/api/chat` accepts as a string (it also
+/// accepts a bare `bool`, which this codebase does not use — an unset
+/// `reasoning_effort` already gets Ollama's own default via an omitted
+/// field, so there's no case where sending an explicit `true`/`false` adds
+/// anything). Kept as a slice (not an enum) because the value round-trips
+/// straight from `AkhConfig`'s TOML `String` into the wire JSON `String`, and
+/// an enum would just add a translation step both ends have to agree on.
+///
+/// `pub` so the ACP `model/set` RPC handler (`bin/akhomed.rs`) validates
+/// against this exact list instead of a hand-maintained copy that could
+/// drift from it.
+pub const VALID_THINK_LEVELS: &[&str] = &["low", "medium", "high", "max"];
 
 impl Default for OllamaConfig {
     fn default() -> Self {
@@ -99,6 +120,35 @@ impl OllamaConfig {
                 }
             },
             None => Some(raw.clone()),
+        }
+    }
+
+    /// Validate [`Self::reasoning_effort`] against Ollama's `think` string
+    /// enum (`"low"|"medium"|"high"|"max"`), case/whitespace-insensitively.
+    ///
+    /// Returns `None` both when unset and when set to something Ollama
+    /// doesn't understand — in the latter case, after logging a warning, so
+    /// a typo'd `reasoning_effort` in a workspace TOML degrades to "no
+    /// think field sent" (today's behaviour, safe) rather than being handed
+    /// to the model verbatim (an unrecognized `think` value that a future
+    /// Ollama release might error on, or that another renderer silently
+    /// mishandles). The ACP `model/set` RPC handler (`akhomed.rs`) already
+    /// validates before it ever writes `reasoning_effort` to disk; this is
+    /// the second gate, for the TOML-direct-edit path that handler doesn't
+    /// cover.
+    pub fn validated_think_level(&self) -> Option<&'static str> {
+        let raw = self.reasoning_effort.as_deref()?.trim();
+        match VALID_THINK_LEVELS.iter().find(|&&v| v.eq_ignore_ascii_case(raw)) {
+            Some(&level) => Some(level),
+            None => {
+                tracing::warn!(
+                    value = raw,
+                    valid = ?VALID_THINK_LEVELS,
+                    "reasoning_effort is not a recognized Ollama 'think' level; \
+                     omitting the think field for this request"
+                );
+                None
+            }
         }
     }
 }
@@ -495,10 +545,13 @@ impl OllamaClient {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
         }
         // Reasoning-effort hint (chat path only): Ollama's reasoning cloud models
-        // (gpt-oss/glm) accept `think: "low"|"medium"|"high"`. Absent ⇒ model default.
-        if let Some(level) = &self.config.reasoning_effort {
+        // (gpt-oss/glm) and the dedicated Qwen3.8 renderer accept
+        // `think: "low"|"medium"|"high"|"max"`. Absent ⇒ model default.
+        if self.config.reasoning_effort.is_some() {
             if self.capabilities().supports_thinking {
-                body["think"] = serde_json::Value::String(level.clone());
+                if let Some(level) = self.config.validated_think_level() {
+                    body["think"] = serde_json::Value::String(level.to_string());
+                }
             } else {
                 tracing::debug!(
                     model = %self.config.model,
@@ -656,9 +709,11 @@ impl OllamaClient {
         if !tools.is_empty() {
             body["tools"] = serde_json::Value::Array(tools.to_vec());
         }
-        if let Some(level) = &self.config.reasoning_effort {
+        if self.config.reasoning_effort.is_some() {
             if self.capabilities().supports_thinking {
-                body["think"] = serde_json::Value::String(level.clone());
+                if let Some(level) = self.config.validated_think_level() {
+                    body["think"] = serde_json::Value::String(level.to_string());
+                }
             } else {
                 tracing::debug!(
                     model = %self.config.model,
@@ -1190,6 +1245,44 @@ mod tests {
         let json = serde_json::to_string(&cfg).expect("serialize");
         let back: OllamaConfig = serde_json::from_str(&json).expect("round-trip");
         assert_eq!(back.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn validated_think_level_none_when_unset() {
+        let cfg = OllamaConfig::default();
+        assert_eq!(cfg.validated_think_level(), None);
+    }
+
+    #[test]
+    fn validated_think_level_accepts_every_documented_level() {
+        for level in VALID_THINK_LEVELS {
+            let cfg = OllamaConfig {
+                reasoning_effort: Some((*level).into()),
+                ..OllamaConfig::default()
+            };
+            assert_eq!(cfg.validated_think_level(), Some(*level));
+        }
+    }
+
+    #[test]
+    fn validated_think_level_is_case_and_whitespace_insensitive() {
+        let cfg = OllamaConfig {
+            reasoning_effort: Some("  HIGH  ".into()),
+            ..OllamaConfig::default()
+        };
+        assert_eq!(cfg.validated_think_level(), Some("high"));
+    }
+
+    #[test]
+    fn validated_think_level_rejects_unknown_values_rather_than_passing_them_through() {
+        // This is the "reject/log unknown ones rather than passing them
+        // through blindly" requirement: a typo'd or stale value must degrade
+        // to "no think field sent", never reach the wire verbatim.
+        let cfg = OllamaConfig {
+            reasoning_effort: Some("xhigh".into()),
+            ..OllamaConfig::default()
+        };
+        assert_eq!(cfg.validated_think_level(), None);
     }
 
     #[test]

@@ -518,11 +518,25 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Reasoning-effort hint for the akh's reasoning cloud model: `"low"`,
-    /// `"medium"`, or `"high"`. `None` (the default) leaves the model's own
-    /// default in effect. Carried into [`OllamaConfig::reasoning_effort`] by
-    /// [`Self::to_model_manager_config`] and sent as `think` on the chat path.
-    /// Serialized as a top-level scalar (before the `[ollama_endpoint]` table).
+    /// Per-workspace reasoning-effort hint: `"low"`, `"medium"`, `"high"`, or
+    /// `"max"` (Ollama's `/api/chat` `think` string enum — see
+    /// [`agent::ollama::VALID_THINK_LEVELS`](super::agent::ollama::VALID_THINK_LEVELS)).
+    /// `None` (the default, and what every shipped workspace TOML — including
+    /// ptah's — should stay on unless deliberately tuned) omits the `think`
+    /// field entirely, leaving Ollama's own default in effect. Carried into
+    /// [`OllamaConfig::reasoning_effort`](super::agent::ollama::OllamaConfig::reasoning_effort)
+    /// by [`Self::to_model_manager_config`] and sent as `think` on the chat
+    /// path; validated there
+    /// ([`OllamaConfig::validated_think_level`](super::agent::ollama::OllamaConfig::validated_think_level))
+    /// against the same enum, so a value that only makes sense under one
+    /// renderer (e.g. Ollama's reasoning cloud models, or the dedicated
+    /// Qwen3.8 renderer) never gets forwarded blindly. Only meaningful for
+    /// models whose renderer actually implements a reasoning-effort concept
+    /// (gpt-oss/glm's native support, or Qwen3.8's dedicated `RENDERER
+    /// qwen3.8` — the generic `qwen3.5` renderer some Qwen3.8 GGUFs ship with
+    /// by default has no reasoning-effort concept at all, so this is a no-op
+    /// there). Serialized as a top-level scalar (before the
+    /// `[ollama_endpoint]` table).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 

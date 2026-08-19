@@ -21,7 +21,7 @@ use tokio::sync::RwLock;
 
 use akh_medu::agent::trigger::TriggerStore;
 use akh_medu::agent::model_manager::AgentModelManager;
-use akh_medu::agent::ollama::OllamaClient;
+use akh_medu::agent::ollama::{OllamaClient, VALID_THINK_LEVELS};
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
@@ -3132,15 +3132,16 @@ impl akh_medu::acp::ServerControl for ServerState {
                         cfg.model = Some(m.clone());
                     }
                     if let Some(level) = &effort_raw {
-                        match level.trim().to_ascii_lowercase().as_str() {
-                            "low" | "medium" | "high" => {
-                                cfg.reasoning_effort = Some(level.trim().to_ascii_lowercase())
-                            }
+                        let normalized = level.trim().to_ascii_lowercase();
+                        match normalized.as_str() {
                             "off" | "none" => cfg.reasoning_effort = None,
+                            _ if VALID_THINK_LEVELS.contains(&normalized.as_str()) => {
+                                cfg.reasoning_effort = Some(normalized)
+                            }
                             other => {
                                 return Err(format!(
-                                    "unknown reasoning effort \"{other}\" \
-                                     (expected low|medium|high|off)"
+                                    "unknown reasoning effort \"{other}\" (expected {}|off)",
+                                    VALID_THINK_LEVELS.join("|")
                                 ));
                             }
                         }
