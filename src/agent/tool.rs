@@ -262,6 +262,19 @@ pub trait Tool: Send + Sync {
     fn locus(&self) -> Option<crate::backend::ExecLocus> {
         None
     }
+
+    /// The read-sandbox roots of the [`Backend`](crate::backend::Backend)
+    /// this tool executes through, if any. `None` for tools with no backend
+    /// (most of them) — mirrors [`Self::locus`]'s default-`None` seam and
+    /// exists for the same reason: the backend is private state on the five
+    /// executor-facing tool structs, and this is the surgical way to surface
+    /// its containment boundary without a wider `Agent`/`ToolRegistry`
+    /// refactor. Used by the ACP layer to validate a client-supplied session
+    /// cwd ("the executor stays above the workdir") before threading it into
+    /// a turn — see `acp::resolve_session_cwd_for_turn`.
+    fn backend_roots(&self) -> Option<Vec<std::path::PathBuf>> {
+        None
+    }
 }
 
 /// Registry of available tools.

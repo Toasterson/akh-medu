@@ -367,6 +367,18 @@ pub struct AkhAcpAgent {
     /// is a no-op, matching the ACP spec's "cancellation is a courtesy, not
     /// a guarantee" contract.
     session_cancels: Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Chat session → the client's real working directory, recorded at
+    /// `session/new` from `req.cwd` when it is an absolute path other than
+    /// the `akh-ws:<name>` workspace sentinel (see [`is_workspace_sentinel`]).
+    /// Threaded into each `session/prompt` turn ([`Self::run_turn`] →
+    /// [`resolve_session_cwd_for_turn`]), which validates it against the
+    /// resolved workspace's executor read-sandbox root before use — "the
+    /// executor stays above the workdir". Never used to fail a session or a
+    /// turn: an unresolvable/out-of-bounds candidate just means this turn
+    /// runs with no session cwd, exactly like a client that never sent one.
+    /// Evicted alongside `sessions`/`session_mcp`/... in
+    /// [`Self::track_new_session`].
+    session_cwds: Arc<Mutex<std::collections::HashMap<String, PathBuf>>>,
     /// Per-session cognitive context (KG cache, ELIZA router, discourse
     /// trajectory). One [`SessionContext`] per ACP session so per-session
     /// cognitive state doesn't bleed across sessions sharing the workspace's
@@ -508,6 +520,7 @@ impl AkhAcpAgent {
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             name: "akh-medu".to_string(),
@@ -537,6 +550,7 @@ impl AkhAcpAgent {
             session_mcp: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_mcp_tools: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             client_caps: Arc::new(Mutex::new(None)),
@@ -739,6 +753,10 @@ impl AkhAcpAgent {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
+                self.session_cwds
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
                 self.session_contexts
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -871,6 +889,7 @@ impl AkhAcpAgent {
         is_dispatch: bool,
         mode_source: &'static str,
         require_pushed_mcp: bool,
+        session_cwd_candidate: Option<PathBuf>,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
@@ -884,6 +903,21 @@ impl AkhAcpAgent {
             // the agentic path covers the common case).
             // ──
             let agent_r = agent.read().unwrap_or_else(|e| e.into_inner());
+            // Session cwd: validate the client's candidate cwd (recorded at
+            // `session/new`, unvalidated until now — this is the first point
+            // with the resolved workspace's `Agent`/`Backend` in hand) and
+            // set the `crate::fs` thread-local for the rest of this closure.
+            // `_session_cwd_guard` is held (not `let _ = ..`) so it lives for
+            // the whole turn and is dropped — restoring "no session cwd" —
+            // only when this closure returns, whichever path it takes below.
+            // See `crate::fs::set_session_cwd` for why this is race-free
+            // under concurrent sessions each running their own `run_turn` on
+            // their own `spawn_blocking` thread.
+            let _session_cwd_guard = crate::fs::set_session_cwd(resolve_session_cwd_for_turn(
+                &agent_r,
+                &session_id,
+                session_cwd_candidate.as_deref(),
+            ));
             // Install the per-turn permission approver (if any) so tool calls
             // made during the turn — by the LLM loop or the symbolic pipeline —
             // can prompt the client.
@@ -3717,6 +3751,28 @@ fn build_connection(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(session_id.to_string(), is_dispatch);
+                        // Session cwd: record the client's real cwd so this
+                        // session's turns can run in the project the client
+                        // has open, instead of always at the executor's
+                        // configured workdir. Only an absolute path that is
+                        // NOT the `akh-ws:<name>` workspace-routing sentinel
+                        // is a real filesystem path — anything else (a
+                        // relative string, the sentinel itself, an unset
+                        // cwd) leaves the session unrecorded here, which is
+                        // exactly "no session cwd" (today's behavior)
+                        // downstream in `resolve_session_cwd_for_turn`.
+                        // Containment against the resolved workspace's
+                        // executor sandbox root is deferred to turn start
+                        // (`run_turn`) — at `session/new` the workspace's
+                        // Backend has not been resolved yet, and resolving
+                        // it here just to validate a path would force eager
+                        // agent construction this handler otherwise avoids.
+                        if req.cwd.is_absolute() && !is_workspace_sentinel(&req.cwd) {
+                            me.session_cwds
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .insert(session_id.to_string(), req.cwd.clone());
+                        }
                         // Honor the MCP servers the client pushes at session
                         // setup (ACP's `mcp_servers`, the equivalent of a CLI's
                         // `--mcp-config`): record them so each prompt in this
@@ -3918,6 +3974,16 @@ fn build_connection(
                         // WI-280: Resolve dispatch mode for this session — the
                         // mode is a per-turn property, not a process-wide flag.
                         let (is_dispatch, mode_source) = me.session_dispatch_mode(&session_id.to_string());
+                        // The candidate cwd recorded (unvalidated) at
+                        // `session/new`; `run_turn` clamps it against the
+                        // resolved workspace's executor sandbox root before
+                        // ever using it — see `resolve_session_cwd_for_turn`.
+                        let session_cwd_candidate = me
+                            .session_cwds
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&session_id.to_string())
+                            .cloned();
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
@@ -3934,6 +4000,7 @@ fn build_connection(
                             is_dispatch,
                             mode_source,
                             require_pushed_mcp,
+                            session_cwd_candidate,
                         );
                         // The busy tracker (`begin_turn` above) must stay set
                         // until the worker actually finishes, which may be
@@ -4710,6 +4777,106 @@ fn resolve_session_workspace(meta: Option<&Meta>, cwd: &Path) -> Option<String> 
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
         })
+}
+
+/// Whether `cwd` is the legacy `akh-ws:<name>` workspace-routing sentinel
+/// (see [`resolve_session_workspace`]) rather than a real filesystem path a
+/// turn could run in.
+fn is_workspace_sentinel(cwd: &Path) -> bool {
+    cwd.to_str().is_some_and(|s| s.starts_with("akh-ws:"))
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Session cwd threading — the client's real project directory, honored
+// ──────────────────────────────────────────────────────────────────────────
+//
+// `session/new` records a *candidate* cwd (`AkhAcpAgent::session_cwds`,
+// unvalidated — the workspace's Backend is not resolved yet at that point).
+// Each `session/prompt` turn (`AkhAcpAgent::run_turn`) validates that
+// candidate against the resolved workspace's own executor read-sandbox root
+// before threading it anywhere, via the two functions below, and sets the
+// `crate::fs` thread-local session cwd for the turn's duration. See
+// `crate::fs::set_session_cwd` for why a thread-local is race-free even with
+// concurrent ACP sessions under the RwLock<Agent> parallel-turns change.
+
+/// Clamp a client-supplied ACP session cwd to the executor's read-sandbox
+/// root — "the executor stays above the workdir" (the operator's containment
+/// rule). Symlink-safe: reuses [`crate::fs::LocalFs::resolve_read`] (the same
+/// canonicalize-then-contain logic every sandboxed read goes through)
+/// instead of a bespoke check.
+///
+/// Returns `Ok(canonical_path)` only when `candidate` exists on this host,
+/// is a directory, and is contained under `boundary`. Otherwise `Err` with a
+/// human-readable reason — never a hard failure. A client may legitimately
+/// send a path that only resolves on its own machine (a different checkout
+/// location, or a different host entirely), so an unresolvable candidate is
+/// routine, not exceptional; the caller degrades to "no session cwd" rather
+/// than rejecting the session or the turn.
+fn clamp_session_cwd(boundary: &Path, candidate: &Path) -> Result<PathBuf, String> {
+    let sandbox = crate::fs::LocalFs::read_only(vec![boundary.to_path_buf()]);
+    let resolved = sandbox.resolve_read(candidate).map_err(|e| e.to_string())?;
+    if !resolved.is_dir() {
+        return Err(format!("\"{}\" is not a directory", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+/// Resolve the session cwd to thread into one turn's `shell_exec` calls and
+/// file-verb relative-path resolution: the client-supplied `candidate`
+/// recorded at `session/new`, clamped to this workspace's executor
+/// read-sandbox root (queried from the registered `shell_exec` tool's
+/// [`Tool::backend_roots`](crate::agent::tool::Tool::backend_roots) — the
+/// same `Backend` every executor-facing tool in this `Agent` shares, so one
+/// lookup covers `shell_exec`/`file_io`/`edit`/`glob`/`grep` alike).
+///
+/// Returns `None` — "run this turn exactly as if no session cwd existed" —
+/// whenever there is nothing to validate against (no executor backend wired
+/// for this workspace) or the candidate fails [`clamp_session_cwd`]. Both
+/// cases are logged at `warn` so an operator can see a client repeatedly
+/// sending an unusable cwd, but neither ever fails the turn.
+fn resolve_session_cwd_for_turn(
+    agent: &Agent,
+    session_id: &str,
+    candidate: Option<&Path>,
+) -> Option<PathBuf> {
+    let candidate = candidate?;
+    let boundary = agent
+        .tool_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("shell_exec")
+        .and_then(|t| t.backend_roots())
+        .and_then(|roots| roots.into_iter().next());
+    let Some(boundary) = boundary else {
+        tracing::warn!(
+            session = %session_id,
+            requested = %candidate.display(),
+            "session cwd requested but this workspace has no executor read-sandbox root \
+             configured — falling back to the configured workdir"
+        );
+        return None;
+    };
+    match clamp_session_cwd(&boundary, candidate) {
+        Ok(resolved) => {
+            tracing::debug!(
+                session = %session_id,
+                cwd = %resolved.display(),
+                "session cwd accepted — turn will run in the client's project directory"
+            );
+            Some(resolved)
+        }
+        Err(reason) => {
+            tracing::warn!(
+                session = %session_id,
+                requested = %candidate.display(),
+                boundary = %boundary.display(),
+                reason = %reason,
+                "session cwd rejected (outside the executor's configured workdir, or does \
+                 not exist on this host) — falling back to the configured workdir"
+            );
+            None
+        }
+    }
 }
 
 /// Concatenate the text content of a prompt's content blocks.
@@ -5570,6 +5737,29 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .contains_key(&victim),
             "the oldest session's SessionContext must be evicted, not leaked"
+        );
+    }
+
+    #[test]
+    fn track_new_session_evicts_the_oldest_sessions_recorded_cwd() {
+        let me = workspace();
+        let victim = "akh-oldest-cwd".to_string();
+        me.track_new_session(&victim);
+        me.session_cwds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(victim.clone(), PathBuf::from("/home/toasty/ws/akh-medu"));
+
+        for i in 0..MAX_TRACKED_SESSIONS {
+            me.track_new_session(&format!("akh-fill-cwd-{i}"));
+        }
+
+        assert!(
+            !me.session_cwds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&victim),
+            "the oldest session's recorded cwd must be evicted, not leaked forever"
         );
     }
 
@@ -8133,6 +8323,160 @@ mod tests {
         assert_eq!(
             resolve_session_workspace(Some(&meta), cwd),
             Some("from-cwd".to_string())
+        );
+    }
+
+    // ── session cwd threading (client's real cwd → shell_exec/file verbs) ──
+
+    #[test]
+    fn is_workspace_sentinel_detects_the_akh_ws_prefix() {
+        assert!(is_workspace_sentinel(Path::new("akh-ws:ptah")));
+        assert!(!is_workspace_sentinel(Path::new("/home/toasty/ws/akh-medu")));
+        assert!(!is_workspace_sentinel(Path::new("relative/not/absolute")));
+    }
+
+    #[test]
+    fn clamp_session_cwd_accepts_a_directory_contained_under_the_boundary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boundary = dir.path().to_path_buf();
+        let project = boundary.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let resolved = clamp_session_cwd(&boundary, &project)
+            .expect("a directory contained under the boundary must be accepted");
+        assert_eq!(resolved, project.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn clamp_session_cwd_rejects_a_path_outside_the_boundary() {
+        let boundary_dir = tempfile::tempdir().expect("tempdir");
+        let outside_dir = tempfile::tempdir().expect("tempdir");
+
+        let err = clamp_session_cwd(boundary_dir.path(), outside_dir.path())
+            .expect_err("a path outside the boundary must be rejected");
+        assert!(err.contains("outside"), "error should explain containment: {err}");
+    }
+
+    #[test]
+    fn clamp_session_cwd_rejects_a_path_that_does_not_exist_on_this_host() {
+        let boundary_dir = tempfile::tempdir().expect("tempdir");
+        let missing = boundary_dir.path().join("does-not-exist-on-this-host");
+
+        let err = clamp_session_cwd(boundary_dir.path(), &missing).expect_err(
+            "a nonexistent path must degrade to a rejection, not panic — a client may \
+             legitimately send a path that only exists on its own machine",
+        );
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn clamp_session_cwd_rejects_a_file_which_is_not_usable_as_a_cwd() {
+        let boundary_dir = tempfile::tempdir().expect("tempdir");
+        let file = boundary_dir.path().join("a-file.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        let err = clamp_session_cwd(boundary_dir.path(), &file)
+            .expect_err("a file path is not usable as a cwd");
+        assert!(err.contains("not a directory"), "{err}");
+    }
+
+    #[test]
+    fn resolve_session_cwd_for_turn_is_none_with_no_candidate() {
+        let (_engine, agent) = engine_and_agent();
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(resolve_session_cwd_for_turn(&locked, "s1", None), None);
+    }
+
+    /// `engine_and_agent()`'s `Agent::new` wires the default in-process
+    /// backend against an engine with no `data_dir`, so its filesystem is
+    /// `LocalFs::denied()` — zero read roots. With no boundary to validate
+    /// against, any candidate must fall back rather than panic or (worse)
+    /// silently accept an unvalidated path.
+    #[test]
+    fn resolve_session_cwd_for_turn_falls_back_when_the_workspace_has_no_executor_boundary() {
+        let (_engine, agent) = engine_and_agent();
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            resolve_session_cwd_for_turn(&locked, "s1", Some(dir.path())),
+            None
+        );
+    }
+
+    /// Build an agent whose executor-facing tools are bound to a real
+    /// sandboxed backend rooted at `boundary`, so `shell_exec`'s
+    /// `backend_roots()` reports a real containment boundary to clamp
+    /// against.
+    fn agent_with_exec_boundary(engine: &Arc<Engine>, boundary: &Path) -> Agent {
+        let backend: Arc<dyn crate::backend::Backend> = Arc::new(
+            crate::backend::InProcessBackend::new(Arc::new(crate::fs::LocalFs::sandbox(boundary))),
+        );
+        Agent::with_backend(Arc::clone(engine), AgentConfig::default(), Some(backend))
+            .expect("agent with backend")
+    }
+
+    #[test]
+    fn resolve_session_cwd_for_turn_accepts_a_candidate_inside_the_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boundary = dir.path().to_path_buf();
+        let project = boundary.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let agent = agent_with_exec_boundary(&engine, &boundary);
+
+        let resolved = resolve_session_cwd_for_turn(&agent, "s1", Some(&project));
+        assert_eq!(resolved, Some(project.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn resolve_session_cwd_for_turn_falls_back_when_candidate_is_outside_the_workdir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boundary = dir.path().to_path_buf();
+        let outside = tempfile::tempdir().expect("tempdir");
+
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let agent = agent_with_exec_boundary(&engine, &boundary);
+
+        let resolved = resolve_session_cwd_for_turn(&agent, "s1", Some(outside.path()));
+        assert_eq!(
+            resolved, None,
+            "outside the configured workdir must fall back, not error or escape"
+        );
+    }
+
+    #[test]
+    fn resolve_session_cwd_for_turn_falls_back_when_candidate_does_not_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boundary = dir.path().to_path_buf();
+        let missing = boundary.join("nope-not-on-this-host");
+
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let agent = agent_with_exec_boundary(&engine, &boundary);
+
+        let resolved = resolve_session_cwd_for_turn(&agent, "s1", Some(&missing));
+        assert_eq!(
+            resolved, None,
+            "a client may legitimately send a path that only exists on its own machine — \
+             this must degrade to no session cwd, not fail the turn"
         );
     }
 

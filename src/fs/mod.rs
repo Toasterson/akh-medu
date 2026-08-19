@@ -17,12 +17,94 @@
 //! implement the same trait by delegating to the ACP client's
 //! `fs/read_text_file` / `fs/write_text_file` for remote workspaces.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use miette::Diagnostic;
 use thiserror::Error;
+
+thread_local! {
+    /// The active ACP session's working directory for the current thread, if
+    /// any. See [`set_session_cwd`].
+    static SESSION_CWD: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// RAII handle from [`set_session_cwd`]. Restores the thread's previous
+/// session cwd (`None` in the common case) on drop, so the scope that
+/// activated a session cwd — normally one ACP prompt turn — can never leave
+/// a stale value behind for whatever runs next on this pooled thread.
+pub struct SessionCwdGuard {
+    previous: Option<PathBuf>,
+}
+
+impl Drop for SessionCwdGuard {
+    fn drop(&mut self) {
+        SESSION_CWD.with(|cell| *cell.borrow_mut() = self.previous.take());
+    }
+}
+
+/// Set the *thread-local* ACP session working directory used to resolve
+/// relative paths in [`LocalFs::resolve_read`]/[`resolve_write`], and read
+/// directly by `shell_exec` for the executed command's `cwd`. Active until
+/// the returned guard drops, which restores whatever was set before (`None`
+/// in the common case).
+///
+/// # Why thread-local is safe here
+///
+/// Every ACP prompt turn runs entirely inside one
+/// `tokio::task::spawn_blocking` closure, on one dedicated OS thread, for the
+/// turn's whole duration (`AkhAcpAgent::run_turn`) — tokio's blocking pool
+/// never interleaves two blocking tasks on the same thread, even though it
+/// happily runs many such closures concurrently on *different* threads.
+/// Concurrent ACP sessions on one workspace are real (the `Agent` lock is a
+/// `RwLock`, and the agentic turn path takes only a read lock, so independent
+/// sessions' turns proceed in parallel — see `run_turn`'s doc comment), but
+/// each one gets its own OS thread for its own turn. Setting this once at the
+/// top of that closure and dropping the guard before the closure returns (and
+/// the thread goes back to the blocking pool) therefore isolates concurrent
+/// sessions correctly: no thread ever observes another session's cwd.
+pub fn set_session_cwd(cwd: Option<PathBuf>) -> SessionCwdGuard {
+    let previous = SESSION_CWD.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), cwd));
+    SessionCwdGuard { previous }
+}
+
+/// The current thread's active session cwd, set by [`set_session_cwd`].
+/// `None` when no session cwd is active — the case for every caller that
+/// predates ACP session-cwd threading (tests, the CLI, a non-ACP embed, or an
+/// ACP client that never sent a real `cwd`), so those paths are entirely
+/// unaffected by this mechanism.
+pub fn session_cwd() -> Option<PathBuf> {
+    SESSION_CWD.with(|cell| cell.borrow().clone())
+}
+
+/// Resolve a possibly-relative path against a base, in priority order:
+///
+/// 1. An absolute `path` passes through unchanged.
+/// 2. Otherwise, the thread-local session cwd ([`session_cwd`]), if one is
+///    active — this is what makes relative reads and writes share one base
+///    once a session cwd is threaded in (fixing the historical read/write
+///    asymmetry: read had no defined base at all, write always used
+///    `write_roots[0]`).
+/// 3. Otherwise, `default_base` — each call site's own historical default.
+///    `resolve_read` passes `None`, which leaves `path` for
+///    [`Path::canonicalize`] to resolve against the process's actual working
+///    directory exactly as before this change; `resolve_write` passes
+///    `write_roots[0]`, also exactly as before. This is what keeps the
+///    no-session-cwd behavior of each verb byte-identical to today.
+fn resolve_relative(path: &Path, default_base: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Some(base) = session_cwd() {
+        return base.join(path);
+    }
+    match default_base {
+        Some(base) => base.join(path),
+        None => path.to_path_buf(),
+    }
+}
 
 /// Errors from filesystem operations behind the sandbox.
 #[derive(Debug, Error, Diagnostic)]
@@ -173,9 +255,18 @@ impl LocalFs {
     /// Resolve a caller path for **reading** to a canonical, contained path.
     ///
     /// `canonicalize` resolves all symlinks (and `..`), so a symlink inside a
-    /// root that points outside it fails containment.
+    /// root that points outside it fails containment. A *relative* `path` is
+    /// joined against the active thread-local session cwd if one is set (see
+    /// [`set_session_cwd`]) — the same base [`Self::resolve_write`] uses in
+    /// that case, closing the historical read/write base asymmetry — and
+    /// otherwise left for `canonicalize` to resolve against the process's
+    /// own working directory, exactly as before session-cwd threading
+    /// existed. Containment against `read_roots` is checked unconditionally
+    /// either way: a session cwd only narrows where a relative path starts,
+    /// never which root it must land inside.
     pub fn resolve_read(&self, path: &Path) -> FsResult<PathBuf> {
-        let canonical = path.canonicalize().map_err(|source| FsError::Io {
+        let joined = resolve_relative(path, None);
+        let canonical = joined.canonicalize().map_err(|source| FsError::Io {
             path: path.display().to_string(),
             source,
         })?;
@@ -205,11 +296,7 @@ impl LocalFs {
                 path: path.display().to_string(),
             });
         }
-        let joined = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.write_roots[0].join(path)
-        };
+        let joined = resolve_relative(path, self.write_roots.first().map(PathBuf::as_path));
         let canonical = canonicalize_existing_prefix(&joined);
         if contained(&canonical, &self.write_roots) {
             Ok(canonical)
@@ -455,5 +542,105 @@ mod tests {
         let fs = LocalFs::read_only(vec![root.clone()]);
         assert!(fs.is_symlink(&root.join("link.txt")));
         assert!(!fs.is_symlink(&root.join("real.txt")));
+    }
+
+    // ── Session cwd threading (ACP `session/new` cwd → shell_exec/file verbs) ──
+
+    #[test]
+    fn relative_write_and_read_use_the_session_cwd_when_one_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let sub = root.join("project");
+        std::fs::create_dir_all(&sub).unwrap();
+        let fs = LocalFs::sandbox(&root);
+
+        // No session cwd yet: relative write lands at the sandbox root, as
+        // it always has.
+        fs.write(Path::new("top.txt"), "top").unwrap();
+        assert!(root.join("top.txt").exists());
+
+        {
+            let _guard = set_session_cwd(Some(sub.clone()));
+            fs.write(Path::new("nested.txt"), "nested").unwrap();
+            assert_eq!(
+                std::fs::read_to_string(sub.join("nested.txt")).unwrap(),
+                "nested",
+                "a relative write must land under the active session cwd"
+            );
+            assert!(
+                !root.join("nested.txt").exists(),
+                "must not also land at the sandbox root"
+            );
+
+            // Read shares the same base as write once a session cwd is
+            // active — a relative read for a file that only exists under
+            // the session cwd must resolve there too (the read/write
+            // asymmetry fix).
+            let read_back = fs.read_to_string(Path::new("nested.txt")).unwrap();
+            assert_eq!(read_back, "nested");
+        }
+
+        // Guard dropped: relative writes go back to the sandbox root exactly
+        // as before — the no-session-cwd behavior is unchanged.
+        fs.write(Path::new("after.txt"), "after").unwrap();
+        assert!(root.join("after.txt").exists());
+    }
+
+    #[test]
+    fn session_cwd_outside_the_sandbox_is_still_denied_on_write() {
+        // The session cwd mechanism only changes which BASE a relative path
+        // is joined against; the existing containment check against
+        // `write_roots` still runs unconditionally afterward. Escaping the
+        // configured root is not possible via a session cwd — belt-and-
+        // suspenders alongside the containment clamp `acp::run_turn`
+        // applies before ever setting this thread-local.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let outside = tempfile::tempdir().unwrap();
+        let fs = LocalFs::sandbox(&root);
+
+        let _guard = set_session_cwd(Some(outside.path().to_path_buf()));
+        let denied = fs.write(Path::new("evil.txt"), "nope");
+        assert!(
+            matches!(denied, Err(FsError::OutsideSandbox { kind: "write", .. })),
+            "a session cwd outside write_roots must not let a relative write escape: {denied:?}"
+        );
+    }
+
+    #[test]
+    fn session_cwd_outside_the_sandbox_is_still_denied_on_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "top-secret").unwrap();
+        let fs = LocalFs::sandbox(&root);
+
+        let _guard = set_session_cwd(Some(outside.path().to_path_buf()));
+        let denied = fs.read_to_string(Path::new("secret.txt"));
+        assert!(
+            matches!(denied, Err(FsError::OutsideSandbox { kind: "read", .. })),
+            "a session cwd outside read_roots must not let a relative read escape: {denied:?}"
+        );
+    }
+
+    #[test]
+    fn set_session_cwd_guard_restores_the_previous_value_on_drop() {
+        assert_eq!(session_cwd(), None, "sanity: nothing active before the test");
+        let a = PathBuf::from("/tmp/akh-session-cwd-test-a");
+        let b = PathBuf::from("/tmp/akh-session-cwd-test-b");
+        {
+            let _outer = set_session_cwd(Some(a.clone()));
+            assert_eq!(session_cwd(), Some(a.clone()));
+            {
+                let _inner = set_session_cwd(Some(b.clone()));
+                assert_eq!(session_cwd(), Some(b.clone()));
+            }
+            assert_eq!(
+                session_cwd(),
+                Some(a.clone()),
+                "dropping the inner guard must restore the outer value, not clear it"
+            );
+        }
+        assert_eq!(session_cwd(), None, "dropping the outer guard must restore None");
     }
 }
