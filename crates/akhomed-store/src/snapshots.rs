@@ -10,8 +10,8 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Iterable,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -20,24 +20,73 @@ use uuid::Uuid;
 use crate::entity::{akh_state, fact, mutation_log, provenance_input, workspace_seed_pack};
 use crate::error::StoreResult;
 
+/// Postgres extended-query protocol bind-parameter limit.
+///
+/// A single prepared statement cannot carry more than 65,535 bind parameters,
+/// so any `insert_many` whose `rows × columns` exceeds this must be chunked.
+const PG_MAX_BIND_PARAMS: usize = 65_535;
+
+/// Chunk size for a multi-row insert so the total bind parameters stay under
+/// the Postgres extended-query limit.
+pub(crate) fn chunk_size_for_columns(columns: usize) -> usize {
+    (PG_MAX_BIND_PARAMS / columns).max(1)
+}
+
 /// Generate `replace_*` (full-replace for an Akh) and `load_*` helpers for an
 /// `akh_id`-scoped entity module.
+///
+/// The optional list of primary-key field names (in addition to `akh_id`) is
+/// used to deduplicate the input in Rust and to build an `ON CONFLICT DO
+/// NOTHING` guard at the database boundary. This prevents corrupted or double-
+/// hydrated in-memory state (e.g. duplicate interned symbols) from aborting a
+/// snapshot with a unique-key violation.
 macro_rules! akh_scoped_ops {
-    ($module:ident, $replace:ident, $load:ident) => {
-        /// Replace all rows for `akh_id` with `rows` (DELETE + insert, one txn).
+    ($module:ident, $replace:ident, $load:ident, [$($pk_field:ident -> $pk_col:ident),*]) => {
+        /// Replace all rows for `akh_id` with `rows` (DELETE + chunked insert, one txn).
+        ///
+        /// Duplicate rows are removed before insert and the insert uses
+        /// `ON CONFLICT DO NOTHING` on the primary key as a belt-and-suspenders
+        /// guard. The insert is chunked so no single query exceeds the Postgres
+        /// 65,535 bind-parameter limit.
         pub async fn $replace(
             db: &DatabaseConnection,
             akh_id: Uuid,
             rows: Vec<crate::entity::$module::Model>,
         ) -> StoreResult<()> {
             use crate::entity::$module::{Column, Entity};
+            let input_len = rows.len();
+            let mut seen = std::collections::HashSet::with_capacity(input_len);
+            let mut unique_rows = Vec::with_capacity(input_len);
+            for row in rows {
+                let key = ($(row.$pk_field.clone()),*);
+                if seen.insert(key) {
+                    unique_rows.push(row);
+                }
+            }
+            if unique_rows.len() < input_len {
+                tracing::debug!(
+                    akh_id = %akh_id,
+                    entity = stringify!($module),
+                    total = input_len,
+                    unique = unique_rows.len(),
+                    "deduplicated duplicate snapshot rows before insert"
+                );
+            }
+
+            let chunk_size = chunk_size_for_columns(Column::iter().count());
             let txn = db.begin().await?;
             Entity::delete_many()
                 .filter(Column::AkhId.eq(akh_id))
                 .exec(&txn)
                 .await?;
-            if !rows.is_empty() {
-                Entity::insert_many(rows.into_iter().map(IntoActiveModel::into_active_model))
+            for chunk in unique_rows.chunks(chunk_size) {
+                let active = chunk.iter().cloned().map(IntoActiveModel::into_active_model);
+                Entity::insert_many(active)
+                    .on_conflict(
+                        OnConflict::columns([Column::AkhId, $(Column::$pk_col),*])
+                            .do_nothing()
+                            .to_owned(),
+                    )
                     .exec(&txn)
                     .await?;
             }
@@ -56,21 +105,21 @@ macro_rules! akh_scoped_ops {
     };
 }
 
-akh_scoped_ops!(symbol, replace_symbols, load_symbols);
-akh_scoped_ops!(drive, replace_drives, load_drives);
-akh_scoped_ops!(agenda, replace_agenda, load_agenda);
-akh_scoped_ops!(curiosity_config, replace_curiosity, load_curiosity);
-akh_scoped_ops!(goal, replace_goals, load_goals);
-akh_scoped_ops!(goal_hierarchy, replace_goal_hierarchy, load_goal_hierarchy);
-akh_scoped_ops!(goal_dependency, replace_goal_dependencies, load_goal_dependencies);
-akh_scoped_ops!(failure_case, replace_failure_cases, load_failure_cases);
-akh_scoped_ops!(effort_case, replace_effort_cases, load_effort_cases);
-akh_scoped_ops!(learned_method, replace_learned_methods, load_learned_methods);
-akh_scoped_ops!(learned_method_step, replace_learned_method_steps, load_learned_method_steps);
-akh_scoped_ops!(competence_tool, replace_competence_tools, load_competence_tools);
-akh_scoped_ops!(competence_category, replace_competence_categories, load_competence_categories);
-akh_scoped_ops!(competence_calibration, replace_competence_calibration, load_competence_calibration);
-akh_scoped_ops!(sleep_metric, replace_sleep_metrics, load_sleep_metrics);
+akh_scoped_ops!(symbol, replace_symbols, load_symbols, [id -> Id]);
+akh_scoped_ops!(drive, replace_drives, load_drives, [kind -> Kind]);
+akh_scoped_ops!(agenda, replace_agenda, load_agenda, [project_id -> ProjectId]);
+akh_scoped_ops!(curiosity_config, replace_curiosity, load_curiosity, []);
+akh_scoped_ops!(goal, replace_goals, load_goals, [id -> Id]);
+akh_scoped_ops!(goal_hierarchy, replace_goal_hierarchy, load_goal_hierarchy, [parent_id -> ParentId, child_id -> ChildId]);
+akh_scoped_ops!(goal_dependency, replace_goal_dependencies, load_goal_dependencies, [goal_id -> GoalId, blocking_goal_id -> BlockingGoalId]);
+akh_scoped_ops!(failure_case, replace_failure_cases, load_failure_cases, [seq -> Seq]);
+akh_scoped_ops!(effort_case, replace_effort_cases, load_effort_cases, [seq -> Seq]);
+akh_scoped_ops!(learned_method, replace_learned_methods, load_learned_methods, [id -> Id]);
+akh_scoped_ops!(learned_method_step, replace_learned_method_steps, load_learned_method_steps, [method_id -> MethodId, step_index -> StepIndex]);
+akh_scoped_ops!(competence_tool, replace_competence_tools, load_competence_tools, [tool -> Tool]);
+akh_scoped_ops!(competence_category, replace_competence_categories, load_competence_categories, [category -> Category]);
+akh_scoped_ops!(competence_calibration, replace_competence_calibration, load_competence_calibration, [seq -> Seq]);
+akh_scoped_ops!(sleep_metric, replace_sleep_metrics, load_sleep_metrics, [cycle -> Cycle]);
 
 /// Replace all facts for a workspace (DELETE-by-workspace + insert, one txn).
 ///
@@ -108,21 +157,24 @@ pub async fn replace_workspace_facts(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        fact::Entity::insert_many(
-            unique_rows.into_iter().map(IntoActiveModel::into_active_model),
-        )
-        .on_conflict(
-            OnConflict::columns([
-                fact::Column::WorkspaceId,
-                fact::Column::Subject,
-                fact::Column::Predicate,
-                fact::Column::Object,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
-        .exec(&txn)
-        .await?;
+        let chunk_size = chunk_size_for_columns(fact::Column::iter().count());
+        for chunk in unique_rows.chunks(chunk_size) {
+            fact::Entity::insert_many(
+                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+            )
+            .on_conflict(
+                OnConflict::columns([
+                    fact::Column::WorkspaceId,
+                    fact::Column::Subject,
+                    fact::Column::Predicate,
+                    fact::Column::Object,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&txn)
+            .await?;
+        }
     }
     txn.commit().await?;
     Ok(())
@@ -147,15 +199,46 @@ pub async fn replace_provenance_inputs(
     provenance_id: i64,
     rows: Vec<provenance_input::Model>,
 ) -> StoreResult<()> {
+    let input_len = rows.len();
+    let mut seen = std::collections::HashSet::with_capacity(input_len);
+    let mut unique_rows = Vec::with_capacity(input_len);
+    for row in rows {
+        let key = (row.provenance_id, row.position);
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+    if unique_rows.len() < input_len {
+        tracing::debug!(
+            provenance_id,
+            total = input_len,
+            unique = unique_rows.len(),
+            "deduplicated duplicate provenance_input rows before snapshot insert"
+        );
+    }
+
     let txn = db.begin().await?;
     provenance_input::Entity::delete_many()
         .filter(provenance_input::Column::ProvenanceId.eq(provenance_id))
         .exec(&txn)
         .await?;
-    if !rows.is_empty() {
-        provenance_input::Entity::insert_many(rows.into_iter().map(IntoActiveModel::into_active_model))
+    if !unique_rows.is_empty() {
+        let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count());
+        for chunk in unique_rows.chunks(chunk_size) {
+            provenance_input::Entity::insert_many(
+                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+            )
+            .on_conflict(
+                OnConflict::columns([
+                    provenance_input::Column::ProvenanceId,
+                    provenance_input::Column::Position,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
             .exec(&txn)
             .await?;
+        }
     }
     txn.commit().await?;
     Ok(())
@@ -180,17 +263,46 @@ pub async fn replace_workspace_seed_packs(
     workspace_id: Uuid,
     rows: Vec<workspace_seed_pack::Model>,
 ) -> StoreResult<()> {
+    let input_len = rows.len();
+    let mut seen = std::collections::HashSet::with_capacity(input_len);
+    let mut unique_rows = Vec::with_capacity(input_len);
+    for row in rows {
+        let key = (row.workspace_id, row.position);
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+    if unique_rows.len() < input_len {
+        tracing::debug!(
+            workspace_id = %workspace_id,
+            total = input_len,
+            unique = unique_rows.len(),
+            "deduplicated duplicate workspace_seed_pack rows before snapshot insert"
+        );
+    }
+
     let txn = db.begin().await?;
     workspace_seed_pack::Entity::delete_many()
         .filter(workspace_seed_pack::Column::WorkspaceId.eq(workspace_id))
         .exec(&txn)
         .await?;
-    if !rows.is_empty() {
-        workspace_seed_pack::Entity::insert_many(
-            rows.into_iter().map(IntoActiveModel::into_active_model),
-        )
-        .exec(&txn)
-        .await?;
+    if !unique_rows.is_empty() {
+        let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count());
+        for chunk in unique_rows.chunks(chunk_size) {
+            workspace_seed_pack::Entity::insert_many(
+                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+            )
+            .on_conflict(
+                OnConflict::columns([
+                    workspace_seed_pack::Column::WorkspaceId,
+                    workspace_seed_pack::Column::Position,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&txn)
+            .await?;
+        }
     }
     txn.commit().await?;
     Ok(())
