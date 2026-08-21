@@ -129,16 +129,18 @@ spec:
               mountPath: /data/akh-medu/models
             {{- end }}
             {{- if .Values.akhomed.sshKey.enabled }}
-            # SSH key + known_hosts for the remote-exec backend (ADR 082 /
-            # Phase 48c). Mounted read-only; per-workspace `[exec]` sections
-            # in akh.toml point `key`/`known_hosts` under this path.
+            # SSH private key for the remote-exec backend (ADR 082 / Phase 48c).
+            # Mounted read-only; per-workspace `[exec] key` in akh.toml
+            # should point under this path.
             - name: ssh-key
               mountPath: {{ .Values.akhomed.sshKey.mountPath | default "/etc/akh/ssh" }}
               readOnly: true
             {{- if .Values.akhomed.sshKey.knownHosts }}
+            # known_hosts is mounted in its OWN directory, not inside the
+            # ssh-key Secret mount, because runc cannot create a subPath
+            # mountpoint inside a read-only Secret directory.
             - name: known-hosts
-              mountPath: {{ .Values.akhomed.sshKey.mountPath | default "/etc/akh/ssh" }}/known_hosts
-              subPath: known_hosts
+              mountPath: {{ .Values.akhomed.sshKey.knownHostsMountPath | default "/etc/akh/ssh-hosts" }}
               readOnly: true
             {{- end }}
             {{- end }}
