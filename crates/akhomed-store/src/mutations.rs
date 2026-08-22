@@ -7,7 +7,10 @@
 use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
+};
 use uuid::Uuid;
 
 use crate::entity::{akh, mutation_log};
@@ -92,6 +95,7 @@ pub async fn append_mutations(
     let now = chrono::Utc::now();
     let chunk_size = (PG_MAX_BIND_PARAMS / mutation_log::Column::iter().count()).max(1);
     let mut inserted = 0u64;
+    let txn = db.begin().await?;
     for chunk in rows.chunks(chunk_size) {
         let models: Vec<mutation_log::ActiveModel> = chunk
             .iter()
@@ -104,9 +108,10 @@ pub async fn append_mutations(
                 applied_at: Set(now),
             })
             .collect();
-        mutation_log::Entity::insert_many(models).exec(db).await?;
+        mutation_log::Entity::insert_many(models).exec(&txn).await?;
         inserted += chunk.len() as u64;
     }
+    txn.commit().await?;
     Ok(inserted)
 }
 
