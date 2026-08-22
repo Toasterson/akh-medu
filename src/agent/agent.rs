@@ -163,7 +163,7 @@ pub struct Agent {
     pub(crate) engine: Arc<Engine>,
     pub(crate) config: AgentConfig,
     pub(crate) working_memory: WorkingMemory,
-    pub(crate) tool_registry: std::sync::Mutex<ToolRegistry>,
+    pub(crate) tool_registry: std::sync::Mutex<Arc<ToolRegistry>>,
     pub(crate) goals: Vec<Goal>,
     pub(crate) predicates: AgentPredicates,
     pub(crate) cycle_count: u64,
@@ -905,7 +905,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry: std::sync::Mutex::new(tool_registry),
+            tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,
             predicates,
             cycle_count: 0,
@@ -1963,6 +1963,12 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .session_scope(asker, Some(tracker))
+    }
+
+    /// Clone the internally synchronized registry so callers can release the
+    /// outer agent slot before a permission round-trip or remote tool call.
+    pub(crate) fn tool_registry_handle(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Get a reference to the wrapped engine.
@@ -4214,7 +4220,7 @@ impl Agent {
             engine,
             config,
             working_memory,
-            tool_registry: std::sync::Mutex::new(tool_registry),
+            tool_registry: std::sync::Mutex::new(Arc::new(tool_registry)),
             goals,
             predicates,
             cycle_count,

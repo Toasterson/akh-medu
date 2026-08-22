@@ -43,6 +43,37 @@ pub enum ChatBackendError {
     TurnFailed { backend: String, reason: String },
 }
 
+/// Immutable backend state captured once at the start of an agentic turn.
+///
+/// In particular, the system prompt includes the current turn's session-local
+/// MCP manifests. Keeping it here prevents another session preparing the same
+/// workspace backend from changing the prompt between this turn's rounds.
+#[derive(Clone, Debug, Default)]
+pub struct PreparedChat {
+    system_prompt: Option<Arc<str>>,
+}
+
+impl PreparedChat {
+    pub(crate) fn with_system_prompt(prompt: impl Into<Arc<str>>) -> Self {
+        Self {
+            system_prompt: Some(prompt.into()),
+        }
+    }
+
+    /// The exact prompt snapshot this turn must use on every model request.
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    pub(crate) fn require_system_prompt(&self, backend: &str) -> Result<&str, ChatBackendError> {
+        self.system_prompt()
+            .ok_or_else(|| ChatBackendError::TurnFailed {
+                backend: backend.to_string(),
+                reason: "agentic turn has no prepared system-prompt snapshot".into(),
+            })
+    }
+}
+
 /// What a model can do, read from the model itself — not guessed.
 ///
 /// Populated from the GGUF metadata for Candle (`<arch>.context_length`) and from
@@ -86,6 +117,21 @@ pub trait ChatBackend: Send + Sync {
         _manifests: &[&crate::agent::tool_manifest::ToolManifest],
     ) {}
 
+    /// Capture immutable state for one complete agentic turn.
+    ///
+    /// The default preserves compatibility with stateless backends: it invokes
+    /// their existing [`Self::prepare`] hook and returns an empty snapshot.
+    /// Stateful prompt backends override this and all `*_prepared` methods.
+    fn prepare_turn(
+        &self,
+        agent_id: &str,
+        psyche: Option<&crate::compartment::psyche::Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) -> PreparedChat {
+        self.prepare(agent_id, psyche, manifests);
+        PreparedChat::default()
+    }
+
     /// The model's capabilities, read from the model (GGUF metadata / Ollama
     /// `/api/show`). Default: unknown. Consumed by the Phase 44 context budget
     /// (window) and reasoning-effort gating.
@@ -106,6 +152,19 @@ pub trait ChatBackend: Send + Sync {
         request_seq: usize,
     ) -> Result<AssistantTurn, ChatBackendError>;
 
+    /// Run one request with the immutable state captured by
+    /// [`Self::prepare_turn`]. Stateless backends inherit the legacy method.
+    fn chat_with_tools_prepared(
+        &self,
+        _prepared: &PreparedChat,
+        agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        self.chat_with_tools(agent_id, conversation, tools, request_seq)
+    }
+
     /// Streaming counterpart. Default: run [`chat_with_tools`](Self::chat_with_tools)
     /// and emit the assembled content as one [`StreamEvent::Content`] (backends
     /// without native streaming still satisfy the loop, which also has a
@@ -123,6 +182,20 @@ pub trait ChatBackend: Send + Sync {
             on_event(StreamEvent::Content(turn.content.clone()));
         }
         Ok(turn)
+    }
+
+    /// Streaming request with the same immutable state as every other round
+    /// in this turn. Stateless backends inherit the legacy streaming method.
+    fn chat_with_tools_streaming_prepared(
+        &self,
+        _prepared: &PreparedChat,
+        agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        self.chat_with_tools_streaming(agent_id, conversation, tools, request_seq, on_event)
     }
 }
 
@@ -160,6 +233,18 @@ impl ChatBackend for OllamaChatBackend {
         self.mgr.load_agent(agent_id, agent_id, psyche, manifests);
     }
 
+    fn prepare_turn(
+        &self,
+        agent_id: &str,
+        psyche: Option<&crate::compartment::psyche::Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) -> PreparedChat {
+        PreparedChat::with_system_prompt(
+            self.mgr
+                .load_agent_prompt(agent_id, agent_id, psyche, manifests),
+        )
+    }
+
     fn capabilities(&self) -> ModelCapabilities {
         self.mgr.capabilities()
     }
@@ -179,6 +264,23 @@ impl ChatBackend for OllamaChatBackend {
             })
     }
 
+    fn chat_with_tools_prepared(
+        &self,
+        prepared: &PreparedChat,
+        agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        let system_prompt = prepared.require_system_prompt("ollama")?;
+        self.mgr
+            .chat_with_tools_using_prompt(agent_id, system_prompt, conversation, tools, request_seq)
+            .map_err(|e| ChatBackendError::TurnFailed {
+                backend: "ollama".into(),
+                reason: e.to_string(),
+            })
+    }
+
     fn chat_with_tools_streaming(
         &self,
         agent_id: &str,
@@ -189,6 +291,31 @@ impl ChatBackend for OllamaChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.mgr
             .chat_with_tools_streaming(agent_id, conversation, tools, request_seq, on_event)
+            .map_err(|e| ChatBackendError::TurnFailed {
+                backend: "ollama".into(),
+                reason: e.to_string(),
+            })
+    }
+
+    fn chat_with_tools_streaming_prepared(
+        &self,
+        prepared: &PreparedChat,
+        agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        let system_prompt = prepared.require_system_prompt("ollama")?;
+        self.mgr
+            .chat_with_tools_streaming_using_prompt(
+                agent_id,
+                system_prompt,
+                conversation,
+                tools,
+                request_seq,
+                on_event,
+            )
             .map_err(|e| ChatBackendError::TurnFailed {
                 backend: "ollama".into(),
                 reason: e.to_string(),
@@ -420,6 +547,208 @@ fn tool_call_from_json(s: &str) -> Option<super::ollama::ToolCall> {
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     Some(super::ollama::ToolCall { name, arguments })
+}
+
+#[cfg(test)]
+mod prompt_isolation_tests {
+    use super::*;
+    use crate::agent::model_manager::{AgentModelManager, ModelManagerConfig};
+    use crate::agent::ollama::OllamaConfig;
+    use crate::agent::tool_manifest::{DangerInfo, DangerLevel, ToolManifest, ToolSource};
+    use serde_json::json;
+    use std::collections::HashSet;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    fn manifest(name: &str, description: &str, server: &str) -> ToolManifest {
+        ToolManifest {
+            name: name.into(),
+            description: description.into(),
+            parameters: vec![],
+            danger: DangerInfo {
+                level: DangerLevel::Safe,
+                capabilities: HashSet::new(),
+                description: "test proxy".into(),
+                shadow_triggers: vec![],
+            },
+            source: ToolSource::Mcp {
+                server: server.into(),
+            },
+        }
+    }
+
+    fn spawn_ollama_capture() -> (String, Arc<Mutex<Vec<Value>>>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock Ollama");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_server = Arc::clone(&captured);
+
+        let server = std::thread::spawn(move || {
+            // Two /api/chat calls plus the manager's one-time /api/show probe.
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().expect("accept mock request");
+                let mut reader = BufReader::new(stream.try_clone().expect("clone mock stream"));
+                let mut writer = stream;
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("read request line");
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).expect("read request header");
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().expect("content length");
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).expect("read request body");
+
+                let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+                let (content_type, response) = if path == "/api/show" {
+                    (
+                        "application/json",
+                        json!({
+                            "capabilities": ["tools"],
+                            "model_info": {"test.context_length": 32768}
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    assert_eq!(path, "/api/chat");
+                    let request: Value = serde_json::from_slice(&body).expect("chat request JSON");
+                    let streaming = request["stream"].as_bool().unwrap_or(false);
+                    captured_for_server.lock().unwrap().push(request);
+                    if streaming {
+                        (
+                            "application/x-ndjson",
+                            "{\"message\":{\"content\":\"ok\"},\"done\":true}\n".into(),
+                        )
+                    } else {
+                        (
+                            "application/json",
+                            json!({"message": {"content": "ok", "tool_calls": []}}).to_string(),
+                        )
+                    }
+                };
+                let http = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                );
+                writer
+                    .write_all(http.as_bytes())
+                    .expect("write mock response");
+                writer.flush().expect("flush mock response");
+            }
+        });
+
+        (base_url, captured, server)
+    }
+
+    #[test]
+    fn ollama_prepared_prompt_and_catalog_survive_cross_session_refreshes() {
+        let (base_url, captured, server) = spawn_ollama_capture();
+        let manager = Arc::new(AgentModelManager::new(ModelManagerConfig {
+            ollama: OllamaConfig {
+                base_url,
+                model: "test-model".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        let backend = OllamaChatBackend::new(manager);
+        let manifest_a = manifest(
+            "mcp__session_a__search",
+            "search only session A may see",
+            "session_a",
+        );
+        let manifest_b = manifest(
+            "mcp__session_b__admin",
+            "admin only session B may see",
+            "session_b",
+        );
+
+        let prepared_a = backend.prepare_turn("shared-workspace", None, &[&manifest_a]);
+        let _prepared_b = backend.prepare_turn("shared-workspace", None, &[&manifest_b]);
+        assert!(
+            prepared_a
+                .system_prompt()
+                .unwrap()
+                .contains("mcp__session_a__search")
+        );
+        assert!(
+            !prepared_a
+                .system_prompt()
+                .unwrap()
+                .contains("mcp__session_b__admin")
+        );
+
+        let tools_a = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "mcp__session_a__search",
+                "description": "session A wire catalog",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        })];
+        let first_conversation = vec![json!({"role": "user", "content": "first round"})];
+        backend
+            .chat_with_tools_prepared(
+                &prepared_a,
+                "shared-workspace",
+                &first_conversation,
+                &tools_a,
+                0,
+            )
+            .expect("session A non-streaming round");
+
+        // Refresh the shared cache again between A's rounds. A's streaming
+        // continuation must retain both its prompt metadata and wire catalog.
+        let _prepared_b_later = backend.prepare_turn("shared-workspace", None, &[&manifest_b]);
+        let later_conversation = vec![
+            json!({"role": "user", "content": "first round"}),
+            json!({"role": "assistant", "content": "", "tool_calls": []}),
+            json!({"role": "tool", "content": "result from A"}),
+        ];
+        backend
+            .chat_with_tools_streaming_prepared(
+                &prepared_a,
+                "shared-workspace",
+                &later_conversation,
+                &tools_a,
+                1,
+                &mut |_| {},
+            )
+            .expect("session A streaming continuation");
+        server.join().expect("mock Ollama server");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["stream"], false);
+        assert_eq!(requests[1]["stream"], true);
+        for request in requests.iter() {
+            let prompt = request["messages"][0]["content"]
+                .as_str()
+                .expect("system prompt");
+            assert!(prompt.contains("mcp__session_a__search"));
+            assert!(prompt.contains("search only session A may see"));
+            assert!(!prompt.contains("mcp__session_b__admin"));
+            assert!(!prompt.contains("admin only session B may see"));
+            assert_eq!(
+                request["tools"][0]["function"]["name"],
+                "mcp__session_a__search"
+            );
+            assert_eq!(
+                request["tools"][0]["function"]["description"],
+                "session A wire catalog"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "candle-backend"))]

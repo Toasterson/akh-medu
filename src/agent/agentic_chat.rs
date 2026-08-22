@@ -395,10 +395,15 @@ impl Agent {
             return None;
         }
 
-        // Refresh per-akh state (e.g. the Ollama system-prompt cache) from psyche.
-        let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
+        // Capture the exact system prompt for this complete turn. Session-local
+        // MCP manifests must not race through a workspace-keyed backend cache.
+        let manifests = self
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_advertised_manifests();
         let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests.iter().collect();
-        backend.prepare(agent_id, self.psyche.as_ref(), &manifest_refs);
+        let prepared_chat = backend.prepare_turn(agent_id, self.psyche.as_ref(), &manifest_refs);
 
         let reg = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut tools = ollama_tool_catalog(&*reg);
@@ -630,7 +635,14 @@ impl Agent {
                         }
                     }
                 };
-                match backend.chat_with_tools_streaming(agent_id, &conversation, &tools, request_seq, &mut on_event) {
+                match backend.chat_with_tools_streaming_prepared(
+                    &prepared_chat,
+                    agent_id,
+                    &conversation,
+                    &tools,
+                    request_seq,
+                    &mut on_event,
+                ) {
                     Ok(t) => t,
                     Err(stream_err) => {
                         tracing::warn!(
@@ -646,7 +658,13 @@ impl Agent {
                             backend_label = backend.label()
                         )));
                         used_fallback = true;
-                        match backend.chat_with_tools(agent_id, &conversation, &tools, request_seq) {
+                        match backend.chat_with_tools_prepared(
+                            &prepared_chat,
+                            agent_id,
+                            &conversation,
+                            &tools,
+                            request_seq,
+                        ) {
                             Ok(t) => t,
                             Err(e) => {
                                 sink.emit(&AkhMessage::error("llm", e.to_string()));
@@ -860,6 +878,7 @@ impl Agent {
         // than the old bare "(stopped after N rounds)" cutoff.
         self.force_final_answer(
             backend.as_ref(),
+            &prepared_chat,
             engine,
             agent_id,
             user_prompt,
@@ -928,13 +947,11 @@ impl Agent {
         let input = tool_input_from_args(&exec_args);
         let mut param_repaired = false;
         let mut a_note: Option<String> = None;
-        // Bind the lock result to an owned `AgentResult` *before* matching on
-        // it: a `match self.tool_registry.lock()....execute(..) { .. }` keeps
-        // the `MutexGuard` temporary alive for the scrutinee's entire match
-        // expression (a well-known Rust footgun), and the `Err` arm below
-        // re-locks the same `std::sync::Mutex` on this thread — a guaranteed
-        // self-deadlock on every failed tool call otherwise.
-        let exec_result = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, input, engine);
+        // Clone the internally synchronized registry before dispatch. The
+        // outer Agent slot stays available while a permission prompt or remote
+        // MCP request blocks, and the same stable handle covers a repair retry.
+        let registry = self.tool_registry_handle();
+        let exec_result = registry.execute(&exec_name, input, engine);
         let (success, result) = match exec_result {
             Ok(o) => (o.success, o.result),
             Err(e) => {
@@ -946,7 +963,7 @@ impl Agent {
                 // the first approved failure stands instead.
                 let opted_out = std::env::var("AKH_AGENT_PARAM_REPAIR").is_ok_and(|v| v == "0");
                 let repairable = matches!(e, super::error::AgentError::ToolExecution { .. });
-                let retry = if opted_out || !repairable || self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).would_ask(&exec_name) {
+                let retry = if opted_out || !repairable || registry.would_ask(&exec_name) {
                     None
                 } else {
                     super::organ::repair_known_call_args(&exec_name, &exec_args, full_catalog)
@@ -962,7 +979,7 @@ impl Agent {
                             retry_note = format!("{retry_note}; {}", g.note);
                         }
                         let retry_input = tool_input_from_args(&retry_args);
-                        match self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(&exec_name, retry_input, engine) {
+                        match registry.execute(&exec_name, retry_input, engine) {
                             Ok(o) => {
                                 tracing::info!(
                                     tool = %exec_name,
@@ -1023,6 +1040,7 @@ impl Agent {
     fn force_final_answer(
         &self,
         backend: &dyn super::chat_backend::ChatBackend,
+        prepared_chat: &super::chat_backend::PreparedChat,
         engine: &Engine,
         agent_id: &str,
         user_prompt: &str,
@@ -1072,8 +1090,14 @@ impl Agent {
                     }
                 }
             };
-            match backend.chat_with_tools_streaming(agent_id, conversation, &no_tools, request_seq, &mut on_event)
-            {
+            match backend.chat_with_tools_streaming_prepared(
+                prepared_chat,
+                agent_id,
+                conversation,
+                &no_tools,
+                request_seq,
+                &mut on_event,
+            ) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(agent_id, "forced-answer streaming failed ({e}); non-streaming");
@@ -1083,7 +1107,13 @@ impl Agent {
                         backend_label = backend.label()
                     )));
                     used_fallback = true;
-                    match backend.chat_with_tools(agent_id, conversation, &no_tools, request_seq) {
+                    match backend.chat_with_tools_prepared(
+                        prepared_chat,
+                        agent_id,
+                        conversation,
+                        &no_tools,
+                        request_seq,
+                    ) {
                         Ok(t) => t,
                         Err(e) => {
                             sink.emit(&AkhMessage::error("llm", e.to_string()));

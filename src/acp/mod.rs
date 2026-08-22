@@ -5832,12 +5832,39 @@ mod tests {
         use crate::agent::permission::{PermissionAsker, PermissionMode};
         use crate::agent::tool_manifest::{Capability, ToolManifest};
 
-        struct TaggedTool(&'static str);
+        struct Rendezvous {
+            entered: std::sync::Mutex<usize>,
+            both_entered: std::sync::Condvar,
+        }
+
+        impl Rendezvous {
+            fn wait_for_peer(&self) -> bool {
+                let mut entered = self.entered.lock().unwrap_or_else(|e| e.into_inner());
+                *entered += 1;
+                self.both_entered.notify_all();
+                while *entered < 2 {
+                    let (next, timeout) = self
+                        .both_entered
+                        .wait_timeout(entered, std::time::Duration::from_secs(2))
+                        .unwrap_or_else(|e| e.into_inner());
+                    entered = next;
+                    if timeout.timed_out() && *entered < 2 {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+
+        struct TaggedTool {
+            tag: &'static str,
+            rendezvous: Option<Arc<Rendezvous>>,
+        }
         impl crate::agent::tool::Tool for TaggedTool {
             fn signature(&self) -> crate::agent::tool::ToolSignature {
                 crate::agent::tool::ToolSignature {
                     name: "mcp__shared__same_name".into(),
-                    description: self.0.into(),
+                    description: self.tag.into(),
                     parameters: vec![],
                 }
             }
@@ -5847,13 +5874,19 @@ mod tests {
                 _engine: &Engine,
                 _input: crate::agent::tool::ToolInput,
             ) -> crate::agent::error::AgentResult<crate::agent::tool::ToolOutput> {
-                Ok(crate::agent::tool::ToolOutput::ok(self.0))
+                if let Some(rendezvous) = &self.rendezvous {
+                    assert!(
+                        rendezvous.wait_for_peer(),
+                        "session tool executions were serialized by the outer registry mutex"
+                    );
+                }
+                Ok(crate::agent::tool::ToolOutput::ok(self.tag))
             }
 
             fn manifest(&self) -> ToolManifest {
                 ToolManifest {
                     name: "mcp__shared__same_name".into(),
-                    description: self.0.into(),
+                    description: self.tag.into(),
                     parameters: vec![],
                     danger: crate::agent::tool_manifest::DangerInfo {
                         level: crate::agent::tool_manifest::DangerLevel::Dangerous,
@@ -5866,10 +5899,17 @@ mod tests {
             }
         }
 
-        struct CountingAsker(Arc<std::sync::atomic::AtomicUsize>);
+        struct CountingAsker {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            rendezvous: Arc<Rendezvous>,
+        }
         impl PermissionAsker for CountingAsker {
             fn ask(&self, _manifest: &ToolManifest, _input_summary: &str) -> bool {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    self.rendezvous.wait_for_peer(),
+                    "session permission waits were serialized by a registry mutex"
+                );
                 true
             }
         }
@@ -5893,12 +5933,22 @@ mod tests {
         ));
         drop(locked);
         let barrier = Arc::new(std::sync::Barrier::new(2));
+        let permission_rendezvous = Arc::new(Rendezvous {
+            entered: std::sync::Mutex::new(0),
+            both_entered: std::sync::Condvar::new(),
+        });
+        let execution_rendezvous = Arc::new(Rendezvous {
+            entered: std::sync::Mutex::new(0),
+            both_entered: std::sync::Condvar::new(),
+        });
         let calls_a = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_b = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let run = |tag: &'static str,
                    calls: Arc<std::sync::atomic::AtomicUsize>,
-                   barrier: Arc<std::sync::Barrier>| {
+                   barrier: Arc<std::sync::Barrier>,
+                   permission_rendezvous: Arc<Rendezvous>,
+                   execution_rendezvous: Arc<Rendezvous>| {
             let agent = Arc::clone(&agent);
             let engine = Arc::clone(&engine);
             std::thread::spawn(move || {
@@ -5911,15 +5961,19 @@ mod tests {
                 );
                 let mut scope = SessionToolGuard::new(
                     &agent,
-                    Some(Arc::new(CountingAsker(Arc::clone(&calls)))),
+                    Some(Arc::new(CountingAsker {
+                        calls: Arc::clone(&calls),
+                        rendezvous: permission_rendezvous,
+                    })),
                     tracker,
                 );
-                scope.register(Box::new(TaggedTool(tag)));
+                scope.register(Box::new(TaggedTool {
+                    tag,
+                    rendezvous: Some(execution_rendezvous),
+                }));
                 barrier.wait();
-                let output = agent
-                    .tool_registry
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                let registry = agent.tool_registry_handle();
+                let output = registry
                     .execute(
                         "mcp__shared__same_name",
                         crate::agent::tool::ToolInput::new(),
@@ -5930,8 +5984,20 @@ mod tests {
             })
         };
 
-        let thread_a = run("session-a", Arc::clone(&calls_a), Arc::clone(&barrier));
-        let thread_b = run("session-b", Arc::clone(&calls_b), Arc::clone(&barrier));
+        let thread_a = run(
+            "session-a",
+            Arc::clone(&calls_a),
+            Arc::clone(&barrier),
+            Arc::clone(&permission_rendezvous),
+            Arc::clone(&execution_rendezvous),
+        );
+        let thread_b = run(
+            "session-b",
+            Arc::clone(&calls_b),
+            Arc::clone(&barrier),
+            Arc::clone(&permission_rendezvous),
+            Arc::clone(&execution_rendezvous),
+        );
         let (output_a, messages_a) = thread_a.join().expect("session A thread");
         let (output_b, messages_b) = thread_b.join().expect("session B thread");
 
@@ -5950,7 +6016,10 @@ mod tests {
         // global callback from another use of the shared workspace agent.
         let locked = agent.read().unwrap_or_else(|e| e.into_inner());
         let (mut scope, _sink) = session_tool_guard(&locked);
-        scope.register(Box::new(TaggedTool("no-asker")));
+        scope.register(Box::new(TaggedTool {
+            tag: "no-asker",
+            rendezvous: None,
+        }));
         locked.sync_live_tools();
         assert!(
             engine

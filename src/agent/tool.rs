@@ -612,8 +612,8 @@ impl ToolRegistry {
         // OODA loop's tool-error isolation is preserved.
         if let Some(manifest) = self.manifest(name) {
             use super::permission::PermissionDecision;
-            let policy = self.policy.lock().unwrap();
-            match policy.decide(&manifest) {
+            let decision = self.policy.lock().unwrap().decide(&manifest);
+            match decision {
                 PermissionDecision::Allow => {}
                 PermissionDecision::Deny(reason) => {
                     return Ok(ToolOutput::err(format!("permission denied: {reason}")));
