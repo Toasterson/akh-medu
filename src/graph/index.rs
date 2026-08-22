@@ -3,7 +3,7 @@
 //! Uses `petgraph` for the graph structure and `DashMap` for fast lookups
 //! by subject, predicate, or object.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 use dashmap::DashMap;
@@ -15,6 +15,8 @@ use crate::error::GraphError;
 use crate::symbol::SymbolId;
 
 use super::{EdgeData, Triple};
+
+type TripleKey = (SymbolId, SymbolId, SymbolId);
 
 /// Result type for graph operations.
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
@@ -30,8 +32,17 @@ pub struct KnowledgeGraph {
     node_index: DashMap<SymbolId, NodeIndex>,
     /// Predicate index: predicate SymbolId → list of (subject, object) pairs.
     predicate_index: DashMap<SymbolId, Vec<(SymbolId, SymbolId)>>,
+    /// Provenance ID → exact graph keys carrying that ledger link. Key zero
+    /// is reserved for graph edges with no provenance link.
+    provenance_index: DashMap<u64, BTreeSet<TripleKey>>,
+    /// Ordered confidence bits → exact graph keys at that confidence.
+    /// Valid non-negative finite `f32` values preserve numeric order in their
+    /// IEEE bit representation, so range lookup is logarithmic plus matches.
+    confidence_index: RwLock<BTreeMap<u32, BTreeSet<TripleKey>>>,
     /// Triple count.
     triple_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    all_triples_scans: std::sync::atomic::AtomicUsize,
 }
 
 impl KnowledgeGraph {
@@ -41,8 +52,87 @@ impl KnowledgeGraph {
             graph: RwLock::new(DiGraph::new()),
             node_index: DashMap::new(),
             predicate_index: DashMap::new(),
+            provenance_index: DashMap::new(),
+            confidence_index: RwLock::new(BTreeMap::new()),
             triple_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            all_triples_scans: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn add_metadata_indices(&self, key: TripleKey, edge: &EdgeData) {
+        self.provenance_index
+            .entry(edge.provenance_id.unwrap_or(0))
+            .or_default()
+            .insert(key);
+        if edge.confidence.is_finite() && (0.0..=1.0).contains(&edge.confidence) {
+            let confidence = if edge.confidence == 0.0 {
+                0.0_f32.to_bits()
+            } else {
+                edge.confidence.to_bits()
+            };
+            self.confidence_index
+                .write()
+                .expect("confidence index lock poisoned")
+                .entry(confidence)
+                .or_default()
+                .insert(key);
+        }
+    }
+
+    fn remove_metadata_indices(&self, key: TripleKey, edge: &EdgeData) {
+        let provenance_id = edge.provenance_id.unwrap_or(0);
+        if let Some(mut keys) = self.provenance_index.get_mut(&provenance_id) {
+            keys.remove(&key);
+        }
+        if !edge.confidence.is_finite() || !(0.0..=1.0).contains(&edge.confidence) {
+            return;
+        }
+        let confidence = if edge.confidence == 0.0 {
+            0.0_f32.to_bits()
+        } else {
+            edge.confidence.to_bits()
+        };
+        let mut index = self
+            .confidence_index
+            .write()
+            .expect("confidence index lock poisoned");
+        if let Some(keys) = index.get_mut(&confidence) {
+            keys.remove(&key);
+            if keys.is_empty() {
+                index.remove(&confidence);
+            }
+        }
+    }
+
+    fn replace_metadata_indices(&self, key: TripleKey, old: &EdgeData, new: &EdgeData) {
+        if old.provenance_id != new.provenance_id || old.confidence != new.confidence {
+            self.remove_metadata_indices(key, old);
+            self.add_metadata_indices(key, new);
+        }
+    }
+
+    fn triples_for_keys(&self, keys: impl IntoIterator<Item = TripleKey>) -> Vec<Triple> {
+        let graph = self.graph.read().expect("graph lock poisoned");
+        keys.into_iter()
+            .filter_map(|(subject, predicate, object)| {
+                let subj_idx = *self.node_index.get(&subject)?.value();
+                let obj_idx = *self.node_index.get(&object)?.value();
+                let edge = graph
+                    .edges_directed(subj_idx, Direction::Outgoing)
+                    .find(|edge| edge.target() == obj_idx && edge.weight().predicate == predicate)?
+                    .weight();
+                Some(Triple {
+                    subject,
+                    predicate,
+                    object,
+                    confidence: edge.confidence,
+                    timestamp: edge.timestamp,
+                    provenance_id: edge.provenance_id,
+                    compartment_id: edge.compartment_id.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Ensure a node exists for the given symbol, returning its NodeIndex.
@@ -75,35 +165,32 @@ impl KnowledgeGraph {
 
         let edge_data = EdgeData::from(triple);
 
-        {
-            let mut graph = self.graph.write().expect("graph lock poisoned");
-
-            // Check for existing edge with same predicate between these nodes
-            let existing = graph
-                .edges_directed(subj_idx, Direction::Outgoing)
-                .find(|e| e.target() == obj_idx && e.weight().predicate == triple.predicate)
-                .map(|e| e.id());
-
-            if let Some(edge_id) = existing {
-                // Update existing edge: take max confidence, update provenance
-                if let Some(weight) = graph.edge_weight_mut(edge_id) {
-                    weight.confidence = weight.confidence.max(edge_data.confidence);
-                    if edge_data.provenance_id.is_some() {
-                        weight.provenance_id = edge_data.provenance_id;
-                    }
-                    weight.timestamp = edge_data.timestamp;
+        let mut graph = self.graph.write().expect("graph lock poisoned");
+        let existing = graph
+            .edges_directed(subj_idx, Direction::Outgoing)
+            .find(|e| e.target() == obj_idx && e.weight().predicate == triple.predicate)
+            .map(|e| e.id());
+        let key = (triple.subject, triple.predicate, triple.object);
+        if let Some(edge_id) = existing {
+            if let Some(weight) = graph.edge_weight_mut(edge_id) {
+                let old = weight.clone();
+                weight.confidence = weight.confidence.max(edge_data.confidence);
+                if edge_data.provenance_id.is_some() {
+                    weight.provenance_id = edge_data.provenance_id;
                 }
-                return Ok(());
+                weight.timestamp = edge_data.timestamp;
+                self.replace_metadata_indices(key, &old, weight);
             }
-
-            graph.add_edge(subj_idx, obj_idx, edge_data);
+            return Ok(());
         }
 
+        graph.add_edge(subj_idx, obj_idx, edge_data.clone());
         // Update predicate index
         self.predicate_index
             .entry(triple.predicate)
             .or_default()
             .push((triple.subject, triple.object));
+        self.add_metadata_indices(key, &edge_data);
 
         self.triple_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -124,27 +211,27 @@ impl KnowledgeGraph {
         self.ensure_node(triple.predicate);
         let edge_data = EdgeData::from(triple);
 
-        {
-            let mut graph = self.graph.write().expect("graph lock poisoned");
-            let existing = graph
-                .edges_directed(subj_idx, Direction::Outgoing)
-                .find(|edge| {
-                    edge.target() == obj_idx && edge.weight().predicate == triple.predicate
-                })
-                .map(|edge| edge.id());
-            if let Some(edge_id) = existing {
-                if let Some(weight) = graph.edge_weight_mut(edge_id) {
-                    *weight = edge_data;
-                }
-                return Ok(());
+        let mut graph = self.graph.write().expect("graph lock poisoned");
+        let existing = graph
+            .edges_directed(subj_idx, Direction::Outgoing)
+            .find(|edge| edge.target() == obj_idx && edge.weight().predicate == triple.predicate)
+            .map(|edge| edge.id());
+        let key = (triple.subject, triple.predicate, triple.object);
+        if let Some(edge_id) = existing {
+            if let Some(weight) = graph.edge_weight_mut(edge_id) {
+                let old = weight.clone();
+                *weight = edge_data.clone();
+                self.replace_metadata_indices(key, &old, weight);
             }
-            graph.add_edge(subj_idx, obj_idx, edge_data);
+            return Ok(());
         }
 
+        graph.add_edge(subj_idx, obj_idx, edge_data.clone());
         self.predicate_index
             .entry(triple.predicate)
             .or_default()
             .push((triple.subject, triple.object));
+        self.add_metadata_indices(key, &edge_data);
         self.triple_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -171,20 +258,20 @@ impl KnowledgeGraph {
         };
 
         let mut graph = self.graph.write().expect("graph lock poisoned");
-
-        // Find the edge with matching predicate between subj and obj
         let edge_to_remove = graph
             .edges_directed(subj_idx, Direction::Outgoing)
             .find(|e| e.target() == obj_idx && e.weight().predicate == predicate)
             .map(|e| e.id());
+        let removed = edge_to_remove.and_then(|edge_id| graph.remove_edge(edge_id));
 
-        if let Some(edge_id) = edge_to_remove {
-            graph.remove_edge(edge_id);
+        if let Some(edge) = removed {
+            let key = (subject, predicate, object);
 
             // Update predicate index
             if let Some(mut pairs) = self.predicate_index.get_mut(&predicate) {
                 pairs.retain(|&(s, o)| !(s == subject && o == object));
             }
+            self.remove_metadata_indices(key, &edge);
 
             self.triple_count
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -203,38 +290,31 @@ impl KnowledgeGraph {
     /// Returns the number of triples removed.
     pub fn remove_triples_in_compartment(&self, compartment_id: &str) -> usize {
         let mut graph = self.graph.write().expect("graph lock poisoned");
-
-        // Collect edge indices whose compartment_id matches.
         let mut to_remove: Vec<_> = graph
             .edge_indices()
-            .filter(|&ei| {
+            .filter(|&edge_id| {
                 graph
-                    .edge_weight(ei)
-                    .is_some_and(|e| e.compartment_id.as_deref() == Some(compartment_id))
+                    .edge_weight(edge_id)
+                    .is_some_and(|edge| edge.compartment_id.as_deref() == Some(compartment_id))
             })
             .collect();
-
-        // Sort descending so swap-remove doesn't invalidate earlier indices.
-        to_remove.sort_by(|a, b| b.cmp(a));
+        to_remove.sort_by(|left, right| right.cmp(left));
 
         let mut removed = 0;
-        for ei in to_remove {
-            // Capture the edge data before removing so we can update the predicate index.
-            if let Some(edge) = graph.edge_weight(ei).cloned()
-                && let Some((src, dst)) = graph.edge_endpoints(ei)
+        for edge_id in to_remove {
+            if let Some(edge) = graph.edge_weight(edge_id).cloned()
+                && let Some((src, dst)) = graph.edge_endpoints(edge_id)
+                && let (Some(subject), Some(object)) = (
+                    graph.node_weight(src).copied(),
+                    graph.node_weight(dst).copied(),
+                )
             {
-                let subject = graph.node_weight(src).copied();
-                let object = graph.node_weight(dst).copied();
-
-                graph.remove_edge(ei);
-
-                // Update predicate index.
-                if let (Some(s), Some(o)) = (subject, object)
-                    && let Some(mut pairs) = self.predicate_index.get_mut(&edge.predicate)
-                {
-                    pairs.retain(|&(ps, po)| !(ps == s && po == o));
+                graph.remove_edge(edge_id);
+                let predicate = edge.predicate;
+                if let Some(mut pairs) = self.predicate_index.get_mut(&predicate) {
+                    pairs.retain(|&(s, o)| !(s == subject && o == object));
                 }
-
+                self.remove_metadata_indices((subject, predicate, object), &edge);
                 removed += 1;
             }
         }
@@ -289,6 +369,66 @@ impl KnowledgeGraph {
             .get(&predicate)
             .map(|v| v.value().clone())
             .unwrap_or_default()
+    }
+
+    /// Materialize exact triples for one predicate without scanning all edges.
+    pub fn triples_with_predicate(&self, predicate: SymbolId) -> Vec<Triple> {
+        let keys = self
+            .predicate_index
+            .get(&predicate)
+            .map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|&(subject, object)| (subject, predicate, object))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.triples_for_keys(keys)
+    }
+
+    /// Materialize triples linked to any requested provenance record.
+    pub fn triples_with_provenance_ids(&self, ids: &HashSet<u64>) -> Vec<Triple> {
+        let mut keys = BTreeSet::new();
+        for id in ids {
+            if let Some(indexed) = self.provenance_index.get(id) {
+                keys.extend(indexed.iter().copied());
+            }
+        }
+        self.triples_for_keys(keys)
+    }
+
+    /// Materialize triples with no ledger link via the reserved index bucket.
+    pub fn triples_without_provenance(&self) -> Vec<Triple> {
+        let keys = self
+            .provenance_index
+            .get(&0)
+            .map(|indexed| indexed.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.triples_for_keys(keys)
+    }
+
+    /// Materialize triples at or above `minimum` via the ordered confidence
+    /// index. Invalid or out-of-range thresholds match nothing.
+    pub fn triples_at_or_above_confidence(&self, minimum: f32) -> Vec<Triple> {
+        if !minimum.is_finite() || !(0.0..=1.0).contains(&minimum) {
+            return Vec::new();
+        }
+        let keys = {
+            let index = self
+                .confidence_index
+                .read()
+                .expect("confidence index lock poisoned");
+            let minimum_bits = if minimum == 0.0 {
+                0.0_f32.to_bits()
+            } else {
+                minimum.to_bits()
+            };
+            index
+                .range(minimum_bits..)
+                .flat_map(|(_, keys)| keys.iter().copied())
+                .collect::<BTreeSet<_>>()
+        };
+        self.triples_for_keys(keys)
     }
 
     /// Get all triples where the given symbol appears as subject.
@@ -407,10 +547,6 @@ impl KnowledgeGraph {
                 .entry(triple.predicate)
                 .or_insert_with(|| graph.add_node(triple.predicate));
 
-            // Skip duplicates rather than creating parallel edges. The predicate
-            // index must also stay deduplicated so downstream snapshot/restore paths
-            // do not re-emit identical rows and collide on their content-addressed
-            // primary keys.
             let already_exists = graph
                 .edges_directed(subj_idx, Direction::Outgoing)
                 .any(|e| e.target() == obj_idx && e.weight().predicate == triple.predicate);
@@ -418,11 +554,13 @@ impl KnowledgeGraph {
                 continue;
             }
 
-            graph.add_edge(subj_idx, obj_idx, EdgeData::from(triple));
+            let edge = EdgeData::from(triple);
+            graph.add_edge(subj_idx, obj_idx, edge.clone());
             self.predicate_index
                 .entry(triple.predicate)
                 .or_default()
                 .push((triple.subject, triple.object));
+            self.add_metadata_indices((triple.subject, triple.predicate, triple.object), &edge);
             count += 1;
         }
         self.triple_count
@@ -432,6 +570,9 @@ impl KnowledgeGraph {
 
     /// Get all triples in the graph.
     pub fn all_triples(&self) -> Vec<Triple> {
+        #[cfg(test)]
+        self.all_triples_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let graph = self.graph.read().expect("graph lock poisoned");
         graph
             .edge_indices()
@@ -451,6 +592,18 @@ impl KnowledgeGraph {
                 })
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_all_triples_scan_count(&self) {
+        self.all_triples_scans
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_triples_scan_count(&self) -> usize {
+        self.all_triples_scans
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Adjust the confidence of an existing triple by `delta`, clamped to `[min_conf, max_conf]`.
@@ -484,10 +637,10 @@ impl KnowledgeGraph {
             .find(|e| e.target() == obj_idx && e.weight().predicate == predicate)
             .map(|e| e.id());
 
-        if let Some(eid) = edge_id {
-            if let Some(weight) = graph.edge_weight_mut(eid) {
-                weight.confidence = (weight.confidence + delta).clamp(min_conf, max_conf);
-            }
+        if let Some(weight) = edge_id.and_then(|edge_id| graph.edge_weight_mut(edge_id)) {
+            let old = weight.clone();
+            weight.confidence = (weight.confidence + delta).clamp(min_conf, max_conf);
+            self.replace_metadata_indices((subject, predicate, object), &old, weight);
             true
         } else {
             false
@@ -739,5 +892,63 @@ mod tests {
         assert_eq!(restored.provenance_id, None);
         assert_eq!(restored.confidence, 0.4);
         assert_eq!(restored.timestamp, 200);
+    }
+
+    #[test]
+    fn audit_reverse_indices_follow_metadata_updates_and_removal() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let relation = sym(2);
+        let b = sym(3);
+        let mut first = Triple::new(a, relation, b)
+            .with_confidence(0.4)
+            .with_provenance(41);
+        first.compartment_id = Some("audit".into());
+        kg.insert_triple(&first).unwrap();
+
+        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([41])).len(), 1);
+        assert!(kg.triples_at_or_above_confidence(0.5).is_empty());
+        assert!(kg.triples_without_provenance().is_empty());
+
+        let updated = Triple::new(a, relation, b)
+            .with_confidence(0.9)
+            .with_provenance(42);
+        kg.insert_triple(&updated).unwrap();
+        assert!(
+            kg.triples_with_provenance_ids(&HashSet::from([41]))
+                .is_empty()
+        );
+        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([42])).len(), 1);
+        assert_eq!(kg.triples_at_or_above_confidence(0.8).len(), 1);
+
+        let untracked = Triple::new(a, relation, b).with_confidence(0.2);
+        kg.replace_triple_exact(&untracked).unwrap();
+        assert!(
+            kg.triples_with_provenance_ids(&HashSet::from([42]))
+                .is_empty()
+        );
+        assert_eq!(kg.triples_without_provenance().len(), 1);
+        assert!(kg.triples_at_or_above_confidence(0.8).is_empty());
+
+        assert!(kg.remove_triple(a, relation, b));
+        assert!(kg.triples_without_provenance().is_empty());
+        assert!(kg.triples_with_predicate(relation).is_empty());
+
+        let c = sym(4);
+        let mut restored = Triple::new(a, relation, c)
+            .with_confidence(-0.0)
+            .with_provenance(43);
+        restored.compartment_id = Some("restored".into());
+        assert_eq!(kg.bulk_load(&[restored]).unwrap(), 1);
+        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([43])).len(), 1);
+        assert!(kg.triples_at_or_above_confidence(0.1).is_empty());
+        assert!(kg.update_triple_confidence(a, relation, c, 0.75, 0.0, 1.0));
+        assert_eq!(kg.triples_at_or_above_confidence(0.7).len(), 1);
+        assert_eq!(kg.remove_triples_in_compartment("restored"), 1);
+        assert!(
+            kg.triples_with_provenance_ids(&HashSet::from([43]))
+                .is_empty()
+        );
+        assert!(kg.triples_at_or_above_confidence(0.0).is_empty());
     }
 }

@@ -1390,6 +1390,8 @@ impl ProvenanceRecord {
 pub struct ProvenanceLedger {
     db: Arc<Mutex<Database>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    all_records_scans: AtomicU64,
 }
 
 impl std::fmt::Debug for ProvenanceLedger {
@@ -1475,6 +1477,8 @@ impl ProvenanceLedger {
         Ok(Self {
             db,
             next_id: AtomicU64::new(next_id),
+            #[cfg(test)]
+            all_records_scans: AtomicU64::new(0),
         })
     }
 
@@ -1652,6 +1656,33 @@ impl ProvenanceLedger {
         self.records_from_kind_index(kind.tag())
     }
 
+    /// Find all records whose persisted kind tag is in `tags`, using one
+    /// coherent redb read transaction and no primary-ledger scan.
+    pub fn by_kind_tags(&self, tags: &[u8]) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock);
+        let index = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+
+        let mut ids = std::collections::BTreeSet::new();
+        for &tag in tags {
+            for entry in index.get(tag).map_err(redb_err)? {
+                ids.insert(entry.map_err(redb_err)?.value());
+            }
+        }
+
+        ids.into_iter()
+            .map(|raw_id| {
+                let encoded = primary
+                    .get(raw_id)
+                    .map_err(redb_err)?
+                    .ok_or(ProvenanceError::NotFound { id: raw_id })?;
+                decode_record_at_key(raw_id, encoded.value())
+            })
+            .collect()
+    }
+
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
         let db_lock = self.db.lock().expect("redb mutex poisoned");
@@ -1674,6 +1705,8 @@ impl ProvenanceLedger {
     /// keeping the scan inside one redb snapshot makes that join both coherent
     /// and bounded in database round trips.
     pub fn all_records(&self) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        #[cfg(test)]
+        self.all_records_scans.fetch_add(1, Ordering::Relaxed);
         let db_lock = self.db.lock().expect("redb mutex poisoned");
         let txn = db_lock.begin_read().map_err(redb_err)?;
         drop(db_lock); // release lock — read txn is independent
@@ -1685,6 +1718,16 @@ impl ProvenanceLedger {
             records.push(decode_record_at_key(key.value(), encoded.value())?);
         }
         Ok(records)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_all_records_scan_count(&self) {
+        self.all_records_scans.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_records_scan_count(&self) -> u64 {
+        self.all_records_scans.load(Ordering::Relaxed)
     }
 
     /// Validate the complete durable ledger as one coherent snapshot.
@@ -2198,6 +2241,36 @@ mod tests {
         assert_eq!(extracted.len(), 1);
         let reasoned = ledger.by_kind(&DerivationKind::Reasoned).unwrap();
         assert_eq!(reasoned.len(), 1);
+    }
+
+    #[test]
+    fn multi_kind_lookup_uses_index_without_primary_scan() {
+        let ledger = ProvenanceLedger::open(test_db()).unwrap();
+        for (derived, kind) in [
+            (sym(1), DerivationKind::Seed),
+            (
+                sym(2),
+                DerivationKind::AgentDecision {
+                    goal: sym(9),
+                    cycle: 1,
+                },
+            ),
+            (sym(3), DerivationKind::Reasoned),
+        ] {
+            ledger
+                .store(&mut ProvenanceRecord::new(derived, kind))
+                .unwrap();
+        }
+
+        ledger.reset_all_records_scan_count();
+        let records = ledger
+            .by_kind_tags(&[
+                DerivationKind::tag_for_name("seed").unwrap(),
+                DerivationKind::tag_for_name("agent_decision").unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(ledger.all_records_scan_count(), 0);
     }
 
     #[test]

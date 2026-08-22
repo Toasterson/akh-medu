@@ -987,6 +987,7 @@ impl Engine {
         }
 
         // --- Phase 9 pre-insert: contradiction detection ---
+        let mut replacement_retracts = Vec::new();
         if self.phase9_config.detect_contradictions {
             let func = self.functional_predicates.read().unwrap();
             let disj = self.disjointness_constraints.read().unwrap();
@@ -1042,24 +1043,21 @@ impl Engine {
                     ContradictionPolicy::Replace => {
                         // A replacement is one compound graph transition. Keep
                         // the historical exact-edge removal semantics (no TMS
-                        // cascade), but make each implicit removal WAL-visible
-                        // before the new assertion; otherwise a snapshot racing
-                        // this operation can resurrect the old edge when it
-                        // replays only the assertion tail.
+                        // cascade), but defer WAL publication until the incoming
+                        // assertion succeeds. The displaced edges and the new
+                        // replay-complete assertion are then emitted as one
+                        // overflow-atomic `replace` record.
                         for c in &contradictions {
                             if self.knowledge_graph.remove_triple(
                                 c.existing.subject,
                                 c.existing.predicate,
                                 c.existing.object,
                             ) {
-                                self.record_mutation(
-                                    crate::mutation::MutationKind::Retract,
-                                    serde_json::json!({
-                                        "subject": c.existing.subject.get(),
-                                        "predicate": c.existing.predicate.get(),
-                                        "object": c.existing.object.get(),
-                                    }),
-                                );
+                                replacement_retracts.push((
+                                    c.existing.subject,
+                                    c.existing.predicate,
+                                    c.existing.object,
+                                ));
                                 if let Some(ref sparql) = self.sparql {
                                     let _ = sparql.remove_triple(
                                         c.existing.subject,
@@ -1127,24 +1125,43 @@ impl Engine {
         // provenance record that do not exist in the relational snapshot; wake
         // must restore those records before publishing the edge and advance
         // both allocators beyond them.
-        self.record_mutation(
-            crate::mutation::MutationKind::Assert,
-            serde_json::json!({
-                "v": crate::mutation::ASSERT_MUTATION_VERSION,
-                "subject": triple.subject.get(),
-                "predicate": triple.predicate.get(),
-                "object": triple.object.get(),
-                "confidence": triple.confidence,
-                "timestamp": triple.timestamp,
-                "compartment": triple.compartment_id.clone(),
-                "provenance_id": triple.provenance_id,
-                "provenance": prepared.provenance,
-                "symbols": prepared.symbols,
-                // ADR 081 P2: content-addressed identity (stable across
-                // akhs/sessions) persisted with the mutation for diffing.
-                "identity": identity.to_hex(),
-            }),
-        );
+        let assertion = serde_json::json!({
+            "v": crate::mutation::ASSERT_MUTATION_VERSION,
+            "subject": triple.subject.get(),
+            "predicate": triple.predicate.get(),
+            "object": triple.object.get(),
+            "confidence": triple.confidence,
+            "timestamp": triple.timestamp,
+            "compartment": triple.compartment_id.clone(),
+            "provenance_id": triple.provenance_id,
+            "provenance": prepared.provenance,
+            "symbols": prepared.symbols,
+            // ADR 081 P2: content-addressed identity (stable across
+            // akhs/sessions) persisted with the mutation for diffing.
+            "identity": identity.to_hex(),
+        });
+        if replacement_retracts.is_empty() {
+            self.record_mutation(crate::mutation::MutationKind::Assert, assertion);
+        } else {
+            let retracts = replacement_retracts
+                .into_iter()
+                .map(|(subject, predicate, object)| {
+                    serde_json::json!({
+                        "subject": subject.get(),
+                        "predicate": predicate.get(),
+                        "object": object.get(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.record_mutation(
+                crate::mutation::MutationKind::Replace,
+                serde_json::json!({
+                    "v": crate::mutation::REPLACE_MUTATION_VERSION,
+                    "retracts": retracts,
+                    "assertion": assertion,
+                }),
+            );
+        }
 
         Ok(())
     }
@@ -1496,6 +1513,15 @@ impl Engine {
         Ok(ledger.by_kind(kind)?)
     }
 
+    /// Get provenance records for any persisted derivation-kind tag without
+    /// scanning the primary ledger.
+    pub fn provenance_by_kind_tags(&self, tags: &[u8]) -> AkhResult<Vec<ProvenanceRecord>> {
+        match self.provenance_ledger.as_ref() {
+            Some(ledger) => Ok(ledger.by_kind_tags(tags)?),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Get all persisted provenance records in one coherent ledger scan.
     ///
     /// An in-memory engine has no provenance ledger, so it returns an empty
@@ -1506,6 +1532,25 @@ impl Engine {
             Some(ledger) => Ok(ledger.all_records()?),
             None => Ok(Vec::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_provenance_filter_scan_counters(&self) {
+        self.knowledge_graph.reset_all_triples_scan_count();
+        if let Some(ledger) = self.provenance_ledger.as_ref() {
+            ledger.reset_all_records_scan_count();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provenance_filter_full_scan_counts(&self) -> (usize, u64) {
+        (
+            self.knowledge_graph.all_triples_scan_count(),
+            self.provenance_ledger
+                .as_ref()
+                .map(|ledger| ledger.all_records_scan_count())
+                .unwrap_or(0),
+        )
     }
 
     /// Access the audit ledger, if persistence is configured.
@@ -1758,6 +1803,31 @@ impl Engine {
         self.knowledge_graph.all_triples()
     }
 
+    /// Get exact triples for one predicate via the maintained reverse index.
+    pub fn triples_with_predicate(&self, predicate: SymbolId) -> Vec<Triple> {
+        self.knowledge_graph.triples_with_predicate(predicate)
+    }
+
+    /// Get triples linked to any provenance ID via the maintained reverse index.
+    pub fn triples_with_provenance_ids(
+        &self,
+        provenance_ids: &std::collections::HashSet<u64>,
+    ) -> Vec<Triple> {
+        self.knowledge_graph
+            .triples_with_provenance_ids(provenance_ids)
+    }
+
+    /// Get triples with no ledger link via the maintained reverse index.
+    pub fn triples_without_provenance(&self) -> Vec<Triple> {
+        self.knowledge_graph.triples_without_provenance()
+    }
+
+    /// Get triples meeting a confidence floor via the ordered reverse index.
+    pub fn triples_at_or_above_confidence(&self, minimum: f32) -> Vec<Triple> {
+        self.knowledge_graph
+            .triples_at_or_above_confidence(minimum)
+    }
+
     /// All registered symbols (id ↔ kind ↔ label). Used by the Phase 38c
     /// snapshot writer to materialise the registry into Postgres.
     pub fn dump_symbols(&self) -> Vec<SymbolMeta> {
@@ -1803,6 +1873,26 @@ impl Engine {
         self.item_memory.get_or_create(&self.ops, triple.object);
         self.identity_index_built.store(false, Ordering::Release);
         Ok(())
+    }
+
+    /// Apply the displaced-edge half of a replayed contradiction replacement.
+    /// Live `ContradictionPolicy::Replace` removes only the exact conflicting
+    /// edges, so replay must not route these through the public TMS-cascading
+    /// retraction path. The final wake persist reprojects the authoritative KG
+    /// into SPARQL after the whole tail has succeeded.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn replay_retract_exact(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) {
+        if self
+            .knowledge_graph
+            .remove_triple(subject, predicate, object)
+        {
+            self.identity_index_built.store(false, Ordering::Release);
+        }
     }
 
     /// Execute a SPARQL SELECT query.

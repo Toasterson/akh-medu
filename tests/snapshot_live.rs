@@ -18,7 +18,9 @@ use akh_medu::provenance::{
 };
 use akh_medu::snapshot::{capture_snapshot_at_watermark, persist_snapshot, wake, write_snapshot};
 use akh_medu::symbol::SymbolKind;
-use akhomed_store::sea_orm::{self, ConnectionTrait, DbBackend, Statement};
+use akhomed_store::sea_orm::{
+    self, ConnectionTrait, DbBackend, Statement, TransactionTrait,
+};
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{MutationRow, append_mutations, connect, ensure_akh, run_migrations};
 
@@ -35,6 +37,32 @@ async fn exec(db: &sea_orm::DatabaseConnection, sql: &str) {
     db.execute(Statement::from_string(DbBackend::Postgres, sql.to_owned()))
         .await
         .unwrap();
+}
+
+async fn waiting_advisory_locks(db: &sea_orm::DatabaseConnection) -> i64 {
+    let row = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT count(*)::bigint AS c FROM pg_locks \
+             WHERE locktype = 'advisory' AND NOT granted",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    row.try_get::<i64>("", "c").unwrap()
+}
+
+async fn wait_for_advisory_waiters(db: &sea_orm::DatabaseConnection, minimum: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if waiting_advisory_locks(db).await >= minimum {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("snapshot publisher did not reach the controlled advisory-lock barrier");
 }
 
 /// Sorted `(subject, predicate, object)` set of an engine's live triples.
@@ -607,4 +635,130 @@ async fn degraded_wake_succeeds_with_missing_table() {
     // Resume must still work; drives fall back to defaults (4 of them).
     let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
     assert_eq!(woken_agent.drives().drives.len(), 4, "drives default-rebuilt");
+}
+
+/// Force newer and older captures to queue behind the same publication lock.
+/// Once released, the newer image must commit atomically and the stale writer
+/// must fail before it can reintroduce the retracted edge.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    ensure_akh(&db, akh_id, "snapshot-overlap", None)
+        .await
+        .unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(src.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let subject = engine.create_symbol(SymbolKind::Entity, "OverlapSubject").unwrap();
+    let predicate = engine
+        .create_symbol(SymbolKind::Relation, "overlap-predicate")
+        .unwrap();
+    let object = engine.create_symbol(SymbolKind::Entity, "OverlapObject").unwrap();
+    engine
+        .add_triple(&Triple::new(subject.id, predicate.id, object.id))
+        .unwrap();
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+
+    append_mutations(
+        &db,
+        akh_id,
+        workspace_id,
+        &[MutationRow {
+            kind: "turn".into(),
+            payload: serde_json::json!({"phase": "before-retraction"}),
+        }],
+    )
+    .await
+    .unwrap();
+    let old_watermark = akhomed_store::snapshots::current_watermark(&db, akh_id)
+        .await
+        .unwrap();
+    let old = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, old_watermark)
+        .unwrap();
+
+    engine
+        .remove_triple(subject.id, predicate.id, object.id)
+        .unwrap();
+    append_mutations(
+        &db,
+        akh_id,
+        workspace_id,
+        &[MutationRow {
+            kind: "retract".into(),
+            payload: serde_json::json!({
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+            }),
+        }],
+    )
+    .await
+    .unwrap();
+    let new_watermark = akhomed_store::snapshots::current_watermark(&db, akh_id)
+        .await
+        .unwrap();
+    assert!(new_watermark > old_watermark);
+    let new = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, new_watermark)
+        .unwrap();
+
+    let blocker = db.begin().await.unwrap();
+    blocker
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            [format!("snapshot:{workspace_id}").into()],
+        ))
+        .await
+        .unwrap();
+    let baseline_waiters = waiting_advisory_locks(&db).await;
+
+    let newer_db = db.clone();
+    let newer = tokio::spawn(async move { persist_snapshot(new, &newer_db).await });
+    wait_for_advisory_waiters(&db, baseline_waiters + 1).await;
+
+    let older_db = db.clone();
+    let older = tokio::spawn(async move { persist_snapshot(old, &older_db).await });
+    wait_for_advisory_waiters(&db, baseline_waiters + 2).await;
+    blocker.commit().await.unwrap();
+
+    newer.await.unwrap().expect("newer snapshot publishes first");
+    let stale = older
+        .await
+        .unwrap()
+        .expect_err("older capture must fail closed after newer publication");
+    assert!(stale.to_string().contains("stale snapshot"), "{stale}");
+
+    let state = akhomed_store::snapshots::load_akh_state(&db, akh_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.watermark, new_watermark);
+    assert!(
+        akhomed_store::snapshots::load_workspace_facts(&db, workspace_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the old edge must not coexist with the newer recovery watermark"
+    );
+
+    let dst = tempfile::tempdir().unwrap();
+    let woken = wake(&dst.path().join("kg"), akh_id, workspace_id, &db)
+        .await
+        .unwrap();
+    assert!(!woken.has_triple(subject.id, predicate.id, object.id));
 }

@@ -2854,9 +2854,9 @@ fn dispatch_akh(
 /// three labels once.  Keeping this small projection in memory makes sorting,
 /// aggregation, and pagination deterministic without repeatedly taking symbol
 /// registry locks from a comparator.
-struct ProvenanceFilterMatch<'a> {
+struct ProvenanceFilterMatch {
     triple: crate::graph::Triple,
-    provenance: Option<&'a crate::provenance::ProvenanceRecord>,
+    provenance: Option<crate::provenance::ProvenanceRecord>,
     subject: String,
     predicate: String,
     object: String,
@@ -2868,9 +2868,9 @@ struct ProvenanceFilterMatch<'a> {
 /// `_akh/provenance/filter`.
 ///
 /// Breakdowns are computed over the complete filtered set (never just the
-/// current page).  Triples without a live ledger record are reported as
-/// `untracked`; they are not silently called `extracted`, because doing so
-/// would turn missing/corrupt provenance into false evidence.
+/// current page). Triples with no provenance link are reported as `untracked`;
+/// a nonzero link whose ledger record is missing fails closed rather than
+/// turning corrupt provenance into false evidence.
 fn provenance_filter_json(
     engine: &Engine,
     workspace: &str,
@@ -2950,20 +2950,63 @@ fn provenance_filter_json(
     }
     let predicate_id = requested_predicate.and_then(|label| engine.resolve_symbol(label).ok());
 
-    // Producers establish provenance before publishing a linked graph edge.
-    // Capture the graph first and the append-only ledger second so every
-    // provenance ID visible in this graph snapshot must already be readable;
-    // a concurrent insertion may be omitted from this page, but cannot be
-    // transiently misreported as `untracked`.
-    let graph_triples = engine.all_triples();
-    let provenance_records = engine
-        .all_provenance()
-        .map_err(|e| diag_err(e, "provenance ledger scan failed"))?;
-    let provenance_by_id: std::collections::HashMap<u64, &crate::provenance::ProvenanceRecord> =
-        provenance_records
+    // Select candidates from maintained reverse indices. Exact totals and
+    // breakdowns still require visiting the complete *filtered candidate set*,
+    // but a narrow kind/predicate/confidence request never scans unrelated KG
+    // edges or the primary provenance ledger.
+    let kind_tags = provenance_filter_kind_tags(&derived_by);
+    let predicate_is_missing = requested_predicate.is_some() && predicate_id.is_none();
+    let mut provenance_by_id = std::collections::HashMap::<
+        u64,
+        crate::provenance::ProvenanceRecord,
+    >::new();
+    let graph_triples = if predicate_is_missing {
+        Vec::new()
+    } else if let Some(predicate) = predicate_id {
+        engine.triples_with_predicate(predicate)
+    } else if min_confidence > 0.0 {
+        engine.triples_at_or_above_confidence(min_confidence)
+    } else if let Some(tags) = kind_tags.as_deref() {
+        let records = engine
+            .provenance_by_kind_tags(tags)
+            .map_err(|e| diag_err(e, "provenance kind-index lookup failed"))?;
+        let ids = records
             .iter()
-            .filter_map(|record| record.id.map(|id| (id.get(), record)))
-            .collect();
+            .filter_map(|record| record.id.map(|id| id.get()))
+            .collect::<std::collections::HashSet<_>>();
+        provenance_by_id.extend(
+            records
+                .into_iter()
+                .filter_map(|record| record.id.map(|id| (id.get(), record))),
+        );
+        engine.triples_with_provenance_ids(&ids)
+    } else if derived_by == "untracked" {
+        engine.triples_without_provenance()
+    } else {
+        // An unconstrained `any` query genuinely asks for the whole graph.
+        engine.all_triples()
+    };
+
+    // Producers commit the append-only ledger before publishing a linked graph
+    // edge. Load only records referenced by the selected candidates. A dangling
+    // nonzero link is corruption and fails closed; it must never be relabelled
+    // as `untracked`.
+    let candidate_provenance_ids = graph_triples
+        .iter()
+        .filter_map(|triple| triple.provenance_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    for raw_id in candidate_provenance_ids {
+        if provenance_by_id.contains_key(&raw_id) {
+            continue;
+        }
+        let id = crate::provenance::ProvenanceId::new(raw_id).ok_or_else(|| {
+            AcpAppError::msg("graph triple carries reserved zero provenance ID")
+        })?;
+        let record = engine
+            .get_provenance(id)
+            .map_err(|e| diag_err(e, format!("dangling provenance link {raw_id}")))?;
+        provenance_by_id.insert(raw_id, record);
+    }
 
     let mut matches = Vec::new();
     for triple in graph_triples {
@@ -2978,9 +3021,10 @@ fn provenance_filter_json(
 
         let provenance = triple
             .provenance_id
-            .and_then(|id| provenance_by_id.get(&id).copied());
-        let provenance_kind = provenance.map(|record| record.kind.kind_name());
+            .and_then(|id| provenance_by_id.get(&id).cloned());
+        let provenance_kind = provenance.as_ref().map(|record| record.kind.kind_name());
         let source_kind = provenance
+            .as_ref()
             .map(|record| provenance_source_bucket(&record.kind))
             .unwrap_or("untracked");
         if !provenance_filter_matches(&derived_by, source_kind, provenance_kind) {
@@ -3036,10 +3080,12 @@ fn provenance_filter_json(
         .map(|item| {
             let timestamp = item
                 .provenance
+                .as_ref()
                 .map(|record| record.timestamp)
                 .unwrap_or(item.triple.timestamp);
             let derivation_chain = item
                 .provenance
+                .as_ref()
                 .map(|record| derivation_chain_edges(engine, &item.triple, record))
                 .unwrap_or_default();
             serde_json::json!({
@@ -3127,6 +3173,27 @@ fn provenance_filter_matches(
         }
         exact_kind => provenance_kind == Some(exact_kind),
     }
+}
+
+/// Resolve a source bucket or exact kind to persisted kind tags. `None` means
+/// the request is about link absence/all knowledge rather than ledger kinds.
+fn provenance_filter_kind_tags(requested: &str) -> Option<Vec<u8>> {
+    use crate::provenance::DerivationKind;
+
+    let names: &[&str] = match requested {
+        "any" | "untracked" => return None,
+        "infer_rules" => &["rule_inference"],
+        "user_asserted" => &["seed"],
+        "agent_learned" => &["agent_decision", "agent_consolidation"],
+        "seed_pack" => &["compartment_loaded"],
+        exact => &[exact],
+    };
+    Some(
+        names
+            .iter()
+            .filter_map(|name| DerivationKind::tag_for_name(name))
+            .collect(),
+    )
 }
 
 /// Map detailed provenance variants to the stable source buckets promised by
@@ -6349,6 +6416,94 @@ mod tests {
         // The ledger scan is exposed through Engine and retains both records;
         // the untracked fact must not manufacture a third provenance record.
         assert_eq!(engine.all_provenance().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn provenance_filter_narrow_queries_never_scan_full_graph_or_ledger() {
+        use crate::provenance::DerivationKind;
+
+        let (_data_dir, engine) = persistent_engine();
+        for index in 0..64 {
+            add_provenanced_triple(
+                &engine,
+                &format!("FillerSubject{index}"),
+                &format!("filler-predicate-{index}"),
+                &format!("FillerObject{index}"),
+                0.1,
+                DerivationKind::Seed,
+                1_700_100_000 + index,
+            );
+        }
+        add_provenanced_triple(
+            &engine,
+            "NeedleSubject",
+            "needle-predicate",
+            "NeedleObject",
+            0.99,
+            DerivationKind::RuleInference {
+                rule_name: "needle".into(),
+                antecedents: Vec::new(),
+            },
+            1_700_200_000,
+        );
+        let untracked_subject = engine.resolve_or_create_entity("UntrackedNeedle").unwrap();
+        let untracked_predicate = engine
+            .resolve_or_create_relation("untracked-predicate")
+            .unwrap();
+        let untracked_object = engine.resolve_or_create_entity("UntrackedObject").unwrap();
+        engine
+            .add_triple(
+                &crate::graph::Triple::new(
+                    untracked_subject,
+                    untracked_predicate,
+                    untracked_object,
+                )
+                .with_confidence(0.2),
+            )
+            .unwrap();
+
+        for (name, params) in [
+            (
+                "kind",
+                serde_json::json!({"derived_by": "infer_rules", "page_size": 1}),
+            ),
+            (
+                "predicate",
+                serde_json::json!({
+                    "derived_by": "any",
+                    "predicate": "needle-predicate",
+                    "page_size": 1,
+                }),
+            ),
+            (
+                "confidence",
+                serde_json::json!({
+                    "derived_by": "any",
+                    "min_confidence": 0.95,
+                    "page_size": 1,
+                }),
+            ),
+            (
+                "untracked",
+                serde_json::json!({"derived_by": "untracked", "page_size": 1}),
+            ),
+        ] {
+            engine.reset_provenance_filter_scan_counters();
+            let response = dispatch_akh(
+                &engine,
+                "default",
+                false,
+                "_akh/provenance/filter",
+                &params,
+            )
+            .unwrap();
+            assert_eq!(response["total_matching"], 1, "{name} response");
+            assert_eq!(
+                engine.provenance_filter_full_scan_counts(),
+                (0, 0),
+                "{name} query regressed to a full scan"
+            );
+        }
     }
 
     #[test]

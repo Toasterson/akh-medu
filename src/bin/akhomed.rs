@@ -93,6 +93,11 @@ struct ServerState {
     /// Phase 38c: per-workspace periodic snapshot tasks, keyed by workspace name.
     /// Stopped on graceful shutdown, followed by a final synchronous snapshot.
     snapshot_tickers: RwLock<HashMap<String, SnapshotTicker>>,
+    /// One capture-to-commit critical section per workspace. Periodic,
+    /// on-demand, sleep, and relocation snapshots all pass through the same
+    /// lock, so an older equal-watermark capture cannot publish after a newer
+    /// capture from this daemon.
+    snapshot_publication_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
     /// so two concurrent wakes of the same cold workspace can't race on the redb.
     waking: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -213,12 +218,13 @@ fn build_local_drop_backend(
 }
 
 ///
-/// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
+/// The agent lives behind a `std::sync::RwLock`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
 /// agent is a quiet no-op (the ticker fires before the first interaction).
 async fn snapshot_once(
     pool: &akhomed_store::DatabaseConnection,
     agents: &RwLock<HashMap<String, Arc<StdRwLock<Agent>>>>,
+    publication_lock: &tokio::sync::Mutex<()>,
     name: &str,
     akh_id: akhomed_store::uuid::Uuid,
     workspace_id: akhomed_store::uuid::Uuid,
@@ -230,6 +236,10 @@ async fn snapshot_once(
             None => return Ok(()),
         }
     };
+    // Serialize the complete sample-watermark -> capture -> DB-commit path.
+    // The store adds the cross-process advisory lock and stale-writer check;
+    // this local lock also orders legitimate equal-watermark captures.
+    let _publication_guard = publication_lock.lock().await;
     // The akh row is the identity these rows hang off; ensure it exists.
     akhomed_store::ensure_akh(pool, akh_id, name, None)
         .await
@@ -381,6 +391,7 @@ impl ServerState {
             akh_lock_conns: RwLock::new(HashMap::new()),
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
+            snapshot_publication_locks: Mutex::new(HashMap::new()),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
@@ -450,6 +461,16 @@ impl ServerState {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    fn snapshot_publication_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.snapshot_publication_locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     /// ADR 077: spawn the background Postgres reconnector. When startup fell
@@ -670,6 +691,7 @@ impl ServerState {
         interval: Duration,
     ) -> SnapshotTicker {
         let agents = Arc::clone(&self.agents);
+        let publication_lock = self.snapshot_publication_lock(&name);
         let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
             let akh_id = akh_medu::wal::akh_id_for(&name);
@@ -694,7 +716,14 @@ impl ServerState {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        match snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await {
+                        match snapshot_once(
+                            &pool,
+                            &agents,
+                            &publication_lock,
+                            &name,
+                            akh_id,
+                            workspace_id,
+                        ).await {
                             Ok(()) => {
                                 if consecutive_failures > 0 {
                                     tracing::info!(
@@ -771,7 +800,16 @@ impl ServerState {
         self.get_agent(name).await?;
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
-        snapshot_once(pool, &self.agents, name, akh_id, workspace_id).await
+        let publication_lock = self.snapshot_publication_lock(name);
+        snapshot_once(
+            pool,
+            &self.agents,
+            &publication_lock,
+            name,
+            akh_id,
+            workspace_id,
+        )
+        .await
     }
 
     /// Hydrate a lazily-opened workspace from its Postgres snapshot before

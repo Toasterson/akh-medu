@@ -11,8 +11,9 @@
 //! - **No loss while Postgres is down.** Failed flushes leave the batch in the
 //!   buffer (re-inserted at the front) and retry on the next tick.
 //! - **Bounded memory.** The buffer is capped at `max_buffer_bytes`; on overflow
-//!   the oldest non-`assert` entries are dropped first (asserts carry knowledge
-//!   and are dropped only as a last resort), with a counter for observability.
+//!   the oldest unprotected entries are dropped first. Asserts, compound
+//!   replacements, and turns are dropped only as a last resort, with a counter
+//!   for observability.
 //!
 //! Replay (38c) re-applies mutations through `Engine::add_triple`, which is
 //! idempotent, so the WAL only needs at-least-once delivery.
@@ -181,6 +182,14 @@ impl WalBuffer {
     /// Total entries dropped due to overflow.
     pub fn dropped_on_overflow(&self) -> u64 {
         self.dropped_on_overflow.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_records_for_test(&self) -> Vec<MutationRecord> {
+        self.take_front(usize::MAX)
+            .into_iter()
+            .map(|pending| MutationRecord::new(pending.kind, pending.payload))
+            .collect()
     }
 }
 
@@ -367,6 +376,28 @@ mod tests {
             remaining.iter().all(|p| p.kind == MutationKind::Assert),
             "non-assert entries should be dropped before asserts"
         );
+    }
+
+    #[test]
+    fn overflow_keeps_compound_replace_as_one_protected_entry() {
+        let replacement = json!({
+            "v": crate::mutation::REPLACE_MUTATION_VERSION,
+            "retracts": [{"subject": 1, "predicate": 2, "object": 3}],
+            "assertion": {"v": crate::mutation::ASSERT_MUTATION_VERSION},
+        });
+        let replacement_bytes = replacement.to_string().len() + 64;
+        let buf = WalBuffer::new(replacement_bytes + 8);
+        buf.push(MutationKind::Replace, replacement.clone());
+        buf.push(
+            MutationKind::Retract,
+            json!({"padding": "this unprotected record must be dropped whole"}),
+        );
+
+        assert_eq!(buf.dropped_on_overflow(), 1);
+        let remaining = buf.drain_records_for_test();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].kind, MutationKind::Replace);
+        assert_eq!(remaining[0].payload, replacement);
     }
 
     #[test]

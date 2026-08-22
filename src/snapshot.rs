@@ -530,8 +530,8 @@ pub fn capture_snapshot_at_watermark(
 }
 
 /// Persist a previously-[captured](capture_snapshot) snapshot to Postgres
-/// (async; holds no agent lock). Cognitive tables are full-replaced; `akh_state`
-/// is upserted with the recovery watermark sampled before capture.
+/// (async; holds no agent lock). The complete relational image and its
+/// recovery watermark are published in one serialized database transaction.
 pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> SnapshotResult<()> {
     use akhomed_store::snapshots as ops;
     let SnapshotData {
@@ -564,34 +564,6 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         extra,
     } = data;
 
-    // ADR 091: `harvest_watermark` is excluded from `upsert_akh_state`'s
-    // `update_columns`, so this value only matters the first time a row is
-    // inserted for this Akh. Reading it back here (0 if no row exists yet)
-    // keeps that first-insert value correct without ever clobbering a value
-    // the dedicated `set_harvest_watermark` setter already wrote.
-    let harvest_watermark = ops::get_harvest_watermark(db, akh_id).await?;
-    // Same read-back-before-insert reasoning as `harvest_watermark` above,
-    // now for the ADR 081 slice 4 daily-Librarian watermark.
-    let librarian_watermark = ops::get_librarian_watermark(db, akh_id).await?;
-
-    ops::replace_symbols(db, akh_id, symbols).await?;
-    ops::replace_workspace_facts_and_provenance(db, workspace_id, akh_id, facts, provenance)
-        .await?;
-    ops::replace_drives(db, akh_id, drives).await?;
-    ops::replace_agenda(db, akh_id, agenda).await?;
-    ops::replace_curiosity(db, akh_id, curiosity).await?;
-    ops::replace_goals(db, akh_id, goals).await?;
-    ops::replace_goal_hierarchy(db, akh_id, goal_hierarchy).await?;
-    ops::replace_goal_dependencies(db, akh_id, goal_dependencies).await?;
-    ops::replace_failure_cases(db, akh_id, failures).await?;
-    ops::replace_effort_cases(db, akh_id, efforts).await?;
-    ops::replace_learned_methods(db, akh_id, methods).await?;
-    ops::replace_learned_method_steps(db, akh_id, method_steps).await?;
-    ops::replace_competence_tools(db, akh_id, comp_tools).await?;
-    ops::replace_competence_categories(db, akh_id, comp_cats).await?;
-    ops::replace_competence_calibration(db, akh_id, comp_calib).await?;
-    ops::replace_sleep_metrics(db, akh_id, sleep_rows).await?;
-
     let state = akh_state::Model {
         akh_id,
         watermark,
@@ -602,11 +574,38 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         last_sleep_cycle,
         psyche,
         extra,
-        harvest_watermark,
-        librarian_watermark,
+        // The store reads any existing independently-advanced values while it
+        // holds the publication lock. Zero is the correct first-row default.
+        harvest_watermark: 0,
+        librarian_watermark: 0,
         updated_at: chrono::Utc::now(),
     };
-    ops::upsert_akh_state(db, state).await?;
+    ops::publish_snapshot(
+        db,
+        workspace_id,
+        akh_id,
+        ops::SnapshotPublication {
+            symbols,
+            facts,
+            provenance,
+            drives,
+            agenda,
+            curiosity,
+            goals,
+            goal_hierarchy,
+            goal_dependencies,
+            failures,
+            efforts,
+            methods,
+            method_steps,
+            competence_tools: comp_tools,
+            competence_categories: comp_cats,
+            competence_calibration: comp_calib,
+            sleep_metrics: sleep_rows,
+            state,
+        },
+    )
+    .await?;
 
     Ok(())
 }
@@ -1544,6 +1543,20 @@ struct ReplayCompleteAssert {
     symbols: Vec<SymbolMeta>,
 }
 
+#[derive(serde::Deserialize)]
+struct ReplayRetract {
+    subject: u64,
+    predicate: u64,
+    object: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ReplayCompleteReplace {
+    v: u64,
+    retracts: Vec<ReplayRetract>,
+    assertion: serde_json::Value,
+}
+
 fn invalid_tail(message: impl Into<String>) -> SnapshotError {
     SnapshotError::Agent(format!("wake: invalid mutation tail: {}", message.into()))
 }
@@ -1621,6 +1634,46 @@ fn payload_triple_ids(
             .ok_or_else(|| invalid_tail(format!("{field} uses zero/reserved symbol ID {raw}")))
     };
     Ok((parse("subject")?, parse("predicate")?, parse("object")?))
+}
+
+fn retract_triple_ids(retract: &ReplayRetract) -> SnapshotResult<(SymbolId, SymbolId, SymbolId)> {
+    let parse = |field: &str, raw: u64| {
+        SymbolId::new(raw)
+            .filter(|id| !is_reserved_symbol_id(id.get()))
+            .ok_or_else(|| {
+                invalid_tail(format!(
+                    "retract {field} uses zero/reserved symbol ID {raw}"
+                ))
+            })
+    };
+    Ok((
+        parse("subject", retract.subject)?,
+        parse("predicate", retract.predicate)?,
+        parse("object", retract.object)?,
+    ))
+}
+
+fn parse_replay_complete_replace(
+    payload: &serde_json::Value,
+) -> SnapshotResult<ReplayCompleteReplace> {
+    let replacement: ReplayCompleteReplace = serde_json::from_value(payload.clone())
+        .map_err(|error| invalid_tail(format!("replace-v1 decode failed: {error}")))?;
+    if replacement.v != crate::mutation::REPLACE_MUTATION_VERSION {
+        return Err(invalid_tail(format!(
+            "unsupported replace mutation version {}",
+            replacement.v
+        )));
+    }
+    if replacement.retracts.is_empty() {
+        return Err(invalid_tail("replace mutation has no displaced edge"));
+    }
+    for retract in &replacement.retracts {
+        retract_triple_ids(retract)?;
+    }
+    // Decode the complete assertion before any retraction is applied. This is
+    // the replay-side half of the compound transition's atomicity contract.
+    parse_replay_complete_assert(&replacement.assertion)?;
+    Ok(replacement)
 }
 
 fn parse_replay_complete_assert(
@@ -1755,10 +1808,14 @@ fn prepare_tail_restore(
     let mut tail_symbol_ids = std::collections::HashSet::new();
 
     for mutation in tail {
-        if mutation.kind != "assert" {
-            continue;
-        }
-        match mutation.payload.get("v") {
+        let assertion = match mutation.kind.as_str() {
+            "assert" => std::borrow::Cow::Borrowed(&mutation.payload),
+            "replace" => std::borrow::Cow::Owned(
+                parse_replay_complete_replace(&mutation.payload)?.assertion,
+            ),
+            _ => continue,
+        };
+        match assertion.get("v") {
             None => continue,
             Some(version)
                 if version.as_u64() == Some(crate::mutation::ASSERT_MUTATION_VERSION) => {}
@@ -1768,8 +1825,7 @@ fn prepare_tail_restore(
                 )));
             }
         }
-        let (_, tail_symbols, tail_record) =
-            parse_replay_complete_assert(&mutation.payload)?;
+        let (_, tail_symbols, tail_record) = parse_replay_complete_assert(&assertion)?;
         for meta in tail_symbols {
             let normalized = crate::registry::normalize_label_key(&meta.label);
             if let Some(other_id) = labels.get(&normalized)
@@ -1835,12 +1891,24 @@ fn prepare_tail_restore(
     // from a later replay-complete envelope; otherwise waking would create an
     // unresolvable ID and risk allocator reuse.
     for mutation in tail {
-        if mutation.kind == "assert" && mutation.payload.get("v").is_none() {
-            let (subject, predicate, object) = payload_triple_ids(&mutation.payload)?;
+        let referenced = match mutation.kind.as_str() {
+            "assert" if mutation.payload.get("v").is_none() => {
+                vec![payload_triple_ids(&mutation.payload)?]
+            }
+            "retract" => vec![payload_triple_ids(&mutation.payload)?],
+            "replace" => parse_replay_complete_replace(&mutation.payload)?
+                .retracts
+                .iter()
+                .map(retract_triple_ids)
+                .collect::<SnapshotResult<Vec<_>>>()?,
+            _ => continue,
+        };
+        for (subject, predicate, object) in referenced {
             for id in [subject, predicate, object] {
                 if !symbol_positions.contains_key(&id.get()) {
                     return Err(invalid_tail(format!(
-                        "legacy assert references unknown symbol {}",
+                        "{} references unknown symbol {}",
+                        mutation.kind,
                         id.get()
                     )));
                 }
@@ -1981,6 +2049,88 @@ fn fact_to_triple(row: &fact::Model) -> SnapshotResult<Triple> {
     Ok(t)
 }
 
+fn validate_replay_symbols_registered(
+    engine: &Engine,
+    triple: (SymbolId, SymbolId, SymbolId),
+    operation: &str,
+) -> SnapshotResult<()> {
+    for id in [triple.0, triple.1, triple.2] {
+        engine.get_symbol_meta(id).map_err(|error| {
+            invalid_tail(format!(
+                "{operation} references unrestored symbol {}: {error}",
+                id.get()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Fully validate one assertion against the already-prepared restore image,
+/// without mutating the graph. Compound replacement replay calls this before
+/// removing any displaced edge.
+fn prepare_assert_for_replay(
+    engine: &Engine,
+    payload: &serde_json::Value,
+) -> SnapshotResult<Triple> {
+    let triple = if payload.get("v").is_some() {
+        let (triple, _, record) = parse_replay_complete_assert(payload)?;
+        if let Some(record) = record {
+            let id = record.id.expect("validated provenance ID");
+            let restored = engine.get_provenance(id).map_err(|error| {
+                invalid_tail(format!(
+                    "assert references unrestored provenance {}: {error}",
+                    id.get()
+                ))
+            })?;
+            let restored = bincode::serialize(&restored).map_err(|error| {
+                invalid_tail(format!("encode restored provenance {}: {error}", id.get()))
+            })?;
+            let expected = bincode::serialize(&record).map_err(|error| {
+                invalid_tail(format!("encode assertion provenance {}: {error}", id.get()))
+            })?;
+            if restored != expected {
+                return Err(invalid_tail(format!(
+                    "assert provenance {} changed before replay",
+                    id.get()
+                )));
+            }
+        }
+        triple
+    } else {
+        let (subject, predicate, object) = payload_triple_ids(payload)?;
+        let mut triple = Triple::new(subject, predicate, object);
+        triple.timestamp = payload
+            .get("timestamp")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let Some(confidence) = payload.get("confidence") {
+            let confidence = confidence
+                .as_f64()
+                .ok_or_else(|| invalid_tail("legacy assert confidence is not numeric"))?
+                as f32;
+            if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+                return Err(invalid_tail("legacy assert confidence is outside [0,1]"));
+            }
+            triple.confidence = confidence;
+        }
+        match payload.get("compartment") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(value)) => {
+                validate_compartment_id(value).map_err(|error| invalid_tail(error.to_string()))?;
+                triple.compartment_id = Some(value.clone())
+            }
+            Some(_) => return Err(invalid_tail("legacy assert compartment is not text")),
+        }
+        triple
+    };
+    validate_replay_symbols_registered(
+        engine,
+        (triple.subject, triple.predicate, triple.object),
+        "assert",
+    )?;
+    Ok(triple)
+}
+
 /// Apply one replayed WAL mutation. Returns whether it was applied. Unknown
 /// future kinds are ignored, while malformed known KG mutations fail wake so
 /// corruption cannot silently drop a fact. Microtheory/compartment replay is
@@ -1989,73 +2139,37 @@ fn fact_to_triple(row: &fact::Model) -> SnapshotResult<Triple> {
 fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
     match m.kind.as_str() {
         "assert" => {
-            let triple = if m.payload.get("v").is_some() {
-                let (triple, _, record) = parse_replay_complete_assert(&m.payload)?;
-                if let Some(record) = record {
-                    let id = record.id.expect("validated provenance ID");
-                    let restored = engine.get_provenance(id).map_err(|error| {
-                        invalid_tail(format!(
-                            "assert references unrestored provenance {}: {error}",
-                            id.get()
-                        ))
-                    })?;
-                    let restored = bincode::serialize(&restored).map_err(|error| {
-                        invalid_tail(format!(
-                            "encode restored provenance {}: {error}",
-                            id.get()
-                        ))
-                    })?;
-                    let expected = bincode::serialize(&record).map_err(|error| {
-                        invalid_tail(format!(
-                            "encode assertion provenance {}: {error}",
-                            id.get()
-                        ))
-                    })?;
-                    if restored != expected {
-                        return Err(invalid_tail(format!(
-                            "assert provenance {} changed before replay",
-                            id.get()
-                        )));
-                    }
-                }
-                triple
-            } else {
-                let (subject, predicate, object) = payload_triple_ids(&m.payload)?;
-                let mut triple = Triple::new(subject, predicate, object);
-                triple.timestamp = m
-                    .payload
-                    .get("timestamp")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                if let Some(confidence) = m.payload.get("confidence") {
-                    let confidence = confidence.as_f64().ok_or_else(|| {
-                        invalid_tail("legacy assert confidence is not numeric")
-                    })? as f32;
-                    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
-                        return Err(invalid_tail("legacy assert confidence is outside [0,1]"));
-                    }
-                    triple.confidence = confidence;
-                }
-                match m.payload.get("compartment") {
-                    None | Some(serde_json::Value::Null) => {}
-                    Some(serde_json::Value::String(value)) => {
-                        validate_compartment_id(value)
-                            .map_err(|error| invalid_tail(error.to_string()))?;
-                        triple.compartment_id = Some(value.clone())
-                    }
-                    Some(_) => return Err(invalid_tail("legacy assert compartment is not text")),
-                }
-                triple
-            };
+            let triple = prepare_assert_for_replay(engine, &m.payload)?;
             engine
                 .replay_assert_exact(&triple)
                 .map_err(|error| SnapshotError::Engine(error.to_string()))?;
             Ok(true)
         }
         "retract" => {
-            let (subject, predicate, object) = payload_triple_ids(&m.payload)?;
+            let triple = payload_triple_ids(&m.payload)?;
+            validate_replay_symbols_registered(engine, triple, "retract")?;
             engine
-                .remove_triple(subject, predicate, object)
+                .remove_triple(triple.0, triple.1, triple.2)
+                .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            Ok(true)
+        }
+        "replace" => {
+            let replacement = parse_replay_complete_replace(&m.payload)?;
+            let retracts = replacement
+                .retracts
+                .iter()
+                .map(retract_triple_ids)
+                .collect::<SnapshotResult<Vec<_>>>()?;
+            for triple in &retracts {
+                validate_replay_symbols_registered(engine, *triple, "replace retract")?;
+            }
+            let assertion = prepare_assert_for_replay(engine, &replacement.assertion)?;
+
+            for (subject, predicate, object) in retracts {
+                engine.replay_retract_exact(subject, predicate, object);
+            }
+            engine
+                .replay_assert_exact(&assertion)
                 .map_err(|error| SnapshotError::Engine(error.to_string()))?;
             Ok(true)
         }
@@ -2991,7 +3105,7 @@ triples_file = "triples.json"
     }
 
     #[test]
-    fn contradiction_replace_tail_replays_the_complete_racing_transition() {
+    fn contradiction_replace_tail_survives_overflow_as_one_wake_transition() {
         let mut live = Engine::new(EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
@@ -3033,15 +3147,56 @@ triples_file = "triples.json"
             .unwrap();
 
         let mutations = sink.0.lock().unwrap().clone();
-        assert_eq!(mutations.len(), 2);
-        assert_eq!(mutations[0].kind, MutationKind::Retract);
-        assert_eq!(mutations[1].kind, MutationKind::Assert);
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].kind, MutationKind::Replace);
+
+        // Force overflow with an unprotected row. The complete Replace entry
+        // must remain intact rather than shedding only its displaced edge.
+        let replacement_bytes = mutations[0].payload.to_string().len() + 64;
+        let buffer = crate::wal::WalBuffer::new(replacement_bytes + 8);
+        buffer.push(mutations[0].kind, mutations[0].payload.clone());
+        buffer.push(
+            MutationKind::Retract,
+            serde_json::json!({"padding": "drop this unprotected overflow victim"}),
+        );
+        assert_eq!(buffer.dropped_on_overflow(), 1);
+        let mutations = buffer.drain_records_for_test();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].kind, MutationKind::Replace);
 
         let restored = Engine::new(EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
         })
         .unwrap();
+        assert_eq!(
+            restored
+                .create_symbol(SymbolKind::Entity, "replace-subject")
+                .unwrap()
+                .id,
+            subject
+        );
+        assert_eq!(
+            restored
+                .create_symbol(SymbolKind::Relation, "replace-predicate")
+                .unwrap()
+                .id,
+            predicate
+        );
+        assert_eq!(
+            restored
+                .create_symbol(SymbolKind::Entity, "old-object")
+                .unwrap()
+                .id,
+            old_object
+        );
+        assert_eq!(
+            restored
+                .create_symbol(SymbolKind::Entity, "new-object")
+                .unwrap()
+                .id,
+            new_object
+        );
         restored.restore_triples(&captured).unwrap();
         for mutation in mutations {
             let tail = akhomed_store::TailMutation {
@@ -3052,6 +3207,43 @@ triples_file = "triples.json"
         }
         assert!(!restored.has_triple(subject, predicate, old_object));
         assert!(restored.has_triple(subject, predicate, new_object));
+    }
+
+    #[test]
+    fn corrupt_tail_retract_with_unknown_symbol_fails_closed() {
+        let engine = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine
+            .create_symbol(SymbolKind::Entity, "known-subject")
+            .unwrap();
+        let predicate = engine
+            .create_symbol(SymbolKind::Relation, "known-predicate")
+            .unwrap();
+        let object = engine
+            .create_symbol(SymbolKind::Entity, "known-object")
+            .unwrap();
+        let unknown = SymbolId::new(999_999).unwrap();
+        engine
+            .add_triple(&Triple::new(subject.id, predicate.id, object.id))
+            .unwrap();
+
+        let mutation = akhomed_store::TailMutation {
+            kind: "retract".into(),
+            payload: serde_json::json!({
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": unknown.get(),
+            }),
+        };
+        assert!(apply_mutation(&engine, &mutation).is_err());
+        assert!(engine.has_triple(subject.id, predicate.id, object.id));
+
+        let mut symbols = vec![subject, predicate, object];
+        let mut provenance = Vec::new();
+        assert!(prepare_tail_restore(&[mutation], &mut symbols, &mut provenance).is_err());
     }
 
     #[test]
