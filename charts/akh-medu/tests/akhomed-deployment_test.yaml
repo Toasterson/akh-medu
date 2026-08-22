@@ -1,0 +1,55 @@
+# Helm-unittest tests for the akhomed deployment's SSH known_hosts handling.
+suite: akhomed ssh-known-hosts regression
+templates:
+  - akhomed-deployment.yaml
+  - akhomed-known-hosts-configmap.yaml
+tests:
+  - it: mounts known_hosts outside the ssh-key Secret directory
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: "|1|example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MXMY0RxzPV2QrBqfHrDc"
+    asserts:
+      - hasDocuments:
+          count: 1
+          ofType: Deployment
+      - equal:
+          path: spec.template.spec.volumes[?name == 'ssh-key'].secret.secretName
+          value: RELEASE-NAME-akh-medu-akhomed-ssh-key
+      - equal:
+          path: spec.template.spec.volumes[?name == 'known-hosts'].configMap.name
+          value: RELEASE-NAME-akh-medu-akhomed-known-hosts
+      # The ssh-key Secret is mounted at /etc/akh/ssh, read-only.
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[?name == 'ssh-key'].mountPath
+          value: /etc/akh/ssh
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[?name == 'ssh-key'].readOnly
+          value: true
+      # The known-hosts ConfigMap is mounted at a SEPARATE path, NOT inside /etc/akh/ssh.
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[?name == 'known-hosts'].mountPath
+          value: /etc/akh/ssh-hosts
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[?name == 'known-hosts'].readOnly
+          value: true
+      # The known_hosts ConfigMap renders the literal content.
+      - equal:
+          path: data.known_hosts
+          value: "|1|example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MXMY0RxzPV2QrBqfHrDc"
+    documentSelector:
+      path: kind
+      value: Deployment
+  - it: omits known-hosts volume when knownHosts is empty
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: ""
+    asserts:
+      - isNull:
+          path: spec.template.spec.volumes[?name == 'known-hosts']
+      - isNull:
+          path: spec.template.spec.containers[0].volumeMounts[?name == 'known-hosts']
+    documentSelector:
+      path: kind
+      value: Deployment

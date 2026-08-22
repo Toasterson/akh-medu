@@ -220,7 +220,7 @@ pub struct AutonomyConfig {
 /// user = "toasty"
 /// port = 22
 /// key = "/etc/akh/ssh/id_ed25519"
-/// known_hosts = "/etc/akh/ssh/known_hosts"
+/// known_hosts = "/etc/akh/ssh-hosts/known_hosts"
 /// workdir = "/home/toasty/akh-workspaces"
 /// ```
 ///
@@ -1648,7 +1648,7 @@ mod tests {
             user = "toasty"
             port = 2222
             key = "/etc/akh/ssh/id_ed25519"
-            known_hosts = "/etc/akh/ssh/known_hosts"
+            known_hosts = "/etc/akh/ssh-hosts/known_hosts"
             workdir = "/home/toasty/akh-workspaces"
         "#;
         let cfg: AkhConfig = toml::from_str(toml_src).expect("remote exec config parses");
@@ -1669,7 +1669,7 @@ mod tests {
         assert_eq!(key, std::path::Path::new("/etc/akh/ssh/id_ed25519"));
         assert_eq!(
             known_hosts.as_ref().map(std::path::Path::new),
-            Some(std::path::Path::new("/etc/akh/ssh/known_hosts"))
+            Some(std::path::Path::new("/etc/akh/ssh-hosts/known_hosts"))
         );
         assert_eq!(
             workdir.as_ref().map(std::path::Path::new),
@@ -1713,7 +1713,7 @@ mod tests {
             user: "toasty".into(),
             port: 22,
             key: "/etc/akh/ssh/id_ed25519".into(),
-            known_hosts: Some("/etc/akh/ssh/known_hosts".into()),
+            known_hosts: Some("/etc/akh/ssh-hosts/known_hosts".into()),
             workdir: Some("/home/toasty/akh-workspaces".into()),
         });
         cfg.save(&path).expect("save");
@@ -1755,7 +1755,7 @@ mod tests {
             user: "toasty".into(),
             port: 2222,
             key: "/etc/akh/ssh/id_ed25519".into(),
-            known_hosts: Some("/etc/akh/ssh/known_hosts".into()),
+            known_hosts: Some("/etc/akh/ssh-hosts/known_hosts".into()),
             workdir: Some("/home/toasty/wsd".into()),
         });
         let rbc = cfg.to_remote_backend_config().expect("Some");
