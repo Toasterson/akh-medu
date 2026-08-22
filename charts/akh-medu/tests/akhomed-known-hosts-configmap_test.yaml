@@ -1,0 +1,25 @@
+# Helm-unittest tests for the optional known_hosts ConfigMap. Keep this suite
+# scoped to one template so every assertion runs against the intended Kind.
+suite: akhomed known-hosts ConfigMap regression
+templates:
+  - templates/akhomed-known-hosts-configmap.yaml
+tests:
+  - it: renders the literal known_hosts content
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: "|1|example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MXMY0RxzPV2QrBqfHrDc"
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: data.known_hosts
+          value: "|1|example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MXMY0RxzPV2QrBqfHrDc"
+  - it: does not render when knownHosts is empty
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: ""
+    asserts:
+      - hasDocuments:
+          count: 0
