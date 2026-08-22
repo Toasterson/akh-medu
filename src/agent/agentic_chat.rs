@@ -16,9 +16,8 @@
 //! [`tokio::task::spawn_blocking`] under the workspace Agent's read lock
 //! (ADR-027); mutable neural transcript state is supplied separately and its
 //! mutex is held only for brief reads/writes, never across model inference or
-//! an `.await`. The per-turn permission asker, if any, must already be installed
-//! on the tool registry (`Agent::set_permission_asker`) so `Ask` tools can bridge
-//! to the ACP client.
+//! an `.await`. ACP installs the per-turn tool/permission/tracker scope before
+//! entering this loop so `Ask` tools can bridge to the correct client.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

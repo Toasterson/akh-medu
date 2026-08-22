@@ -3,7 +3,11 @@
 //! Tools are the agent's interface to the engine's capabilities.
 //! Each tool implements the [`Tool`] trait and is registered in a [`ToolRegistry`].
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::audit::{AuditEntry, AuditKind, AuditLedger};
@@ -279,6 +283,9 @@ pub trait Tool: Send + Sync {
 
 /// Registry of available tools.
 pub struct ToolRegistry {
+    /// Stable identity used to match this registry's thread-local turn scope.
+    /// Unlike the object's address, this remains valid if the registry moves.
+    session_identity: u64,
     tools: Mutex<HashMap<String, Arc<dyn Tool>>>,
     manifests: Mutex<HashMap<String, ToolManifest>>,
     /// Names of tools suppressed from the LLM catalog (`advertise_to_llm()` is
@@ -296,10 +303,89 @@ pub struct ToolRegistry {
     tracker: Mutex<Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>>,
 }
 
+/// One synchronous turn's tool-registry overlay.
+///
+/// ACP turns execute inside a single `spawn_blocking` closure. Keeping their
+/// pushed MCP proxies, permission approver, and execution tracker in a
+/// thread-local overlay lets different sessions use the same workspace
+/// [`ToolRegistry`] concurrently without publishing credentials or callbacks
+/// into shared agent state. The overlay is installed and removed by
+/// [`ToolSessionGuard`].
+struct ToolSessionState {
+    registry_identity: u64,
+    scope_id: u64,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    manifests: HashMap<String, ToolManifest>,
+    unadvertised: HashSet<String>,
+    asker: Option<Arc<dyn super::permission::PermissionAsker>>,
+    tracker: Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>,
+}
+
+thread_local! {
+    static TOOL_SESSION_SCOPES: RefCell<Vec<ToolSessionState>> = const { RefCell::new(Vec::new()) };
+}
+
+static TOOL_SESSION_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
+static TOOL_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Panic-safe lifetime guard for one thread-confined tool session.
+///
+/// This guard is deliberately `!Send`: installing on one worker thread and
+/// dropping on another would leave the first thread's overlay behind for a
+/// later task scheduled on that worker.
+pub(crate) struct ToolSessionGuard {
+    registry_identity: u64,
+    scope_id: u64,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl ToolSessionGuard {
+    /// Register a tool only in this turn's overlay.
+    pub(crate) fn register(&mut self, tool: Box<dyn Tool>) {
+        let manifest = tool.manifest();
+        let name = manifest.name.clone();
+        let advertised = tool.advertise_to_llm();
+        TOOL_SESSION_SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let state = scopes
+                .iter_mut()
+                .find(|state| state.scope_id == self.scope_id)
+                .expect("tool session guard must own an installed scope");
+            debug_assert_eq!(state.registry_identity, self.registry_identity);
+            if advertised {
+                state.unadvertised.remove(&name);
+            } else {
+                state.unadvertised.insert(name.clone());
+            }
+            state.manifests.insert(name.clone(), manifest);
+            state.tools.insert(name, Arc::from(tool));
+        });
+    }
+}
+
+impl Drop for ToolSessionGuard {
+    fn drop(&mut self) {
+        TOOL_SESSION_SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            if let Some(pos) = scopes
+                .iter()
+                .rposition(|state| state.scope_id == self.scope_id)
+            {
+                let state = scopes.remove(pos);
+                debug_assert_eq!(state.registry_identity, self.registry_identity);
+                if let Some(tracker) = state.tracker {
+                    tracker.flush_all_search_bursts();
+                }
+            }
+        });
+    }
+}
+
 impl ToolRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         Self {
+            session_identity: TOOL_REGISTRY_ID.fetch_add(1, Ordering::Relaxed),
             tools: Mutex::new(HashMap::new()),
             manifests: Mutex::new(HashMap::new()),
             unadvertised: Mutex::new(std::collections::HashSet::new()),
@@ -307,6 +393,43 @@ impl ToolRegistry {
             policy: Mutex::new(super::permission::PermissionPolicy::default()),
             asker: Mutex::new(None),
             tracker: Mutex::new(None),
+        }
+    }
+
+    fn with_session_state<R>(&self, f: impl FnOnce(Option<&ToolSessionState>) -> R) -> R {
+        let registry_identity = self.session_identity;
+        TOOL_SESSION_SCOPES.with(|scopes| {
+            let scopes = scopes.borrow();
+            f(scopes
+                .iter()
+                .rev()
+                .find(|state| state.registry_identity == registry_identity))
+        })
+    }
+
+    /// Install a thread-confined overlay for one synchronous ACP turn.
+    pub(crate) fn session_scope(
+        &self,
+        asker: Option<Arc<dyn super::permission::PermissionAsker>>,
+        tracker: Option<Arc<super::tool_execution_tracker::ToolExecutionTracker>>,
+    ) -> ToolSessionGuard {
+        let registry_identity = self.session_identity;
+        let scope_id = TOOL_SESSION_SCOPE_ID.fetch_add(1, Ordering::Relaxed);
+        TOOL_SESSION_SCOPES.with(|scopes| {
+            scopes.borrow_mut().push(ToolSessionState {
+                registry_identity,
+                scope_id,
+                tools: HashMap::new(),
+                manifests: HashMap::new(),
+                unadvertised: HashSet::new(),
+                asker,
+                tracker,
+            });
+        });
+        ToolSessionGuard {
+            registry_identity,
+            scope_id,
+            _not_send: PhantomData,
         }
     }
 
@@ -362,9 +485,8 @@ impl ToolRegistry {
         self.tools.lock().unwrap().insert(name, Arc::from(tool));
     }
 
-    /// Remove a previously-registered tool by name. Returns `true` if a tool was
-    /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
-    /// over ACP at `session/new`) after a prompt turn completes.
+    /// Remove a previously-registered persistent tool by name. Returns `true`
+    /// if a tool was removed.
     pub fn remove(&self, name: &str) -> bool {
         self.manifests.lock().unwrap().remove(name);
         self.unadvertised.lock().unwrap().remove(name);
@@ -373,15 +495,29 @@ impl ToolRegistry {
 
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if let Some(tool) = self.with_session_state(|state| {
+            state.and_then(|state| state.tools.get(name).cloned())
+        }) {
+            return Some(tool);
+        }
         self.tools.lock().unwrap().get(name).cloned()
     }
 
     /// Get a tool's manifest by name.
     pub fn manifest(&self, name: &str) -> Option<ToolManifest> {
+        if let Some(manifest) = self.with_session_state(|state| {
+            state.and_then(|state| state.manifests.get(name).cloned())
+        }) {
+            return Some(manifest);
+        }
         self.manifests.lock().unwrap().get(name).cloned()
     }
 
-    /// List all registered tool manifests.
+    /// List persistent registry manifests.
+    ///
+    /// Thread-scoped proxies are deliberately excluded so reconciliation into
+    /// the engine/tool graph cannot publish one session's MCP credentials.
+    /// Turn-local catalogs use [`Self::list_advertised_manifests`] instead.
     pub fn list_manifests(&self) -> Vec<ToolManifest> {
         self.manifests.lock().unwrap().values().cloned().collect()
     }
@@ -389,25 +525,51 @@ impl ToolRegistry {
     /// Whether a tool is advertised to the LLM catalog (ADR 076 §1). Unknown
     /// names are treated as advertised (the default).
     pub fn is_advertised(&self, name: &str) -> bool {
+        if let Some(advertised) = self.with_session_state(|state| {
+            state.and_then(|state| {
+                state
+                    .tools
+                    .contains_key(name)
+                    .then(|| !state.unadvertised.contains(name))
+            })
+        }) {
+            return advertised;
+        }
         !self.unadvertised.lock().unwrap().contains(name)
     }
 
     /// List manifests for tools advertised to the LLM catalog — i.e. excluding
     /// those whose `advertise_to_llm()` returned `false`.
     pub fn list_advertised_manifests(&self) -> Vec<ToolManifest> {
-        let unadv = self.unadvertised.lock().unwrap();
-        self.manifests
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|m| !unadv.contains(&m.name))
-            .cloned()
+        let mut manifests = self.manifests.lock().unwrap().clone();
+        let mut unadvertised = self.unadvertised.lock().unwrap().clone();
+        self.with_session_state(|state| {
+            if let Some(state) = state {
+                for (name, manifest) in &state.manifests {
+                    manifests.insert(name.clone(), manifest.clone());
+                    if state.unadvertised.contains(name) {
+                        unadvertised.insert(name.clone());
+                    } else {
+                        unadvertised.remove(name);
+                    }
+                }
+            }
+        });
+        manifests
+            .into_values()
+            .filter(|manifest| !unadvertised.contains(&manifest.name))
             .collect()
     }
 
     /// List all registered tool signatures.
     pub fn list(&self) -> Vec<ToolSignature> {
-        self.tools.lock().unwrap().values().map(|t| t.signature()).collect()
+        let mut tools = self.tools.lock().unwrap().clone();
+        self.with_session_state(|state| {
+            if let Some(state) = state {
+                tools.extend(state.tools.clone());
+            }
+        });
+        tools.into_values().map(|tool| tool.signature()).collect()
     }
 
     /// Would executing `name` right now stop at an **Ask** permission prompt?
@@ -419,11 +581,11 @@ impl ToolRegistry {
     /// The retry path skips such tools instead — the first approved failure
     /// stands, exactly as it would without repair.
     pub fn would_ask(&self, name: &str) -> bool {
-        let manifests = self.manifests.lock().unwrap();
+        let manifest = self.manifest(name);
         let policy = self.policy.lock().unwrap();
-        manifests.get(name).is_some_and(|m| {
+        manifest.as_ref().is_some_and(|manifest| {
             matches!(
-                policy.decide(m),
+                policy.decide(manifest),
                 super::permission::PermissionDecision::Ask(_)
             )
         })
@@ -448,7 +610,7 @@ impl ToolRegistry {
         // Permission gate (no-op under the default Bypass mode). A denied or
         // unapproved tool returns a failed ToolOutput rather than Err, so the
         // OODA loop's tool-error isolation is preserved.
-        if let Some(manifest) = self.manifests.lock().unwrap().get(name).cloned() {
+        if let Some(manifest) = self.manifest(name) {
             use super::permission::PermissionDecision;
             let policy = self.policy.lock().unwrap();
             match policy.decide(&manifest) {
@@ -458,12 +620,13 @@ impl ToolRegistry {
                 }
                 PermissionDecision::Ask(reason) => {
                     let summary = truncate_summary(&format!("{:?}", input.params), 200);
-                    let approved = self
-                        .asker
-                        .lock()
-                        .unwrap()
+                    let session_asker =
+                        self.with_session_state(|state| state.map(|state| state.asker.clone()));
+                    let asker = session_asker
+                        .unwrap_or_else(|| self.asker.lock().unwrap().clone());
+                    let approved = asker
                         .as_ref()
-                        .map(|a| a.ask(&manifest, &summary))
+                        .map(|asker| asker.ask(&manifest, &summary))
                         .unwrap_or(false);
                     if !approved {
                         return Ok(ToolOutput::err(format!(
@@ -475,7 +638,11 @@ impl ToolRegistry {
         }
 
         // Start tracking this tool execution for ACP ToolCall events.
-        let guard = self.tracker.lock().unwrap().as_ref().map(|tracker| {
+        let session_tracker =
+            self.with_session_state(|state| state.map(|state| state.tracker.clone()));
+        let tracker = session_tracker
+            .unwrap_or_else(|| self.tracker.lock().unwrap().clone());
+        let guard = tracker.as_ref().map(|tracker| {
             let title = build_tool_title(name, &input);
             let locations = extract_tool_locations(name, &input);
             tracker.start_tool(name, title, locations)

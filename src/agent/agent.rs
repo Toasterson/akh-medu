@@ -1836,29 +1836,18 @@ impl Agent {
         &self.working_memory
     }
 
-    /// Register a custom tool.
+    /// Register a workspace-global custom tool.
     ///
     /// Deliberately does **not** call [`Self::seed_tool_graph_and_live_view`]
     /// (the KG reconciliation path) — only [`Self::sync_live_tools`], which
-    /// updates the engine's live-tool view. Callers of `register_tool` are
-    /// almost always registering *session-scoped* tools (e.g. MCP servers
-    /// pushed over ACP for one prompt turn — see `mcp_bridge`), which are
-    /// only ever meant to be locally callable for the lifetime of that
-    /// session and must not become durable, peer-visible entries in the KG's
-    /// tool-manifest projection. Compile-time/build-provided tools go through
-    /// [`Self::seed_tool_graph_and_live_view`] at construction instead, which
-    /// *does* reconcile the KG. This keeps `tool_query`'s scoped answer
-    /// ("which tools may agent X invoke?", answered from the KG — see
-    /// `agent/tools/tool_query.rs`) accurate: a peer never sees another akh's
-    /// per-turn session tools, only its durable ones.
+    /// updates the engine's live-tool view. ACP prompt-scoped proxies use
+    /// [`Self::begin_tool_session`] instead and never enter global state.
     pub fn register_tool(&self, tool: Box<dyn super::tool::Tool>) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(tool);
         self.sync_live_tools();
     }
 
-    /// Remove a previously-registered tool by name. Returns `true` if one was
-    /// removed. Used to tear down session-scoped tools (e.g. MCP servers pushed
-    /// over ACP for one prompt turn) once the turn completes.
+    /// Remove a workspace-global tool by name. Returns `true` if one was removed.
     pub fn unregister_tool(&self, name: &str) -> bool {
         let removed = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
         self.sync_live_tools();
@@ -1867,9 +1856,8 @@ impl Agent {
 
     /// Push the current tool registry into the engine's live-tool view so
     /// engine-level introspection (`tool_query`) reports what is actually
-    /// callable *now* — including per-turn session tools (MCP-over-ACP) that
-    /// never touch the durable KG. Called at construction and on every
-    /// tool register/unregister. Cheap: a small clone under a brief write lock.
+    /// callable *now*. Thread-scoped ACP proxies are deliberately excluded.
+    /// Called at construction and on every global tool register/unregister.
     /// Reconcile the durable KG tool projection with the live registry (pruning
     /// tools left over from an older build — the registrar is otherwise
     /// append-only, so deleted tools would linger in Postgres and be reported
@@ -1958,6 +1946,23 @@ impl Agent {
     /// Remove the tool execution tracker.
     pub fn clear_tool_tracker(&self) {
         self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_tracker();
+    }
+
+    /// Install a thread-confined tool overlay for one synchronous ACP turn.
+    ///
+    /// Session-pushed MCP tools, the permission approver, and the execution
+    /// tracker remain visible only to calls made on this worker thread until
+    /// the returned guard drops. The workspace registry is never mutated, so
+    /// concurrent sessions cannot observe or tear down one another's state.
+    pub(crate) fn begin_tool_session(
+        &self,
+        asker: Option<std::sync::Arc<dyn crate::agent::permission::PermissionAsker>>,
+        tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
+    ) -> crate::agent::tool::ToolSessionGuard {
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_scope(asker, Some(tracker))
     }
 
     /// Get a reference to the wrapped engine.
