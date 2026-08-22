@@ -871,7 +871,145 @@ pub enum DerivationKind {
     },
 }
 
+/// Version marker for exact RuleInference support triples encoded in the
+/// variant's `antecedents` vector as
+/// `[marker, subject, predicate, object, ...]`.
+///
+/// Older records contain an unversioned symbol walk and remain readable.  The
+/// maximum `u64` is reserved for this metadata marker and is never resolved as
+/// a registry symbol.
+pub const RULE_SUPPORT_TRIPLES_V1_SENTINEL: u64 = u64::MAX;
+
 impl DerivationKind {
+    /// Stable snake-case names used by audit and wire protocols.
+    ///
+    /// The array index is the kind's persisted numeric tag.  Keep additions in
+    /// lock-step with [`Self::tag`]; unlike a name derived from `Debug`, these
+    /// strings are an explicit compatibility contract.
+    pub const KIND_NAMES: [&'static str; 108] = [
+        "extracted",
+        "seed",
+        "graph_edge",
+        "vsa_recovery",
+        "analogy",
+        "filler_recovery",
+        "reasoned",
+        "aggregated",
+        "agent_decision",
+        "agent_consolidation",
+        "rule_inference",
+        "fused_inference",
+        "gap_identified",
+        "schema_discovered",
+        "semantic_enrichment",
+        "compartment_loaded",
+        "shadow_veto",
+        "psyche_evolution",
+        "wasm_tool_execution",
+        "cli_tool_execution",
+        "document_ingested",
+        "concept_extracted",
+        "context_inheritance",
+        "context_lifting",
+        "predicate_generalization",
+        "predicate_inverse",
+        "defeasible_override",
+        "dispatch_route",
+        "argument_verdict",
+        "rule_macro_expansion",
+        "temporal_decay",
+        "contradiction_detected",
+        "skolem_witness",
+        "skolem_grounding",
+        "cwa_query",
+        "second_order_instantiation",
+        "nart_creation",
+        "code_generated",
+        "code_refinement",
+        "library_learning",
+        "autonomous_goal_generation",
+        "htn_decomposition",
+        "priority_argumentation",
+        "project_created",
+        "watch_fired",
+        "metacognitive_evaluation",
+        "resource_assessment",
+        "procedural_learning",
+        "email_ingested",
+        "email_threaded",
+        "spam_classification",
+        "email_triaged",
+        "email_extracted",
+        "pim_task_managed",
+        "calendar_event_managed",
+        "preference_learned",
+        "jitir_suggestion",
+        "proactive_assistance",
+        "causal_schema_learned",
+        "ritual_of_awakening",
+        "identity_resolved",
+        "domain_expansion",
+        "prerequisite_discovered",
+        "zpd_classification",
+        "sleep_consolidation",
+        "directed_curiosity",
+        "resource_discovery",
+        "curriculum_ingestion",
+        "competence_assessment",
+        "bootstrap_orchestration",
+        "continuous_learning",
+        "nlu_parsed",
+        "contact_resolved",
+        "contact_merged",
+        "relationship_recorded",
+        "style_observed",
+        "calendar_attendee_linked",
+        "llm_triple_extraction",
+        "event_calculus_projection",
+        "counterfactual_reasoning",
+        "mcts_planning",
+        "evidence_combination",
+        "source_reliability_assessed",
+        "epistemic_assessment",
+        "epistemic_update",
+        "theory_of_mind",
+        "active_inference_cycle",
+        "game_theoretic_model",
+        "neural_probe",
+        "delegation",
+        "article_created",
+        "article_updated",
+        "article_cited",
+        "article_federated",
+        "opinion_expressed",
+        "debate_contribution",
+        "cluster_topology_ingested",
+        "knowledge_elicitation",
+        "vsa_rl_update",
+        "file_import",
+        "kg_compaction",
+        "affective_appraisal",
+        "perceived",
+        "relation_enrichment",
+        "open_claw_import",
+        "librarian_extraction",
+        "note_reprojection",
+        "source_attributed",
+    ];
+
+    /// Stable wire name for this derivation kind.
+    pub fn kind_name(&self) -> &'static str {
+        Self::KIND_NAMES[self.tag() as usize]
+    }
+
+    /// Resolve an exact stable wire name to its persisted numeric tag.
+    pub fn tag_for_name(name: &str) -> Option<u8> {
+        Self::KIND_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .map(|index| index as u8)
+    }
+
     /// Numeric tag for indexing by kind.
     pub fn tag(&self) -> u8 {
         match self {
@@ -1572,6 +1710,14 @@ mod tests {
         let mut r2 = ProvenanceRecord::new(sym(43), DerivationKind::Seed);
         let id2 = ledger2.store(&mut r2).unwrap();
         assert!(id2.get() > stored_id.get());
+
+        let mut all = ledger2.all_records().unwrap();
+        all.sort_by_key(|record| record.id);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, Some(stored_id));
+        assert_eq!(all[1].id, Some(id2));
+        assert_eq!(all[0].kind.kind_name(), "extracted");
+        assert_eq!(all[1].kind.kind_name(), "seed");
     }
 
     #[test]

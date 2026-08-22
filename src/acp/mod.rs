@@ -2860,7 +2860,8 @@ struct ProvenanceFilterMatch<'a> {
     subject: String,
     predicate: String,
     object: String,
-    kind: String,
+    derived_by: &'static str,
+    provenance_kind: Option<&'static str>,
 }
 
 /// Execute the workspace-wide provenance filter used by
@@ -2898,6 +2899,17 @@ fn provenance_filter_json(
     let derived_by = normalize_provenance_filter(derived_by);
     if derived_by.is_empty() {
         return Err(AcpAppError::msg("derived_by must not be empty"));
+    }
+    if !matches!(
+        derived_by.as_str(),
+        "any" | "untracked" | "infer_rules" | "user_asserted" | "agent_learned" | "seed_pack"
+    ) && crate::provenance::DerivationKind::tag_for_name(&derived_by).is_none()
+    {
+        return Err(AcpAppError::msg(format!(
+            "unknown derived_by value {derived_by:?}; use any, untracked, infer_rules, \
+             user_asserted, agent_learned, seed_pack, or an exact provenance kind such as \
+             rule_inference"
+        )));
     }
 
     let min_confidence = params
@@ -2938,6 +2950,12 @@ fn provenance_filter_json(
     }
     let predicate_id = requested_predicate.and_then(|label| engine.resolve_symbol(label).ok());
 
+    // Producers establish provenance before publishing a linked graph edge.
+    // Capture the graph first and the append-only ledger second so every
+    // provenance ID visible in this graph snapshot must already be readable;
+    // a concurrent insertion may be omitted from this page, but cannot be
+    // transiently misreported as `untracked`.
+    let graph_triples = engine.all_triples();
     let provenance_records = engine
         .all_provenance()
         .map_err(|e| diag_err(e, "provenance ledger scan failed"))?;
@@ -2948,7 +2966,7 @@ fn provenance_filter_json(
             .collect();
 
     let mut matches = Vec::new();
-    for triple in engine.all_triples() {
+    for triple in graph_triples {
         if !triple.confidence.is_finite() || triple.confidence < min_confidence {
             continue;
         }
@@ -2961,10 +2979,11 @@ fn provenance_filter_json(
         let provenance = triple
             .provenance_id
             .and_then(|id| provenance_by_id.get(&id).copied());
-        let kind = provenance
-            .map(|record| provenance_kind_name(&record.kind))
-            .unwrap_or_else(|| "untracked".to_string());
-        if !provenance_filter_matches(&derived_by, &kind) {
+        let provenance_kind = provenance.map(|record| record.kind.kind_name());
+        let source_kind = provenance
+            .map(|record| provenance_source_bucket(&record.kind))
+            .unwrap_or("untracked");
+        if !provenance_filter_matches(&derived_by, source_kind, provenance_kind) {
             continue;
         }
 
@@ -2974,7 +2993,8 @@ fn provenance_filter_json(
             object: engine.resolve_label(triple.object),
             triple,
             provenance,
-            kind,
+            derived_by: source_kind,
+            provenance_kind,
         });
     }
 
@@ -2995,7 +3015,9 @@ fn provenance_filter_json(
     let mut breakdown_by_kind = std::collections::BTreeMap::<String, usize>::new();
     let mut breakdown_by_predicate = std::collections::BTreeMap::<String, usize>::new();
     for item in &matches {
-        *breakdown_by_kind.entry(item.kind.clone()).or_default() += 1;
+        *breakdown_by_kind
+            .entry(item.derived_by.to_string())
+            .or_default() += 1;
         *breakdown_by_predicate
             .entry(item.predicate.clone())
             .or_default() += 1;
@@ -3016,35 +3038,19 @@ fn provenance_filter_json(
                 .provenance
                 .map(|record| record.timestamp)
                 .unwrap_or(item.triple.timestamp);
-            let sources = item
-                .provenance
-                .map(|record| {
-                    record
-                        .sources
-                        .iter()
-                        .map(|source| engine.resolve_label(*source))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let derivation = item
-                .provenance
-                .and_then(|record| serde_json::to_value(&record.kind).ok());
             let derivation_chain = item
                 .provenance
-                .map(|record| direct_derivation_edges(engine, record))
+                .map(|record| derivation_chain_edges(engine, record))
                 .unwrap_or_default();
             serde_json::json!({
                 "subject": item.subject,
                 "predicate": item.predicate,
                 "object": item.object,
                 "confidence": item.triple.confidence,
-                "derived_by": item.kind,
-                "provenance_id": item.triple.provenance_id,
-                "derivation": derivation,
-                "sources": sources,
+                "derived_by": item.derived_by,
+                "provenance_kind": item.provenance_kind,
                 "derivation_chain": derivation_chain,
                 "derived_at": unix_seconds_to_iso8601(timestamp),
-                "derived_at_unix": timestamp,
             })
         })
         .collect::<Vec<_>>();
@@ -3108,113 +3114,128 @@ fn normalize_provenance_filter(raw: &str) -> String {
     normalized
 }
 
-fn provenance_filter_matches(requested: &str, canonical_kind: &str) -> bool {
+fn provenance_filter_matches(
+    requested: &str,
+    source_bucket: &str,
+    provenance_kind: Option<&str>,
+) -> bool {
     match requested {
         "any" => true,
-        "infer_rules" => canonical_kind == "rule_inference",
-        "user_asserted" => canonical_kind == "seed",
-        "seed_pack" => canonical_kind == "compartment_loaded",
-        "agent_learned" => matches!(
-            canonical_kind,
-            "agent_consolidation"
-                | "library_learning"
-                | "procedural_learning"
-                | "preference_learned"
-                | "causal_schema_learned"
-        ),
-        exact => canonical_kind == exact,
-    }
-}
-
-/// Stable snake_case wire name derived from the Rust enum variant.  Using the
-/// variant name rather than duplicating `DerivationKind::tag()`'s numeric table
-/// means newly added provenance kinds automatically become queryable and
-/// visible in breakdowns.
-fn provenance_kind_name(kind: &crate::provenance::DerivationKind) -> String {
-    let debug = format!("{kind:?}");
-    let variant = debug
-        .split(|ch: char| ch == '{' || ch == '(' || ch.is_ascii_whitespace())
-        .next()
-        .unwrap_or("Unknown");
-    pascal_to_snake_case(variant)
-}
-
-fn pascal_to_snake_case(value: &str) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    let mut out = String::with_capacity(value.len() + 4);
-    for (index, ch) in chars.iter().copied().enumerate() {
-        let previous_is_lower_or_digit = index > 0
-            && (chars[index - 1].is_ascii_lowercase() || chars[index - 1].is_ascii_digit());
-        let acronym_boundary = index > 0
-            && chars[index - 1].is_ascii_uppercase()
-            && chars
-                .get(index + 1)
-                .is_some_and(|next| next.is_ascii_lowercase());
-        if ch.is_ascii_uppercase()
-            && !out.is_empty()
-            && (previous_is_lower_or_digit || acronym_boundary)
-        {
-            out.push('_');
+        "untracked" => provenance_kind.is_none(),
+        "infer_rules" | "user_asserted" | "agent_learned" | "seed_pack" => {
+            requested == source_bucket
         }
-        out.push(ch.to_ascii_lowercase());
+        exact_kind => provenance_kind == Some(exact_kind),
     }
-    out
 }
 
-/// Return only graph edges that actually explain a direct provenance hop.
-/// The source labels are also emitted separately, so this helper never invents
-/// a predicate when a record names sources but the corresponding KG edge has
-/// already been removed.
-fn direct_derivation_edges(
+/// Map detailed provenance variants to the stable source buckets promised by
+/// WI-183.  Variants outside those four semantic groups retain their explicit
+/// stable kind name, so the endpoint remains useful for every ledger kind.
+fn provenance_source_bucket(kind: &crate::provenance::DerivationKind) -> &'static str {
+    use crate::provenance::DerivationKind;
+
+    match kind {
+        DerivationKind::RuleInference { .. } => "infer_rules",
+        DerivationKind::Seed => "user_asserted",
+        DerivationKind::CompartmentLoaded { .. } => "seed_pack",
+        DerivationKind::AgentDecision { .. }
+        | DerivationKind::AgentConsolidation { .. }
+        | DerivationKind::LibraryLearning { .. }
+        | DerivationKind::ProceduralLearning { .. }
+        | DerivationKind::PreferenceLearned { .. }
+        | DerivationKind::CausalSchemaLearned { .. } => "agent_learned",
+        other => other.kind_name(),
+    }
+}
+
+/// Return only live graph edges that explain this provenance record.
+///
+/// New rule-inference records carry versioned exact `(subject, predicate,
+/// object)` support keys in `antecedents`.  Older records stored only a symbol
+/// walk; missing legacy hops remain missing rather than being invented, and
+/// parallel predicates are selected by a stable label/id sort.
+fn derivation_chain_edges(
     engine: &Engine,
     record: &crate::provenance::ProvenanceRecord,
 ) -> Vec<serde_json::Value> {
     use crate::provenance::DerivationKind;
 
     let mut rows = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut push = |subject: crate::symbol::SymbolId,
-                    predicate: crate::symbol::SymbolId,
-                    object: crate::symbol::SymbolId,
-                    confidence: f32| {
-        if seen.insert((subject.get(), predicate.get(), object.get())) {
+    let mut seen_triples = std::collections::BTreeSet::new();
+    let mut push_live = |subject: crate::symbol::SymbolId,
+                         object: crate::symbol::SymbolId,
+                         preferred_predicate: Option<crate::symbol::SymbolId>| {
+        if rows.len() >= 64 {
+            return;
+        }
+        let mut candidates = engine
+            .triples_from(subject)
+            .into_iter()
+            .filter(|triple| {
+                triple.object == object
+                    && preferred_predicate.is_none_or(|predicate| triple.predicate == predicate)
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            engine
+                .resolve_label(left.predicate)
+                .cmp(&engine.resolve_label(right.predicate))
+                .then_with(|| left.predicate.get().cmp(&right.predicate.get()))
+                .then_with(|| right.confidence.total_cmp(&left.confidence))
+                .then_with(|| left.timestamp.cmp(&right.timestamp))
+        });
+        if let Some(triple) = candidates.first()
+            && seen_triples.insert((
+                triple.subject.get(),
+                triple.predicate.get(),
+                triple.object.get(),
+            ))
+        {
             rows.push(serde_json::json!([
-                engine.resolve_label(subject),
-                engine.resolve_label(predicate),
-                engine.resolve_label(object),
-                confidence,
+                engine.resolve_label(triple.subject),
+                engine.resolve_label(triple.predicate),
+                engine.resolve_label(triple.object),
+                triple.confidence,
             ]));
         }
     };
 
     match &record.kind {
         DerivationKind::GraphEdge { from, predicate } => {
-            push(*from, *predicate, record.derived_id, record.confidence);
+            push_live(*from, record.derived_id, Some(*predicate));
         }
         DerivationKind::VsaRecovery {
             from,
             predicate,
-            similarity,
-        } => push(*from, *predicate, record.derived_id, *similarity),
+            similarity: _,
+        } => push_live(*from, record.derived_id, Some(*predicate)),
         DerivationKind::FillerRecovery { subject, predicate } => {
-            push(*subject, *predicate, record.derived_id, record.confidence);
+            push_live(*subject, record.derived_id, Some(*predicate));
+        }
+        DerivationKind::RuleInference { antecedents, .. } => {
+            let exact = antecedents
+                .first()
+                .is_some_and(|marker| {
+                    marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+                })
+                && (antecedents.len() - 1) % 3 == 0;
+            if exact {
+                for triple_key in antecedents[1..].chunks_exact(3).take(64) {
+                    push_live(triple_key[0], triple_key[2], Some(triple_key[1]));
+                }
+            } else {
+                // Legacy records only retained an ordered symbol walk.  Select
+                // one live predicate deterministically, never a fabricated
+                // edge, and cap traversal for corrupt/cyclic payloads.
+                for pair in antecedents.windows(2).take(64) {
+                    if pair[0] != pair[1] {
+                        push_live(pair[0], pair[1], None);
+                    }
+                }
+            }
         }
         _ => {}
-    }
-
-    for source in &record.sources {
-        for triple in engine
-            .triples_from(*source)
-            .into_iter()
-            .filter(|triple| triple.object == record.derived_id)
-        {
-            push(
-                triple.subject,
-                triple.predicate,
-                triple.object,
-                triple.confidence,
-            );
-        }
     }
     rows
 }
@@ -6204,6 +6225,18 @@ mod tests {
             DerivationKind::Seed,
             1_700_000_002,
         );
+        add_provenanced_triple(
+            &engine,
+            "Horus",
+            "selected",
+            "Task-42",
+            0.8,
+            DerivationKind::AgentDecision {
+                goal: engine.resolve_or_create_entity("Task-42").unwrap(),
+                cycle: 7,
+            },
+            1_700_000_001,
+        );
 
         // A lower-confidence untracked fact is useful for the alias/filter
         // checks below, but must be excluded from this first filtered set.
@@ -6232,9 +6265,10 @@ mod tests {
         assert_eq!(response["page"], 2);
         assert_eq!(response["triples"].as_array().unwrap().len(), 1);
         assert_eq!(response["triples"][0]["subject"], "Ptah");
-        assert_eq!(response["triples"][0]["derived_by"], "seed");
-        assert_eq!(response["breakdown_by_kind"]["rule_inference"], 1);
-        assert_eq!(response["breakdown_by_kind"]["seed"], 1);
+        assert_eq!(response["triples"][0]["derived_by"], "user_asserted");
+        assert_eq!(response["triples"][0]["provenance_kind"], "seed");
+        assert_eq!(response["breakdown_by_kind"]["infer_rules"], 1);
+        assert_eq!(response["breakdown_by_kind"]["user_asserted"], 1);
         assert_eq!(response["breakdown_by_predicate"]["is-a"], 2);
         assert_eq!(response["triples"][0]["derived_at"], "2023-11-14T22:13:22Z");
         assert!(response["triples"][0]["derivation_chain"].is_array());
@@ -6250,6 +6284,8 @@ mod tests {
         assert_eq!(inferred["filter"]["derived_by"], "infer_rules");
         assert_eq!(inferred["total_matching"], 1);
         assert_eq!(inferred["triples"][0]["subject"], "Tecton");
+        assert_eq!(inferred["breakdown_by_kind"]["infer_rules"], 1);
+        assert!(inferred["breakdown_by_kind"].get("user_asserted").is_none());
 
         let asserted = dispatch_akh(
             &engine,
@@ -6261,6 +6297,18 @@ mod tests {
         .unwrap();
         assert_eq!(asserted["total_matching"], 1);
         assert_eq!(asserted["triples"][0]["subject"], "Ptah");
+
+        let learned = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({"derived_by": "agent_learned"}),
+        )
+        .unwrap();
+        assert_eq!(learned["total_matching"], 1);
+        assert_eq!(learned["triples"][0]["subject"], "Horus");
+        assert_eq!(learned["triples"][0]["provenance_kind"], "agent_decision");
 
         let untracked = dispatch_akh(
             &engine,
@@ -6275,7 +6323,66 @@ mod tests {
 
         // The ledger scan is exposed through Engine and retains both records;
         // the untracked fact must not manufacture a third provenance record.
-        assert_eq!(engine.all_provenance().unwrap().len(), 2);
+        assert_eq!(engine.all_provenance().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn provenance_filter_uses_production_rule_links_and_exact_support_chain() {
+        let (_data_dir, engine) = persistent_engine();
+        engine
+            .ingest_label_triples(&[
+                ("Dog".into(), "is-a".into(), "Mammal".into(), 1.0),
+                ("Mammal".into(), "is-a".into(), "Animal".into(), 1.0),
+            ])
+            .unwrap();
+
+        let result = engine
+            .run_rules(crate::autonomous::RuleEngineConfig::default())
+            .unwrap();
+        let dog = engine.lookup_symbol("Dog").unwrap();
+        let is_a = engine.lookup_symbol("is-a").unwrap();
+        let animal = engine.lookup_symbol("Animal").unwrap();
+        let derived = result
+            .derived
+            .iter()
+            .find(|item| {
+                item.triple.subject == dog
+                    && item.triple.predicate == is_a
+                    && item.triple.object == animal
+            })
+            .expect("transitive production rule result");
+        assert!(
+            derived.triple.provenance_id.is_some(),
+            "persistent rule results must carry their exact provenance record"
+        );
+
+        let response = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({"derived_by": "infer_rules"}),
+        )
+        .unwrap();
+        let row = response["triples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["subject"] == "Dog"
+                    && row["predicate"] == "is-a"
+                    && row["object"] == "Animal"
+            })
+            .expect("production inferred triple in audit response");
+        assert_eq!(row["derived_by"], "infer_rules");
+        assert_eq!(row["provenance_kind"], "rule_inference");
+        assert_eq!(
+            row["derivation_chain"],
+            serde_json::json!([
+                ["Dog", "is-a", "Mammal", 1.0],
+                ["Mammal", "is-a", "Animal", 1.0],
+            ])
+        );
     }
 
     #[test]
@@ -6286,6 +6393,7 @@ mod tests {
             serde_json::json!({"page_size": 501}),
             serde_json::json!({"min_confidence": 1.1}),
             serde_json::json!({"workspace": "other"}),
+            serde_json::json!({"derived_by": "infer_rulse"}),
         ] {
             assert!(
                 dispatch_akh(&engine, "default", false, "_akh/provenance/filter", &params,)
@@ -6296,7 +6404,7 @@ mod tests {
     }
 
     #[test]
-    fn provenance_filter_is_advertised_and_names_future_kinds_without_a_tag_table() {
+    fn provenance_filter_is_advertised_and_uses_stable_kind_names() {
         let (engine, _agent) = engine_and_agent();
         let capabilities = dispatch_akh(
             &engine,
@@ -6313,11 +6421,23 @@ mod tests {
                 .iter()
                 .any(|method| method == "_akh/provenance/filter")
         );
-        assert_eq!(pascal_to_snake_case("VsaRecovery"), "vsa_recovery");
         assert_eq!(
-            pascal_to_snake_case("LlmTripleExtraction"),
-            "llm_triple_extraction"
+            crate::provenance::DerivationKind::tag_for_name("vsa_recovery"),
+            Some(3)
         );
+        assert_eq!(
+            crate::provenance::DerivationKind::tag_for_name("llm_triple_extraction"),
+            Some(77)
+        );
+        assert_eq!(
+            crate::provenance::DerivationKind::tag_for_name("source_attributed"),
+            Some(107)
+        );
+        assert_eq!(
+            crate::provenance::DerivationKind::tag_for_name("not_a_kind"),
+            None
+        );
+        assert_eq!(crate::provenance::DerivationKind::KIND_NAMES.len(), 108);
         assert_eq!(unix_seconds_to_iso8601(0), "1970-01-01T00:00:00Z");
         assert_eq!(unix_seconds_to_iso8601(951_782_400), "2000-02-29T00:00:00Z");
     }

@@ -515,15 +515,26 @@ impl RuleEngine {
             }
 
             // Commit new triples to the KG and store provenance.
-            for dt in &new_this_round {
-                if self.config.auto_commit {
-                    // Ignore duplicate-triple errors.
-                    let _ = engine.add_triple(&dt.triple);
+            for dt in &mut new_this_round {
+                // Persist exact support triple keys inside the existing
+                // RuleInference payload.  The version marker keeps older
+                // subject-only records readable without changing the bincode
+                // enum layout.
+                let mut antecedent_ids = vec![SymbolId::new(
+                    crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL,
+                )
+                .expect("non-zero provenance support marker")];
+                let mut source_ids = Vec::new();
+                for premise in &dt.antecedent_triples {
+                    antecedent_ids.extend([
+                        premise.subject,
+                        premise.predicate,
+                        premise.object,
+                    ]);
+                    if !source_ids.contains(&premise.subject) {
+                        source_ids.push(premise.subject);
+                    }
                 }
-
-                // Store provenance.
-                let antecedent_ids: Vec<SymbolId> =
-                    dt.antecedent_triples.iter().map(|t| t.subject).collect();
                 let mut record = ProvenanceRecord::new(
                     dt.triple.subject,
                     DerivationKind::RuleInference {
@@ -531,10 +542,23 @@ impl RuleEngine {
                         antecedents: antecedent_ids.clone(),
                     },
                 )
-                .with_sources(antecedent_ids)
+                .with_sources(source_ids)
                 .with_confidence(dt.confidence)
                 .with_depth(dt.iteration);
-                let _ = engine.store_provenance(&mut record);
+                let provenance_id = engine.store_provenance(&mut record).ok();
+
+                // The graph edge is the unit returned by provenance/filter,
+                // so establish the triple-level invariant before insertion.
+                // In-memory engines have no ledger and remain explicitly
+                // untracked; persistent engines carry the exact record ID.
+                if let Some(id) = provenance_id {
+                    dt.triple.provenance_id = Some(id.get());
+                }
+                if self.config.auto_commit {
+                    // Ignore duplicate-triple errors.  insert_triple updates an
+                    // existing edge's provenance when this ID is present.
+                    let _ = engine.add_triple(&dt.triple);
+                }
             }
 
             derived.extend(new_this_round);
