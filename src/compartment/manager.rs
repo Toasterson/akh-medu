@@ -40,6 +40,48 @@ impl std::fmt::Debug for CompartmentManager {
 /// Namespace for compartment named graphs in Oxigraph.
 pub const COMPARTMENT_NS: &str = "https://akh-medu.dev/compartment/";
 
+/// Whether the live edge for `triple` is already backed by the exact pack
+/// provenance that would be written for it now.
+///
+/// Stable identity proves the live edge, while the ledger record proves the
+/// producer and binds that edge's object and subject.  Checking all of them is
+/// what makes it safe for a deferred compartment load to preserve volatile edge
+/// metadata restored by cold wake instead of publishing a replacement record.
+pub(super) fn has_exact_live_pack_provenance(
+    engine: &crate::engine::Engine,
+    triple: &crate::graph::Triple,
+    compartment_id: &str,
+    source_file: &str,
+) -> bool {
+    if triple.compartment_id.as_deref() != Some(compartment_id) {
+        return false;
+    }
+
+    let identity = engine.triple_identity(triple);
+    let Some(existing) = engine.triple_by_identity(&identity) else {
+        return false;
+    };
+    let Some(provenance_id) = existing
+        .provenance_id
+        .and_then(crate::provenance::ProvenanceId::new)
+    else {
+        return false;
+    };
+    let Ok(record) = engine.get_provenance(provenance_id) else {
+        return false;
+    };
+
+    record.derived_id == triple.object
+        && record.sources.as_slice() == [triple.subject]
+        && matches!(
+            record.kind,
+            crate::provenance::DerivationKind::CompartmentLoaded {
+                compartment_id: ref restored_compartment,
+                source_file: ref restored_source,
+            } if restored_compartment == compartment_id && restored_source == source_file
+        )
+}
+
 impl CompartmentManager {
     /// Create a new compartment manager scanning the given directory.
     pub fn new(compartments_dir: PathBuf) -> Self {
@@ -220,22 +262,12 @@ impl CompartmentManager {
                         // proves this exact pack/file is safe to preserve; an
                         // untracked or differently sourced collision still needs
                         // the normal tracked insertion path.
-                        let identity = engine.triple_identity(&triple);
-                        let already_tracked_by_this_pack = engine
-                            .triple_by_identity(&identity)
-                            .and_then(|existing| existing.provenance_id)
-                            .and_then(crate::provenance::ProvenanceId::new)
-                            .and_then(|id| engine.get_provenance(id).ok())
-                            .is_some_and(|record| {
-                                matches!(
-                                    record.kind,
-                                    crate::provenance::DerivationKind::CompartmentLoaded {
-                                        compartment_id: ref restored_compartment,
-                                        source_file: ref restored_source,
-                                    } if restored_compartment.as_str() == compartment_id.as_str()
-                                        && restored_source.as_str() == triples_file.as_str()
-                                )
-                            });
+                        let already_tracked_by_this_pack = has_exact_live_pack_provenance(
+                            engine,
+                            &triple,
+                            &compartment_id,
+                            triples_file,
+                        );
                         if !already_tracked_by_this_pack {
                             let mut triple = [triple];
                             let mut provenance = crate::provenance::ProvenanceRecord::new(
@@ -770,6 +802,7 @@ tags = []
         let sun = engine.resolve_symbol("Sun").unwrap();
         let emits = engine.resolve_symbol("emits").unwrap();
         let light = engine.resolve_symbol("Light").unwrap();
+        let moon = engine.resolve_or_create_entity("Moon").unwrap();
         let pack_fact = || {
             engine
                 .triples_from(sun)
@@ -781,11 +814,26 @@ tags = []
                 })
                 .expect("pack fact should be live")
         };
+        let assert_exact_pack_record = |raw_id: u64| {
+            let record = engine
+                .get_provenance(crate::provenance::ProvenanceId::new(raw_id).unwrap())
+                .unwrap();
+            assert_eq!(record.derived_id, light);
+            assert_eq!(record.sources, vec![sun]);
+            assert!(matches!(
+                &record.kind,
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id,
+                    source_file,
+                } if compartment_id == "facts" && source_file == "triples.json"
+            ));
+        };
 
         let first = pack_fact();
         let original_provenance = first
             .provenance_id
             .expect("persistent pack load should attach provenance");
+        assert_exact_pack_record(original_provenance);
         let ledger_len = engine.all_provenance().unwrap().len();
 
         // Model snapshot restore with a recognizable preserved timestamp. A
@@ -836,14 +884,91 @@ tags = []
             .provenance_id
             .expect("an untracked collision still needs pack provenance");
         assert_ne!(repaired_id, original_provenance);
-        assert!(matches!(
-            engine
-                .get_provenance(crate::provenance::ProvenanceId::new(repaired_id).unwrap())
-                .unwrap()
-                .kind,
-            crate::provenance::DerivationKind::CompartmentLoaded { .. }
-        ));
+        assert_exact_pack_record(repaired_id);
         assert_eq!(engine.all_provenance().unwrap().len(), ledger_len + 1);
+
+        // A provenance ID alone is not proof that the live edge came from this
+        // exact pack. Exercise each ledger field independently so none can be
+        // omitted from the preservation predicate without this regression
+        // catching it.
+        let wrong_records = [
+            (
+                "wrong subject source",
+                light,
+                vec![moon],
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id: "facts".into(),
+                    source_file: "triples.json".into(),
+                },
+            ),
+            (
+                "additional subject source",
+                light,
+                vec![sun, moon],
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id: "facts".into(),
+                    source_file: "triples.json".into(),
+                },
+            ),
+            (
+                "wrong derived object",
+                moon,
+                vec![sun],
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id: "facts".into(),
+                    source_file: "triples.json".into(),
+                },
+            ),
+            (
+                "wrong pack source file",
+                light,
+                vec![sun],
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id: "facts".into(),
+                    source_file: "other.json".into(),
+                },
+            ),
+            (
+                "wrong provenance compartment",
+                light,
+                vec![sun],
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id: "other".into(),
+                    source_file: "triples.json".into(),
+                },
+            ),
+        ];
+
+        for (case, derived_id, sources, kind) in wrong_records {
+            let mut collision = [crate::graph::Triple::new(sun, emits, light)
+                .with_confidence(0.8)
+                .with_compartment("facts".into())];
+            let mut wrong_record = crate::provenance::ProvenanceRecord::new(derived_id, kind)
+                .with_sources(sources)
+                .with_confidence(0.8);
+            let wrong_id = engine
+                .add_triples_with_provenance(&mut collision, &mut wrong_record)
+                .unwrap()
+                .expect("persistent collision should receive provenance")
+                .get();
+            assert_eq!(pack_fact().provenance_id, Some(wrong_id), "{case}");
+            let ledger_before_repair = engine.all_provenance().unwrap().len();
+
+            let repair_manager = CompartmentManager::new(tmp.path().to_path_buf());
+            assert_eq!(repair_manager.discover().unwrap(), 1);
+            repair_manager.load("facts", &engine).unwrap();
+
+            let repaired_id = pack_fact()
+                .provenance_id
+                .expect("invalid pack provenance must be repaired");
+            assert_ne!(repaired_id, wrong_id, "{case}");
+            assert_exact_pack_record(repaired_id);
+            assert_eq!(
+                engine.all_provenance().unwrap().len(),
+                ledger_before_repair + 1,
+                "{case} must mint exactly one replacement record"
+            );
+        }
     }
 
     fn make_manager() -> (CompartmentManager, tempfile::TempDir) {

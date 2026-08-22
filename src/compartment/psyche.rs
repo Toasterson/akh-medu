@@ -500,11 +500,20 @@ impl Psyche {
 
         macro_rules! add {
             ($s:expr, $p:expr, $o:expr, $c:expr) => {{
-                // Skip if triple already exists (idempotent injection for restarts).
-                if !engine.has_triple($s, $p, $o) {
-                    let mut triples = [crate::graph::Triple::new($s, $p, $o)
-                        .with_confidence($c)
-                        .with_compartment(cid.clone())];
+                let triple = crate::graph::Triple::new($s, $p, $o)
+                    .with_confidence($c)
+                    .with_compartment(cid.clone());
+                // A cold-woken edge is idempotent only when its attached ledger
+                // record proves this exact psyche pack and this exact edge.
+                // Every other collision is repaired through the ledger-before-edge
+                // insertion path below.
+                if !super::manager::has_exact_live_pack_provenance(
+                    engine,
+                    &triple,
+                    &cid,
+                    "psyche.toml",
+                ) {
+                    let mut triples = [triple];
                     let mut provenance = crate::provenance::ProvenanceRecord::new(
                         $o,
                         crate::provenance::DerivationKind::CompartmentLoaded {
@@ -675,6 +684,159 @@ mod tests {
             },
             source: ToolSource::Native,
         }
+    }
+
+    #[test]
+    fn psyche_reload_preserves_cold_woken_provenance_and_timestamp() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let data = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(data.path().join("engine-data")),
+            ..Default::default()
+        })
+        .unwrap();
+        let psyche = Psyche::default();
+        assert!(psyche.inject_into_kg(&engine, "psyche").unwrap() > 0);
+
+        let self_sym = engine.resolve_symbol("psyche:self").unwrap();
+        let integration = engine.resolve_symbol("psyche:integration").unwrap();
+        let individuation = engine.resolve_symbol("psyche:individuation_level").unwrap();
+        let psyche_fact = || {
+            engine
+                .triples_from(self_sym)
+                .into_iter()
+                .find(|triple| {
+                    triple.predicate == individuation
+                        && triple.object == integration
+                        && triple.compartment_id.as_deref() == Some("psyche")
+                })
+                .expect("psyche integration fact should be live")
+        };
+
+        let first = psyche_fact();
+        let original_id = first
+            .provenance_id
+            .expect("psyche injection should attach provenance");
+        let ledger_len = engine.all_provenance().unwrap().len();
+        let restored_timestamp = 1_700_000_456;
+        let mut restored = first;
+        restored.timestamp = restored_timestamp;
+        engine.add_triple(&restored).unwrap();
+
+        assert_eq!(psyche.inject_into_kg(&engine, "psyche").unwrap(), 0);
+        let after_reload = psyche_fact();
+        assert_eq!(after_reload.provenance_id, Some(original_id));
+        assert_eq!(after_reload.timestamp, restored_timestamp);
+        assert_eq!(engine.all_provenance().unwrap().len(), ledger_len);
+    }
+
+    #[test]
+    fn psyche_repairs_untracked_and_wrong_provenance_records() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let data = tempfile::TempDir::new().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(data.path().join("engine-data")),
+            ..Default::default()
+        })
+        .unwrap();
+        let psyche = Psyche::default();
+        psyche.inject_into_kg(&engine, "psyche").unwrap();
+
+        let self_sym = engine.resolve_symbol("psyche:self").unwrap();
+        let integration = engine.resolve_symbol("psyche:integration").unwrap();
+        let individuation = engine.resolve_symbol("psyche:individuation_level").unwrap();
+        let psyche_fact = || {
+            engine
+                .triples_from(self_sym)
+                .into_iter()
+                .find(|triple| {
+                    triple.predicate == individuation
+                        && triple.object == integration
+                        && triple.compartment_id.as_deref() == Some("psyche")
+                })
+                .expect("psyche integration fact should be live")
+        };
+        let assert_exact_psyche_record = |raw_id: u64| {
+            let record = engine
+                .get_provenance(crate::provenance::ProvenanceId::new(raw_id).unwrap())
+                .unwrap();
+            assert_eq!(record.derived_id, integration);
+            assert_eq!(record.sources, vec![self_sym]);
+            assert!(matches!(
+                &record.kind,
+                crate::provenance::DerivationKind::CompartmentLoaded {
+                    compartment_id,
+                    source_file,
+                } if compartment_id == "psyche" && source_file == "psyche.toml"
+            ));
+        };
+
+        let first = psyche_fact();
+        let confidence = first.confidence;
+        engine
+            .remove_triple(first.subject, first.predicate, first.object)
+            .unwrap();
+        engine
+            .add_triple(
+                &crate::graph::Triple::new(self_sym, individuation, integration)
+                    .with_confidence(confidence)
+                    .with_compartment("psyche".into()),
+            )
+            .unwrap();
+        assert_eq!(psyche_fact().provenance_id, None);
+        let before_untracked_repair = engine.all_provenance().unwrap().len();
+
+        assert_eq!(psyche.inject_into_kg(&engine, "psyche").unwrap(), 1);
+        let repaired_untracked = psyche_fact()
+            .provenance_id
+            .expect("untracked psyche collision must be repaired");
+        assert_exact_psyche_record(repaired_untracked);
+        assert_eq!(
+            engine.all_provenance().unwrap().len(),
+            before_untracked_repair + 1
+        );
+
+        let wrong = engine
+            .resolve_or_create_entity("psyche:wrong-provenance-node")
+            .unwrap();
+        let mut collision = [
+            crate::graph::Triple::new(self_sym, individuation, integration)
+                .with_confidence(confidence)
+                .with_compartment("psyche".into()),
+        ];
+        let mut wrong_record = crate::provenance::ProvenanceRecord::new(
+            wrong,
+            crate::provenance::DerivationKind::CompartmentLoaded {
+                compartment_id: "psyche".into(),
+                source_file: "psyche.toml".into(),
+            },
+        )
+        .with_sources(vec![wrong])
+        .with_confidence(confidence);
+        let wrong_id = engine
+            .add_triples_with_provenance(&mut collision, &mut wrong_record)
+            .unwrap()
+            .expect("persistent collision should receive provenance")
+            .get();
+        assert_eq!(psyche_fact().provenance_id, Some(wrong_id));
+        let before_wrong_record_repair = engine.all_provenance().unwrap().len();
+
+        assert_eq!(psyche.inject_into_kg(&engine, "psyche").unwrap(), 1);
+        let repaired_wrong = psyche_fact()
+            .provenance_id
+            .expect("wrong psyche provenance must be replaced");
+        assert_ne!(repaired_wrong, wrong_id);
+        assert_exact_psyche_record(repaired_wrong);
+        assert_eq!(
+            engine.all_provenance().unwrap().len(),
+            before_wrong_record_repair + 1
+        );
     }
 
     #[test]

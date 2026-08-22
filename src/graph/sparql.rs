@@ -62,6 +62,15 @@ impl SparqlStore {
         NamedNode::new(format!("{AKH_NS}{}", symbol.get())).expect("valid IRI")
     }
 
+    /// Convert a compartment ID to its named-graph IRI.
+    pub(crate) fn compartment_to_iri(compartment_id: &str) -> GraphResult<NamedNode> {
+        NamedNode::new(format!("{COMPARTMENT_NS}{compartment_id}")).map_err(|e| {
+            GraphError::Sparql {
+                message: format!("invalid compartment IRI for compartment {compartment_id:?}: {e}"),
+            }
+        })
+    }
+
     /// Try to parse a SymbolId from an IRI string.
     pub(crate) fn iri_to_symbol(iri: &str) -> Option<SymbolId> {
         let id_str = iri.strip_prefix(AKH_NS)?;
@@ -89,7 +98,7 @@ impl SparqlStore {
 
         match compartment_id {
             Some(id) => {
-                let graph_iri = NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid IRI");
+                let graph_iri = Self::compartment_to_iri(id)?;
                 let quad = Quad::new(subject, predicate, object, graph_iri.as_ref());
                 self.store.insert(&quad).map_err(|e| GraphError::Sparql {
                     message: format!("insert into graph {id} failed: {e}"),
@@ -114,10 +123,10 @@ impl SparqlStore {
         sparql: &str,
         compartment_id: &str,
     ) -> GraphResult<Vec<Vec<(String, String)>>> {
-        let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");
+        let graph_iri = Self::compartment_to_iri(compartment_id)?;
         // Inject FROM clause after SELECT
         let scoped = if let Some(rest) = sparql.strip_prefix("SELECT") {
-            format!("SELECT FROM <{graph_iri}>{rest}")
+            format!("SELECT FROM <{}>{rest}", graph_iri.as_str())
         } else {
             sparql.to_string()
         };
@@ -143,8 +152,8 @@ impl SparqlStore {
 
     /// Remove all triples in a named compartment graph.
     pub fn remove_graph(&self, compartment_id: &str) -> GraphResult<()> {
-        let graph_iri = format!("{COMPARTMENT_NS}{compartment_id}");
-        let drop_query = format!("DROP GRAPH <{graph_iri}>");
+        let graph_iri = Self::compartment_to_iri(compartment_id)?;
+        let drop_query = format!("DROP GRAPH <{}>", graph_iri.as_str());
         // Oxigraph may not support DROP GRAPH via query(), so we use update().
         self.store
             .update(&drop_query)
@@ -237,6 +246,31 @@ impl SparqlStore {
     pub fn sync_from(&self, kg: &KnowledgeGraph) -> GraphResult<usize> {
         let triples = kg.all_triples();
         let count = triples.len();
+        // Build every quad before opening the replacement transaction.  In
+        // particular, an invalid compartment must not clear the live store
+        // before its named-graph IRI is rejected.
+        let quads = triples
+            .iter()
+            .map(|triple| {
+                let subject = Self::symbol_to_iri(triple.subject);
+                let predicate = Self::symbol_to_iri(triple.predicate);
+                let object = Self::symbol_to_iri(triple.object);
+                match triple.compartment_id.as_deref() {
+                    Some(id) => Ok(Quad::new(
+                        subject,
+                        predicate,
+                        object,
+                        Self::compartment_to_iri(id)?,
+                    )),
+                    None => Ok(Quad::new(
+                        subject,
+                        predicate,
+                        object,
+                        GraphNameRef::DefaultGraph,
+                    )),
+                }
+            })
+            .collect::<GraphResult<Vec<_>>>()?;
         let mut transaction = self
             .store
             .start_transaction()
@@ -246,20 +280,8 @@ impl SparqlStore {
         transaction.clear().map_err(|e| GraphError::Sparql {
             message: format!("clear SPARQL replacement transaction failed: {e}"),
         })?;
-        for triple in &triples {
-            let subject = Self::symbol_to_iri(triple.subject);
-            let predicate = Self::symbol_to_iri(triple.predicate);
-            let object = Self::symbol_to_iri(triple.object);
-            let quad = match triple.compartment_id.as_deref() {
-                Some(id) => Quad::new(
-                    subject,
-                    predicate,
-                    object,
-                    NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid compartment IRI"),
-                ),
-                None => Quad::new(subject, predicate, object, GraphNameRef::DefaultGraph),
-            };
-            transaction.insert(&quad);
+        for quad in &quads {
+            transaction.insert(quad);
         }
         transaction.commit().map_err(|e| GraphError::Sparql {
             message: format!("commit SPARQL replacement transaction failed: {e}"),
@@ -367,6 +389,15 @@ mod tests {
         SymbolId::new(id).unwrap()
     }
 
+    fn assert_invalid_compartment(error: GraphError) {
+        match error {
+            GraphError::Sparql { message } => {
+                assert!(message.contains("invalid compartment IRI"), "{message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
     #[test]
     fn iri_roundtrip() {
         let id = sym(42);
@@ -388,6 +419,21 @@ mod tests {
     }
 
     #[test]
+    fn compartment_operations_reject_malformed_iris() {
+        let store = SparqlStore::in_memory().unwrap();
+        let triple = Triple::new(sym(1), sym(2), sym(3)).with_compartment("bad compartment".into());
+
+        assert_invalid_compartment(store.insert_triple(&triple).unwrap_err());
+        assert_invalid_compartment(
+            store
+                .query_in_graph("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", "bad compartment")
+                .unwrap_err(),
+        );
+        assert_invalid_compartment(store.remove_graph("bad compartment").unwrap_err());
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
     fn sync_from_knowledge_graph() {
         let kg = KnowledgeGraph::new();
         kg.insert_triple(&Triple::new(sym(1), sym(10), sym(2)))
@@ -405,6 +451,35 @@ mod tests {
         assert!(
             !store
                 .query_ask(&format!("ASK {{ <{AKH_NS}99> ?p ?o }}"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn sync_from_rejects_malformed_compartment_without_replacing_store() {
+        let store = SparqlStore::in_memory().unwrap();
+        store
+            .insert_triple(&Triple::new(sym(99), sym(10), sym(100)))
+            .unwrap();
+
+        let kg = KnowledgeGraph::new();
+        kg.insert_triple(&Triple::new(sym(1), sym(10), sym(2)))
+            .unwrap();
+        kg.insert_triple(
+            &Triple::new(sym(2), sym(10), sym(3)).with_compartment("bad compartment".into()),
+        )
+        .unwrap();
+
+        assert_invalid_compartment(store.sync_from(&kg).unwrap_err());
+        assert_eq!(store.len().unwrap(), 1);
+        assert!(
+            store
+                .query_ask(&format!("ASK {{ <{AKH_NS}99> ?p ?o }}"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .query_ask(&format!("ASK {{ <{AKH_NS}1> ?p ?o }}"))
                 .unwrap()
         );
     }

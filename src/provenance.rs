@@ -1004,6 +1004,161 @@ impl DerivationKind {
         "source_attributed",
     ];
 
+    /// Every registry symbol referenced by this derivation payload.
+    ///
+    /// A provenance record's `derived_id` and top-level `sources` are not the
+    /// whole symbol closure: several variants embed additional typed IDs. WAL
+    /// envelopes and snapshot validation use this exhaustive visitor so a
+    /// record can never be restored with an unresolved ID that the allocator
+    /// may later reuse. Rule-inference protocol markers are metadata, not
+    /// registry symbols, and are deliberately excluded.
+    pub fn referenced_symbol_ids(&self) -> Vec<SymbolId> {
+        match self {
+            Self::GraphEdge { from, predicate }
+            | Self::VsaRecovery {
+                from, predicate, ..
+            } => vec![*from, *predicate],
+            Self::Analogy { a, b, c } => vec![*a, *b, *c],
+            Self::FillerRecovery { subject, predicate } => vec![*subject, *predicate],
+            Self::AgentDecision { goal, .. }
+            | Self::PriorityArgumentation { goal, .. }
+            | Self::MetacognitiveEvaluation { goal, .. }
+            | Self::ResourceAssessment { goal, .. } => vec![*goal],
+            Self::RuleInference { antecedents, .. } => antecedents
+                .iter()
+                .copied()
+                .filter(|id| {
+                    !matches!(
+                        id.get(),
+                        RULE_SUPPORT_TRIPLES_V1_SENTINEL | RULE_APPLICATION_V2_SENTINEL
+                    )
+                })
+                .collect(),
+            Self::ContextInheritance { context, ancestor } => vec![*context, *ancestor],
+            Self::ContextLifting {
+                from_context,
+                to_context,
+                ..
+            } => vec![*from_context, *to_context],
+            Self::PredicateGeneralization { specific, general } => vec![*specific, *general],
+            Self::PredicateInverse { predicate, inverse } => vec![*predicate, *inverse],
+            Self::DefeasibleOverride { winner, loser, .. } => vec![*winner, *loser],
+            Self::ArgumentVerdict { winner, .. } => vec![*winner],
+            Self::ContradictionDetected {
+                existing_object,
+                incoming_object,
+                ..
+            } => vec![*existing_object, *incoming_object],
+            Self::SkolemWitness {
+                existential_relation,
+                bound_var,
+            } => vec![*existential_relation, *bound_var],
+            Self::SkolemGrounding {
+                skolem,
+                concrete_entity,
+            } => vec![*skolem, *concrete_entity],
+            Self::CwaQuery {
+                context,
+                subject,
+                predicate,
+            } => vec![*context, *subject, *predicate],
+            Self::SecondOrderInstantiation { predicate, .. } => vec![*predicate],
+            Self::NartCreation { function, .. } => vec![*function],
+            Self::ProceduralLearning { source_goal, .. } => vec![*source_goal],
+            Self::DirectedCuriosity { concept, .. } => vec![*concept],
+            Self::VsaRlUpdate { tool, .. } => vec![*tool],
+            Self::SourceAttributed {
+                subject,
+                predicate,
+                source,
+            } => vec![*subject, *predicate, *source],
+
+            Self::Extracted
+            | Self::Seed
+            | Self::Reasoned
+            | Self::Aggregated
+            | Self::AgentConsolidation { .. }
+            | Self::FusedInference { .. }
+            | Self::GapIdentified { .. }
+            | Self::SchemaDiscovered { .. }
+            | Self::SemanticEnrichment { .. }
+            | Self::CompartmentLoaded { .. }
+            | Self::ShadowVeto { .. }
+            | Self::PsycheEvolution { .. }
+            | Self::WasmToolExecution { .. }
+            | Self::CliToolExecution { .. }
+            | Self::DocumentIngested { .. }
+            | Self::ConceptExtracted { .. }
+            | Self::DispatchRoute { .. }
+            | Self::RuleMacroExpansion { .. }
+            | Self::TemporalDecay { .. }
+            | Self::CodeGenerated { .. }
+            | Self::CodeRefinement { .. }
+            | Self::LibraryLearning { .. }
+            | Self::AutonomousGoalGeneration { .. }
+            | Self::HtnDecomposition { .. }
+            | Self::ProjectCreated { .. }
+            | Self::WatchFired { .. }
+            | Self::EmailIngested { .. }
+            | Self::EmailThreaded { .. }
+            | Self::SpamClassification { .. }
+            | Self::EmailTriaged { .. }
+            | Self::EmailExtracted { .. }
+            | Self::PimTaskManaged { .. }
+            | Self::CalendarEventManaged { .. }
+            | Self::PreferenceLearned { .. }
+            | Self::JitirSuggestion { .. }
+            | Self::ProactiveAssistance { .. }
+            | Self::CausalSchemaLearned { .. }
+            | Self::RitualOfAwakening { .. }
+            | Self::IdentityResolved { .. }
+            | Self::DomainExpansion { .. }
+            | Self::PrerequisiteDiscovered { .. }
+            | Self::ZpdClassification { .. }
+            | Self::SleepConsolidation { .. }
+            | Self::ResourceDiscovery { .. }
+            | Self::CurriculumIngestion { .. }
+            | Self::CompetenceAssessment { .. }
+            | Self::BootstrapOrchestration { .. }
+            | Self::ContinuousLearning { .. }
+            | Self::NluParsed { .. }
+            | Self::ContactResolved { .. }
+            | Self::ContactMerged { .. }
+            | Self::RelationshipRecorded { .. }
+            | Self::StyleObserved { .. }
+            | Self::CalendarAttendeeLinked { .. }
+            | Self::LlmTripleExtraction { .. }
+            | Self::EventCalculusProjection { .. }
+            | Self::CounterfactualReasoning { .. }
+            | Self::MctsPlanning { .. }
+            | Self::EvidenceCombination { .. }
+            | Self::SourceReliabilityAssessed { .. }
+            | Self::EpistemicAssessment { .. }
+            | Self::EpistemicUpdate { .. }
+            | Self::TheoryOfMind { .. }
+            | Self::ActiveInferenceCycle { .. }
+            | Self::GameTheoreticModel { .. }
+            | Self::NeuralProbe { .. }
+            | Self::AffectiveAppraisal { .. }
+            | Self::Delegation { .. }
+            | Self::ArticleCreated { .. }
+            | Self::ArticleUpdated { .. }
+            | Self::ArticleCited { .. }
+            | Self::ArticleFederated { .. }
+            | Self::OpinionExpressed { .. }
+            | Self::DebateContribution { .. }
+            | Self::ClusterTopologyIngested { .. }
+            | Self::KnowledgeElicitation { .. }
+            | Self::FileImport { .. }
+            | Self::KgCompaction { .. }
+            | Self::Perceived { .. }
+            | Self::RelationEnrichment { .. }
+            | Self::OpenClawImport { .. }
+            | Self::LibrarianExtraction { .. }
+            | Self::NoteReprojection { .. } => Vec::new(),
+        }
+    }
+
     /// Stable wire name for this derivation kind.
     pub fn kind_name(&self) -> &'static str {
         Self::KIND_NAMES[self.tag() as usize]
@@ -1652,6 +1807,32 @@ mod tests {
 
     fn sym(id: u64) -> SymbolId {
         SymbolId::new(id).unwrap()
+    }
+
+    #[test]
+    fn derivation_symbol_closure_is_exhaustive_for_payload_ids() {
+        let rule = DerivationKind::RuleInference {
+            rule_name: "transitive".into(),
+            antecedents: vec![
+                sym(RULE_SUPPORT_TRIPLES_V1_SENTINEL),
+                sym(RULE_APPLICATION_V2_SENTINEL),
+                sym(10),
+                sym(11),
+                sym(12),
+            ],
+        };
+        assert_eq!(rule.referenced_symbol_ids(), vec![sym(10), sym(11), sym(12)]);
+
+        let context = DerivationKind::CwaQuery {
+            context: sym(20),
+            subject: sym(21),
+            predicate: sym(22),
+        };
+        assert_eq!(
+            context.referenced_symbol_ids(),
+            vec![sym(20), sym(21), sym(22)]
+        );
+        assert!(DerivationKind::Extracted.referenced_symbol_ids().is_empty());
     }
 
     #[test]

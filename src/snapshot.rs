@@ -162,22 +162,27 @@ pub fn capture_snapshot_at_watermark(
     // Flush durable state to local redb (registry, allocator counter, KG snapshot).
     agent.persist().map_err(|e| SnapshotError::Agent(e.to_string()))?;
 
-    let allocator_next = read_allocator_next(engine);
+    let allocator_next = i64::try_from(engine.symbol_allocator_next()).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "symbol allocator next ID {} exceeds the relational snapshot range",
+            engine.symbol_allocator_next()
+        ))
+    })?;
 
     let symbols: Vec<symbol::Model> = engine
         .dump_symbols()
         .into_iter()
         .map(|m| {
             let (kind, glyph) = symbol_kind_parts(&m.kind);
-            symbol::Model {
+            Ok(symbol::Model {
                 akh_id,
-                id: m.id.get() as i64,
+                id: relational_symbol_id("symbol", m.id)?,
                 kind,
                 glyph_codepoint: glyph,
                 label: m.label,
-            }
+            })
         })
-        .collect();
+        .collect::<SnapshotResult<_>>()?;
 
     // Live KG → rows; retracted triples are absent.  Capture the graph
     // before the append-only ledger so any linked ID visible here is already
@@ -195,12 +200,12 @@ pub fn capture_snapshot_at_watermark(
                         "fact provenance ID {} exceeds the relational snapshot range",
                         t.provenance_id.unwrap_or_default()
                     ))
-                })?;
+            })?;
             Ok(fact::Model {
                 workspace_id,
-                subject: t.subject.get() as i64,
-                predicate: t.predicate.get() as i64,
-                object: t.object.get() as i64,
+                subject: relational_symbol_id("fact subject", t.subject)?,
+                predicate: relational_symbol_id("fact predicate", t.predicate)?,
+                object: relational_symbol_id("fact object", t.object)?,
                 akh_id,
                 confidence: t.confidence,
                 asserted_at: ts(t.timestamp),
@@ -274,13 +279,15 @@ pub fn capture_snapshot_at_watermark(
         .agenda
         .projects
         .iter()
-        .map(|(id, prio)| agenda::Model {
-            akh_id,
-            project_id: id.get() as i64,
-            priority: *prio as i16,
-            is_active: Some(*id) == active,
+        .map(|(id, prio)| {
+            Ok(agenda::Model {
+                akh_id,
+                project_id: relational_symbol_id("agenda project", *id)?,
+                priority: *prio as i16,
+                is_active: Some(*id) == active,
+            })
         })
-        .collect();
+        .collect::<SnapshotResult<_>>()?;
 
     let c = &agent.curiosity_config;
     let curiosity = vec![curiosity_config::Model {
@@ -293,34 +300,35 @@ pub fn capture_snapshot_at_watermark(
         known_curiosity_factor: c.known_curiosity_factor,
     }];
 
-    let goals: Vec<goal::Model> = agent.goals.iter().map(|g| goal_to_model(akh_id, g)).collect();
+    let goals: Vec<goal::Model> = agent
+        .goals
+        .iter()
+        .map(|g| goal_to_model(akh_id, g))
+        .collect::<SnapshotResult<_>>()?;
     // Normalised goal DAG: `children` → ordered hierarchy edges; `blocked_by` →
     // dependency edges.
-    let goal_hierarchy: Vec<goal_hierarchy::Model> = agent
-        .goals
-        .iter()
-        .flat_map(|g| {
-            let parent_id = g.symbol_id.get() as i64;
-            g.children.iter().enumerate().map(move |(pos, child)| goal_hierarchy::Model {
+    let mut goal_hierarchy = Vec::new();
+    let mut goal_dependencies = Vec::new();
+    for g in &agent.goals {
+        let goal_id = relational_symbol_id("goal", g.symbol_id)?;
+        for (position, child) in g.children.iter().enumerate() {
+            goal_hierarchy.push(goal_hierarchy::Model {
                 akh_id,
-                parent_id,
-                child_id: child.get() as i64,
-                position: pos as i32,
-            })
-        })
-        .collect();
-    let goal_dependencies: Vec<goal_dependency::Model> = agent
-        .goals
-        .iter()
-        .flat_map(|g| {
-            let goal_id = g.symbol_id.get() as i64;
-            g.blocked_by.iter().map(move |b| goal_dependency::Model {
+                parent_id: goal_id,
+                child_id: relational_symbol_id("goal child", *child)?,
+                position: i32::try_from(position).map_err(|_| {
+                    SnapshotError::Agent("goal child position exceeds i32".into())
+                })?,
+            });
+        }
+        for blocker in &g.blocked_by {
+            goal_dependencies.push(goal_dependency::Model {
                 akh_id,
                 goal_id,
-                blocking_goal_id: b.get() as i64,
-            })
-        })
-        .collect();
+                blocking_goal_id: relational_symbol_id("blocking goal", *blocker)?,
+            });
+        }
+    }
 
     let failures: Vec<failure_case::Model> = agent
         .failure_index
@@ -362,38 +370,40 @@ pub fn capture_snapshot_at_watermark(
         .method_index
         .methods()
         .iter()
-        .map(|m| learned_method::Model {
-            akh_id,
-            id: m.id.get() as i64,
-            name: m.name.clone(),
-            precondition_pattern: m.precondition_pattern.clone(),
-            precondition_vector: m.precondition_vector.clone(),
-            confidence: m.confidence,
-            usage_count: m.usage_count as i32,
-            success_count: m.success_count as i32,
-            failure_count: m.failure_count as i32,
-            learned_at: m.learned_at as i64,
-            last_used: m.last_used as i64,
-            source_goal_description: m.source_goal_description.clone(),
+        .map(|m| {
+            Ok(learned_method::Model {
+                akh_id,
+                id: relational_symbol_id("learned method", m.id)?,
+                name: m.name.clone(),
+                precondition_pattern: m.precondition_pattern.clone(),
+                precondition_vector: m.precondition_vector.clone(),
+                confidence: m.confidence,
+                usage_count: m.usage_count as i32,
+                success_count: m.success_count as i32,
+                failure_count: m.failure_count as i32,
+                learned_at: m.learned_at as i64,
+                last_used: m.last_used as i64,
+                source_goal_description: m.source_goal_description.clone(),
+            })
         })
-        .collect();
+        .collect::<SnapshotResult<_>>()?;
     // Normalised method steps: one ordered child row per `GeneralizedStep`.
-    let method_steps: Vec<learned_method_step::Model> = agent
-        .method_index
-        .methods()
-        .iter()
-        .flat_map(|m| {
-            let method_id = m.id.get() as i64;
-            m.steps.iter().enumerate().map(move |(idx, step)| learned_method_step::Model {
+    let mut method_steps = Vec::new();
+    for method in agent.method_index.methods() {
+        let method_id = relational_symbol_id("learned method step", method.id)?;
+        for (index, step) in method.steps.iter().enumerate() {
+            method_steps.push(learned_method_step::Model {
                 akh_id,
                 method_id,
-                step_index: idx as i32,
+                step_index: i32::try_from(index).map_err(|_| {
+                    SnapshotError::Agent("learned method step index exceeds i32".into())
+                })?,
                 tool: step.tool.clone(),
                 arg_pattern: step.arg_pattern.clone(),
                 expected_outcome: step.expected_outcome.clone(),
-            })
-        })
-        .collect();
+            });
+        }
+    }
 
     // Competence — 3 tables.
     let cm = &agent.competence_model;
@@ -597,16 +607,16 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
 
 // --- helpers ---
 
-/// Read the symbol allocator counter from the engine's local store (written by
-/// `Engine::persist`, which `agent.persist()` triggers).
-fn read_allocator_next(engine: &crate::engine::Engine) -> i64 {
-    engine
-        .store()
-        .get_meta(b"sym_allocator_next")
-        .ok()
-        .flatten()
-        .and_then(|b| bincode::deserialize::<u64>(&b).ok())
-        .unwrap_or(1) as i64
+/// Checked conversion for any registry ID crossing into a signed relational
+/// column. Silent `as` wrapping could persist a negative ID and make the next
+/// wake either reject a valid snapshot or allocate over an existing symbol.
+fn relational_symbol_id(field: &str, id: SymbolId) -> SnapshotResult<i64> {
+    i64::try_from(id.get()).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "{field} symbol ID {} exceeds the relational snapshot range",
+            id.get()
+        ))
+    })
 }
 
 /// UNIX-seconds → `DateTimeUtc`, defaulting to now on overflow.
@@ -634,7 +644,7 @@ fn json_variant(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
+fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> SnapshotResult<goal::Model> {
     let status = serde_json::to_value(&g.status)
         .ok()
         .and_then(|v| json_variant(&v))
@@ -648,20 +658,23 @@ fn goal_to_model(akh_id: Uuid, g: &crate::agent::Goal) -> goal::Model {
     // full, lossless `Goal` (including data-bearing status variants like
     // `Failed { .. }` and nested optionals) so wake can reconstruct it exactly.
     let detail = serde_json::to_value(g).ok();
-    goal::Model {
+    Ok(goal::Model {
         akh_id,
-        id: g.symbol_id.get() as i64,
+        id: relational_symbol_id("goal", g.symbol_id)?,
         description: g.description.clone(),
         status,
         priority: g.priority as i16,
         success_criteria: g.success_criteria.clone(),
-        parent: g.parent.map(|s| s.get() as i64),
+        parent: g
+            .parent
+            .map(|symbol| relational_symbol_id("goal parent", symbol))
+            .transpose()?,
         created_at: g.created_at as i64,
         cycles_worked: g.cycles_worked as i32,
         last_progress_cycle: g.last_progress_cycle as i64,
         source,
         detail,
-    }
+    })
 }
 
 // ===========================================================================
@@ -1502,6 +1515,16 @@ fn invalid_tail(message: impl Into<String>) -> SnapshotError {
     SnapshotError::Agent(format!("wake: invalid mutation tail: {}", message.into()))
 }
 
+fn validate_compartment_id(compartment_id: &str) -> SnapshotResult<()> {
+    crate::graph::sparql::SparqlStore::compartment_to_iri(compartment_id)
+        .map(|_| ())
+        .map_err(|error| {
+            SnapshotError::Agent(format!(
+                "wake: invalid compartment {compartment_id:?}: {error}"
+            ))
+        })
+}
+
 fn is_reserved_symbol_id(raw: u64) -> bool {
     raw == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
         || raw == crate::provenance::RULE_APPLICATION_V2_SENTINEL
@@ -1538,6 +1561,10 @@ fn parse_replay_complete_assert(
             "assert confidence {} is outside [0,1]",
             envelope.confidence
         )));
+    }
+    if let Some(compartment_id) = envelope.compartment.as_deref() {
+        validate_compartment_id(compartment_id)
+            .map_err(|error| invalid_tail(error.to_string()))?;
     }
     let subject = SymbolId::new(envelope.subject)
         .filter(|id| !is_reserved_symbol_id(id.get()))
@@ -1601,6 +1628,7 @@ fn parse_replay_complete_assert(
     if let Some(record) = &envelope.provenance {
         required.push(record.derived_id);
         required.extend(record.sources.iter().copied());
+        required.extend(record.kind.referenced_symbol_ids());
     }
     required.sort_unstable();
     required.dedup();
@@ -1792,6 +1820,13 @@ fn validate_provenance_symbols(
         let provenance_id = record.id.map(crate::provenance::ProvenanceId::get);
         for (field, id) in std::iter::once(("derived", record.derived_id))
             .chain(record.sources.iter().copied().map(|id| ("source", id)))
+            .chain(
+                record
+                    .kind
+                    .referenced_symbol_ids()
+                    .into_iter()
+                    .map(|id| ("derivation", id)),
+            )
         {
             if !ids.contains(&id) {
                 return Err(SnapshotError::Agent(format!(
@@ -1836,6 +1871,9 @@ fn fact_to_triple(row: &fact::Model) -> SnapshotResult<Triple> {
                 })
         })
         .transpose()?;
+    if let Some(compartment_id) = row.compartment.as_deref() {
+        validate_compartment_id(compartment_id)?;
+    }
     t.compartment_id = row.compartment.clone();
     Ok(t)
 }
@@ -1898,6 +1936,8 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
                 match m.payload.get("compartment") {
                     None | Some(serde_json::Value::Null) => {}
                     Some(serde_json::Value::String(value)) => {
+                        validate_compartment_id(value)
+                            .map_err(|error| invalid_tail(error.to_string()))?;
                         triple.compartment_id = Some(value.clone())
                     }
                     Some(_) => return Err(invalid_tail("legacy assert compartment is not text")),
@@ -1930,9 +1970,21 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use crate::agent::drives::DriveKind;
     use crate::agent::goal::{GoalSource, GoalStatus};
+    use crate::mutation::{MutationKind, MutationRecord, MutationSink};
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<MutationRecord>>);
+
+    impl MutationSink for RecordingSink {
+        fn record(&self, mutation: MutationRecord) {
+            self.0.lock().unwrap().push(mutation);
+        }
+    }
 
     fn replay_symbol(id: u64, kind: SymbolKind, label: &str, created_at: u64) -> SymbolMeta {
         SymbolMeta {
@@ -1977,7 +2029,7 @@ mod tests {
         // Writer: scalar/optional state → `detail`; `children`/`blocked_by` →
         // normalised edge rows. Reader: `build_goals` overlays the edges back on.
         let akh = Uuid::nil();
-        let model = goal_to_model(akh, &goal);
+        let model = goal_to_model(akh, &goal).unwrap();
         let parent_id = goal.symbol_id.get() as i64;
         let hierarchy: Vec<goal_hierarchy::Model> = goal
             .children
@@ -2364,6 +2416,13 @@ triples_file = "triples.json"
         )
         .unwrap();
 
+        // Production cold wake always publishes the validated relational
+        // allocator before opening the restore-only engine.
+        {
+            let store = TieredStore::with_persistence(root.path(), "symbols").unwrap();
+            put_bincode_required(&store, b"sym_allocator_next", &1_u64).unwrap();
+        }
+
         let engine = Engine::new_for_restore(EngineConfig {
             data_dir: Some(root.path().to_path_buf()),
             ..Default::default()
@@ -2555,6 +2614,162 @@ triples_file = "triples.json"
         assert_eq!(fresh.id.get(), 704, "symbol allocation must advance beyond the WAL tail");
         let mut next_record = ProvenanceRecord::new(fresh.id, DerivationKind::Reasoned);
         assert_eq!(engine.store_provenance(&mut next_record).unwrap().get(), 42);
+    }
+
+    #[test]
+    fn replay_complete_tail_requires_derivation_symbols_and_valid_compartments() {
+        use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
+
+        let subject = replay_symbol(800, SymbolKind::Entity, "Subject", 1);
+        let predicate = replay_symbol(801, SymbolKind::Relation, "predicate", 2);
+        let object = replay_symbol(802, SymbolKind::Entity, "Object", 3);
+        let missing_support = SymbolId::new(803).unwrap();
+        let mut record = ProvenanceRecord::new(
+            object.id,
+            DerivationKind::GraphEdge {
+                from: missing_support,
+                predicate: predicate.id,
+            },
+        )
+        .with_sources(vec![subject.id]);
+        record.id = ProvenanceId::new(51);
+
+        let missing_kind_symbol = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 1,
+                "compartment": null,
+                "provenance_id": 51,
+                "provenance": record,
+                "symbols": [subject.clone(), predicate.clone(), object.clone()],
+            }),
+        };
+        assert!(
+            prepare_tail_restore(
+                &[missing_kind_symbol],
+                &mut Vec::new(),
+                &mut Vec::new()
+            )
+            .is_err(),
+            "a provenance-kind symbol without metadata must fail closed"
+        );
+
+        let malformed_compartment = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 1,
+                "compartment": "invalid compartment with spaces",
+                "provenance_id": null,
+                "provenance": null,
+                "symbols": [subject, predicate, object],
+            }),
+        };
+        assert!(
+            prepare_tail_restore(
+                &[malformed_compartment],
+                &mut Vec::new(),
+                &mut Vec::new()
+            )
+            .is_err(),
+            "a malformed V2 compartment must return an error"
+        );
+
+        let malformed_fact = fact::Model {
+            workspace_id: Uuid::nil(),
+            subject: 800,
+            predicate: 801,
+            object: 802,
+            akh_id: Uuid::nil(),
+            confidence: 1.0,
+            asserted_at: chrono::DateTime::from_timestamp(1, 0).unwrap(),
+            retracted_at: None,
+            provenance_id: None,
+            compartment: Some("invalid compartment with spaces".into()),
+        };
+        assert!(
+            fact_to_triple(&malformed_fact).is_err(),
+            "a malformed relational compartment must return an error"
+        );
+    }
+
+    #[test]
+    fn contradiction_replace_tail_replays_the_complete_racing_transition() {
+        let mut live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = live
+            .create_symbol(SymbolKind::Entity, "replace-subject")
+            .unwrap()
+            .id;
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "replace-predicate")
+            .unwrap()
+            .id;
+        let old_object = live
+            .create_symbol(SymbolKind::Entity, "old-object")
+            .unwrap()
+            .id;
+        let new_object = live
+            .create_symbol(SymbolKind::Entity, "new-object")
+            .unwrap()
+            .id;
+        live.functional_preds_mut().declare_functional(predicate);
+        live.add_triple(&Triple::new(subject, predicate, old_object))
+            .unwrap();
+
+        // This is the captured base image. The Replace transition happens
+        // after its watermark and must therefore be fully represented by the
+        // tail: retract old, then assert new.
+        let captured = live.all_triples();
+        let mut phase9 = live.phase9_config().clone();
+        phase9.contradiction_policy = crate::engine::ContradictionPolicy::Replace;
+        live.set_phase9_config(phase9);
+        let sink = Arc::new(RecordingSink::default());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
+        live.add_triple(&Triple::new(subject, predicate, new_object))
+            .unwrap();
+
+        let mutations = sink.0.lock().unwrap().clone();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].kind, MutationKind::Retract);
+        assert_eq!(mutations[1].kind, MutationKind::Assert);
+
+        let restored = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        restored.restore_triples(&captured).unwrap();
+        for mutation in mutations {
+            let tail = akhomed_store::TailMutation {
+                kind: mutation.kind.as_str().into(),
+                payload: mutation.payload,
+            };
+            assert!(apply_mutation(&restored, &tail).unwrap());
+        }
+        assert!(!restored.has_triple(subject, predicate, old_object));
+        assert!(restored.has_triple(subject, predicate, new_object));
+    }
+
+    #[test]
+    fn relational_symbol_ids_reject_unsigned_overflow() {
+        let too_large = SymbolId::new(i64::MAX as u64 + 1).unwrap();
+        assert!(relational_symbol_id("test", too_large).is_err());
     }
 
     #[test]

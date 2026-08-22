@@ -296,13 +296,11 @@ impl Engine {
             // Initialize provenance ledger from the durable store's database.
             let ledger = if let Some(ref durable) = store.durable {
                 let db = durable.database_arc();
-                match ProvenanceLedger::open(db) {
-                    Ok(l) => Some(l),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to open provenance ledger, running without");
-                        None
-                    }
-                }
+                // A persistent engine must never publish tracked facts while
+                // silently disabling the ledger that gives their IDs meaning.
+                // In-memory engines legitimately have no ledger; an on-disk
+                // ledger open/decode failure is corruption and aborts startup.
+                Some(ProvenanceLedger::open(db)?)
             } else {
                 None
             };
@@ -347,36 +345,25 @@ impl Engine {
             // compartment ownership, and the exact provenance ID.  Oxigraph
             // only stores S/P/O, so preferring a non-empty SPARQL store here
             // would silently strip all of that metadata on every local restart.
-            let bincode_triples = [b"kg_triples_snapshot".as_slice(), b"kg:triples".as_slice()]
-                .into_iter()
-                .find_map(|key| {
-                    let bytes = match store.get_meta(key) {
-                        Ok(Some(bytes)) => bytes,
-                        Ok(None) => return None,
-                        Err(error) => {
-                            tracing::warn!(
-                                key = %String::from_utf8_lossy(key),
-                                %error,
-                                "KG metadata snapshot read failed"
-                            );
-                            return None;
-                        }
-                    };
-                    match bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
-                        Ok(triples) => Some(triples),
-                        Err(error) => {
-                            tracing::warn!(
-                                key = %String::from_utf8_lossy(key),
-                                %error,
-                                "KG metadata snapshot decode failed"
-                            );
-                            None
-                        }
-                    }
-                });
+            let primary = store.get_meta(b"kg_triples_snapshot")?;
+            let compatibility = if primary.is_none() {
+                store.get_meta(b"kg:triples")?
+            } else {
+                None
+            };
 
-            if let Some(bincode_triples) = bincode_triples {
-                let count = knowledge_graph.bulk_load(&bincode_triples).unwrap_or(0);
+            if let Some(bytes) = primary.or(compatibility) {
+                // Presence of either rich-snapshot key is an explicit format
+                // marker. Once present, read/decode/load failures must abort;
+                // falling back to lossy S/P/O quads would erase confidence,
+                // timestamps, compartments, and provenance links.
+                let bincode_triples: Vec<crate::graph::Triple> =
+                    bincode::deserialize(&bytes).map_err(|error| {
+                        crate::error::StoreError::Serialization {
+                            message: format!("failed to decode rich KG snapshot: {error}"),
+                        }
+                    })?;
+                let count = knowledge_graph.bulk_load(&bincode_triples)?;
                 tracing::info!(
                     triples = count,
                     "knowledge graph restored from bincode snapshot"
@@ -386,17 +373,12 @@ impl Engine {
                 // metadata snapshot existed.  These triples are necessarily
                 // bare; the next `persist()` writes the richer authoritative
                 // snapshot.
-                let sparql_triples = sparql
-                    .as_ref()
-                    .map(|s| {
-                        s.all_triples().unwrap_or_else(|e| {
-                            tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                            vec![]
-                        })
-                    })
-                    .unwrap_or_default();
+                let sparql_triples = match sparql.as_ref() {
+                    Some(store) => store.all_triples()?,
+                    None => Vec::new(),
+                };
                 if !sparql_triples.is_empty() {
-                    let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
+                    let count = knowledge_graph.bulk_load(&sparql_triples)?;
                     tracing::info!(
                         triples = count,
                         "knowledge graph restored from SPARQL fallback"
@@ -406,20 +388,70 @@ impl Engine {
         }
 
         // Restore registry and allocator from persistent storage if available.
-        let registry = SymbolRegistry::restore(&store).unwrap_or_else(|e| {
-            tracing::debug!(error = %e, "registry restore skipped, starting fresh");
-            SymbolRegistry::new()
-        });
+        let registry = SymbolRegistry::restore(&store)?;
+        let ledger_has_records = match provenance_ledger.as_ref() {
+            Some(ledger) => ledger.len()? > 0,
+            None => false,
+        };
 
         let symbol_allocator = {
-            let restored_next = store
-                .get_meta(b"sym_allocator_next")
-                .ok()
-                .flatten()
-                .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok());
-            match restored_next {
-                Some(next) => Arc::new(AtomicSymbolAllocator::starting_from(next)),
-                None => Arc::new(AtomicSymbolAllocator::new()),
+            match store.get_meta(b"sym_allocator_next")? {
+                Some(bytes) => {
+                    if bytes.len() != std::mem::size_of::<u64>() {
+                        return Err(crate::error::StoreError::Serialization {
+                            message: format!(
+                                "invalid symbol allocator encoding length {}",
+                                bytes.len()
+                            ),
+                        }
+                        .into());
+                    }
+                    let next = bincode::deserialize::<u64>(&bytes).map_err(|error| {
+                        crate::error::StoreError::Serialization {
+                            message: format!("failed to decode symbol allocator: {error}"),
+                        }
+                    })?;
+                    let minimum_next = registry
+                        .all()
+                        .into_iter()
+                        .map(|meta| meta.id.get())
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| crate::error::StoreError::Serialization {
+                            message: "symbol ID space is exhausted".into(),
+                        })?;
+                    if next == 0
+                        || next < minimum_next
+                        || matches!(
+                            next,
+                            crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+                                | crate::provenance::RULE_APPLICATION_V2_SENTINEL
+                        )
+                    {
+                        return Err(crate::error::StoreError::Serialization {
+                            message: format!(
+                                "invalid symbol allocator next ID {next}; registry requires at least {minimum_next}"
+                            ),
+                        }
+                        .into());
+                    }
+                    Arc::new(AtomicSymbolAllocator::starting_from(next))
+                }
+                None
+                    if !defer_startup_loads
+                        && registry.is_empty()
+                        && knowledge_graph.triple_count() == 0
+                        && !ledger_has_records =>
+                {
+                    Arc::new(AtomicSymbolAllocator::new())
+                }
+                None => {
+                    return Err(crate::error::StoreError::NotFound {
+                        key: "sym_allocator_next".into(),
+                    }
+                    .into());
+                }
             }
         };
 
@@ -755,19 +787,33 @@ impl Engine {
                         return Err(EngineError::ContradictionRejected { message: msg }.into());
                     }
                     ContradictionPolicy::Replace => {
-                        // Remove conflicting existing triples first
+                        // A replacement is one compound graph transition. Keep
+                        // the historical exact-edge removal semantics (no TMS
+                        // cascade), but make each implicit removal WAL-visible
+                        // before the new assertion; otherwise a snapshot racing
+                        // this operation can resurrect the old edge when it
+                        // replays only the assertion tail.
                         for c in &contradictions {
-                            let _ = self.knowledge_graph.remove_triple(
+                            if self.knowledge_graph.remove_triple(
                                 c.existing.subject,
                                 c.existing.predicate,
                                 c.existing.object,
-                            );
-                            if let Some(ref sparql) = self.sparql {
-                                let _ = sparql.remove_triple(
-                                    c.existing.subject,
-                                    c.existing.predicate,
-                                    c.existing.object,
+                            ) {
+                                self.record_mutation(
+                                    crate::mutation::MutationKind::Retract,
+                                    serde_json::json!({
+                                        "subject": c.existing.subject.get(),
+                                        "predicate": c.existing.predicate.get(),
+                                        "object": c.existing.object.get(),
+                                    }),
                                 );
+                                if let Some(ref sparql) = self.sparql {
+                                    let _ = sparql.remove_triple(
+                                        c.existing.subject,
+                                        c.existing.predicate,
+                                        c.existing.object,
+                                    );
+                                }
                             }
                         }
                     }
@@ -846,13 +892,21 @@ impl Engine {
         if let Some(record) = &provenance {
             required_symbol_ids.push(record.derived_id);
             required_symbol_ids.extend(record.sources.iter().copied());
+            required_symbol_ids.extend(record.kind.referenced_symbol_ids());
         }
         required_symbol_ids.sort_unstable();
         required_symbol_ids.dedup();
         let symbols: Vec<SymbolMeta> = required_symbol_ids
             .into_iter()
-            .filter_map(|id| self.registry.get(id))
-            .collect();
+            .map(|id| {
+                self.registry.get(id).ok_or_else(|| {
+                    crate::error::SymbolError::NotFound {
+                        symbol_id: id.get(),
+                    }
+                    .into()
+                })
+            })
+            .collect::<AkhResult<_>>()?;
         self.record_mutation(
             crate::mutation::MutationKind::Assert,
             serde_json::json!({
@@ -1480,6 +1534,15 @@ impl Engine {
     /// snapshot writer to materialise the registry into Postgres.
     pub fn dump_symbols(&self) -> Vec<SymbolMeta> {
         self.registry.all()
+    }
+
+    /// Exact next symbol ID held by the live allocator.
+    ///
+    /// Snapshot capture reads the allocator itself rather than re-reading a
+    /// just-persisted sidecar that could be missing, stale, or undecodable.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn symbol_allocator_next(&self) -> u64 {
+        self.symbol_allocator.peek_next()
     }
 
     /// Bulk-load triples into the KG and item memory **without** the Phase 9
@@ -3617,6 +3680,92 @@ mod tests {
         let info = engine.info();
         assert_eq!(info.dimension, 1000);
         assert!(!info.persistent);
+    }
+
+    #[test]
+    fn persistent_restart_rejects_corrupt_rich_snapshot_and_allocator() {
+        let rich_dir = tempfile::tempdir().unwrap();
+        {
+            let engine = Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(rich_dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .ingest_label_triples(&[(
+                    "Subject".into(),
+                    "predicate".into(),
+                    "Object".into(),
+                    1.0,
+                )])
+                .unwrap();
+            engine.persist().unwrap();
+        }
+        {
+            let store = TieredStore::with_persistence(rich_dir.path(), "symbols").unwrap();
+            store
+                .put_meta(b"kg_triples_snapshot", b"not-a-bincode-snapshot")
+                .unwrap();
+        }
+        assert!(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(rich_dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .is_err(),
+            "a present-but-corrupt rich snapshot must not fall back to bare SPARQL triples"
+        );
+
+        let allocator_dir = tempfile::tempdir().unwrap();
+        {
+            let engine = Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(allocator_dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+            engine.create_symbol(SymbolKind::Entity, "Existing").unwrap();
+            engine.persist().unwrap();
+        }
+        {
+            let store = TieredStore::with_persistence(allocator_dir.path(), "symbols").unwrap();
+            store
+                .put_meta(b"sym_allocator_next", b"bad")
+                .unwrap();
+        }
+        assert!(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(allocator_dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .is_err(),
+            "allocator corruption must abort persistent startup"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn restore_constructor_rejects_corrupt_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = TieredStore::with_persistence(dir.path(), "symbols").unwrap();
+            store.put_meta(b"sym_meta:7", b"not-symbol-meta").unwrap();
+            store
+                .put_meta(b"sym_allocator_next", &bincode::serialize(&8_u64).unwrap())
+                .unwrap();
+        }
+        assert!(
+            Engine::new_for_restore(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .is_err(),
+            "cold restore must not replace an unreadable registry with an empty one"
+        );
     }
 
     #[test]

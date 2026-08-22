@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::engine::Engine;
 use crate::graph::Triple;
-use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
+use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
 use super::error::AutonomousResult;
@@ -391,24 +391,12 @@ impl RuleEngine {
 
             for rule in &all_rules {
                 let bindings_list = self.match_antecedents(rule, engine)?;
-                let mut legacy_support_counts = HashMap::<Vec<SymbolId>, usize>::new();
-                for (_, matched) in &bindings_list {
-                    *legacy_support_counts
-                        .entry(matched.iter().map(|triple| triple.subject).collect())
-                        .or_default() += 1;
-                }
 
                 let mut rule_derived_count = 0;
                 for (bindings, matched_triples) in &bindings_list {
                     if rule_derived_count >= rule.max_derivations_per_iteration {
                         break;
                     }
-                    let legacy_subjects = matched_triples
-                        .iter()
-                        .map(|premise| premise.subject)
-                        .collect::<Vec<_>>();
-                    let legacy_support_unique =
-                        legacy_support_counts.get(&legacy_subjects) == Some(&1);
 
                     for consequent in &rule.consequents {
                         if let Some(triple) =
@@ -468,32 +456,16 @@ impl RuleEngine {
                                 continue;
                             }
 
-                            // Upgrade an existing pre-contract rule result only
-                            // when its old ledger record identifies this exact
-                            // rule application unambiguously.  Never relabel an
-                            // arbitrary asserted fact merely because a rule can
-                            // also derive it.
-                            if let Some(existing) = engine
-                                .triples_from(triple.subject)
-                                .into_iter()
-                                .find(|candidate| {
-                                    candidate.predicate == triple.predicate
-                                        && candidate.object == triple.object
-                                })
-                            {
-                                if existing.provenance_id.is_none()
-                                    && let Some(provenance_id) = recover_rule_provenance_id(
-                                        engine,
-                                        rule,
-                                        &triple,
-                                        matched_triples,
-                                        legacy_support_unique,
-                                    )
-                                {
-                                    let mut repaired = existing;
-                                    repaired.provenance_id = Some(provenance_id.get());
-                                    engine.add_triple(&repaired)?;
-                                }
+                            // No persisted RuleInference format proves that its
+                            // conclusion was committed to the graph: legacy and
+                            // V1 records omit the exact conclusion, while V2 is
+                            // also emitted by non-committing runs.  Consequently
+                            // an existing edge is authoritative and must never be
+                            // relabelled merely because a ledger record describes
+                            // a matching derivation.  New committed derivations are
+                            // linked atomically below via
+                            // `add_triples_with_provenance`.
+                            if engine.has_triple(triple.subject, triple.predicate, triple.object) {
                                 continue;
                             }
 
@@ -888,55 +860,6 @@ fn rule_application_v2_payload(conclusion: &Triple, support: &[Triple]) -> Vec<S
     payload
 }
 
-/// Find one pre-existing provenance record that proves the current rule
-/// application produced an already-present edge.
-///
-/// V2 records bind the rule name, exact conclusion, and exact `(s,p,o)` support
-/// keys.  V1 support-only records cannot prove which conclusion was produced
-/// and fail closed.  Unversioned legacy records only carry antecedent subjects,
-/// so they are accepted solely for single-consequent rules with a unique
-/// support binding.  More than one matching record is always ambiguous.
-fn recover_rule_provenance_id(
-    engine: &Engine,
-    rule: &InferenceRule,
-    conclusion: &Triple,
-    matched_triples: &[Triple],
-    legacy_support_unique: bool,
-) -> Option<ProvenanceId> {
-    let exact_application = rule_application_v2_payload(conclusion, matched_triples);
-    let legacy_subjects = matched_triples
-        .iter()
-        .map(|triple| triple.subject)
-        .collect::<Vec<_>>();
-    let mut candidates = engine
-        .provenance_of(conclusion.subject)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|record| {
-            let DerivationKind::RuleInference {
-                rule_name,
-                antecedents,
-            } = &record.kind
-            else {
-                return None;
-            };
-            if record.derived_id != conclusion.subject || rule_name != &rule.name {
-                return None;
-            }
-            let versioned = antecedents.first().is_some_and(|marker| {
-                marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
-            });
-            let exact = versioned && antecedents == &exact_application;
-            let legacy = !versioned
-                && legacy_support_unique
-                && rule.consequents.len() == 1
-                && antecedents == &legacy_subjects;
-            if exact || legacy { record.id } else { None }
-        });
-    let only = candidates.next()?;
-    candidates.next().is_none().then_some(only)
-}
-
 /// Compute the average confidence of a set of triples.
 fn avg_confidence(triples: &[Triple]) -> f32 {
     if triples.is_empty() {
@@ -1031,7 +954,50 @@ mod tests {
     }
 
     #[test]
-    fn legacy_rule_record_repairs_an_untracked_edge_when_unambiguous() {
+    fn committed_new_derivation_is_linked_to_its_rule_record() {
+        let (_dir, engine) = persistent_test_engine();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+            ])
+            .unwrap();
+
+        RuleEngine::new(one_pass_config(true))
+            .with_rules(RuleSet::builtin())
+            .run(&engine)
+            .unwrap();
+
+        let a = engine.lookup_symbol("A").unwrap();
+        let c = engine.lookup_symbol("C").unwrap();
+        let is_a = engine.lookup_symbol("is-a").unwrap();
+        let committed = engine
+            .triples_from(a)
+            .into_iter()
+            .find(|triple| triple.predicate == is_a && triple.object == c)
+            .expect("committed rule conclusion");
+        let provenance_id = committed
+            .provenance_id
+            .and_then(crate::provenance::ProvenanceId::new)
+            .expect("committed conclusion must carry provenance");
+        let record = engine.get_provenance(provenance_id).unwrap();
+        assert!(matches!(
+            record.kind,
+            DerivationKind::RuleInference {
+                ref rule_name,
+                ref antecedents,
+            } if rule_name == "is-a-transitive"
+                && antecedents.first().is_some_and(|marker| {
+                    marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+                })
+                && antecedents.get(1).is_some_and(|marker| {
+                    marker.get() == crate::provenance::RULE_APPLICATION_V2_SENTINEL
+                })
+        ));
+    }
+
+    #[test]
+    fn legacy_rule_record_never_relabels_an_independently_asserted_edge() {
         let (dir, engine) = persistent_test_engine();
         engine
             .ingest_label_triples(&[
@@ -1054,7 +1020,7 @@ mod tests {
         )
         .with_sources(vec![a, b])
         .with_confidence(1.0);
-        let legacy_id = engine.store_provenance(&mut legacy).unwrap();
+        engine.store_provenance(&mut legacy).unwrap();
         engine.persist().unwrap();
         drop(engine);
 
@@ -1067,13 +1033,13 @@ mod tests {
 
         engine
             .run_rules(RuleEngineConfig::default())
-            .expect("repair run");
-        let repaired = engine
+            .expect("fail-closed rule run");
+        let unchanged = engine
             .triples_from(a)
             .into_iter()
             .find(|triple| triple.predicate == is_a && triple.object == c)
             .unwrap();
-        assert_eq!(repaired.provenance_id, Some(legacy_id.get()));
+        assert_eq!(unchanged.provenance_id, None);
     }
 
     #[test]
@@ -1105,7 +1071,7 @@ mod tests {
 
         engine
             .run_rules(RuleEngineConfig::default())
-            .expect("fail-closed repair run");
+            .expect("fail-closed rule run");
         let unchanged = engine
             .triples_from(a)
             .into_iter()
@@ -1149,40 +1115,33 @@ mod tests {
     }
 
     #[test]
-    fn non_committing_record_cannot_relabel_a_different_conclusion() {
+    fn exact_v2_dry_run_record_never_relabels_its_independently_asserted_conclusion() {
         let (_dir, engine) = persistent_test_engine();
         let subject = test_symbol(&engine, SymbolKind::Entity, "subject");
         let support_predicate = test_symbol(&engine, SymbolKind::Relation, "supported-by");
         let support_object = test_symbol(&engine, SymbolKind::Entity, "evidence");
-        let first_predicate = test_symbol(&engine, SymbolKind::Relation, "first-result");
-        let first_object = test_symbol(&engine, SymbolKind::Entity, "first-value");
-        let second_predicate = test_symbol(&engine, SymbolKind::Relation, "second-result");
-        let second_object = test_symbol(&engine, SymbolKind::Entity, "second-value");
+        let result_predicate = test_symbol(&engine, SymbolKind::Relation, "result");
+        let result_object = test_symbol(&engine, SymbolKind::Entity, "value");
         let support = Triple::new(subject, support_predicate, support_object);
-        let first_conclusion = Triple::new(subject, first_predicate, first_object);
-        let second_conclusion = Triple::new(subject, second_predicate, second_object);
+        let conclusion = Triple::new(subject, result_predicate, result_object);
         engine.add_triple(&support).unwrap();
 
         let dry_run = RuleEngine::new(one_pass_config(false)).with_rules(test_rule_set(
-            "same-rule",
+            "dry-run-rule",
             &support,
-            std::slice::from_ref(&first_conclusion),
+            std::slice::from_ref(&conclusion),
         ));
         let result = dry_run.run(&engine).unwrap();
         assert_eq!(result.derived.len(), 1);
         assert!(result.derived[0].triple.provenance_id.is_some());
-        assert!(!engine.has_triple(
-            first_conclusion.subject,
-            first_conclusion.predicate,
-            first_conclusion.object
-        ));
+        assert!(!engine.has_triple(conclusion.subject, conclusion.predicate, conclusion.object));
 
-        engine.add_triple(&second_conclusion).unwrap();
+        engine.add_triple(&conclusion).unwrap();
         RuleEngine::new(one_pass_config(true))
             .with_rules(test_rule_set(
-                "same-rule",
+                "dry-run-rule",
                 &support,
-                std::slice::from_ref(&second_conclusion),
+                std::slice::from_ref(&conclusion),
             ))
             .run(&engine)
             .unwrap();
@@ -1190,13 +1149,13 @@ mod tests {
         let unchanged = engine
             .triples_from(subject)
             .into_iter()
-            .find(|triple| triple.predicate == second_predicate && triple.object == second_object)
+            .find(|triple| triple.predicate == result_predicate && triple.object == result_object)
             .unwrap();
         assert_eq!(unchanged.provenance_id, None);
     }
 
     #[test]
-    fn same_support_multi_consequent_records_repair_only_their_exact_edges() {
+    fn exact_v2_dry_run_records_never_relabel_multiple_asserted_conclusions() {
         let (_dir, engine) = persistent_test_engine();
         let subject = test_symbol(&engine, SymbolKind::Entity, "subject");
         let support_predicate = test_symbol(&engine, SymbolKind::Relation, "supported-by");
@@ -1239,17 +1198,17 @@ mod tests {
             .run(&engine)
             .unwrap();
 
-        let repaired = engine.triples_from(subject);
-        let first = repaired
+        let unchanged = engine.triples_from(subject);
+        let first = unchanged
             .iter()
             .find(|triple| triple.predicate == first_predicate && triple.object == first_object)
             .unwrap();
-        let second = repaired
+        let second = unchanged
             .iter()
             .find(|triple| triple.predicate == second_predicate && triple.object == second_object)
             .unwrap();
-        assert_eq!(first.provenance_id, Some(first_id));
-        assert_eq!(second.provenance_id, Some(second_id));
+        assert_eq!(first.provenance_id, None);
+        assert_eq!(second.provenance_id, None);
     }
 
     #[test]
@@ -1786,8 +1745,12 @@ mod tests {
         // The engine-level self-referential-triple guard (PR #206/#187) now rejects this
         // self-loop at ingest, which is a *stronger* guarantee than the rule-engine check;
         // tolerate the rejection (nothing is inserted) and still assert no self-loop is derived.
-        let _ = engine
-            .ingest_label_triples(&[("deity".into(), "parent-of".into(), "deity".into(), 0.9)]);
+        let _ = engine.ingest_label_triples(&[(
+            "deity".into(),
+            "parent-of".into(),
+            "deity".into(),
+            0.9,
+        )]);
 
         let re = RuleEngine::new(RuleEngineConfig::default()).with_rules(RuleSet::builtin());
         let result = re.run(&engine).unwrap();
@@ -1918,12 +1881,7 @@ mod tests {
         let engine = test_engine();
         engine
             .ingest_label_triples(&[
-                (
-                    "Tecton".into(),
-                    "is-a".into(),
-                    "ActionRunner".into(),
-                    0.95,
-                ),
+                ("Tecton".into(), "is-a".into(), "ActionRunner".into(), 0.95),
                 (
                     "ActionRunner".into(),
                     "is-a".into(),
@@ -1953,12 +1911,7 @@ mod tests {
         let engine = test_engine();
         // Ingest two symbols so they are registered.
         engine
-            .ingest_label_triples(&[(
-                "Tecton".into(),
-                "is-a".into(),
-                "InfraTarget".into(),
-                1.0,
-            )])
+            .ingest_label_triples(&[("Tecton".into(), "is-a".into(), "InfraTarget".into(), 1.0)])
             .unwrap();
 
         let tecton = engine.lookup_symbol("Tecton").unwrap();
@@ -1971,30 +1924,19 @@ mod tests {
             tecton,
             HyperVec::from_raw(vec![0xFFu8; byte_len], dim, Encoding::Bipolar),
         );
-        engine.item_memory().insert(
-            target,
-            HyperVec::zero(dim, Encoding::Bipolar),
-        );
+        engine
+            .item_memory()
+            .insert(target, HyperVec::zero(dim, Encoding::Bipolar));
 
         // Guard must block (Tecton is identity, similarity 0.0 < threshold 0.40).
         assert!(
-            identity_vsa_similarity_guard(
-                &engine,
-                tecton,
-                target,
-                IDENTITY_VSA_GUARD_THRESHOLD
-            ),
+            identity_vsa_similarity_guard(&engine, tecton, target, IDENTITY_VSA_GUARD_THRESHOLD),
             "guard should block strongly dissimilar is-a for identity entity"
         );
 
         // Reverse: non-identity subject → guard is a no-op.
         assert!(
-            !identity_vsa_similarity_guard(
-                &engine,
-                target,
-                tecton,
-                IDENTITY_VSA_GUARD_THRESHOLD
-            ),
+            !identity_vsa_similarity_guard(&engine, target, tecton, IDENTITY_VSA_GUARD_THRESHOLD),
             "guard must not block when subject is not an identity entity"
         );
 
@@ -2004,12 +1946,7 @@ mod tests {
             HyperVec::from_raw(vec![0xFFu8; byte_len], dim, Encoding::Bipolar),
         );
         assert!(
-            !identity_vsa_similarity_guard(
-                &engine,
-                tecton,
-                target,
-                IDENTITY_VSA_GUARD_THRESHOLD
-            ),
+            !identity_vsa_similarity_guard(&engine, tecton, target, IDENTITY_VSA_GUARD_THRESHOLD),
             "guard must allow when vectors are identical"
         );
     }
