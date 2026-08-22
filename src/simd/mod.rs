@@ -98,7 +98,7 @@ pub fn best_kernel() -> Box<dyn VsaKernel> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     /// Fixed seed so a failure reproduces locally and in CI.
     const RNG_SEED: u64 = 0x4B5F_5CA1_4B1A_5EED;
@@ -113,6 +113,20 @@ mod tests {
     /// tolerance is chosen generously relative to the expected variation
     /// (~1e-6) while still catching implementation mistakes.
     const COSINE_EPS: f32 = 1e-4;
+
+    #[test]
+    fn detect_isa_returns_valid_level() {
+        let level = detect_isa();
+        // Should always be at least Generic.
+        assert!(level >= IsaLevel::Generic);
+    }
+
+    #[test]
+    fn best_kernel_returns_working_kernel() {
+        let kernel = best_kernel();
+        let level = kernel.isa_level();
+        assert!(level >= IsaLevel::Generic);
+    }
 
     /// Run the full kernel test suite against any implementation.
     pub fn kernel_conformance_tests(kernel: &dyn VsaKernel) {
@@ -197,46 +211,49 @@ mod tests {
             let bytes = len;
 
             // xor_bind
-            let a: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
-            let b: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let a: Vec<u8> = (0..bytes).map(|_| rng.r#gen::<u8>()).collect();
+            let b: Vec<u8> = (0..bytes).map(|_| rng.r#gen::<u8>()).collect();
             let mut sim_out = vec![0u8; bytes];
             let mut ref_out = vec![0u8; bytes];
             kernel.xor_bind(&a, &b, &mut sim_out);
             reference.xor_bind(&a, &b, &mut ref_out);
             assert_eq!(
-                sim_out, ref_out,
+                sim_out,
+                ref_out,
                 "xor_bind mismatch at length {bytes} for {}",
                 kernel.isa_level()
             );
 
             // bundle_add_i8
-            let mut acc_sim: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let acc_sim: Vec<i8> = (0..bytes).map(|_| rng.r#gen::<i8>()).collect();
             let acc_ref = acc_sim.clone();
-            let src: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let src: Vec<i8> = (0..bytes).map(|_| rng.r#gen::<i8>()).collect();
             let mut acc_sim2 = acc_sim.clone();
             kernel.bundle_add_i8(&mut acc_sim2, &src);
             let mut acc_ref2 = acc_ref.clone();
             reference.bundle_add_i8(&mut acc_ref2, &src);
             assert_eq!(
-                acc_sim2, acc_ref2,
+                acc_sim2,
+                acc_ref2,
                 "bundle_add_i8 mismatch at length {bytes} for {}",
                 kernel.isa_level()
             );
 
             // hamming_distance
-            let a: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
-            let b: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let a: Vec<u8> = (0..bytes).map(|_| rng.r#gen::<u8>()).collect();
+            let b: Vec<u8> = (0..bytes).map(|_| rng.r#gen::<u8>()).collect();
             let sim_dist = kernel.hamming_distance(&a, &b);
             let ref_dist = reference.hamming_distance(&a, &b);
             assert_eq!(
-                sim_dist, ref_dist,
+                sim_dist,
+                ref_dist,
                 "hamming_distance mismatch at length {bytes} for {}",
                 kernel.isa_level()
             );
 
             // cosine_similarity_i8
-            let a: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
-            let b: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let a: Vec<i8> = (0..bytes).map(|_| rng.r#gen::<i8>()).collect();
+            let b: Vec<i8> = (0..bytes).map(|_| rng.r#gen::<i8>()).collect();
             let sim_sim = kernel.cosine_similarity_i8(&a, &b);
             let sim_ref = reference.cosine_similarity_i8(&a, &b);
             let diff = (sim_sim - sim_ref).abs();
@@ -247,12 +264,22 @@ mod tests {
             );
 
             // permute: include byte-aligned, bit-aligned, and over-long shifts.
-            let data: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let data: Vec<u8> = (0..bytes).map(|_| rng.r#gen::<u8>()).collect();
             let shifts = if bytes == 0 {
                 vec![0]
             } else {
                 let total_bits = bytes * 8;
-                vec![0, 1, 7, 8, 9, total_bits - 1, total_bits, total_bits + 1, total_bits * 2 + 5]
+                vec![
+                    0,
+                    1,
+                    7,
+                    8,
+                    9,
+                    total_bits - 1,
+                    total_bits,
+                    total_bits + 1,
+                    total_bits * 2 + 5,
+                ]
             };
             for shift in shifts {
                 let mut sim_out = vec![0u8; bytes];
@@ -260,7 +287,8 @@ mod tests {
                 kernel.permute(&data, shift, &mut sim_out);
                 reference.permute(&data, shift, &mut ref_out);
                 assert_eq!(
-                    sim_out, ref_out,
+                    sim_out,
+                    ref_out,
                     "permute mismatch at length {bytes} shift {shift} for {}",
                     kernel.isa_level()
                 );
