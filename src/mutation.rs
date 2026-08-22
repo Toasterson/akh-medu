@@ -10,6 +10,11 @@
 //! Keeping the trait here, in the core, means the engine carries **no**
 //! dependency on SeaORM/sqlx: the lean `akh` client builds without any of it.
 
+/// Version of the replay-complete assertion payload written to the mutation
+/// WAL. Version 1 was the original unmarked `{subject,predicate,object,...}`
+/// shape and remains readable when all referenced symbols predate a snapshot.
+pub const ASSERT_MUTATION_VERSION: u64 = 2;
+
 /// A single knowledge mutation captured at the engine boundary.
 #[derive(Debug, Clone)]
 pub struct MutationRecord {

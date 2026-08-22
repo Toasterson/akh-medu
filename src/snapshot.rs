@@ -80,6 +80,10 @@ pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 pub struct SnapshotData {
     akh_id: Uuid,
     workspace_id: Uuid,
+    /// WAL sequence sampled before the in-memory capture began.  It is a safe
+    /// lower bound: mutations racing with capture may be replayed twice, but a
+    /// captured snapshot can never advance past a mutation it did not see.
+    watermark: i64,
     symbols: Vec<symbol::Model>,
     facts: Vec<fact::Model>,
     provenance: Vec<provenance_snapshot::Model>,
@@ -117,7 +121,8 @@ pub async fn write_snapshot(
     workspace_id: Uuid,
     db: &DatabaseConnection,
 ) -> SnapshotResult<()> {
-    let data = capture_snapshot(agent, akh_id, workspace_id)?;
+    let watermark = akhomed_store::snapshots::current_watermark(db, akh_id).await?;
+    let data = capture_snapshot_at_watermark(agent, akh_id, workspace_id, watermark)?;
     persist_snapshot(data, db).await
 }
 
@@ -132,6 +137,26 @@ pub fn capture_snapshot(
     akh_id: Uuid,
     workspace_id: Uuid,
 ) -> SnapshotResult<SnapshotData> {
+    // A zero lower bound is deliberately conservative for callers that do not
+    // have a database handle.  Operational callers use
+    // `capture_snapshot_at_watermark`; replaying older rows is idempotent and
+    // safer than sampling a watermark after capture.
+    capture_snapshot_at_watermark(agent, akh_id, workspace_id, 0)
+}
+
+/// Capture state against a WAL lower bound sampled *before* acquiring the
+/// agent guard and copying its state.
+pub fn capture_snapshot_at_watermark(
+    agent: &Agent,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    watermark: i64,
+) -> SnapshotResult<SnapshotData> {
+    if watermark < 0 {
+        return Err(SnapshotError::Agent(
+            "snapshot WAL watermark cannot be negative".into(),
+        ));
+    }
     let engine = agent.engine();
 
     // Flush durable state to local redb (registry, allocator counter, KG snapshot).
@@ -460,6 +485,7 @@ pub fn capture_snapshot(
     Ok(SnapshotData {
         akh_id,
         workspace_id,
+        watermark,
         symbols,
         facts,
         provenance,
@@ -489,12 +515,13 @@ pub fn capture_snapshot(
 
 /// Persist a previously-[captured](capture_snapshot) snapshot to Postgres
 /// (async; holds no agent lock). Cognitive tables are full-replaced; `akh_state`
-/// is upserted with the recovery watermark (`MAX(mutation_log.seq)` now).
+/// is upserted with the recovery watermark sampled before capture.
 pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> SnapshotResult<()> {
     use akhomed_store::snapshots as ops;
     let SnapshotData {
         akh_id,
         workspace_id,
+        watermark,
         symbols,
         facts,
         provenance,
@@ -521,7 +548,6 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         extra,
     } = data;
 
-    let watermark = ops::current_watermark(db, akh_id).await?;
     // ADR 091: `harvest_watermark` is excluded from `upsert_akh_state`'s
     // `update_columns`, so this value only matters the first time a row is
     // inserted for this Akh. Reading it back here (0 if no row exists yet)
@@ -692,7 +718,7 @@ pub async fn wake(
     let calib_rows = ops::load_competence_calibration(db, akh_id).await?;
     let sleep_rows = ops::load_sleep_metrics(db, akh_id).await?;
 
-    let provenance_records = provenance_rows
+    let mut provenance_records = provenance_rows
         .iter()
         .map(provenance_row_to_record)
         .collect::<SnapshotResult<Vec<_>>>()?;
@@ -703,6 +729,10 @@ pub async fn wake(
         .and_then(serde_json::Value::as_u64)
         .is_some_and(|version| version >= PROVENANCE_SNAPSHOT_VERSION);
     if !provenance_snapshot_complete {
+        // A tail record can legitimately reuse an ID that a pre-v1 local-only
+        // ledger once assigned. Clear unverifiable base links before merging
+        // the tail, so that future record can never retroactively rebind an
+        // older fact to unrelated provenance.
         let cleared =
             clear_unverifiable_legacy_provenance_links(&mut fact_rows, &provenance_records);
         if cleared > 0 {
@@ -714,7 +744,16 @@ pub async fn wake(
             );
         }
     }
+    let mut symbol_metas = symbol_rows_to_metas(&symbol_rows)?;
+    let base_allocator_next =
+        validate_symbol_snapshot(&symbol_metas, state.allocator_next)?;
+    let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    let tail_allocator_next =
+        prepare_tail_restore(&tail, &mut symbol_metas, &mut provenance_records)?;
+    let restored_allocator_next = base_allocator_next.max(tail_allocator_next);
+    validate_provenance_symbols(&provenance_records, &symbol_metas)?;
     validate_fact_provenance_links(&fact_rows, &provenance_records)?;
+    validate_fact_symbols(&fact_rows, &symbol_metas)?;
 
     // 3. Reconstruct the local redb meta the engine + agent read on open. The
     //    store must be dropped before `Engine::new` reopens the same redb file.
@@ -726,12 +765,12 @@ pub async fn wake(
             }
         })?;
 
-        write_registry(&store, &symbol_rows);
-        put_bincode(
+        write_registry(&store, &symbol_metas)?;
+        put_bincode_required(
             &store,
             b"sym_allocator_next",
-            &(state.allocator_next as u64),
-        );
+            &restored_allocator_next,
+        )?;
         put_bincode(&store, b"agent:cycle_count", &(state.cycle_count as u64));
 
         if let Some(d) = build_drive_system(&drive_rows) {
@@ -794,17 +833,19 @@ pub async fn wake(
         .map_err(|e| SnapshotError::Engine(format!("restore provenance ledger: {e}")))?;
 
     // 5. Restore the KG (+ item memory) from the relational facts.
-    let triples: Vec<Triple> = fact_rows.iter().filter_map(fact_to_triple).collect();
+    let triples = fact_rows
+        .iter()
+        .map(fact_to_triple)
+        .collect::<SnapshotResult<Vec<_>>>()?;
     engine
         .restore_triples(&triples)
         .map_err(|e| SnapshotError::Engine(e.to_string()))?;
 
     // 6. Replay the WAL tail newer than the snapshot watermark. No sink is
     //    installed yet, so these mutations are applied but not re-logged.
-    let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
     let mut replayed = 0usize;
     for m in &tail {
-        if apply_mutation(&engine, m) {
+        if apply_mutation(&engine, m)? {
             replayed += 1;
         }
     }
@@ -866,22 +907,53 @@ fn put_bincode<T: serde::Serialize>(store: &TieredStore, key: &[u8], value: &T) 
     }
 }
 
+/// Encode and persist recovery-critical metadata. Unlike optional cognitive
+/// state, failure here aborts wake so an engine with an incorrect allocator or
+/// incomplete registry is never published.
+fn put_bincode_required<T: serde::Serialize>(
+    store: &TieredStore,
+    key: &[u8],
+    value: &T,
+) -> SnapshotResult<()> {
+    let bytes = bincode::serialize(value).map_err(|error| {
+        SnapshotError::Agent(format!(
+            "wake: encode required meta {}: {error}",
+            String::from_utf8_lossy(key)
+        ))
+    })?;
+    store.put_meta(key, &bytes).map_err(|error| {
+        SnapshotError::Agent(format!(
+            "wake: persist required meta {}: {error}",
+            String::from_utf8_lossy(key)
+        ))
+    })?;
+    Ok(())
+}
+
 /// Rebuild the symbol registry from `symbols` rows and persist it as `sym_meta:`
 /// entries — the format [`Engine::new`] reads on open.
-fn write_registry(store: &TieredStore, rows: &[symbol::Model]) {
+fn write_registry(store: &TieredStore, metas: &[SymbolMeta]) -> SnapshotResult<()> {
     let registry = SymbolRegistry::new();
-    for row in rows {
-        let Some(id) = SymbolId::new(row.id as u64) else {
-            continue;
-        };
-        let kind = symbol_kind_from(&row.kind, row.glyph_codepoint);
-        if let Err(e) = registry.register(SymbolMeta::new(id, kind, row.label.clone())) {
-            tracing::warn!(label = %row.label, error = %e, "wake: skipping duplicate symbol");
+    let mut ids = std::collections::HashSet::with_capacity(metas.len());
+    for meta in metas {
+        if !ids.insert(meta.id) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: duplicate symbol ID {}",
+                meta.id.get()
+            )));
         }
+        registry.register(meta.clone()).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "wake: invalid symbol {} ({}): {error}",
+                meta.id.get(),
+                meta.label
+            ))
+        })?;
     }
-    if let Err(e) = registry.persist(store) {
-        tracing::warn!(error = %e, "wake: symbol registry persist failed");
-    }
+    registry
+        .replace_persisted(store)
+        .map_err(|error| SnapshotError::Agent(format!("wake: replace symbol registry: {error}")))?;
+    Ok(())
 }
 
 /// Inverse of [`symbol_kind_parts`].
@@ -894,6 +966,89 @@ fn symbol_kind_from(kind: &str, glyph: Option<i32>) -> SymbolKind {
         },
         _ => SymbolKind::Entity,
     }
+}
+
+fn symbol_rows_to_metas(rows: &[symbol::Model]) -> SnapshotResult<Vec<SymbolMeta>> {
+    rows.iter()
+        .map(|row| {
+            let raw_id = u64::try_from(row.id).map_err(|_| {
+                SnapshotError::Agent(format!(
+                    "wake: symbol {} has a non-positive ID {}",
+                    row.label, row.id
+                ))
+            })?;
+            let id = SymbolId::new(raw_id)
+                .filter(|id| !is_reserved_symbol_id(id.get()))
+                .ok_or_else(|| {
+                    SnapshotError::Agent(format!(
+                        "wake: symbol {} uses invalid/reserved ID {}",
+                        row.label, row.id
+                    ))
+                })?;
+            Ok(SymbolMeta {
+                id,
+                kind: symbol_kind_from(&row.kind, row.glyph_codepoint),
+                label: row.label.clone(),
+                // The legacy relational symbol table predates these fields.
+                // Replay-complete WAL envelopes carry their exact values for
+                // post-snapshot symbols.
+                created_at: 0,
+                source: None,
+            })
+        })
+        .collect()
+}
+
+/// Validate the authoritative relational registry and its captured allocator.
+/// Returns the exact captured next ID once it is known to be beyond every
+/// restored symbol.
+fn validate_symbol_snapshot(metas: &[SymbolMeta], allocator_next: i64) -> SnapshotResult<u64> {
+    let allocator_next = u64::try_from(allocator_next).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "wake: symbol allocator has invalid next ID {allocator_next}"
+        ))
+    })?;
+    if allocator_next == 0 || is_reserved_symbol_id(allocator_next) {
+        return Err(SnapshotError::Agent(format!(
+            "wake: symbol allocator has invalid/reserved next ID {allocator_next}"
+        )));
+    }
+
+    let mut ids = std::collections::HashSet::with_capacity(metas.len());
+    let mut labels = std::collections::HashMap::with_capacity(metas.len());
+    let mut max_id = 0u64;
+    for meta in metas {
+        let raw_id = meta.id.get();
+        if is_reserved_symbol_id(raw_id) || !ids.insert(raw_id) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: duplicate or reserved symbol ID {raw_id}"
+            )));
+        }
+        let normalized = crate::registry::normalize_label_key(&meta.label);
+        if let Some(previous) = labels.insert(normalized, raw_id)
+            && previous != raw_id
+        {
+            return Err(SnapshotError::Agent(format!(
+                "wake: duplicate symbol label {} for IDs {previous} and {raw_id}",
+                meta.label
+            )));
+        }
+        max_id = max_id.max(raw_id);
+    }
+    let minimum_next = max_id.checked_add(1).ok_or_else(|| {
+        SnapshotError::Agent("wake: restored symbol ID space is exhausted".into())
+    })?;
+    if is_reserved_symbol_id(minimum_next) {
+        return Err(SnapshotError::Agent(
+            "wake: restored symbol ID space reaches a reserved protocol marker".into(),
+        ));
+    }
+    if allocator_next < minimum_next {
+        return Err(SnapshotError::Agent(format!(
+            "wake: allocator next ID {allocator_next} collides with restored symbol {max_id}"
+        )));
+    }
+    Ok(allocator_next)
 }
 
 fn drive_kind_from(label: &str) -> Option<crate::agent::drives::DriveKind> {
@@ -1326,50 +1481,440 @@ fn clear_unverifiable_legacy_provenance_links(
     cleared
 }
 
+#[derive(serde::Deserialize)]
+struct ReplayCompleteAssert {
+    v: u64,
+    subject: u64,
+    predicate: u64,
+    object: u64,
+    confidence: f32,
+    timestamp: u64,
+    #[serde(default)]
+    compartment: Option<String>,
+    #[serde(default)]
+    provenance_id: Option<u64>,
+    #[serde(default)]
+    provenance: Option<crate::provenance::ProvenanceRecord>,
+    symbols: Vec<SymbolMeta>,
+}
+
+fn invalid_tail(message: impl Into<String>) -> SnapshotError {
+    SnapshotError::Agent(format!("wake: invalid mutation tail: {}", message.into()))
+}
+
+fn is_reserved_symbol_id(raw: u64) -> bool {
+    raw == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+        || raw == crate::provenance::RULE_APPLICATION_V2_SENTINEL
+}
+
+fn payload_triple_ids(
+    payload: &serde_json::Value,
+) -> SnapshotResult<(SymbolId, SymbolId, SymbolId)> {
+    let parse = |field: &str| {
+        let raw = payload
+            .get(field)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| invalid_tail(format!("missing/invalid {field}")))?;
+        SymbolId::new(raw)
+            .filter(|id| !is_reserved_symbol_id(id.get()))
+            .ok_or_else(|| invalid_tail(format!("{field} uses zero/reserved symbol ID {raw}")))
+    };
+    Ok((parse("subject")?, parse("predicate")?, parse("object")?))
+}
+
+fn parse_replay_complete_assert(
+    payload: &serde_json::Value,
+) -> SnapshotResult<(Triple, Vec<SymbolMeta>, Option<crate::provenance::ProvenanceRecord>)> {
+    let envelope: ReplayCompleteAssert = serde_json::from_value(payload.clone())
+        .map_err(|error| invalid_tail(format!("assert-v2 decode failed: {error}")))?;
+    if envelope.v != crate::mutation::ASSERT_MUTATION_VERSION {
+        return Err(invalid_tail(format!(
+            "unsupported assert mutation version {}",
+            envelope.v
+        )));
+    }
+    if !envelope.confidence.is_finite() || !(0.0..=1.0).contains(&envelope.confidence) {
+        return Err(invalid_tail(format!(
+            "assert confidence {} is outside [0,1]",
+            envelope.confidence
+        )));
+    }
+    let subject = SymbolId::new(envelope.subject)
+        .filter(|id| !is_reserved_symbol_id(id.get()))
+        .ok_or_else(|| invalid_tail("assert subject uses zero/reserved symbol ID"))?;
+    let predicate = SymbolId::new(envelope.predicate)
+        .filter(|id| !is_reserved_symbol_id(id.get()))
+        .ok_or_else(|| invalid_tail("assert predicate uses zero/reserved symbol ID"))?;
+    let object = SymbolId::new(envelope.object)
+        .filter(|id| !is_reserved_symbol_id(id.get()))
+        .ok_or_else(|| invalid_tail("assert object uses zero/reserved symbol ID"))?;
+
+    match (envelope.provenance_id, envelope.provenance.as_ref()) {
+        (None, None) => {}
+        (Some(raw_id), Some(record)) => {
+            let id = crate::provenance::ProvenanceId::new(raw_id).ok_or_else(|| {
+                invalid_tail("assert provenance ID must be non-zero")
+            })?;
+            if record.id != Some(id) {
+                return Err(invalid_tail(format!(
+                    "assert provenance ID {raw_id} does not match record {:?}",
+                    record.id.map(crate::provenance::ProvenanceId::get)
+                )));
+            }
+            if !record.confidence.is_finite() || !(0.0..=1.0).contains(&record.confidence) {
+                return Err(invalid_tail(format!(
+                    "provenance {raw_id} confidence {} is outside [0,1]",
+                    record.confidence
+                )));
+            }
+        }
+        _ => {
+            return Err(invalid_tail(
+                "assert provenance ID and full record must be present together",
+            ));
+        }
+    }
+
+    let mut metadata_ids = std::collections::HashMap::new();
+    let mut metadata_labels = std::collections::HashMap::new();
+    for meta in &envelope.symbols {
+        if is_reserved_symbol_id(meta.id.get())
+            || metadata_ids.insert(meta.id.get(), meta).is_some()
+        {
+            return Err(invalid_tail(format!(
+                "duplicate/reserved symbol metadata ID {}",
+                meta.id.get()
+            )));
+        }
+        let normalized = crate::registry::normalize_label_key(&meta.label);
+        if let Some(previous) = metadata_labels.insert(normalized, meta.id.get())
+            && previous != meta.id.get()
+        {
+            return Err(invalid_tail(format!(
+                "symbol label {} is assigned to IDs {previous} and {}",
+                meta.label,
+                meta.id.get()
+            )));
+        }
+    }
+    let mut required = vec![subject, predicate, object];
+    if let Some(record) = &envelope.provenance {
+        required.push(record.derived_id);
+        required.extend(record.sources.iter().copied());
+    }
+    required.sort_unstable();
+    required.dedup();
+    for id in required {
+        if !metadata_ids.contains_key(&id.get()) {
+            return Err(invalid_tail(format!(
+                "assert is missing full metadata for symbol {}",
+                id.get()
+            )));
+        }
+    }
+
+    let mut triple = Triple::new(subject, predicate, object);
+    triple.confidence = envelope.confidence;
+    triple.timestamp = envelope.timestamp;
+    triple.compartment_id = envelope.compartment;
+    triple.provenance_id = envelope.provenance_id;
+    Ok((triple, envelope.symbols, envelope.provenance))
+}
+
+/// Merge every replay prerequisite into the cold-restore image before opening
+/// the engine. Facts are still replayed in WAL order afterwards so retract/TMS
+/// behavior stays unchanged.
+fn prepare_tail_restore(
+    tail: &[akhomed_store::TailMutation],
+    symbols: &mut Vec<SymbolMeta>,
+    provenance: &mut Vec<crate::provenance::ProvenanceRecord>,
+) -> SnapshotResult<u64> {
+    let mut symbol_positions = std::collections::HashMap::with_capacity(symbols.len());
+    let mut labels = std::collections::HashMap::with_capacity(symbols.len());
+    for (position, meta) in symbols.iter().enumerate() {
+        symbol_positions.insert(meta.id.get(), position);
+        labels.insert(crate::registry::normalize_label_key(&meta.label), meta.id.get());
+    }
+    let mut provenance_by_id = std::collections::HashMap::with_capacity(provenance.len());
+    for (position, record) in provenance.iter().enumerate() {
+        let id = record
+            .id
+            .ok_or_else(|| invalid_tail("snapshot provenance record is missing its ID"))?
+            .get();
+        if provenance_by_id.insert(id, position).is_some() {
+            return Err(invalid_tail(format!("duplicate provenance ID {id}")));
+        }
+    }
+    let mut tail_symbol_ids = std::collections::HashSet::new();
+
+    for mutation in tail {
+        if mutation.kind != "assert" {
+            continue;
+        }
+        match mutation.payload.get("v") {
+            None => continue,
+            Some(version)
+                if version.as_u64() == Some(crate::mutation::ASSERT_MUTATION_VERSION) => {}
+            Some(version) => {
+                return Err(invalid_tail(format!(
+                    "unsupported assert mutation version {version}"
+                )));
+            }
+        }
+        let (_, tail_symbols, tail_record) =
+            parse_replay_complete_assert(&mutation.payload)?;
+        for meta in tail_symbols {
+            let normalized = crate::registry::normalize_label_key(&meta.label);
+            if let Some(other_id) = labels.get(&normalized)
+                && *other_id != meta.id.get()
+            {
+                return Err(invalid_tail(format!(
+                    "symbol label {} conflicts with restored ID {other_id}",
+                    meta.label
+                )));
+            }
+            if let Some(position) = symbol_positions.get(&meta.id.get()).copied() {
+                let existing = &symbols[position];
+                if existing.kind != meta.kind
+                    || existing.label != meta.label
+                {
+                    return Err(invalid_tail(format!(
+                        "symbol ID {} conflicts with restored metadata",
+                        meta.id.get()
+                    )));
+                }
+                if tail_symbol_ids.contains(&meta.id.get())
+                    && (existing.created_at != meta.created_at || existing.source != meta.source)
+                {
+                    return Err(invalid_tail(format!(
+                        "symbol ID {} has conflicting replay metadata",
+                        meta.id.get()
+                    )));
+                }
+                // The WAL carries the full metadata fields that the legacy
+                // relational symbol row does not, so prefer it once identity
+                // and kind have been verified.
+                symbols[position] = meta;
+                tail_symbol_ids.insert(symbols[position].id.get());
+            } else {
+                let position = symbols.len();
+                labels.insert(normalized, meta.id.get());
+                symbol_positions.insert(meta.id.get(), position);
+                tail_symbol_ids.insert(meta.id.get());
+                symbols.push(meta);
+            }
+        }
+        if let Some(record) = tail_record {
+            let id = record.id.expect("validated versioned provenance ID").get();
+            if let Some(position) = provenance_by_id.get(&id).copied() {
+                let existing = bincode::serialize(&provenance[position])
+                    .map_err(|error| invalid_tail(format!("encode provenance {id}: {error}")))?;
+                let incoming = bincode::serialize(&record)
+                    .map_err(|error| invalid_tail(format!("encode provenance {id}: {error}")))?;
+                if existing != incoming {
+                    return Err(invalid_tail(format!(
+                        "provenance ID {id} has conflicting records"
+                    )));
+                }
+            } else {
+                provenance_by_id.insert(id, provenance.len());
+                provenance.push(record);
+            }
+        }
+    }
+
+    // Legacy assertions did not carry registry records. They remain replayable
+    // only when every referenced symbol is already known from the snapshot or
+    // from a later replay-complete envelope; otherwise waking would create an
+    // unresolvable ID and risk allocator reuse.
+    for mutation in tail {
+        if mutation.kind == "assert" && mutation.payload.get("v").is_none() {
+            let (subject, predicate, object) = payload_triple_ids(&mutation.payload)?;
+            for id in [subject, predicate, object] {
+                if !symbol_positions.contains_key(&id.get()) {
+                    return Err(invalid_tail(format!(
+                        "legacy assert references unknown symbol {}",
+                        id.get()
+                    )));
+                }
+            }
+        }
+    }
+
+    let max_id = symbols.iter().map(|meta| meta.id.get()).max().unwrap_or(0);
+    let next = max_id.checked_add(1).ok_or_else(|| {
+        invalid_tail("post-snapshot symbol ID space is exhausted")
+    })?;
+    if is_reserved_symbol_id(next) {
+        return Err(invalid_tail(
+            "post-snapshot symbol allocator would enter the reserved sentinel",
+        ));
+    }
+    Ok(next.max(1))
+}
+
+fn validate_fact_symbols(facts: &[fact::Model], symbols: &[SymbolMeta]) -> SnapshotResult<()> {
+    let ids: std::collections::HashSet<u64> =
+        symbols.iter().map(|meta| meta.id.get()).collect();
+    for fact in facts {
+        for (field, raw) in [
+            ("subject", fact.subject),
+            ("predicate", fact.predicate),
+            ("object", fact.object),
+        ] {
+            let id = u64::try_from(raw)
+                .ok()
+                .and_then(SymbolId::new)
+                .filter(|id| !is_reserved_symbol_id(id.get()))
+                .ok_or_else(|| {
+                    SnapshotError::Agent(format!(
+                        "wake: fact {field} has invalid symbol ID {raw}"
+                    ))
+                })?;
+            if !ids.contains(&id.get()) {
+                return Err(SnapshotError::Agent(format!(
+                    "wake: fact {field} references missing symbol {}",
+                    id.get()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_provenance_symbols(
+    records: &[crate::provenance::ProvenanceRecord],
+    symbols: &[SymbolMeta],
+) -> SnapshotResult<()> {
+    let ids: std::collections::HashSet<SymbolId> =
+        symbols.iter().map(|meta| meta.id).collect();
+    for record in records {
+        let provenance_id = record.id.map(crate::provenance::ProvenanceId::get);
+        for (field, id) in std::iter::once(("derived", record.derived_id))
+            .chain(record.sources.iter().copied().map(|id| ("source", id)))
+        {
+            if !ids.contains(&id) {
+                return Err(SnapshotError::Agent(format!(
+                    "wake: provenance {provenance_id:?} {field} references missing symbol {}",
+                    id.get()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Convert a persisted `facts` row into a KG [`Triple`].
-fn fact_to_triple(row: &fact::Model) -> Option<Triple> {
-    let s = SymbolId::new(u64::try_from(row.subject).ok()?)?;
-    let p = SymbolId::new(u64::try_from(row.predicate).ok()?)?;
-    let o = SymbolId::new(u64::try_from(row.object).ok()?)?;
+fn fact_to_triple(row: &fact::Model) -> SnapshotResult<Triple> {
+    let convert = |field: &str, raw: i64| {
+        u64::try_from(raw)
+            .ok()
+            .and_then(SymbolId::new)
+            .filter(|id| !is_reserved_symbol_id(id.get()))
+            .ok_or_else(|| {
+                SnapshotError::Agent(format!(
+                    "wake: fact {field} has invalid symbol ID {raw}"
+                ))
+            })
+    };
+    let s = convert("subject", row.subject)?;
+    let p = convert("predicate", row.predicate)?;
+    let o = convert("object", row.object)?;
     let mut t = Triple::new(s, p, o);
     t.confidence = row.confidence;
     t.timestamp = row.asserted_at.timestamp().max(0) as u64;
-    t.provenance_id = row.provenance_id.and_then(|v| u64::try_from(v).ok());
+    t.provenance_id = row
+        .provenance_id
+        .map(|raw| {
+            let id = u64::try_from(raw).map_err(|_| {
+                SnapshotError::Agent(format!("wake: fact has invalid provenance ID {raw}"))
+            })?;
+            crate::provenance::ProvenanceId::new(id)
+                .map(crate::provenance::ProvenanceId::get)
+                .ok_or_else(|| {
+                    SnapshotError::Agent(format!("wake: fact has invalid provenance ID {raw}"))
+                })
+        })
+        .transpose()?;
     t.compartment_id = row.compartment.clone();
-    Some(t)
+    Ok(t)
 }
 
-/// Apply one replayed WAL mutation. Returns whether it was applied (unknown
-/// kinds and malformed payloads are skipped). Microtheory/compartment replay is
+/// Apply one replayed WAL mutation. Returns whether it was applied. Unknown
+/// future kinds are ignored, while malformed known KG mutations fail wake so
+/// corruption cannot silently drop a fact. Microtheory/compartment replay is
 /// deferred (38d). `kind="turn"` rows (ADR 091) are explicitly skipped — raw
 /// transcript-capture staging, never a KG mutation.
-fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
-    let ids = |p: &serde_json::Value| -> Option<(SymbolId, SymbolId, SymbolId)> {
-        Some((
-            SymbolId::new(p.get("subject")?.as_u64()?)?,
-            SymbolId::new(p.get("predicate")?.as_u64()?)?,
-            SymbolId::new(p.get("object")?.as_u64()?)?,
-        ))
-    };
+fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
     match m.kind.as_str() {
         "assert" => {
-            let Some((s, p, o)) = ids(&m.payload) else {
-                return false;
+            let triple = if m.payload.get("v").is_some() {
+                let (triple, _, record) = parse_replay_complete_assert(&m.payload)?;
+                if let Some(record) = record {
+                    let id = record.id.expect("validated provenance ID");
+                    let restored = engine.get_provenance(id).map_err(|error| {
+                        invalid_tail(format!(
+                            "assert references unrestored provenance {}: {error}",
+                            id.get()
+                        ))
+                    })?;
+                    let restored = bincode::serialize(&restored).map_err(|error| {
+                        invalid_tail(format!(
+                            "encode restored provenance {}: {error}",
+                            id.get()
+                        ))
+                    })?;
+                    let expected = bincode::serialize(&record).map_err(|error| {
+                        invalid_tail(format!(
+                            "encode assertion provenance {}: {error}",
+                            id.get()
+                        ))
+                    })?;
+                    if restored != expected {
+                        return Err(invalid_tail(format!(
+                            "assert provenance {} changed before replay",
+                            id.get()
+                        )));
+                    }
+                }
+                triple
+            } else {
+                let (subject, predicate, object) = payload_triple_ids(&m.payload)?;
+                let mut triple = Triple::new(subject, predicate, object);
+                triple.timestamp = m
+                    .payload
+                    .get("timestamp")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                if let Some(confidence) = m.payload.get("confidence") {
+                    let confidence = confidence.as_f64().ok_or_else(|| {
+                        invalid_tail("legacy assert confidence is not numeric")
+                    })? as f32;
+                    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+                        return Err(invalid_tail("legacy assert confidence is outside [0,1]"));
+                    }
+                    triple.confidence = confidence;
+                }
+                match m.payload.get("compartment") {
+                    None | Some(serde_json::Value::Null) => {}
+                    Some(serde_json::Value::String(value)) => {
+                        triple.compartment_id = Some(value.clone())
+                    }
+                    Some(_) => return Err(invalid_tail("legacy assert compartment is not text")),
+                }
+                triple
             };
-            let mut t = Triple::new(s, p, o);
-            if let Some(c) = m.payload.get("confidence").and_then(|v| v.as_f64()) {
-                t.confidence = c as f32;
-            }
-            if let Some(comp) = m.payload.get("compartment").and_then(|v| v.as_str()) {
-                t.compartment_id = Some(comp.to_string());
-            }
-            engine.add_triple(&t).is_ok()
+            engine
+                .replay_assert_exact(&triple)
+                .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            Ok(true)
         }
         "retract" => {
-            let Some((s, p, o)) = ids(&m.payload) else {
-                return false;
-            };
-            engine.remove_triple(s, p, o).is_ok()
+            let (subject, predicate, object) = payload_triple_ids(&m.payload)?;
+            engine
+                .remove_triple(subject, predicate, object)
+                .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            Ok(true)
         }
         // ADR 091 decision 3: `turn` rows are raw transcript-capture staging,
         // never KG mutations — the KG facts derived from a turn (if any) get
@@ -1378,8 +1923,8 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> bool {
         // just means "not counted in `replayed`" here (see the caller at
         // `wake`, ~line 690-696) — it is NOT treated as an error or an unknown
         // kind; wake proceeds normally with `turn` rows present.
-        "turn" => false,
-        _ => false,
+        "turn" => Ok(false),
+        _ => Ok(false),
     }
 }
 
@@ -1388,6 +1933,16 @@ mod tests {
     use super::*;
     use crate::agent::drives::DriveKind;
     use crate::agent::goal::{GoalSource, GoalStatus};
+
+    fn replay_symbol(id: u64, kind: SymbolKind, label: &str, created_at: u64) -> SymbolMeta {
+        SymbolMeta {
+            id: SymbolId::new(id).unwrap(),
+            kind,
+            label: label.into(),
+            created_at,
+            source: None,
+        }
+    }
 
     // The reconstruction helpers (writer-side `goal_to_model` + wake-side
     // `build_*`) are the highest-risk paths — pure row<->struct mapping that the
@@ -1905,6 +2460,166 @@ triples_file = "triples.json"
     }
 
     #[test]
+    fn replay_complete_tail_restores_fresh_symbols_provenance_and_exact_reassertion() {
+        use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
+
+        let root = tempfile::tempdir().unwrap();
+        let subject = replay_symbol(700, SymbolKind::Entity, "TailSubject", 101);
+        let predicate = replay_symbol(701, SymbolKind::Relation, "tail-predicate", 102);
+        let object = replay_symbol(702, SymbolKind::Entity, "TailObject", 103);
+        let mut source = replay_symbol(703, SymbolKind::Entity, "TailSource", 104);
+        source.source = Some(crate::symbol::SourceRef {
+            document_id: "post-snapshot-document".into(),
+            chunk_index: 4,
+            byte_start: 8,
+            byte_end: 21,
+        });
+        let symbols = vec![
+            subject.clone(),
+            predicate.clone(),
+            object.clone(),
+            source.clone(),
+        ];
+
+        let mut record = ProvenanceRecord::new(object.id, DerivationKind::Extracted)
+            .with_sources(vec![source.id])
+            .with_confidence(0.83)
+            .with_depth(2);
+        record.id = ProvenanceId::new(41);
+        record.timestamp = 10;
+
+        let tracked = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 0.83,
+                "timestamp": 10,
+                "compartment": "tail-pack",
+                "provenance_id": 41,
+                "provenance": record,
+                "symbols": symbols,
+            }),
+        };
+        let untracked = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 0.55,
+                "timestamp": 20,
+                "compartment": null,
+                "provenance_id": null,
+                "provenance": null,
+                "symbols": [subject, predicate, object],
+            }),
+        };
+        let tail = vec![tracked, untracked];
+        let mut restored_symbols = Vec::new();
+        let mut restored_provenance = Vec::new();
+        let allocator_next =
+            prepare_tail_restore(&tail, &mut restored_symbols, &mut restored_provenance).unwrap();
+        assert_eq!(allocator_next, 704);
+        assert_eq!(restored_provenance.len(), 1);
+
+        {
+            let store = TieredStore::with_persistence(root.path(), "symbols").unwrap();
+            write_registry(&store, &restored_symbols).unwrap();
+            put_bincode_required(&store, b"sym_allocator_next", &allocator_next).unwrap();
+        }
+        let engine = Engine::new_for_restore(EngineConfig {
+            data_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        engine.replace_all_provenance(&restored_provenance).unwrap();
+        for mutation in &tail {
+            assert!(apply_mutation(&engine, mutation).unwrap());
+        }
+
+        let restored_source = engine.get_symbol_meta(source.id).unwrap();
+        assert_eq!(restored_source.created_at, 104);
+        assert_eq!(restored_source.source, source.source);
+        assert_eq!(engine.get_provenance(ProvenanceId::new(41).unwrap()).unwrap().depth, 2);
+        let edge = engine.triples_from(subject.id).pop().unwrap();
+        assert_eq!(edge.confidence, 0.55);
+        assert_eq!(edge.timestamp, 20);
+        assert_eq!(edge.compartment_id, None);
+        assert_eq!(edge.provenance_id, None, "the later untracked assertion is authoritative");
+
+        let fresh = engine.create_symbol(SymbolKind::Entity, "AfterTail").unwrap();
+        assert_eq!(fresh.id.get(), 704, "symbol allocation must advance beyond the WAL tail");
+        let mut next_record = ProvenanceRecord::new(fresh.id, DerivationKind::Reasoned);
+        assert_eq!(engine.store_provenance(&mut next_record).unwrap().get(), 42);
+    }
+
+    #[test]
+    fn restore_validation_rejects_allocator_collisions_and_malformed_facts() {
+        let meta = replay_symbol(9, SymbolKind::Entity, "Nine", 0);
+        assert!(validate_symbol_snapshot(std::slice::from_ref(&meta), 9).is_err());
+        assert!(validate_symbol_snapshot(std::slice::from_ref(&meta), 10).is_ok());
+
+        let malformed = fact::Model {
+            workspace_id: Uuid::nil(),
+            subject: 0,
+            predicate: 9,
+            object: 9,
+            akh_id: Uuid::nil(),
+            confidence: 1.0,
+            asserted_at: chrono::DateTime::from_timestamp(10, 0).unwrap(),
+            retracted_at: None,
+            provenance_id: None,
+            compartment: None,
+        };
+        assert!(fact_to_triple(&malformed).is_err());
+        assert!(validate_fact_symbols(&[malformed], &[meta]).is_err());
+
+        let subject = replay_symbol(20, SymbolKind::Entity, "Subject", 0);
+        let predicate = replay_symbol(21, SymbolKind::Relation, "predicate", 0);
+        let object = replay_symbol(22, SymbolKind::Entity, "Object", 0);
+        let missing_id_record = crate::provenance::ProvenanceRecord::new(
+            object.id,
+            crate::provenance::DerivationKind::Extracted,
+        );
+        assert!(
+            parse_replay_complete_assert(&serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 0,
+                "provenance_id": 0,
+                "provenance": missing_id_record,
+                "symbols": [subject, predicate, object],
+            }))
+            .is_err(),
+            "zero must not compare equal to a missing provenance ID"
+        );
+    }
+
+    #[test]
+    fn capture_uses_the_pre_capture_watermark() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            Engine::new(EngineConfig {
+                data_dir: Some(root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let agent = Agent::new(engine, crate::agent::AgentConfig::default()).unwrap();
+        let data = capture_snapshot_at_watermark(&agent, Uuid::new_v4(), Uuid::new_v4(), 37)
+            .unwrap();
+        assert_eq!(data.watermark, 37);
+        assert!(capture_snapshot_at_watermark(&agent, Uuid::nil(), Uuid::nil(), -1).is_err());
+    }
+
+    #[test]
     fn apply_mutation_skips_turn_rows_without_error() {
         // ADR 091 decision 3: `turn` rows are raw transcript staging, never
         // replayed into the KG. `apply_mutation` must return `false` (not
@@ -1923,7 +2638,10 @@ triples_file = "triples.json"
                 "tools": [],
             }),
         };
-        assert!(!apply_mutation(&engine, &m), "turn rows are not KG mutations");
+        assert!(
+            !apply_mutation(&engine, &m).unwrap(),
+            "turn rows are not KG mutations"
+        );
 
         // An unrelated malformed/unknown kind also returns false — same
         // non-error signal — so the explicit "turn" arm is a documentation /
@@ -1932,6 +2650,6 @@ triples_file = "triples.json"
             kind: "totally_unknown".to_string(),
             payload: serde_json::json!({}),
         };
-        assert!(!apply_mutation(&engine, &unknown));
+        assert!(!apply_mutation(&engine, &unknown).unwrap());
     }
 }

@@ -145,14 +145,14 @@ impl AtomicSymbolAllocator {
 
     /// Allocate the next symbol ID.
     ///
-    /// Returns an error if the ID space is exhausted. `u64::MAX` is reserved
-    /// for versioned metadata sentinels and is never minted as a registry
-    /// symbol.
+    /// Returns an error if the ID space is exhausted. The top two `u64` values
+    /// are reserved for versioned provenance metadata sentinels and are never
+    /// minted as registry symbols.
     pub fn next_id(&self) -> AkhResult<SymbolId> {
         let raw = self
             .next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                if current == u64::MAX {
+                if current >= u64::MAX - 1 {
                     None
                 } else {
                     Some(current + 1)
@@ -185,6 +185,13 @@ mod tests {
             std::mem::size_of::<Option<SymbolId>>(),
             std::mem::size_of::<SymbolId>()
         );
+    }
+
+    #[test]
+    fn allocator_never_mints_reserved_provenance_markers() {
+        let allocator = AtomicSymbolAllocator::starting_from(u64::MAX - 1);
+        assert!(allocator.next_id().is_err());
+        assert_eq!(allocator.peek_next(), u64::MAX - 1);
     }
 
     #[test]

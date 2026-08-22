@@ -823,14 +823,49 @@ impl Engine {
         );
 
         // --- Phase 38b: write-ahead log ---
+        // The assertion envelope is replay-complete rather than only carrying
+        // numeric triple IDs. A post-snapshot fact may introduce symbols and a
+        // provenance record that do not exist in the relational snapshot; wake
+        // must restore those records before publishing the edge and advance
+        // both allocators beyond them.
+        let provenance = triple
+            .provenance_id
+            .and_then(ProvenanceId::new)
+            .and_then(|id| match self.get_provenance(id) {
+                Ok(record) => Some(record),
+                Err(error) => {
+                    tracing::error!(
+                        provenance_id = id.get(),
+                        %error,
+                        "assertion references provenance that cannot be written to the WAL"
+                    );
+                    None
+                }
+            });
+        let mut required_symbol_ids = vec![triple.subject, triple.predicate, triple.object];
+        if let Some(record) = &provenance {
+            required_symbol_ids.push(record.derived_id);
+            required_symbol_ids.extend(record.sources.iter().copied());
+        }
+        required_symbol_ids.sort_unstable();
+        required_symbol_ids.dedup();
+        let symbols: Vec<SymbolMeta> = required_symbol_ids
+            .into_iter()
+            .filter_map(|id| self.registry.get(id))
+            .collect();
         self.record_mutation(
             crate::mutation::MutationKind::Assert,
             serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
                 "subject": triple.subject.get(),
                 "predicate": triple.predicate.get(),
                 "object": triple.object.get(),
                 "confidence": triple.confidence,
-                "compartment": triple.compartment_id,
+                "timestamp": triple.timestamp,
+                "compartment": triple.compartment_id.clone(),
+                "provenance_id": triple.provenance_id,
+                "provenance": provenance,
+                "symbols": symbols,
                 // ADR 081 P2: content-addressed identity (stable across
                 // akhs/sessions) persisted with the mutation for diffing.
                 "identity": identity.to_hex(),
@@ -1463,6 +1498,20 @@ impl Engine {
         self.identity_index_built
             .store(false, Ordering::Release);
         Ok(count)
+    }
+
+    /// Apply one authoritative WAL assertion without the live mutation
+    /// pipeline or re-logging it. Unlike ordinary idempotent insertion this
+    /// replaces all edge metadata, including clearing a superseded provenance
+    /// link when the later assertion is intentionally untracked.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn replay_assert_exact(&self, triple: &Triple) -> AkhResult<()> {
+        self.knowledge_graph.replace_triple_exact(triple)?;
+        self.item_memory.get_or_create(&self.ops, triple.subject);
+        self.item_memory.get_or_create(&self.ops, triple.predicate);
+        self.item_memory.get_or_create(&self.ops, triple.object);
+        self.identity_index_built.store(false, Ordering::Release);
+        Ok(())
     }
 
     /// Execute a SPARQL SELECT query.

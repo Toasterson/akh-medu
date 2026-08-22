@@ -111,6 +111,45 @@ impl KnowledgeGraph {
         Ok(())
     }
 
+    /// Insert or exactly replace a triple's complete edge metadata.
+    ///
+    /// Normal live assertions merge confidence and retain an old provenance
+    /// link when the new assertion is untracked. WAL replay needs replacement
+    /// semantics instead: the later assertion is authoritative, including an
+    /// explicit `None` provenance value, otherwise a reasserted fact can wake
+    /// falsely attributed to its pre-snapshot source.
+    pub(crate) fn replace_triple_exact(&self, triple: &Triple) -> GraphResult<()> {
+        let subj_idx = self.ensure_node(triple.subject);
+        let obj_idx = self.ensure_node(triple.object);
+        self.ensure_node(triple.predicate);
+        let edge_data = EdgeData::from(triple);
+
+        {
+            let mut graph = self.graph.write().expect("graph lock poisoned");
+            let existing = graph
+                .edges_directed(subj_idx, Direction::Outgoing)
+                .find(|edge| {
+                    edge.target() == obj_idx && edge.weight().predicate == triple.predicate
+                })
+                .map(|edge| edge.id());
+            if let Some(edge_id) = existing {
+                if let Some(weight) = graph.edge_weight_mut(edge_id) {
+                    *weight = edge_data;
+                }
+                return Ok(());
+            }
+            graph.add_edge(subj_idx, obj_idx, edge_data);
+        }
+
+        self.predicate_index
+            .entry(triple.predicate)
+            .or_default()
+            .push((triple.subject, triple.object));
+        self.triple_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Remove a triple from the graph.
     ///
     /// Removes the edge between subject and object with the matching predicate.
@@ -677,5 +716,28 @@ mod tests {
         let triples = kg.triples_from(a);
         assert_eq!(triples.len(), 1);
         assert!((triples[0].confidence - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn exact_replay_replaces_and_can_clear_provenance() {
+        let kg = KnowledgeGraph::new();
+        let a = sym(1);
+        let r = sym(2);
+        let b = sym(3);
+        let mut tracked = Triple::new(a, r, b).with_provenance(41);
+        tracked.confidence = 0.9;
+        tracked.timestamp = 100;
+        kg.insert_triple(&tracked).unwrap();
+
+        let mut replayed = Triple::new(a, r, b);
+        replayed.confidence = 0.4;
+        replayed.timestamp = 200;
+        kg.replace_triple_exact(&replayed).unwrap();
+
+        let restored = kg.triples_from(a).pop().unwrap();
+        assert_eq!(kg.triple_count(), 1);
+        assert_eq!(restored.provenance_id, None);
+        assert_eq!(restored.confidence, 0.4);
+        assert_eq!(restored.timestamp, 200);
     }
 }

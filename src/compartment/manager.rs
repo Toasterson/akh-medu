@@ -206,24 +206,54 @@ impl CompartmentManager {
                             }
                         })?;
 
-                        let mut triple = [crate::graph::Triple::new(s, p, o)
+                        let triple = crate::graph::Triple::new(s, p, o)
                             .with_confidence(confidence)
-                            .with_compartment(compartment_id.clone())];
-                        let mut provenance = crate::provenance::ProvenanceRecord::new(
-                            o,
-                            crate::provenance::DerivationKind::CompartmentLoaded {
-                                compartment_id: compartment_id.clone(),
-                                source_file: triples_file.clone(),
-                            },
-                        )
-                        .with_sources(vec![s])
-                        .with_confidence(confidence);
-                        engine
-                            .add_triples_with_provenance(&mut triple, &mut provenance)
-                            .map_err(|e| CompartmentError::InvalidManifest {
-                                path: triples_path.display().to_string(),
-                                message: format!("failed to add tracked triple: {e}"),
-                            })?;
+                            .with_compartment(compartment_id.clone());
+
+                        // Cold wake restores live facts (including their volatile
+                        // provenance/timestamp metadata) before deferred
+                        // compartment loading. Re-inserting an identical fact via
+                        // `add_triples_with_provenance` would first mint a redundant
+                        // ledger record, then overwrite that restored metadata on
+                        // the idempotent graph edge. The stable identity includes
+                        // the compartment. Only an edge whose live ledger record
+                        // proves this exact pack/file is safe to preserve; an
+                        // untracked or differently sourced collision still needs
+                        // the normal tracked insertion path.
+                        let identity = engine.triple_identity(&triple);
+                        let already_tracked_by_this_pack = engine
+                            .triple_by_identity(&identity)
+                            .and_then(|existing| existing.provenance_id)
+                            .and_then(crate::provenance::ProvenanceId::new)
+                            .and_then(|id| engine.get_provenance(id).ok())
+                            .is_some_and(|record| {
+                                matches!(
+                                    record.kind,
+                                    crate::provenance::DerivationKind::CompartmentLoaded {
+                                        compartment_id: ref restored_compartment,
+                                        source_file: ref restored_source,
+                                    } if restored_compartment.as_str() == compartment_id.as_str()
+                                        && restored_source.as_str() == triples_file.as_str()
+                                )
+                            });
+                        if !already_tracked_by_this_pack {
+                            let mut triple = [triple];
+                            let mut provenance = crate::provenance::ProvenanceRecord::new(
+                                o,
+                                crate::provenance::DerivationKind::CompartmentLoaded {
+                                    compartment_id: compartment_id.clone(),
+                                    source_file: triples_file.clone(),
+                                },
+                            )
+                            .with_sources(vec![s])
+                            .with_confidence(confidence);
+                            engine
+                                .add_triples_with_provenance(&mut triple, &mut provenance)
+                                .map_err(|e| CompartmentError::InvalidManifest {
+                                    path: triples_path.display().to_string(),
+                                    message: format!("failed to add tracked triple: {e}"),
+                                })?;
+                        }
                         triple_count += 1;
                     }
                 }
@@ -712,6 +742,108 @@ tags = []
         let m = mgr.get("tecton").unwrap();
         assert_eq!(m.kind, CompartmentKind::Workspace);
         assert_eq!(m.scope, CompartmentScope::Private);
+    }
+
+    #[test]
+    fn same_pack_reload_preserves_cold_woken_provenance_and_timestamp() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::vsa::Dimension;
+
+        let (tmp, manager) = tmp_manager();
+        let mut manifest = workspace_manifest("facts");
+        manifest.triples_file = Some("triples.json".into());
+        manager.create_compartment(manifest).unwrap();
+        std::fs::write(
+            tmp.path().join("facts").join("triples.json"),
+            r#"[{"subject":"Sun","predicate":"emits","object":"Light","confidence":0.8}]"#,
+        )
+        .unwrap();
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(tmp.path().join("engine-data")),
+            ..Default::default()
+        })
+        .unwrap();
+
+        manager.load("facts", &engine).unwrap();
+        let sun = engine.resolve_symbol("Sun").unwrap();
+        let emits = engine.resolve_symbol("emits").unwrap();
+        let light = engine.resolve_symbol("Light").unwrap();
+        let pack_fact = || {
+            engine
+                .triples_from(sun)
+                .into_iter()
+                .find(|triple| {
+                    triple.predicate == emits
+                        && triple.object == light
+                        && triple.compartment_id.as_deref() == Some("facts")
+                })
+                .expect("pack fact should be live")
+        };
+
+        let first = pack_fact();
+        let original_provenance = first
+            .provenance_id
+            .expect("persistent pack load should attach provenance");
+        let ledger_len = engine.all_provenance().unwrap().len();
+
+        // Model snapshot restore with a recognizable preserved timestamp. A
+        // fresh manager below represents deferred compartment startup after
+        // that restore has already made the fact live.
+        let restored_timestamp = 1_700_000_123;
+        let mut restored = first;
+        restored.timestamp = restored_timestamp;
+        engine.add_triple(&restored).unwrap();
+        assert_eq!(pack_fact().timestamp, restored_timestamp);
+
+        let cold_woken_manager = CompartmentManager::new(tmp.path().to_path_buf());
+        assert_eq!(cold_woken_manager.discover().unwrap(), 1);
+        cold_woken_manager.load("facts", &engine).unwrap();
+
+        let after_reload = pack_fact();
+        assert_eq!(after_reload.provenance_id, Some(original_provenance));
+        assert_eq!(after_reload.timestamp, restored_timestamp);
+        assert_eq!(engine.all_provenance().unwrap().len(), ledger_len);
+        assert_eq!(
+            engine
+                .triples_from(sun)
+                .into_iter()
+                .filter(|triple| {
+                    triple.predicate == emits
+                        && triple.object == light
+                        && triple.compartment_id.as_deref() == Some("facts")
+                })
+                .count(),
+            1
+        );
+
+        engine.remove_triple(sun, emits, light).unwrap();
+        engine
+            .add_triple(
+                &crate::graph::Triple::new(sun, emits, light)
+                    .with_confidence(0.8)
+                    .with_compartment("facts".into()),
+            )
+            .unwrap();
+        assert_eq!(pack_fact().provenance_id, None);
+
+        let repair_manager = CompartmentManager::new(tmp.path().to_path_buf());
+        assert_eq!(repair_manager.discover().unwrap(), 1);
+        repair_manager.load("facts", &engine).unwrap();
+        let repaired = pack_fact();
+        let repaired_id = repaired
+            .provenance_id
+            .expect("an untracked collision still needs pack provenance");
+        assert_ne!(repaired_id, original_provenance);
+        assert!(matches!(
+            engine
+                .get_provenance(crate::provenance::ProvenanceId::new(repaired_id).unwrap())
+                .unwrap()
+                .kind,
+            crate::provenance::DerivationKind::CompartmentLoaded { .. }
+        ));
+        assert_eq!(engine.all_provenance().unwrap().len(), ledger_len + 1);
     }
 
     fn make_manager() -> (CompartmentManager, tempfile::TempDir) {

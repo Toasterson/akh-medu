@@ -880,6 +880,13 @@ pub enum DerivationKind {
 /// a registry symbol.
 pub const RULE_SUPPORT_TRIPLES_V1_SENTINEL: u64 = u64::MAX;
 
+/// Inner marker for a conclusion-bound RuleInference application encoded as
+/// `[V1 marker, V2 marker, conclusion s, p, o, support s, p, o, ...]`.
+/// Keeping the V1 marker outermost makes old readers fail closed on the
+/// deliberately non-triple-aligned payload instead of misreading metadata as
+/// support.
+pub const RULE_APPLICATION_V2_SENTINEL: u64 = u64::MAX - 1;
+
 impl DerivationKind {
     /// Stable snake-case names used by audit and wire protocols.
     ///

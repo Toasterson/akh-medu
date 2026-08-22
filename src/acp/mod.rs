@@ -3219,8 +3219,19 @@ fn derivation_chain_edges(
                 // A malformed versioned payload is corrupt, not a legacy
                 // symbol walk.  Fail closed rather than interpreting shifted
                 // IDs as unrelated live support edges.
-                if (antecedents.len() - 1) % 3 == 0 {
-                    for triple_key in antecedents[1..].chunks_exact(3).take(64) {
+                let support = if antecedents.get(1).is_some_and(|marker| {
+                    marker.get() == crate::provenance::RULE_APPLICATION_V2_SENTINEL
+                }) {
+                    // V2 binds the exact conclusion before the support list.
+                    // The conclusion is ownership metadata, not an antecedent
+                    // and must not appear in the derivation chain.
+                    (antecedents.len() >= 5 && (antecedents.len() - 5) % 3 == 0)
+                        .then_some(&antecedents[5..])
+                } else {
+                    ((antecedents.len() - 1) % 3 == 0).then_some(&antecedents[1..])
+                };
+                if let Some(support) = support {
+                    for triple_key in support.chunks_exact(3).take(64) {
                         push_live(triple_key[0], triple_key[2], Some(triple_key[1]));
                     }
                 }
@@ -6527,6 +6538,66 @@ tags = []
             derivation_chain_edges(&engine, &record).is_empty(),
             "a malformed versioned payload must not fall back to legacy symbol walking"
         );
+    }
+
+    #[test]
+    fn provenance_chain_v2_exposes_support_but_not_the_conclusion_header() {
+        let (engine, _agent) = engine_and_agent();
+        let conclusion_subject = engine.resolve_or_create_entity("ConclusionSubject").unwrap();
+        let conclusion_predicate = engine.resolve_or_create_relation("concludes").unwrap();
+        let conclusion_object = engine.resolve_or_create_entity("ConclusionObject").unwrap();
+        let support_subject = engine.resolve_or_create_entity("SupportSubject").unwrap();
+        let support_predicate = engine.resolve_or_create_relation("supports").unwrap();
+        let support_object = engine.resolve_or_create_entity("SupportObject").unwrap();
+        engine
+            .add_triple(
+                &crate::graph::Triple::new(
+                    conclusion_subject,
+                    conclusion_predicate,
+                    conclusion_object,
+                )
+                .with_confidence(0.9),
+            )
+            .unwrap();
+        engine
+            .add_triple(
+                &crate::graph::Triple::new(
+                    support_subject,
+                    support_predicate,
+                    support_object,
+                )
+                .with_confidence(0.8),
+            )
+            .unwrap();
+
+        let record = crate::provenance::ProvenanceRecord::new(
+            conclusion_object,
+            crate::provenance::DerivationKind::RuleInference {
+                rule_name: "bound-conclusion".into(),
+                antecedents: vec![
+                    crate::symbol::SymbolId::new(
+                        crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL,
+                    )
+                    .unwrap(),
+                    crate::symbol::SymbolId::new(
+                        crate::provenance::RULE_APPLICATION_V2_SENTINEL,
+                    )
+                    .unwrap(),
+                    conclusion_subject,
+                    conclusion_predicate,
+                    conclusion_object,
+                    support_subject,
+                    support_predicate,
+                    support_object,
+                ],
+            },
+        );
+        let chain = derivation_chain_edges(&engine, &record);
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0][0], "SupportSubject");
+        assert_eq!(chain[0][1], "supports");
+        assert_eq!(chain[0][2], "SupportObject");
+        assert!((chain[0][3].as_f64().unwrap() - 0.8).abs() < 1e-6);
     }
 
     #[test]

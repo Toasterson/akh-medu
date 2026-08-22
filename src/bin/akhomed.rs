@@ -234,12 +234,23 @@ async fn snapshot_once(
     akhomed_store::ensure_akh(pool, akh_id, name, None)
         .await
         .map_err(|e| e.to_string())?;
+    // Sample the recovery boundary before capturing. Any mutation committed
+    // after this point has a larger sequence and is replayed, even if it races
+    // between the in-memory copy and the async relational writes.
+    let watermark = akhomed_store::snapshots::current_watermark(pool, akh_id)
+        .await
+        .map_err(|e| e.to_string())?;
     // Capture under the lock (sync), release, then persist lock-free.
     let started = std::time::Instant::now();
     let data = {
         let guard = agent.read().unwrap_or_else(|e| e.into_inner());
-        akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
-            .map_err(|e| e.to_string())?
+        akh_medu::snapshot::capture_snapshot_at_watermark(
+            &guard,
+            akh_id,
+            workspace_id,
+            watermark,
+        )
+        .map_err(|e| e.to_string())?
     };
     let capture_ms = started.elapsed().as_millis();
     let persist_started = std::time::Instant::now();

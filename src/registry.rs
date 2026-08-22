@@ -129,6 +129,34 @@ impl SymbolRegistry {
         Ok(())
     }
 
+    /// Authoritatively replace the durable symbol namespace with this
+    /// registry in one transaction.
+    ///
+    /// Normal persistence is append/update oriented because a live registry
+    /// only grows.  Cold restore is different: the relational snapshot is the
+    /// source of truth, so stale `sym_meta:*` keys from a reused host must be
+    /// removed atomically with publishing the restored entries.
+    pub fn replace_persisted(&self, store: &TieredStore) -> AkhResult<()> {
+        let mut keys = Vec::with_capacity(self.id_to_meta.len());
+        let mut values = Vec::with_capacity(self.id_to_meta.len());
+        for entry in self.id_to_meta.iter() {
+            let meta = entry.value();
+            keys.push(format!("sym_meta:{}", meta.id.get()).into_bytes());
+            values.push(bincode::serialize(meta).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize symbol meta: {e}"),
+                }
+            })?);
+        }
+        let entries: Vec<(&[u8], &[u8])> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+            .collect();
+        store.replace_meta_prefix(b"sym_meta:", &entries)?;
+        Ok(())
+    }
+
     /// Restore the registry from the durable store by scanning `sym_meta:` prefix.
     pub fn restore(store: &TieredStore) -> AkhResult<Self> {
         let registry = Self::new();
@@ -267,5 +295,28 @@ mod tests {
         let sun = restored.get(sym(1)).unwrap();
         assert_eq!(sun.label, "Sun");
         assert_eq!(sun.kind, SymbolKind::Entity);
+    }
+
+    #[test]
+    fn authoritative_restore_removes_reused_host_symbols() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TieredStore::with_persistence(dir.path(), "test").unwrap();
+
+        let stale = SymbolRegistry::new();
+        stale.register(meta(1, "Sun")).unwrap();
+        stale.register(meta(99, "StaleHostOnly")).unwrap();
+        stale.persist(&store).unwrap();
+
+        let restored = SymbolRegistry::new();
+        restored.register(meta(1, "Sun")).unwrap();
+        restored.register(meta(2, "Moon")).unwrap();
+        restored.replace_persisted(&store).unwrap();
+
+        let reopened = SymbolRegistry::restore(&store).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(reopened.lookup("Sun"), Some(sym(1)));
+        assert_eq!(reopened.lookup("Moon"), Some(sym(2)));
+        assert!(reopened.lookup("StaleHostOnly").is_none());
+        assert!(reopened.get(sym(99)).is_none());
     }
 }
