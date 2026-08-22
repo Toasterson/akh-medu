@@ -1105,6 +1105,18 @@ impl Engine {
         Ok(ledger.by_kind(kind)?)
     }
 
+    /// Get all persisted provenance records in one coherent ledger scan.
+    ///
+    /// An in-memory engine has no provenance ledger, so it returns an empty
+    /// set.  Callers can still report its knowledge-graph triples as
+    /// `untracked`; actual ledger read/decoding failures remain errors.
+    pub fn all_provenance(&self) -> AkhResult<Vec<ProvenanceRecord>> {
+        match self.provenance_ledger.as_ref() {
+            Some(ledger) => Ok(ledger.all_records()?),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Access the audit ledger, if persistence is configured.
     pub fn audit_ledger(&self) -> Option<&Arc<crate::audit::AuditLedger>> {
         self.audit_ledger.as_ref()

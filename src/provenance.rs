@@ -1315,6 +1315,32 @@ impl ProvenanceLedger {
         self.len().map(|n| n == 0)
     }
 
+    /// Retrieve every provenance record in one read transaction.
+    ///
+    /// This is intentionally a ledger scan rather than one `get` transaction
+    /// per knowledge-graph triple.  Audit surfaces such as
+    /// `_akh/provenance/filter` need to join many triples to their provenance;
+    /// keeping the scan inside one redb snapshot makes that join both coherent
+    /// and bounded in database round trips.
+    pub fn all_records(&self) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+
+        let mut records = Vec::with_capacity(table.len().map_err(redb_err)? as usize);
+        for entry in table.iter().map_err(redb_err)? {
+            let (_, encoded) = entry.map_err(redb_err)?;
+            let record = bincode::deserialize(encoded.value()).map_err(|e| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: format!("provenance record deserialize: {e}"),
+                })
+            })?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------

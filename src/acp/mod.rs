@@ -1845,6 +1845,7 @@ const ENGINE_ONLY_METHODS: &[&str] = &[
     "_akh/argue",
     "_akh/explain",
     "_akh/provenance",
+    "_akh/provenance/filter",
     "_akh/identity",
 ];
 
@@ -1889,7 +1890,7 @@ fn dispatch_akh(
                 "reasoning", "evidence",
                 // Phase 29 capability-exposure groups (plan
                 // docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039).
-                "microtheory", "psyche", "argue", "explain", "trust",
+                "microtheory", "psyche", "argue", "explain", "trust", "provenance",
                 // ADR 081 Slice 9 — schema-coverage report.
                 "schema",
                 // Identity — client-driven Ritual of Awakening (re-exposed as an
@@ -1936,6 +1937,7 @@ fn dispatch_akh(
                 // Phase 29e — transparent reasoning traces.
                 "_akh/explain",
                 "_akh/provenance",
+                "_akh/provenance/filter",
                 // Phase 29h — evidence assessment.
                 "_akh/evidence/assess",
                 // Phase 29i — source trust.
@@ -2836,10 +2838,413 @@ fn dispatch_akh(
             }))
         }
 
+        // A workspace-wide audit view over triples joined to their persisted
+        // provenance.  This is deliberately a separate method from the
+        // symbol-anchored `_akh/provenance` lookup: operators use it to measure
+        // a suspect derivation family before any cleanup is attempted.
+        "provenance/filter" => provenance_filter_json(engine, workspace, params),
+
         other => Err(AcpAppError::msg(format!(
             "unknown _akh data-plane method: _akh/{other}"
         ))),
     }
+}
+
+/// One triple after joining its optional provenance record and resolving the
+/// three labels once.  Keeping this small projection in memory makes sorting,
+/// aggregation, and pagination deterministic without repeatedly taking symbol
+/// registry locks from a comparator.
+struct ProvenanceFilterMatch<'a> {
+    triple: crate::graph::Triple,
+    provenance: Option<&'a crate::provenance::ProvenanceRecord>,
+    subject: String,
+    predicate: String,
+    object: String,
+    kind: String,
+}
+
+/// Execute the workspace-wide provenance filter used by
+/// `_akh/provenance/filter`.
+///
+/// Breakdowns are computed over the complete filtered set (never just the
+/// current page).  Triples without a live ledger record are reported as
+/// `untracked`; they are not silently called `extracted`, because doing so
+/// would turn missing/corrupt provenance into false evidence.
+fn provenance_filter_json(
+    engine: &Engine,
+    workspace: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, AcpAppError> {
+    if let Some(requested) = params.get("workspace") {
+        let requested = requested
+            .as_str()
+            .ok_or_else(|| AcpAppError::msg("workspace must be a string"))?;
+        if requested != workspace {
+            return Err(AcpAppError::msg(format!(
+                "workspace mismatch: this ACP session is routed to {workspace:?}, not {requested:?}"
+            )));
+        }
+    }
+
+    let derived_by = params
+        .get("derived_by")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| AcpAppError::msg("derived_by must be a string"))
+        })
+        .transpose()?
+        .unwrap_or("any");
+    let derived_by = normalize_provenance_filter(derived_by);
+    if derived_by.is_empty() {
+        return Err(AcpAppError::msg("derived_by must not be empty"));
+    }
+
+    let min_confidence = params
+        .get("min_confidence")
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or_else(|| AcpAppError::msg("min_confidence must be a number in [0,1]"))
+        })
+        .transpose()?
+        .unwrap_or(0.0);
+    if !(0.0..=1.0).contains(&min_confidence) {
+        return Err(AcpAppError::msg("min_confidence must be a number in [0,1]"));
+    }
+    let min_confidence = min_confidence as f32;
+
+    let page = parse_positive_usize(params, "page", 1)?;
+    let page_size = parse_positive_usize(params, "page_size", 50)?;
+    if page_size > 500 {
+        return Err(AcpAppError::msg("page_size must be between 1 and 500"));
+    }
+    let offset = page
+        .checked_sub(1)
+        .and_then(|n| n.checked_mul(page_size))
+        .ok_or_else(|| AcpAppError::msg("page offset is too large"))?;
+
+    let requested_predicate = params
+        .get("predicate")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| AcpAppError::msg("predicate must be a string"))
+        })
+        .transpose()?
+        .map(str::trim);
+    if requested_predicate == Some("") {
+        return Err(AcpAppError::msg("predicate must not be empty"));
+    }
+    let predicate_id = requested_predicate.and_then(|label| engine.resolve_symbol(label).ok());
+
+    let provenance_records = engine
+        .all_provenance()
+        .map_err(|e| diag_err(e, "provenance ledger scan failed"))?;
+    let provenance_by_id: std::collections::HashMap<u64, &crate::provenance::ProvenanceRecord> =
+        provenance_records
+            .iter()
+            .filter_map(|record| record.id.map(|id| (id.get(), record)))
+            .collect();
+
+    let mut matches = Vec::new();
+    for triple in engine.all_triples() {
+        if !triple.confidence.is_finite() || triple.confidence < min_confidence {
+            continue;
+        }
+        if requested_predicate.is_some()
+            && predicate_id.is_none_or(|predicate| triple.predicate != predicate)
+        {
+            continue;
+        }
+
+        let provenance = triple
+            .provenance_id
+            .and_then(|id| provenance_by_id.get(&id).copied());
+        let kind = provenance
+            .map(|record| provenance_kind_name(&record.kind))
+            .unwrap_or_else(|| "untracked".to_string());
+        if !provenance_filter_matches(&derived_by, &kind) {
+            continue;
+        }
+
+        matches.push(ProvenanceFilterMatch {
+            subject: engine.resolve_label(triple.subject),
+            predicate: engine.resolve_label(triple.predicate),
+            object: engine.resolve_label(triple.object),
+            triple,
+            provenance,
+            kind,
+        });
+    }
+
+    // Deterministic across graph insertion order: confidence first (the most
+    // suspicious/high-value facts lead), then labels, then timestamp/id.
+    matches.sort_by(|left, right| {
+        right
+            .triple
+            .confidence
+            .total_cmp(&left.triple.confidence)
+            .then_with(|| left.subject.cmp(&right.subject))
+            .then_with(|| left.predicate.cmp(&right.predicate))
+            .then_with(|| left.object.cmp(&right.object))
+            .then_with(|| right.triple.timestamp.cmp(&left.triple.timestamp))
+            .then_with(|| left.triple.subject.get().cmp(&right.triple.subject.get()))
+    });
+
+    let mut breakdown_by_kind = std::collections::BTreeMap::<String, usize>::new();
+    let mut breakdown_by_predicate = std::collections::BTreeMap::<String, usize>::new();
+    for item in &matches {
+        *breakdown_by_kind.entry(item.kind.clone()).or_default() += 1;
+        *breakdown_by_predicate
+            .entry(item.predicate.clone())
+            .or_default() += 1;
+    }
+
+    let total_matching = matches.len();
+    let total_pages = if total_matching == 0 {
+        0
+    } else {
+        total_matching.div_ceil(page_size)
+    };
+    let triples = matches
+        .iter()
+        .skip(offset)
+        .take(page_size)
+        .map(|item| {
+            let timestamp = item
+                .provenance
+                .map(|record| record.timestamp)
+                .unwrap_or(item.triple.timestamp);
+            let sources = item
+                .provenance
+                .map(|record| {
+                    record
+                        .sources
+                        .iter()
+                        .map(|source| engine.resolve_label(*source))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let derivation = item
+                .provenance
+                .and_then(|record| serde_json::to_value(&record.kind).ok());
+            let derivation_chain = item
+                .provenance
+                .map(|record| direct_derivation_edges(engine, record))
+                .unwrap_or_default();
+            serde_json::json!({
+                "subject": item.subject,
+                "predicate": item.predicate,
+                "object": item.object,
+                "confidence": item.triple.confidence,
+                "derived_by": item.kind,
+                "provenance_id": item.triple.provenance_id,
+                "derivation": derivation,
+                "sources": sources,
+                "derivation_chain": derivation_chain,
+                "derived_at": unix_seconds_to_iso8601(timestamp),
+                "derived_at_unix": timestamp,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!({
+        "workspace": workspace,
+        "filter": {
+            "derived_by": derived_by,
+            "predicate": requested_predicate,
+            "min_confidence": min_confidence,
+        },
+        "total_matching": total_matching,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "triples": triples,
+        "breakdown_by_kind": breakdown_by_kind,
+        "breakdown_by_predicate": breakdown_by_predicate,
+    }))
+}
+
+fn parse_positive_usize(
+    params: &serde_json::Value,
+    key: &str,
+    default: usize,
+) -> Result<usize, AcpAppError> {
+    let Some(value) = params.get(key) else {
+        return Ok(default);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| AcpAppError::msg(format!("{key} must be a positive integer")))?;
+    let parsed = usize::try_from(raw)
+        .map_err(|_| AcpAppError::msg(format!("{key} is too large for this host")))?;
+    if parsed == 0 {
+        return Err(AcpAppError::msg(format!(
+            "{key} must be a positive integer"
+        )));
+    }
+    Ok(parsed)
+}
+
+/// Normalize wire spellings while preserving semantic aliases from the
+/// original MCP contract (`infer_rules`, `user_asserted`, `agent_learned`, and
+/// `seed_pack`).
+fn normalize_provenance_filter(raw: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_separator = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !normalized.is_empty() {
+            normalized.push('_');
+            last_was_separator = true;
+        }
+    }
+    while normalized.ends_with('_') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn provenance_filter_matches(requested: &str, canonical_kind: &str) -> bool {
+    match requested {
+        "any" => true,
+        "infer_rules" => canonical_kind == "rule_inference",
+        "user_asserted" => canonical_kind == "seed",
+        "seed_pack" => canonical_kind == "compartment_loaded",
+        "agent_learned" => matches!(
+            canonical_kind,
+            "agent_consolidation"
+                | "library_learning"
+                | "procedural_learning"
+                | "preference_learned"
+                | "causal_schema_learned"
+        ),
+        exact => canonical_kind == exact,
+    }
+}
+
+/// Stable snake_case wire name derived from the Rust enum variant.  Using the
+/// variant name rather than duplicating `DerivationKind::tag()`'s numeric table
+/// means newly added provenance kinds automatically become queryable and
+/// visible in breakdowns.
+fn provenance_kind_name(kind: &crate::provenance::DerivationKind) -> String {
+    let debug = format!("{kind:?}");
+    let variant = debug
+        .split(|ch: char| ch == '{' || ch == '(' || ch.is_ascii_whitespace())
+        .next()
+        .unwrap_or("Unknown");
+    pascal_to_snake_case(variant)
+}
+
+fn pascal_to_snake_case(value: &str) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(value.len() + 4);
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let previous_is_lower_or_digit = index > 0
+            && (chars[index - 1].is_ascii_lowercase() || chars[index - 1].is_ascii_digit());
+        let acronym_boundary = index > 0
+            && chars[index - 1].is_ascii_uppercase()
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_lowercase());
+        if ch.is_ascii_uppercase()
+            && !out.is_empty()
+            && (previous_is_lower_or_digit || acronym_boundary)
+        {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Return only graph edges that actually explain a direct provenance hop.
+/// The source labels are also emitted separately, so this helper never invents
+/// a predicate when a record names sources but the corresponding KG edge has
+/// already been removed.
+fn direct_derivation_edges(
+    engine: &Engine,
+    record: &crate::provenance::ProvenanceRecord,
+) -> Vec<serde_json::Value> {
+    use crate::provenance::DerivationKind;
+
+    let mut rows = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut push = |subject: crate::symbol::SymbolId,
+                    predicate: crate::symbol::SymbolId,
+                    object: crate::symbol::SymbolId,
+                    confidence: f32| {
+        if seen.insert((subject.get(), predicate.get(), object.get())) {
+            rows.push(serde_json::json!([
+                engine.resolve_label(subject),
+                engine.resolve_label(predicate),
+                engine.resolve_label(object),
+                confidence,
+            ]));
+        }
+    };
+
+    match &record.kind {
+        DerivationKind::GraphEdge { from, predicate } => {
+            push(*from, *predicate, record.derived_id, record.confidence);
+        }
+        DerivationKind::VsaRecovery {
+            from,
+            predicate,
+            similarity,
+        } => push(*from, *predicate, record.derived_id, *similarity),
+        DerivationKind::FillerRecovery { subject, predicate } => {
+            push(*subject, *predicate, record.derived_id, record.confidence);
+        }
+        _ => {}
+    }
+
+    for source in &record.sources {
+        for triple in engine
+            .triples_from(*source)
+            .into_iter()
+            .filter(|triple| triple.object == record.derived_id)
+        {
+            push(
+                triple.subject,
+                triple.predicate,
+                triple.object,
+                triple.confidence,
+            );
+        }
+    }
+    rows
+}
+
+/// Dependency-free UTC rendering for the wire response.  The civil-date
+/// conversion is the proleptic Gregorian algorithm by era/day-of-era; using
+/// `i128` keeps even a corrupt-but-valid `u64` timestamp bounded and avoids a
+/// year-by-year loop.
+fn unix_seconds_to_iso8601(seconds: u64) -> String {
+    let days = i128::from(seconds / 86_400);
+    let seconds_of_day = seconds % 86_400;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// The workspace's [`CompartmentManager`], or a clean error for workspaces
@@ -5736,6 +6141,185 @@ mod tests {
         let engine = Arc::new(engine);
         let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
         (engine, Arc::new(RwLock::new(agent)))
+    }
+
+    fn persistent_engine() -> (tempfile::TempDir, Arc<Engine>) {
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(data_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .expect("persistent engine");
+        (data_dir, Arc::new(engine))
+    }
+
+    fn add_provenanced_triple(
+        engine: &Engine,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        confidence: f32,
+        kind: crate::provenance::DerivationKind,
+        timestamp: u64,
+    ) {
+        let subject_id = engine.resolve_or_create_entity(subject).unwrap();
+        let predicate_id = engine.resolve_or_create_relation(predicate).unwrap();
+        let object_id = engine.resolve_or_create_entity(object).unwrap();
+        let mut provenance = crate::provenance::ProvenanceRecord::new(object_id, kind)
+            .with_sources(vec![subject_id])
+            .with_confidence(confidence);
+        provenance.timestamp = timestamp;
+        let provenance_id = engine.store_provenance(&mut provenance).unwrap();
+        let mut triple = crate::graph::Triple::new(subject_id, predicate_id, object_id)
+            .with_confidence(confidence)
+            .with_provenance(provenance_id.get());
+        triple.timestamp = timestamp;
+        engine.add_triple(&triple).unwrap();
+    }
+
+    #[test]
+    fn provenance_filter_paginates_and_aggregates_the_full_filtered_set() {
+        use crate::provenance::DerivationKind;
+
+        let (_data_dir, engine) = persistent_engine();
+        add_provenanced_triple(
+            &engine,
+            "Tecton",
+            "is-a",
+            "Architect",
+            0.95,
+            DerivationKind::RuleInference {
+                rule_name: "role".into(),
+                antecedents: Vec::new(),
+            },
+            1_700_000_003,
+        );
+        add_provenanced_triple(
+            &engine,
+            "Ptah",
+            "is-a",
+            "Deity",
+            0.85,
+            DerivationKind::Seed,
+            1_700_000_002,
+        );
+
+        // A lower-confidence untracked fact is useful for the alias/filter
+        // checks below, but must be excluded from this first filtered set.
+        engine
+            .ingest_label_triples(&[("Stor01".into(), "part-of".into(), "Lab".into(), 0.75)])
+            .unwrap();
+
+        let response = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({
+                "workspace": "default",
+                "derived_by": "any",
+                "predicate": "is-a",
+                "min_confidence": 0.8,
+                "page": 2,
+                "page_size": 1,
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(response["total_matching"], 2);
+        assert_eq!(response["total_pages"], 2);
+        assert_eq!(response["page"], 2);
+        assert_eq!(response["triples"].as_array().unwrap().len(), 1);
+        assert_eq!(response["triples"][0]["subject"], "Ptah");
+        assert_eq!(response["triples"][0]["derived_by"], "seed");
+        assert_eq!(response["breakdown_by_kind"]["rule_inference"], 1);
+        assert_eq!(response["breakdown_by_kind"]["seed"], 1);
+        assert_eq!(response["breakdown_by_predicate"]["is-a"], 2);
+        assert_eq!(response["triples"][0]["derived_at"], "2023-11-14T22:13:22Z");
+        assert!(response["triples"][0]["derivation_chain"].is_array());
+
+        let inferred = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({"derived_by": "infer-rules"}),
+        )
+        .unwrap();
+        assert_eq!(inferred["filter"]["derived_by"], "infer_rules");
+        assert_eq!(inferred["total_matching"], 1);
+        assert_eq!(inferred["triples"][0]["subject"], "Tecton");
+
+        let asserted = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({"derived_by": "user asserted"}),
+        )
+        .unwrap();
+        assert_eq!(asserted["total_matching"], 1);
+        assert_eq!(asserted["triples"][0]["subject"], "Ptah");
+
+        let untracked = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/provenance/filter",
+            &serde_json::json!({"derived_by": "untracked"}),
+        )
+        .unwrap();
+        assert_eq!(untracked["total_matching"], 1);
+        assert_eq!(untracked["triples"][0]["subject"], "Stor01");
+
+        // The ledger scan is exposed through Engine and retains both records;
+        // the untracked fact must not manufacture a third provenance record.
+        assert_eq!(engine.all_provenance().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn provenance_filter_rejects_unsafe_bounds_and_cross_workspace_params() {
+        let (_data_dir, engine) = persistent_engine();
+        for params in [
+            serde_json::json!({"page": 0}),
+            serde_json::json!({"page_size": 501}),
+            serde_json::json!({"min_confidence": 1.1}),
+            serde_json::json!({"workspace": "other"}),
+        ] {
+            assert!(
+                dispatch_akh(&engine, "default", false, "_akh/provenance/filter", &params,)
+                    .is_err(),
+                "invalid params should fail closed: {params}"
+            );
+        }
+    }
+
+    #[test]
+    fn provenance_filter_is_advertised_and_names_future_kinds_without_a_tag_table() {
+        let (engine, _agent) = engine_and_agent();
+        let capabilities = dispatch_akh(
+            &engine,
+            "default",
+            false,
+            "_akh/meta/capabilities",
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert!(
+            capabilities["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|method| method == "_akh/provenance/filter")
+        );
+        assert_eq!(pascal_to_snake_case("VsaRecovery"), "vsa_recovery");
+        assert_eq!(
+            pascal_to_snake_case("LlmTripleExtraction"),
+            "llm_triple_extraction"
+        );
+        assert_eq!(unix_seconds_to_iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(unix_seconds_to_iso8601(951_782_400), "2000-02-29T00:00:00Z");
     }
 
     // ── SessionToolGuard (Breakage #1: cross-client MCP tool leak on panic) ──
