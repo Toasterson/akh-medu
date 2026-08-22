@@ -18,10 +18,7 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let sql = include_str!("../../migrations/20260604_000002_drawer_ingest.sql");
-        manager
-            .get_connection()
-            .execute_unprepared(sql)
-            .await?;
+        manager.get_connection().execute_unprepared(sql).await?;
         Ok(())
     }
 
@@ -42,6 +39,12 @@ impl MigrationTrait for Migration {
              DROP COLUMN IF EXISTS speaker, \
              DROP COLUMN IF EXISTS session_id, \
              DROP COLUMN IF EXISTS body_hash",
+        )
+        .await?;
+
+        db.execute_unprepared(
+            "ALTER TABLE heka_drawer_chunks \
+             DROP COLUMN IF EXISTS heading",
         )
         .await?;
 

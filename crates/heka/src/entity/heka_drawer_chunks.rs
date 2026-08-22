@@ -19,6 +19,9 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub text: String,
 
+    /// Markdown heading in effect for this chunk, when one was present.
+    pub heading: Option<String>,
+
     /// Word count of the chunk text.
     pub word_count: i32,
 

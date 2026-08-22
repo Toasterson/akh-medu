@@ -38,12 +38,13 @@
 //! The akh is identified by `HEKA_AKH_NAME` env var (default: "tecton").
 
 use std::io::Read;
+use std::path::PathBuf;
 
 use miette::{IntoDiagnostic, WrapErr};
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::Deserialize;
-use uuid::Uuid;
 
+use heka::HekaConfig;
 use heka::entity::heka_akhs;
 use heka::ingest::write_drawer;
 
@@ -117,9 +118,17 @@ async fn main() -> miette::Result<()> {
     }
 
     // Connect to the database.
-    let db_url = std::env::var("DATABASE_URL").map_err(|_| {
-        miette::miette!("DATABASE_URL env var is required (or set [database] url in heka.toml)")
-    })?;
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            let config_path = default_config_path();
+            HekaConfig::from_file(&config_path)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("loading config from {}", config_path.display()))?
+                .database
+                .url
+        }
+    };
     let db = sea_orm::Database::connect(&db_url)
         .await
         .into_diagnostic()
@@ -135,7 +144,7 @@ async fn main() -> miette::Result<()> {
         .wrap_err_with(|| format!("looking up akh '{akh_name}'"))?
         .ok_or_else(|| {
             miette::miette!(
-                "akh '{akh_name}' not found in heka_akhs — register it first via `hekad register-akh`"
+                "akh '{akh_name}' not found in heka_akhs — create its heka_akhs registration before enabling the capture hook (no registration CLI exists yet)"
             )
         })?;
 
@@ -155,18 +164,10 @@ async fn main() -> miette::Result<()> {
         let contact = turn.contact.as_deref().or(default_contact);
         let topics = turn.topics.clone().unwrap_or_default();
 
-        let summary = write_drawer(
-            &db,
-            akh.id,
-            session_id,
-            speaker,
-            body,
-            contact,
-            &topics,
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("writing drawer")?;
+        let summary = write_drawer(&db, akh.id, session_id, speaker, body, contact, &topics)
+            .await
+            .into_diagnostic()
+            .wrap_err("writing drawer")?;
 
         if summary.duplicated {
             duplicated += 1;
@@ -185,4 +186,14 @@ async fn main() -> miette::Result<()> {
     );
 
     Ok(())
+}
+
+/// Default config file path: `~/.config/heka/heka.toml`.
+fn default_config_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("heka")
+        .join("heka.toml")
 }

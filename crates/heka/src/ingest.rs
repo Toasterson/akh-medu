@@ -15,14 +15,14 @@
 //! rolls back the drawer row.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, QueryFilter,
+    Set, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::chunker::{chunk_paragraph_aware, DEFAULT_TARGET_CHUNK_CHARS};
+use crate::chunker::{DEFAULT_TARGET_CHUNK_CHARS, chunk_paragraph_aware};
 use crate::entity::{heka_drawer_chunks, heka_drawers};
 use crate::error::{HekaError, HekaResult};
 
@@ -130,7 +130,7 @@ pub async fn write_drawer(
             akh_id.into(),
             title.into(),
             serde_json::json!([]).into(), // tags
-            serde_json::json!({}).into(),  // metadata
+            serde_json::json!({}).into(), // metadata
             body_hash.clone().into(),
             session_id.map(|s| s.to_string()).into(),
             speaker.map(|s| s.to_string()).into(),
@@ -142,9 +142,8 @@ pub async fn write_drawer(
     );
     let result = txn.query_one(stmt).await?;
 
-    // If ON CONFLICT fired (concurrent insert), result is non-null with
-    // the existing ID — but since we did DO NOTHING without RETURNING on
-    // conflict, the row is None. Re-query to get the actual ID.
+    // If a concurrent insert triggered ON CONFLICT DO NOTHING, RETURNING
+    // produces no row. Re-query below to obtain the winner's ID.
     let actual_drawer_id = match result {
         Some(row) => row.try_get_by_index::<Uuid>(0).map_err(|e| {
             HekaError::Database(sea_orm::DbErr::RecordNotFound(format!(
@@ -183,9 +182,10 @@ pub async fn write_drawer(
             drawer_id: Set(actual_drawer_id),
             chunk_index: Set(i as i32),
             text: Set(c.text),
+            heading: Set(c.heading),
             word_count: Set(c.word_count),
             embedded_at: Set(None),
-            created_at: Set(now.into()),
+            created_at: Set(now),
         })
         .collect();
 
@@ -228,11 +228,8 @@ fn derive_title(body: &str, speaker: Option<&str>) -> String {
         .find(|l| !l.is_empty())
         .unwrap_or("");
 
-    let title = if first_line.is_empty() {
-        format!(
-            "{} turn",
-            speaker.unwrap_or("unknown")
-        )
+    if first_line.is_empty() {
+        format!("{} turn", speaker.unwrap_or("unknown"))
     } else {
         let chars: Vec<char> = first_line.chars().collect();
         if chars.len() > 120 {
@@ -240,9 +237,7 @@ fn derive_title(body: &str, speaker: Option<&str>) -> String {
         } else {
             first_line.to_string()
         }
-    };
-
-    title
+    }
 }
 
 #[cfg(test)]

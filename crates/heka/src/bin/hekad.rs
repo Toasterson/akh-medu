@@ -21,8 +21,8 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 
 use heka::config::HekaConfig;
+use heka::embedder::{SentenceEmbedder, resolve_model_dir};
 use heka::eval::EvalCommand;
-use heka::embedder::{resolve_model_dir, SentenceEmbedder};
 use heka::migration::Migrator;
 
 /// Heka daemon CLI.
@@ -125,8 +125,7 @@ async fn run_embed(config_path: Option<PathBuf>) -> miette::Result<()> {
         .wrap_err_with(|| format!("resolving embedding model '{model_name}'"))?;
 
     tracing::info!(model = model_name, dir = %resolved.display(), "loading ONNX model");
-    let embedder = SentenceEmbedder::load(&resolved)
-        .wrap_err("loading ONNX embedding model")?;
+    let embedder = SentenceEmbedder::load(&resolved).wrap_err("loading ONNX embedding model")?;
     let shared: heka::embedder::SharedEmbedder = Arc::new(Mutex::new(embedder));
 
     tracing::info!(

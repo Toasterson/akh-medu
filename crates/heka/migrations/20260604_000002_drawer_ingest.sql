@@ -6,6 +6,7 @@
 --   * speaker     — "user" | "assistant" | "system" (who produced this turn)
 --   * contact     — freeform contact label (e.g. "claude-code@laptop")
 --   * topics      — JSONB array of topic tags extracted from the turn
+--   * heading     — markdown heading propagated to each generated chunk
 --
 -- The UNIQUE(akh_id, body_hash) constraint makes re-capturing the same
 -- session a no-op: INSERT ... ON CONFLICT DO NOTHING skips rows whose
@@ -20,6 +21,10 @@ ALTER TABLE heka_drawers
     ADD COLUMN IF NOT EXISTS speaker    TEXT,
     ADD COLUMN IF NOT EXISTS contact    TEXT,
     ADD COLUMN IF NOT EXISTS topics     JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- Preserve the chunker's propagated markdown heading instead of discarding it.
+ALTER TABLE heka_drawer_chunks
+    ADD COLUMN IF NOT EXISTS heading TEXT;
 
 -- Backfill body_hash for pre-existing rows using pgcrypto's digest.
 -- Rows without a body (legacy drawers created before Phase 42c) get

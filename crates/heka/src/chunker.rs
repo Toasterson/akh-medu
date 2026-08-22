@@ -40,11 +40,7 @@ pub struct ChunkDraft {
 /// only to decide whether to pull markdown-style headings off the front
 /// of paragraphs; passing `"markdown"` or `"md"` enables heading
 /// extraction, anything else treats the input as opaque prose.
-pub fn chunk_paragraph_aware(
-    body: &str,
-    target_chars: usize,
-    format: &str,
-) -> Vec<ChunkDraft> {
+pub fn chunk_paragraph_aware(body: &str, target_chars: usize, format: &str) -> Vec<ChunkDraft> {
     let target = target_chars.max(MIN_TARGET_CHARS);
     let is_markdown = matches!(format, "markdown" | "md");
 
@@ -89,8 +85,8 @@ pub fn chunk_paragraph_aware(
 
         // Will this paragraph push us over the budget?
         let sep = if current.is_empty() { 0 } else { 2 };
-        let would_overflow = !current.is_empty()
-            && current.chars().count() + sep + content.chars().count() > target;
+        let would_overflow =
+            !current.is_empty() && current.chars().count() + sep + content.chars().count() > target;
         if would_overflow {
             flush(&mut chunks, &mut current, current_heading.clone());
             current = content;
@@ -165,7 +161,12 @@ fn split_leading_heading(para: &str) -> Option<(String, Option<String>)> {
     }
     match chars.next() {
         Some(c) if c.is_whitespace() => {
-            let heading = chars.as_str().trim().trim_end_matches('#').trim().to_string();
+            let heading = chars
+                .as_str()
+                .trim()
+                .trim_end_matches('#')
+                .trim()
+                .to_string();
             let rest: String = lines.collect::<Vec<_>>().join("\n");
             let rest = if rest.trim().is_empty() {
                 None
@@ -281,8 +282,7 @@ mod tests {
     #[test]
     fn splits_when_budget_exceeded() {
         let para = "Lorem ipsum dolor sit amet consectetur adipiscing elit.";
-        let body = std::iter::repeat(para)
-            .take(9)
+        let body = std::iter::repeat_n(para, 9)
             .collect::<Vec<_>>()
             .join("\n\n");
         let chunks = chunk_paragraph_aware(&body, 200, "text");
@@ -321,5 +321,14 @@ mod tests {
         let body = "para one.\n\npara two.";
         let chunks = chunk_paragraph_aware(body, 10, "text");
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn propagates_markdown_heading_to_persistable_chunks() {
+        let body = "# First\n\nOne.\n\nTwo.\n\n## Second\n\nThree.";
+        let chunks = chunk_paragraph_aware(body, 200, "markdown");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].heading.as_deref(), Some("First"));
+        assert_eq!(chunks[1].heading.as_deref(), Some("Second"));
     }
 }
