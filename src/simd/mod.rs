@@ -98,20 +98,21 @@ pub fn best_kernel() -> Box<dyn VsaKernel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
-    #[test]
-    fn detect_isa_returns_valid_level() {
-        let level = detect_isa();
-        // Should always be at least Generic.
-        assert!(level >= IsaLevel::Generic);
-    }
+    /// Fixed seed so a failure reproduces locally and in CI.
+    const RNG_SEED: u64 = 0x4B5F_5CA1_4B1A_5EED;
 
-    #[test]
-    fn best_kernel_returns_working_kernel() {
-        let kernel = best_kernel();
-        let level = kernel.isa_level();
-        assert!(level >= IsaLevel::Generic);
-    }
+    /// Real HyperVecs are 10,000 bits = 1,250 bytes. We exercise both block
+    /// widths (NEON 16, AVX2 32), including exact and +/-1 boundaries.
+    const LENGTH_SWEEP: &[usize] = &[0, 1, 15, 16, 17, 31, 32, 33, 1249, 1250, 1251];
+
+    /// Tolerance for `cosine_similarity_i8`. The SIMD kernels accumulate dot /
+    /// norm products in a different order than the scalar reference, so
+    /// floating-point results can differ by a small rounding amount. The
+    /// tolerance is chosen generously relative to the expected variation
+    /// (~1e-6) while still catching implementation mistakes.
+    const COSINE_EPS: f32 = 1e-4;
 
     /// Run the full kernel test suite against any implementation.
     pub fn kernel_conformance_tests(kernel: &dyn VsaKernel) {
@@ -185,9 +186,96 @@ mod tests {
         assert_eq!(out[0], 0b0100_0000);
     }
 
+    /// Assert that the SIMD `kernel` agrees with `generic::GenericKernel`
+    /// across randomised, alignment-breaking inputs. This is the real safety net:
+    /// a wrong bind silently corrupts every downstream symbol.
+    fn assert_kernel_matches_generic(kernel: &dyn VsaKernel) {
+        let mut rng = StdRng::seed_from_u64(RNG_SEED);
+        let reference = generic::GenericKernel;
+
+        for &len in LENGTH_SWEEP {
+            let bytes = len;
+
+            // xor_bind
+            let a: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let b: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let mut sim_out = vec![0u8; bytes];
+            let mut ref_out = vec![0u8; bytes];
+            kernel.xor_bind(&a, &b, &mut sim_out);
+            reference.xor_bind(&a, &b, &mut ref_out);
+            assert_eq!(
+                sim_out, ref_out,
+                "xor_bind mismatch at length {bytes} for {}",
+                kernel.isa_level()
+            );
+
+            // bundle_add_i8
+            let mut acc_sim: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let acc_ref = acc_sim.clone();
+            let src: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let mut acc_sim2 = acc_sim.clone();
+            kernel.bundle_add_i8(&mut acc_sim2, &src);
+            let mut acc_ref2 = acc_ref.clone();
+            reference.bundle_add_i8(&mut acc_ref2, &src);
+            assert_eq!(
+                acc_sim2, acc_ref2,
+                "bundle_add_i8 mismatch at length {bytes} for {}",
+                kernel.isa_level()
+            );
+
+            // hamming_distance
+            let a: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let b: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let sim_dist = kernel.hamming_distance(&a, &b);
+            let ref_dist = reference.hamming_distance(&a, &b);
+            assert_eq!(
+                sim_dist, ref_dist,
+                "hamming_distance mismatch at length {bytes} for {}",
+                kernel.isa_level()
+            );
+
+            // cosine_similarity_i8
+            let a: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let b: Vec<i8> = (0..bytes).map(|_| rng.gen::<i8>()).collect();
+            let sim_sim = kernel.cosine_similarity_i8(&a, &b);
+            let sim_ref = reference.cosine_similarity_i8(&a, &b);
+            let diff = (sim_sim - sim_ref).abs();
+            assert!(
+                diff <= COSINE_EPS,
+                "cosine_similarity_i8 mismatch at length {bytes} for {}: got {sim_sim}, expected {sim_ref}, diff {diff}",
+                kernel.isa_level()
+            );
+
+            // permute: include byte-aligned, bit-aligned, and over-long shifts.
+            let data: Vec<u8> = (0..bytes).map(|_| rng.gen::<u8>()).collect();
+            let shifts = if bytes == 0 {
+                vec![0]
+            } else {
+                let total_bits = bytes * 8;
+                vec![0, 1, 7, 8, 9, total_bits - 1, total_bits, total_bits + 1, total_bits * 2 + 5]
+            };
+            for shift in shifts {
+                let mut sim_out = vec![0u8; bytes];
+                let mut ref_out = vec![0u8; bytes];
+                kernel.permute(&data, shift, &mut sim_out);
+                reference.permute(&data, shift, &mut ref_out);
+                assert_eq!(
+                    sim_out, ref_out,
+                    "permute mismatch at length {bytes} shift {shift} for {}",
+                    kernel.isa_level()
+                );
+            }
+        }
+    }
+
     #[test]
     fn generic_kernel_conformance() {
         kernel_conformance_tests(&generic::GenericKernel);
+    }
+
+    #[test]
+    fn generic_kernel_matches_itself() {
+        assert_kernel_matches_generic(&generic::GenericKernel);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -198,9 +286,23 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_kernel_matches_generic() {
+        if detect_isa() >= IsaLevel::Avx2 {
+            assert_kernel_matches_generic(&avx2::Avx2Kernel);
+        }
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_kernel_conformance() {
         kernel_conformance_tests(&neon::NeonKernel);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_kernel_matches_generic() {
+        assert_kernel_matches_generic(&neon::NeonKernel);
     }
 }
