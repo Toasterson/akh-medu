@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{
-    Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
+    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable,
+    ReadableTableMetadata, TableDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1405,6 +1406,28 @@ fn redb_err(msg: impl std::fmt::Display) -> ProvenanceError {
     })
 }
 
+fn decode_record_at_key(raw_id: u64, encoded: &[u8]) -> ProvenanceResult<ProvenanceRecord> {
+    let expected_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+        ProvenanceError::Store(StoreError::Serialization {
+            message: "provenance table contains reserved zero key".into(),
+        })
+    })?;
+    let record: ProvenanceRecord = bincode::deserialize(encoded).map_err(|error| {
+        ProvenanceError::Store(StoreError::Serialization {
+            message: format!("failed to decode provenance record at key {raw_id}: {error}"),
+        })
+    })?;
+    if record.id != Some(expected_id) {
+        return Err(ProvenanceError::Store(StoreError::Serialization {
+            message: format!(
+                "provenance key {raw_id} does not match embedded ID {:?}",
+                record.id.map(ProvenanceId::get)
+            ),
+        }));
+    }
+    Ok(record)
+}
+
 impl ProvenanceLedger {
     /// Open a provenance ledger on an existing database.
     ///
@@ -1443,17 +1466,46 @@ impl ProvenanceLedger {
             max
         };
 
+        let next_id = max_id.checked_add(1).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance ID space is exhausted".into(),
+            })
+        })?;
+
         Ok(Self {
             db,
-            next_id: AtomicU64::new(max_id + 1),
+            next_id: AtomicU64::new(next_id),
         })
+    }
+
+    /// Reserve a contiguous range of provenance IDs without allowing the
+    /// allocator to wrap through zero. The returned value is the first ID in
+    /// the range; `count` successive IDs are reserved.
+    fn allocate_ids(&self, count: usize) -> ProvenanceResult<u64> {
+        let count = u64::try_from(count).map_err(|_| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance allocation request is too large".into(),
+            })
+        })?;
+        self.next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current != 0).then(|| current.checked_add(count)).flatten()
+            })
+            .map_err(|_| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "provenance ID space is exhausted".into(),
+                })
+            })
     }
 
     /// Store a single record, assigning it a new ID.
     pub fn store(&self, record: &mut ProvenanceRecord) -> ProvenanceResult<ProvenanceId> {
-        let raw_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let prov_id =
-            ProvenanceId::new(raw_id).expect("provenance ID counter should never reach zero");
+        let raw_id = self.allocate_ids(1)?;
+        let prov_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance allocator produced zero".into(),
+            })
+        })?;
         record.id = Some(prov_id);
 
         let encoded = bincode::serialize(&record).map_err(|e| {
@@ -1506,14 +1558,18 @@ impl ProvenanceLedger {
             return Ok(Vec::new());
         }
 
+        let first_id = self.allocate_ids(records.len())?;
         let mut ids = Vec::with_capacity(records.len());
         let mut encoded_batch = Vec::with_capacity(records.len());
 
         // Assign IDs and serialize before opening the transaction.
-        for record in records.iter_mut() {
-            let raw_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let prov_id =
-                ProvenanceId::new(raw_id).expect("provenance ID counter should never reach zero");
+        for (offset, record) in records.iter_mut().enumerate() {
+            let raw_id = first_id + offset as u64;
+            let prov_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "provenance allocator produced zero".into(),
+                })
+            })?;
             record.id = Some(prov_id);
             ids.push(prov_id);
 
@@ -1576,12 +1632,7 @@ impl ProvenanceLedger {
             .get(id.get())
             .map_err(redb_err)?
             .ok_or(ProvenanceError::NotFound { id: id.get() })?;
-        let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-            ProvenanceError::Store(StoreError::Serialization {
-                message: format!("provenance record deserialize: {e}"),
-            })
-        })?;
-        Ok(record)
+        decode_record_at_key(id.get(), guard.value())
     }
 
     /// Find all provenance records for a given derived symbol.
@@ -1630,14 +1681,94 @@ impl ProvenanceLedger {
 
         let mut records = Vec::with_capacity(table.len().map_err(redb_err)? as usize);
         for entry in table.iter().map_err(redb_err)? {
-            let (_, encoded) = entry.map_err(redb_err)?;
-            let record = bincode::deserialize(encoded.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
+            let (key, encoded) = entry.map_err(redb_err)?;
+            records.push(decode_record_at_key(key.value(), encoded.value())?);
+        }
+        Ok(records)
+    }
+
+    /// Validate the complete durable ledger as one coherent snapshot.
+    ///
+    /// Normal local startup calls this before publishing any restored facts.
+    /// It rejects malformed values, primary-key/embedded-ID disagreement, and
+    /// any missing, dangling, or stale secondary-index entry. Symbol closure is
+    /// validated by the engine after the returned records are joined to the
+    /// authoritative registry.
+    pub(crate) fn validate_integrity(&self) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        use std::collections::BTreeSet;
+
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
+
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        let mut records = Vec::with_capacity(primary.len().map_err(redb_err)? as usize);
+        let mut expected_derived = BTreeSet::new();
+        let mut expected_sources = BTreeSet::new();
+        let mut expected_kinds = BTreeSet::new();
+
+        for entry in primary.iter().map_err(redb_err)? {
+            let (key, encoded) = entry.map_err(redb_err)?;
+            let raw_id = key.value();
+            let record = decode_record_at_key(raw_id, encoded.value())?;
+
+            expected_derived.insert((record.derived_id.get(), raw_id));
+            for source in &record.sources {
+                expected_sources.insert((source.get(), raw_id));
+            }
+            expected_kinds.insert((record.kind.tag(), raw_id));
             records.push(record);
         }
+
+        let derived_index = txn
+            .open_multimap_table(DERIVED_INDEX)
+            .map_err(redb_err)?;
+        let mut actual_derived = BTreeSet::new();
+        for entry in derived_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_derived.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_derived != expected_derived {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance derived-symbol index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
+        let source_index = txn
+            .open_multimap_table(SOURCE_INDEX)
+            .map_err(redb_err)?;
+        let mut actual_sources = BTreeSet::new();
+        for entry in source_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_sources.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_sources != expected_sources {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance source-symbol index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
+        let kind_index = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
+        let mut actual_kinds = BTreeSet::new();
+        for entry in kind_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_kinds.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_kinds != expected_kinds {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance derivation-kind index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
         Ok(records)
     }
 
@@ -1753,12 +1884,7 @@ impl ProvenanceLedger {
                 .get(raw_id)
                 .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
-            let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
-            records.push(record);
+            records.push(decode_record_at_key(raw_id, guard.value())?);
         }
         Ok(records)
     }
@@ -1782,12 +1908,7 @@ impl ProvenanceLedger {
                 .get(raw_id)
                 .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
-            let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
-            records.push(record);
+            records.push(decode_record_at_key(raw_id, guard.value())?);
         }
         Ok(records)
     }
@@ -1915,6 +2036,81 @@ mod tests {
         let missing_id = ProvenanceRecord::new(sym(11), DerivationKind::Extracted);
         assert!(ledger.replace_all(&[missing_id]).is_err());
         assert_eq!(ledger.get(live_id).unwrap().derived_id, sym(5));
+    }
+
+    #[test]
+    fn integrity_validation_accepts_complete_primary_and_indices() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        let mut record = ProvenanceRecord::new(
+            sym(7),
+            DerivationKind::GraphEdge {
+                from: sym(8),
+                predicate: sym(9),
+            },
+        )
+        .with_sources(vec![sym(8)]);
+        let id = ledger.store(&mut record).unwrap();
+
+        let records = ledger.validate_integrity().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, Some(id));
+    }
+
+    #[test]
+    fn integrity_validation_rejects_primary_key_id_mismatch() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+        ledger.store(&mut record).unwrap();
+
+        let mut corrupt = record;
+        corrupt.id = ProvenanceId::new(2);
+        let encoded = bincode::serialize(&corrupt).unwrap();
+        {
+            let db = db.lock().unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut primary = txn.open_table(PROVENANCE_TABLE).unwrap();
+                primary.insert(1, encoded.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let error = ledger.validate_integrity().unwrap_err();
+        assert!(format!("{error}").contains("does not match embedded ID"));
+    }
+
+    #[test]
+    fn integrity_validation_rejects_missing_secondary_index_entry() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+        ledger.store(&mut record).unwrap();
+
+        {
+            let db = db.lock().unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.delete_multimap_table(DERIVED_INDEX).unwrap();
+            txn.open_multimap_table(DERIVED_INDEX).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let error = ledger.validate_integrity().unwrap_err();
+        assert!(format!("{error}").contains("derived-symbol index is inconsistent"));
+    }
+
+    #[test]
+    fn provenance_allocator_fails_closed_before_wraparound() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        ledger.next_id.store(u64::MAX, Ordering::SeqCst);
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+
+        let error = ledger.store(&mut record).unwrap_err();
+        assert!(format!("{error}").contains("ID space is exhausted"));
+        assert!(record.id.is_none());
+        assert_eq!(ledger.len().unwrap(), 0);
     }
 
     #[test]

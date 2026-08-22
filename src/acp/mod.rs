@@ -3040,7 +3040,7 @@ fn provenance_filter_json(
                 .unwrap_or(item.triple.timestamp);
             let derivation_chain = item
                 .provenance
-                .map(|record| derivation_chain_edges(engine, record))
+                .map(|record| derivation_chain_edges(engine, &item.triple, record))
                 .unwrap_or_default();
             serde_json::json!({
                 "subject": item.subject,
@@ -3153,6 +3153,7 @@ fn provenance_source_bucket(kind: &crate::provenance::DerivationKind) -> &'stati
 /// parallel predicates are selected by a stable label/id sort.
 fn derivation_chain_edges(
     engine: &Engine,
+    audited_triple: &crate::graph::Triple,
     record: &crate::provenance::ProvenanceRecord,
 ) -> Vec<serde_json::Value> {
     use crate::provenance::DerivationKind;
@@ -3224,8 +3225,15 @@ fn derivation_chain_edges(
                 }) {
                     // V2 binds the exact conclusion before the support list.
                     // The conclusion is ownership metadata, not an antecedent
-                    // and must not appear in the derivation chain.
-                    (antecedents.len() >= 5 && (antecedents.len() - 5) % 3 == 0)
+                    // and must not appear in the derivation chain.  It must
+                    // also name the audited edge exactly; accepting support
+                    // from a record bound to some other conclusion would turn
+                    // corrupt provenance into a valid-looking explanation.
+                    (antecedents.len() >= 5
+                        && (antecedents.len() - 5) % 3 == 0
+                        && antecedents[2] == audited_triple.subject
+                        && antecedents[3] == audited_triple.predicate
+                        && antecedents[4] == audited_triple.object)
                         .then_some(&antecedents[5..])
                 } else {
                     ((antecedents.len() - 1) % 3 == 0).then_some(&antecedents[1..])
@@ -6534,8 +6542,9 @@ tags = []
                 ],
             },
         );
+        let audited = crate::graph::Triple::new(subject, legacy_predicate, derived);
         assert!(
-            derivation_chain_edges(&engine, &record).is_empty(),
+            derivation_chain_edges(&engine, &audited, &record).is_empty(),
             "a malformed versioned payload must not fall back to legacy symbol walking"
         );
     }
@@ -6549,16 +6558,13 @@ tags = []
         let support_subject = engine.resolve_or_create_entity("SupportSubject").unwrap();
         let support_predicate = engine.resolve_or_create_relation("supports").unwrap();
         let support_object = engine.resolve_or_create_entity("SupportObject").unwrap();
-        engine
-            .add_triple(
-                &crate::graph::Triple::new(
-                    conclusion_subject,
-                    conclusion_predicate,
-                    conclusion_object,
-                )
-                .with_confidence(0.9),
-            )
-            .unwrap();
+        let conclusion = crate::graph::Triple::new(
+            conclusion_subject,
+            conclusion_predicate,
+            conclusion_object,
+        )
+        .with_confidence(0.9);
+        engine.add_triple(&conclusion).unwrap();
         engine
             .add_triple(
                 &crate::graph::Triple::new(
@@ -6592,12 +6598,22 @@ tags = []
                 ],
             },
         );
-        let chain = derivation_chain_edges(&engine, &record);
+        let chain = derivation_chain_edges(&engine, &conclusion, &record);
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0][0], "SupportSubject");
         assert_eq!(chain[0][1], "supports");
         assert_eq!(chain[0][2], "SupportObject");
         assert!((chain[0][3].as_f64().unwrap() - 0.8).abs() < 1e-6);
+
+        let unrelated = crate::graph::Triple::new(
+            conclusion_subject,
+            conclusion_predicate,
+            support_object,
+        );
+        assert!(
+            derivation_chain_edges(&engine, &unrelated, &record).is_empty(),
+            "V2 support must not explain a different audited conclusion"
+        );
     }
 
     #[test]

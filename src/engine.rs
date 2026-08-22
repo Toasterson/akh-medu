@@ -239,6 +239,90 @@ struct IdentityKey {
     compartment_id: Option<String>,
 }
 
+/// Side-effect-free material needed to publish one assertion and its replay
+/// envelope. Constructing this value is the admission boundary: once it
+/// succeeds, every symbol and provenance reference in the eventual WAL entry
+/// has already been resolved exactly.
+struct PreparedAssertion {
+    identity: TripleIdentity,
+    provenance: Option<ProvenanceRecord>,
+    symbols: Vec<SymbolMeta>,
+}
+
+fn invalid_persistent_state(message: impl Into<String>) -> crate::error::AkhError {
+    crate::error::StoreError::Serialization {
+        message: message.into(),
+    }
+    .into()
+}
+
+fn require_registered_symbol(registry: &SymbolRegistry, id: SymbolId) -> AkhResult<SymbolMeta> {
+    if matches!(
+        id.get(),
+        crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+            | crate::provenance::RULE_APPLICATION_V2_SENTINEL
+    ) {
+        return Err(invalid_persistent_state(format!(
+            "reserved provenance marker {} cannot be used as a registry symbol",
+            id.get()
+        )));
+    }
+    registry.get(id).ok_or_else(|| {
+        SymbolError::NotFound {
+            symbol_id: id.get(),
+        }
+        .into()
+    })
+}
+
+fn provenance_symbol_ids(record: &ProvenanceRecord) -> Vec<SymbolId> {
+    let mut ids = Vec::with_capacity(1 + record.sources.len());
+    ids.push(record.derived_id);
+    ids.extend(record.sources.iter().copied());
+    ids.extend(record.kind.referenced_symbol_ids());
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn validate_provenance_record_symbols(
+    registry: &SymbolRegistry,
+    record: &ProvenanceRecord,
+) -> AkhResult<()> {
+    if !record.confidence.is_finite() || !(0.0..=1.0).contains(&record.confidence) {
+        return Err(invalid_persistent_state(format!(
+            "provenance confidence {} is outside [0,1]",
+            record.confidence
+        )));
+    }
+    for id in provenance_symbol_ids(record) {
+        require_registered_symbol(registry, id)?;
+    }
+    Ok(())
+}
+
+fn validate_triple_symbols_and_shape(
+    registry: &SymbolRegistry,
+    triple: &Triple,
+) -> AkhResult<()> {
+    if !triple.confidence.is_finite() || !(0.0..=1.0).contains(&triple.confidence) {
+        return Err(invalid_persistent_state(format!(
+            "triple ({}, {}, {}) confidence {} is outside [0,1]",
+            triple.subject.get(),
+            triple.predicate.get(),
+            triple.object.get(),
+            triple.confidence
+        )));
+    }
+    for id in [triple.subject, triple.predicate, triple.object] {
+        require_registered_symbol(registry, id)?;
+    }
+    if let Some(compartment_id) = triple.compartment_id.as_deref() {
+        SparqlStore::compartment_to_iri(compartment_id)?;
+    }
+    Ok(())
+}
+
 impl Engine {
     /// Create a new engine with the given configuration.
     pub fn new(config: EngineConfig) -> AkhResult<Self> {
@@ -335,11 +419,13 @@ impl Engine {
         let store = Arc::new(store);
 
         // A Postgres cold wake is authoritative and must start from an empty
-        // graph even when it reuses a host-local data directory.  Importing a
+        // graph even when it reuses a host-local data directory. Importing a
         // stale bincode/Oxigraph graph here would retain facts absent from the
         // relational snapshot and could bind their provenance IDs to the
-        // replacement ledger below.
-        if !defer_startup_loads {
+        // replacement ledger below. Normal local startup decodes the candidate
+        // graph now, but does not publish it until its complete symbol and
+        // provenance closure has been validated below.
+        let (restored_triples, restored_from_rich_snapshot) = if !defer_startup_loads {
             // Restore the knowledge graph.  The bincode/redb snapshot is
             // authoritative because it retains confidence, timestamps,
             // compartment ownership, and the exact provenance ID.  Oxigraph
@@ -363,11 +449,7 @@ impl Engine {
                             message: format!("failed to decode rich KG snapshot: {error}"),
                         }
                     })?;
-                let count = knowledge_graph.bulk_load(&bincode_triples)?;
-                tracing::info!(
-                    triples = count,
-                    "knowledge graph restored from bincode snapshot"
-                );
+                (bincode_triples, true)
             } else {
                 // Compatibility fallback for installations created before the
                 // metadata snapshot existed.  These triples are necessarily
@@ -377,22 +459,56 @@ impl Engine {
                     Some(store) => store.all_triples()?,
                     None => Vec::new(),
                 };
-                if !sparql_triples.is_empty() {
-                    let count = knowledge_graph.bulk_load(&sparql_triples)?;
-                    tracing::info!(
-                        triples = count,
-                        "knowledge graph restored from SPARQL fallback"
-                    );
-                }
+                (sparql_triples, false)
             }
-        }
+        } else {
+            (Vec::new(), false)
+        };
 
         // Restore registry and allocator from persistent storage if available.
         let registry = SymbolRegistry::restore(&store)?;
-        let ledger_has_records = match provenance_ledger.as_ref() {
-            Some(ledger) => ledger.len()? > 0,
-            None => false,
+        let restored_provenance = match provenance_ledger.as_ref() {
+            Some(ledger) if !defer_startup_loads => ledger.validate_integrity()?,
+            _ => Vec::new(),
         };
+        let ledger_has_records = if defer_startup_loads {
+            match provenance_ledger.as_ref() {
+                Some(ledger) => ledger.len()? > 0,
+                None => false,
+            }
+        } else {
+            !restored_provenance.is_empty()
+        };
+
+        if !defer_startup_loads {
+            let provenance_ids: std::collections::HashSet<ProvenanceId> =
+                restored_provenance.iter().filter_map(|record| record.id).collect();
+            for record in &restored_provenance {
+                validate_provenance_record_symbols(&registry, record)?;
+            }
+            for triple in &restored_triples {
+                validate_triple_symbols_and_shape(&registry, triple)?;
+                if let Some(raw_id) = triple.provenance_id {
+                    let provenance_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+                        invalid_persistent_state(format!(
+                            "restored triple ({}, {}, {}) has zero provenance ID",
+                            triple.subject.get(),
+                            triple.predicate.get(),
+                            triple.object.get()
+                        ))
+                    })?;
+                    if !provenance_ids.contains(&provenance_id) {
+                        return Err(invalid_persistent_state(format!(
+                            "restored triple ({}, {}, {}) references missing provenance ID {}",
+                            triple.subject.get(),
+                            triple.predicate.get(),
+                            triple.object.get(),
+                            raw_id
+                        )));
+                    }
+                }
+            }
+        }
 
         let symbol_allocator = {
             match store.get_meta(b"sym_allocator_next")? {
@@ -441,7 +557,7 @@ impl Engine {
                 None
                     if !defer_startup_loads
                         && registry.is_empty()
-                        && knowledge_graph.triple_count() == 0
+                        && restored_triples.is_empty()
                         && !ledger_has_records =>
                 {
                     Arc::new(AtomicSymbolAllocator::new())
@@ -454,6 +570,21 @@ impl Engine {
                 }
             }
         };
+
+        if !defer_startup_loads && !restored_triples.is_empty() {
+            let count = knowledge_graph.bulk_load(&restored_triples)?;
+            if restored_from_rich_snapshot {
+                tracing::info!(
+                    triples = count,
+                    "knowledge graph restored from bincode snapshot"
+                );
+            } else {
+                tracing::info!(
+                    triples = count,
+                    "knowledge graph restored from SPARQL fallback"
+                );
+            }
+        }
 
         let grammar_registry = GrammarRegistry::new();
 
@@ -682,14 +813,47 @@ impl Engine {
         Ok(meta)
     }
 
-    /// Add a triple to the knowledge graph.
-    ///
-    /// The full Phase 9 pipeline runs around insertion (all configurable):
-    /// 1. **Pre-insert**: Constraint check, contradiction detection
-    /// 2. **Insert**: KG + hypervector creation + SPARQL sync
-    /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
-    pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
-        // --- Self-referential guard ---
+    /// Resolve and validate everything needed by an assertion before any
+    /// mutation in the insertion pipeline is allowed to run.
+    fn prepare_assertion(&self, triple: &Triple) -> AkhResult<PreparedAssertion> {
+        validate_triple_symbols_and_shape(&self.registry, triple)?;
+
+        let provenance = match triple.provenance_id {
+            None => None,
+            Some(raw_id) => {
+                let id = ProvenanceId::new(raw_id)
+                    .ok_or(ProvenanceError::NotFound { id: raw_id })?;
+                let record = self.get_provenance(id)?;
+                if record.id != Some(id) {
+                    return Err(invalid_persistent_state(format!(
+                        "provenance lookup for ID {raw_id} returned embedded ID {:?}",
+                        record.id.map(ProvenanceId::get)
+                    )));
+                }
+                validate_provenance_record_symbols(&self.registry, &record)?;
+                Some(record)
+            }
+        };
+
+        let mut required_symbol_ids = vec![triple.subject, triple.predicate, triple.object];
+        if let Some(record) = &provenance {
+            required_symbol_ids.extend(provenance_symbol_ids(record));
+        }
+        required_symbol_ids.sort_unstable();
+        required_symbol_ids.dedup();
+        let symbols = required_symbol_ids
+            .into_iter()
+            .map(|id| require_registered_symbol(&self.registry, id))
+            .collect::<AkhResult<Vec<_>>>()?;
+
+        Ok(PreparedAssertion {
+            identity: self.triple_identity(triple),
+            provenance,
+            symbols,
+        })
+    }
+
+    fn reject_self_referential_assertion(&self, triple: &Triple) -> AkhResult<()> {
         if self.phase9_config.reject_self_referential && triple.subject == triple.object {
             return Err(EngineError::SelfReferentialTriple {
                 subject_label: self.resolve_label(triple.subject),
@@ -698,6 +862,95 @@ impl Engine {
             }
             .into());
         }
+        Ok(())
+    }
+
+    /// Build an isolated view of the current graph for deterministic batch
+    /// admission. This is only needed when a configured constraint or Reject
+    /// contradiction policy can fail based on graph state; the common default
+    /// path avoids cloning the graph.
+    fn batch_admission_shadow(&self) -> AkhResult<Self> {
+        let mut config = self.config.clone();
+        config.data_dir = None;
+        config.compartments_dir = None;
+        config.workspace_root = None;
+        config.scratch_dir = None;
+        config.extra_read_roots.clear();
+        let mut shadow = Self::new(config)?;
+
+        for meta in self.registry.all() {
+            shadow.registry.register(meta)?;
+        }
+        shadow
+            .knowledge_graph
+            .bulk_load(&self.knowledge_graph.all_triples())?;
+
+        shadow.phase9_config = self.phase9_config.clone();
+        // Admission needs the pre-insert checks and their sequential graph
+        // view, not post-insert derivations or support bookkeeping.
+        shadow.phase9_config.skolem_auto_ground = false;
+        shadow.phase9_config.macro_expansion_on_insert = false;
+        shadow.phase9_config.tms_enabled = false;
+        *shadow.constraint_registry.write().unwrap() =
+            self.constraint_registry.read().unwrap().clone();
+        *shadow.functional_predicates.write().unwrap() =
+            self.functional_predicates.read().unwrap().clone();
+        *shadow.multi_valued_predicates.write().unwrap() =
+            self.multi_valued_predicates.read().unwrap().clone();
+        *shadow.disjointness_constraints.write().unwrap() =
+            self.disjointness_constraints.read().unwrap().clone();
+        *shadow.temporal_registry.write().unwrap() =
+            self.temporal_registry.read().unwrap().clone();
+        Ok(shadow)
+    }
+
+    fn preflight_provenance_batch(
+        &self,
+        triples: &[Triple],
+        record: &ProvenanceRecord,
+    ) -> AkhResult<()> {
+        validate_provenance_record_symbols(&self.registry, record)?;
+
+        let needs_graph_shadow = (self.phase9_config.enforce_constraints
+            && !self.constraint_registry.read().unwrap().is_empty())
+            || (self.phase9_config.detect_contradictions
+                && self.phase9_config.contradiction_policy == ContradictionPolicy::Reject);
+        let shadow = needs_graph_shadow
+            .then(|| self.batch_admission_shadow())
+            .transpose()?;
+
+        for triple in triples {
+            let mut untracked = triple.clone();
+            untracked.provenance_id = None;
+            self.prepare_assertion(&untracked)?;
+            self.reject_self_referential_assertion(&untracked)?;
+            if let Some(shadow) = &shadow {
+                // Sequentially applying to an isolated graph catches a later
+                // member whose constraint/Reject outcome depends on an earlier
+                // member, without touching the live ledger, KG, SPARQL store,
+                // identity index, or WAL.
+                shadow.add_triple(&untracked)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Add a triple to the knowledge graph.
+    ///
+    /// The full Phase 9 pipeline runs around insertion (all configurable):
+    /// 1. **Pre-insert**: Constraint check, contradiction detection
+    /// 2. **Insert**: KG + hypervector creation + SPARQL sync
+    /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
+    pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        // Construct the complete replay envelope before any subsystem is
+        // mutated. In particular, ContradictionPolicy::Replace must not retract
+        // a live edge and emit its WAL record only to discover later that the
+        // incoming assertion has an invalid symbol, compartment, or provenance
+        // link.
+        let prepared = self.prepare_assertion(triple)?;
+
+        // --- Self-referential guard ---
+        self.reject_self_referential_assertion(triple)?;
 
         // --- Phase 9 pre-insert: constraint check ---
         if self.phase9_config.enforce_constraints {
@@ -857,7 +1110,7 @@ impl Engine {
         }
 
         // --- ADR 081 P2: mint the stable triple identity alongside insertion ---
-        let identity = self.triple_identity(triple);
+        let identity = prepared.identity;
         self.identity_index.insert(
             identity,
             IdentityKey {
@@ -874,39 +1127,6 @@ impl Engine {
         // provenance record that do not exist in the relational snapshot; wake
         // must restore those records before publishing the edge and advance
         // both allocators beyond them.
-        let provenance = triple
-            .provenance_id
-            .and_then(ProvenanceId::new)
-            .and_then(|id| match self.get_provenance(id) {
-                Ok(record) => Some(record),
-                Err(error) => {
-                    tracing::error!(
-                        provenance_id = id.get(),
-                        %error,
-                        "assertion references provenance that cannot be written to the WAL"
-                    );
-                    None
-                }
-            });
-        let mut required_symbol_ids = vec![triple.subject, triple.predicate, triple.object];
-        if let Some(record) = &provenance {
-            required_symbol_ids.push(record.derived_id);
-            required_symbol_ids.extend(record.sources.iter().copied());
-            required_symbol_ids.extend(record.kind.referenced_symbol_ids());
-        }
-        required_symbol_ids.sort_unstable();
-        required_symbol_ids.dedup();
-        let symbols: Vec<SymbolMeta> = required_symbol_ids
-            .into_iter()
-            .map(|id| {
-                self.registry.get(id).ok_or_else(|| {
-                    crate::error::SymbolError::NotFound {
-                        symbol_id: id.get(),
-                    }
-                    .into()
-                })
-            })
-            .collect::<AkhResult<_>>()?;
         self.record_mutation(
             crate::mutation::MutationKind::Assert,
             serde_json::json!({
@@ -918,8 +1138,8 @@ impl Engine {
                 "timestamp": triple.timestamp,
                 "compartment": triple.compartment_id.clone(),
                 "provenance_id": triple.provenance_id,
-                "provenance": provenance,
-                "symbols": symbols,
+                "provenance": prepared.provenance,
+                "symbols": prepared.symbols,
                 // ADR 081 P2: content-addressed identity (stable across
                 // akhs/sessions) persisted with the mutation for diffing.
                 "identity": identity.to_hex(),
@@ -1189,6 +1409,7 @@ impl Engine {
 
     /// Store a provenance record in the ledger.
     pub fn store_provenance(&self, record: &mut ProvenanceRecord) -> AkhResult<ProvenanceId> {
+        validate_provenance_record_symbols(&self.registry, record)?;
         let ledger = self
             .provenance_ledger
             .as_ref()
@@ -1210,6 +1431,13 @@ impl Engine {
         if triples.is_empty() {
             return Ok(None);
         }
+
+        // Validate the entire batch and the nested provenance symbol closure
+        // before assigning or committing a ledger ID. Caller-supplied triple
+        // provenance is intentionally ignored here because this operation owns
+        // that field and replaces it with the newly assigned record ID.
+        self.preflight_provenance_batch(triples, record)?;
+
         let provenance_id = match self.provenance_ledger.as_ref() {
             Some(ledger) => Some(ledger.store(record)?),
             None => None,
@@ -3746,6 +3974,257 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assertion_preflight_preserves_replace_target_on_missing_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("functional:predicate").unwrap();
+        let old_object = engine.resolve_or_create_entity("old-object").unwrap();
+        let new_object = engine.resolve_or_create_entity("new-object").unwrap();
+        let old = Triple::new(subject, predicate, old_object);
+        engine.add_triple(&old).unwrap();
+        let old_identity = engine.triple_identity(&old);
+
+        engine
+            .functional_preds_mut()
+            .declare_functional(predicate);
+        let mut phase9 = engine.phase9_config().clone();
+        phase9.contradiction_policy = ContradictionPolicy::Replace;
+        engine.set_phase9_config(phase9);
+        let sink = Arc::new(crate::mutation::CountingSink::default());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn crate::mutation::MutationSink>)
+                .is_ok()
+        );
+
+        let incoming = Triple::new(subject, predicate, new_object).with_provenance(999);
+        assert!(engine.add_triple(&incoming).is_err());
+
+        assert!(engine.has_triple(subject, predicate, old_object));
+        assert!(!engine.has_triple(subject, predicate, new_object));
+        assert!(engine.triple_by_identity(&old_identity).is_some());
+        assert_eq!(
+            sink.count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "failed assertion must emit neither replacement retract nor assert"
+        );
+        let sparql_triples = engine.sparql.as_ref().unwrap().all_triples().unwrap();
+        assert_eq!(sparql_triples.len(), 1);
+        assert_eq!(sparql_triples[0].object, old_object);
+    }
+
+    #[test]
+    fn assertion_preflight_rejects_missing_nested_provenance_symbol_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("predicate").unwrap();
+        let object = engine.resolve_or_create_entity("object").unwrap();
+        let missing = SymbolId::new(9_999_999).unwrap();
+        let mut corrupt_record = ProvenanceRecord::new(
+            subject,
+            DerivationKind::GraphEdge {
+                from: missing,
+                predicate,
+            },
+        );
+        let provenance_id = engine
+            .provenance_ledger
+            .as_ref()
+            .unwrap()
+            .store(&mut corrupt_record)
+            .unwrap();
+        let sink = Arc::new(crate::mutation::CountingSink::default());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn crate::mutation::MutationSink>)
+                .is_ok()
+        );
+
+        let tracked = Triple::new(subject, predicate, object).with_provenance(provenance_id.get());
+        assert!(engine.add_triple(&tracked).is_err());
+        assert_eq!(engine.triple_count(), 0);
+        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn provenance_batch_preflights_before_ledger_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("predicate").unwrap();
+        let object = engine.resolve_or_create_entity("object").unwrap();
+        let missing = SymbolId::new(9_999_999).unwrap();
+        let mut record = ProvenanceRecord::new(
+            subject,
+            DerivationKind::AgentDecision {
+                goal: missing,
+                cycle: 1,
+            },
+        );
+        let mut triples = [Triple::new(subject, predicate, object)];
+
+        assert!(
+            engine
+                .add_triples_with_provenance(&mut triples, &mut record)
+                .is_err()
+        );
+        assert!(record.id.is_none());
+        assert_eq!(engine.all_provenance().unwrap().len(), 0);
+        assert_eq!(engine.triple_count(), 0);
+    }
+
+    #[test]
+    fn provenance_batch_later_reject_is_atomic_across_live_subsystems() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("functional:predicate").unwrap();
+        let first_object = engine.resolve_or_create_entity("first-object").unwrap();
+        let rejected_object = engine.resolve_or_create_entity("rejected-object").unwrap();
+        engine
+            .functional_preds_mut()
+            .declare_functional(predicate);
+        let mut phase9 = engine.phase9_config().clone();
+        phase9.contradiction_policy = ContradictionPolicy::Reject;
+        engine.set_phase9_config(phase9);
+        let sink = Arc::new(crate::mutation::CountingSink::default());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn crate::mutation::MutationSink>)
+                .is_ok()
+        );
+
+        let mut triples = [
+            Triple::new(subject, predicate, first_object),
+            Triple::new(subject, predicate, rejected_object),
+        ];
+        let mut record = ProvenanceRecord::new(subject, DerivationKind::Seed);
+        assert!(
+            engine
+                .add_triples_with_provenance(&mut triples, &mut record)
+                .is_err()
+        );
+
+        assert!(record.id.is_none());
+        assert!(triples.iter().all(|triple| triple.provenance_id.is_none()));
+        assert_eq!(engine.all_provenance().unwrap().len(), 0);
+        assert_eq!(engine.triple_count(), 0);
+        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn persistent_restart_rejects_invalid_rich_graph_references() {
+        fn assert_rejected(mut corrupt: impl FnMut(&mut Triple)) {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let engine = Engine::new(EngineConfig {
+                    dimension: Dimension::TEST,
+                    data_dir: Some(dir.path().to_path_buf()),
+                    ..Default::default()
+                })
+                .unwrap();
+                let subject = engine.resolve_or_create_entity("subject").unwrap();
+                let predicate = engine.resolve_or_create_relation("predicate").unwrap();
+                let object = engine.resolve_or_create_entity("object").unwrap();
+                engine
+                    .add_triple(&Triple::new(subject, predicate, object))
+                    .unwrap();
+                engine.persist().unwrap();
+            }
+
+            let store = TieredStore::with_persistence(dir.path(), "symbols").unwrap();
+            let bytes = store.get_meta(b"kg_triples_snapshot").unwrap().unwrap();
+            let mut triples: Vec<Triple> = bincode::deserialize(&bytes).unwrap();
+            corrupt(&mut triples[0]);
+            store
+                .put_meta(
+                    b"kg_triples_snapshot",
+                    &bincode::serialize(&triples).unwrap(),
+                )
+                .unwrap();
+            drop(store);
+
+            assert!(
+                Engine::new(EngineConfig {
+                    dimension: Dimension::TEST,
+                    data_dir: Some(dir.path().to_path_buf()),
+                    ..Default::default()
+                })
+                .is_err()
+            );
+        }
+
+        assert_rejected(|triple| {
+            triple.subject = SymbolId::new(9_999_999).unwrap();
+        });
+        assert_rejected(|triple| {
+            triple.provenance_id = Some(999);
+        });
+        assert_rejected(|triple| {
+            triple.compartment_id = Some("bad compartment\niri".into());
+        });
+        assert_rejected(|triple| {
+            triple.confidence = f32::NAN;
+        });
+    }
+
+    #[test]
+    fn persistent_restart_rejects_ledger_symbol_outside_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let derived = {
+            let engine = Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+            let derived = engine.resolve_or_create_entity("derived").unwrap();
+            let mut record = ProvenanceRecord::new(derived, DerivationKind::Seed);
+            engine.store_provenance(&mut record).unwrap();
+            engine.persist().unwrap();
+            derived
+        };
+        let store = TieredStore::with_persistence(dir.path(), "symbols").unwrap();
+        store
+            .remove_meta(format!("sym_meta:{}", derived.get()).as_bytes())
+            .unwrap();
+        drop(store);
+
+        assert!(
+            Engine::new(EngineConfig {
+                dimension: Dimension::TEST,
+                data_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
+
     #[cfg(feature = "postgres")]
     #[test]
     fn restore_constructor_rejects_corrupt_registry() {
@@ -3834,7 +4313,7 @@ mod tests {
         let t2 = Triple {
             confidence: 0.4,
             timestamp: t1.timestamp + 1000,
-            provenance_id: Some(42),
+            provenance_id: None,
             ..t1.clone()
         };
         engine.add_triple(&t2).unwrap();

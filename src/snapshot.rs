@@ -169,9 +169,9 @@ pub fn capture_snapshot_at_watermark(
         ))
     })?;
 
-    let symbols: Vec<symbol::Model> = engine
-        .dump_symbols()
-        .into_iter()
+    let symbol_metas = engine.dump_symbols();
+    let symbols: Vec<symbol::Model> = symbol_metas
+        .iter()
         .map(|m| {
             let (kind, glyph) = symbol_kind_parts(&m.kind);
             Ok(symbol::Model {
@@ -179,7 +179,7 @@ pub fn capture_snapshot_at_watermark(
                 id: relational_symbol_id("symbol", m.id)?,
                 kind,
                 glyph_codepoint: glyph,
-                label: m.label,
+                label: m.label.clone(),
             })
         })
         .collect::<SnapshotResult<_>>()?;
@@ -256,6 +256,12 @@ pub fn capture_snapshot_at_watermark(
             })
         })
         .collect::<SnapshotResult<Vec<_>>>()?;
+    // A complete snapshot is a closed manifest.  Validate it against the
+    // exact registry captured above rather than relying on wake to discover a
+    // missing nested derivation symbol after this corrupt image is durable.
+    validate_symbol_snapshot(&symbol_metas, allocator_next)?;
+    validate_fact_symbols(&facts, &symbol_metas)?;
+    validate_provenance_symbols(&provenance_records, &symbol_metas)?;
     validate_fact_provenance_links(&facts, &provenance_records)?;
 
     let drives: Vec<drive::Model> = agent
@@ -741,6 +747,22 @@ pub async fn wake(
         .and_then(|extra| extra.get("provenance_snapshot_version"))
         .and_then(serde_json::Value::as_u64)
         .is_some_and(|version| version >= PROVENANCE_SNAPSHOT_VERSION);
+
+    let mut symbol_metas = symbol_rows_to_metas(&symbol_rows)?;
+    let base_allocator_next =
+        validate_symbol_snapshot(&symbol_metas, state.allocator_next)?;
+
+    // Validate the base image before admitting any post-snapshot symbol or
+    // provenance record.  Otherwise a dangling base fact can be
+    // retroactively made to look valid when an unrelated tail record happens
+    // to reuse the same numeric ID.
+    validate_base_restore_image(
+        &fact_rows,
+        &provenance_records,
+        &symbol_metas,
+        provenance_snapshot_complete,
+    )?;
+
     if !provenance_snapshot_complete {
         // A tail record can legitimately reuse an ID that a pre-v1 local-only
         // ledger once assigned. Clear unverifiable base links before merging
@@ -757,9 +779,6 @@ pub async fn wake(
             );
         }
     }
-    let mut symbol_metas = symbol_rows_to_metas(&symbol_rows)?;
-    let base_allocator_next =
-        validate_symbol_snapshot(&symbol_metas, state.allocator_next)?;
     let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
     let tail_allocator_next =
         prepare_tail_restore(&tail, &mut symbol_metas, &mut provenance_records)?;
@@ -1468,6 +1487,20 @@ fn validate_fact_provenance_links(
     Ok(())
 }
 
+fn validate_base_restore_image(
+    facts: &[fact::Model],
+    records: &[crate::provenance::ProvenanceRecord],
+    symbols: &[SymbolMeta],
+    provenance_snapshot_complete: bool,
+) -> SnapshotResult<()> {
+    validate_fact_symbols(facts, symbols)?;
+    validate_provenance_symbols(records, symbols)?;
+    if provenance_snapshot_complete {
+        validate_fact_provenance_links(facts, records)?;
+    }
+    Ok(())
+}
+
 /// Pre-v1 snapshots persisted numeric fact links but not the local ledger that
 /// gave those IDs meaning.  Keep any link that a concurrently/backfilled
 /// portable ledger proves, and clear only the unverifiable remainder so it can
@@ -1528,6 +1561,51 @@ fn validate_compartment_id(compartment_id: &str) -> SnapshotResult<()> {
 fn is_reserved_symbol_id(raw: u64) -> bool {
     raw == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
         || raw == crate::provenance::RULE_APPLICATION_V2_SENTINEL
+}
+
+fn validate_rule_application_payload(
+    record: &crate::provenance::ProvenanceRecord,
+    conclusion: (SymbolId, SymbolId, SymbolId),
+) -> SnapshotResult<()> {
+    let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = &record.kind
+    else {
+        return Ok(());
+    };
+    let Some(first) = antecedents.first() else {
+        return Ok(());
+    };
+    if first.get() != crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL {
+        return Ok(());
+    }
+
+    let is_v2 = antecedents.get(1).is_some_and(|marker| {
+        marker.get() == crate::provenance::RULE_APPLICATION_V2_SENTINEL
+    });
+    if !is_v2 {
+        if (antecedents.len() - 1) % 3 != 0 {
+            return Err(invalid_tail(
+                "versioned rule support payload is not a sequence of triples",
+            ));
+        }
+        return Ok(());
+    }
+    if antecedents.len() < 5 || (antecedents.len() - 5) % 3 != 0 {
+        return Err(invalid_tail(
+            "V2 rule application payload has an invalid conclusion/support shape",
+        ));
+    }
+    if (antecedents[2], antecedents[3], antecedents[4]) != conclusion {
+        return Err(invalid_tail(format!(
+            "V2 rule conclusion ({}, {}, {}) does not match assertion ({}, {}, {})",
+            antecedents[2].get(),
+            antecedents[3].get(),
+            antecedents[4].get(),
+            conclusion.0.get(),
+            conclusion.1.get(),
+            conclusion.2.get()
+        )));
+    }
+    Ok(())
 }
 
 fn payload_triple_ids(
@@ -1594,6 +1672,7 @@ fn parse_replay_complete_assert(
                     record.confidence
                 )));
             }
+            validate_rule_application_payload(record, (subject, predicate, object))?;
         }
         _ => {
             return Err(invalid_tail(
@@ -1785,6 +1864,15 @@ fn validate_fact_symbols(facts: &[fact::Model], symbols: &[SymbolMeta]) -> Snaps
     let ids: std::collections::HashSet<u64> =
         symbols.iter().map(|meta| meta.id.get()).collect();
     for fact in facts {
+        if !fact.confidence.is_finite() || !(0.0..=1.0).contains(&fact.confidence) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: fact ({}, {}, {}) confidence {} is outside [0,1]",
+                fact.subject, fact.predicate, fact.object, fact.confidence
+            )));
+        }
+        if let Some(compartment_id) = fact.compartment.as_deref() {
+            validate_compartment_id(compartment_id)?;
+        }
         for (field, raw) in [
             ("subject", fact.subject),
             ("predicate", fact.predicate),
@@ -1816,8 +1904,23 @@ fn validate_provenance_symbols(
 ) -> SnapshotResult<()> {
     let ids: std::collections::HashSet<SymbolId> =
         symbols.iter().map(|meta| meta.id).collect();
+    let mut provenance_ids = std::collections::HashSet::with_capacity(records.len());
     for record in records {
-        let provenance_id = record.id.map(crate::provenance::ProvenanceId::get);
+        let provenance_id = record
+            .id
+            .ok_or_else(|| SnapshotError::Agent("wake: provenance record has no ID".into()))?
+            .get();
+        if !provenance_ids.insert(provenance_id) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: duplicate provenance ID {provenance_id}"
+            )));
+        }
+        if !record.confidence.is_finite() || !(0.0..=1.0).contains(&record.confidence) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: provenance {provenance_id} confidence {} is outside [0,1]",
+                record.confidence
+            )));
+        }
         for (field, id) in std::iter::once(("derived", record.derived_id))
             .chain(record.sources.iter().copied().map(|id| ("source", id)))
             .chain(
@@ -1830,7 +1933,7 @@ fn validate_provenance_symbols(
         {
             if !ids.contains(&id) {
                 return Err(SnapshotError::Agent(format!(
-                    "wake: provenance {provenance_id:?} {field} references missing symbol {}",
+                    "wake: provenance {provenance_id} {field} references missing symbol {}",
                     id.get()
                 )));
             }
@@ -2378,20 +2481,41 @@ mod tests {
     }
 
     #[test]
-    fn capture_rejects_a_dangling_fact_provenance_link() {
-        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
-        let subject = engine.resolve_or_create_entity("DanglingSubject").unwrap();
-        let predicate = engine
-            .resolve_or_create_relation("dangling-predicate")
-            .unwrap();
-        let object = engine.resolve_or_create_entity("DanglingObject").unwrap();
-        engine
-            .add_triple(&Triple::new(subject, predicate, object).with_provenance(42))
-            .unwrap();
-        let agent = Agent::new(Arc::clone(&engine), crate::agent::AgentConfig::default()).unwrap();
+    fn snapshot_manifest_rejects_a_dangling_fact_provenance_link() {
+        let dangling = fact::Model {
+            workspace_id: Uuid::nil(),
+            subject: 1,
+            predicate: 2,
+            object: 3,
+            akh_id: Uuid::nil(),
+            confidence: 1.0,
+            asserted_at: chrono::DateTime::from_timestamp(1, 0).unwrap(),
+            retracted_at: None,
+            provenance_id: Some(42),
+            compartment: None,
+        };
         assert!(
-            capture_snapshot(&agent, Uuid::new_v4(), Uuid::new_v4()).is_err(),
-            "capture must fail before publishing an incomplete provenance manifest"
+            validate_fact_provenance_links(&[dangling], &[]).is_err(),
+            "capture's manifest validation must reject a dangling provenance link"
+        );
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_unregistered_nested_provenance_symbols() {
+        let derived = replay_symbol(30, SymbolKind::Entity, "Derived", 0);
+        let predicate = replay_symbol(31, SymbolKind::Relation, "edge", 0);
+        let missing = SymbolId::new(32).unwrap();
+        let mut record = crate::provenance::ProvenanceRecord::new(
+            derived.id,
+            crate::provenance::DerivationKind::GraphEdge {
+                from: missing,
+                predicate: predicate.id,
+            },
+        );
+        record.id = crate::provenance::ProvenanceId::new(1);
+        assert!(
+            validate_provenance_symbols(&[record], &[derived, predicate]).is_err(),
+            "capture must reject a ledger whose typed derivation payload is outside the registry"
         );
     }
 
@@ -2699,6 +2823,170 @@ triples_file = "triples.json"
         assert!(
             fact_to_triple(&malformed_fact).is_err(),
             "a malformed relational compartment must return an error"
+        );
+    }
+
+    #[test]
+    fn complete_base_image_cannot_be_repaired_by_unrelated_tail_ids() {
+        use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
+
+        let subject = replay_symbol(900, SymbolKind::Entity, "BaseSubject", 1);
+        let predicate = replay_symbol(901, SymbolKind::Relation, "base-predicate", 1);
+        let object = replay_symbol(902, SymbolKind::Entity, "BaseObject", 1);
+        let tail_object = replay_symbol(903, SymbolKind::Entity, "TailObject", 2);
+        let timestamp = chrono::DateTime::from_timestamp(10, 0).unwrap();
+        let base_fact = fact::Model {
+            workspace_id: Uuid::nil(),
+            subject: subject.id.get() as i64,
+            predicate: predicate.id.get() as i64,
+            object: object.id.get() as i64,
+            akh_id: Uuid::nil(),
+            confidence: 1.0,
+            asserted_at: timestamp,
+            retracted_at: None,
+            provenance_id: Some(61),
+            compartment: None,
+        };
+        let mut symbols = vec![subject.clone(), predicate.clone(), object.clone()];
+        let mut records = Vec::new();
+
+        assert!(
+            validate_base_restore_image(
+                std::slice::from_ref(&base_fact),
+                &records,
+                &symbols,
+                true,
+            )
+            .is_err(),
+            "a complete base must reject its dangling link before tail merge"
+        );
+
+        let mut unrelated = ProvenanceRecord::new(tail_object.id, DerivationKind::Seed);
+        unrelated.id = ProvenanceId::new(61);
+        let tail = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": tail_object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 11,
+                "compartment": null,
+                "provenance_id": 61,
+                "provenance": unrelated,
+                "symbols": [subject, predicate, tail_object],
+            }),
+        };
+        prepare_tail_restore(&[tail], &mut symbols, &mut records).unwrap();
+        assert!(
+            validate_fact_provenance_links(&[base_fact], &records).is_ok(),
+            "post-merge numeric validation alone would retroactively misbind the base fact"
+        );
+    }
+
+    #[test]
+    fn base_fact_symbols_are_closed_before_tail_metadata_is_admitted() {
+        let missing_subject = replay_symbol(920, SymbolKind::Entity, "LateSubject", 2);
+        let predicate = replay_symbol(921, SymbolKind::Relation, "base-predicate", 1);
+        let object = replay_symbol(922, SymbolKind::Entity, "BaseObject", 1);
+        let tail_object = replay_symbol(923, SymbolKind::Entity, "TailObject", 2);
+        let base_fact = fact::Model {
+            workspace_id: Uuid::nil(),
+            subject: missing_subject.id.get() as i64,
+            predicate: predicate.id.get() as i64,
+            object: object.id.get() as i64,
+            akh_id: Uuid::nil(),
+            confidence: 1.0,
+            asserted_at: chrono::DateTime::from_timestamp(10, 0).unwrap(),
+            retracted_at: None,
+            provenance_id: None,
+            compartment: None,
+        };
+        let mut symbols = vec![predicate.clone(), object];
+        assert!(
+            validate_base_restore_image(
+                std::slice::from_ref(&base_fact),
+                &[],
+                &symbols,
+                true,
+            )
+            .is_err(),
+            "tail metadata must not make an unknown base symbol valid"
+        );
+
+        let tail = akhomed_store::TailMutation {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": missing_subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": tail_object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 11,
+                "compartment": null,
+                "provenance_id": null,
+                "provenance": null,
+                "symbols": [missing_subject, predicate, tail_object],
+            }),
+        };
+        prepare_tail_restore(&[tail], &mut symbols, &mut Vec::new()).unwrap();
+        assert!(validate_fact_symbols(&[base_fact], &symbols).is_ok());
+    }
+
+    #[test]
+    fn replay_complete_v2_rule_record_must_bind_the_asserted_conclusion() {
+        use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
+
+        let subject = replay_symbol(940, SymbolKind::Entity, "ConclusionSubject", 1);
+        let predicate = replay_symbol(941, SymbolKind::Relation, "concludes", 1);
+        let object = replay_symbol(942, SymbolKind::Entity, "ConclusionObject", 1);
+        let other = replay_symbol(943, SymbolKind::Entity, "OtherConclusion", 1);
+        let support_subject = replay_symbol(944, SymbolKind::Entity, "SupportSubject", 1);
+        let support_predicate = replay_symbol(945, SymbolKind::Relation, "supports", 1);
+        let support_object = replay_symbol(946, SymbolKind::Entity, "SupportObject", 1);
+        let mut record = ProvenanceRecord::new(
+            object.id,
+            DerivationKind::RuleInference {
+                rule_name: "mismatched".into(),
+                antecedents: vec![
+                    SymbolId::new(crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL)
+                        .unwrap(),
+                    SymbolId::new(crate::provenance::RULE_APPLICATION_V2_SENTINEL).unwrap(),
+                    subject.id,
+                    predicate.id,
+                    other.id,
+                    support_subject.id,
+                    support_predicate.id,
+                    support_object.id,
+                ],
+            },
+        );
+        record.id = ProvenanceId::new(71);
+
+        assert!(
+            parse_replay_complete_assert(&serde_json::json!({
+                "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                "subject": subject.id.get(),
+                "predicate": predicate.id.get(),
+                "object": object.id.get(),
+                "confidence": 1.0,
+                "timestamp": 1,
+                "compartment": null,
+                "provenance_id": 71,
+                "provenance": record,
+                "symbols": [
+                    subject,
+                    predicate,
+                    object,
+                    other,
+                    support_subject,
+                    support_predicate,
+                    support_object,
+                ],
+            }))
+            .is_err(),
+            "a V2 rule record bound to another conclusion must fail closed"
         );
     }
 
