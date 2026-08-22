@@ -13,6 +13,7 @@
 //!   hekad embed [config_path]      Run the embed worker (foreground, Ctrl-C to stop)
 
 use std::path::PathBuf;
+#[cfg(feature = "embedding")]
 use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
@@ -21,6 +22,7 @@ use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 
 use heka::config::HekaConfig;
+#[cfg(feature = "embedding")]
 use heka::embedder::{SentenceEmbedder, resolve_model_dir};
 use heka::eval::EvalCommand;
 use heka::migration::Migrator;
@@ -106,6 +108,7 @@ fn default_config_path() -> PathBuf {
 
 /// Run the embed worker: load the ONNX model, connect to the DB, and
 /// poll for unembedded chunks forever (or until Ctrl-C).
+#[cfg(feature = "embedding")]
 async fn run_embed(config_path: Option<PathBuf>) -> miette::Result<()> {
     let config_path = config_path.unwrap_or_else(default_config_path);
 
@@ -138,4 +141,11 @@ async fn run_embed(config_path: Option<PathBuf>) -> miette::Result<()> {
     heka::embed_worker::run_embed_worker(Arc::new(db), shared, config.embedding.clone()).await;
 
     Ok(())
+}
+
+#[cfg(not(feature = "embedding"))]
+async fn run_embed(_config_path: Option<PathBuf>) -> miette::Result<()> {
+    Err(miette::miette!(
+        "the embed worker requires the `embedding` feature; rebuild hekad with default features"
+    ))
 }

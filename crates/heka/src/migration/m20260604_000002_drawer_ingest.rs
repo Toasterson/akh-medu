@@ -51,3 +51,16 @@ impl MigrationTrait for Migration {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    const MIGRATION_SQL: &str = include_str!("../../migrations/20260604_000002_drawer_ingest.sql");
+
+    #[test]
+    fn legacy_backfill_has_no_pgcrypto_dependency_or_title_collisions() {
+        assert!(!MIGRATION_SQL.contains("digest("));
+        assert!(!MIGRATION_SQL.contains("CREATE EXTENSION IF NOT EXISTS pgcrypto"));
+        assert!(MIGRATION_SQL.contains("'legacy:' || id::text"));
+        assert!(MIGRATION_SQL.contains("WHERE body_hash IS NULL"));
+    }
+}

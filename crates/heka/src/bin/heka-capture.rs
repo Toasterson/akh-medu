@@ -8,8 +8,10 @@
 //! {
 //!   "hooks": {
 //!     "Stop": [{
-//!       "type": "command",
-//!       "command": "heka-capture"
+//!       "hooks": [{
+//!         "type": "command",
+//!         "command": "heka-capture"
+//!       }]
 //!     }]
 //!   }
 //! }
@@ -17,16 +19,21 @@
 //!
 //! ## Input format
 //!
-//! The stop-hook payload is a JSON object with a `session_id` field and a
-//! `transcript` array of turn objects, each with:
+//! Claude Code provides `session_id`, `transcript_path`, and
+//! `last_assistant_message`. `heka-capture` parses user and assistant text from
+//! the transcript JSONL and uses `last_assistant_message` when the asynchronously
+//! written transcript does not yet contain the final response.
+//!
+//! The pre-Phase-42c inline `transcript`/`turns` format remains accepted. Each
+//! inline turn contains:
 //! - `speaker`: "user" | "assistant" | "system"
 //! - `body`: the turn text content
 //! - optional `contact`: freeform contact label
 //! - optional `topics`: array of topic strings
 //!
 //! If the payload has a flat `turns` array (older format), that is accepted too.
-//! If no transcript is present, the raw stdin text is ingested as a single
-//! "system" turn — this makes `heka-capture` usable as a pipe target:
+//! Non-JSON stdin text is ingested as a single "system" turn, which keeps
+//! `heka-capture` usable as a pipe target:
 //!
 //! ```sh
 //! echo "some text to remember" | heka-capture
@@ -42,33 +49,11 @@ use std::path::PathBuf;
 
 use miette::{IntoDiagnostic, WrapErr};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-use serde::Deserialize;
 
 use heka::HekaConfig;
+use heka::capture::parse_capture_input;
 use heka::entity::heka_akhs;
 use heka::ingest::write_drawer;
-
-/// Claude Code stop-hook payload.
-#[derive(Debug, Deserialize, Default)]
-struct StopHookPayload {
-    session_id: Option<String>,
-    /// Full transcript format (preferred): array of turns.
-    transcript: Option<Vec<TurnPayload>>,
-    /// Legacy format: flat turns array.
-    turns: Option<Vec<TurnPayload>>,
-    /// Contact label (applied to all turns if present).
-    contact: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct TurnPayload {
-    speaker: Option<String>,
-    body: Option<String>,
-    /// Per-turn contact override.
-    contact: Option<String>,
-    /// Per-turn topics.
-    topics: Option<Vec<String>>,
-}
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
@@ -91,26 +76,10 @@ async fn main() -> miette::Result<()> {
         return Ok(());
     }
 
-    // Parse the payload. If it's not valid JSON, treat the raw text as a
-    // single system turn (pipe-friendly mode).
-    let payload: StopHookPayload = if input.trim_start().starts_with('{') {
-        serde_json::from_str(&input)
-            .into_diagnostic()
-            .wrap_err("parsing stop-hook JSON payload")?
-    } else {
-        StopHookPayload {
-            transcript: Some(vec![TurnPayload {
-                speaker: Some("system".to_string()),
-                body: Some(input.clone()),
-                contact: None,
-                topics: None,
-            }]),
-            ..Default::default()
-        }
-    };
-
-    // Collect turns from transcript or legacy turns field.
-    let turns = payload.transcript.or(payload.turns).unwrap_or_default();
+    let batch = parse_capture_input(&input)
+        .into_diagnostic()
+        .wrap_err("parsing capture input")?;
+    let turns = &batch.turns;
 
     if turns.is_empty() {
         tracing::warn!("heka-capture: no turns in payload, nothing to ingest");
@@ -148,13 +117,13 @@ async fn main() -> miette::Result<()> {
             )
         })?;
 
-    let session_id = payload.session_id.as_deref();
-    let default_contact = payload.contact.as_deref();
+    let session_id = batch.session_id.as_deref();
+    let default_contact = batch.contact.as_deref();
 
     let mut ingested = 0usize;
     let mut duplicated = 0usize;
 
-    for turn in &turns {
+    for turn in turns {
         let body = match &turn.body {
             Some(b) if !b.trim().is_empty() => b,
             _ => continue,

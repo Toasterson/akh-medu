@@ -26,6 +26,13 @@ use crate::chunker::{DEFAULT_TARGET_CHUNK_CHARS, chunk_paragraph_aware};
 use crate::entity::{heka_drawer_chunks, heka_drawers};
 use crate::error::{HekaError, HekaResult};
 
+const INSERT_DRAWER_SQL: &str = "INSERT INTO heka_drawers \
+     (id, akh_id, title, tags, metadata, body_hash, session_id, speaker, contact, topics, \
+      created_at, updated_at) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+     ON CONFLICT (akh_id, body_hash) WHERE body_hash IS NOT NULL DO NOTHING \
+     RETURNING id";
+
 /// Summary returned from a successful `write_drawer` call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DrawerIngestSummary {
@@ -119,12 +126,7 @@ pub async fn write_drawer(
     // and the insert would otherwise error.
     let stmt = Statement::from_sql_and_values(
         DatabaseBackend::Postgres,
-        "INSERT INTO heka_drawers \
-         (id, akh_id, title, tags, metadata, body_hash, session_id, speaker, contact, topics, \
-          created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-         ON CONFLICT (akh_id, body_hash) WHERE body_hash IS NOT NULL DO NOTHING \
-         RETURNING id",
+        INSERT_DRAWER_SQL,
         [
             drawer_id.into(),
             akh_id.into(),
@@ -265,5 +267,24 @@ mod tests {
     fn derive_title_uses_speaker_fallback() {
         let title = derive_title("   \n  \n  ", Some("assistant"));
         assert_eq!(title, "assistant turn");
+    }
+
+    #[test]
+    fn replaying_two_hundred_unique_turns_has_identical_hash_cardinality() {
+        use std::collections::HashSet;
+
+        let first_capture: HashSet<_> = (0..200)
+            .map(|index| hex_hash(&format!("session turn {index}")))
+            .collect();
+        let replay: HashSet<_> = (0..200)
+            .map(|index| hex_hash(&format!("session turn {index}")))
+            .collect();
+
+        assert_eq!(first_capture.len(), 200);
+        assert_eq!(first_capture, replay);
+        assert!(
+            INSERT_DRAWER_SQL
+                .contains("ON CONFLICT (akh_id, body_hash) WHERE body_hash IS NOT NULL DO NOTHING")
+        );
     }
 }

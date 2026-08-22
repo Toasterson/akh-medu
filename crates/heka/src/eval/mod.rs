@@ -1,9 +1,7 @@
 //! Evaluation harness for long-term memory benchmarks.
 //!
-//! Phase 42b: ships the harness BEFORE retrieval is built so each subsequent
-//! sub-phase has a measurement loop. Until 42c lands, the retrieval stub returns
-//! empty — the harness reports 0% recall. Each subsequent sub-phase pushes the
-//! number up.
+//! LongMemEval uses the Phase 42c drawer, embedding, and pgvector pipeline.
+//! LoCoMo remains a baseline harness for a later integration phase.
 //!
 //! # Datasets
 //!
@@ -30,11 +28,11 @@ pub enum EvalCommand {
     /// Run the LongMemEval benchmark suite.
     Longmemeval {
         /// Retrieval mode: `raw` (direct embedding search) or `hybrid`
-        /// (embedding + symbolic re-rank). Until 42c, both modes return 0%.
+        /// (embedding + symbolic re-rank candidate stage).
         #[arg(long, default_value = "raw")]
         mode: String,
 
-        /// Number of sessions to evaluate (default: 10 for smoke test).
+        /// Number of non-abstention benchmark questions to evaluate.
         #[arg(long, default_value_t = 10)]
         sessions: usize,
 
@@ -91,7 +89,7 @@ pub struct EvalMetrics {
     pub total_questions: usize,
     /// Number of hits (gold answer in top-K).
     pub hits: usize,
-    /// Recall@K = hits / total_questions. 0.0 until 42c lands.
+    /// Recall@K = hits / total_questions.
     pub recall_at_k: f64,
     /// p50 latency in seconds.
     pub p50_latency_secs: f64,

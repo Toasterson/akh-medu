@@ -26,9 +26,10 @@ ALTER TABLE heka_drawers
 ALTER TABLE heka_drawer_chunks
     ADD COLUMN IF NOT EXISTS heading TEXT;
 
--- Backfill body_hash for pre-existing rows using pgcrypto's digest.
--- Rows without a body (legacy drawers created before Phase 42c) get
--- the hash of their title — good enough for idempotency on re-migrate.
+-- Backfill pre-Phase-42c rows without requiring pgcrypto. Legacy drawers do
+-- not retain their original body, so a per-row marker is both honest and
+-- collision-free within an akh. New ingests always use the real SHA-256 body
+-- hash calculated by the application.
 DO $$
 BEGIN
     IF EXISTS (
@@ -36,7 +37,7 @@ BEGIN
         WHERE table_name = 'heka_drawers' AND column_name = 'body_hash'
     ) THEN
         UPDATE heka_drawers
-           SET body_hash = encode(digest(COALESCE(title, ''), 'sha256'), 'hex')
+           SET body_hash = 'legacy:' || id::text
          WHERE body_hash IS NULL;
     END IF;
 END $$;

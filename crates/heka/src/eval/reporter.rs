@@ -70,10 +70,17 @@ pub struct Reporter {
 impl Reporter {
     /// Build a reporter from a context, capturing hardware info at construction time.
     pub fn new(ctx: ReportContext) -> Self {
+        Self::new_with_embedding_model(ctx, "stub (no retrieval)")
+    }
+
+    /// Build a reporter and record the concrete embedding model used.
+    pub fn new_with_embedding_model(
+        ctx: ReportContext,
+        embedding_model: impl Into<String>,
+    ) -> Self {
         let hardware = capture_hardware();
         let models = ModelInfo {
-            // Default embedding model — 42c will make this configurable.
-            embedding_model: "stub (no retrieval)".to_string(),
+            embedding_model: embedding_model.into(),
             llm_model: None,
         };
 
@@ -214,7 +221,7 @@ impl Reporter {
         }
 
         // ── Baseline note ──
-        if r.metrics.recall_at_k == 0.0 {
+        if r.metrics.recall_at_k == 0.0 && r.models.embedding_model.starts_with("stub") {
             md.push_str("## Baseline Note\n\n");
             md.push_str(
                 "Recall is 0.0 because retrieval is a stub (Phase 42b). \
