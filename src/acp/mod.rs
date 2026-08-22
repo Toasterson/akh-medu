@@ -61,6 +61,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::agent::conversation::ConversationState;
 use crate::agent::Agent;
 use crate::agent::{GoalStatus, PlanStatus, StepStatus};
 use crate::bootstrap::identity::{
@@ -77,6 +78,10 @@ pub use control::{
     is_control_method, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
     ServerControl, WorkspaceHandles, CONTROL_METHODS,
 };
+
+type SessionConversation = Arc<Mutex<ConversationState>>;
+type SessionConversationMap =
+    Arc<Mutex<std::collections::HashMap<String, SessionConversation>>>;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
@@ -385,10 +390,17 @@ pub struct AkhAcpAgent {
     /// single `Arc<Mutex<ChatProcessor>>`. Evicted alongside `sessions`,
     /// `session_mcp`, and `session_mcp_tools` in [`Self::track_new_session`].
     session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
+    /// Chat session → neural conversation state. The workspace [`Agent`] is
+    /// shared by every ACP session, but its agentic transcript must not be:
+    /// each session gets its own short-held mutex so turns in different
+    /// sessions neither inherit one another's prompts nor serialize model
+    /// inference. Evicted with the rest of the session state.
+    session_conversations: SessionConversationMap,
     /// Insertion-ordered session ids (oldest first), paired with `sessions`,
-    /// `session_mcp`, `session_mcp_tools`, and `session_contexts` purely to
+    /// `session_mcp`, `session_mcp_tools`, `session_contexts`, and
+    /// `session_conversations` purely to
     /// pick an eviction victim once [`MAX_TRACKED_SESSIONS`] is exceeded —
-    /// those four maps are otherwise insert-only and would retain
+    /// those maps are otherwise insert-only and would retain
     /// client-pushed bearer tokens and per-session cognitive state for the
     /// daemon's entire lifetime.
     session_order: Arc<Mutex<std::collections::VecDeque<String>>>,
@@ -456,7 +468,8 @@ const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_SOCKET_READ_TIMEOUT_SECS: u64 = 60;
 
 /// Cap on tracked ACP sessions (`sessions` + `session_mcp` +
-/// `session_mcp_tools` + `session_contexts`). Once exceeded, the oldest
+/// `session_mcp_tools` + `session_contexts` + `session_conversations`). Once
+/// exceeded, the oldest
 /// session's state (including any client-pushed bearer token) is evicted at
 /// `session/new` — see [`AkhAcpAgent::track_new_session`].
 const MAX_TRACKED_SESSIONS: usize = 256;
@@ -522,6 +535,7 @@ impl AkhAcpAgent {
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
@@ -552,6 +566,7 @@ impl AkhAcpAgent {
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
@@ -719,8 +734,9 @@ impl AkhAcpAgent {
     /// tracked session's state once [`MAX_TRACKED_SESSIONS`] is exceeded.
     ///
     /// `sessions`, `session_mcp` (which holds any client-pushed bearer
-    /// tokens), `session_mcp_tools`, `session_cancels`, and `session_contexts`
-    /// (per-session cognitive state) are otherwise append-only with no
+    /// tokens), `session_mcp_tools`, `session_cancels`, `session_contexts`
+    /// (per-session cognitive state), and `session_conversations` (neural
+    /// transcript state) are otherwise append-only with no
     /// session-end signal in ACP, so without this a long-lived daemon would
     /// retain every client's credentials, discovered tool set, and per-session
     /// cognitive state forever — an unbounded memory leak. Eviction is true LRU-by-use
@@ -731,6 +747,13 @@ impl AkhAcpAgent {
     fn track_new_session(&self, session_id: &str) {
         let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
         order.push_back(session_id.to_string());
+        self.session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                session_id.to_string(),
+                Arc::new(Mutex::new(ConversationState::new(session_id, "narrative"))),
+            );
         if order.len() > MAX_TRACKED_SESSIONS {
             if let Some(evicted) = order.pop_front() {
                 self.sessions
@@ -758,6 +781,10 @@ impl AkhAcpAgent {
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
                 self.session_contexts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&evicted);
+                self.session_conversations
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&evicted);
@@ -842,8 +869,10 @@ impl AkhAcpAgent {
     /// Run a single prompt turn under the ADR-027 lock discipline, **streaming**
     /// its narration to `sink` as the turn unfolds.
     ///
-    /// The turn runs inside [`spawn_blocking`]: the agent + processor `Mutex`es
-    /// are acquired and released entirely inside the closure, and each
+    /// The turn runs inside [`spawn_blocking`]: the Agent read lock, the
+    /// session's short-held neural-state mutex, and (on symbolic fallback)
+    /// the processor mutex are acquired and released entirely inside the
+    /// closure, and each
     /// [`AkhMessage`] is handed to `sink` (a non-blocking channel send) the
     /// instant it is produced — answer text, reasoning, and tool steps stream
     /// out live rather than being batched at turn-end. Because the send is
@@ -876,6 +905,7 @@ impl AkhAcpAgent {
         agent: Arc<RwLock<Agent>>,
         processor: Arc<Mutex<ChatProcessor>>,
         session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
+        session_conversations: SessionConversationMap,
         agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
@@ -892,6 +922,27 @@ impl AkhAcpAgent {
         session_cwd_candidate: Option<PathBuf>,
     ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
         tokio::task::spawn_blocking(move || {
+            // Clone this session's conversation handle under the map lock, then
+            // release the map immediately. `run_agentic_turn` only locks the
+            // inner state for brief transcript reads/writes; neither the map
+            // nor another session's state is held across model inference.
+            // The entry fallback covers a prompt from a session whose bounded
+            // state was evicted before the client disconnected.
+            let session_conversation = {
+                let mut conversations = session_conversations
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                Arc::clone(
+                    conversations
+                        .entry(session_id.clone())
+                        .or_insert_with(|| {
+                            Arc::new(Mutex::new(ConversationState::new(
+                                session_id.clone(),
+                                "narrative",
+                            )))
+                        }),
+                )
+            };
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
             // turns proceed in parallel). The agentic path never touches
             // `ChatProcessor` at all — it holds only `agent.read()` for the
@@ -1044,7 +1095,15 @@ impl AkhAcpAgent {
             );
             if guard
                 .agent
-                .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
+                .run_agentic_turn_with_conversation_state(
+                    &engine,
+                    &agent_id,
+                    &text,
+                    &*sink,
+                    &cancel,
+                    is_dispatch,
+                    session_conversation.as_ref(),
+                )
                 .is_none()
             {
                 // Symbolic fallback needs `&mut Agent` (it calls
@@ -3989,6 +4048,7 @@ fn build_connection(
                             agent,
                             processor,
                             me.session_contexts.clone(),
+                            me.session_conversations.clone(),
                             ws.clone(),
                             text,
                             Some(asker),
@@ -5713,6 +5773,14 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(victim.clone(), SessionContext::new());
+        me.session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&victim)
+            .expect("track_new_session creates neural state")
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_operator_turn("victim-only prompt");
 
         // Push exactly enough new sessions to trip the cap by one eviction.
         for i in 0..MAX_TRACKED_SESSIONS {
@@ -5737,6 +5805,41 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .contains_key(&victim),
             "the oldest session's SessionContext must be evicted, not leaked"
+        );
+        assert!(
+            !me.session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&victim),
+            "the oldest session's neural ConversationState must be evicted, not leaked"
+        );
+    }
+
+    #[test]
+    fn tracked_sessions_have_independent_neural_state_locks() {
+        let me = workspace();
+        me.track_new_session("akh-neural-a");
+        me.track_new_session("akh-neural-b");
+
+        let (a, a_again, b) = {
+            let conversations = me
+                .session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                Arc::clone(conversations.get("akh-neural-a").expect("state a")),
+                Arc::clone(conversations.get("akh-neural-a").expect("state a again")),
+                Arc::clone(conversations.get("akh-neural-b").expect("state b")),
+            )
+        };
+
+        assert!(Arc::ptr_eq(&a, &a_again), "one ACP session must reuse its neural state");
+        assert!(!Arc::ptr_eq(&a, &b), "different ACP sessions must not share neural state");
+
+        let _a_guard = a.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            b.try_lock().is_ok(),
+            "locking one session's transcript must not block another session"
         );
     }
 
@@ -5777,6 +5880,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(survivor.clone(), "survivor-workspace".into());
+        let survivor_conversation = {
+            let conversations = me
+                .session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(conversations.get(&survivor).expect("survivor neural state"))
+        };
 
         // Fill most of the cap with other sessions, "using" the survivor
         // partway through so it is bumped to the back of the eviction queue.
@@ -5797,6 +5907,14 @@ mod tests {
             "survivor-workspace",
             "an actively-used session must survive cap eviction, not fall back to default_ws"
         );
+        let retained = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&survivor)
+            .cloned()
+            .expect("an actively-used session's neural state must survive LRU eviction");
+        assert!(Arc::ptr_eq(&survivor_conversation, &retained));
     }
 
     // --- WI-280: dispatch mode detection tests ---

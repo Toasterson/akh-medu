@@ -12,11 +12,13 @@
 //! ## Concurrency
 //!
 //! The whole turn is synchronous — blocking Ollama HTTP (`ureq`) interleaved
-//! with synchronous tool execution. Callers run it inside
-//! [`tokio::task::spawn_blocking`] holding the agent `Mutex` (ADR-027); no guard
-//! crosses an `.await`. The per-turn permission asker, if any, must already be
-//! installed on the tool registry (`Agent::set_permission_asker`) so `Ask` tools
-//! can bridge to the ACP client.
+//! with synchronous tool execution. ACP callers run it inside
+//! [`tokio::task::spawn_blocking`] under the workspace Agent's read lock
+//! (ADR-027); mutable neural transcript state is supplied separately and its
+//! mutex is held only for brief reads/writes, never across model inference or
+//! an `.await`. The per-turn permission asker, if any, must already be installed
+//! on the tool registry (`Agent::set_permission_asker`) so `Ask` tools can bridge
+//! to the ACP client.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -26,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Agent;
+use super::conversation::ConversationState;
 use super::ollama::StreamEvent;
 use super::tool::{ToolInput, ToolRegistry};
 use crate::engine::Engine;
@@ -335,9 +338,9 @@ impl Agent {
     /// `cancel` is checked once at the top of every round (between model
     /// calls, never mid-call): when set, the loop stops immediately without
     /// spending a final tool-free synthesis round, so the ACP idle watchdog
-    /// (which sets it once it gives up waiting on this turn) can reclaim the
-    /// agent lock as soon as the in-flight round returns instead of the
-    /// worker running unattended for the rest of the turn's budget. A caller
+    /// (which sets it once it gives up waiting on this turn) can stop the
+    /// worker as soon as the in-flight round returns instead of letting it run
+    /// unattended for the rest of the turn's budget. A caller
     /// with no cancellation source (e.g. tests, the symbolic pipeline's
     /// callers) passes a flag that is never set.
     pub fn run_agentic_turn(
@@ -348,6 +351,34 @@ impl Agent {
         sink: &dyn MessageSink,
         cancel: &std::sync::atomic::AtomicBool,
         is_autonomous_dispatch: bool,
+    ) -> Option<()> {
+        self.run_agentic_turn_with_conversation_state(
+            engine,
+            agent_id,
+            user_prompt,
+            sink,
+            cancel,
+            is_autonomous_dispatch,
+            &self.conversation_state,
+        )
+    }
+
+    /// Run one neural turn using the supplied conversation state.
+    ///
+    /// ACP supplies one state per protocol session; non-ACP callers use
+    /// [`Self::run_agentic_turn`], which preserves the Agent's historical
+    /// workspace-level state. The state mutex is intentionally never held
+    /// across backend inference, so unrelated ACP sessions remain concurrent.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_agentic_turn_with_conversation_state(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
+        conversation_state: &std::sync::Mutex<ConversationState>,
     ) -> Option<()> {
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
@@ -430,7 +461,10 @@ impl Agent {
         // turns directly (the agent turn is recorded at the end). The symbolic
         // path already records both speakers; this closes the gap for the agentic
         // path so multi-turn context works (measure-first Q1).
-        self.conversation_state().record_operator_turn(user_prompt);
+        conversation_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_operator_turn(user_prompt);
 
         // Phase 44d/44g: retrieve the input's KG context + relevant past episodes
         // for the working-context manager. The agent owns the engine + predicates;
@@ -441,7 +475,9 @@ impl Agent {
             // 44d delta refresh: inject only facts not already shown this session
             // (the activation frontier that moved), trusting retained history to
             // hold the rest. Opt-in; the default re-sends the full relevant block.
-            let mut conv_guard = self.conversation_state();
+            let mut conv_guard = conversation_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let seen = conv_guard.kg_seen_mut();
             crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
         } else {
@@ -451,7 +487,12 @@ impl Agent {
         let recalled = self.recall_for_prompt(engine, user_prompt, 3);
         // 44e: a one-line continuity seed (the conversation's opening ask), so the
         // thread survives history trimming. None on the first turn.
-        let session_seed = self.session_seed();
+        let session_seed = {
+            let conv_guard = conversation_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Self::session_seed_from(&conv_guard)
+        };
 
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default
@@ -474,7 +515,9 @@ impl Agent {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
-            let conv_guard = self.conversation_state();
+            let conv_guard = conversation_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let episode = EpisodeState::new(agent_id, user_prompt, engine)
                 .with_conversation(Some(&*conv_guard))
                 .with_context(kg_context.as_deref(), &recalled, session_seed.as_deref())
@@ -741,7 +784,10 @@ impl Agent {
                     mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
                     "completion check → returning: turn complete with answer"
                 );
-                self.conversation_state().record_agent_turn(answer);
+                conversation_state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .record_agent_turn(answer);
                 // ADR 091: capture the completed turn to the WAL (raw
                 // staging; a no-op if no sink is installed or capture is
                 // opted out).
@@ -823,6 +869,7 @@ impl Agent {
             stop,
             &tool_trace,
             &mut turn_metrics,
+            conversation_state,
         );
         // Log turn-level metrics summary (total prompt size, request count).
         turn_metrics.log();
@@ -985,6 +1032,7 @@ impl Agent {
         stop: TurnStop,
         tool_trace: &[Value],
         turn_metrics: &mut super::llm_metrics::TurnMetrics,
+        conversation_state: &std::sync::Mutex<ConversationState>,
     ) {
         conversation.push(json!({
             "role": "user",
@@ -1055,7 +1103,10 @@ impl Agent {
             )));
             return;
         }
-        self.conversation_state().record_agent_turn(answer);
+        conversation_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_agent_turn(answer);
         // ADR 091: same capture hook as the normal-completion turn-end site.
         self.emit_turn_wal(engine, agent_id, user_prompt, answer, tool_trace);
         if used_fallback {
@@ -1389,6 +1440,233 @@ mod tests {
 
     fn call(name: &str, args: &str) -> (String, Value) {
         (name.to_string(), json!({ "q": args }))
+    }
+
+    /// Immediate-answer backend that records the exact context supplied for
+    /// every turn, used to prove ACP-style conversation states retain their
+    /// own history without inheriting a neighboring session's transcript.
+    struct RecordingAnswerBackend {
+        conversations: std::sync::Arc<std::sync::Mutex<Vec<Vec<Value>>>>,
+        answer_seq: std::sync::atomic::AtomicUsize,
+    }
+
+    /// Backend that pauses every caller inside inference until the test
+    /// releases it. If a shared conversation mutex is held across inference,
+    /// the second caller cannot report entry and the regression test fails.
+    struct BlockingAnswerBackend {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for RecordingAnswerBackend {
+        fn label(&self) -> &str {
+            "recording-answer"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(conversation.to_vec());
+            let answer = self
+                .answer_seq
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: format!("answer-{answer}"),
+                tool_calls: vec![],
+                ..Default::default()
+            })
+        }
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for BlockingAnswerBackend {
+        fn label(&self) -> &str {
+            "blocking-answer"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.entered.send(()).expect("test receiver remains alive");
+            let (lock, wake) = &*self.release;
+            let mut released = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*released {
+                released = wake.wait(released).unwrap_or_else(|e| e.into_inner());
+            }
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "complete".into(),
+                tool_calls: vec![],
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn supplied_conversation_states_retain_history_without_cross_session_bleed() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        agent.set_chat_backend(std::sync::Arc::new(RecordingAnswerBackend {
+            conversations: std::sync::Arc::clone(&observed),
+            answer_seq: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        agent.set_context_manager(std::sync::Arc::new(
+            crate::agent::context::PassiveManager::with_tail(10),
+        ));
+
+        let state_a = std::sync::Mutex::new(ConversationState::new("session-a", "narrative"));
+        let state_b = std::sync::Mutex::new(ConversationState::new("session-b", "narrative"));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "alpha-first",
+                &sink,
+                &cancel,
+                false,
+                &state_a,
+            ),
+            Some(())
+        );
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "bravo-first",
+                &sink,
+                &cancel,
+                false,
+                &state_b,
+            ),
+            Some(())
+        );
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "alpha-second",
+                &sink,
+                &cancel,
+                false,
+                &state_a,
+            ),
+            Some(())
+        );
+
+        let observed = observed.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(observed.len(), 3);
+        let session_b_prompt = serde_json::to_string(&observed[1]).unwrap();
+        assert!(session_b_prompt.contains("bravo-first"));
+        assert!(!session_b_prompt.contains("alpha-first"));
+        assert!(!session_b_prompt.contains("answer-0"));
+
+        let session_a_follow_up = serde_json::to_string(&observed[2]).unwrap();
+        assert!(session_a_follow_up.contains("alpha-first"));
+        assert!(session_a_follow_up.contains("answer-0"));
+        assert!(session_a_follow_up.contains("alpha-second"));
+        assert!(!session_a_follow_up.contains("bravo-first"));
+        assert!(!session_a_follow_up.contains("answer-1"));
+
+        assert_eq!(
+            state_a.lock().unwrap_or_else(|e| e.into_inner()).turns.len(),
+            4,
+            "session A must retain both of its complete exchanges"
+        );
+        assert_eq!(
+            state_b.lock().unwrap_or_else(|e| e.into_inner()).turns.len(),
+            2,
+            "session B must contain only its own exchange"
+        );
+    }
+
+    #[test]
+    fn distinct_conversation_states_do_not_serialize_backend_inference() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = std::sync::Arc::new((
+            std::sync::Mutex::new(false),
+            std::sync::Condvar::new(),
+        ));
+        agent.set_chat_backend(std::sync::Arc::new(BlockingAnswerBackend {
+            entered: entered_tx,
+            release: std::sync::Arc::clone(&release),
+        }));
+
+        let state_a = std::sync::Mutex::new(ConversationState::new("session-a", "narrative"));
+        let state_b = std::sync::Mutex::new(ConversationState::new("session-b", "narrative"));
+
+        let both_entered_before_release = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let sink = crate::message::VecSink::new();
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                agent.run_agentic_turn_with_conversation_state(
+                    &engine,
+                    "thoth",
+                    "session-a prompt",
+                    &sink,
+                    &cancel,
+                    false,
+                    &state_a,
+                )
+            });
+            let second = scope.spawn(|| {
+                let sink = crate::message::VecSink::new();
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                agent.run_agentic_turn_with_conversation_state(
+                    &engine,
+                    "thoth",
+                    "session-b prompt",
+                    &sink,
+                    &cancel,
+                    false,
+                    &state_b,
+                )
+            });
+
+            let first_entered = entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
+            let second_entered = entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
+
+            let (lock, wake) = &*release;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            wake.notify_all();
+
+            assert_eq!(first.join().expect("first turn thread"), Some(()));
+            assert_eq!(second.join().expect("second turn thread"), Some(()));
+            first_entered && second_entered
+        });
+
+        assert!(
+            both_entered_before_release,
+            "two ACP sessions must reach backend inference concurrently; no shared transcript lock may span inference"
+        );
     }
 
     // ── ensure_real_user_turn (Qwen3.8 "no user query" 500 hardening) ──────

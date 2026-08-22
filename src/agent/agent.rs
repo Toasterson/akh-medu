@@ -2071,8 +2071,7 @@ impl Agent {
     /// keeps the thread even when middle turns are later trimmed under budget.
     /// `None` for a fresh (≤1-turn) conversation — there the first turn *is* the
     /// current prompt, so a seed would just duplicate it.
-    pub(crate) fn session_seed(&self) -> Option<String> {
-        let conv = self.conversation_state();
+    pub(crate) fn session_seed_from(conv: &ConversationState) -> Option<String> {
         if conv.turns.len() <= 1 {
             return None;
         }
