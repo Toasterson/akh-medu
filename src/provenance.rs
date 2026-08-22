@@ -1479,6 +1479,91 @@ impl ProvenanceLedger {
         Ok(records)
     }
 
+    /// Replace the complete ledger with records carrying their original IDs.
+    ///
+    /// This is the cold-wake counterpart to [`Self::all_records`].  The
+    /// primary table and every secondary index are rebuilt in one redb
+    /// transaction, so restored graph edges can never observe a partially
+    /// rebuilt ledger.  Callers must invoke this before publishing the woken
+    /// engine to concurrent writers.
+    pub fn replace_all(&self, records: &[ProvenanceRecord]) -> ProvenanceResult<()> {
+        let mut encoded = Vec::with_capacity(records.len());
+        let mut seen = std::collections::HashSet::with_capacity(records.len());
+        let mut max_id = 0u64;
+
+        for record in records {
+            let raw_id = record.id.ok_or_else(|| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "restored provenance record is missing its ID".into(),
+                })
+            })?.get();
+            if !seen.insert(raw_id) {
+                return Err(ProvenanceError::Store(StoreError::Serialization {
+                    message: format!("duplicate restored provenance ID {raw_id}"),
+                }));
+            }
+            max_id = max_id.max(raw_id);
+            let bytes = bincode::serialize(record).map_err(|e| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: format!("restored provenance record serialize: {e}"),
+                })
+            })?;
+            encoded.push((raw_id, bytes));
+        }
+
+        let next_id = max_id.checked_add(1).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "restored provenance ID space is exhausted".into(),
+            })
+        })?;
+
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
+        txn.delete_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        txn.delete_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
+        txn.delete_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
+        txn.delete_multimap_table(KIND_INDEX).map_err(redb_err)?;
+
+        {
+            let mut primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+            for (raw_id, bytes) in &encoded {
+                primary
+                    .insert(*raw_id, bytes.as_slice())
+                    .map_err(redb_err)?;
+            }
+        }
+        {
+            let mut derived_idx = txn
+                .open_multimap_table(DERIVED_INDEX)
+                .map_err(redb_err)?;
+            let mut source_idx = txn
+                .open_multimap_table(SOURCE_INDEX)
+                .map_err(redb_err)?;
+            let mut kind_idx = txn
+                .open_multimap_table(KIND_INDEX)
+                .map_err(redb_err)?;
+            for (record, (raw_id, _)) in records.iter().zip(&encoded) {
+                derived_idx
+                    .insert(record.derived_id.get(), *raw_id)
+                    .map_err(redb_err)?;
+                for source in &record.sources {
+                    source_idx
+                        .insert(source.get(), *raw_id)
+                        .map_err(redb_err)?;
+                }
+                kind_idx
+                    .insert(record.kind.tag(), *raw_id)
+                    .map_err(redb_err)?;
+            }
+        }
+        txn.commit().map_err(redb_err)?;
+
+        // `replace_all` is a cold-wake operation performed before the engine is
+        // published, so restoring the exact allocator successor is race-free.
+        self.next_id.store(next_id, Ordering::SeqCst);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -1597,6 +1682,72 @@ mod tests {
         assert_eq!(id1.get(), 1);
         assert_eq!(id2.get(), 2);
         assert_eq!(id3.get(), 3);
+    }
+
+    #[test]
+    fn replace_all_restores_ids_indices_and_allocator() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+
+        let mut stale = ProvenanceRecord::new(sym(1), DerivationKind::Extracted);
+        let stale_id = ledger.store(&mut stale).unwrap();
+
+        let source = sym(9);
+        let mut first = ProvenanceRecord::new(sym(70), DerivationKind::Seed)
+            .with_sources(vec![source]);
+        first.id = ProvenanceId::new(7);
+        let mut second = ProvenanceRecord::new(sym(90), DerivationKind::Reasoned)
+            .with_sources(vec![source]);
+        second.id = ProvenanceId::new(9);
+
+        ledger.replace_all(&[first, second]).unwrap();
+        assert!(matches!(ledger.get(stale_id), Err(ProvenanceError::NotFound { .. })));
+        assert_eq!(ledger.len().unwrap(), 2);
+        assert_eq!(ledger.by_source(source).unwrap().len(), 2);
+        assert_eq!(ledger.by_kind(&DerivationKind::Seed).unwrap().len(), 1);
+
+        let mut next = ProvenanceRecord::new(sym(100), DerivationKind::Aggregated);
+        assert_eq!(ledger.store(&mut next).unwrap().get(), 10);
+    }
+
+    #[test]
+    fn replace_all_rejects_invalid_manifests_without_erasing_live_data() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        let mut live = ProvenanceRecord::new(sym(5), DerivationKind::Seed);
+        let live_id = ledger.store(&mut live).unwrap();
+
+        let mut duplicate_a = ProvenanceRecord::new(sym(7), DerivationKind::Reasoned);
+        duplicate_a.id = ProvenanceId::new(8);
+        let mut duplicate_b = ProvenanceRecord::new(sym(9), DerivationKind::Aggregated);
+        duplicate_b.id = ProvenanceId::new(8);
+        assert!(ledger.replace_all(&[duplicate_a, duplicate_b]).is_err());
+        assert_eq!(ledger.get(live_id).unwrap().derived_id, sym(5));
+
+        let missing_id = ProvenanceRecord::new(sym(11), DerivationKind::Extracted);
+        assert!(ledger.replace_all(&[missing_id]).is_err());
+        assert_eq!(ledger.get(live_id).unwrap().derived_id, sym(5));
+    }
+
+    #[test]
+    fn rule_support_payloads_roundtrip_in_legacy_and_versioned_forms() {
+        let marker = sym(RULE_SUPPORT_TRIPLES_V1_SENTINEL);
+        for antecedents in [vec![sym(1), sym(2)], vec![marker, sym(1), sym(3), sym(2)]] {
+            let record = ProvenanceRecord::new(
+                sym(9),
+                DerivationKind::RuleInference {
+                    rule_name: "compatibility".into(),
+                    antecedents: antecedents.clone(),
+                },
+            );
+            let bytes = bincode::serialize(&record).unwrap();
+            let decoded: ProvenanceRecord = bincode::deserialize(&bytes).unwrap();
+            assert!(matches!(
+                decoded.kind,
+                DerivationKind::RuleInference { antecedents: restored, .. }
+                    if restored == antecedents
+            ));
+        }
     }
 
     #[test]

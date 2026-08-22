@@ -171,9 +171,7 @@ impl SparqlStore {
         // required because a triple is only ever inserted into one graph
         // (either DefaultGraph or a specific compartment named graph).
         let results = SparqlEvaluator::new()
-            .parse_query(
-                "SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
-            )
+            .parse_query("SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }")
             .map_err(|e| GraphError::Sparql {
                 message: format!("SPARQL parse failed: {e}"),
             })?
@@ -231,13 +229,41 @@ impl SparqlStore {
         Ok(triples)
     }
 
-    /// Sync all triples from an in-memory KnowledgeGraph to the SPARQL store.
+    /// Atomically replace the SPARQL store with the in-memory knowledge graph.
+    ///
+    /// A plain insert-only sync leaves retracted or host-stale triples behind,
+    /// which is especially dangerous after a Postgres cold wake.  One
+    /// Oxigraph transaction makes the rich in-memory snapshot authoritative.
     pub fn sync_from(&self, kg: &KnowledgeGraph) -> GraphResult<usize> {
         let triples = kg.all_triples();
         let count = triples.len();
+        let mut transaction = self
+            .store
+            .start_transaction()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("start SPARQL replacement transaction failed: {e}"),
+            })?;
+        transaction.clear().map_err(|e| GraphError::Sparql {
+            message: format!("clear SPARQL replacement transaction failed: {e}"),
+        })?;
         for triple in &triples {
-            self.insert_triple(triple)?;
+            let subject = Self::symbol_to_iri(triple.subject);
+            let predicate = Self::symbol_to_iri(triple.predicate);
+            let object = Self::symbol_to_iri(triple.object);
+            let quad = match triple.compartment_id.as_deref() {
+                Some(id) => Quad::new(
+                    subject,
+                    predicate,
+                    object,
+                    NamedNode::new(format!("{COMPARTMENT_NS}{id}")).expect("valid compartment IRI"),
+                ),
+                None => Quad::new(subject, predicate, object, GraphNameRef::DefaultGraph),
+            };
+            transaction.insert(&quad);
         }
+        transaction.commit().map_err(|e| GraphError::Sparql {
+            message: format!("commit SPARQL replacement transaction failed: {e}"),
+        })?;
         Ok(count)
     }
 
@@ -370,9 +396,17 @@ mod tests {
             .unwrap();
 
         let store = SparqlStore::in_memory().unwrap();
+        store
+            .insert_triple(&Triple::new(sym(99), sym(10), sym(100)))
+            .unwrap();
         let synced = store.sync_from(&kg).unwrap();
         assert_eq!(synced, 2);
         assert_eq!(store.len().unwrap(), 2);
+        assert!(
+            !store
+                .query_ask(&format!("ASK {{ <{AKH_NS}99> ?p ?o }}"))
+                .unwrap()
+        );
     }
 
     #[test]

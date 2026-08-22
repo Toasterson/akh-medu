@@ -206,10 +206,24 @@ impl CompartmentManager {
                             }
                         })?;
 
-                        let triple = crate::graph::Triple::new(s, p, o)
+                        let mut triple = [crate::graph::Triple::new(s, p, o)
                             .with_confidence(confidence)
-                            .with_compartment(compartment_id.clone());
-                        let _ = engine.add_triple(&triple);
+                            .with_compartment(compartment_id.clone())];
+                        let mut provenance = crate::provenance::ProvenanceRecord::new(
+                            o,
+                            crate::provenance::DerivationKind::CompartmentLoaded {
+                                compartment_id: compartment_id.clone(),
+                                source_file: triples_file.clone(),
+                            },
+                        )
+                        .with_sources(vec![s])
+                        .with_confidence(confidence);
+                        engine
+                            .add_triples_with_provenance(&mut triple, &mut provenance)
+                            .map_err(|e| CompartmentError::InvalidManifest {
+                                path: triples_path.display().to_string(),
+                                message: format!("failed to add tracked triple: {e}"),
+                            })?;
                         triple_count += 1;
                     }
                 }

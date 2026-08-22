@@ -502,10 +502,19 @@ impl Psyche {
             ($s:expr, $p:expr, $o:expr, $c:expr) => {{
                 // Skip if triple already exists (idempotent injection for restarts).
                 if !engine.has_triple($s, $p, $o) {
-                    let t = crate::graph::Triple::new($s, $p, $o)
+                    let mut triples = [crate::graph::Triple::new($s, $p, $o)
                         .with_confidence($c)
-                        .with_compartment(cid.clone());
-                    engine.add_triple(&t)?;
+                        .with_compartment(cid.clone())];
+                    let mut provenance = crate::provenance::ProvenanceRecord::new(
+                        $o,
+                        crate::provenance::DerivationKind::CompartmentLoaded {
+                            compartment_id: cid.clone(),
+                            source_file: "psyche.toml".into(),
+                        },
+                    )
+                    .with_sources(vec![$s])
+                    .with_confidence($c);
+                    engine.add_triples_with_provenance(&mut triples, &mut provenance)?;
                     count += 1;
                 }
             }};

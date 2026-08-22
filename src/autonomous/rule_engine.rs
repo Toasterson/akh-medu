@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::engine::Engine;
 use crate::graph::Triple;
-use crate::provenance::{DerivationKind, ProvenanceRecord};
+use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
 use super::error::AutonomousResult;
@@ -391,12 +391,24 @@ impl RuleEngine {
 
             for rule in &all_rules {
                 let bindings_list = self.match_antecedents(rule, engine)?;
+                let mut legacy_support_counts = HashMap::<Vec<SymbolId>, usize>::new();
+                for (_, matched) in &bindings_list {
+                    *legacy_support_counts
+                        .entry(matched.iter().map(|triple| triple.subject).collect())
+                        .or_default() += 1;
+                }
 
                 let mut rule_derived_count = 0;
                 for (bindings, matched_triples) in &bindings_list {
                     if rule_derived_count >= rule.max_derivations_per_iteration {
                         break;
                     }
+                    let legacy_subjects = matched_triples
+                        .iter()
+                        .map(|premise| premise.subject)
+                        .collect::<Vec<_>>();
+                    let legacy_support_unique =
+                        legacy_support_counts.get(&legacy_subjects) == Some(&1);
 
                     for consequent in &rule.consequents {
                         if let Some(triple) =
@@ -452,10 +464,37 @@ impl RuleEngine {
                                 triple.object.get(),
                             );
 
-                            // Skip if already in KG or already derived.
-                            if engine.has_triple(triple.subject, triple.predicate, triple.object)
-                                || derived_set.contains(&key)
+                            if derived_set.contains(&key) {
+                                continue;
+                            }
+
+                            // Upgrade an existing pre-contract rule result only
+                            // when its old ledger record identifies this exact
+                            // rule application unambiguously.  Never relabel an
+                            // arbitrary asserted fact merely because a rule can
+                            // also derive it.
+                            if let Some(existing) = engine
+                                .triples_from(triple.subject)
+                                .into_iter()
+                                .find(|candidate| {
+                                    candidate.predicate == triple.predicate
+                                        && candidate.object == triple.object
+                                })
                             {
+                                if existing.provenance_id.is_none()
+                                    && let Some(provenance_id) =
+                                        recover_rule_provenance_id(
+                                            engine,
+                                            rule,
+                                            triple.subject,
+                                            matched_triples,
+                                            legacy_support_unique,
+                                        )
+                                {
+                                    let mut repaired = existing;
+                                    repaired.provenance_id = Some(provenance_id.get());
+                                    engine.add_triple(&repaired)?;
+                                }
                                 continue;
                             }
 
@@ -545,19 +584,15 @@ impl RuleEngine {
                 .with_sources(source_ids)
                 .with_confidence(dt.confidence)
                 .with_depth(dt.iteration);
-                let provenance_id = engine.store_provenance(&mut record).ok();
-
-                // The graph edge is the unit returned by provenance/filter,
-                // so establish the triple-level invariant before insertion.
-                // In-memory engines have no ledger and remain explicitly
-                // untracked; persistent engines carry the exact record ID.
-                if let Some(id) = provenance_id {
-                    dt.triple.provenance_id = Some(id.get());
-                }
                 if self.config.auto_commit {
-                    // Ignore duplicate-triple errors.  insert_triple updates an
-                    // existing edge's provenance when this ID is present.
-                    let _ = engine.add_triple(&dt.triple);
+                    let mut triple = [dt.triple.clone()];
+                    engine.add_triples_with_provenance(&mut triple, &mut record)?;
+                    dt.triple = triple.into_iter().next().expect("one rule triple");
+                } else if let Ok(id) = engine.store_provenance(&mut record) {
+                    // A non-committing run still returns the durable evidence
+                    // ID when a ledger exists, but deliberately leaves the KG
+                    // untouched.
+                    dt.triple.provenance_id = Some(id.get());
                 }
             }
 
@@ -841,6 +876,54 @@ impl RuleEngine {
 }
 
 /// Compute the average confidence of a set of triples.
+/// Find one pre-existing provenance record that proves the current rule
+/// application produced an already-present edge.
+///
+/// New records carry exact `(s,p,o)` support keys.  Legacy records only carry
+/// antecedent subjects, so they are accepted solely for single-consequent
+/// rules and only when exactly one record matches; ambiguity fails closed.
+fn recover_rule_provenance_id(
+    engine: &Engine,
+    rule: &InferenceRule,
+    derived_subject: SymbolId,
+    matched_triples: &[Triple],
+    legacy_support_unique: bool,
+) -> Option<ProvenanceId> {
+    let exact_support = matched_triples
+        .iter()
+        .flat_map(|triple| [triple.subject, triple.predicate, triple.object])
+        .collect::<Vec<_>>();
+    let legacy_subjects = matched_triples
+        .iter()
+        .map(|triple| triple.subject)
+        .collect::<Vec<_>>();
+    let mut candidates = engine
+        .provenance_of(derived_subject)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|record| {
+            let DerivationKind::RuleInference {
+                rule_name,
+                antecedents,
+            } = &record.kind
+            else {
+                return None;
+            };
+            if rule_name != &rule.name {
+                return None;
+            }
+            let exact = antecedents.first().is_some_and(|marker| {
+                marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+            }) && antecedents[1..] == exact_support;
+            let legacy = legacy_support_unique
+                && rule.consequents.len() == 1
+                && antecedents == &legacy_subjects;
+            if exact || legacy { record.id } else { None }
+        });
+    let only = candidates.next()?;
+    candidates.next().is_none().then_some(only)
+}
+
 fn avg_confidence(triples: &[Triple]) -> f32 {
     if triples.is_empty() {
         return 1.0;
@@ -862,6 +945,17 @@ mod tests {
         .unwrap()
     }
 
+    fn persistent_test_engine() -> (tempfile::TempDir, Engine) {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        (dir, engine)
+    }
+
     #[test]
     fn transitive_closure_derives_new_triple() {
         let engine = test_engine();
@@ -881,6 +975,124 @@ mod tests {
         let c = engine.lookup_symbol("C").unwrap();
         let isa = engine.lookup_symbol("is-a").unwrap();
         assert!(engine.has_triple(a, isa, c));
+    }
+
+    #[test]
+    fn legacy_rule_record_repairs_an_untracked_edge_when_unambiguous() {
+        let (dir, engine) = persistent_test_engine();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+            ])
+            .unwrap();
+        let a = engine.lookup_symbol("A").unwrap();
+        let b = engine.lookup_symbol("B").unwrap();
+        let c = engine.lookup_symbol("C").unwrap();
+        let is_a = engine.lookup_symbol("is-a").unwrap();
+        engine.add_triple(&Triple::new(a, is_a, c)).unwrap();
+
+        let mut legacy = ProvenanceRecord::new(
+            a,
+            DerivationKind::RuleInference {
+                rule_name: "is-a-transitive".into(),
+                antecedents: vec![a, b],
+            },
+        )
+        .with_sources(vec![a, b])
+        .with_confidence(1.0);
+        let legacy_id = engine.store_provenance(&mut legacy).unwrap();
+        engine.persist().unwrap();
+        drop(engine);
+
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        engine
+            .run_rules(RuleEngineConfig::default())
+            .expect("repair run");
+        let repaired = engine
+            .triples_from(a)
+            .into_iter()
+            .find(|triple| triple.predicate == is_a && triple.object == c)
+            .unwrap();
+        assert_eq!(repaired.provenance_id, Some(legacy_id.get()));
+    }
+
+    #[test]
+    fn ambiguous_legacy_rule_records_do_not_relabel_an_edge() {
+        let (_dir, engine) = persistent_test_engine();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+            ])
+            .unwrap();
+        let a = engine.lookup_symbol("A").unwrap();
+        let b = engine.lookup_symbol("B").unwrap();
+        let c = engine.lookup_symbol("C").unwrap();
+        let is_a = engine.lookup_symbol("is-a").unwrap();
+        engine.add_triple(&Triple::new(a, is_a, c)).unwrap();
+
+        for _ in 0..2 {
+            let mut legacy = ProvenanceRecord::new(
+                a,
+                DerivationKind::RuleInference {
+                    rule_name: "is-a-transitive".into(),
+                    antecedents: vec![a, b],
+                },
+            )
+            .with_sources(vec![a, b]);
+            engine.store_provenance(&mut legacy).unwrap();
+        }
+
+        engine
+            .run_rules(RuleEngineConfig::default())
+            .expect("fail-closed repair run");
+        let unchanged = engine
+            .triples_from(a)
+            .into_iter()
+            .find(|triple| triple.predicate == is_a && triple.object == c)
+            .unwrap();
+        assert_eq!(unchanged.provenance_id, None);
+    }
+
+    #[test]
+    fn ambiguous_legacy_support_bindings_do_not_relabel_an_edge() {
+        let (_dir, engine) = persistent_test_engine();
+        engine
+            .ingest_label_triples(&[
+                ("A".into(), "is-a".into(), "B".into(), 1.0),
+                ("B".into(), "is-a".into(), "C".into(), 1.0),
+                ("B".into(), "is-a".into(), "D".into(), 1.0),
+            ])
+            .unwrap();
+        let a = engine.lookup_symbol("A").unwrap();
+        let b = engine.lookup_symbol("B").unwrap();
+        let c = engine.lookup_symbol("C").unwrap();
+        let is_a = engine.lookup_symbol("is-a").unwrap();
+        engine.add_triple(&Triple::new(a, is_a, c)).unwrap();
+
+        let mut legacy = ProvenanceRecord::new(
+            a,
+            DerivationKind::RuleInference {
+                rule_name: "is-a-transitive".into(),
+                antecedents: vec![a, b],
+            },
+        );
+        engine.store_provenance(&mut legacy).unwrap();
+
+        engine.run_rules(RuleEngineConfig::default()).unwrap();
+        let unchanged = engine
+            .triples_from(a)
+            .into_iter()
+            .find(|triple| triple.predicate == is_a && triple.object == c)
+            .unwrap();
+        assert_eq!(unchanged.provenance_id, None);
     }
 
     #[test]

@@ -263,9 +263,6 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
 
     let effective = if let TypeOutcome::Typed { type_symbol, .. } = &type_outcome {
         let type_triple = Triple::new(note_entity, is_a, *type_symbol);
-        engine
-            .add_triple(&type_triple)
-            .map_err(|e| projection_err(&note.id, format!("type triple: {e}")))?;
         asserted_triples.push(type_triple);
         sources.push(*type_symbol);
         // Slice 3: walk the is-a chain for the effective (own + inherited)
@@ -311,9 +308,6 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
                     .resolve_or_create_relation(key)
                     .map_err(|e| projection_err(&note.id, format!("property predicate '{key}': {e}")))?;
                 let property_triple = Triple::new(note_entity, predicate, value_entity);
-                engine
-                    .add_triple(&property_triple)
-                    .map_err(|e| projection_err(&note.id, format!("property triple '{key}': {e}")))?;
                 asserted_triples.push(property_triple);
                 typed_property_count += 1;
                 typed_properties.push(TypedPropertyProjection {
@@ -331,9 +325,6 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
                     .resolve_or_create_relation(&frontier_label)
                     .map_err(|e| projection_err(&note.id, format!("frontier predicate '{key}': {e}")))?;
                 let frontier_triple = Triple::new(note_entity, predicate, value_entity);
-                engine
-                    .add_triple(&frontier_triple)
-                    .map_err(|e| projection_err(&note.id, format!("frontier triple '{key}': {e}")))?;
                 asserted_triples.push(frontier_triple);
                 frontier_property_count += 1;
             }
@@ -363,9 +354,6 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
             .resolve_or_create_entity(&link.target)
             .map_err(|e| projection_err(&note.id, format!("wikilink target '{}': {e}", link.target)))?;
         let link_triple = Triple::new(note_entity, links_to, target);
-        engine
-            .add_triple(&link_triple)
-            .map_err(|e| projection_err(&note.id, format!("wikilink triple '{}': {e}", link.target)))?;
         asserted_triples.push(link_triple);
         sources.push(target);
         wikilink_count += 1;
@@ -383,7 +371,32 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
     )
     .with_sources(sources)
     .with_confidence(1.0);
-    let provenance_id = engine.store_provenance(&mut prov).ok();
+    // Preserve retained triples exactly: only facts absent from the KG are
+    // published with this pass's provenance ID.  Reprojection relies on an
+    // unchanged edge keeping its original confidence/provenance.
+    let mut missing = asserted_triples
+        .iter()
+        .enumerate()
+        .filter(|(_, triple)| {
+            !engine.has_triple(triple.subject, triple.predicate, triple.object)
+        })
+        .map(|(index, triple)| (index, triple.clone()))
+        .collect::<Vec<_>>();
+    let provenance_id = if missing.is_empty() {
+        engine.store_provenance(&mut prov).ok()
+    } else {
+        let mut new_triples = missing
+            .iter()
+            .map(|(_, triple)| triple.clone())
+            .collect::<Vec<_>>();
+        let id = engine
+            .add_triples_with_provenance(&mut new_triples, &mut prov)
+            .map_err(|e| projection_err(&note.id, format!("tracked projection triples: {e}")))?;
+        for ((index, _), inserted) in missing.drain(..).zip(new_triples) {
+            asserted_triples[index] = inserted;
+        }
+        id
+    };
 
     Ok(ProjectionReport {
         note_id: note.id.clone(),
@@ -1190,6 +1203,11 @@ mod tests {
             .find(|t| t.predicate == birth_date_triple.predicate && t.object == birth_date_triple.object)
             .expect("birthDate triple still live");
         assert!((live_birth_date.confidence - birth_date_triple.confidence).abs() < 1e-6);
+        assert_eq!(
+            live_birth_date.provenance_id,
+            birth_date_triple.provenance_id,
+            "a retained edge must keep its original provenance link",
+        );
 
         // A NoteReprojection provenance record documents who/what
         // superseded the old email fact — the audit trail work-item 8 asks

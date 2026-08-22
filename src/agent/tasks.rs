@@ -483,48 +483,56 @@ pub fn create_task(
     let symbol_id = engine.create_symbol(crate::symbol::SymbolKind::Entity, &label)?.id;
 
     let marker = engine.resolve_or_create_entity(TASK_MARKER_LABEL)?;
-    engine.add_triple(&Triple::new(symbol_id, preds.task_type, marker))?;
+    let mut triples = vec![Triple::new(symbol_id, preds.task_type, marker)];
 
     let title_sym = engine.resolve_or_create_entity(&format!("literal:{}", new.title))?;
-    engine.add_triple(&Triple::new(symbol_id, preds.has_title, title_sym))?;
+    triples.push(Triple::new(symbol_id, preds.has_title, title_sym));
 
     let state_sym = engine.resolve_or_create_entity("task:state:open")?;
-    engine.add_triple(&Triple::new(symbol_id, preds.has_state, state_sym))?;
+    triples.push(Triple::new(symbol_id, preds.has_state, state_sym));
 
     let priority_sym =
         engine.resolve_or_create_entity(&format!("task:priority:{}", new.priority.as_label()))?;
-    engine.add_triple(&Triple::new(symbol_id, preds.has_priority, priority_sym))?;
+    triples.push(Triple::new(symbol_id, preds.has_priority, priority_sym));
 
     if let Some(due) = new.due {
         let due_sym = engine.resolve_or_create_entity(&format!("date:{}", format_date(due)))?;
-        engine.add_triple(&Triple::new(symbol_id, preds.has_due, due_sym))?;
+        triples.push(Triple::new(symbol_id, preds.has_due, due_sym));
     }
     if let Some(scheduled) = new.scheduled {
         let sched_sym =
             engine.resolve_or_create_entity(&format!("date:{}", format_date(scheduled)))?;
-        engine.add_triple(&Triple::new(symbol_id, preds.has_scheduled, sched_sym))?;
+        triples.push(Triple::new(symbol_id, preds.has_scheduled, sched_sym));
     }
     if let Some(rec) = &new.recurrence {
         let rec_sym = engine.resolve_or_create_entity(&format!("recur:{}", rec.as_label()))?;
-        engine.add_triple(&Triple::new(symbol_id, preds.has_recurrence, rec_sym))?;
+        triples.push(Triple::new(symbol_id, preds.has_recurrence, rec_sym));
     }
     if let Some(note) = new.source_note {
-        engine.add_triple(&Triple::new(symbol_id, preds.has_source_note, note))?;
+        triples.push(Triple::new(symbol_id, preds.has_source_note, note));
     }
 
     // Episodic future-spine projection (module doc): tag as episodic memory
     // so generic recall finds it, without minting a second KG node.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    engine.add_triple(&Triple::new(symbol_id, agent_preds.memory_type, mem_type_sym))?;
+    triples.push(Triple::new(
+        symbol_id,
+        agent_preds.memory_type,
+        mem_type_sym,
+    ));
     let task_tag = engine.resolve_or_create_entity("tag:task")?;
-    engine.add_triple(&Triple::new(symbol_id, agent_preds.has_tag, task_tag))?;
+    triples.push(Triple::new(symbol_id, agent_preds.has_tag, task_tag));
     if new.due.is_some() || new.scheduled.is_some() {
         let future_tag = engine.resolve_or_create_entity("tag:future")?;
-        engine.add_triple(&Triple::new(symbol_id, agent_preds.has_tag, future_tag))?;
+        triples.push(Triple::new(symbol_id, agent_preds.has_tag, future_tag));
     }
     let excerpt = if new.title.len() > 80 { &new.title[..80] } else { &new.title };
     let summary_sym = engine.resolve_or_create_entity(&format!("summary:{excerpt}"))?;
-    engine.add_triple(&Triple::new(symbol_id, agent_preds.has_summary, summary_sym))?;
+    triples.push(Triple::new(
+        symbol_id,
+        agent_preds.has_summary,
+        summary_sym,
+    ));
 
     let mut prov = ProvenanceRecord::new(
         symbol_id,
@@ -534,7 +542,7 @@ pub fn create_task(
         },
     )
     .with_confidence(1.0);
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     reconstruct_task(engine, preds, symbol_id)?.ok_or(TaskError::NotFound {
         symbol_id: symbol_id.get(),
@@ -729,15 +737,27 @@ pub fn complete_task(
     let summary_text = format!("Completed: {}", current.title);
     let excerpt = if summary_text.len() > 80 { &summary_text[..80] } else { &summary_text };
     let summary_sym = engine.resolve_or_create_entity(&format!("summary:{excerpt}"))?;
-    engine.add_triple(&Triple::new(episode_id, agent_preds.has_summary, summary_sym))?;
+    let mut episode_triples = vec![Triple::new(
+        episode_id,
+        agent_preds.has_summary,
+        summary_sym,
+    )];
 
     let complete_tag = engine.resolve_or_create_entity("tag:task_complete")?;
-    engine.add_triple(&Triple::new(episode_id, agent_preds.has_tag, complete_tag))?;
+    episode_triples.push(Triple::new(
+        episode_id,
+        agent_preds.has_tag,
+        complete_tag,
+    ));
 
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    engine.add_triple(&Triple::new(episode_id, agent_preds.memory_type, mem_type_sym))?;
+    episode_triples.push(Triple::new(
+        episode_id,
+        agent_preds.memory_type,
+        mem_type_sym,
+    ));
 
-    engine.add_triple(&Triple::new(episode_id, agent_preds.learned, symbol_id))?;
+    episode_triples.push(Triple::new(episode_id, agent_preds.learned, symbol_id));
 
     let mut prov = ProvenanceRecord::new(
         episode_id,
@@ -748,7 +768,7 @@ pub fn complete_task(
     )
     .with_sources(vec![symbol_id])
     .with_confidence(1.0);
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut episode_triples, &mut prov)?;
 
     // 2. Flip the task to Done: state + link to the completion episode.
     replace_single(

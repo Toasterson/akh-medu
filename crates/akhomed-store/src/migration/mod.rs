@@ -15,6 +15,7 @@ mod m20260621_000001_akh_config;
 mod m20260710_000001_harvest_watermark;
 mod m20260711_000001_schema_registry;
 mod m20260711_000002_librarian_watermark;
+mod m20260822_000001_provenance_snapshot;
 
 pub struct Migrator;
 
@@ -30,6 +31,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000001_harvest_watermark::Migration),
             Box::new(m20260711_000001_schema_registry::Migration),
             Box::new(m20260711_000002_librarian_watermark::Migration),
+            Box::new(m20260822_000001_provenance_snapshot::Migration),
         ]
     }
 }

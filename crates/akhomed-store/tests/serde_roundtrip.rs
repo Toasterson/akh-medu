@@ -4,8 +4,8 @@
 
 use akhomed_store::entity::{
     akh, akh_state, competence_tool, drive, effort_case, fact, failure_case, goal, goal_dependency,
-    goal_hierarchy, learned_method_step, mutation_log, provenance, provenance_input, symbol,
-    workspace, workspace_seed_pack,
+    goal_hierarchy, learned_method_step, mutation_log, provenance, provenance_input,
+    provenance_snapshot, symbol, workspace, workspace_seed_pack,
 };
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -90,6 +90,17 @@ fn json_columns_roundtrip() {
         subject: 5,
         derivation: json!({ "kind": "AgentConsolidation" }),
         confidence: 0.9,
+        created_at: ts(),
+    });
+    roundtrip(&provenance_snapshot::Model {
+        akh_id: Uuid::from_u128(1),
+        provenance_id: 7,
+        workspace_id: Uuid::from_u128(2),
+        derived_symbol: 5,
+        sources: json!([1, 2, 3]),
+        derivation: json!({ "RuleInference": { "rule_name": "is-a-transitive" } }),
+        confidence: 0.88,
+        depth: 2,
         created_at: ts(),
     });
     roundtrip(&workspace::Model {

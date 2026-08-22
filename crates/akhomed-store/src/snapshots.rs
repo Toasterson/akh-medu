@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 // The macro-driven helpers fully-qualify their entity modules; only these are
 // referenced directly by the hand-written helpers below.
-use crate::entity::{akh_state, fact, mutation_log, provenance_input, workspace_seed_pack};
+use crate::entity::{
+    akh_state, fact, mutation_log, provenance_input, provenance_snapshot, workspace_seed_pack,
+};
 use crate::error::StoreResult;
 
 /// Postgres extended-query protocol bind-parameter limit.
@@ -180,6 +182,67 @@ pub async fn replace_workspace_facts(
     Ok(())
 }
 
+/// Atomically replace one workspace's facts and the owning Akh's portable
+/// provenance ledger snapshot.
+///
+/// Fact rows contain numeric provenance links.  Committing the two row sets in
+/// one transaction prevents a snapshot reader from observing new facts with an
+/// old ledger (or the inverse).  Inserts are chunked below PostgreSQL's 65,535
+/// bind-parameter ceiling.
+pub async fn replace_workspace_facts_and_provenance(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+    akh_id: Uuid,
+    rows: Vec<fact::Model>,
+    provenance_rows: Vec<provenance_snapshot::Model>,
+) -> StoreResult<()> {
+    const ROWS_PER_CHUNK: usize = 6_000;
+
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    let mut unique_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = (row.subject, row.predicate, row.object);
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+
+    let txn = db.begin().await?;
+    fact::Entity::delete_many()
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .exec(&txn)
+        .await?;
+    provenance_snapshot::Entity::delete_many()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .exec(&txn)
+        .await?;
+
+    for chunk in unique_rows.chunks(ROWS_PER_CHUNK) {
+        fact::Entity::insert_many(chunk.iter().cloned().map(IntoActiveModel::into_active_model))
+            .on_conflict(
+                OnConflict::columns([
+                    fact::Column::WorkspaceId,
+                    fact::Column::Subject,
+                    fact::Column::Predicate,
+                    fact::Column::Object,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&txn)
+            .await?;
+    }
+    for chunk in provenance_rows.chunks(ROWS_PER_CHUNK) {
+        provenance_snapshot::Entity::insert_many(
+            chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+        )
+        .exec(&txn)
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
 /// Load all facts for a workspace.
 pub async fn load_workspace_facts(
     db: &DatabaseConnection,
@@ -187,6 +250,22 @@ pub async fn load_workspace_facts(
 ) -> StoreResult<Vec<fact::Model>> {
     Ok(fact::Entity::find()
         .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .all(db)
+        .await?)
+}
+
+/// Load the complete portable provenance ledger for one Akh.
+///
+/// Provenance IDs are Akh-local rather than workspace-local.  The stored
+/// `workspace_id` remains useful audit metadata for the latest snapshot, but
+/// must not constrain wake when an Akh is addressed through another workspace.
+pub async fn load_provenance_snapshot(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+) -> StoreResult<Vec<provenance_snapshot::Model>> {
+    Ok(provenance_snapshot::Entity::find()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .order_by_asc(provenance_snapshot::Column::ProvenanceId)
         .all(db)
         .await?)
 }

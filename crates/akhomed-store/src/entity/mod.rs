@@ -13,6 +13,7 @@ pub mod fact;
 pub mod mutation_log;
 pub mod provenance;
 pub mod provenance_input;
+pub mod provenance_snapshot;
 pub mod symbol;
 
 // akhomed.* — cognitive state tables

@@ -3140,11 +3140,7 @@ fn provenance_source_bucket(kind: &crate::provenance::DerivationKind) -> &'stati
         DerivationKind::Seed => "user_asserted",
         DerivationKind::CompartmentLoaded { .. } => "seed_pack",
         DerivationKind::AgentDecision { .. }
-        | DerivationKind::AgentConsolidation { .. }
-        | DerivationKind::LibraryLearning { .. }
-        | DerivationKind::ProceduralLearning { .. }
-        | DerivationKind::PreferenceLearned { .. }
-        | DerivationKind::CausalSchemaLearned { .. } => "agent_learned",
+        | DerivationKind::AgentConsolidation { .. } => "agent_learned",
         other => other.kind_name(),
     }
 }
@@ -3214,15 +3210,19 @@ fn derivation_chain_edges(
             push_live(*subject, record.derived_id, Some(*predicate));
         }
         DerivationKind::RuleInference { antecedents, .. } => {
-            let exact = antecedents
+            let versioned = antecedents
                 .first()
                 .is_some_and(|marker| {
                     marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
-                })
-                && (antecedents.len() - 1) % 3 == 0;
-            if exact {
-                for triple_key in antecedents[1..].chunks_exact(3).take(64) {
-                    push_live(triple_key[0], triple_key[2], Some(triple_key[1]));
+                });
+            if versioned {
+                // A malformed versioned payload is corrupt, not a legacy
+                // symbol walk.  Fail closed rather than interpreting shifted
+                // IDs as unrelated live support edges.
+                if (antecedents.len() - 1) % 3 == 0 {
+                    for triple_key in antecedents[1..].chunks_exact(3).take(64) {
+                        push_live(triple_key[0], triple_key[2], Some(triple_key[1]));
+                    }
                 }
             } else {
                 // Legacy records only retained an ordered symbol walk.  Select
@@ -6238,10 +6238,16 @@ mod tests {
             1_700_000_001,
         );
 
-        // A lower-confidence untracked fact is useful for the alias/filter
-        // checks below, but must be excluded from this first filtered set.
+        // A lower-confidence deliberately untracked fact is useful for the
+        // alias/filter checks below.  Public assertion ingestion is now a
+        // tracked production source, so construct this legacy edge directly.
+        let stor = engine.resolve_or_create_entity("Stor01").unwrap();
+        let part_of = engine.resolve_or_create_relation("part-of").unwrap();
+        let lab = engine.resolve_or_create_entity("Lab").unwrap();
         engine
-            .ingest_label_triples(&[("Stor01".into(), "part-of".into(), "Lab".into(), 0.75)])
+            .add_triple(
+                &crate::graph::Triple::new(stor, part_of, lab).with_confidence(0.75),
+            )
             .unwrap();
 
         let response = dispatch_akh(
@@ -6382,6 +6388,144 @@ mod tests {
                 ["Dog", "is-a", "Mammal", 1.0],
                 ["Mammal", "is-a", "Animal", 1.0],
             ])
+        );
+    }
+
+    #[test]
+    fn provenance_filter_source_buckets_use_real_production_producers() {
+        let (_data_dir, engine) = persistent_engine();
+
+        // user_asserted — the public label-ingestion path.
+        engine
+            .ingest_label_triples(&[(
+                "UserAssertion".into(),
+                "states".into(),
+                "Claim".into(),
+                0.91,
+            )])
+            .unwrap();
+
+        // agent_learned — the production OODA-cycle episode indexer.
+        let predicates = crate::agent::AgentPredicates::init(&engine).unwrap();
+        let goal = engine.resolve_or_create_entity("AuditGoal").unwrap();
+        crate::agent::memory::index_cycle_episode(
+            &engine,
+            &predicates,
+            183,
+            "audit provenance",
+            Some(goal),
+            "kg_query",
+            "advanced",
+        )
+        .unwrap();
+
+        // seed_pack — the real compartment discovery/load path.
+        let compartment_root = tempfile::tempdir().unwrap();
+        let pack_dir = compartment_root.path().join("audit-pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(
+            pack_dir.join("compartment.toml"),
+            r#"id = "audit-pack"
+name = "Audit Pack"
+kind = "Workspace"
+scope = "Private"
+description = "provenance contract fixture"
+triples_file = "triples.json"
+tags = []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_dir.join("triples.json"),
+            r#"[{"subject":"PackSeed","predicate":"belongs-to","object":"AuditPack","confidence":0.88}]"#,
+        )
+        .unwrap();
+        let manager = crate::compartment::CompartmentManager::new(
+            compartment_root.path().to_path_buf(),
+        );
+        assert_eq!(manager.discover().unwrap(), 1);
+        manager.load("audit-pack", &engine).unwrap();
+
+        // infer_rules — the production transitive rule runner.
+        engine
+            .ingest_label_triples(&[
+                ("Dog".into(), "is-a".into(), "Mammal".into(), 1.0),
+                ("Mammal".into(), "is-a".into(), "Animal".into(), 1.0),
+            ])
+            .unwrap();
+        engine
+            .run_rules(crate::autonomous::RuleEngineConfig::default())
+            .unwrap();
+
+        let rows_for = |bucket: &str| {
+            dispatch_akh(
+                &engine,
+                "default",
+                false,
+                "_akh/provenance/filter",
+                &serde_json::json!({"derived_by": bucket, "page_size": 500}),
+            )
+            .unwrap()
+        };
+
+        let asserted = rows_for("user_asserted");
+        assert!(asserted["triples"].as_array().unwrap().iter().any(|row| {
+            row["subject"] == "UserAssertion" && row["provenance_kind"] == "seed"
+        }));
+
+        let learned = rows_for("agent_learned");
+        assert!(learned["triples"].as_array().unwrap().iter().any(|row| {
+            row["subject"] == "cycle_episode:183"
+                && row["provenance_kind"] == "agent_consolidation"
+        }));
+
+        let packed = rows_for("seed_pack");
+        assert!(packed["triples"].as_array().unwrap().iter().any(|row| {
+            row["subject"] == "PackSeed"
+                && row["provenance_kind"] == "compartment_loaded"
+        }));
+
+        let inferred = rows_for("infer_rules");
+        assert!(inferred["triples"].as_array().unwrap().iter().any(|row| {
+            row["subject"] == "Dog"
+                && row["predicate"] == "is-a"
+                && row["object"] == "Animal"
+                && row["provenance_kind"] == "rule_inference"
+        }));
+    }
+
+    #[test]
+    fn provenance_chain_rejects_malformed_versioned_rule_support() {
+        let (engine, _agent) = engine_and_agent();
+        let subject = engine.resolve_or_create_entity("SupportSubject").unwrap();
+        let support_predicate = engine.resolve_or_create_relation("support-predicate").unwrap();
+        let legacy_predicate = engine.resolve_or_create_relation("legacy-hop").unwrap();
+        let derived = engine.resolve_or_create_entity("DerivedObject").unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(
+                subject,
+                legacy_predicate,
+                support_predicate,
+            ))
+            .unwrap();
+
+        let record = crate::provenance::ProvenanceRecord::new(
+            derived,
+            crate::provenance::DerivationKind::RuleInference {
+                rule_name: "corrupt".into(),
+                antecedents: vec![
+                    crate::symbol::SymbolId::new(
+                        crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL,
+                    )
+                    .unwrap(),
+                    subject,
+                    support_predicate,
+                ],
+            },
+        );
+        assert!(
+            derivation_chain_edges(&engine, &record).is_empty(),
+            "a malformed versioned payload must not fall back to legacy symbol walking"
         );
     }
 

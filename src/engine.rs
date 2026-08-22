@@ -242,6 +242,17 @@ struct IdentityKey {
 impl Engine {
     /// Create a new engine with the given configuration.
     pub fn new(config: EngineConfig) -> AkhResult<Self> {
+        Self::new_inner(config, false)
+    }
+
+    /// Open an engine for snapshot restoration without publishing disk-backed
+    /// compartments or skills before the restored provenance allocator exists.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn new_for_restore(config: EngineConfig) -> AkhResult<Self> {
+        Self::new_inner(config, true)
+    }
+
+    fn new_inner(config: EngineConfig, defer_startup_loads: bool) -> AkhResult<Self> {
         if config.dimension.0 == 0 {
             return Err(EngineError::InvalidConfig {
                 message: "dimension must be > 0".into(),
@@ -325,51 +336,71 @@ impl Engine {
 
         let store = Arc::new(store);
 
-        // Restore knowledge graph.
-        //
-        // Primary path: SPARQL store (persistent when `sparql-persist` is enabled).
-        // Fallback path: bincode snapshot in the TieredStore metadata, written by
-        // `Engine::persist()`.  This allows triple persistence in environments
-        // without RocksDB (e.g., test mode, single-binary deployments).
-        let sparql_triples = sparql
-            .as_ref()
-            .map(|s| {
-                s.all_triples().unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "KG restore from SPARQL skipped");
-                    vec![]
-                })
-            })
-            .unwrap_or_default();
-
-        if !sparql_triples.is_empty() {
-            let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
-            tracing::info!(triples = count, "knowledge graph restored from SPARQL");
-        } else {
-            // SPARQL is unavailable or empty — try the bincode fallback.
-            let fallback = store
-                .get_meta(b"kg_triples_snapshot")
-                .ok()
-                .flatten()
-                .and_then(|bytes| {
-                    bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes).ok()
-                })
-                .unwrap_or_default();
-            if !fallback.is_empty() {
-                let count = knowledge_graph.bulk_load(&fallback).unwrap_or(0);
-                tracing::info!(triples = count, "knowledge graph restored from bincode snapshot");
-            }
-        }
-
-        // Fallback: restore KG triples from redb if SPARQL didn't provide any
-        // (e.g. sparql-persist feature is disabled or this is the first run after
-        //  upgrading to redb-backed triple persistence).
-        if knowledge_graph.triple_count() == 0 {
-            if let Ok(Some(bytes)) = store.get_meta(b"kg:triples") {
-                if let Ok(triples) = bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
-                    if !triples.is_empty() {
-                        let count = knowledge_graph.bulk_load(&triples).unwrap_or(0);
-                        tracing::info!(triples = count, "knowledge graph restored from redb fallback");
+        // A Postgres cold wake is authoritative and must start from an empty
+        // graph even when it reuses a host-local data directory.  Importing a
+        // stale bincode/Oxigraph graph here would retain facts absent from the
+        // relational snapshot and could bind their provenance IDs to the
+        // replacement ledger below.
+        if !defer_startup_loads {
+            // Restore the knowledge graph.  The bincode/redb snapshot is
+            // authoritative because it retains confidence, timestamps,
+            // compartment ownership, and the exact provenance ID.  Oxigraph
+            // only stores S/P/O, so preferring a non-empty SPARQL store here
+            // would silently strip all of that metadata on every local restart.
+            let bincode_triples = [b"kg_triples_snapshot".as_slice(), b"kg:triples".as_slice()]
+                .into_iter()
+                .find_map(|key| {
+                    let bytes = match store.get_meta(key) {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => return None,
+                        Err(error) => {
+                            tracing::warn!(
+                                key = %String::from_utf8_lossy(key),
+                                %error,
+                                "KG metadata snapshot read failed"
+                            );
+                            return None;
+                        }
+                    };
+                    match bincode::deserialize::<Vec<crate::graph::Triple>>(&bytes) {
+                        Ok(triples) => Some(triples),
+                        Err(error) => {
+                            tracing::warn!(
+                                key = %String::from_utf8_lossy(key),
+                                %error,
+                                "KG metadata snapshot decode failed"
+                            );
+                            None
+                        }
                     }
+                });
+
+            if let Some(bincode_triples) = bincode_triples {
+                let count = knowledge_graph.bulk_load(&bincode_triples).unwrap_or(0);
+                tracing::info!(
+                    triples = count,
+                    "knowledge graph restored from bincode snapshot"
+                );
+            } else {
+                // Compatibility fallback for installations created before the
+                // metadata snapshot existed.  These triples are necessarily
+                // bare; the next `persist()` writes the richer authoritative
+                // snapshot.
+                let sparql_triples = sparql
+                    .as_ref()
+                    .map(|s| {
+                        s.all_triples().unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "KG restore from SPARQL skipped");
+                            vec![]
+                        })
+                    })
+                    .unwrap_or_default();
+                if !sparql_triples.is_empty() {
+                    let count = knowledge_graph.bulk_load(&sparql_triples).unwrap_or(0);
+                    tracing::info!(
+                        triples = count,
+                        "knowledge graph restored from SPARQL fallback"
+                    );
                 }
             }
         }
@@ -459,14 +490,21 @@ impl Engine {
         // restore_phase9() so it merges with any previously persisted set.
         engine.register_builtin_multi_valued();
 
-        // Auto-load all discovered compartments (psyche, domain, etc.) so their
-        // triples and psyche config are available immediately.
-        engine.load_discovered_compartments();
-
-        // Auto-activate all discovered skills so installed == active.
-        engine.activate_installed_skills();
+        if !defer_startup_loads {
+            engine.finish_deferred_startup_loads();
+        }
 
         Ok(engine)
+    }
+
+    /// Complete startup work intentionally deferred during cold restore.
+    pub(crate) fn finish_deferred_startup_loads(&self) {
+        // Auto-load all discovered compartments (psyche, domain, etc.) so
+        // their triples and psyche config are available immediately.
+        self.load_discovered_compartments();
+
+        // Auto-activate all discovered skills so installed == active.
+        self.activate_installed_skills();
     }
 
     /// Auto-load all discovered (Dormant) compartments.
@@ -1069,6 +1107,42 @@ impl Engine {
         Ok(ledger.store(record)?)
     }
 
+    /// Store one provenance record before publishing every triple it supports.
+    ///
+    /// Persistent engines attach the assigned ID to all triples; in-memory
+    /// engines still insert the triples but return `None`.  Centralising this
+    /// ordering prevents audit readers from observing an edge whose referenced
+    /// ledger record has not committed yet.
+    pub fn add_triples_with_provenance(
+        &self,
+        triples: &mut [Triple],
+        record: &mut ProvenanceRecord,
+    ) -> AkhResult<Option<ProvenanceId>> {
+        if triples.is_empty() {
+            return Ok(None);
+        }
+        let provenance_id = match self.provenance_ledger.as_ref() {
+            Some(ledger) => Some(ledger.store(record)?),
+            None => None,
+        };
+        for triple in triples {
+            triple.provenance_id = provenance_id.map(ProvenanceId::get);
+            self.add_triple(triple)?;
+        }
+        Ok(provenance_id)
+    }
+
+    /// Replace the complete local ledger during cold wake, preserving IDs and
+    /// rebuilding every secondary index before facts are restored.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn replace_all_provenance(&self, records: &[ProvenanceRecord]) -> AkhResult<()> {
+        let ledger = self
+            .provenance_ledger
+            .as_ref()
+            .ok_or(ProvenanceError::NoPersistence)?;
+        Ok(ledger.replace_all(records)?)
+    }
+
     /// Get a provenance record by ID.
     pub fn get_provenance(&self, id: ProvenanceId) -> AkhResult<ProvenanceRecord> {
         let ledger = self
@@ -1489,8 +1563,11 @@ impl Engine {
             let p = self.resolve_or_create_relation(predicate)?;
             let o = self.resolve_or_create_entity(object)?;
 
-            let triple = Triple::new(s, p, o).with_confidence(*confidence);
-            self.add_triple(&triple)?;
+            let mut triple = [Triple::new(s, p, o).with_confidence(*confidence)];
+            let mut provenance = ProvenanceRecord::new(o, DerivationKind::Seed)
+                .with_sources(vec![s])
+                .with_confidence(*confidence);
+            self.add_triples_with_provenance(&mut triple, &mut provenance)?;
             ingested += 1;
         }
 

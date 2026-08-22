@@ -6,6 +6,7 @@
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
 use akh_medu::infer::InferenceQuery;
+use akh_medu::provenance::DerivationKind;
 use akh_medu::symbol::SymbolKind;
 use akh_medu::vsa::Dimension;
 
@@ -124,6 +125,70 @@ fn provenance_survives_restart() {
             sym_id
         );
     }
+}
+
+#[test]
+fn triple_provenance_link_and_metadata_survive_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let linked_id;
+
+    {
+        let engine = persistent_engine(dir.path());
+        engine
+            .ingest_label_triples(&[("Sun".into(), "is-a".into(), "Star".into(), 0.83)])
+            .unwrap();
+        let triple = engine.all_triples().pop().unwrap();
+        linked_id = triple.provenance_id.expect("tracked seed triple");
+        assert_eq!(triple.confidence, 0.83);
+        engine.persist().unwrap();
+    }
+
+    {
+        let engine = persistent_engine(dir.path());
+        let triple = engine.all_triples().pop().unwrap();
+        assert_eq!(triple.provenance_id, Some(linked_id));
+        assert_eq!(triple.confidence, 0.83);
+        let record = engine
+            .get_provenance(akh_medu::provenance::ProvenanceId::new(linked_id).unwrap())
+            .unwrap();
+        assert_eq!(record.kind, DerivationKind::Seed);
+    }
+}
+
+#[cfg(feature = "sparql-persist")]
+#[test]
+fn sparql_persist_restart_prefers_the_rich_metadata_snapshot() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let linked_id;
+
+    {
+        let engine = persistent_engine(dir.path());
+        engine
+            .ingest_label_triples(&[("Dog".into(), "is-a".into(), "Mammal".into(), 0.73)])
+            .unwrap();
+        let triple = engine.all_triples().pop().unwrap();
+        linked_id = triple.provenance_id.unwrap();
+        engine.persist().unwrap();
+    }
+
+    let reopened = persistent_engine(dir.path());
+    let dog = reopened.lookup_symbol("Dog").unwrap();
+    let is_a = reopened.lookup_symbol("is-a").unwrap();
+    let mammal = reopened.lookup_symbol("Mammal").unwrap();
+    let triple = reopened
+        .triples_from(dog)
+        .into_iter()
+        .find(|triple| triple.predicate == is_a && triple.object == mammal)
+        .unwrap();
+    assert_eq!(triple.provenance_id, Some(linked_id));
+    assert_eq!(triple.confidence, 0.73);
+    assert_eq!(
+        reopened
+            .get_provenance(akh_medu::provenance::ProvenanceId::new(linked_id).unwrap())
+            .unwrap()
+            .kind,
+        DerivationKind::Seed
+    );
 }
 
 #[test]

@@ -145,9 +145,20 @@ impl AtomicSymbolAllocator {
 
     /// Allocate the next symbol ID.
     ///
-    /// Returns an error if the ID space is exhausted (after 2^64 - 1 allocations).
+    /// Returns an error if the ID space is exhausted. `u64::MAX` is reserved
+    /// for versioned metadata sentinels and is never minted as a registry
+    /// symbol.
     pub fn next_id(&self) -> AkhResult<SymbolId> {
-        let raw = self.next.fetch_add(1, Ordering::Relaxed);
+        let raw = self
+            .next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if current == u64::MAX {
+                    None
+                } else {
+                    Some(current + 1)
+                }
+            })
+            .map_err(|_| SymbolError::AllocatorExhausted)?;
         SymbolId::new(raw).ok_or_else(|| SymbolError::AllocatorExhausted.into())
     }
 
@@ -199,6 +210,14 @@ mod tests {
         let alloc = AtomicSymbolAllocator::starting_from(100);
         assert_eq!(alloc.next_id().unwrap().get(), 100);
         assert_eq!(alloc.next_id().unwrap().get(), 101);
+    }
+
+    #[test]
+    fn allocator_never_mints_reserved_max_id() {
+        let alloc = AtomicSymbolAllocator::starting_from(u64::MAX);
+        assert!(alloc.next_id().is_err());
+        assert!(alloc.next_id().is_err(), "exhaustion must remain sticky");
+        assert!(alloc.next_id().is_err(), "allocator must never wrap to ID 1");
     }
 
     #[test]

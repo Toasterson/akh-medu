@@ -14,12 +14,12 @@ use thiserror::Error;
 
 use akhomed_store::DatabaseConnection;
 use akhomed_store::chrono;
-use akhomed_store::uuid::Uuid;
 use akhomed_store::entity::{
     agenda, akh_state, competence_calibration, competence_category, competence_tool,
-    curiosity_config, drive, effort_case, fact, failure_case, goal, goal_dependency, goal_hierarchy,
-    learned_method, learned_method_step, sleep_metric, symbol,
+    curiosity_config, drive, effort_case, fact, failure_case, goal, goal_dependency,
+    goal_hierarchy, learned_method, learned_method_step, provenance_snapshot, sleep_metric, symbol,
 };
+use akhomed_store::uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::engine::{Engine, EngineConfig};
@@ -27,6 +27,8 @@ use crate::graph::Triple;
 use crate::registry::SymbolRegistry;
 use crate::store::TieredStore;
 use crate::symbol::{SymbolId, SymbolKind, SymbolMeta};
+
+const PROVENANCE_SNAPSHOT_VERSION: u64 = 1;
 
 /// Errors from the snapshot/wake path.
 #[derive(Debug, Error, Diagnostic)]
@@ -80,6 +82,7 @@ pub struct SnapshotData {
     workspace_id: Uuid,
     symbols: Vec<symbol::Model>,
     facts: Vec<fact::Model>,
+    provenance: Vec<provenance_snapshot::Model>,
     drives: Vec<drive::Model>,
     agenda: Vec<agenda::Model>,
     curiosity: Vec<curiosity_config::Model>,
@@ -151,23 +154,79 @@ pub fn capture_snapshot(
         })
         .collect();
 
-    // Live KG → rows; retracted triples are absent.
-    let facts: Vec<fact::Model> = engine
-        .all_triples()
-        .into_iter()
-        .map(|t| fact::Model {
-            workspace_id,
-            subject: t.subject.get() as i64,
-            predicate: t.predicate.get() as i64,
-            object: t.object.get() as i64,
-            akh_id,
-            confidence: t.confidence,
-            asserted_at: ts(t.timestamp),
-            retracted_at: None,
-            provenance_id: t.provenance_id.map(|p| p as i64),
-            compartment: t.compartment_id.clone(),
+    // Live KG → rows; retracted triples are absent.  Capture the graph
+    // before the append-only ledger so any linked ID visible here is already
+    // committed by producers that obey `add_triples_with_provenance`.
+    let graph_triples = engine.all_triples();
+    let facts = graph_triples
+        .iter()
+        .map(|t| {
+            let provenance_id = t
+                .provenance_id
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    SnapshotError::Agent(format!(
+                        "fact provenance ID {} exceeds the relational snapshot range",
+                        t.provenance_id.unwrap_or_default()
+                    ))
+                })?;
+            Ok(fact::Model {
+                workspace_id,
+                subject: t.subject.get() as i64,
+                predicate: t.predicate.get() as i64,
+                object: t.object.get() as i64,
+                akh_id,
+                confidence: t.confidence,
+                asserted_at: ts(t.timestamp),
+                retracted_at: None,
+                provenance_id,
+                compartment: t.compartment_id.clone(),
+            })
         })
-        .collect();
+        .collect::<SnapshotResult<Vec<_>>>()?;
+
+    // The complete local ledger is paired transactionally with `facts` in
+    // Postgres.  Keeping every record (not only currently linked ones)
+    // preserves raw provenance queries and the exact next-ID watermark.
+    let provenance_records = engine
+        .all_provenance()
+        .map_err(|e| SnapshotError::Agent(format!("capture provenance ledger: {e}")))?;
+    let provenance = provenance_records
+        .iter()
+        .map(|record| {
+            let id = record.id.ok_or_else(|| {
+                SnapshotError::Agent("persisted provenance record has no ID".into())
+            })?;
+            Ok(provenance_snapshot::Model {
+                akh_id,
+                provenance_id: i64::try_from(id.get()).map_err(|_| {
+                    SnapshotError::Agent(format!(
+                        "provenance ID {} exceeds the relational snapshot range",
+                        id.get()
+                    ))
+                })?,
+                workspace_id,
+                derived_symbol: i64::try_from(record.derived_id.get()).map_err(|_| {
+                    SnapshotError::Agent(format!(
+                        "derived symbol {} exceeds the relational snapshot range",
+                        record.derived_id.get()
+                    ))
+                })?,
+                sources: serde_json::to_value(&record.sources).map_err(|e| {
+                    SnapshotError::Agent(format!("serialize provenance sources: {e}"))
+                })?,
+                derivation: serde_json::to_value(&record.kind).map_err(|e| {
+                    SnapshotError::Agent(format!("serialize provenance derivation: {e}"))
+                })?,
+                confidence: record.confidence,
+                depth: i64::try_from(record.depth)
+                    .map_err(|_| SnapshotError::Agent("provenance depth exceeds i64".into()))?,
+                created_at: ts(record.timestamp),
+            })
+        })
+        .collect::<SnapshotResult<Vec<_>>>()?;
+    validate_fact_provenance_links(&facts, &provenance_records)?;
 
     let drives: Vec<drive::Model> = agent
         .drives
@@ -390,6 +449,7 @@ pub fn capture_snapshot(
         agent.cycle_count,
     );
     let extra = serde_json::json!({
+        "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
         "improvement_history": agent.improvement_history,
         "method_stats": agent.method_registry_htn.export_stats(),
@@ -402,6 +462,7 @@ pub fn capture_snapshot(
         workspace_id,
         symbols,
         facts,
+        provenance,
         drives,
         agenda,
         curiosity,
@@ -436,6 +497,7 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         workspace_id,
         symbols,
         facts,
+        provenance,
         drives,
         agenda,
         curiosity,
@@ -471,7 +533,8 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     let librarian_watermark = ops::get_librarian_watermark(db, akh_id).await?;
 
     ops::replace_symbols(db, akh_id, symbols).await?;
-    ops::replace_workspace_facts(db, workspace_id, facts).await?;
+    ops::replace_workspace_facts_and_provenance(db, workspace_id, akh_id, facts, provenance)
+        .await?;
     ops::replace_drives(db, akh_id, drives).await?;
     ops::replace_agenda(db, akh_id, agenda).await?;
     ops::replace_curiosity(db, akh_id, curiosity).await?;
@@ -612,7 +675,8 @@ pub async fn wake(
     // 2. Load the relational truth. Each is best-effort: a missing/empty table
     //    yields defaults downstream.
     let symbol_rows = ops::load_symbols(db, akh_id).await?;
-    let fact_rows = ops::load_workspace_facts(db, workspace_id).await?;
+    let mut fact_rows = ops::load_workspace_facts(db, workspace_id).await?;
+    let provenance_rows = ops::load_provenance_snapshot(db, akh_id).await?;
     let drive_rows = ops::load_drives(db, akh_id).await?;
     let agenda_rows = ops::load_agenda(db, akh_id).await?;
     let curiosity_rows = ops::load_curiosity(db, akh_id).await?;
@@ -628,6 +692,30 @@ pub async fn wake(
     let calib_rows = ops::load_competence_calibration(db, akh_id).await?;
     let sleep_rows = ops::load_sleep_metrics(db, akh_id).await?;
 
+    let provenance_records = provenance_rows
+        .iter()
+        .map(provenance_row_to_record)
+        .collect::<SnapshotResult<Vec<_>>>()?;
+    let provenance_snapshot_complete = state
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get("provenance_snapshot_version"))
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|version| version >= PROVENANCE_SNAPSHOT_VERSION);
+    if !provenance_snapshot_complete {
+        let cleared =
+            clear_unverifiable_legacy_provenance_links(&mut fact_rows, &provenance_records);
+        if cleared > 0 {
+            tracing::warn!(
+                akh = %akh_id,
+                %workspace_id,
+                cleared,
+                "wake: downgraded unverifiable pre-v1 provenance links to untracked"
+            );
+        }
+    }
+    validate_fact_provenance_links(&fact_rows, &provenance_records)?;
+
     // 3. Reconstruct the local redb meta the engine + agent read on open. The
     //    store must be dropped before `Engine::new` reopens the same redb file.
     {
@@ -639,7 +727,11 @@ pub async fn wake(
         })?;
 
         write_registry(&store, &symbol_rows);
-        put_bincode(&store, b"sym_allocator_next", &(state.allocator_next as u64));
+        put_bincode(
+            &store,
+            b"sym_allocator_next",
+            &(state.allocator_next as u64),
+        );
         put_bincode(&store, b"agent:cycle_count", &(state.cycle_count as u64));
 
         if let Some(d) = build_drive_system(&drive_rows) {
@@ -687,12 +779,19 @@ pub async fn wake(
     // 4. Open the engine over the reconstructed redb (registry + allocator come
     //    back here; the KG is still empty).
     let engine = Arc::new(
-        Engine::new(EngineConfig {
+        Engine::new_for_restore(EngineConfig {
             data_dir: Some(data_dir.to_path_buf()),
             ..Default::default()
         })
         .map_err(|e| SnapshotError::Engine(e.to_string()))?,
     );
+
+    // Replace the local redb ledger before publishing any restored fact.  This
+    // both removes stale host-local records and restores the exact next ID, so
+    // a dangling fact can never be rebound to an unrelated future record.
+    engine
+        .replace_all_provenance(&provenance_records)
+        .map_err(|e| SnapshotError::Engine(format!("restore provenance ledger: {e}")))?;
 
     // 5. Restore the KG (+ item memory) from the relational facts.
     let triples: Vec<Triple> = fact_rows.iter().filter_map(fact_to_triple).collect();
@@ -709,6 +808,11 @@ pub async fn wake(
             replayed += 1;
         }
     }
+    // Disk-backed compartments and skills may publish provenance-linked
+    // triples.  Start them only after the restored ledger/allocator is live,
+    // otherwise replacing the ledger above would immediately dangle their
+    // freshly assigned IDs.
+    engine.finish_deferred_startup_loads();
     tracing::info!(
         akh = %akh_id,
         triples = triples.len(),
@@ -899,7 +1003,11 @@ fn build_goals(
                 .and_then(|v| serde_json::from_value::<crate::agent::Goal>(v.clone()).ok())?;
             goal.children = children_by_parent
                 .get(&row.id)
-                .map(|v| v.iter().filter_map(|(_, c)| SymbolId::new(*c as u64)).collect())
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|(_, c)| SymbolId::new(*c as u64))
+                        .collect()
+                })
                 .unwrap_or_default();
             goal.blocked_by = blocked_by_goal
                 .get(&row.id)
@@ -910,7 +1018,9 @@ fn build_goals(
         .collect()
 }
 
-fn build_failure_cases(rows: &[failure_case::Model]) -> Vec<crate::agent::metacognition::FailureCase> {
+fn build_failure_cases(
+    rows: &[failure_case::Model],
+) -> Vec<crate::agent::metacognition::FailureCase> {
     use crate::agent::metacognition::FailureCase;
     let mut rows: Vec<_> = rows.iter().collect();
     rows.sort_by_key(|r| r.seq);
@@ -927,7 +1037,9 @@ fn build_failure_cases(rows: &[failure_case::Model]) -> Vec<crate::agent::metaco
         .collect()
 }
 
-fn build_effort_cases(rows: &[effort_case::Model]) -> Option<Vec<crate::agent::resource::EffortCase>> {
+fn build_effort_cases(
+    rows: &[effort_case::Model],
+) -> Option<Vec<crate::agent::resource::EffortCase>> {
     use crate::agent::resource::EffortCase;
     if rows.is_empty() {
         return None;
@@ -1006,7 +1118,9 @@ fn build_competence(
     categories: &[competence_category::Model],
     calib: &[competence_calibration::Model],
 ) -> crate::agent::metacognition::CompetenceModel {
-    use crate::agent::metacognition::{CalibrationPoint, CategoryRecord, CompetenceModel, ToolRecord};
+    use crate::agent::metacognition::{
+        CalibrationPoint, CategoryRecord, CompetenceModel, ToolRecord,
+    };
     let mut model = CompetenceModel::default();
     for t in tools {
         model.tools.insert(
@@ -1113,15 +1227,114 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
     }
 }
 
+/// Convert one portable relational row back into the exact local ledger
+/// record.  Invalid IDs or malformed typed JSON fail wake rather than leaving
+/// a dangling fact link behind.
+fn provenance_row_to_record(
+    row: &provenance_snapshot::Model,
+) -> SnapshotResult<crate::provenance::ProvenanceRecord> {
+    let raw_id = u64::try_from(row.provenance_id).map_err(|_| {
+        SnapshotError::Engine(format!(
+            "invalid restored provenance ID {}",
+            row.provenance_id
+        ))
+    })?;
+    let id = crate::provenance::ProvenanceId::new(raw_id)
+        .ok_or_else(|| SnapshotError::Engine("restored provenance ID must be non-zero".into()))?;
+    let derived_raw = u64::try_from(row.derived_symbol).map_err(|_| {
+        SnapshotError::Engine(format!(
+            "invalid restored derived symbol {}",
+            row.derived_symbol
+        ))
+    })?;
+    let derived_id = SymbolId::new(derived_raw)
+        .ok_or_else(|| SnapshotError::Engine("restored derived symbol must be non-zero".into()))?;
+    let sources = serde_json::from_value::<Vec<SymbolId>>(row.sources.clone())
+        .map_err(|e| SnapshotError::Engine(format!("decode provenance {raw_id} sources: {e}")))?;
+    let kind = serde_json::from_value::<crate::provenance::DerivationKind>(row.derivation.clone())
+        .map_err(|e| {
+            SnapshotError::Engine(format!("decode provenance {raw_id} derivation: {e}"))
+        })?;
+    let depth = usize::try_from(row.depth).map_err(|_| {
+        SnapshotError::Engine(format!("invalid provenance {raw_id} depth {}", row.depth))
+    })?;
+
+    Ok(crate::provenance::ProvenanceRecord {
+        id: Some(id),
+        derived_id,
+        sources,
+        kind,
+        confidence: row.confidence,
+        depth,
+        timestamp: row.created_at.timestamp().max(0) as u64,
+    })
+}
+
+/// Ensure every fact-level provenance link resolves inside the same complete
+/// ledger image.  Used on both sides of the relational snapshot boundary so a
+/// corrupt source engine cannot publish a snapshot that wake would reject.
+fn validate_fact_provenance_links(
+    facts: &[fact::Model],
+    records: &[crate::provenance::ProvenanceRecord],
+) -> SnapshotResult<()> {
+    let provenance_ids: std::collections::HashSet<u64> = records
+        .iter()
+        .filter_map(|record| record.id.map(|id| id.get()))
+        .collect();
+    for fact in facts {
+        if let Some(raw_id) = fact.provenance_id {
+            let id = u64::try_from(raw_id).map_err(|_| {
+                SnapshotError::Engine(format!(
+                    "fact ({}, {}, {}) has invalid provenance ID {raw_id}",
+                    fact.subject, fact.predicate, fact.object
+                ))
+            })?;
+            if id == 0 || !provenance_ids.contains(&id) {
+                return Err(SnapshotError::Engine(format!(
+                    "fact ({}, {}, {}) references missing provenance ID {raw_id}",
+                    fact.subject, fact.predicate, fact.object
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pre-v1 snapshots persisted numeric fact links but not the local ledger that
+/// gave those IDs meaning.  Keep any link that a concurrently/backfilled
+/// portable ledger proves, and clear only the unverifiable remainder so it can
+/// never bind to an unrelated record after the allocator restarts.
+fn clear_unverifiable_legacy_provenance_links(
+    facts: &mut [fact::Model],
+    records: &[crate::provenance::ProvenanceRecord],
+) -> usize {
+    let provenance_ids: std::collections::HashSet<u64> = records
+        .iter()
+        .filter_map(|record| record.id.map(|id| id.get()))
+        .collect();
+    let mut cleared = 0;
+    for fact in facts {
+        let verified = fact
+            .provenance_id
+            .and_then(|raw_id| u64::try_from(raw_id).ok())
+            .is_some_and(|id| id != 0 && provenance_ids.contains(&id));
+        if fact.provenance_id.is_some() && !verified {
+            fact.provenance_id = None;
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
 /// Convert a persisted `facts` row into a KG [`Triple`].
 fn fact_to_triple(row: &fact::Model) -> Option<Triple> {
-    let s = SymbolId::new(row.subject as u64)?;
-    let p = SymbolId::new(row.predicate as u64)?;
-    let o = SymbolId::new(row.object as u64)?;
+    let s = SymbolId::new(u64::try_from(row.subject).ok()?)?;
+    let p = SymbolId::new(u64::try_from(row.predicate).ok()?)?;
+    let o = SymbolId::new(u64::try_from(row.object).ok()?)?;
     let mut t = Triple::new(s, p, o);
     t.confidence = row.confidence;
     t.timestamp = row.asserted_at.timestamp().max(0) as u64;
-    t.provenance_id = row.provenance_id.map(|v| v as u64);
+    t.provenance_id = row.provenance_id.and_then(|v| u64::try_from(v).ok());
     t.compartment_id = row.compartment.clone();
     Some(t)
 }
@@ -1288,9 +1501,24 @@ mod tests {
             detail: Some(detail),
         };
         let hierarchy = vec![
-            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 30, position: 2 },
-            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 10, position: 0 },
-            goal_hierarchy::Model { akh_id: Uuid::nil(), parent_id: 1, child_id: 20, position: 1 },
+            goal_hierarchy::Model {
+                akh_id: Uuid::nil(),
+                parent_id: 1,
+                child_id: 30,
+                position: 2,
+            },
+            goal_hierarchy::Model {
+                akh_id: Uuid::nil(),
+                parent_id: 1,
+                child_id: 10,
+                position: 0,
+            },
+            goal_hierarchy::Model {
+                akh_id: Uuid::nil(),
+                parent_id: 1,
+                child_id: 20,
+                position: 1,
+            },
         ];
         let back = build_goals(std::slice::from_ref(&row), &hierarchy, &[]);
         assert_eq!(
@@ -1498,8 +1726,182 @@ mod tests {
             SymbolKind::Glyph { codepoint: '𓂀' },
         ] {
             let (s, g) = symbol_kind_parts(&kind);
-            assert_eq!(symbol_kind_from(&s, g), kind, "kind {kind:?} must round-trip");
+            assert_eq!(
+                symbol_kind_from(&s, g),
+                kind,
+                "kind {kind:?} must round-trip"
+            );
         }
+    }
+
+    #[test]
+    fn provenance_snapshot_row_roundtrips_typed_record() {
+        let sentinel = SymbolId::new(crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL).unwrap();
+        let source = SymbolId::new(11).unwrap();
+        let predicate = SymbolId::new(12).unwrap();
+        let object = SymbolId::new(13).unwrap();
+        let kind = crate::provenance::DerivationKind::RuleInference {
+            rule_name: "roundtrip".into(),
+            antecedents: vec![sentinel, source, predicate, object],
+        };
+        let row = provenance_snapshot::Model {
+            akh_id: Uuid::nil(),
+            provenance_id: 17,
+            workspace_id: Uuid::nil(),
+            derived_symbol: 19,
+            sources: serde_json::to_value(vec![source, object]).unwrap(),
+            derivation: serde_json::to_value(&kind).unwrap(),
+            confidence: 0.82,
+            depth: 3,
+            created_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+
+        let restored = provenance_row_to_record(&row).unwrap();
+        assert_eq!(restored.id.unwrap().get(), 17);
+        assert_eq!(restored.derived_id.get(), 19);
+        assert_eq!(restored.sources, vec![source, object]);
+        assert_eq!(restored.kind, kind);
+        assert_eq!(restored.confidence, 0.82);
+        assert_eq!(restored.depth, 3);
+        assert_eq!(restored.timestamp, 1_700_000_000);
+
+        let mut malformed = row;
+        malformed.sources = serde_json::json!({"not": "a symbol list"});
+        assert!(provenance_row_to_record(&malformed).is_err());
+    }
+
+    #[test]
+    fn capture_rejects_a_dangling_fact_provenance_link() {
+        let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+        let subject = engine.resolve_or_create_entity("DanglingSubject").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("dangling-predicate")
+            .unwrap();
+        let object = engine.resolve_or_create_entity("DanglingObject").unwrap();
+        engine
+            .add_triple(&Triple::new(subject, predicate, object).with_provenance(42))
+            .unwrap();
+        let agent = Agent::new(Arc::clone(&engine), crate::agent::AgentConfig::default()).unwrap();
+        assert!(
+            capture_snapshot(&agent, Uuid::new_v4(), Uuid::new_v4()).is_err(),
+            "capture must fail before publishing an incomplete provenance manifest"
+        );
+    }
+
+    #[test]
+    fn deferred_restore_loads_compartments_after_the_ledger_watermark() {
+        let root = tempfile::tempdir().unwrap();
+        let pack_dir = root.path().join("compartments").join("restore-pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(
+            pack_dir.join("compartment.toml"),
+            r#"id = "restore-pack"
+name = "Restore Pack"
+kind = "Workspace"
+scope = "Private"
+triples_file = "triples.json"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            pack_dir.join("triples.json"),
+            r#"[{"subject":"DeferredSeed","predicate":"belongs-to","object":"RestorePack"}]"#,
+        )
+        .unwrap();
+
+        let engine = Engine::new_for_restore(EngineConfig {
+            data_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(engine.resolve_symbol("DeferredSeed").is_err());
+        engine.replace_all_provenance(&[]).unwrap();
+        engine.finish_deferred_startup_loads();
+
+        let subject = engine.lookup_symbol("DeferredSeed").unwrap();
+        let triple = engine.triples_from(subject).pop().unwrap();
+        let provenance_id = triple.provenance_id.expect("tracked compartment edge");
+        assert!(matches!(
+            engine
+                .get_provenance(crate::provenance::ProvenanceId::new(provenance_id).unwrap())
+                .unwrap()
+                .kind,
+            crate::provenance::DerivationKind::CompartmentLoaded { .. }
+        ));
+    }
+
+    #[test]
+    fn cold_restore_ignores_a_stale_host_local_graph() {
+        let root = tempfile::tempdir().unwrap();
+        {
+            let stale = Engine::new(EngineConfig {
+                data_dir: Some(root.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+            stale
+                .ingest_label_triples(&[(
+                    "StaleSubject".into(),
+                    "stale-predicate".into(),
+                    "StaleObject".into(),
+                    1.0,
+                )])
+                .unwrap();
+            stale.persist().unwrap();
+        }
+
+        let restoring = Engine::new_for_restore(EngineConfig {
+            data_dir: Some(root.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            restoring.all_triples().is_empty(),
+            "the relational wake snapshot, not a reused host cache, is authoritative"
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_clears_only_unverifiable_provenance_links() {
+        let mut record = crate::provenance::ProvenanceRecord::new(
+            SymbolId::new(3).unwrap(),
+            crate::provenance::DerivationKind::Seed,
+        );
+        record.id = crate::provenance::ProvenanceId::new(17);
+        let timestamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut facts = vec![
+            fact::Model {
+                workspace_id: Uuid::nil(),
+                subject: 1,
+                predicate: 2,
+                object: 3,
+                akh_id: Uuid::nil(),
+                confidence: 1.0,
+                asserted_at: timestamp,
+                retracted_at: None,
+                provenance_id: Some(17),
+                compartment: None,
+            },
+            fact::Model {
+                workspace_id: Uuid::nil(),
+                subject: 4,
+                predicate: 2,
+                object: 5,
+                akh_id: Uuid::nil(),
+                confidence: 1.0,
+                asserted_at: timestamp,
+                retracted_at: None,
+                provenance_id: Some(99),
+                compartment: None,
+            },
+        ];
+
+        assert_eq!(
+            clear_unverifiable_legacy_provenance_links(&mut facts, &[record]),
+            1
+        );
+        assert_eq!(facts[0].provenance_id, Some(17));
+        assert_eq!(facts[1].provenance_id, None);
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::graph::Triple;
+use akh_medu::provenance::{DerivationKind, ProvenanceId, RULE_SUPPORT_TRIPLES_V1_SENTINEL};
 use akh_medu::snapshot::{wake, write_snapshot};
 use akh_medu::symbol::SymbolKind;
 use akhomed_store::sea_orm::{self, ConnectionTrait, DbBackend, Statement};
@@ -223,6 +224,107 @@ async fn wake_reconstructs_identical_akh() {
     // cycle_count is restored via the agent:* meta the wake rebuilt.
     let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
     assert_eq!(woken_agent.cycle_count(), 42, "cycle_count must be restored");
+}
+
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn wake_preserves_provenance_links_and_allocator_identity() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    let src = tempfile::tempdir().unwrap();
+    let engine = Arc::new(
+        Engine::new(EngineConfig {
+            data_dir: Some(src.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    engine
+        .ingest_label_triples(&[
+            ("Dog".into(), "is-a".into(), "Mammal".into(), 1.0),
+            ("Mammal".into(), "is-a".into(), "Animal".into(), 1.0),
+        ])
+        .unwrap();
+    engine
+        .run_rules(akh_medu::autonomous::RuleEngineConfig::default())
+        .unwrap();
+    let dog = engine.lookup_symbol("Dog").unwrap();
+    let is_a = engine.lookup_symbol("is-a").unwrap();
+    let animal = engine.lookup_symbol("Animal").unwrap();
+    let source_triple = engine
+        .triples_from(dog)
+        .into_iter()
+        .find(|triple| triple.predicate == is_a && triple.object == animal)
+        .expect("source inferred edge");
+    let source_provenance_id = source_triple.provenance_id.expect("linked source edge");
+    let source_max_id = engine
+        .all_provenance()
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| record.id.map(ProvenanceId::get))
+        .max()
+        .unwrap();
+
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
+    ensure_akh(&db, akh_id, "provenance-wake-test", None)
+        .await
+        .unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .expect("snapshot");
+
+    let dst = tempfile::tempdir().unwrap();
+    let woken = wake(&dst.path().join("kg"), akh_id, workspace_id, &db)
+        .await
+        .expect("wake");
+    let restored = woken
+        .triples_from(dog)
+        .into_iter()
+        .find(|triple| triple.predicate == is_a && triple.object == animal)
+        .expect("restored inferred edge");
+    assert_eq!(restored.provenance_id, Some(source_provenance_id));
+    let restored_record = woken
+        .get_provenance(ProvenanceId::new(source_provenance_id).unwrap())
+        .expect("restored provenance record");
+    match restored_record.kind {
+        DerivationKind::RuleInference { antecedents, .. } => {
+            assert_eq!(antecedents[0].get(), RULE_SUPPORT_TRIPLES_V1_SENTINEL);
+            assert_eq!(antecedents.len(), 7, "two exact support triples");
+        }
+        other => panic!("unexpected restored derivation: {other:?}"),
+    }
+
+    woken
+        .ingest_label_triples(&[(
+            "FreshAssertion".into(),
+            "states".into(),
+            "FreshClaim".into(),
+            0.9,
+        )])
+        .unwrap();
+    let fresh = woken
+        .triples_from(woken.lookup_symbol("FreshAssertion").unwrap())
+        .into_iter()
+        .find(|triple| triple.predicate == woken.lookup_symbol("states").unwrap())
+        .unwrap();
+    assert!(
+        fresh.provenance_id.unwrap() > source_max_id,
+        "new provenance must allocate beyond the restored ledger watermark"
+    );
+    assert!(matches!(
+        woken
+            .get_provenance(ProvenanceId::new(source_provenance_id).unwrap())
+            .unwrap()
+            .kind,
+        DerivationKind::RuleInference { .. }
+    ));
 }
 
 /// Lazy-open hydration (Anima WI 019fe636-94e1): a k8s tmpfs pod boots with an
