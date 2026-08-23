@@ -194,17 +194,17 @@ if [[ -z "$DATASET" ]]; then
     echo "HEKA_PHASE42C_DATASET_REVISION must be an immutable 40-hex commit when downloading the dataset" >&2
     exit 1
   fi
-  DATASET="$TEMP_ROOT/longmemeval_oracle.json"
+  DATASET="$TEMP_ROOT/longmemeval_s_cleaned.json"
   curl --fail --location --retry 3 \
-    --max-filesize 67108864 \
+    --max-filesize 536870912 \
     --output "$DATASET" \
-    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/$DATASET_REVISION/longmemeval_oracle.json"
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/$DATASET_REVISION/longmemeval_s_cleaned.json"
 fi
 if [[ ! -f "$DATASET" ]]; then
-  echo "official LongMemEval oracle dataset is required" >&2
+  echo "official LongMemEval cleaned small dataset is required" >&2
   exit 1
 fi
-verify_sha256 "$DATASET" "${HEKA_PHASE42C_DATASET_SHA256:-}" "LongMemEval oracle dataset"
+verify_sha256 "$DATASET" "${HEKA_PHASE42C_DATASET_SHA256:-}" "LongMemEval cleaned small dataset"
 
 ORT_DOWNLOADED=0
 if [[ -z "${ORT_DYLIB_PATH:-}" ]]; then
@@ -249,13 +249,19 @@ export HEKA_PHASE42C_LONGMEMEVAL_DATASET="$DATASET"
 
 CARGO_TARGET_DIR="$HEKA_PHASE42C_TARGET_DIR" cargo build \
   --manifest-path "$REPO_ROOT/Cargo.toml" \
-  -p heka --bin hekad
+  -p heka --bin hekad --bin heka-capture
 HEKAD_BIN="$HEKA_PHASE42C_TARGET_DIR/debug/hekad"
+HEKA_CAPTURE_BIN="$HEKA_PHASE42C_TARGET_DIR/debug/heka-capture"
 if [[ ! -x "$HEKAD_BIN" ]]; then
   echo "workspace hekad acceptance binary is unavailable" >&2
   exit 1
 fi
+if [[ ! -x "$HEKA_CAPTURE_BIN" ]]; then
+  echo "workspace heka-capture acceptance binary is unavailable" >&2
+  exit 1
+fi
 export HEKA_PHASE42C_HEKAD_BIN="$HEKAD_BIN"
+export HEKA_PHASE42C_HEKA_CAPTURE_BIN="$HEKA_CAPTURE_BIN"
 
 CARGO_TARGET_DIR="$HEKA_PHASE42C_TARGET_DIR" cargo test \
   --manifest-path "$REPO_ROOT/Cargo.toml" \

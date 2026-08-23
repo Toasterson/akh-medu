@@ -237,8 +237,9 @@ fn resolve_dataset_path(path: &Path) -> miette::Result<PathBuf> {
         ));
     }
 
-    // Prefer the full cleaned small split when present. The fetch helper uses
-    // the official oracle split for a lightweight smoke run.
+    // Prefer the full cleaned small split so normal retrieval evaluation has
+    // real distractor haystacks. Oracle-only files remain readable for
+    // backwards-compatible, explicitly supplied fixtures.
     for filename in [
         "longmemeval_s_cleaned.json",
         "longmemeval_s.json",

@@ -136,16 +136,87 @@ async fn embed_pending_batch_scoped(
     // backpressure here without holding database locks or spawning more work.
     let inference_permit = embedder.acquire_inference(EMBED_BATCH_TIMEOUT).await?;
     let transaction = db.begin().await?;
-    let result = process_claimed_batch(
-        &transaction,
-        embedder,
-        inference_permit,
-        batch_size,
-        model_name,
-        akh_id,
-    )
+    let result = async {
+        let pending_chunks = claim_pending(&transaction, batch_size, akh_id).await?;
+        if pending_chunks.is_empty() {
+            return Ok(EmbedStats::default());
+        }
+        process_claimed_batch(
+            &transaction,
+            embedder,
+            inference_permit,
+            model_name,
+            pending_chunks,
+        )
+        .await
+    }
     .await;
 
+    finish_embedding_transaction(transaction, result).await
+}
+
+#[cfg(test)]
+pub(crate) async fn embed_pending_batch_for_akh_with_claim_probe(
+    db: &DatabaseConnection,
+    embedder: &SharedEmbedder,
+    batch_size: usize,
+    model_name: &str,
+    akh_id: Uuid,
+    claim_barrier: Arc<tokio::sync::Barrier>,
+    claimed_ids: tokio::sync::mpsc::Sender<Vec<Uuid>>,
+) -> HekaResult<EmbedStats> {
+    validate_batch_size(batch_size)?;
+    validate_model_name(model_name)?;
+
+    let inference_permit = embedder.acquire_inference(EMBED_BATCH_TIMEOUT).await?;
+    let transaction = db.begin().await?;
+    let result = async {
+        let pending_chunks = claim_pending(&transaction, batch_size, Some(akh_id)).await?;
+        if pending_chunks.is_empty() {
+            return Err(HekaError::Embedding(
+                "embedding claim-overlap probe received an empty claim".to_string(),
+            ));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            claimed_ids.send(pending_chunks.iter().map(|chunk| chunk.id).collect()),
+        )
+        .await
+        .map_err(|_| {
+            HekaError::Embedding(
+                "timed out reporting an embedding claim to the overlap observer".to_string(),
+            )
+        })?
+        .map_err(|_| {
+            HekaError::Embedding(
+                "embedding claim-overlap observer closed before receiving a claim".to_string(),
+            )
+        })?;
+        tokio::time::timeout(Duration::from_secs(10), claim_barrier.wait())
+            .await
+            .map_err(|_| {
+                HekaError::Embedding(
+                    "timed out proving overlapping disjoint embedding claims".to_string(),
+                )
+            })?;
+        process_claimed_batch(
+            &transaction,
+            embedder,
+            inference_permit,
+            model_name,
+            pending_chunks,
+        )
+        .await
+    }
+    .await;
+
+    finish_embedding_transaction(transaction, result).await
+}
+
+async fn finish_embedding_transaction(
+    transaction: DatabaseTransaction,
+    result: HekaResult<EmbedStats>,
+) -> HekaResult<EmbedStats> {
     match result {
         Ok(stats) => {
             transaction.commit().await?;
@@ -166,15 +237,9 @@ async fn process_claimed_batch(
     transaction: &DatabaseTransaction,
     embedder: &SharedEmbedder,
     inference_permit: InferencePermit,
-    batch_size: usize,
     model_name: &str,
-    akh_id: Option<Uuid>,
+    pending_chunks: Vec<heka_drawer_chunks::Model>,
 ) -> HekaResult<EmbedStats> {
-    let pending_chunks = claim_pending(transaction, batch_size, akh_id).await?;
-    if pending_chunks.is_empty() {
-        return Ok(EmbedStats::default());
-    }
-
     let chunk_count = pending_chunks.len();
     validate_text_budget(pending_chunks.iter().map(|chunk| chunk.text.as_str()))?;
     let texts_owned: Vec<String> = pending_chunks

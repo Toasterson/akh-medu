@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,15 +17,18 @@ use miette::{IntoDiagnostic, WrapErr};
 use sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, Statement, TransactionTrait};
 use sea_orm_migration::MigratorTrait;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
 use super::*;
-use crate::capture::{CapturePolicy, parse_capture_input_with_policy};
 use crate::config::{
     DatabaseConfig, EmbeddingConfig, EvalConfig, HekaConfig, ServerConfig, connect_database,
 };
-use crate::embed_worker::{count_pending_for_akh, embed_pending_batch_for_akh};
+use crate::embed_worker::{
+    count_pending_for_akh, embed_pending_batch_for_akh,
+    embed_pending_batch_for_akh_with_claim_probe,
+};
 use crate::embedder::{SentenceEmbedder, SharedEmbedder};
 use crate::entity::heka_drawer_embeddings::vec_to_pgvector;
 use crate::ingest::write_drawer;
@@ -36,6 +40,7 @@ const RESOURCE_ENV: &str = "HEKA_PHASE42C_RESOURCE_ID";
 const MODEL_DIR_ENV: &str = "HEKA_PHASE42C_MODEL_DIR";
 const DATASET_ENV: &str = "HEKA_PHASE42C_LONGMEMEVAL_DATASET";
 const HEKAD_BIN_ENV: &str = "HEKA_PHASE42C_HEKAD_BIN";
+const HEKA_CAPTURE_BIN_ENV: &str = "HEKA_PHASE42C_HEKA_CAPTURE_BIN";
 const MODEL_NAME: &str = "all-MiniLM-L6-v2";
 const LEGACY_REPAIR_AUDIT_KEY: &str = "heka_phase42c_legacy_title_hash_repair";
 const LEGACY_REPAIR_AUDIT_VALUE: &str = "repaired:m20260604_000002_drawer_ingest";
@@ -133,53 +138,21 @@ async fn run_acceptance(
     verify_initial_migration_ladder(db, resource).await?;
     verify_legacy_migration_upgrade(db, database_url, resource).await?;
 
-    let capture_akh = insert_akh(db, &format!("{resource}_capture")).await?;
-    let batch = realistic_two_hundred_turn_capture(resource)?;
-    miette::ensure!(
-        batch.turns.len() == 200,
-        "Stop capture did not yield 200 turns"
-    );
-    for turn in &batch.turns {
-        let summary = write_drawer(
-            db,
-            capture_akh,
-            batch.session_id.as_deref(),
-            turn.speaker.as_deref(),
-            turn.body.as_deref().unwrap_or_default(),
-            None,
-            &[],
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("capturing a production-path drawer")?;
-        miette::ensure!(
-            !summary.duplicated,
-            "first capture unexpectedly deduplicated"
-        );
-    }
+    let capture_akh_name = format!("{resource}_capture");
+    let capture_akh = insert_akh(db, &capture_akh_name).await?;
+    let capture = TempCaptureTree::new(resource)?;
+    let capture_payload = realistic_two_hundred_turn_capture(&capture)?;
+    write_capture_config(&capture, database_url)?;
+    invoke_public_capture(&capture, &capture_payload, &capture_akh_name, database_url).await?;
     miette::ensure!(
         count_drawers(db, capture_akh).await? == 200,
-        "first capture did not persist exactly 200 drawers"
+        "workspace heka-capture did not persist exactly 200 drawers"
     );
 
-    for turn in &batch.turns {
-        let summary = write_drawer(
-            db,
-            capture_akh,
-            batch.session_id.as_deref(),
-            turn.speaker.as_deref(),
-            turn.body.as_deref().unwrap_or_default(),
-            None,
-            &[],
-        )
-        .await
-        .into_diagnostic()
-        .wrap_err("replaying a production-path drawer")?;
-        miette::ensure!(summary.duplicated, "replay inserted a duplicate drawer");
-    }
+    invoke_public_capture(&capture, &capture_payload, &capture_akh_name, database_url).await?;
     miette::ensure!(
         count_drawers(db, capture_akh).await? == 200,
-        "replay changed the 200-drawer cardinality"
+        "workspace heka-capture replay changed the 200-drawer cardinality"
     );
 
     let embedder = SharedEmbedder::new(
@@ -199,7 +172,7 @@ async fn run_acceptance(
         "200-chunk drain did not create exactly 200 embeddings"
     );
 
-    verify_concurrent_and_retry_workers(db, &embedder, resource).await?;
+    verify_concurrent_and_retry_workers(db, &embedder, model_dir, resource).await?;
     verify_longmemeval_retrieval_and_isolation(db, &embedder, dataset).await?;
     verify_public_longmemeval_smoke(db, database_url, model_dir, dataset, resource).await?;
 
@@ -599,6 +572,7 @@ async fn verify_legacy_migration_upgrade(
 async fn verify_concurrent_and_retry_workers(
     db: &DatabaseConnection,
     embedder: &SharedEmbedder,
+    model_dir: &Path,
     resource: &str,
 ) -> miette::Result<()> {
     let akh_id = insert_akh(db, &format!("{resource}_workers")).await?;
@@ -617,20 +591,110 @@ async fn verify_concurrent_and_retry_workers(
         .wrap_err("seeding concurrent worker fixture")?;
     }
 
-    let barrier = Arc::new(Barrier::new(3));
-    let first = spawn_worker(db, embedder, barrier.clone(), akh_id, 32);
-    let second = spawn_worker(db, embedder, barrier.clone(), akh_id, 32);
-    barrier.wait().await;
-    let first = first
-        .await
+    // Separate model instances have independent single-flight gates. The
+    // after-claim barrier proves both transactions simultaneously hold
+    // nonempty SKIP LOCKED claims before either begins inference.
+    let first_embedder = SharedEmbedder::new(
+        SentenceEmbedder::load(model_dir)
+            .into_diagnostic()
+            .wrap_err("loading first independent concurrency model")?,
+    );
+    let second_embedder = SharedEmbedder::new(
+        SentenceEmbedder::load(model_dir)
+            .into_diagnostic()
+            .wrap_err("loading second independent concurrency model")?,
+    );
+    let start_barrier = Arc::new(Barrier::new(3));
+    let claim_barrier = Arc::new(Barrier::new(2));
+    let (claimed_tx, mut claimed_rx) = tokio::sync::mpsc::channel(2);
+    let mut first = spawn_probed_worker(
+        db,
+        &first_embedder,
+        start_barrier.clone(),
+        claim_barrier.clone(),
+        claimed_tx.clone(),
+        akh_id,
+        32,
+    );
+    let mut second = spawn_probed_worker(
+        db,
+        &second_embedder,
+        start_barrier.clone(),
+        claim_barrier,
+        claimed_tx.clone(),
+        akh_id,
+        32,
+    );
+    drop(claimed_tx);
+    start_barrier.wait().await;
+    let observed: miette::Result<(Vec<Uuid>, Vec<Uuid>)> = async {
+        let first_claim = tokio::time::timeout(Duration::from_secs(15), claimed_rx.recv())
+            .await
+            .map_err(|_| miette::miette!("first overlapping worker claim was not observed"))?
+            .ok_or_else(|| {
+                miette::miette!("claim observer closed before the first worker claim")
+            })?;
+        let second_claim = tokio::time::timeout(Duration::from_secs(15), claimed_rx.recv())
+            .await
+            .map_err(|_| miette::miette!("second overlapping worker claim was not observed"))?
+            .ok_or_else(|| {
+                miette::miette!("claim observer closed before the second worker claim")
+            })?;
+        Ok((first_claim, second_claim))
+    }
+    .await;
+    let (first_claim, second_claim) = match observed {
+        Ok(claims) => claims,
+        Err(error) => {
+            first.abort();
+            second.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(&mut first, &mut second)
+            })
+            .await;
+            return Err(error);
+        }
+    };
+    let first_ids: HashSet<Uuid> = first_claim.into_iter().collect();
+    let second_ids: HashSet<Uuid> = second_claim.into_iter().collect();
+    let (first_result, second_result) = match tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(&mut first, &mut second)
+    })
+    .await
+    {
+        Ok(joined) => joined,
+        Err(_) => {
+            first.abort();
+            second.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(&mut first, &mut second)
+            })
+            .await;
+            return Err(miette::miette!(
+                "concurrent workers exceeded the shared 60-second boundary"
+            ));
+        }
+    };
+    let first = first_result
         .into_diagnostic()
         .wrap_err("joining first concurrent worker")?
         .into_diagnostic()?;
-    let second = second
-        .await
+    let second = second_result
         .into_diagnostic()
         .wrap_err("joining second concurrent worker")?
         .into_diagnostic()?;
+    miette::ensure!(
+        first_ids.len() == 32 && second_ids.len() == 32,
+        "overlapping workers did not each hold one nonempty 32-row claim"
+    );
+    miette::ensure!(
+        first_ids.is_disjoint(&second_ids),
+        "overlapping SKIP LOCKED workers claimed the same chunk"
+    );
+    miette::ensure!(
+        first_ids.union(&second_ids).count() == 64,
+        "overlapping worker claims did not cover exactly 64 distinct chunks"
+    );
     miette::ensure!(
         first.chunks_processed + second.chunks_processed == 64,
         "concurrent workers did not claim exactly 64 distinct chunks"
@@ -706,21 +770,35 @@ async fn verify_concurrent_and_retry_workers(
         count_embeddings(db, akh_id).await? == 65,
         "failure recovery produced the wrong embedding cardinality"
     );
+    eprintln!(
+        "Phase 42c worker acceptance: two independent models overlapped disjoint 32+32 SKIP LOCKED claims"
+    );
     Ok(())
 }
 
-fn spawn_worker(
+fn spawn_probed_worker(
     db: &DatabaseConnection,
     embedder: &SharedEmbedder,
-    barrier: Arc<Barrier>,
+    start_barrier: Arc<Barrier>,
+    claim_barrier: Arc<Barrier>,
+    claimed_ids: tokio::sync::mpsc::Sender<Vec<Uuid>>,
     akh_id: Uuid,
     batch_size: usize,
 ) -> tokio::task::JoinHandle<crate::HekaResult<crate::embed_worker::EmbedStats>> {
     let db = db.clone();
     let embedder = embedder.clone();
     tokio::spawn(async move {
-        barrier.wait().await;
-        embed_pending_batch_for_akh(&db, &embedder, batch_size, MODEL_NAME, akh_id).await
+        start_barrier.wait().await;
+        embed_pending_batch_for_akh_with_claim_probe(
+            &db,
+            &embedder,
+            batch_size,
+            MODEL_NAME,
+            akh_id,
+            claim_barrier,
+            claimed_ids,
+        )
+        .await
     })
 }
 
@@ -819,23 +897,138 @@ async fn verify_longmemeval_retrieval_and_isolation(
         _ => return Err(miette::miette!("LongMemEval emitted the wrong metric kind")),
     }
 
+    verify_cutoff_sensitive_ranking(db).await?;
+
     let official_cases = load_dataset(official_dataset)?;
     validate_dataset(&official_cases)?;
     let official = official_cases
         .iter()
-        .find(|case| !is_abstention(case))
-        .ok_or_else(|| miette::miette!("official dataset contains no evaluable case"))?;
+        .find(|case| !is_abstention(case) && case.haystack_session_ids.len() > TOP_K)
+        .ok_or_else(|| {
+            miette::miette!(
+                "official cleaned dataset contains no evaluable case with more than {TOP_K} haystack sessions"
+            )
+        })?;
     let official_result =
         evaluate_case_isolated(db, embedder, 32, MODEL_NAME, Uuid::new_v4(), official).await?;
     miette::ensure!(
         official_result.recalled_all,
-        "official LongMemEval oracle case produced zero recall_all@5"
+        "official LongMemEval cleaned-haystack case produced zero recall_all@5"
+    );
+    eprintln!(
+        "Phase 42c cleaned LongMemEval case: haystack_sessions={} recall_all@5=1",
+        official.haystack_session_ids.len()
     );
     miette::ensure!(
         count_longmemeval_akhs(db).await? == 0,
         "normal evaluation left an isolated corpus behind"
     );
     Ok(())
+}
+
+async fn verify_cutoff_sensitive_ranking(db: &DatabaseConnection) -> miette::Result<()> {
+    let akh_id = insert_akh(db, &format!("phase42c-cutoff:{}", Uuid::new_v4())).await?;
+    let outcome = async {
+        let model_name = "phase42c-cutoff-ranking";
+        let slopes = [0.0_f32, 0.1, 0.2, 0.3, 0.4, 0.5];
+        let mut gold_embedding_id = None;
+        for (index, slope) in slopes.into_iter().enumerate() {
+            let session_id = format!("cutoff-session-{index}");
+            let summary = write_drawer(
+                db,
+                akh_id,
+                Some(&session_id),
+                Some("user"),
+                &format!("deterministic cutoff ranking fixture {index}"),
+                None,
+                &[],
+            )
+            .await
+            .into_diagnostic()
+            .wrap_err("seeding deterministic cutoff drawer")?;
+            miette::ensure!(
+                summary.chunk_count == 1 && !summary.duplicated,
+                "deterministic cutoff fixture did not create one unique chunk"
+            );
+            let chunk_id = chunk_id_for_drawer(db, summary.drawer_id).await?;
+            let embedding_id = Uuid::new_v4();
+            db.execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "INSERT INTO heka_drawer_embeddings \
+                     (id, chunk_id, model_name, embedding, created_at) \
+                 VALUES ($1, $2, $3, $4::vector(384), $5)",
+                [
+                    embedding_id.into(),
+                    chunk_id.into(),
+                    model_name.to_string().into(),
+                    vec_to_pgvector(&cutoff_vector(slope)).into(),
+                    chrono::Utc::now().into(),
+                ],
+            ))
+            .await
+            .into_diagnostic()
+            .wrap_err("inserting deterministic cutoff embedding")?;
+            db.execute(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "UPDATE heka_drawer_chunks SET embedded_at = $1 WHERE id = $2",
+                [chrono::Utc::now().into(), chunk_id.into()],
+            ))
+            .await
+            .into_diagnostic()
+            .wrap_err("marking deterministic cutoff chunk embedded")?;
+            if index == TOP_K {
+                gold_embedding_id = Some(embedding_id);
+            }
+        }
+
+        let query = cutoff_vector(0.0);
+        let answer = vec![format!("cutoff-session-{TOP_K}")];
+        let rank_six = search_sessions(db, akh_id, model_name, &query, TOP_K).await?;
+        miette::ensure!(
+            rank_six.len() == TOP_K && evidence_recall(&rank_six, &answer) == (false, false),
+            "rank-six gold session unexpectedly crossed the top-{TOP_K} cutoff"
+        );
+
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "UPDATE heka_drawer_embeddings SET embedding = $1::vector(384) WHERE id = $2",
+            [
+                vec_to_pgvector(&cutoff_vector(0.35)).into(),
+                gold_embedding_id
+                    .ok_or_else(|| miette::miette!("cutoff gold embedding was not seeded"))?
+                    .into(),
+            ],
+        ))
+        .await
+        .into_diagnostic()
+        .wrap_err("moving the gold session across the deterministic cutoff")?;
+        let rank_five = search_sessions(db, akh_id, model_name, &query, TOP_K).await?;
+        miette::ensure!(
+            rank_five.len() == TOP_K && evidence_recall(&rank_five, &answer) == (true, true),
+            "rank-five gold session did not cross the top-{TOP_K} cutoff"
+        );
+        eprintln!(
+            "Phase 42c cutoff acceptance: deterministic gold moved from rank 6 miss to rank 5 hit"
+        );
+        Ok(())
+    }
+    .await;
+    let cleanup = cleanup_eval_akh(db, akh_id).await;
+    match (outcome, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(miette::miette!(
+            "{error}; cutoff-corpus cleanup also failed: {cleanup_error}"
+        )),
+    }
+}
+
+fn cutoff_vector(slope: f32) -> Vec<f32> {
+    let mut vector = vec![0.0; crate::embedder::EMBEDDING_DIM];
+    vector[0] = 1.0;
+    vector[1] = slope;
+    vector
 }
 
 async fn invoke_public_legacy_repair(
@@ -867,6 +1060,7 @@ async fn invoke_public_legacy_repair(
         .arg("--config-path")
         .arg(&public.config)
         .env_remove("DATABASE_URL")
+        .env_remove(ADMIN_URL_ENV)
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(30), command.output())
         .await
@@ -894,6 +1088,20 @@ async fn verify_public_longmemeval_smoke(
     official_dataset: &Path,
     resource: &str,
 ) -> miette::Result<()> {
+    let expected_dataset_hash = compute_dataset_hash(official_dataset)
+        .ok_or_else(|| miette::miette!("official cleaned dataset could not be hashed"))?;
+    {
+        let cases = load_dataset(official_dataset)?;
+        validate_dataset(&cases)?;
+        let selection = select_retrieval_cases(&cases, 1)?;
+        miette::ensure!(
+            selection
+                .cases
+                .iter()
+                .all(|case| case.haystack_session_ids.len() > TOP_K),
+            "public LongMemEval selection must use cleaned retrieval haystacks with more than {TOP_K} sessions"
+        );
+    }
     let provided_bin = validated_hekad_bin()?;
 
     let public = TempPublicEval::new(resource)?;
@@ -936,6 +1144,7 @@ async fn verify_public_longmemeval_smoke(
         .arg(&public.output)
         .env("XDG_CONFIG_HOME", &public.xdg_config_home)
         .env_remove("DATABASE_URL")
+        .env_remove(ADMIN_URL_ENV)
         .kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(120), command.output())
         .await
@@ -969,6 +1178,24 @@ async fn verify_public_longmemeval_smoke(
             == Some("evidence_session_retrieval"),
         "public LongMemEval smoke report emitted the wrong metric kind"
     );
+    miette::ensure!(
+        report
+            .pointer("/dataset_hash")
+            .and_then(|value| value.as_str())
+            == Some(expected_dataset_hash.as_str()),
+        "public LongMemEval report did not bind the exact cleaned dataset bytes"
+    );
+    miette::ensure!(
+        report
+            .pointer("/metrics/total_questions")
+            .and_then(|value| value.as_u64())
+            == Some(1)
+            && report
+                .pointer("/metrics/retrieval_params/top_k")
+                .and_then(|value| value.as_str())
+                == Some("5"),
+        "public LongMemEval report did not preserve its honest one-question top-5 denominator"
+    );
     let recall_all = report
         .pointer("/metrics/scores/recall_all@5")
         .and_then(|value| value.as_f64())
@@ -976,6 +1203,9 @@ async fn verify_public_longmemeval_smoke(
     miette::ensure!(
         recall_all > 0.0,
         "public LongMemEval smoke report produced zero recall_all@5"
+    );
+    eprintln!(
+        "Phase 42c public LongMemEval: cleaned haystack denominator=1 recall_all@5={recall_all}"
     );
     miette::ensure!(
         count_longmemeval_akhs(db).await? == 0,
@@ -985,21 +1215,30 @@ async fn verify_public_longmemeval_smoke(
 }
 
 fn validated_hekad_bin() -> miette::Result<PathBuf> {
+    validated_workspace_bin(HEKAD_BIN_ENV, "hekad")
+}
+
+fn validated_capture_bin() -> miette::Result<PathBuf> {
+    validated_workspace_bin(HEKA_CAPTURE_BIN_ENV, "heka-capture")
+}
+
+fn validated_workspace_bin(environment: &str, binary: &str) -> miette::Result<PathBuf> {
     let provided_bin = PathBuf::from(
-        std::env::var_os(HEKAD_BIN_ENV)
-            .ok_or_else(|| miette::miette!("{HEKAD_BIN_ENV} is required"))?,
+        std::env::var_os(environment)
+            .ok_or_else(|| miette::miette!("{environment} is required"))?,
     )
     .canonicalize()
     .into_diagnostic()
-    .wrap_err("canonicalizing the public hekad acceptance binary")?;
+    .wrap_err_with(|| format!("canonicalizing the public {binary} acceptance binary"))?;
     let expected_bin = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/debug/hekad")
+        .join("../../target/debug")
+        .join(binary)
         .canonicalize()
         .into_diagnostic()
-        .wrap_err("locating the workspace-built hekad acceptance binary")?;
+        .wrap_err_with(|| format!("locating the workspace-built {binary} acceptance binary"))?;
     miette::ensure!(
         provided_bin == expected_bin,
-        "public command binary is not the exact workspace target/debug/hekad"
+        "public command binary is not the exact workspace target/debug/{binary}"
     );
     #[cfg(unix)]
     {
@@ -1009,7 +1248,10 @@ fn validated_hekad_bin() -> miette::Result<PathBuf> {
             .into_diagnostic()?
             .permissions()
             .mode();
-        miette::ensure!(mode & 0o111 != 0, "public hekad binary is not executable");
+        miette::ensure!(
+            mode & 0o111 != 0,
+            "public {binary} binary is not executable"
+        );
     }
     Ok(provided_bin)
 }
@@ -1098,10 +1340,7 @@ async fn drain_akh(
     ))
 }
 
-fn realistic_two_hundred_turn_capture(
-    resource: &str,
-) -> miette::Result<crate::capture::CaptureBatch> {
-    let tree = TempCaptureTree::new(resource)?;
+fn realistic_two_hundred_turn_capture(tree: &TempCaptureTree) -> miette::Result<String> {
     let records = (0..200)
         .map(|index| {
             let role = if index % 2 == 0 { "user" } else { "assistant" };
@@ -1124,24 +1363,104 @@ fn realistic_two_hundred_turn_capture(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&tree.transcript, records)
+    let mut transcript_options = OpenOptions::new();
+    transcript_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        transcript_options.mode(0o600);
+    }
+    let mut transcript = transcript_options
+        .open(&tree.transcript)
+        .into_diagnostic()
+        .wrap_err("creating private disposable Stop transcript")?;
+    transcript
+        .write_all(records.as_bytes())
         .into_diagnostic()
         .wrap_err("writing disposable Stop transcript")?;
-    let payload = serde_json::json!({
+    transcript
+        .sync_all()
+        .into_diagnostic()
+        .wrap_err("syncing disposable Stop transcript")?;
+    Ok(serde_json::json!({
         "session_id": tree.session_id,
         "transcript_path": tree.transcript,
-        "cwd": tree.nested_cwd,
+        // This is a real sibling worktree selection, proven by the matching
+        // exact-session transcript rows rather than an encoded ancestor key.
+        "cwd": tree.alternate_cwd,
         "hook_event_name": "Stop"
     })
-    .to_string();
-    parse_capture_input_with_policy(&payload, &CapturePolicy::new(tree.root.clone()))
+    .to_string())
+}
+
+fn write_capture_config(tree: &TempCaptureTree, database_url: &str) -> miette::Result<()> {
+    let config = HekaConfig {
+        database: DatabaseConfig {
+            url: database_url.to_string(),
+            max_connections: 4,
+        },
+        server: ServerConfig::default(),
+        embedding: EmbeddingConfig::default(),
+        eval: EvalConfig::default(),
+    };
+    write_private_config(&tree.config, &config)
+}
+
+async fn invoke_public_capture(
+    tree: &TempCaptureTree,
+    payload: &str,
+    akh_name: &str,
+    database_url: &str,
+) -> miette::Result<()> {
+    let provided_bin = validated_capture_bin()?;
+    let mut command = tokio::process::Command::new(&provided_bin);
+    command
+        .env("HOME", &tree.home)
+        .env("HEKA_AKH_NAME", akh_name)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("DATABASE_URL")
+        .env_remove(ADMIN_URL_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
         .into_diagnostic()
-        .wrap_err("parsing realistic Stop transcript")
+        .wrap_err("launching workspace heka-capture")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| miette::miette!("workspace heka-capture stdin was not piped"))?;
+    tokio::time::timeout(Duration::from_secs(5), stdin.write_all(payload.as_bytes()))
+        .await
+        .map_err(|_| miette::miette!("writing workspace heka-capture stdin exceeded 5 seconds"))?
+        .into_diagnostic()
+        .wrap_err("writing workspace heka-capture stdin")?;
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(60), child.wait_with_output())
+        .await
+        .map_err(|_| miette::miette!("workspace heka-capture exceeded 60 seconds"))?
+        .into_diagnostic()
+        .wrap_err("waiting for workspace heka-capture")?;
+    miette::ensure!(
+        output.status.success(),
+        "workspace heka-capture failed with status {} (output withheld to protect configuration secrets)",
+        output.status
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    miette::ensure!(
+        !stdout.contains(database_url) && !stderr.contains(database_url),
+        "workspace heka-capture emitted the raw database URL"
+    );
+    Ok(())
 }
 
 struct TempCaptureTree {
     base: PathBuf,
-    root: PathBuf,
+    home: PathBuf,
+    config: PathBuf,
     cwd: PathBuf,
     nested_cwd: PathBuf,
     alternate_cwd: PathBuf,
@@ -1153,23 +1472,27 @@ impl TempCaptureTree {
     fn new(resource: &str) -> miette::Result<Self> {
         let base = std::env::temp_dir().join(format!("{resource}-capture-{}", Uuid::new_v4()));
         miette::ensure!(!base.exists(), "disposable capture path already exists");
-        let root = base.join("claude-projects");
+        let home = base.join("home");
+        let root = home.join(".claude/projects");
+        let config_dir = home.join(".config/heka");
+        let config = config_dir.join("heka.toml");
         let cwd = base.join("workspace");
         let nested_cwd = cwd.join("nested/source");
         let alternate_cwd = base.join("alternate-worktree");
-        std::fs::create_dir_all(&root).into_diagnostic()?;
-        std::fs::create_dir_all(&nested_cwd).into_diagnostic()?;
-        std::fs::create_dir_all(&alternate_cwd).into_diagnostic()?;
+        for directory in [&root, &config_dir, &nested_cwd, &alternate_cwd] {
+            create_private_dir_all(directory)?;
+        }
         let cwd = cwd.canonicalize().into_diagnostic()?;
         let nested_cwd = nested_cwd.canonicalize().into_diagnostic()?;
         let alternate_cwd = alternate_cwd.canonicalize().into_diagnostic()?;
         let project = root.join(claude_project_component(&cwd));
-        std::fs::create_dir_all(&project).into_diagnostic()?;
+        create_private_dir_all(&project)?;
         let session_id = Uuid::new_v4().to_string();
         let transcript = project.join(format!("{session_id}.jsonl"));
         Ok(Self {
             base,
-            root,
+            home,
+            config,
             cwd,
             nested_cwd,
             alternate_cwd,
@@ -1177,6 +1500,20 @@ impl TempCaptureTree {
             transcript,
         })
     }
+}
+
+fn create_private_dir_all(path: &Path) -> miette::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .into_diagnostic()
+        .wrap_err_with(|| format!("creating private disposable directory {}", path.display()))
 }
 
 fn claude_project_component(project_root: &Path) -> String {
@@ -1273,6 +1610,19 @@ async fn count_embeddings(db: &DatabaseConnection, akh_id: Uuid) -> miette::Resu
         akh_id,
     )
     .await
+}
+
+async fn chunk_id_for_drawer(db: &DatabaseConnection, drawer_id: Uuid) -> miette::Result<Uuid> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            "SELECT id FROM heka_drawer_chunks WHERE drawer_id = $1 ORDER BY chunk_index LIMIT 1",
+            [drawer_id.into()],
+        ))
+        .await
+        .into_diagnostic()?
+        .ok_or_else(|| miette::miette!("drawer chunk lookup returned no row"))?;
+    row.try_get("", "id").into_diagnostic()
 }
 
 async fn count_chunk_embeddings(db: &DatabaseConnection, chunk_id: Uuid) -> miette::Result<i64> {
