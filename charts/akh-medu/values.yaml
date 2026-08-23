@@ -174,9 +174,15 @@ akhomed:
   # in-process — no volume is mounted and behaviour is unchanged.
   sshKey:
     enabled: false
-    # Mount path inside the container. akh.toml's `[exec] key`/`known_hosts`
-    # should point under this directory.
+    # Mount path inside the container for the SSH private key Secret.
+    # akh.toml's `[exec] key` should point under this directory.
     mountPath: /etc/akh/ssh
+    # Separate directory for the known_hosts ConfigMap. It must NOT be
+    # inside `mountPath`: that Secret volume is mounted read-only, and runc
+    # cannot create a subPath mountpoint inside a read-only directory.
+    # akh.toml's `[exec] known_hosts` should point to
+    # `<knownHostsMountPath>/known_hosts`.
+    knownHostsMountPath: /etc/akh/ssh-hosts
     # The SSH private key (OpenSSH format, unencrypted — ADR 086 §1). Set
     # inline here for dev/eval; for anything real, use `existingSecret` to
     # reference a pre-provisioned secret you manage out-of-band. The secret
@@ -186,10 +192,11 @@ akhomed:
     # Inline key material (used only when `existingSecret` is empty). The
     # chart creates a Secret from this; leave it empty to skip creation.
     privateKey: ""
-    # Inline known_hosts file content. Mounted as a ConfigMap at
-    # `<mountPath>/known_hosts`. Empty ⇒ no known_hosts is mounted (the
-    # russh default `~/.ssh/known_hosts` is used instead — fine when HOME
-    # is set, but typically you want an explicit known_hosts in a pod).
+    # Inline known_hosts file content. Mounted as a whole-dir ConfigMap at
+    # `knownHostsMountPath`; the file appears at
+    # `<knownHostsMountPath>/known_hosts`. Empty ⇒ no known_hosts is mounted
+    # (the russh default `~/.ssh/known_hosts` is used instead — fine when
+    # HOME is set, but typically you want an explicit known_hosts in a pod).
     knownHosts: ""
 
   # ── Declarative config (akhomed-config-configmap.yaml) ───────────────────

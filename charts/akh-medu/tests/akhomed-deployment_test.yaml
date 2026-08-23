@@ -1,0 +1,59 @@
+# Helm-unittest tests for the akhomed deployment's SSH known_hosts handling.
+suite: akhomed ssh-known-hosts regression
+templates:
+  - templates/akhomed-deployment.yaml
+tests:
+  - it: mounts known_hosts outside the ssh-key Secret directory
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: "|1|example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDIhz2GK/XCUj4i6Q5yQJNL1MXMY0RxzPV2QrBqfHrDc"
+    asserts:
+      - isKind:
+          of: Deployment
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ssh-key
+            secret:
+              secretName: RELEASE-NAME-akh-medu-akhomed-ssh-key
+              defaultMode: 256
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: known-hosts
+            configMap:
+              name: RELEASE-NAME-akh-medu-akhomed-known-hosts
+              defaultMode: 292
+      # The ssh-key Secret is mounted at /etc/akh/ssh, read-only.
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: ssh-key
+            mountPath: /etc/akh/ssh
+            readOnly: true
+          any: true
+      # The known-hosts ConfigMap is mounted at a SEPARATE path, NOT inside /etc/akh/ssh.
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: known-hosts
+            mountPath: /etc/akh/ssh-hosts
+            readOnly: true
+          any: true
+  - it: omits known-hosts volume when knownHosts is empty
+    set:
+      akhomed.enabled: true
+      akhomed.sshKey.enabled: true
+      akhomed.sshKey.knownHosts: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: known-hosts
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: known-hosts
+          any: true
