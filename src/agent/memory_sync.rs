@@ -154,26 +154,26 @@ fn persist_journal_episode(
         wm_entry.content.chars().take(80).collect::<String>()
     );
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(
+    let mut triples = vec![Triple::new(
         episode.id,
         predicates.has_summary,
         summary_sym,
-    ));
+    )];
 
     // Tag with "openclaw" source and the journal's own tags.
     let source_tag = engine.resolve_or_create_entity("tag:openclaw")?;
-    let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_tag, source_tag));
+    triples.push(Triple::new(episode.id, predicates.has_tag, source_tag));
 
     for tag_str in &journal.tags {
         let tag_label = format!("tag:{tag_str}");
         if let Ok(tag_sym) = engine.resolve_or_create_entity(&tag_label) {
-            let _ = engine.add_triple(&Triple::new(episode.id, predicates.has_tag, tag_sym));
+            triples.push(Triple::new(episode.id, predicates.has_tag, tag_sym));
         }
     }
 
     // Mark as episodic memory.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(
+    triples.push(Triple::new(
         episode.id,
         predicates.memory_type,
         mem_type_sym,
@@ -194,7 +194,7 @@ fn persist_journal_episode(
         },
     )
     .with_confidence(relevance);
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     Ok(())
 }

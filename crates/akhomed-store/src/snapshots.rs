@@ -10,14 +10,20 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, Iterable,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
+    EntityTrait, IntoActiveModel, Iterable, QueryFilter, QueryOrder, QuerySelect, Statement,
+    TransactionTrait,
 };
 use uuid::Uuid;
 
 // The macro-driven helpers fully-qualify their entity modules; only these are
 // referenced directly by the hand-written helpers below.
-use crate::entity::{akh_state, fact, mutation_log, provenance_input, workspace_seed_pack};
+use crate::entity::{
+    agenda, akh, akh_state, competence_calibration, competence_category, competence_tool,
+    curiosity_config, drive, effort_case, fact, failure_case, goal, goal_dependency,
+    goal_hierarchy, learned_method, learned_method_step, mutation_log, provenance_input,
+    provenance_snapshot, sleep_metric, symbol, workspace_seed_pack,
+};
 use crate::error::StoreResult;
 
 /// Postgres extended-query protocol bind-parameter limit.
@@ -121,6 +127,196 @@ akh_scoped_ops!(competence_category, replace_competence_categories, load_compete
 akh_scoped_ops!(competence_calibration, replace_competence_calibration, load_competence_calibration, [seq -> Seq]);
 akh_scoped_ops!(sleep_metric, replace_sleep_metrics, load_sleep_metrics, [cycle -> Cycle]);
 
+/// Complete owned row image published by one relational snapshot transaction.
+///
+/// Keeping this envelope in the store crate lets publication use one database
+/// transaction rather than exposing a half-replaced image between the former
+/// per-table transactions.
+pub struct SnapshotPublication {
+    /// Residency generation captured by the owning daemon. Must still match
+    /// `akhomed_akh.residency_epoch` at commit time.
+    pub residency_epoch: i64,
+    pub symbols: Vec<symbol::Model>,
+    pub facts: Vec<fact::Model>,
+    pub provenance: Vec<provenance_snapshot::Model>,
+    pub drives: Vec<drive::Model>,
+    pub agenda: Vec<agenda::Model>,
+    pub curiosity: Vec<curiosity_config::Model>,
+    pub goals: Vec<goal::Model>,
+    pub goal_hierarchy: Vec<goal_hierarchy::Model>,
+    pub goal_dependencies: Vec<goal_dependency::Model>,
+    pub failures: Vec<failure_case::Model>,
+    pub efforts: Vec<effort_case::Model>,
+    pub methods: Vec<learned_method::Model>,
+    pub method_steps: Vec<learned_method_step::Model>,
+    pub competence_tools: Vec<competence_tool::Model>,
+    pub competence_categories: Vec<competence_category::Model>,
+    pub competence_calibration: Vec<competence_calibration::Model>,
+    pub sleep_metrics: Vec<sleep_metric::Model>,
+    pub state: akh_state::Model,
+}
+
+/// Replace an Akh's complete relational snapshot atomically.
+///
+/// PostgreSQL writers also take a transaction-scoped advisory lock keyed by
+/// workspace before checking the published watermark. This serializes periodic
+/// and on-demand publishers across daemon instances. A capture older than the
+/// winner fails before any row is changed; successful readers can observe only
+/// the old image or the complete new image, never mixed tables/watermark.
+pub async fn publish_snapshot(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+    akh_id: Uuid,
+    mut publication: SnapshotPublication,
+) -> StoreResult<()> {
+    macro_rules! replace_akh_rows {
+        ($transaction:ident, $module:ident, $rows:expr) => {{
+            crate::entity::$module::Entity::delete_many()
+                .filter(crate::entity::$module::Column::AkhId.eq(akh_id))
+                .exec(&$transaction)
+                .await?;
+            if !$rows.is_empty() {
+                crate::entity::$module::Entity::insert_many(
+                    $rows
+                        .into_iter()
+                        .map(IntoActiveModel::into_active_model),
+                )
+                .exec(&$transaction)
+                .await?;
+            }
+        }};
+    }
+
+    const ROWS_PER_CHUNK: usize = 6_000;
+    let transaction = db.begin().await?;
+    if transaction.get_database_backend() == DatabaseBackend::Postgres {
+        transaction
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                [format!("snapshot:{workspace_id}").into()],
+            ))
+            .await?;
+    }
+
+    let owner = akh::Entity::find_by_id(akh_id)
+        .one(&transaction)
+        .await?
+        .ok_or_else(|| crate::error::StoreError::Conflict {
+            message: format!("snapshot owner akh {akh_id} does not exist"),
+        })?;
+    if owner.residency_epoch != publication.residency_epoch {
+        return Err(crate::error::StoreError::Conflict {
+            message: format!(
+                "stale snapshot owner for workspace {workspace_id}: captured residency epoch {}, \
+                 but current owner epoch is {}",
+                publication.residency_epoch, owner.residency_epoch
+            ),
+        });
+    }
+
+    let published = akh_state::Entity::find_by_id(akh_id)
+        .one(&transaction)
+        .await?;
+    if let Some(published) = published.as_ref()
+        && published.watermark > publication.state.watermark
+    {
+        return Err(crate::error::StoreError::Conflict {
+            message: format!(
+                "stale snapshot for workspace {workspace_id}: captured at WAL watermark \
+                 {}, but watermark {} is already published",
+                publication.state.watermark, published.watermark
+            ),
+        });
+    }
+
+    // These independently advanced cursors are not part of the in-memory
+    // capture. Preserve the value observed under the publication lock for a
+    // first insert; the conflict update deliberately leaves both untouched.
+    if let Some(published) = published {
+        publication.state.harvest_watermark = published.harvest_watermark;
+        publication.state.librarian_watermark = published.librarian_watermark;
+    }
+
+    replace_akh_rows!(transaction, symbol, publication.symbols);
+
+    let mut seen = std::collections::HashSet::with_capacity(publication.facts.len());
+    let mut facts = Vec::with_capacity(publication.facts.len());
+    for row in publication.facts {
+        let key = (row.subject, row.predicate, row.object);
+        if seen.insert(key) {
+            facts.push(row);
+        }
+    }
+    fact::Entity::delete_many()
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .exec(&transaction)
+        .await?;
+    provenance_snapshot::Entity::delete_many()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .exec(&transaction)
+        .await?;
+    for chunk in facts.chunks(ROWS_PER_CHUNK) {
+        fact::Entity::insert_many(chunk.iter().cloned().map(IntoActiveModel::into_active_model))
+            .on_conflict(
+                OnConflict::columns([
+                    fact::Column::WorkspaceId,
+                    fact::Column::Subject,
+                    fact::Column::Predicate,
+                    fact::Column::Object,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&transaction)
+            .await?;
+    }
+    for chunk in publication.provenance.chunks(ROWS_PER_CHUNK) {
+        provenance_snapshot::Entity::insert_many(
+            chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+        )
+        .exec(&transaction)
+        .await?;
+    }
+
+    replace_akh_rows!(transaction, drive, publication.drives);
+    replace_akh_rows!(transaction, agenda, publication.agenda);
+    replace_akh_rows!(transaction, curiosity_config, publication.curiosity);
+    replace_akh_rows!(transaction, goal, publication.goals);
+    replace_akh_rows!(transaction, goal_hierarchy, publication.goal_hierarchy);
+    replace_akh_rows!(transaction, goal_dependency, publication.goal_dependencies);
+    replace_akh_rows!(transaction, failure_case, publication.failures);
+    replace_akh_rows!(transaction, effort_case, publication.efforts);
+    replace_akh_rows!(transaction, learned_method, publication.methods);
+    replace_akh_rows!(transaction, learned_method_step, publication.method_steps);
+    replace_akh_rows!(transaction, competence_tool, publication.competence_tools);
+    replace_akh_rows!(transaction, competence_category, publication.competence_categories);
+    replace_akh_rows!(transaction, competence_calibration, publication.competence_calibration);
+    replace_akh_rows!(transaction, sleep_metric, publication.sleep_metrics);
+
+    use akh_state::Column;
+    akh_state::Entity::insert(publication.state.into_active_model())
+        .on_conflict(
+            OnConflict::column(Column::AkhId)
+                .update_columns([
+                    Column::Watermark,
+                    Column::AllocatorNext,
+                    Column::CycleCount,
+                    Column::SessionStartCycle,
+                    Column::SleepPhase,
+                    Column::LastSleepCycle,
+                    Column::Psyche,
+                    Column::Extra,
+                    Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(&transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// Replace all facts for a workspace (DELETE-by-workspace + insert, one txn).
 ///
 /// The `akhomed_facts` primary key is `(workspace_id, subject, predicate,
@@ -180,6 +376,67 @@ pub async fn replace_workspace_facts(
     Ok(())
 }
 
+/// Atomically replace one workspace's facts and the owning Akh's portable
+/// provenance ledger snapshot.
+///
+/// Fact rows contain numeric provenance links.  Committing the two row sets in
+/// one transaction prevents a snapshot reader from observing new facts with an
+/// old ledger (or the inverse).  Inserts are chunked below PostgreSQL's 65,535
+/// bind-parameter ceiling.
+pub async fn replace_workspace_facts_and_provenance(
+    db: &DatabaseConnection,
+    workspace_id: Uuid,
+    akh_id: Uuid,
+    rows: Vec<fact::Model>,
+    provenance_rows: Vec<provenance_snapshot::Model>,
+) -> StoreResult<()> {
+    const ROWS_PER_CHUNK: usize = 6_000;
+
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    let mut unique_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let key = (row.subject, row.predicate, row.object);
+        if seen.insert(key) {
+            unique_rows.push(row);
+        }
+    }
+
+    let txn = db.begin().await?;
+    fact::Entity::delete_many()
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .exec(&txn)
+        .await?;
+    provenance_snapshot::Entity::delete_many()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .exec(&txn)
+        .await?;
+
+    for chunk in unique_rows.chunks(ROWS_PER_CHUNK) {
+        fact::Entity::insert_many(chunk.iter().cloned().map(IntoActiveModel::into_active_model))
+            .on_conflict(
+                OnConflict::columns([
+                    fact::Column::WorkspaceId,
+                    fact::Column::Subject,
+                    fact::Column::Predicate,
+                    fact::Column::Object,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec(&txn)
+            .await?;
+    }
+    for chunk in provenance_rows.chunks(ROWS_PER_CHUNK) {
+        provenance_snapshot::Entity::insert_many(
+            chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+        )
+        .exec(&txn)
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
 /// Load all facts for a workspace.
 pub async fn load_workspace_facts(
     db: &DatabaseConnection,
@@ -187,6 +444,22 @@ pub async fn load_workspace_facts(
 ) -> StoreResult<Vec<fact::Model>> {
     Ok(fact::Entity::find()
         .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .all(db)
+        .await?)
+}
+
+/// Load the complete portable provenance ledger for one Akh.
+///
+/// Provenance IDs are Akh-local rather than workspace-local.  The stored
+/// `workspace_id` remains useful audit metadata for the latest snapshot, but
+/// must not constrain wake when an Akh is addressed through another workspace.
+pub async fn load_provenance_snapshot(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+) -> StoreResult<Vec<provenance_snapshot::Model>> {
+    Ok(provenance_snapshot::Entity::find()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .order_by_asc(provenance_snapshot::Column::ProvenanceId)
         .all(db)
         .await?)
 }

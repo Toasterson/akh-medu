@@ -10,6 +10,21 @@
 //! Keeping the trait here, in the core, means the engine carries **no**
 //! dependency on SeaORM/sqlx: the lean `akh` client builds without any of it.
 
+/// Version of the replay-complete assertion payload written to the mutation
+/// WAL. Version 1 was the original unmarked `{subject,predicate,object,...}`
+/// shape and remains readable when all referenced symbols predate a snapshot.
+pub const ASSERT_MUTATION_VERSION: u64 = 2;
+
+/// Version of the compound contradiction-replacement payload. A replacement
+/// is one logical transition: every displaced edge and the replay-complete new
+/// assertion must survive (or be dropped) together in the bounded WAL.
+pub const REPLACE_MUTATION_VERSION: u64 = 1;
+
+/// Version of the replay-complete, overflow-protected TMS cascade retraction.
+/// V2 closes every referenced provenance record so the batch can survive even
+/// when its older assertion is dropped by bounded-WAL overflow.
+pub const RETRACT_BATCH_MUTATION_VERSION: u64 = 2;
+
 /// A single knowledge mutation captured at the engine boundary.
 #[derive(Debug, Clone)]
 pub struct MutationRecord {
@@ -37,6 +52,13 @@ pub enum MutationKind {
     Assert,
     /// A triple was retracted.
     Retract,
+    /// One primary retraction and every concrete edge removed by its TMS
+    /// cascade. Kept as one protected record so fresh-host replay does not
+    /// depend on an in-memory TMS that is absent from the relational snapshot.
+    RetractBatch,
+    /// One or more conflicting triples were retracted and a replacement was
+    /// asserted as one indivisible replay/overflow unit.
+    Replace,
     /// A microtheory was activated in the workspace.
     MicrotheoryLoad,
     /// A microtheory was deactivated.
@@ -60,6 +82,8 @@ impl MutationKind {
         match self {
             MutationKind::Assert => "assert",
             MutationKind::Retract => "retract",
+            MutationKind::RetractBatch => "retract_batch",
+            MutationKind::Replace => "replace",
             MutationKind::MicrotheoryLoad => "microtheory_load",
             MutationKind::MicrotheoryUnload => "microtheory_unload",
             MutationKind::CompartmentCreate => "compartment_create",
@@ -69,12 +93,18 @@ impl MutationKind {
     }
 
     /// Whether this kind carries knowledge that should be preserved over the
-    /// buffer-overflow drop policy. Asserts and turns are protected;
+    /// buffer-overflow drop policy. Asserts, compound replacements, and turns are protected;
     /// everything else is reconstructable or less critical and is dropped
     /// first under pressure. A dropped turn is silent memory loss (ADR 091),
     /// same severity class as a dropped assert.
     pub fn is_protected_on_overflow(self) -> bool {
-        matches!(self, MutationKind::Assert | MutationKind::Turn)
+        matches!(
+            self,
+            MutationKind::Assert
+                | MutationKind::RetractBatch
+                | MutationKind::Replace
+                | MutationKind::Turn
+        )
     }
 }
 
@@ -128,6 +158,8 @@ mod tests {
     fn kind_strings_are_stable() {
         assert_eq!(MutationKind::Assert.as_str(), "assert");
         assert_eq!(MutationKind::Retract.as_str(), "retract");
+        assert_eq!(MutationKind::RetractBatch.as_str(), "retract_batch");
+        assert_eq!(MutationKind::Replace.as_str(), "replace");
         assert_eq!(MutationKind::MicrotheoryLoad.as_str(), "microtheory_load");
         assert_eq!(MutationKind::CompartmentDestroy.as_str(), "compartment_destroy");
         assert_eq!(MutationKind::Turn.as_str(), "turn");
@@ -136,6 +168,8 @@ mod tests {
     #[test]
     fn assert_and_turn_are_protected() {
         assert!(MutationKind::Assert.is_protected_on_overflow());
+        assert!(MutationKind::RetractBatch.is_protected_on_overflow());
+        assert!(MutationKind::Replace.is_protected_on_overflow());
         assert!(MutationKind::Turn.is_protected_on_overflow());
         assert!(!MutationKind::Retract.is_protected_on_overflow());
         assert!(!MutationKind::MicrotheoryLoad.is_protected_on_overflow());

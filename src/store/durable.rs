@@ -27,7 +27,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 
 use crate::error::StoreError;
 use crate::store::StoreResult;
@@ -187,6 +187,70 @@ impl DurableStore {
             message: format!("commit failed: {e}"),
         })?;
         Ok(count)
+    }
+
+    /// Atomically replace every entry under `prefix` with `entries`.
+    ///
+    /// Snapshot restore uses this for authoritative namespaces such as the
+    /// symbol registry.  A scan followed by independent remove/put
+    /// transactions leaves a crash window where readers can observe a partial
+    /// registry; keeping the delete and insert phases in one redb write
+    /// transaction makes the replacement all-or-nothing.
+    pub fn replace_prefix(&self, prefix: &[u8], entries: &[(&[u8], &[u8])]) -> StoreResult<()> {
+        if entries.iter().any(|(key, _)| !key.starts_with(prefix)) {
+            return Err(StoreError::Serialization {
+                message: "replacement entry is outside the requested metadata prefix".into(),
+            });
+        }
+
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
+            message: format!("begin_write failed: {e}"),
+        })?;
+        {
+            let mut table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
+                message: format!("open_table failed: {e}"),
+            })?;
+            let end_bound = increment_prefix(prefix);
+            let stale_keys = {
+                let iter = match &end_bound {
+                    Some(end) => table
+                        .range::<&[u8]>(prefix..end.as_slice())
+                        .map_err(|e| StoreError::Redb {
+                            message: format!("range scan failed: {e}"),
+                        })?,
+                    None => table.range::<&[u8]>(prefix..).map_err(|e| StoreError::Redb {
+                        message: format!("range scan failed: {e}"),
+                    })?,
+                };
+                let mut keys = Vec::new();
+                for entry in iter {
+                    let (key, _) = entry.map_err(|e| StoreError::Redb {
+                        message: format!("range iteration failed: {e}"),
+                    })?;
+                    let key = key.value().to_vec();
+                    if !key.starts_with(prefix) {
+                        break;
+                    }
+                    keys.push(key);
+                }
+                keys
+            };
+            for key in stale_keys {
+                table.remove(key.as_slice()).map_err(|e| StoreError::Redb {
+                    message: format!("remove failed: {e}"),
+                })?;
+            }
+            for (key, value) in entries {
+                table.insert(*key, *value).map_err(|e| StoreError::Redb {
+                    message: format!("insert failed: {e}"),
+                })?;
+            }
+        }
+        txn.commit().map_err(|e| StoreError::Redb {
+            message: format!("commit failed: {e}"),
+        })?;
+        Ok(())
     }
 
     /// Check if a key exists.
@@ -362,6 +426,27 @@ mod tests {
         assert_eq!(store.get(b"k2").unwrap(), Some(b"v2".to_vec()));
         assert_eq!(store.get(b"k3").unwrap(), None);
         assert_eq!(store.get(b"k4").unwrap(), Some(b"v4".to_vec()));
+    }
+
+    #[test]
+    fn replace_prefix_removes_stale_keys_and_preserves_other_namespaces() {
+        let dir = TempDir::new().unwrap();
+        let store = DurableStore::open(dir.path()).unwrap();
+        store.put(b"sym_meta:1", b"old-one").unwrap();
+        store.put(b"sym_meta:99", b"stale").unwrap();
+        store.put(b"agent:state", b"keep").unwrap();
+
+        store
+            .replace_prefix(
+                b"sym_meta:",
+                &[(b"sym_meta:1", b"new-one"), (b"sym_meta:2", b"new-two")],
+            )
+            .unwrap();
+
+        assert_eq!(store.get(b"sym_meta:1").unwrap(), Some(b"new-one".to_vec()));
+        assert_eq!(store.get(b"sym_meta:2").unwrap(), Some(b"new-two".to_vec()));
+        assert_eq!(store.get(b"sym_meta:99").unwrap(), None);
+        assert_eq!(store.get(b"agent:state").unwrap(), Some(b"keep".to_vec()));
     }
 
     #[test]

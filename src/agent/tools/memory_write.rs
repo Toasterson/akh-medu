@@ -140,12 +140,20 @@ impl Tool for MemoryWriteTool {
             format!("summary:{summary}")
         };
         let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-        let _ = engine.add_triple(&Triple::new(episode_id, self.predicates.has_summary, summary_sym));
+        let mut triples = vec![Triple::new(
+            episode_id,
+            self.predicates.has_summary,
+            summary_sym,
+        )];
 
         // Tags (caller tags + a source tag for queryability).
         for tag in tags.iter().chain(std::iter::once(&format!("source:{source}"))) {
             let tag_sym = engine.resolve_or_create_entity(&format!("tag:{tag}"))?;
-            let _ = engine.add_triple(&Triple::new(episode_id, self.predicates.has_tag, tag_sym));
+            triples.push(Triple::new(
+                episode_id,
+                self.predicates.has_tag,
+                tag_sym,
+            ));
         }
 
         // Facts — assert each triple and link the episode to the subject so
@@ -154,14 +162,14 @@ impl Tool for MemoryWriteTool {
             let s = engine.resolve_or_create_entity(&fact.subject)?;
             let p = engine.resolve_or_create_relation(&fact.predicate)?;
             let o = engine.resolve_or_create_entity(&fact.object)?;
-            let _ = engine.add_triple(&Triple::new(s, p, o).with_confidence(fact.confidence));
-            let _ = engine.add_triple(&Triple::new(episode_id, self.predicates.learned, s));
+            triples.push(Triple::new(s, p, o).with_confidence(fact.confidence));
+            triples.push(Triple::new(episode_id, self.predicates.learned, s));
             symbols.push(s);
         }
 
         // Mark as episodic memory so recall discovers it.
         let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-        let _ = engine.add_triple(&Triple::new(
+        triples.push(Triple::new(
             episode_id,
             self.predicates.memory_type,
             mem_type_sym,
@@ -179,8 +187,10 @@ impl Tool for MemoryWriteTool {
                 relevance_score: 1.0,
             }
         };
-        let mut prov = ProvenanceRecord::new(episode_id, kind).with_confidence(1.0);
-        let _ = engine.store_provenance(&mut prov);
+        let mut prov = ProvenanceRecord::new(episode_id, kind)
+            .with_sources(symbols.iter().copied().skip(1).collect())
+            .with_confidence(1.0);
+        engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
         Ok(ToolOutput::ok_with_symbols(
             format!(

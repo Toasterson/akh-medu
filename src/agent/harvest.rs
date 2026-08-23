@@ -166,12 +166,13 @@ pub fn mint_turn_episode(
     let episode_id = engine.create_symbol(SymbolKind::Entity, &episode_label)?.id;
 
     // 4. Links, following the `persist_episode` (memory.rs) template.
-    for sym in &syms {
-        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, *sym));
-    }
+    let mut triples = syms
+        .iter()
+        .map(|symbol| Triple::new(episode_id, predicates.learned, *symbol))
+        .collect::<Vec<_>>();
 
     let conversation_tag = engine.resolve_or_create_entity("tag:conversation")?;
-    let _ = engine.add_triple(&Triple::new(
+    triples.push(Triple::new(
         episode_id,
         predicates.has_tag,
         conversation_tag,
@@ -180,7 +181,7 @@ pub fn mint_turn_episode(
     // REQUIRED: `reconstruct_episode` (memory.rs) rejects episodes without a
     // `memory_type` link — without this, recall never sees these episodes.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(
+    triples.push(Triple::new(
         episode_id,
         predicates.memory_type,
         mem_type_sym,
@@ -191,7 +192,7 @@ pub fn mint_turn_episode(
     let excerpt = char_boundary_truncate(user_prompt, 80);
     let summary_label = format!("summary:{excerpt}");
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(
+    triples.push(Triple::new(
         episode_id,
         predicates.has_summary,
         summary_sym,
@@ -208,7 +209,7 @@ pub fn mint_turn_episode(
     )
     .with_sources(syms)
     .with_confidence(0.5);
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     Ok(Some(episode_id))
 }

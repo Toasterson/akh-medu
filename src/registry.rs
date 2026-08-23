@@ -129,21 +129,108 @@ impl SymbolRegistry {
         Ok(())
     }
 
+    /// Authoritatively replace the durable symbol namespace with this
+    /// registry in one transaction.
+    ///
+    /// Normal persistence is append/update oriented because a live registry
+    /// only grows.  Cold restore is different: the relational snapshot is the
+    /// source of truth, so stale `sym_meta:*` keys from a reused host must be
+    /// removed atomically with publishing the restored entries.
+    pub fn replace_persisted(&self, store: &TieredStore) -> AkhResult<()> {
+        let mut keys = Vec::with_capacity(self.id_to_meta.len());
+        let mut values = Vec::with_capacity(self.id_to_meta.len());
+        for entry in self.id_to_meta.iter() {
+            let meta = entry.value();
+            keys.push(format!("sym_meta:{}", meta.id.get()).into_bytes());
+            values.push(bincode::serialize(meta).map_err(|e| {
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize symbol meta: {e}"),
+                }
+            })?);
+        }
+        let entries: Vec<(&[u8], &[u8])> = keys
+            .iter()
+            .zip(values.iter())
+            .map(|(key, value)| (key.as_slice(), value.as_slice()))
+            .collect();
+        store.replace_meta_prefix(b"sym_meta:", &entries)?;
+        Ok(())
+    }
+
     /// Restore the registry from the durable store by scanning `sym_meta:` prefix.
     pub fn restore(store: &TieredStore) -> AkhResult<Self> {
         let registry = Self::new();
 
         if let Some(ref durable) = store.durable {
             let entries = durable.scan_prefix(b"sym_meta:")?;
-            for (_key, value) in entries {
+            let mut seen_ids = std::collections::HashSet::with_capacity(entries.len());
+            let mut seen_labels = std::collections::HashMap::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key_text = std::str::from_utf8(&key).map_err(|error| {
+                    crate::error::StoreError::Serialization {
+                        message: format!("invalid symbol metadata key encoding: {error}"),
+                    }
+                })?;
+                let raw_key_id = key_text
+                    .strip_prefix("sym_meta:")
+                    .and_then(|suffix| suffix.parse::<u64>().ok())
+                    .ok_or_else(|| crate::error::StoreError::Serialization {
+                        message: format!("invalid symbol metadata key {key_text:?}"),
+                    })?;
+                let key_id = SymbolId::new(raw_key_id).ok_or_else(|| {
+                    crate::error::StoreError::Serialization {
+                        message: "symbol metadata key contains reserved zero ID".into(),
+                    }
+                })?;
+                if key != format!("sym_meta:{}", key_id.get()).as_bytes() {
+                    return Err(crate::error::StoreError::Serialization {
+                        message: format!("non-canonical symbol metadata key {key_text:?}"),
+                    }
+                    .into());
+                }
                 let meta: SymbolMeta = bincode::deserialize(&value).map_err(|e| {
                     crate::error::StoreError::Serialization {
                         message: format!("failed to deserialize symbol meta: {e}"),
                     }
                 })?;
+                if meta.id != key_id {
+                    return Err(crate::error::StoreError::Serialization {
+                        message: format!(
+                            "symbol metadata key ID {} does not match embedded ID {}",
+                            key_id.get(),
+                            meta.id.get()
+                        ),
+                    }
+                    .into());
+                }
+                if matches!(
+                    meta.id.get(),
+                    crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+                        | crate::provenance::RULE_APPLICATION_V2_SENTINEL
+                ) {
+                    return Err(crate::error::StoreError::Serialization {
+                        message: format!(
+                            "symbol metadata uses reserved provenance marker ID {}",
+                            meta.id.get()
+                        ),
+                    }
+                    .into());
+                }
+                if !seen_ids.insert(meta.id) {
+                    return Err(crate::error::StoreError::Serialization {
+                        message: format!("duplicate durable symbol ID {}", meta.id.get()),
+                    }
+                    .into());
+                }
                 let normalized = normalize_label_key(&meta.label);
-                registry.label_to_id.insert(normalized, meta.id);
-                registry.id_to_meta.insert(meta.id, meta);
+                if let Some(existing_id) = seen_labels.insert(normalized, meta.id) {
+                    return Err(SymbolError::DuplicateLabel {
+                        label: meta.label,
+                        existing_id: existing_id.get(),
+                    }
+                    .into());
+                }
+                registry.register(meta)?;
             }
         }
 
@@ -267,5 +354,63 @@ mod tests {
         let sun = restored.get(sym(1)).unwrap();
         assert_eq!(sun.label, "Sun");
         assert_eq!(sun.kind, SymbolKind::Entity);
+    }
+
+    #[test]
+    fn authoritative_restore_removes_reused_host_symbols() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TieredStore::with_persistence(dir.path(), "test").unwrap();
+
+        let stale = SymbolRegistry::new();
+        stale.register(meta(1, "Sun")).unwrap();
+        stale.register(meta(99, "StaleHostOnly")).unwrap();
+        stale.persist(&store).unwrap();
+
+        let restored = SymbolRegistry::new();
+        restored.register(meta(1, "Sun")).unwrap();
+        restored.register(meta(2, "Moon")).unwrap();
+        restored.replace_persisted(&store).unwrap();
+
+        let reopened = SymbolRegistry::restore(&store).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(reopened.lookup("Sun"), Some(sym(1)));
+        assert_eq!(reopened.lookup("Moon"), Some(sym(2)));
+        assert!(reopened.lookup("StaleHostOnly").is_none());
+        assert!(reopened.get(sym(99)).is_none());
+    }
+
+    #[test]
+    fn restore_rejects_key_and_embedded_id_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TieredStore::with_persistence(dir.path(), "test").unwrap();
+        let encoded = bincode::serialize(&meta(2, "Moon")).unwrap();
+        store.put_meta(b"sym_meta:1", &encoded).unwrap();
+
+        let error = SymbolRegistry::restore(&store).unwrap_err();
+        assert!(format!("{error}").contains("does not match embedded ID"));
+    }
+
+    #[test]
+    fn restore_rejects_duplicate_normalized_labels() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TieredStore::with_persistence(dir.path(), "test").unwrap();
+        let first = bincode::serialize(&meta(1, "Ma'at")).unwrap();
+        let second = bincode::serialize(&meta(2, "Maat")).unwrap();
+        store.put_meta(b"sym_meta:1", &first).unwrap();
+        store.put_meta(b"sym_meta:2", &second).unwrap();
+
+        let error = SymbolRegistry::restore(&store).unwrap_err();
+        assert!(format!("{error}").contains("duplicate label"));
+    }
+
+    #[test]
+    fn restore_rejects_noncanonical_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = TieredStore::with_persistence(dir.path(), "test").unwrap();
+        let encoded = bincode::serialize(&meta(1, "Sun")).unwrap();
+        store.put_meta(b"sym_meta:01", &encoded).unwrap();
+
+        let error = SymbolRegistry::restore(&store).unwrap_err();
+        assert!(format!("{error}").contains("non-canonical"));
     }
 }

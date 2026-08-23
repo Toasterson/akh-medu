@@ -119,6 +119,18 @@ async fn transcript_to_episodic_recall_survives_restart_across_pg() {
     ensure_akh(&db, akh_id, "adr091-acceptance", None)
         .await
         .unwrap();
+    let residency = Arc::new(
+        akhomed_store::StablePgSession::connect(&akhomed_store::PoolOptions::new(
+            std::env::var("AKH_TEST_PG_URL").unwrap(),
+        ))
+        .await
+        .unwrap(),
+    );
+    assert!(residency.try_acquire_akh_lock(akh_id).await.unwrap());
+    let residency_epoch = residency
+        .claim_akh_residency(akh_id, workspace_id)
+        .await
+        .unwrap();
 
     // ---------------------------------------------------------------
     // Phase A — "session A": inject a fact, flush the WAL, close the session.
@@ -127,9 +139,10 @@ async fn transcript_to_episodic_recall_survives_restart_across_pg() {
         let engine_a = Engine::new(EngineConfig::default()).unwrap();
 
         let log_a = Arc::new(MutationLog::new(
-            db.clone(),
+            Arc::clone(&residency),
             akh_id,
             workspace_id,
+            residency_epoch,
             WalConfig::new(Duration::from_millis(50), 64, 1 << 20),
         ));
         engine_a

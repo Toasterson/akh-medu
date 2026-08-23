@@ -86,16 +86,29 @@ struct ServerState {
     /// unlock never runs (crash, network drop). Same pattern
     /// [`akhomed_store::run_migrations_locked`] already uses for the migration
     /// lock. Keyed by workspace name.
-    akh_lock_conns: RwLock<HashMap<String, Arc<akhomed_store::DatabaseConnection>>>,
+    akh_lock_conns: RwLock<HashMap<String, HeldResidency>>,
     /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
     /// Drained on graceful shutdown so the final batch reaches Postgres.
     wal_flushers: RwLock<HashMap<String, WalFlusher>>,
     /// Phase 38c: per-workspace periodic snapshot tasks, keyed by workspace name.
     /// Stopped on graceful shutdown, followed by a final synchronous snapshot.
     snapshot_tickers: RwLock<HashMap<String, SnapshotTicker>>,
+    /// One capture-to-commit critical section per workspace. Periodic,
+    /// on-demand, sleep, and relocation snapshots all pass through the same
+    /// lock, so an older equal-watermark capture cannot publish after a newer
+    /// capture from this daemon.
+    snapshot_publication_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Workspaces being slept/relocated. New lazy loads fail while the runtime
+    /// is quiesced and its residency fence is being handed off.
+    handoffs: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
     /// so two concurrent wakes of the same cold workspace can't race on the redb.
     waking: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Explicit wakes that have completed authoritative hydration and are now
+    /// entering the ordinary lazy Engine/Agent construction path. This lets
+    /// that path skip both a second hydrate and first-birth seed application,
+    /// while unrelated callers still fail closed during the earlier wake phase.
+    hydrated_wakes: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Per-workspace load locks serialising the slow (first-load) path of
     /// `get_engine`: concurrent first-loads must not each build a separate Engine
     /// (each would wire its own WAL flusher + snapshot ticker and all but the
@@ -125,16 +138,58 @@ async fn fetch_load_lock(
     )
 }
 
+/// Move a host-local redb out of the authoritative path before rebuilding it
+/// from Postgres.  A unique suffix preserves every prior quarantine if a wake
+/// is retried under the same residency epoch; no stale file is overwritten.
+fn quarantine_local_redb(
+    kg_dir: &std::path::Path,
+    residency_epoch: i64,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let redb = kg_dir.join("akh-medu.redb");
+    if !redb.exists() {
+        return Ok(None);
+    }
+    let stem = format!("akh-medu.pre-residency-{residency_epoch}");
+    let mut attempt = 0_u32;
+    let backup = loop {
+        let name = if attempt == 0 {
+            format!("{stem}.redb")
+        } else {
+            format!("{stem}-{attempt}.redb")
+        };
+        let candidate = kg_dir.join(name);
+        if !candidate.exists() {
+            break candidate;
+        }
+        attempt = attempt.checked_add(1).ok_or_else(|| {
+            format!("too many quarantined redb images under {}", kg_dir.display())
+        })?;
+    };
+    std::fs::rename(&redb, &backup).map_err(|error| {
+        format!(
+            "cannot quarantine host-local redb {} as {}: {error}",
+            redb.display(),
+            backup.display()
+        )
+    })?;
+    Ok(Some(backup))
+}
+
 /// RAII token marking a workspace as mid-wake; clears the name on drop so an
 /// early `?`-return still releases the single-flight slot.
 struct WakeGuard {
     set: Arc<Mutex<std::collections::HashSet<String>>>,
+    hydrated: Arc<Mutex<std::collections::HashSet<String>>>,
     name: String,
 }
 
 impl Drop for WakeGuard {
     fn drop(&mut self) {
         self.set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.name);
+        self.hydrated
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(&self.name);
@@ -149,6 +204,16 @@ struct WalFlusher {
     /// buffer before evicting the engine (Phase 38e/g) instead of waiting for
     /// the next interval tick.
     log: Arc<akh_medu::wal::MutationLog>,
+}
+
+fn start_wal_flusher(log: Arc<akh_medu::wal::MutationLog>) -> WalFlusher {
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let handle = Arc::clone(&log).spawn_flusher(shutdown_rx);
+    WalFlusher {
+        shutdown,
+        handle,
+        log,
+    }
 }
 
 /// Handle to a workspace's background snapshot ticker task (Phase 38c).
@@ -213,16 +278,23 @@ fn build_local_drop_backend(
 }
 
 ///
-/// The agent lives behind a `std::sync::Mutex`, so capture (sync) runs under the
+/// The agent lives behind a `std::sync::RwLock`, so capture (sync) runs under the
 /// lock and the guard is dropped before the async DB persist. A not-yet-loaded
 /// agent is a quiet no-op (the ticker fires before the first interaction).
 async fn snapshot_once(
     pool: &akhomed_store::DatabaseConnection,
     agents: &RwLock<HashMap<String, Arc<StdRwLock<Agent>>>>,
+    publication_lock: &tokio::sync::Mutex<()>,
     name: &str,
     akh_id: akhomed_store::uuid::Uuid,
     workspace_id: akhomed_store::uuid::Uuid,
+    residency_epoch: i64,
 ) -> Result<(), String> {
+    // Serialize sample-watermark -> capture -> DB-commit, and acquire this
+    // guard before cloning the resident agent. Eviction/handoff takes the same
+    // guard before dropping residency, so an old Arc can never be captured
+    // after ownership is released.
+    let _publication_guard = publication_lock.lock().await;
     let agent = {
         let map = agents.read().await;
         match map.get(name) {
@@ -234,12 +306,24 @@ async fn snapshot_once(
     akhomed_store::ensure_akh(pool, akh_id, name, None)
         .await
         .map_err(|e| e.to_string())?;
+    // Sample the recovery boundary before capturing. Any mutation committed
+    // after this point has a larger sequence and is replayed, even if it races
+    // between the in-memory copy and the async relational writes.
+    let watermark = akhomed_store::snapshots::current_watermark(pool, akh_id)
+        .await
+        .map_err(|e| e.to_string())?;
     // Capture under the lock (sync), release, then persist lock-free.
     let started = std::time::Instant::now();
     let data = {
         let guard = agent.read().unwrap_or_else(|e| e.into_inner());
-        akh_medu::snapshot::capture_snapshot(&guard, akh_id, workspace_id)
-            .map_err(|e| e.to_string())?
+        akh_medu::snapshot::capture_snapshot_at_fence(
+            &guard,
+            akh_id,
+            workspace_id,
+            watermark,
+            residency_epoch,
+        )
+        .map_err(|e| e.to_string())?
     };
     let capture_ms = started.elapsed().as_millis();
     let persist_started = std::time::Instant::now();
@@ -265,6 +349,15 @@ struct WorkspaceDaemon {
     handle: tokio::task::JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
+}
+
+/// Dedicated session-lock connection plus the durable fencing generation
+/// acquired by that residency. Eviction explicitly unlocks and clears the
+/// session's local ownership marker; dropping the final session Arc is the
+/// network-failure fallback. The epoch permanently fences every earlier owner.
+struct HeldResidency {
+    session: Arc<akhomed_store::StablePgSession>,
+    epoch: i64,
 }
 
 /// Per-workspace psyche snapshot map.
@@ -370,7 +463,10 @@ impl ServerState {
             akh_lock_conns: RwLock::new(HashMap::new()),
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
+            snapshot_publication_locks: Mutex::new(HashMap::new()),
+            handoffs: Arc::new(Mutex::new(std::collections::HashSet::new())),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            hydrated_wakes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
         }
@@ -441,12 +537,22 @@ impl ServerState {
             .clone()
     }
 
+    fn snapshot_publication_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.snapshot_publication_locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
     /// ADR 077: spawn the background Postgres reconnector. When startup fell
     /// back to local-only (boot-time network race, or PG transiently down),
     /// this task keeps retrying the connection with capped backoff. On success
     /// it swaps the live pool into `pg_pool` and re-enables durability for every
-    /// already-loaded akh — snapshotting each one's in-memory state (everything
-    /// accumulated while local-only) before wiring the WAL, so nothing is lost.
+    /// already-loaded akh. Existing durable state is authoritative after an
+    /// ownership gap; only a genuinely new Akh may promote its local image.
     /// No-op (returns immediately) when no `[postgres]` section is configured.
     /// Self-terminates once connected.
     fn spawn_pg_reconnector(self: &Arc<Self>) {
@@ -466,6 +572,21 @@ impl ServerState {
                 tokio::time::sleep(backoff).await;
                 match try_connect_pg(&opts, migrate).await {
                     Ok(pool) => {
+                        // Fence cached local-only runtimes before publishing the
+                        // newly connected pool. Rewire clears each gate only
+                        // after that workspace owns a durable epoch and is
+                        // hydrated/wired; a failed claim remains fail-closed.
+                        let loaded = me
+                            .workspaces
+                            .read()
+                            .await
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        me.handoffs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(loaded);
                         *me.pg_pool.write().unwrap_or_else(|e| e.into_inner()) = Some(pool);
                         tracing::info!(
                             "reconnected to PostgreSQL backing store — re-enabling durability"
@@ -487,58 +608,165 @@ impl ServerState {
     }
 
     /// After a runtime reconnect, re-enable the WAL + periodic snapshot for
-    /// every already-loaded workspace and persist a full snapshot of each, so
-    /// the state accumulated during local-only mode reaches Postgres. New
-    /// workspaces loaded after this point wire normally via `get_engine`.
+    /// every already-loaded workspace. A pre-existing relational image wins
+    /// over a reused host-local graph after an ownership gap; a genuinely new
+    /// Akh promotes its local image only after acquiring a fenced residency.
+    /// New workspaces loaded after this point wire normally via `get_engine`.
     async fn rewire_after_reconnect(&self) {
-        // Capture names + engine handles under a short read lock, then release
-        // it before doing per-workspace work (wire_wal / snapshot take locks).
-        let loaded: Vec<(String, Arc<Engine>)> = {
+        // Capture names only. Holding an Engine Arc across the authoritative
+        // hydrate branch would keep its redb handle alive while wake rebuilds
+        // the canonical local image.
+        let loaded: Vec<String> = {
             let map = self.workspaces.read().await;
-            map.iter()
-                .map(|(n, e)| (n.clone(), Arc::clone(e)))
-                .collect()
+            map.keys().cloned().collect()
         };
         if loaded.is_empty() {
             return;
         }
-        let pool = self.pg_pool();
-        for (name, engine) in loaded {
-            // Wire the WAL first so mutations from here on are captured, then
-            // snapshot the full current state (idempotent; materialises into the
-            // relational tables what was accumulated while local-only).
-            self.wire_wal(&name, &engine).await;
-
-            // Guard: an in-memory engine that came up empty (e.g. a k8s tmpfs
-            // pod that booted cold and hasn't been hydrated yet) must never
-            // overwrite durable Postgres state with an empty snapshot.
-            if engine.all_triples().is_empty()
-                && let Some(p) = pool.as_ref()
+        let Some(pool) = self.pg_pool() else {
+            return;
+        };
+        for name in loaded {
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name.clone());
+            let akh_id = akh_medu::wal::akh_id_for(&name);
+            let residency_epoch = match self
+                .acquire_akh_lock_or_refuse(&name, akh_id, "reconnect")
+                .await
             {
-                let akh_id = akh_medu::wal::akh_id_for(&name);
-                match akhomed_store::snapshots::load_akh_state(p, akh_id).await {
-                    Ok(Some(_)) => {
-                        tracing::warn!(
-                            workspace = %name,
-                            "refusing post-reconnect snapshot: in-memory engine is empty but \
-                             the store has state for this akh — snapshot would destroy the \
-                             durable copy; wake/hydrate instead"
-                        );
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    self.stop_workspace_daemon(&name).await;
+                    if let Some(engine) = self.workspaces.read().await.get(&name).cloned() {
+                        engine.quiesce_mutations();
+                    }
+                    tracing::error!(
+                        workspace = %name,
+                        error = %error,
+                        "Postgres reconnected but this daemon could not claim residency; \
+                         local runtime is fenced and remains unavailable"
+                    );
+                    continue;
+                }
+            };
+            let Some(engine) = self.workspaces.read().await.get(&name).cloned() else {
+                if let Err(error) = self.release_akh_lock(&name, akh_id).await {
+                    tracing::error!(workspace = %name, %error, "could not release empty reconnect residency");
+                    continue;
+                }
+                self.handoffs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&name);
+                continue;
+            };
+
+            let has_authoritative = match akhomed_store::snapshots::load_akh_state(&pool, akh_id)
+                .await
+            {
+                Ok(state) => state.is_some_and(|state| state.extra.is_some()),
+                Err(error) => {
+                    engine.quiesce_mutations();
+                    tracing::warn!(
+                        workspace = %name,
+                        %error,
+                        "could not establish whether Postgres has authoritative state after reconnect; workspace remains fenced"
+                    );
+                    continue;
+                }
+            };
+
+            if has_authoritative {
+                // Any durable image wins over a host-local engine used while
+                // ownership could not be proven. The same helper used by open
+                // and explicit wake performs the actual quarantine + rebuild.
+                let _wake_guard = {
+                    let mut waking = self.waking.lock().unwrap_or_else(|e| e.into_inner());
+                    if !waking.insert(name.clone()) {
+                        tracing::error!(workspace = %name, "reconnect hydrate collided with another wake; workspace remains fenced");
                         continue;
                     }
-                    Ok(None) => {} // genuinely fresh akh with an empty engine: safe to snapshot
-                    Err(e) => {
-                        tracing::warn!(
-                            workspace = %name,
-                            error = %e,
-                            "could not check Postgres state before post-reconnect snapshot of \
-                             an empty in-memory engine; skipping this snapshot to avoid a \
-                             possible destructive overwrite"
-                        );
-                        continue;
+                    WakeGuard {
+                        set: Arc::clone(&self.waking),
+                        hydrated: Arc::clone(&self.hydrated_wakes),
+                        name: name.clone(),
+                    }
+                };
+                let agent_load_lock = fetch_load_lock(&self.agent_load_locks, &name).await;
+                let agent_load_guard = agent_load_lock.lock().await;
+                let engine_load_lock = fetch_load_lock(&self.engine_load_locks, &name).await;
+                let engine_load_guard = engine_load_lock.lock().await;
+                self.stop_workspace_daemon(&name).await;
+                if let Some(mut ticker) = self.snapshot_tickers.write().await.remove(&name) {
+                    let _ = ticker.shutdown.send(true);
+                    if tokio::time::timeout(Duration::from_secs(5), &mut ticker.handle)
+                        .await
+                        .is_err()
+                    {
+                        ticker.handle.abort();
+                        tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s on reconnect handoff");
                     }
                 }
+                let publication_lock = self.snapshot_publication_lock(&name);
+                let publication_guard = publication_lock.lock().await;
+                engine.quiesce_mutations();
+                if let Err(error) = self.stop_and_drain_wal(&name).await {
+                    tracing::error!(workspace = %name, %error, "reconnect handoff retained residency because WAL did not drain");
+                    continue;
+                }
+                self.agents.write().await.remove(&name);
+                self.workspaces.write().await.remove(&name);
+                self.psyche_snapshots.write().await.remove(&name);
+                self.nlu_pipelines.write().await.remove(&name);
+                self.daemon_pauses.write().await.remove(&name);
+                drop(engine);
+
+                let ws_paths = self.paths.workspace(&name);
+                let hydrated = self
+                    .quarantine_then_hydrate_authoritative(
+                        &name,
+                        &ws_paths,
+                        residency_epoch,
+                        true,
+                    )
+                    .await;
+                drop(publication_guard);
+                drop(engine_load_guard);
+                drop(agent_load_guard);
+                match hydrated {
+                    Ok(Some(_)) => {
+                        self.hydrated_wakes
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(name.clone());
+                        self.handoffs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&name);
+                        match self.get_agent(&name).await {
+                            Ok(_) => tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect"),
+                            Err(error) => tracing::error!(workspace = %name, %error, "durable reconnect hydrate succeeded but runtime resume failed"),
+                        }
+                    }
+                    Ok(None) => unreachable!("authoritative reconnect requires a complete image"),
+                    Err(error) => tracing::error!(
+                        workspace = %name,
+                        %error,
+                        "failed to hydrate durable state after reconnect; workspace remains fenced"
+                    ),
+                }
+                continue;
             }
+
+            // Ownership is established before either WAL or snapshot becomes
+            // write-capable. The ticker carries the same immutable epoch.
+            self.wire_wal(&name, &engine, residency_epoch).await;
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&name);
 
             match self.snapshot_workspace(&name).await {
                 Ok(()) => tracing::info!(
@@ -557,13 +785,30 @@ impl ServerState {
     /// Phase 38b: install the mutation WAL on `engine` for workspace `name`,
     /// when a Postgres backing store is configured. Best-effort: any failure
     /// logs and leaves the workspace in local-only mode (no WAL).
-    async fn wire_wal(&self, name: &str, engine: &Engine) {
+    async fn wire_wal(&self, name: &str, engine: &Engine, residency_epoch: i64) {
         let pool = self.pg_pool();
         let Some(pool) = pool.as_ref() else {
             return;
         };
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let residency_session = {
+            let held = self.akh_lock_conns.read().await;
+            let Some(residency) = held.get(name) else {
+                tracing::warn!(workspace = %name, "residency session is not held; WAL disabled");
+                return;
+            };
+            if residency.epoch != residency_epoch {
+                tracing::warn!(
+                    workspace = %name,
+                    expected_epoch = residency_epoch,
+                    held_epoch = residency.epoch,
+                    "residency epoch changed before WAL wiring; WAL disabled"
+                );
+                return;
+            }
+            Arc::clone(&residency.session)
+        };
 
         // The akh row is the FK target for mutation_log; ensure it exists first.
         if let Err(e) = akhomed_store::ensure_akh(pool, akh_id, name, None).await {
@@ -587,9 +832,10 @@ impl ServerState {
         };
 
         let log = Arc::new(akh_medu::wal::MutationLog::new(
-            (**pool).clone(),
+            residency_session,
             akh_id,
             workspace_id,
+            residency_epoch,
             wal_cfg,
         ));
         if engine
@@ -617,15 +863,9 @@ impl ServerState {
             tracing::warn!(workspace = %name, "turn body reader already installed; skipping");
         }
 
-        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = Arc::clone(&log).spawn_flusher(shutdown_rx);
         self.wal_flushers.write().await.insert(
             name.to_string(),
-            WalFlusher {
-                shutdown,
-                handle,
-                log: Arc::clone(&log),
-            },
+            start_wal_flusher(Arc::clone(&log)),
         );
         tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
 
@@ -636,6 +876,7 @@ impl ServerState {
                 name.to_string(),
                 Arc::clone(pool),
                 Duration::from_secs(snapshot_interval_secs),
+                residency_epoch,
             );
             self.snapshot_tickers
                 .write()
@@ -657,8 +898,10 @@ impl ServerState {
         name: String,
         pool: Arc<akhomed_store::DatabaseConnection>,
         interval: Duration,
+        residency_epoch: i64,
     ) -> SnapshotTicker {
         let agents = Arc::clone(&self.agents);
+        let publication_lock = self.snapshot_publication_lock(&name);
         let (shutdown, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(async move {
             let akh_id = akh_medu::wal::akh_id_for(&name);
@@ -683,7 +926,15 @@ impl ServerState {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        match snapshot_once(&pool, &agents, &name, akh_id, workspace_id).await {
+                        match snapshot_once(
+                            &pool,
+                            &agents,
+                            &publication_lock,
+                            &name,
+                            akh_id,
+                            workspace_id,
+                            residency_epoch,
+                        ).await {
                             Ok(()) => {
                                 if consecutive_failures > 0 {
                                     tracing::info!(
@@ -760,7 +1011,85 @@ impl ServerState {
         self.get_agent(name).await?;
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
-        snapshot_once(pool, &self.agents, name, akh_id, workspace_id).await
+        let residency_epoch = self.residency_epoch(name).await?;
+        let publication_lock = self.snapshot_publication_lock(name);
+        snapshot_once(
+            pool,
+            &self.agents,
+            &publication_lock,
+            name,
+            akh_id,
+            workspace_id,
+            residency_epoch,
+        )
+        .await
+    }
+
+    /// Quarantine any reusable local redb and rebuild the canonical image from
+    /// a complete authoritative Postgres snapshot.
+    ///
+    /// This is the sole cold-hydration primitive used by normal open,
+    /// reconnect, and explicit `_akh/akh/wake`. Callers must first claim the
+    /// supplied residency epoch and serialize their load/handoff path.
+    async fn quarantine_then_hydrate_authoritative(
+        &self,
+        name: &str,
+        ws_paths: &akh_medu::paths::WorkspacePaths,
+        residency_epoch: i64,
+        require_complete: bool,
+    ) -> Result<Option<(usize, usize)>, String> {
+        let pool = self
+            .pg_pool()
+            .ok_or_else(|| "no Postgres backing store configured (no [postgres] section)".to_string())?;
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let state = akhomed_store::snapshots::load_akh_state(&pool, akh_id)
+            .await
+            .map_err(|error| {
+                format!("could not check Postgres for existing state of \"{name}\": {error}")
+            })?;
+        let has_complete_image = state.as_ref().is_some_and(|state| state.extra.is_some());
+        if !has_complete_image {
+            if require_complete {
+                return Err(format!(
+                    "cannot wake \"{name}\": Postgres has no complete authoritative snapshot"
+                ));
+            }
+            return Ok(None);
+        }
+
+        std::fs::create_dir_all(&ws_paths.kg_dir)
+            .map_err(|error| format!("cannot create workspace kg dir for \"{name}\": {error}"))?;
+        if let Some(backup) = quarantine_local_redb(&ws_paths.kg_dir, residency_epoch)? {
+            tracing::warn!(
+                workspace = %name,
+                path = %backup.display(),
+                residency_epoch,
+                "quarantined host-local redb before authoritative hydrate"
+            );
+        }
+
+        let engine = akh_medu::snapshot::wake(
+            &ws_paths.kg_dir,
+            akh_id,
+            akh_medu::wal::workspace_id_for(name),
+            &pool,
+        )
+        .await
+        .map_err(|error| format!("authoritative hydration failed for \"{name}\": {error}"))?;
+        let triples = engine.all_triples().len();
+        let symbols = engine.all_symbols().len();
+        drop(engine);
+
+        if let Err(error) = akhomed_store::touch_last_seen(
+            &pool,
+            akh_id,
+            akhomed_store::chrono::Utc::now(),
+        )
+        .await
+        {
+            tracing::warn!(workspace = %name, error = %error, "could not update last_seen after authoritative hydrate");
+        }
+        Ok(Some((triples, symbols)))
     }
 
     /// Hydrate a lazily-opened workspace from its Postgres snapshot before
@@ -774,11 +1103,12 @@ impl ServerState {
     /// "already loaded".
     ///
     /// Returns `Ok(true)` when hydration happened — the caller must skip
-    /// seed-pack application, since the redb now holds the real akh. Returns
-    /// `Ok(false)` when hydration does not apply: no Postgres pool, an
-    /// explicit `_akh/akh/wake` is already hydrating this workspace, the redb
-    /// already exists, or this is a genuinely fresh akh with no store state
-    /// (normal seed-pack birth). Returns `Err` to **fail the open closed**:
+    /// seed-pack application, since the redb now holds the real akh. An
+    /// existing host-local redb is quarantined whenever Postgres has an
+    /// authoritative image; it is never trusted merely because the path
+    /// exists. Returns `Ok(false)` when hydration does not apply: no Postgres
+    /// pool or this is a genuinely fresh akh with no store state (normal seed-pack
+    /// birth). Returns `Err` to **fail the open closed**:
     /// once we know Postgres has state for this akh, we must not fall back to
     /// a cold empty engine — that is exactly the split-brain window the
     /// advisory lock exists to prevent.
@@ -786,11 +1116,11 @@ impl ServerState {
         &self,
         name: &str,
         ws_paths: &akh_medu::paths::WorkspacePaths,
+        residency_epoch: i64,
     ) -> Result<bool, String> {
-        let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        if self.pg_pool().is_none() {
             return Ok(false);
-        };
+        }
 
         // Single-flight against an explicit `_akh/akh/wake`: if one is already
         // in flight for this workspace it owns the hydration (and will have
@@ -799,80 +1129,47 @@ impl ServerState {
         let _wake_guard = {
             let mut waking = self.waking.lock().unwrap_or_else(|e| e.into_inner());
             if !waking.insert(name.to_string()) {
-                return Ok(false);
+                if self
+                    .hydrated_wakes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(name)
+                {
+                    return Ok(true);
+                }
+                return Err(format!(
+                    "workspace \"{name}\" is still being authoritatively hydrated"
+                ));
             }
             WakeGuard {
                 set: Arc::clone(&self.waking),
+                hydrated: Arc::clone(&self.hydrated_wakes),
                 name: name.to_string(),
             }
         };
-
-        // Cold check: a redb already on disk means this workspace was already
-        // hydrated (or born locally) — nothing to do here.
-        if ws_paths.kg_dir.join("akh-medu.redb").exists() {
-            return Ok(false);
+        let hydrated = self
+            .quarantine_then_hydrate_authoritative(
+                name,
+                ws_paths,
+                residency_epoch,
+                false,
+            )
+            .await?;
+        if let Some((triples, symbols)) = hydrated {
+            tracing::info!(workspace = %name, triples, symbols, "hydrated workspace from Postgres on open");
+            Ok(true)
+        } else {
+            Ok(false)
         }
-
-        let akh_id = akh_medu::wal::akh_id_for(name);
-        let Some(_state) = akhomed_store::snapshots::load_akh_state(pool, akh_id)
-            .await
-            .map_err(|e| {
-                format!("could not check Postgres for existing state of \"{name}\": {e}")
-            })?
-        else {
-            // No store state at all: this is a genuinely fresh akh. Let
-            // `get_engine` proceed with its normal seed-pack birth.
-            return Ok(false);
-        };
-
-        // 38g split-brain guard: refuse — do not fall back to a cold empty
-        // engine — if another host already holds the akh's advisory lock.
-        self.acquire_akh_lock_or_refuse(name, akh_id, "open").await?;
-
-        std::fs::create_dir_all(&ws_paths.kg_dir)
-            .map_err(|e| format!("cannot create workspace kg dir for \"{name}\": {e}"))?;
-
-        // Reconstruct the local redb from Postgres. `wake` opens its own
-        // Engine over `kg_dir` and must be dropped before `get_engine` reopens
-        // the same redb file — redb is single-writer.
-        let engine = akh_medu::snapshot::wake(
-            &ws_paths.kg_dir,
-            akh_id,
-            akh_medu::wal::workspace_id_for(name),
-            pool,
-        )
-        .await
-        .map_err(|e| format!("hydration on open failed for \"{name}\": {e}"))?;
-        let triples = engine.all_triples().len();
-        let symbols = engine.all_symbols().len();
-        drop(engine);
-
-        // Heartbeat: mark this host as the akh's live owner (best-effort — the
-        // akh row is guaranteed to exist already, since `akh_state` FKs to it).
-        if let Err(e) =
-            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
-        {
-            tracing::warn!(workspace = %name, error = %e, "could not update last_seen after hydrate-on-open");
-        }
-
-        tracing::info!(
-            workspace = %name,
-            %akh_id,
-            triples,
-            symbols,
-            "hydrated workspace from Postgres on open"
-        );
-        Ok(true)
     }
 
     /// Wake a cold workspace from its Postgres snapshot (control-plane
     /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
     /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
     async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        if self.pg_pool().is_none() {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
-        };
+        }
         // Single-flight: refuse a second concurrent wake of the same workspace
         // (otherwise both would open the same redb and one fails confusingly).
         // The guard clears the slot on drop, including the `?` early returns below.
@@ -883,6 +1180,7 @@ impl ServerState {
             }
             WakeGuard {
                 set: Arc::clone(&self.waking),
+                hydrated: Arc::clone(&self.hydrated_wakes),
                 name: name.to_string(),
             }
         };
@@ -897,37 +1195,31 @@ impl ServerState {
         }
 
         let akh_id = akh_medu::wal::akh_id_for(name);
-        let workspace_id = akh_medu::wal::workspace_id_for(name);
-
         // 38g split-brain guard: a cold akh may live on another host. Acquire its
         // Postgres advisory lock before touching state so two hosts can't wake the
         // same akh concurrently; refuse fast (non-zero CLI exit) if it's held.
-        self.acquire_akh_lock_or_refuse(name, akh_id, "wake").await?;
+        let residency_epoch = self
+            .acquire_akh_lock_or_refuse(name, akh_id, "wake")
+            .await?;
 
         let ws_paths = self.paths.workspace(name);
-        std::fs::create_dir_all(&ws_paths.kg_dir)
-            .map_err(|e| format!("cannot create workspace kg dir: {e}"))?;
-
-        // Reconstruct the local redb from Postgres. `wake` persists the KG
-        // snapshot to redb before returning; dropping the engine releases the
-        // redb lock so the lazy path can reopen it.
-        let engine = akh_medu::snapshot::wake(&ws_paths.kg_dir, akh_id, workspace_id, pool)
-            .await
-            .map_err(|e| format!("wake failed: {e}"))?;
-        let triples = engine.all_triples().len();
-        let symbols = engine.all_symbols().len();
-        drop(engine);
+        let (triples, symbols) = self
+            .quarantine_then_hydrate_authoritative(
+                name,
+                &ws_paths,
+                residency_epoch,
+                true,
+            )
+            .await?
+            .expect("require_complete returns a hydration result");
+        self.hydrated_wakes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_string());
 
         // Bring the akh fully online via the standard path (resume reads the redb
         // wake just populated; this also wires the WAL + snapshot ticker).
         self.get_agent(name).await?;
-
-        // Heartbeat: mark this host as the akh's live owner (best-effort).
-        if let Err(e) =
-            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
-        {
-            tracing::warn!(workspace = %name, error = %e, "could not update last_seen after wake");
-        }
 
         tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
         Ok(serde_json::json!({
@@ -945,7 +1237,7 @@ impl ServerState {
     /// closed) rather than silently proceeding — split-brain is worse than a
     /// retry. No-op when there is no Postgres pool (local-only mode has a single
     /// host by construction, so there is nothing to guard against).
-    /// Build single-connection pool options from the live `[postgres]` config.
+    /// Build pinned-session options from the live `[postgres]` config.
     ///
     /// Returns `None` in local-only mode (no `[postgres]`). `DATABASE_URL`
     /// overrides the configured URL, matching the migrate path.
@@ -954,7 +1246,8 @@ impl ServerState {
         let pg = cfg.postgres.as_ref()?;
         Some(akhomed_store::PoolOptions {
             url: std::env::var("DATABASE_URL").unwrap_or_else(|_| pg.url.clone()),
-            // One connection, by construction: it *is* the lock's session.
+            // Ignored by StablePgSession (which always owns exactly one socket),
+            // retained so the same options type can be used for both APIs.
             max_connections: 1,
             connect_timeout: std::time::Duration::from_secs(pg.connect_timeout_secs),
         })
@@ -965,9 +1258,9 @@ impl ServerState {
         name: &str,
         akh_id: akhomed_store::uuid::Uuid,
         op: &str,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         if self.pg_pool().is_none() {
-            return Ok(());
+            return Ok(0);
         }
         // Serialize the check-then-acquire: two concurrent opens of the same
         // workspace must not each dial a connection, or the loser's lock
@@ -979,24 +1272,57 @@ impl ServerState {
         // the ACP open re-checks the same akh moments later. Re-dialing there
         // would draw a second session and refuse against our own lock — the
         // deadlock this map exists to prevent.
-        if held.contains_key(name) {
-            return Ok(());
+        if let Some(residency) = held.get(name) {
+            return Ok(residency.epoch);
         }
 
         let Some(opts) = self.akh_lock_pool_options().await else {
-            return Ok(());
+            return Ok(0);
         };
-        let conn = akhomed_store::connect(&opts).await.map_err(|e| {
+        let session = Arc::new(akhomed_store::StablePgSession::connect(&opts).await.map_err(|e| {
             format!(
                 "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
                  refusing to {op} to avoid split-brain. Check the Postgres backing store."
             )
-        })?;
+        })?);
 
-        match akhomed_store::try_acquire_akh_lock(&conn, akh_id).await {
+        match session.try_acquire_akh_lock(akh_id).await {
             Ok(true) => {
-                held.insert(name.to_string(), Arc::new(conn));
-                Ok(())
+                // The pooled connection may create the identity, but the
+                // fencing epoch must advance on the same physical session
+                // that owns the advisory lock.
+                let pool = self.pg_pool().ok_or_else(|| {
+                    format!("Postgres pool disappeared while claiming residency for \"{name}\"")
+                })?;
+                if let Err(error) = akhomed_store::ensure_akh(&pool, akh_id, name, None).await {
+                    let _ = session.release_akh_lock(akh_id).await;
+                    return Err(format!(
+                        "could not ensure akh identity while claiming residency for \
+                         \"{name}\" ({error}); refusing to {op}"
+                    ));
+                }
+                let workspace_id = akh_medu::wal::workspace_id_for(name);
+                let epoch = match session
+                    .claim_akh_residency(akh_id, workspace_id)
+                    .await
+                {
+                    Ok(epoch) => epoch,
+                    Err(error) => {
+                        let _ = session.release_akh_lock(akh_id).await;
+                        return Err(format!(
+                            "could not acquire the durable residency fence for \"{name}\" \
+                             ({error}); refusing to {op}"
+                        ));
+                    }
+                };
+                held.insert(
+                    name.to_string(),
+                    HeldResidency {
+                        session,
+                        epoch,
+                    },
+                );
+                Ok(epoch)
             }
             Ok(false) => Err(format!(
                 "refusing to {op} \"{name}\": another host already holds the akh's \
@@ -1010,60 +1336,107 @@ impl ServerState {
         }
     }
 
+    async fn residency_epoch(&self, name: &str) -> Result<i64, String> {
+        if self.pg_pool().is_none() {
+            return Ok(0);
+        }
+        self.akh_lock_conns
+            .read()
+            .await
+            .get(name)
+            .map(|residency| residency.epoch)
+            .ok_or_else(|| {
+                format!(
+                    "workspace \"{name}\" has no held residency fence; refusing durable write"
+                )
+            })
+    }
+
     /// Release the Akh's advisory lock — paired with
     /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
     /// re-acquire. No-op when this daemon does not hold it.
     ///
-    /// Dropping the connection is what actually guarantees the release: the
-    /// explicit `pg_advisory_unlock` is a courtesy so the lock frees before
-    /// the socket teardown completes, but a failed unlock (or a dead socket)
-    /// no longer strands the lock the way a pooled release did.
-    async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
-        let conn = self.akh_lock_conns.write().await.remove(name);
-        let Some(conn) = conn else {
-            return;
+    /// The explicit unlock also clears the stable session's local ownership
+    /// marker, so a WAL sink retained through an old `Arc<Engine>` fails closed.
+    /// Dropping the final session Arc closes the socket as the crash/network
+    /// fallback; unlike a pool, it can never reconnect under the old lock state.
+    async fn release_akh_lock(
+        &self,
+        name: &str,
+        akh_id: akhomed_store::uuid::Uuid,
+    ) -> Result<(), String> {
+        if self.wal_flushers.read().await.contains_key(name) {
+            return Err(format!(
+                "refusing to release residency for \"{name}\" while its WAL flusher is retained"
+            ));
+        }
+        let residency = self.akh_lock_conns.write().await.remove(name);
+        let Some(residency) = residency else {
+            return Ok(());
         };
-        if let Err(e) = akhomed_store::release_akh_lock(&conn, akh_id).await {
+        if let Err(e) = residency.session.release_akh_lock(akh_id).await {
             tracing::warn!(
                 workspace = %name, error = %e,
-                "explicit akh advisory-lock unlock failed; dropping the connection \
-                 releases the session lock regardless"
+                "explicit akh advisory-lock unlock failed; the stable session was \
+                 closed to release the server-side lock and reject retained writers"
             );
         }
-        drop(conn);
+        drop(residency);
+        Ok(())
     }
 
     /// Evict a workspace's cached engine + agent and stop its background tasks
     /// (daemon, WAL flusher, snapshot ticker), freeing the akh's memory. Shared
     /// by `sleep_workspace`; the akh's durable state must already be persisted
     /// (snapshot + WAL flush) before calling this, or unflushed mutations are lost.
-    async fn evict_workspace(&self, name: &str) {
+    async fn evict_workspace(&self, name: &str) -> Result<(), String> {
+        {
+            let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+            handoffs.insert(name.to_string());
+        }
+        // Drain any slow-path construction already in flight, then keep both
+        // load gates closed until the caches and ownership record are gone.
+        let agent_load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
+        let _agent_load_guard = agent_load_lock.lock().await;
+        let engine_load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
+        let _engine_load_guard = engine_load_lock.lock().await;
+
         // Stop the OODA daemon first so no further mutations are produced.
         self.stop_workspace_daemon(name).await;
 
         // Stop + drain the snapshot ticker.
-        if let Some(ticker) = self.snapshot_tickers.write().await.remove(name) {
+        if let Some(mut ticker) = self.snapshot_tickers.write().await.remove(name) {
             let _ = ticker.shutdown.send(true);
-            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+            if tokio::time::timeout(Duration::from_secs(5), &mut ticker.handle)
                 .await
                 .is_err()
             {
                 tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s on evict");
+                ticker.handle.abort();
             }
         }
 
-        // Stop + drain the WAL flusher (the final batch was already flushed by
-        // the caller's snapshot path; this drains anything buffered since).
-        if let Some(mut flusher) = self.wal_flushers.write().await.remove(name) {
-            let _ = flusher.shutdown.send(true);
-            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
-                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained on evict"),
-                Err(_) => {
-                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s on evict, aborting");
-                    flusher.handle.abort();
-                }
+        // Wait for every periodic/on-demand publisher that cloned the agent
+        // before quiescence. Holding this guard through cache removal and lock
+        // release prevents a stale capture from publishing after handoff.
+        let publication_lock = self.snapshot_publication_lock(name);
+        let _publication_guard = publication_lock.lock().await;
+
+        if let Some(engine) = self.workspaces.read().await.get(name).cloned() {
+            engine.quiesce_mutations();
+            if let Err(error) = engine.persist() {
+                tracing::warn!(
+                    workspace = %name,
+                    %error,
+                    "final local persist after handoff quiescence failed"
+                );
             }
         }
+
+        // Do not tear down caches or release residency until every pending row
+        // is durably appended. On failure the flusher/log, residency, quiesced
+        // engine, and handoff fence all remain available for an explicit retry.
+        self.stop_and_drain_wal(name).await?;
 
         // Drop the cached agent + engine + ancillary caches so memory is freed.
         // Dropping the engine releases the redb lock so a later wake can reopen it.
@@ -1076,7 +1449,7 @@ impl ServerState {
         // Release the advisory lock so this host (or another) can re-acquire on
         // the next wake (no-op in local-only mode).
         let akh_id = akh_medu::wal::akh_id_for(name);
-        self.release_akh_lock(name, akh_id).await;
+        self.release_akh_lock(name, akh_id).await?;
 
         // ADR-049: and clear the heartbeat. The akh is provably not resident —
         // snapshot written, WAL flushed, engine dropped, lock released — so a
@@ -1093,6 +1466,11 @@ impl ServerState {
                 );
             }
         }
+        self.handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        Ok(())
     }
 
     /// Deep-sleep a workspace (control-plane `_akh/akh/sleep`).
@@ -1109,8 +1487,8 @@ impl ServerState {
             self.snapshot_workspace(name).await?;
             // Flush the WAL synchronously so any mutation since the snapshot
             // reaches Postgres before we drop the in-memory engine.
-            self.flush_wal(name).await;
-            self.evict_workspace(name).await;
+            self.flush_wal(name).await?;
+            self.evict_workspace(name).await?;
             tracing::info!(workspace = %name, "akh deep-slept (snapshot + evict)");
             Ok(serde_json::json!({
                 "workspace": name,
@@ -1125,7 +1503,7 @@ impl ServerState {
             {
                 tracing::warn!(workspace = %name, error = %e, "local persist before sleep failed");
             }
-            self.evict_workspace(name).await;
+            self.evict_workspace(name).await?;
             tracing::warn!(workspace = %name, "akh slept (local-only: evicted, no Postgres durability)");
             Ok(serde_json::json!({
                 "workspace": name,
@@ -1140,7 +1518,7 @@ impl ServerState {
     /// 38e/g). Used by sleep/relocate so any mutation since the snapshot reaches
     /// Postgres before the in-memory engine is dropped — without waiting for the
     /// next interval tick. A no-op when no flusher is wired (local-only mode).
-    async fn flush_wal(&self, name: &str) {
+    async fn flush_wal(&self, name: &str) -> Result<usize, String> {
         let log = self
             .wal_flushers
             .read()
@@ -1148,17 +1526,66 @@ impl ServerState {
             .get(name)
             .map(|f| Arc::clone(&f.log));
         if let Some(log) = log {
-            // flush_once drains at most one batch; loop until the buffer is empty
-            // so the relational copy is fully current before eviction/hand-off.
-            let mut total = 0usize;
-            loop {
-                let flushed = log.flush_once().await;
-                total += flushed;
-                if flushed == 0 || log.pending() == 0 {
-                    break;
-                }
-            }
+            let total = log.flush_all().await.map_err(|error| {
+                format!(
+                    "WAL drain failed for \"{name}\" with {} row(s) retained: {error}",
+                    log.pending()
+                )
+            })?;
             tracing::debug!(workspace = %name, rows = total, "forced WAL flush before sleep/relocate");
+            Ok(total)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Stop the background task and perform one Result-bearing ordered drain.
+    /// A failed/blocked drain is reinstalled in the workspace map, so callers
+    /// cannot release residency or report a successful handoff while rows wait.
+    async fn stop_and_drain_wal(&self, name: &str) -> Result<usize, String> {
+        let Some(mut flusher) = self.wal_flushers.write().await.remove(name) else {
+            return Ok(0);
+        };
+        let log = Arc::clone(&flusher.log);
+        let _ = flusher.shutdown.send(true);
+        match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(workspace = %name, error = %error, "WAL flusher task failed before final drain");
+            }
+            Err(_) => {
+                self.wal_flushers
+                    .write()
+                    .await
+                    .insert(name.to_string(), flusher);
+                return Err(format!(
+                    "WAL flusher for \"{name}\" did not finish its ordered drain within 5s; residency retained"
+                ));
+            }
+        }
+
+        match log.flush_all().await {
+            Ok(total) if log.pending() == 0 => Ok(total),
+            Ok(_) => {
+                let pending = log.pending();
+                self.wal_flushers
+                    .write()
+                    .await
+                    .insert(name.to_string(), start_wal_flusher(log));
+                Err(format!(
+                    "WAL drain for \"{name}\" returned with {pending} row(s) still pending; residency retained"
+                ))
+            }
+            Err(error) => {
+                let pending = log.pending();
+                self.wal_flushers
+                    .write()
+                    .await
+                    .insert(name.to_string(), start_wal_flusher(log));
+                Err(format!(
+                    "WAL drain failed for \"{name}\" with {pending} row(s) retained: {error}"
+                ))
+            }
         }
     }
 
@@ -1170,7 +1597,7 @@ impl ServerState {
     /// error telling the operator to configure `[postgres]`.
     async fn relocate_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
         let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        let Some(_pool) = pool.as_ref() else {
             return Err(
                 "relocation requires a Postgres backing store (no [postgres] section configured). \
                  Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) so the \
@@ -1187,17 +1614,12 @@ impl ServerState {
         // Snapshot (loads the agent if needed) + flush so the relational copy is
         // current and complete before we hand off.
         self.snapshot_workspace(name).await?;
-        self.flush_wal(name).await;
+        self.flush_wal(name).await?;
 
-        // Mark the heartbeat so the recovery host sees a fresh `last_seen`.
-        if let Err(e) =
-            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
-        {
-            tracing::warn!(workspace = %name, error = %e, "could not update last_seen on relocate");
-        }
-
-        // Release the lock so the recovery host can acquire it on wake.
-        self.release_akh_lock(name, akh_id).await;
+        // Relocation is a real handoff, not merely a lock release: stop the
+        // source ticker/WAL/agent, wait out in-flight snapshots, remove the
+        // runtime, then release ownership and clear its heartbeat.
+        self.evict_workspace(name).await?;
 
         tracing::info!(workspace = %name, %akh_id, "akh prepared for relocation");
         Ok(serde_json::json!({
@@ -1994,22 +2416,35 @@ impl ServerState {
             }
         }
 
-        let flushers: Vec<(String, WalFlusher)> =
-            self.wal_flushers.write().await.drain().collect();
-        for (name, mut flusher) in flushers {
-            let _ = flusher.shutdown.send(true);
-            match tokio::time::timeout(Duration::from_secs(5), &mut flusher.handle).await {
-                Ok(_) => tracing::info!(workspace = %name, "WAL flusher drained"),
-                Err(_) => {
-                    tracing::warn!(workspace = %name, "WAL flusher did not drain within 5s, aborting");
-                    flusher.handle.abort();
-                }
+        let wal_names = self
+            .wal_flushers
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in wal_names {
+            match self.stop_and_drain_wal(&name).await {
+                Ok(rows) => tracing::info!(workspace = %name, rows, "WAL flusher drained"),
+                Err(error) => tracing::error!(
+                    workspace = %name,
+                    %error,
+                    "WAL shutdown drain failed; residency and pending log remain fenced until process exit"
+                ),
             }
         }
     }
 
     /// Get or lazily open an engine for the given workspace.
     async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, String> {
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
         // Check if already loaded.
         {
             let map = self.workspaces.read().await;
@@ -2023,6 +2458,15 @@ impl ServerState {
         // snapshot ticker, and all but the winner would leak as orphaned tasks).
         let load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
         let _load_guard = load_lock.lock().await;
+
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
 
         // Double-check: a racing winner may have populated the cache while we
         // waited for the load lock.
@@ -2065,7 +2509,19 @@ impl ServerState {
         // durable state in the store (e.g. a k8s tmpfs pod that just
         // restarted). Must run before `Engine::new` opens the redb below —
         // that's the file hydration populates.
-        let hydrated = self.try_hydrate_from_store(name, &ws_paths).await?;
+        let residency_epoch = if self.pg_pool().is_some() {
+            self.acquire_akh_lock_or_refuse(
+                name,
+                akh_medu::wal::akh_id_for(name),
+                "open",
+            )
+            .await?
+        } else {
+            0
+        };
+        let hydrated = self
+            .try_hydrate_from_store(name, &ws_paths, residency_epoch)
+            .await?;
 
         // Honour the akh's read-root unlock (ADR 076 §4): when `openclaw_import`
         // is on, `effective_read_roots()` adds `~/.openclaw` so the agent's
@@ -2133,7 +2589,7 @@ impl ServerState {
         }
 
         // Phase 38b: install the mutation WAL (no-op in local-only mode).
-        self.wire_wal(name, &engine).await;
+        self.wire_wal(name, &engine, residency_epoch).await;
 
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
@@ -2147,6 +2603,14 @@ impl ServerState {
     /// share the same instance. Construction is heavy (Agent::resume
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
     async fn get_agent(&self, name: &str) -> Result<Arc<StdRwLock<Agent>>, String> {
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
         // Fast path: already cached.
         {
             let agents = self.agents.read().await;
@@ -2162,6 +2626,15 @@ impl ServerState {
         let load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
         let _load_guard = load_lock.lock().await;
 
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
+
         // Double-check after acquiring the load lock.
         {
             let agents = self.agents.read().await;
@@ -2174,7 +2647,7 @@ impl ServerState {
         // attach a WAL + snapshot ticker to an akh another host owns.
         // Same guards as wake_workspace, applied to the accidental path
         // (e.g. `akh -w <name> acp status` on a non-owning host).
-        if let Some(pool) = self.pg_pool().as_ref() {
+        if self.pg_pool().is_some() {
             let akh_id = akh_medu::wal::akh_id_for(name);
             // Skip the lock re-acquisition if a wake on this host already
             // holds it — SeaORM uses a pool, so a second pg_try_advisory_lock
@@ -2188,21 +2661,6 @@ impl ServerState {
             if !waking_holds {
                 self.acquire_akh_lock_or_refuse(name, akh_id, "lazy-load")
                     .await?;
-            }
-            // Freshness: refuse if another host heartbeated recently.
-            if let Ok(Some(last_seen)) =
-                akhomed_store::get_last_seen(pool, akh_id).await
-            {
-                let age =
-                    (akhomed_store::chrono::Utc::now() - last_seen).num_seconds();
-                if age < 60 {
-                    return Err(format!(
-                        "workspace \"{name}\" was seen alive on another host \
-                         {age}s ago (last_seen < 60s). Refusing lazy-load to \
-                         prevent split-brain (ADR-049). Run `akh akh relocate` \
-                         on the owning host or wait for last_seen to age out."
-                    ));
-                }
             }
         }
 
@@ -4002,6 +4460,9 @@ async fn main() {
 mod control_plane_tests {
     use super::*;
     use akh_medu::acp::ServerControl;
+    use akh_medu::graph::Triple;
+    use akh_medu::symbol::SymbolKind;
+    use akhomed_store::sea_orm::{ConnectionTrait as _, DbBackend, Statement};
     use serde_json::json;
 
     /// Build a `ServerState` rooted under a fresh tempdir.
@@ -4018,6 +4479,338 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    #[test]
+    fn redb_quarantine_never_overwrites_an_earlier_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let redb = tmp.path().join("akh-medu.redb");
+        std::fs::write(&redb, b"first").unwrap();
+        let first = quarantine_local_redb(tmp.path(), 7).unwrap().unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+
+        std::fs::write(&redb, b"second").unwrap();
+        let second = quarantine_local_redb(tmp.path(), 7).unwrap().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AKH_TEST_PG_URL"]
+    async fn normal_open_quarantines_stale_redb_before_authoritative_hydrate() {
+        let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+            eprintln!("skipping: set AKH_TEST_PG_URL");
+            return;
+        };
+        let opts = akhomed_store::PoolOptions::new(url.clone());
+        let db = Arc::new(akhomed_store::connect(&opts).await.unwrap());
+        akhomed_store::run_migrations(&db).await.unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let config = AkhomedConfig {
+            postgres: Some(akh_medu::config::PostgresConfig {
+                url,
+                pool_size: 4,
+                connect_timeout_secs: 10,
+                migrate_on_start: false,
+                wal_flush_interval_secs: 60,
+                wal_batch_size: 64,
+                wal_max_buffer_mb: 4,
+                snapshot_interval_secs: 0,
+            }),
+            ..Default::default()
+        };
+        let workspace = format!("stale-redb-{}", akhomed_store::uuid::Uuid::new_v4());
+
+        let first = ServerState::new(paths.clone(), config.clone(), Some(Arc::clone(&db)));
+        first
+            .dispatch("_akh/workspace/create", &json!({ "name": &workspace }))
+            .await
+            .unwrap();
+        let live = first.get_engine(&workspace).await.unwrap();
+        let subject = live.resolve_or_create_entity("authoritative-subject").unwrap();
+        let predicate = live.resolve_or_create_relation("authoritative-predicate").unwrap();
+        let object = live.resolve_or_create_entity("authoritative-object").unwrap();
+        live.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        first.snapshot_workspace(&workspace).await.unwrap();
+        first.evict_workspace(&workspace).await.unwrap();
+        drop(live);
+        drop(first);
+
+        // Reuse the same host path but deliberately diverge its local cache
+        // after the relational image was published.
+        let kg_dir = paths.workspace(&workspace).kg_dir;
+        {
+            let stale = Engine::new(EngineConfig {
+                dimension: Dimension::DEFAULT,
+                data_dir: Some(kg_dir.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            let authoritative_subject = stale.lookup_symbol("authoritative-subject").unwrap();
+            let authoritative_predicate = stale.lookup_symbol("authoritative-predicate").unwrap();
+            let authoritative_object = stale.lookup_symbol("authoritative-object").unwrap();
+            stale
+                .remove_triple(
+                    authoritative_subject,
+                    authoritative_predicate,
+                    authoritative_object,
+                )
+                .unwrap();
+            let stale_subject = stale.resolve_or_create_entity("stale-only-subject").unwrap();
+            let stale_predicate = stale.resolve_or_create_relation("stale-only-predicate").unwrap();
+            let stale_object = stale.resolve_or_create_entity("stale-only-object").unwrap();
+            stale
+                .add_triple(&Triple::new(stale_subject, stale_predicate, stale_object))
+                .unwrap();
+            stale.persist().unwrap();
+        }
+
+        let second = ServerState::new(paths.clone(), config, Some(Arc::clone(&db)));
+        let restored = second.get_engine(&workspace).await.unwrap();
+        let restored_subject = restored.lookup_symbol("authoritative-subject").unwrap();
+        let restored_predicate = restored.lookup_symbol("authoritative-predicate").unwrap();
+        let restored_object = restored.lookup_symbol("authoritative-object").unwrap();
+        assert!(restored.has_triple(
+            restored_subject,
+            restored_predicate,
+            restored_object
+        ));
+        assert!(restored.lookup_symbol("stale-only-subject").is_err());
+        assert!(
+            std::fs::read_dir(&kg_dir).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("akh-medu.pre-residency-")),
+            "the divergent host image must be preserved only as quarantine"
+        );
+        second.evict_workspace(&workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AKH_TEST_PG_URL"]
+    async fn control_wake_quarantines_stale_graph_and_optional_metadata() {
+        let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+            eprintln!("skipping: set AKH_TEST_PG_URL");
+            return;
+        };
+        let opts = akhomed_store::PoolOptions::new(url.clone());
+        let db = Arc::new(akhomed_store::connect(&opts).await.unwrap());
+        akhomed_store::run_migrations(&db).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let config = AkhomedConfig {
+            postgres: Some(akh_medu::config::PostgresConfig {
+                url,
+                pool_size: 4,
+                connect_timeout_secs: 10,
+                migrate_on_start: false,
+                wal_flush_interval_secs: 60,
+                wal_batch_size: 64,
+                wal_max_buffer_mb: 4,
+                snapshot_interval_secs: 0,
+            }),
+            ..Default::default()
+        };
+        let workspace = format!("control-wake-{}", akhomed_store::uuid::Uuid::new_v4());
+        let first = ServerState::new(paths.clone(), config.clone(), Some(Arc::clone(&db)));
+        first
+            .dispatch("_akh/workspace/create", &json!({"name": &workspace}))
+            .await
+            .unwrap();
+        let live = first.get_engine(&workspace).await.unwrap();
+        let subject = live.resolve_or_create_entity("wake-authoritative-subject").unwrap();
+        let predicate = live.resolve_or_create_relation("wake-authoritative-predicate").unwrap();
+        let object = live.resolve_or_create_entity("wake-authoritative-object").unwrap();
+        live.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        first.snapshot_workspace(&workspace).await.unwrap();
+        first.evict_workspace(&workspace).await.unwrap();
+        drop(live);
+        drop(first);
+
+        let kg_dir = paths.workspace(&workspace).kg_dir;
+        let sentinel: &[u8] = b"stale-host-only-metadata";
+        {
+            let stale = Engine::new(EngineConfig {
+                dimension: Dimension::DEFAULT,
+                data_dir: Some(kg_dir.clone()),
+                ..Default::default()
+            })
+            .unwrap();
+            let stale_subject = stale.resolve_or_create_entity("wake-stale-subject").unwrap();
+            let stale_predicate = stale.resolve_or_create_relation("wake-stale-predicate").unwrap();
+            let stale_object = stale.resolve_or_create_entity("wake-stale-object").unwrap();
+            stale
+                .add_triple(&Triple::new(stale_subject, stale_predicate, stale_object))
+                .unwrap();
+            for key in [
+                b"agent:drive_system".as_slice(),
+                b"agent:goals".as_slice(),
+                b"agent:psyche".as_slice(),
+                b"agent:stale-extra".as_slice(),
+            ] {
+                stale.store().put_meta(key, sentinel).unwrap();
+            }
+            stale.persist().unwrap();
+        }
+
+        let second = ServerState::new(paths.clone(), config, Some(Arc::clone(&db)));
+        second
+            .dispatch("_akh/akh/wake", &json!({"workspace": &workspace}))
+            .await
+            .unwrap();
+        let restored = second.get_engine(&workspace).await.unwrap();
+        assert!(restored.lookup_symbol("wake-stale-subject").is_err());
+        let restored_subject = restored.lookup_symbol("wake-authoritative-subject").unwrap();
+        let restored_predicate = restored.lookup_symbol("wake-authoritative-predicate").unwrap();
+        let restored_object = restored.lookup_symbol("wake-authoritative-object").unwrap();
+        assert!(restored.has_triple(restored_subject, restored_predicate, restored_object));
+        for key in [
+            b"agent:drive_system".as_slice(),
+            b"agent:goals".as_slice(),
+            b"agent:psyche".as_slice(),
+            b"agent:stale-extra".as_slice(),
+        ] {
+            assert_ne!(restored.store().get_meta(key).unwrap().as_deref(), Some(sentinel));
+        }
+
+        let quarantine = std::fs::read_dir(&kg_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("akh-medu.pre-residency-")
+            })
+            .expect("control wake must preserve the stale local image as quarantine");
+        let quarantine_copy = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            quarantine,
+            quarantine_copy.path().join("akh-medu.redb"),
+        )
+        .unwrap();
+        let quarantined = Engine::new(EngineConfig {
+            dimension: Dimension::DEFAULT,
+            data_dir: Some(quarantine_copy.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(quarantined.lookup_symbol("wake-stale-subject").is_ok());
+        for key in [
+            b"agent:drive_system".as_slice(),
+            b"agent:goals".as_slice(),
+            b"agent:psyche".as_slice(),
+            b"agent:stale-extra".as_slice(),
+        ] {
+            assert_eq!(quarantined.store().get_meta(key).unwrap().as_deref(), Some(sentinel));
+        }
+        second.evict_workspace(&workspace).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AKH_TEST_PG_URL"]
+    async fn failed_wal_drain_retains_residency_runtime_and_handoff_fence() {
+        let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+            eprintln!("skipping: set AKH_TEST_PG_URL");
+            return;
+        };
+        let opts = akhomed_store::PoolOptions::new(url.clone());
+        let db = Arc::new(akhomed_store::connect(&opts).await.unwrap());
+        akhomed_store::run_migrations(&db).await.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let paths = AkhPaths {
+            config_dir: base.join("config"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            runtime_dir: base.join("run"),
+            cache_dir: base.join("cache"),
+        };
+        paths.ensure_dirs().unwrap();
+        let config = AkhomedConfig {
+            postgres: Some(akh_medu::config::PostgresConfig {
+                url,
+                pool_size: 4,
+                connect_timeout_secs: 10,
+                migrate_on_start: false,
+                wal_flush_interval_secs: 60,
+                wal_batch_size: 64,
+                wal_max_buffer_mb: 4,
+                snapshot_interval_secs: 0,
+            }),
+            ..Default::default()
+        };
+        let workspace = format!("wal-drain-fence-{}", akhomed_store::uuid::Uuid::new_v4());
+        let state = ServerState::new(paths, config, Some(Arc::clone(&db)));
+        state
+            .dispatch("_akh/workspace/create", &json!({"name": &workspace}))
+            .await
+            .unwrap();
+        let engine = state.get_engine(&workspace).await.unwrap();
+        let session = Arc::clone(
+            &state
+                .akh_lock_conns
+                .read()
+                .await
+                .get(&workspace)
+                .unwrap()
+                .session,
+        );
+        let backend_pid = session.backend_process_id().await.unwrap();
+        let terminated = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT pg_terminate_backend($1) AS terminated",
+                [backend_pid.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get::<bool>("", "terminated")
+            .unwrap();
+        assert!(terminated);
+
+        let subject = engine.resolve_or_create_entity("pending-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("pending-predicate").unwrap();
+        let object = engine.resolve_or_create_entity("pending-object").unwrap();
+        engine.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        let error = state
+            .evict_workspace(&workspace)
+            .await
+            .expect_err("a failed WAL drain must refuse eviction");
+        assert!(error.contains("WAL drain"), "{error}");
+        assert!(state.workspaces.read().await.contains_key(&workspace));
+        assert!(state.akh_lock_conns.read().await.contains_key(&workspace));
+        assert!(
+            state
+                .handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(&workspace)
+        );
+        let flushers = state.wal_flushers.read().await;
+        let flusher = flushers.get(&workspace).expect("failed drain must retain the log");
+        assert!(flusher.log.pending() > 0);
     }
 
     #[tokio::test]
@@ -4353,6 +5146,19 @@ mod control_plane_tests {
             .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
             .await
             .expect("create");
+        let held_engine = state.get_engine("alpha").await.expect("open engine");
+        let subject = held_engine
+            .create_symbol(SymbolKind::Entity, "handoff-source")
+            .unwrap()
+            .id;
+        let predicate = held_engine
+            .create_symbol(SymbolKind::Relation, "handoff-relation")
+            .unwrap()
+            .id;
+        let object = held_engine
+            .create_symbol(SymbolKind::Entity, "handoff-object")
+            .unwrap()
+            .id;
         let r = state
             .dispatch("_akh/akh/sleep", &json!({ "workspace": "alpha" }))
             .await
@@ -4371,6 +5177,12 @@ mod control_plane_tests {
         assert!(
             state.workspaces.read().await.is_empty() && state.agents.read().await.is_empty(),
             "sleep must evict cached engine + agent",
+        );
+        assert!(
+            held_engine
+                .add_triple(&Triple::new(subject, predicate, object))
+                .is_err(),
+            "a handle retained across handoff must be quiesced"
         );
     }
 
@@ -4409,6 +5221,56 @@ mod control_plane_tests {
             );
         }
         assert_eq!(state.workspaces.read().await.len(), 1, "exactly one engine cached");
+    }
+
+    #[tokio::test]
+    async fn handoff_gate_refuses_new_engine_and_agent_residency() {
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "handoff" }))
+            .await
+            .expect("create");
+        state
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("handoff".to_string());
+
+        let engine = state.get_engine("handoff").await;
+        let agent = state.get_agent("handoff").await;
+        assert!(engine.is_err_and(|error| error.contains("handed off")));
+        assert!(agent.is_err_and(|error| error.contains("handed off")));
+        assert!(state.workspaces.read().await.is_empty());
+        assert!(state.agents.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eviction_waits_for_in_flight_snapshot_publication_guard() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "publishing" }))
+            .await
+            .expect("create");
+        state.get_agent("publishing").await.expect("load agent");
+        let publication_lock = state.snapshot_publication_lock("publishing");
+        let publication_guard = publication_lock.lock().await;
+
+        let evicting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.evict_workspace("publishing").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!evicting.is_finished(), "eviction bypassed publication guard");
+        assert!(
+            state.agents.read().await.contains_key("publishing"),
+            "eviction must not drop an agent while its snapshot owns the publication guard"
+        );
+
+        drop(publication_guard);
+        evicting.await.unwrap().unwrap();
+        assert!(!state.agents.read().await.contains_key("publishing"));
+        assert!(!state.workspaces.read().await.contains_key("publishing"));
     }
 
     #[tokio::test]

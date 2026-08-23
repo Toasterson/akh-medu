@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use redb::{
-    Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
+    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable,
+    ReadableTableMetadata, TableDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -871,7 +872,307 @@ pub enum DerivationKind {
     },
 }
 
+/// Version marker for exact RuleInference support triples encoded in the
+/// variant's `antecedents` vector as
+/// `[marker, subject, predicate, object, ...]`.
+///
+/// Older records contain an unversioned symbol walk and remain readable.  The
+/// maximum `u64` is reserved for this metadata marker and is never resolved as
+/// a registry symbol.
+pub const RULE_SUPPORT_TRIPLES_V1_SENTINEL: u64 = u64::MAX;
+
+/// Inner marker for a conclusion-bound RuleInference application encoded as
+/// `[V1 marker, V2 marker, conclusion s, p, o, support s, p, o, ...]`.
+/// Keeping the V1 marker outermost makes old readers fail closed on the
+/// deliberately non-triple-aligned payload instead of misreading metadata as
+/// support.
+pub const RULE_APPLICATION_V2_SENTINEL: u64 = u64::MAX - 1;
+
 impl DerivationKind {
+    /// Stable snake-case names used by audit and wire protocols.
+    ///
+    /// The array index is the kind's persisted numeric tag.  Keep additions in
+    /// lock-step with [`Self::tag`]; unlike a name derived from `Debug`, these
+    /// strings are an explicit compatibility contract.
+    pub const KIND_NAMES: [&'static str; 108] = [
+        "extracted",
+        "seed",
+        "graph_edge",
+        "vsa_recovery",
+        "analogy",
+        "filler_recovery",
+        "reasoned",
+        "aggregated",
+        "agent_decision",
+        "agent_consolidation",
+        "rule_inference",
+        "fused_inference",
+        "gap_identified",
+        "schema_discovered",
+        "semantic_enrichment",
+        "compartment_loaded",
+        "shadow_veto",
+        "psyche_evolution",
+        "wasm_tool_execution",
+        "cli_tool_execution",
+        "document_ingested",
+        "concept_extracted",
+        "context_inheritance",
+        "context_lifting",
+        "predicate_generalization",
+        "predicate_inverse",
+        "defeasible_override",
+        "dispatch_route",
+        "argument_verdict",
+        "rule_macro_expansion",
+        "temporal_decay",
+        "contradiction_detected",
+        "skolem_witness",
+        "skolem_grounding",
+        "cwa_query",
+        "second_order_instantiation",
+        "nart_creation",
+        "code_generated",
+        "code_refinement",
+        "library_learning",
+        "autonomous_goal_generation",
+        "htn_decomposition",
+        "priority_argumentation",
+        "project_created",
+        "watch_fired",
+        "metacognitive_evaluation",
+        "resource_assessment",
+        "procedural_learning",
+        "email_ingested",
+        "email_threaded",
+        "spam_classification",
+        "email_triaged",
+        "email_extracted",
+        "pim_task_managed",
+        "calendar_event_managed",
+        "preference_learned",
+        "jitir_suggestion",
+        "proactive_assistance",
+        "causal_schema_learned",
+        "ritual_of_awakening",
+        "identity_resolved",
+        "domain_expansion",
+        "prerequisite_discovered",
+        "zpd_classification",
+        "sleep_consolidation",
+        "directed_curiosity",
+        "resource_discovery",
+        "curriculum_ingestion",
+        "competence_assessment",
+        "bootstrap_orchestration",
+        "continuous_learning",
+        "nlu_parsed",
+        "contact_resolved",
+        "contact_merged",
+        "relationship_recorded",
+        "style_observed",
+        "calendar_attendee_linked",
+        "llm_triple_extraction",
+        "event_calculus_projection",
+        "counterfactual_reasoning",
+        "mcts_planning",
+        "evidence_combination",
+        "source_reliability_assessed",
+        "epistemic_assessment",
+        "epistemic_update",
+        "theory_of_mind",
+        "active_inference_cycle",
+        "game_theoretic_model",
+        "neural_probe",
+        "delegation",
+        "article_created",
+        "article_updated",
+        "article_cited",
+        "article_federated",
+        "opinion_expressed",
+        "debate_contribution",
+        "cluster_topology_ingested",
+        "knowledge_elicitation",
+        "vsa_rl_update",
+        "file_import",
+        "kg_compaction",
+        "affective_appraisal",
+        "perceived",
+        "relation_enrichment",
+        "open_claw_import",
+        "librarian_extraction",
+        "note_reprojection",
+        "source_attributed",
+    ];
+
+    /// Every registry symbol referenced by this derivation payload.
+    ///
+    /// A provenance record's `derived_id` and top-level `sources` are not the
+    /// whole symbol closure: several variants embed additional typed IDs. WAL
+    /// envelopes and snapshot validation use this exhaustive visitor so a
+    /// record can never be restored with an unresolved ID that the allocator
+    /// may later reuse. Rule-inference protocol markers are metadata, not
+    /// registry symbols, and are deliberately excluded.
+    pub fn referenced_symbol_ids(&self) -> Vec<SymbolId> {
+        match self {
+            Self::GraphEdge { from, predicate }
+            | Self::VsaRecovery {
+                from, predicate, ..
+            } => vec![*from, *predicate],
+            Self::Analogy { a, b, c } => vec![*a, *b, *c],
+            Self::FillerRecovery { subject, predicate } => vec![*subject, *predicate],
+            Self::AgentDecision { goal, .. }
+            | Self::PriorityArgumentation { goal, .. }
+            | Self::MetacognitiveEvaluation { goal, .. }
+            | Self::ResourceAssessment { goal, .. } => vec![*goal],
+            Self::RuleInference { antecedents, .. } => antecedents
+                .iter()
+                .copied()
+                .filter(|id| {
+                    !matches!(
+                        id.get(),
+                        RULE_SUPPORT_TRIPLES_V1_SENTINEL | RULE_APPLICATION_V2_SENTINEL
+                    )
+                })
+                .collect(),
+            Self::ContextInheritance { context, ancestor } => vec![*context, *ancestor],
+            Self::ContextLifting {
+                from_context,
+                to_context,
+                ..
+            } => vec![*from_context, *to_context],
+            Self::PredicateGeneralization { specific, general } => vec![*specific, *general],
+            Self::PredicateInverse { predicate, inverse } => vec![*predicate, *inverse],
+            Self::DefeasibleOverride { winner, loser, .. } => vec![*winner, *loser],
+            Self::ArgumentVerdict { winner, .. } => vec![*winner],
+            Self::ContradictionDetected {
+                existing_object,
+                incoming_object,
+                ..
+            } => vec![*existing_object, *incoming_object],
+            Self::SkolemWitness {
+                existential_relation,
+                bound_var,
+            } => vec![*existential_relation, *bound_var],
+            Self::SkolemGrounding {
+                skolem,
+                concrete_entity,
+            } => vec![*skolem, *concrete_entity],
+            Self::CwaQuery {
+                context,
+                subject,
+                predicate,
+            } => vec![*context, *subject, *predicate],
+            Self::SecondOrderInstantiation { predicate, .. } => vec![*predicate],
+            Self::NartCreation { function, .. } => vec![*function],
+            Self::ProceduralLearning { source_goal, .. } => vec![*source_goal],
+            Self::DirectedCuriosity { concept, .. } => vec![*concept],
+            Self::VsaRlUpdate { tool, .. } => vec![*tool],
+            Self::SourceAttributed {
+                subject,
+                predicate,
+                source,
+            } => vec![*subject, *predicate, *source],
+
+            Self::Extracted
+            | Self::Seed
+            | Self::Reasoned
+            | Self::Aggregated
+            | Self::AgentConsolidation { .. }
+            | Self::FusedInference { .. }
+            | Self::GapIdentified { .. }
+            | Self::SchemaDiscovered { .. }
+            | Self::SemanticEnrichment { .. }
+            | Self::CompartmentLoaded { .. }
+            | Self::ShadowVeto { .. }
+            | Self::PsycheEvolution { .. }
+            | Self::WasmToolExecution { .. }
+            | Self::CliToolExecution { .. }
+            | Self::DocumentIngested { .. }
+            | Self::ConceptExtracted { .. }
+            | Self::DispatchRoute { .. }
+            | Self::RuleMacroExpansion { .. }
+            | Self::TemporalDecay { .. }
+            | Self::CodeGenerated { .. }
+            | Self::CodeRefinement { .. }
+            | Self::LibraryLearning { .. }
+            | Self::AutonomousGoalGeneration { .. }
+            | Self::HtnDecomposition { .. }
+            | Self::ProjectCreated { .. }
+            | Self::WatchFired { .. }
+            | Self::EmailIngested { .. }
+            | Self::EmailThreaded { .. }
+            | Self::SpamClassification { .. }
+            | Self::EmailTriaged { .. }
+            | Self::EmailExtracted { .. }
+            | Self::PimTaskManaged { .. }
+            | Self::CalendarEventManaged { .. }
+            | Self::PreferenceLearned { .. }
+            | Self::JitirSuggestion { .. }
+            | Self::ProactiveAssistance { .. }
+            | Self::CausalSchemaLearned { .. }
+            | Self::RitualOfAwakening { .. }
+            | Self::IdentityResolved { .. }
+            | Self::DomainExpansion { .. }
+            | Self::PrerequisiteDiscovered { .. }
+            | Self::ZpdClassification { .. }
+            | Self::SleepConsolidation { .. }
+            | Self::ResourceDiscovery { .. }
+            | Self::CurriculumIngestion { .. }
+            | Self::CompetenceAssessment { .. }
+            | Self::BootstrapOrchestration { .. }
+            | Self::ContinuousLearning { .. }
+            | Self::NluParsed { .. }
+            | Self::ContactResolved { .. }
+            | Self::ContactMerged { .. }
+            | Self::RelationshipRecorded { .. }
+            | Self::StyleObserved { .. }
+            | Self::CalendarAttendeeLinked { .. }
+            | Self::LlmTripleExtraction { .. }
+            | Self::EventCalculusProjection { .. }
+            | Self::CounterfactualReasoning { .. }
+            | Self::MctsPlanning { .. }
+            | Self::EvidenceCombination { .. }
+            | Self::SourceReliabilityAssessed { .. }
+            | Self::EpistemicAssessment { .. }
+            | Self::EpistemicUpdate { .. }
+            | Self::TheoryOfMind { .. }
+            | Self::ActiveInferenceCycle { .. }
+            | Self::GameTheoreticModel { .. }
+            | Self::NeuralProbe { .. }
+            | Self::AffectiveAppraisal { .. }
+            | Self::Delegation { .. }
+            | Self::ArticleCreated { .. }
+            | Self::ArticleUpdated { .. }
+            | Self::ArticleCited { .. }
+            | Self::ArticleFederated { .. }
+            | Self::OpinionExpressed { .. }
+            | Self::DebateContribution { .. }
+            | Self::ClusterTopologyIngested { .. }
+            | Self::KnowledgeElicitation { .. }
+            | Self::FileImport { .. }
+            | Self::KgCompaction { .. }
+            | Self::Perceived { .. }
+            | Self::RelationEnrichment { .. }
+            | Self::OpenClawImport { .. }
+            | Self::LibrarianExtraction { .. }
+            | Self::NoteReprojection { .. } => Vec::new(),
+        }
+    }
+
+    /// Stable wire name for this derivation kind.
+    pub fn kind_name(&self) -> &'static str {
+        Self::KIND_NAMES[self.tag() as usize]
+    }
+
+    /// Resolve an exact stable wire name to its persisted numeric tag.
+    pub fn tag_for_name(name: &str) -> Option<u8> {
+        Self::KIND_NAMES
+            .iter()
+            .position(|candidate| *candidate == name)
+            .map(|index| index as u8)
+    }
+
     /// Numeric tag for indexing by kind.
     pub fn tag(&self) -> u8 {
         match self {
@@ -1089,6 +1390,8 @@ impl ProvenanceRecord {
 pub struct ProvenanceLedger {
     db: Arc<Mutex<Database>>,
     next_id: AtomicU64,
+    #[cfg(test)]
+    all_records_scans: AtomicU64,
 }
 
 impl std::fmt::Debug for ProvenanceLedger {
@@ -1103,6 +1406,28 @@ fn redb_err(msg: impl std::fmt::Display) -> ProvenanceError {
     ProvenanceError::Store(StoreError::Redb {
         message: msg.to_string(),
     })
+}
+
+fn decode_record_at_key(raw_id: u64, encoded: &[u8]) -> ProvenanceResult<ProvenanceRecord> {
+    let expected_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+        ProvenanceError::Store(StoreError::Serialization {
+            message: "provenance table contains reserved zero key".into(),
+        })
+    })?;
+    let record: ProvenanceRecord = bincode::deserialize(encoded).map_err(|error| {
+        ProvenanceError::Store(StoreError::Serialization {
+            message: format!("failed to decode provenance record at key {raw_id}: {error}"),
+        })
+    })?;
+    if record.id != Some(expected_id) {
+        return Err(ProvenanceError::Store(StoreError::Serialization {
+            message: format!(
+                "provenance key {raw_id} does not match embedded ID {:?}",
+                record.id.map(ProvenanceId::get)
+            ),
+        }));
+    }
+    Ok(record)
 }
 
 impl ProvenanceLedger {
@@ -1143,17 +1468,48 @@ impl ProvenanceLedger {
             max
         };
 
+        let next_id = max_id.checked_add(1).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance ID space is exhausted".into(),
+            })
+        })?;
+
         Ok(Self {
             db,
-            next_id: AtomicU64::new(max_id + 1),
+            next_id: AtomicU64::new(next_id),
+            #[cfg(test)]
+            all_records_scans: AtomicU64::new(0),
         })
+    }
+
+    /// Reserve a contiguous range of provenance IDs without allowing the
+    /// allocator to wrap through zero. The returned value is the first ID in
+    /// the range; `count` successive IDs are reserved.
+    fn allocate_ids(&self, count: usize) -> ProvenanceResult<u64> {
+        let count = u64::try_from(count).map_err(|_| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance allocation request is too large".into(),
+            })
+        })?;
+        self.next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current != 0).then(|| current.checked_add(count)).flatten()
+            })
+            .map_err(|_| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "provenance ID space is exhausted".into(),
+                })
+            })
     }
 
     /// Store a single record, assigning it a new ID.
     pub fn store(&self, record: &mut ProvenanceRecord) -> ProvenanceResult<ProvenanceId> {
-        let raw_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let prov_id =
-            ProvenanceId::new(raw_id).expect("provenance ID counter should never reach zero");
+        let raw_id = self.allocate_ids(1)?;
+        let prov_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance allocator produced zero".into(),
+            })
+        })?;
         record.id = Some(prov_id);
 
         let encoded = bincode::serialize(&record).map_err(|e| {
@@ -1206,14 +1562,18 @@ impl ProvenanceLedger {
             return Ok(Vec::new());
         }
 
+        let first_id = self.allocate_ids(records.len())?;
         let mut ids = Vec::with_capacity(records.len());
         let mut encoded_batch = Vec::with_capacity(records.len());
 
         // Assign IDs and serialize before opening the transaction.
-        for record in records.iter_mut() {
-            let raw_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let prov_id =
-                ProvenanceId::new(raw_id).expect("provenance ID counter should never reach zero");
+        for (offset, record) in records.iter_mut().enumerate() {
+            let raw_id = first_id + offset as u64;
+            let prov_id = ProvenanceId::new(raw_id).ok_or_else(|| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "provenance allocator produced zero".into(),
+                })
+            })?;
             record.id = Some(prov_id);
             ids.push(prov_id);
 
@@ -1276,12 +1636,7 @@ impl ProvenanceLedger {
             .get(id.get())
             .map_err(redb_err)?
             .ok_or(ProvenanceError::NotFound { id: id.get() })?;
-        let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-            ProvenanceError::Store(StoreError::Serialization {
-                message: format!("provenance record deserialize: {e}"),
-            })
-        })?;
-        Ok(record)
+        decode_record_at_key(id.get(), guard.value())
     }
 
     /// Find all provenance records for a given derived symbol.
@@ -1301,6 +1656,33 @@ impl ProvenanceLedger {
         self.records_from_kind_index(kind.tag())
     }
 
+    /// Find all records whose persisted kind tag is in `tags`, using one
+    /// coherent redb read transaction and no primary-ledger scan.
+    pub fn by_kind_tags(&self, tags: &[u8]) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock);
+        let index = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+
+        let mut ids = std::collections::BTreeSet::new();
+        for &tag in tags {
+            for entry in index.get(tag).map_err(redb_err)? {
+                ids.insert(entry.map_err(redb_err)?.value());
+            }
+        }
+
+        ids.into_iter()
+            .map(|raw_id| {
+                let encoded = primary
+                    .get(raw_id)
+                    .map_err(redb_err)?
+                    .ok_or(ProvenanceError::NotFound { id: raw_id })?;
+                decode_record_at_key(raw_id, encoded.value())
+            })
+            .collect()
+    }
+
     /// Total number of provenance records.
     pub fn len(&self) -> ProvenanceResult<usize> {
         let db_lock = self.db.lock().expect("redb mutex poisoned");
@@ -1313,6 +1695,209 @@ impl ProvenanceLedger {
     /// Whether the ledger has no records.
     pub fn is_empty(&self) -> ProvenanceResult<bool> {
         self.len().map(|n| n == 0)
+    }
+
+    /// Retrieve every provenance record in one read transaction.
+    ///
+    /// This is intentionally a ledger scan rather than one `get` transaction
+    /// per knowledge-graph triple.  Audit surfaces such as
+    /// `_akh/provenance/filter` need to join many triples to their provenance;
+    /// keeping the scan inside one redb snapshot makes that join both coherent
+    /// and bounded in database round trips.
+    pub fn all_records(&self) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        #[cfg(test)]
+        self.all_records_scans.fetch_add(1, Ordering::Relaxed);
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
+        let table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+
+        let mut records = Vec::with_capacity(table.len().map_err(redb_err)? as usize);
+        for entry in table.iter().map_err(redb_err)? {
+            let (key, encoded) = entry.map_err(redb_err)?;
+            records.push(decode_record_at_key(key.value(), encoded.value())?);
+        }
+        Ok(records)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_all_records_scan_count(&self) {
+        self.all_records_scans.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn all_records_scan_count(&self) -> u64 {
+        self.all_records_scans.load(Ordering::Relaxed)
+    }
+
+    /// Validate the complete durable ledger as one coherent snapshot.
+    ///
+    /// Normal local startup calls this before publishing any restored facts.
+    /// It rejects malformed values, primary-key/embedded-ID disagreement, and
+    /// any missing, dangling, or stale secondary-index entry. Symbol closure is
+    /// validated by the engine after the returned records are joined to the
+    /// authoritative registry.
+    pub(crate) fn validate_integrity(&self) -> ProvenanceResult<Vec<ProvenanceRecord>> {
+        use std::collections::BTreeSet;
+
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_read().map_err(redb_err)?;
+        drop(db_lock); // release lock — read txn is independent
+
+        let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        let mut records = Vec::with_capacity(primary.len().map_err(redb_err)? as usize);
+        let mut expected_derived = BTreeSet::new();
+        let mut expected_sources = BTreeSet::new();
+        let mut expected_kinds = BTreeSet::new();
+
+        for entry in primary.iter().map_err(redb_err)? {
+            let (key, encoded) = entry.map_err(redb_err)?;
+            let raw_id = key.value();
+            let record = decode_record_at_key(raw_id, encoded.value())?;
+
+            expected_derived.insert((record.derived_id.get(), raw_id));
+            for source in &record.sources {
+                expected_sources.insert((source.get(), raw_id));
+            }
+            expected_kinds.insert((record.kind.tag(), raw_id));
+            records.push(record);
+        }
+
+        let derived_index = txn
+            .open_multimap_table(DERIVED_INDEX)
+            .map_err(redb_err)?;
+        let mut actual_derived = BTreeSet::new();
+        for entry in derived_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_derived.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_derived != expected_derived {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance derived-symbol index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
+        let source_index = txn
+            .open_multimap_table(SOURCE_INDEX)
+            .map_err(redb_err)?;
+        let mut actual_sources = BTreeSet::new();
+        for entry in source_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_sources.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_sources != expected_sources {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance source-symbol index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
+        let kind_index = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
+        let mut actual_kinds = BTreeSet::new();
+        for entry in kind_index.iter().map_err(redb_err)? {
+            let (key, values) = entry.map_err(redb_err)?;
+            for value in values {
+                actual_kinds.insert((key.value(), value.map_err(redb_err)?.value()));
+            }
+        }
+        if actual_kinds != expected_kinds {
+            return Err(ProvenanceError::Store(StoreError::Serialization {
+                message: "provenance derivation-kind index is inconsistent with primary records"
+                    .into(),
+            }));
+        }
+
+        Ok(records)
+    }
+
+    /// Replace the complete ledger with records carrying their original IDs.
+    ///
+    /// This is the cold-wake counterpart to [`Self::all_records`].  The
+    /// primary table and every secondary index are rebuilt in one redb
+    /// transaction, so restored graph edges can never observe a partially
+    /// rebuilt ledger.  Callers must invoke this before publishing the woken
+    /// engine to concurrent writers.
+    pub fn replace_all(&self, records: &[ProvenanceRecord]) -> ProvenanceResult<()> {
+        let mut encoded = Vec::with_capacity(records.len());
+        let mut seen = std::collections::HashSet::with_capacity(records.len());
+        let mut max_id = 0u64;
+
+        for record in records {
+            let raw_id = record.id.ok_or_else(|| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: "restored provenance record is missing its ID".into(),
+                })
+            })?.get();
+            if !seen.insert(raw_id) {
+                return Err(ProvenanceError::Store(StoreError::Serialization {
+                    message: format!("duplicate restored provenance ID {raw_id}"),
+                }));
+            }
+            max_id = max_id.max(raw_id);
+            let bytes = bincode::serialize(record).map_err(|e| {
+                ProvenanceError::Store(StoreError::Serialization {
+                    message: format!("restored provenance record serialize: {e}"),
+                })
+            })?;
+            encoded.push((raw_id, bytes));
+        }
+
+        let next_id = max_id.checked_add(1).ok_or_else(|| {
+            ProvenanceError::Store(StoreError::Serialization {
+                message: "restored provenance ID space is exhausted".into(),
+            })
+        })?;
+
+        let db_lock = self.db.lock().expect("redb mutex poisoned");
+        let txn = db_lock.begin_write().map_err(redb_err)?;
+        txn.delete_table(PROVENANCE_TABLE).map_err(redb_err)?;
+        txn.delete_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
+        txn.delete_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
+        txn.delete_multimap_table(KIND_INDEX).map_err(redb_err)?;
+
+        {
+            let mut primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
+            for (raw_id, bytes) in &encoded {
+                primary
+                    .insert(*raw_id, bytes.as_slice())
+                    .map_err(redb_err)?;
+            }
+        }
+        {
+            let mut derived_idx = txn
+                .open_multimap_table(DERIVED_INDEX)
+                .map_err(redb_err)?;
+            let mut source_idx = txn
+                .open_multimap_table(SOURCE_INDEX)
+                .map_err(redb_err)?;
+            let mut kind_idx = txn
+                .open_multimap_table(KIND_INDEX)
+                .map_err(redb_err)?;
+            for (record, (raw_id, _)) in records.iter().zip(&encoded) {
+                derived_idx
+                    .insert(record.derived_id.get(), *raw_id)
+                    .map_err(redb_err)?;
+                for source in &record.sources {
+                    source_idx
+                        .insert(source.get(), *raw_id)
+                        .map_err(redb_err)?;
+                }
+                kind_idx
+                    .insert(record.kind.tag(), *raw_id)
+                    .map_err(redb_err)?;
+            }
+        }
+        txn.commit().map_err(redb_err)?;
+
+        // `replace_all` is a cold-wake operation performed before the engine is
+        // published, so restoring the exact allocator successor is race-free.
+        self.next_id.store(next_id, Ordering::SeqCst);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1342,12 +1927,7 @@ impl ProvenanceLedger {
                 .get(raw_id)
                 .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
-            let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
-            records.push(record);
+            records.push(decode_record_at_key(raw_id, guard.value())?);
         }
         Ok(records)
     }
@@ -1371,12 +1951,7 @@ impl ProvenanceLedger {
                 .get(raw_id)
                 .map_err(redb_err)?
                 .ok_or(ProvenanceError::NotFound { id: raw_id })?;
-            let record: ProvenanceRecord = bincode::deserialize(guard.value()).map_err(|e| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: format!("provenance record deserialize: {e}"),
-                })
-            })?;
-            records.push(record);
+            records.push(decode_record_at_key(raw_id, guard.value())?);
         }
         Ok(records)
     }
@@ -1396,6 +1971,32 @@ mod tests {
 
     fn sym(id: u64) -> SymbolId {
         SymbolId::new(id).unwrap()
+    }
+
+    #[test]
+    fn derivation_symbol_closure_is_exhaustive_for_payload_ids() {
+        let rule = DerivationKind::RuleInference {
+            rule_name: "transitive".into(),
+            antecedents: vec![
+                sym(RULE_SUPPORT_TRIPLES_V1_SENTINEL),
+                sym(RULE_APPLICATION_V2_SENTINEL),
+                sym(10),
+                sym(11),
+                sym(12),
+            ],
+        };
+        assert_eq!(rule.referenced_symbol_ids(), vec![sym(10), sym(11), sym(12)]);
+
+        let context = DerivationKind::CwaQuery {
+            context: sym(20),
+            subject: sym(21),
+            predicate: sym(22),
+        };
+        assert_eq!(
+            context.referenced_symbol_ids(),
+            vec![sym(20), sym(21), sym(22)]
+        );
+        assert!(DerivationKind::Extracted.referenced_symbol_ids().is_empty());
     }
 
     #[test]
@@ -1433,6 +2034,147 @@ mod tests {
         assert_eq!(id1.get(), 1);
         assert_eq!(id2.get(), 2);
         assert_eq!(id3.get(), 3);
+    }
+
+    #[test]
+    fn replace_all_restores_ids_indices_and_allocator() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+
+        let mut stale = ProvenanceRecord::new(sym(1), DerivationKind::Extracted);
+        let stale_id = ledger.store(&mut stale).unwrap();
+
+        let source = sym(9);
+        let mut first = ProvenanceRecord::new(sym(70), DerivationKind::Seed)
+            .with_sources(vec![source]);
+        first.id = ProvenanceId::new(7);
+        let mut second = ProvenanceRecord::new(sym(90), DerivationKind::Reasoned)
+            .with_sources(vec![source]);
+        second.id = ProvenanceId::new(9);
+
+        ledger.replace_all(&[first, second]).unwrap();
+        assert!(matches!(ledger.get(stale_id), Err(ProvenanceError::NotFound { .. })));
+        assert_eq!(ledger.len().unwrap(), 2);
+        assert_eq!(ledger.by_source(source).unwrap().len(), 2);
+        assert_eq!(ledger.by_kind(&DerivationKind::Seed).unwrap().len(), 1);
+
+        let mut next = ProvenanceRecord::new(sym(100), DerivationKind::Aggregated);
+        assert_eq!(ledger.store(&mut next).unwrap().get(), 10);
+    }
+
+    #[test]
+    fn replace_all_rejects_invalid_manifests_without_erasing_live_data() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        let mut live = ProvenanceRecord::new(sym(5), DerivationKind::Seed);
+        let live_id = ledger.store(&mut live).unwrap();
+
+        let mut duplicate_a = ProvenanceRecord::new(sym(7), DerivationKind::Reasoned);
+        duplicate_a.id = ProvenanceId::new(8);
+        let mut duplicate_b = ProvenanceRecord::new(sym(9), DerivationKind::Aggregated);
+        duplicate_b.id = ProvenanceId::new(8);
+        assert!(ledger.replace_all(&[duplicate_a, duplicate_b]).is_err());
+        assert_eq!(ledger.get(live_id).unwrap().derived_id, sym(5));
+
+        let missing_id = ProvenanceRecord::new(sym(11), DerivationKind::Extracted);
+        assert!(ledger.replace_all(&[missing_id]).is_err());
+        assert_eq!(ledger.get(live_id).unwrap().derived_id, sym(5));
+    }
+
+    #[test]
+    fn integrity_validation_accepts_complete_primary_and_indices() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        let mut record = ProvenanceRecord::new(
+            sym(7),
+            DerivationKind::GraphEdge {
+                from: sym(8),
+                predicate: sym(9),
+            },
+        )
+        .with_sources(vec![sym(8)]);
+        let id = ledger.store(&mut record).unwrap();
+
+        let records = ledger.validate_integrity().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, Some(id));
+    }
+
+    #[test]
+    fn integrity_validation_rejects_primary_key_id_mismatch() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+        ledger.store(&mut record).unwrap();
+
+        let mut corrupt = record;
+        corrupt.id = ProvenanceId::new(2);
+        let encoded = bincode::serialize(&corrupt).unwrap();
+        {
+            let db = db.lock().unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut primary = txn.open_table(PROVENANCE_TABLE).unwrap();
+                primary.insert(1, encoded.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        let error = ledger.validate_integrity().unwrap_err();
+        assert!(format!("{error}").contains("does not match embedded ID"));
+    }
+
+    #[test]
+    fn integrity_validation_rejects_missing_secondary_index_entry() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(Arc::clone(&db)).unwrap();
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+        ledger.store(&mut record).unwrap();
+
+        {
+            let db = db.lock().unwrap();
+            let txn = db.begin_write().unwrap();
+            txn.delete_multimap_table(DERIVED_INDEX).unwrap();
+            txn.open_multimap_table(DERIVED_INDEX).unwrap();
+            txn.commit().unwrap();
+        }
+
+        let error = ledger.validate_integrity().unwrap_err();
+        assert!(format!("{error}").contains("derived-symbol index is inconsistent"));
+    }
+
+    #[test]
+    fn provenance_allocator_fails_closed_before_wraparound() {
+        let db = test_db();
+        let ledger = ProvenanceLedger::open(db).unwrap();
+        ledger.next_id.store(u64::MAX, Ordering::SeqCst);
+        let mut record = ProvenanceRecord::new(sym(7), DerivationKind::Seed);
+
+        let error = ledger.store(&mut record).unwrap_err();
+        assert!(format!("{error}").contains("ID space is exhausted"));
+        assert!(record.id.is_none());
+        assert_eq!(ledger.len().unwrap(), 0);
+    }
+
+    #[test]
+    fn rule_support_payloads_roundtrip_in_legacy_and_versioned_forms() {
+        let marker = sym(RULE_SUPPORT_TRIPLES_V1_SENTINEL);
+        for antecedents in [vec![sym(1), sym(2)], vec![marker, sym(1), sym(3), sym(2)]] {
+            let record = ProvenanceRecord::new(
+                sym(9),
+                DerivationKind::RuleInference {
+                    rule_name: "compatibility".into(),
+                    antecedents: antecedents.clone(),
+                },
+            );
+            let bytes = bincode::serialize(&record).unwrap();
+            let decoded: ProvenanceRecord = bincode::deserialize(&bytes).unwrap();
+            assert!(matches!(
+                decoded.kind,
+                DerivationKind::RuleInference { antecedents: restored, .. }
+                    if restored == antecedents
+            ));
+        }
     }
 
     #[test]
@@ -1502,6 +2244,36 @@ mod tests {
     }
 
     #[test]
+    fn multi_kind_lookup_uses_index_without_primary_scan() {
+        let ledger = ProvenanceLedger::open(test_db()).unwrap();
+        for (derived, kind) in [
+            (sym(1), DerivationKind::Seed),
+            (
+                sym(2),
+                DerivationKind::AgentDecision {
+                    goal: sym(9),
+                    cycle: 1,
+                },
+            ),
+            (sym(3), DerivationKind::Reasoned),
+        ] {
+            ledger
+                .store(&mut ProvenanceRecord::new(derived, kind))
+                .unwrap();
+        }
+
+        ledger.reset_all_records_scan_count();
+        let records = ledger
+            .by_kind_tags(&[
+                DerivationKind::tag_for_name("seed").unwrap(),
+                DerivationKind::tag_for_name("agent_decision").unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(ledger.all_records_scan_count(), 0);
+    }
+
+    #[test]
     fn store_batch_single_transaction() {
         let db = test_db();
         let ledger = ProvenanceLedger::open(db).unwrap();
@@ -1546,6 +2318,14 @@ mod tests {
         let mut r2 = ProvenanceRecord::new(sym(43), DerivationKind::Seed);
         let id2 = ledger2.store(&mut r2).unwrap();
         assert!(id2.get() > stored_id.get());
+
+        let mut all = ledger2.all_records().unwrap();
+        all.sort_by_key(|record| record.id);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, Some(stored_id));
+        assert_eq!(all[1].id, Some(id2));
+        assert_eq!(all[0].kind.kind_name(), "extracted");
+        assert_eq!(all[1].kind.kind_name(), "seed");
     }
 
     #[test]

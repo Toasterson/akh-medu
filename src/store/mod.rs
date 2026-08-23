@@ -143,6 +143,18 @@ impl TieredStore {
             None => Ok(vec![]),
         }
     }
+
+    /// Atomically replace the durable metadata namespace under `prefix`.
+    pub fn replace_meta_prefix(
+        &self,
+        prefix: &[u8],
+        entries: &[(&[u8], &[u8])],
+    ) -> StoreResult<()> {
+        match &self.durable {
+            Some(d) => d.replace_prefix(prefix, entries),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]

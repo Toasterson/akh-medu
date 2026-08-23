@@ -537,11 +537,6 @@ fn persist_episode(
         .create_symbol(crate::symbol::SymbolKind::Entity, &episode_label)?
         .id;
 
-    // Link to learned symbols.
-    for sym in &entry.symbols {
-        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, *sym));
-    }
-
     // Create a tag for the entry kind.
     let kind_tag_label = match entry.kind {
         WorkingMemoryKind::Observation => "tag:observation",
@@ -551,24 +546,13 @@ fn persist_episode(
         WorkingMemoryKind::ToolResult => "tag:tool_result",
     };
     let tag_sym = engine.resolve_or_create_entity(kind_tag_label)?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, tag_sym));
 
     // Mark as episodic memory type.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(
-        episode_id,
-        predicates.memory_type,
-        mem_type_sym,
-    ));
 
     // Store affective valence for mood-congruent retrieval (Phase 23).
     let valence_label = format!("affect_valence:{:.3}", affective_valence);
     let valence_sym = engine.resolve_or_create_entity(&valence_label)?;
-    let _ = engine.add_triple(&Triple::new(
-        episode_id,
-        predicates.has_affective_valence,
-        valence_sym,
-    ));
 
     // Store provenance. Use char_indices to find a safe UTF-8 truncation boundary;
     // byte-slicing at a fixed offset panics on multi-byte sequences.
@@ -598,7 +582,21 @@ fn persist_episode(
     .with_sources(entry.symbols.clone())
     .with_confidence(relevance_score);
 
-    let _ = engine.store_provenance(&mut prov);
+    let mut triples = entry
+        .symbols
+        .iter()
+        .map(|symbol| Triple::new(episode_id, predicates.learned, *symbol))
+        .collect::<Vec<_>>();
+    triples.extend([
+        Triple::new(episode_id, predicates.has_tag, tag_sym),
+        Triple::new(episode_id, predicates.memory_type, mem_type_sym),
+        Triple::new(
+            episode_id,
+            predicates.has_affective_valence,
+            valence_sym,
+        ),
+    ]);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     Ok(episode_id)
 }
@@ -734,30 +732,46 @@ pub fn index_cycle_episode(
         format!("summary:{summary_text}")
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_summary, summary_sym));
+    let mut triples = vec![Triple::new(
+        episode_id,
+        predicates.has_summary,
+        summary_sym,
+    )];
 
     // Tag: marks this as a direct cycle episode (as opposed to a consolidated one).
     let cycle_tag = engine.resolve_or_create_entity("tag:cycle_episode")?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, cycle_tag));
+    triples.push(Triple::new(episode_id, predicates.has_tag, cycle_tag));
 
     // Tag: progress outcome for targeted queries.
     let progress_tag_label = format!("tag:progress_{progress}");
     let progress_tag = engine.resolve_or_create_entity(&progress_tag_label)?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.has_tag, progress_tag));
+    triples.push(Triple::new(
+        episode_id,
+        predicates.has_tag,
+        progress_tag,
+    ));
 
     // Link to the goal so symbol-based recall can find this episode.
     if let Some(gid) = goal_id {
-        let _ = engine.add_triple(&Triple::new(episode_id, predicates.learned, gid));
+        triples.push(Triple::new(episode_id, predicates.learned, gid));
     }
 
     // Mark as episodic memory — this is how recall_recent_episodes discovers all episodes.
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.memory_type, mem_type_sym));
+    triples.push(Triple::new(
+        episode_id,
+        predicates.memory_type,
+        mem_type_sym,
+    ));
 
     // from_cycle: link to a cycle-number entity for temporal ordering queries.
     let cycle_entity_label = format!("cycle:{cycle_count}");
     let cycle_sym = engine.resolve_or_create_entity(&cycle_entity_label)?;
-    let _ = engine.add_triple(&Triple::new(episode_id, predicates.from_cycle, cycle_sym));
+    triples.push(Triple::new(
+        episode_id,
+        predicates.from_cycle,
+        cycle_sym,
+    ));
 
     // Provenance — record at full confidence since this is a direct agent action.
     let reason = format!(
@@ -774,7 +788,7 @@ pub fn index_cycle_episode(
     if let Some(gid) = goal_id {
         prov = prov.with_sources(vec![gid]);
     }
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     Ok(())
 }

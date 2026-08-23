@@ -7,6 +7,7 @@
 use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::sea_query::OnConflict;
+use sea_orm::sqlx::Connection as _;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, QueryOrder, QuerySelect,
     TransactionTrait,
@@ -14,7 +15,8 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::entity::{akh, mutation_log};
-use crate::error::StoreResult;
+use crate::error::{StoreError, StoreResult};
+use crate::pool::StablePgSession;
 
 /// Postgres extended-query protocol bind-parameter limit.
 ///
@@ -63,6 +65,7 @@ pub async fn ensure_akh(
         // Timestamps set app-side (no DB defaults) for backend portability.
         awakened_at: Set(chrono::Utc::now()),
         last_seen: NotSet,
+        residency_epoch: NotSet,
     };
     let result = akh::Entity::insert(model)
         .on_conflict(OnConflict::column(akh::Column::Id).do_nothing().to_owned())
@@ -113,6 +116,97 @@ pub async fn append_mutations(
     }
     txn.commit().await?;
     Ok(inserted)
+}
+
+/// Append a WAL batch through the exact PostgreSQL session that owns the Akh's
+/// residency advisory lock, rejecting a stale fencing generation atomically.
+///
+/// The workspace publication advisory lock orders this transaction against
+/// [`StablePgSession::claim_akh_residency`]. Consequently an old owner can
+/// either commit before the handoff advances the epoch, or observe the newer
+/// epoch and fail without inserting any row; it cannot straddle the handoff.
+pub async fn append_mutations_fenced(
+    session: &StablePgSession,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    residency_epoch: i64,
+    rows: &[MutationRow],
+) -> StoreResult<u64> {
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // The state mutex covers both the local lock marker and the physical
+    // connection for the whole transaction. Explicit release therefore cannot
+    // race between the ownership check and commit.
+    let mut state = session.lock_state().await;
+    if state.locked_akh != Some(akh_id) {
+        return Err(StoreError::Conflict {
+            message: format!(
+                "refusing WAL append for akh {akh_id}: the pinned session does not own its residency lock"
+            ),
+        });
+    }
+
+    let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
+        message: format!("refusing WAL append for akh {akh_id}: pinned session is closed"),
+    })?;
+    let mut transaction = connection.begin().await.map_err(sqlx_query_error)?;
+    sea_orm::sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+    )
+    .bind(format!("snapshot:{workspace_id}"))
+    .execute(&mut *transaction)
+    .await
+    .map_err(sqlx_query_error)?;
+
+    let current_epoch: Option<i64> = sea_orm::sqlx::query_scalar(
+        "SELECT residency_epoch FROM akhomed_akh WHERE id = $1",
+    )
+    .bind(akh_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(sqlx_query_error)?;
+    let Some(current_epoch) = current_epoch else {
+        transaction.rollback().await.map_err(sqlx_query_error)?;
+        return Err(StoreError::Conflict {
+            message: format!("cannot append WAL for unknown akh {akh_id}"),
+        });
+    };
+    if current_epoch != residency_epoch {
+        transaction.rollback().await.map_err(sqlx_query_error)?;
+        return Err(StoreError::Conflict {
+            message: format!(
+                "stale WAL owner for workspace {workspace_id}: writer residency epoch \
+                 {residency_epoch}, current owner epoch {current_epoch}"
+            ),
+        });
+    }
+
+    let applied_at = chrono::Utc::now();
+    for row in rows {
+        sea_orm::sqlx::query(
+            "INSERT INTO akhomed_mutation_log \
+             (akh_id, workspace_id, kind, payload, applied_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(akh_id)
+        .bind(workspace_id)
+        .bind(&row.kind)
+        .bind(&row.payload)
+        .bind(applied_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_query_error)?;
+    }
+    transaction.commit().await.map_err(sqlx_query_error)?;
+    Ok(rows.len() as u64)
+}
+
+fn sqlx_query_error(source: sea_orm::sqlx::Error) -> StoreError {
+    StoreError::Db {
+        source: sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(source)),
+    }
 }
 
 /// Load `kind='turn'` rows for an Akh with `seq > after_seq`, ordered ascending

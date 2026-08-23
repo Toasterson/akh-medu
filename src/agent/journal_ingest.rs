@@ -339,12 +339,18 @@ fn create_episode(
         format!("summary:{summary_text}")
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let _ = engine.add_triple(&Triple::new(episode, predicates.has_summary, summary_sym));
+    let mut triples = vec![Triple::new(
+        episode,
+        predicates.has_summary,
+        summary_sym,
+    )];
 
     // Tags.
-    let _ = engine.add_triple(&Triple::new(episode, predicates.has_tag, tags.journal));
-    let _ = engine.add_triple(&Triple::new(episode, predicates.has_tag, tags.daily));
-    let _ = engine.add_triple(&Triple::new(episode, predicates.has_tag, tags.source));
+    triples.extend([
+        Triple::new(episode, predicates.has_tag, tags.journal),
+        Triple::new(episode, predicates.has_tag, tags.daily),
+        Triple::new(episode, predicates.has_tag, tags.source),
+    ]);
 
     if !chunk.heading.is_empty() {
         let slug: String = chunk
@@ -355,18 +361,18 @@ fn create_episode(
             .collect();
         let heading_tag =
             engine.resolve_or_create_entity(&format!("journal:section:{slug}"))?;
-        let _ = engine.add_triple(&Triple::new(episode, predicates.has_tag, heading_tag));
+        triples.push(Triple::new(episode, predicates.has_tag, heading_tag));
     }
 
     // memory_type marker — makes `agent_recall` treat this as an episode.
     let mem_type = engine.resolve_or_create_entity("episodic_memory")?;
-    let _ = engine.add_triple(&Triple::new(episode, predicates.memory_type, mem_type));
+    triples.push(Triple::new(episode, predicates.memory_type, mem_type));
 
     // Learned symbols from keyword extraction.
     let keywords = extract_keywords(&chunk.heading, &chunk.content);
     for kw in &keywords {
         let sym = engine.resolve_or_create_entity(kw)?;
-        let _ = engine.add_triple(&Triple::new(episode, predicates.learned, sym));
+        triples.push(Triple::new(episode, predicates.learned, sym));
     }
 
     // Provenance record.
@@ -383,7 +389,7 @@ fn create_episode(
         },
     )
     .with_confidence(0.75);
-    let _ = engine.store_provenance(&mut prov);
+    engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
     Ok(episode)
 }

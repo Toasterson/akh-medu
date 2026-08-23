@@ -25,14 +25,15 @@ mod pool;
 
 pub use error::{StoreError, StoreResult};
 pub use memberships::{
-    clear_last_seen, get_last_seen, join_workspace, leave_workspace, list_members, release_akh_lock,
-    touch_last_seen, try_acquire_akh_lock,
+    clear_last_seen, get_last_seen, join_workspace, leave_workspace, list_members,
+    release_akh_lock, touch_last_seen, try_acquire_akh_lock,
 };
 pub use migration::Migrator;
 pub use mutations::{
-    MutationRow, TurnRow, append_mutations, ensure_akh, load_turn_by_seq, load_turns_since,
+    MutationRow, TurnRow, append_mutations, append_mutations_fenced, ensure_akh,
+    load_turn_by_seq, load_turns_since,
 };
-pub use pool::{PoolOptions, connect};
+pub use pool::{PoolOptions, StablePgSession, connect};
 pub use schema_registry::{
     SchemaPackRow, admit_pack, get_pack, latest_pack, list_active_microtheories, list_packs,
     record_pack_activation,
