@@ -170,8 +170,7 @@ async fn run_register_akh(
     let config = HekaConfig::from_file(&config_path)
         .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
 
-    tracing::info!(url = %config.database.url, "connecting to PostgreSQL");
-    let db = Database::connect(&config.database.url)
+    let db = connect_database(&config.database.url, config.database.max_connections)
         .await
         .into_diagnostic()
         .wrap_err("connecting to PostgreSQL")?;
