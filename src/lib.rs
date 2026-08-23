@@ -32,6 +32,7 @@
 #[cfg(feature = "acp")]
 pub mod acp;
 pub mod agent;
+pub mod advertise;
 pub mod akh_config;
 pub mod bench_phase41g;
 pub mod bench_phase44;

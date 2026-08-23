@@ -38,6 +38,11 @@ pub struct Psyche {
     /// Written alongside the `ennead-role` file for inter-agent discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ennead_role: Option<String>,
+    /// BLAKE3 hash of the akh's avatar bytes. Bytes-on-change: updated
+    /// whenever the avatar image changes. Advertised via the power-state
+    /// contract (Wave R3 / ticket 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_hash: Option<String>,
 }
 
 /// Persona — the mask the agent presents outward.
