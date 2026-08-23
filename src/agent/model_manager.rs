@@ -352,6 +352,18 @@ impl AgentModelManager {
         psyche: Option<&Psyche>,
         manifests: &[&crate::agent::tool_manifest::ToolManifest],
     ) {
+        let _ = self.load_agent_prompt(agent_id, agent_name, psyche, manifests);
+    }
+
+    /// Refresh the workspace cache and return the exact prompt stored there so
+    /// an agentic caller can retain an immutable turn-local snapshot.
+    pub(crate) fn load_agent_prompt(
+        &self,
+        agent_id: &str,
+        agent_name: &str,
+        psyche: Option<&Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) -> String {
         let prompt = assemble_system_prompt(
             agent_id,
             agent_name,
@@ -361,12 +373,14 @@ impl AgentModelManager {
             manifests,
         );
         let mut agents = self.agents.lock().expect("model manager lock poisoned");
-        let entry = agents.entry(agent_id.to_string()).or_insert_with(|| AgentEntry {
-            system_prompt: prompt.clone(),
-            last_used: Instant::now(),
-        });
+        let entry = agents
+            .entry(agent_id.to_string())
+            .or_insert_with(|| AgentEntry {
+                system_prompt: prompt.clone(),
+                last_used: Instant::now(),
+            });
         // Always refresh prompt and timestamp on explicit load.
-        entry.system_prompt = prompt;
+        entry.system_prompt = prompt.clone();
         entry.last_used = Instant::now();
 
         tracing::debug!(
@@ -376,6 +390,7 @@ impl AgentModelManager {
             tool_count = manifests.len(),
             "agent model entry loaded"
         );
+        prompt
     }
 
     // ── Inference ─────────────────────────────────────────────────────────
@@ -449,24 +464,36 @@ impl AgentModelManager {
         tools: &[serde_json::Value],
         request_seq: usize,
     ) -> ModelManagerResult<AssistantTurn> {
-        let system_prompt = {
-            let mut agents = self.agents.lock().expect("model manager lock poisoned");
-            let entry =
-                agents
-                    .get_mut(agent_id)
-                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
-                        agent_id: agent_id.into(),
-                    })?;
-            entry.last_used = Instant::now();
-            entry.system_prompt.clone()
-        };
+        let system_prompt = self.cached_system_prompt(agent_id)?;
+        self.chat_with_tools_using_prompt(
+            agent_id,
+            &system_prompt,
+            conversation,
+            tools,
+            request_seq,
+        )
+    }
+
+    /// Run a tool-enabled request with an immutable prompt captured by the
+    /// caller at turn start. The workspace cache is touched for lifecycle
+    /// accounting but is never reread or overwritten here.
+    pub(crate) fn chat_with_tools_using_prompt(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        request_seq: usize,
+    ) -> ModelManagerResult<AssistantTurn> {
+        self.touch_loaded_agent(agent_id);
 
         let mut messages = Vec::with_capacity(conversation.len() + 1);
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
         let turn = self.ollama.chat(&messages, tools, request_seq)?;
-        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        self.usage
+            .record(turn.prompt_tokens, turn.completion_tokens);
         self.ensure_context_window();
         Ok(turn)
     }
@@ -486,26 +513,62 @@ impl AgentModelManager {
         request_seq: usize,
         on_event: &mut dyn FnMut(super::ollama::StreamEvent),
     ) -> ModelManagerResult<AssistantTurn> {
-        let system_prompt = {
-            let mut agents = self.agents.lock().expect("model manager lock poisoned");
-            let entry =
-                agents
-                    .get_mut(agent_id)
-                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
-                        agent_id: agent_id.into(),
-                    })?;
-            entry.last_used = Instant::now();
-            entry.system_prompt.clone()
-        };
+        let system_prompt = self.cached_system_prompt(agent_id)?;
+        self.chat_with_tools_streaming_using_prompt(
+            agent_id,
+            &system_prompt,
+            conversation,
+            tools,
+            request_seq,
+            on_event,
+        )
+    }
+
+    /// Streaming request using the immutable prompt captured for this turn.
+    pub(crate) fn chat_with_tools_streaming_using_prompt(
+        &self,
+        agent_id: &str,
+        system_prompt: &str,
+        conversation: &[serde_json::Value],
+        tools: &[serde_json::Value],
+        request_seq: usize,
+        on_event: &mut dyn FnMut(super::ollama::StreamEvent),
+    ) -> ModelManagerResult<AssistantTurn> {
+        self.touch_loaded_agent(agent_id);
 
         let mut messages = Vec::with_capacity(conversation.len() + 1);
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
         messages.extend_from_slice(conversation);
 
-        let turn = self.ollama.chat_stream(&messages, tools, request_seq, on_event)?;
-        self.usage.record(turn.prompt_tokens, turn.completion_tokens);
+        let turn = self
+            .ollama
+            .chat_stream(&messages, tools, request_seq, on_event)?;
+        self.usage
+            .record(turn.prompt_tokens, turn.completion_tokens);
         self.ensure_context_window();
         Ok(turn)
+    }
+
+    fn cached_system_prompt(&self, agent_id: &str) -> ModelManagerResult<String> {
+        let mut agents = self.agents.lock().expect("model manager lock poisoned");
+        let entry = agents
+            .get_mut(agent_id)
+            .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                agent_id: agent_id.into(),
+            })?;
+        entry.last_used = Instant::now();
+        Ok(entry.system_prompt.clone())
+    }
+
+    fn touch_loaded_agent(&self, agent_id: &str) {
+        if let Some(entry) = self
+            .agents
+            .lock()
+            .expect("model manager lock poisoned")
+            .get_mut(agent_id)
+        {
+            entry.last_used = Instant::now();
+        }
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────

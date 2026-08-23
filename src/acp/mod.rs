@@ -61,6 +61,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use crate::agent::conversation::ConversationState;
 use crate::agent::Agent;
 use crate::agent::{GoalStatus, PlanStatus, StepStatus};
 use crate::bootstrap::identity::{
@@ -77,6 +78,16 @@ pub use control::{
     is_control_method, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
     ServerControl, WorkspaceHandles, CONTROL_METHODS,
 };
+
+type SessionConversation = Arc<Mutex<ConversationState>>;
+type SessionConversationMap =
+    Arc<Mutex<std::collections::HashMap<String, SessionConversation>>>;
+type SessionContextHandle = Arc<Mutex<SessionContext>>;
+type SessionContextMap = Arc<Mutex<std::collections::HashMap<String, SessionContextHandle>>>;
+type SessionMcpToolCache =
+    Arc<Mutex<Option<Vec<mcp_bridge::DiscoveredServerTools>>>>;
+type SessionMcpToolCacheMap =
+    Arc<Mutex<std::collections::HashMap<String, SessionMcpToolCache>>>;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
@@ -356,7 +367,7 @@ pub struct AkhAcpAgent {
     /// (session-lifetime cache). Every prompt after the first rebuilds proxy
     /// `Tool`s from these cached descriptors with zero network I/O instead of
     /// re-running `initialize` + `tools/list` against each pushed server.
-    session_mcp_tools: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>>,
+    session_mcp_tools: SessionMcpToolCacheMap,
     /// Chat session → the in-flight turn's cancel flag. Populated for the
     /// duration of one `session/prompt` turn (inserted where the turn's
     /// `cancel: Arc<AtomicBool>` is created, removed by the bookkeeping task
@@ -384,14 +395,26 @@ pub struct AkhAcpAgent {
     /// cognitive state doesn't bleed across sessions sharing the workspace's
     /// single `Arc<Mutex<ChatProcessor>>`. Evicted alongside `sessions`,
     /// `session_mcp`, and `session_mcp_tools` in [`Self::track_new_session`].
-    session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
-    /// Insertion-ordered session ids (oldest first), paired with `sessions`,
-    /// `session_mcp`, `session_mcp_tools`, and `session_contexts` purely to
+    session_contexts: SessionContextMap,
+    /// Chat session → neural conversation state. The workspace [`Agent`] is
+    /// shared by every ACP session, but its agentic transcript must not be:
+    /// each session gets its own short-held mutex so turns in different
+    /// sessions neither inherit one another's prompts nor serialize model
+    /// inference. Evicted with the rest of the session state.
+    session_conversations: SessionConversationMap,
+    /// Access-ordered session ids (least recently used first), paired with
+    /// `sessions`, `session_mcp`, `session_mcp_tools`, `session_contexts`, and
+    /// `session_conversations` purely to
     /// pick an eviction victim once [`MAX_TRACKED_SESSIONS`] is exceeded —
-    /// those four maps are otherwise insert-only and would retain
+    /// those maps are otherwise insert-only and would retain
     /// client-pushed bearer tokens and per-session cognitive state for the
     /// daemon's entire lifetime.
     session_order: Arc<Mutex<std::collections::VecDeque<String>>>,
+    /// Sessions with a prompt turn currently in flight. This is both the
+    /// same-session ordering gate and an eviction pin: a second prompt for the
+    /// same session fails fast, and LRU eviction skips the session until its
+    /// worker actually finishes.
+    session_active_turns: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Agent name advertised during `initialize`.
     name: String,
     /// Client filesystem/terminal capabilities captured at `initialize`.
@@ -456,9 +479,10 @@ const DEFAULT_TURN_IDLE_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_SOCKET_READ_TIMEOUT_SECS: u64 = 60;
 
 /// Cap on tracked ACP sessions (`sessions` + `session_mcp` +
-/// `session_mcp_tools` + `session_contexts`). Once exceeded, the oldest
-/// session's state (including any client-pushed bearer token) is evicted at
-/// `session/new` — see [`AkhAcpAgent::track_new_session`].
+/// `session_mcp_tools` + `session_contexts` + `session_conversations`). Once
+/// reached, the least-recently-used idle session's state (including any
+/// client-pushed bearer token) is evicted at `session/new` — see
+/// [`AkhAcpAgent::track_new_session`].
 const MAX_TRACKED_SESSIONS: usize = 256;
 
 /// The prompt-turn idle watchdog from `AKH_TURN_IDLE_TIMEOUT_SECS` (seconds;
@@ -498,6 +522,67 @@ fn require_pushed_mcp_effective(per_workspace_default: bool) -> bool {
         .unwrap_or(per_workspace_default)
 }
 
+/// Immutable metadata captured atomically when `session/new` registers a
+/// protocol session.
+#[derive(Default)]
+struct SessionRegistration {
+    workspace: Option<String>,
+    is_dispatch: bool,
+    mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
+    cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionAccessError {
+    Unknown,
+    AlreadyActive,
+    CapacityExhausted,
+    Duplicate,
+    Incomplete,
+}
+
+impl SessionAccessError {
+    fn message(self, session_id: &str) -> String {
+        match self {
+            Self::Unknown => format!(
+                "unknown or expired ACP session {session_id:?}; create a new session before prompting"
+            ),
+            Self::AlreadyActive => format!(
+                "ACP session {session_id:?} already has a prompt in flight; wait for that turn to finish"
+            ),
+            Self::CapacityExhausted => format!(
+                "ACP session capacity is exhausted because every tracked session has a turn in flight"
+            ),
+            Self::Duplicate => format!("ACP session {session_id:?} is already registered"),
+            Self::Incomplete => format!(
+                "ACP session {session_id:?} has incomplete internal state and cannot be used safely"
+            ),
+        }
+    }
+}
+
+/// One checked-out protocol session. Its `Drop` releases the same-session turn
+/// gate; moving it into the worker-completion task pins the LRU entry until the
+/// blocking worker has actually stopped, including after a client watchdog
+/// response has already returned.
+struct SessionTurnLease {
+    owner: AkhAcpAgent,
+    session_id: String,
+    workspace: String,
+    is_dispatch: bool,
+    mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
+    mcp_tool_cache: SessionMcpToolCache,
+    cwd: Option<PathBuf>,
+    context: SessionContextHandle,
+    conversation: SessionConversation,
+}
+
+impl Drop for SessionTurnLease {
+    fn drop(&mut self) {
+        self.owner.end_session_turn(&self.session_id);
+    }
+}
+
 impl AkhAcpAgent {
     /// Build a new ACP agent wrapper for a single workspace.
     ///
@@ -522,7 +607,9 @@ impl AkhAcpAgent {
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            session_active_turns: Arc::new(Mutex::new(std::collections::HashSet::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
             control: None,
@@ -552,7 +639,9 @@ impl AkhAcpAgent {
             session_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_cwds: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_contexts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_conversations: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            session_active_turns: Arc::new(Mutex::new(std::collections::HashSet::new())),
             client_caps: Arc::new(Mutex::new(None)),
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
@@ -645,141 +734,227 @@ impl AkhAcpAgent {
         }
     }
 
-    /// The workspace a chat session is bound to (recorded at `session/new` from
-    /// the request `cwd` sentinel), or the default when unrecorded.
+    /// Atomically register all state for a freshly minted ACP session.
     ///
-    /// Also counts as a "use" of the session for eviction purposes (see
-    /// [`Self::touch_session`]): a session that keeps prompting is bumped to
-    /// the back of the eviction queue so [`Self::track_new_session`] only
-    /// ever evicts sessions that are both old *and* idle, never one that is
-    /// still actively bound and in use — silently misrouting a live
-    /// session's prompts to `default_ws` after eviction would be a
-    /// cross-workspace data-isolation break.
-    fn session_workspace(&self, session_id: &str) -> String {
-        let ws = self
+    /// The access-order queue is the canonical session registry. It is held
+    /// while every backing map is initialized, then the id is published at the
+    /// queue tail. Prompt checkout takes the same lock first, so it can never
+    /// observe a half-created entry. At capacity, the least-recently-used idle
+    /// session is evicted; an in-flight session is pinned until its worker ends.
+    fn track_new_session(
+        &self,
+        session_id: &str,
+        registration: SessionRegistration,
+    ) -> Result<(), SessionAccessError> {
+        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
+        if order.iter().any(|tracked| tracked == session_id) {
+            return Err(SessionAccessError::Duplicate);
+        }
+
+        if order.len() >= MAX_TRACKED_SESSIONS {
+            let active = self
+                .session_active_turns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let Some(victim_pos) = order
+                .iter()
+                .position(|candidate| !active.contains(candidate))
+            else {
+                return Err(SessionAccessError::CapacityExhausted);
+            };
+            let evicted = order
+                .remove(victim_pos)
+                .expect("the selected LRU victim must exist");
+            drop(active);
+
+            self.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_is_dispatch
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_mcp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_mcp_tools
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_cwds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            self.session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&evicted);
+            tracing::debug!(
+                session = %evicted,
+                cap = MAX_TRACKED_SESSIONS,
+                "evicted least-recently-used idle ACP session state"
+            );
+        }
+
+        let workspace = registration
+            .workspace
+            .unwrap_or_else(|| self.default_ws.clone());
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), workspace);
+        self.session_is_dispatch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), registration.is_dispatch);
+        if !registration.mcp_cfgs.is_empty() {
+            self.session_mcp
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session_id.to_string(), registration.mcp_cfgs);
+        }
+        self.session_mcp_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string(), Arc::new(Mutex::new(None)));
+        if let Some(cwd) = registration.cwd {
+            self.session_cwds
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session_id.to_string(), cwd);
+        }
+        self.session_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                session_id.to_string(),
+                Arc::new(Mutex::new(SessionContext::new())),
+            );
+        self.session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                session_id.to_string(),
+                Arc::new(Mutex::new(ConversationState::new(session_id, "narrative"))),
+            );
+        order.push_back(session_id.to_string());
+        Ok(())
+    }
+
+    /// Validate and exclusively check out one session for a prompt turn.
+    /// Unknown/evicted ids fail closed; they never fall back to the default
+    /// workspace or recreate transcript state outside the bounded registry.
+    fn begin_session_turn(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionTurnLease, SessionAccessError> {
+        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pos) = order.iter().position(|tracked| tracked == session_id) else {
+            return Err(SessionAccessError::Unknown);
+        };
+
+        let mut active = self
+            .session_active_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !active.insert(session_id.to_string()) {
+            return Err(SessionAccessError::AlreadyActive);
+        }
+
+        let context = self
+            .session_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned();
+        let workspace = self
             .sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .cloned();
-        match ws {
-            Some(ws) => {
-                self.touch_session(session_id);
-                ws
-            }
-            None => self.default_ws.clone(),
-        }
-    }
-
-    /// Resolve the dispatch mode for a session. Recorded at `session/new` from
-    /// the cwd pattern (WI-280). Returns `(is_dispatch, source)`: `true` for an
-    /// autonomous dispatch (Anima work item), `false` for interactive (CLI/TUI).
-    /// Source is `"session-meta"` when resolved from the session record,
-    /// `"env-default"` when falling back to `AKH_DISPATCH_MODE`, or `"default"`
-    /// when neither applies (defaults to interactive).
-    fn session_dispatch_mode(&self, session_id: &str) -> (bool, &'static str) {
+        let conversation = self
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned();
+        let mcp_tool_cache = self
+            .session_mcp_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned();
         let is_dispatch = self
             .session_is_dispatch
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .copied();
-        match is_dispatch {
-            Some(mode) => (mode, "session-meta"),
-            None => {
-                // No session record (shouldn't happen in production), check env
-                // fallback
-                let env_dispatch = std::env::var("AKH_DISPATCH_MODE")
-                    .map(|v| v == "1")
-                    .unwrap_or(false);
-                if env_dispatch {
-                    (true, "env-default")
-                } else {
-                    (false, "default")
-                }
-            }
-        }
-    }
-
-    /// Bump `session_id` to the most-recently-used end of the eviction
-    /// queue. A no-op if the session isn't tracked (e.g. already evicted, or
-    /// never registered via [`Self::track_new_session`]).
-    fn touch_session(&self, session_id: &str) {
-        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(pos) = order.iter().position(|s| s == session_id) {
-            // Cheap for the O(1)-common case (already at or near the back
-            // for a session that prompts repeatedly); worst case is O(cap)
-            // with `MAX_TRACKED_SESSIONS` bounding it to 256.
-            order.remove(pos);
-            order.push_back(session_id.to_string());
-        }
-    }
-
-    /// Record a freshly-minted session id and evict the least-recently-used
-    /// tracked session's state once [`MAX_TRACKED_SESSIONS`] is exceeded.
-    ///
-    /// `sessions`, `session_mcp` (which holds any client-pushed bearer
-    /// tokens), `session_mcp_tools`, `session_cancels`, and `session_contexts`
-    /// (per-session cognitive state) are otherwise append-only with no
-    /// session-end signal in ACP, so without this a long-lived daemon would
-    /// retain every client's credentials, discovered tool set, and per-session
-    /// cognitive state forever — an unbounded memory leak. Eviction is true LRU-by-use
-    /// (see [`Self::touch_session`], called from [`Self::session_workspace`]
-    /// on every prompt): a session only becomes the eviction victim once it
-    /// is both the oldest tracked *and* has gone unused since every other
-    /// tracked session's last use.
-    fn track_new_session(&self, session_id: &str) {
-        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
-        order.push_back(session_id.to_string());
-        if order.len() > MAX_TRACKED_SESSIONS {
-            if let Some(evicted) = order.pop_front() {
-                self.sessions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_is_dispatch
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_mcp
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_mcp_tools
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_cancels
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_cwds
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                self.session_contexts
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&evicted);
-                tracing::debug!(
-                    session = %evicted,
-                    cap = MAX_TRACKED_SESSIONS,
-                    "evicted oldest ACP session state (session cap reached)"
-                );
-            }
-        }
-    }
-
-    /// The MCP servers a client pushed for this session at `session/new`, or an
-    /// empty vec if none. Cloned per prompt so the bridge can connect without
-    /// holding the session lock across network I/O.
-    fn session_mcp_cfgs(&self, session_id: &str) -> Vec<mcp_bridge::SessionMcpServerCfg> {
-        self.session_mcp
+        let (
+            Some(workspace),
+            Some(context),
+            Some(conversation),
+            Some(mcp_tool_cache),
+            Some(is_dispatch),
+        ) = (
+            workspace,
+            context,
+            conversation,
+            mcp_tool_cache,
+            is_dispatch,
+        )
+        else {
+            active.remove(session_id);
+            return Err(SessionAccessError::Incomplete);
+        };
+        let mcp_cfgs = self
+            .session_mcp
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(session_id)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let cwd = self
+            .session_cwds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned();
+
+        order.remove(pos);
+        order.push_back(session_id.to_string());
+        drop(active);
+        drop(order);
+
+        Ok(SessionTurnLease {
+            owner: self.clone(),
+            session_id: session_id.to_string(),
+            workspace,
+            is_dispatch,
+            mcp_cfgs,
+            mcp_tool_cache,
+            cwd,
+            context,
+            conversation,
+        })
+    }
+
+    fn end_session_turn(&self, session_id: &str) {
+        self.session_active_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
     }
 
     /// Record the start of a `session/prompt` turn for `ws` — the fail-fast
@@ -842,8 +1017,10 @@ impl AkhAcpAgent {
     /// Run a single prompt turn under the ADR-027 lock discipline, **streaming**
     /// its narration to `sink` as the turn unfolds.
     ///
-    /// The turn runs inside [`spawn_blocking`]: the agent + processor `Mutex`es
-    /// are acquired and released entirely inside the closure, and each
+    /// The turn runs inside [`spawn_blocking`]: the Agent read lock, the
+    /// session's short-held neural-state mutex, and (on symbolic fallback)
+    /// the processor mutex are acquired and released entirely inside the
+    /// closure, and each
     /// [`AkhMessage`] is handed to `sink` (a non-blocking channel send) the
     /// instant it is produced — answer text, reasoning, and tool steps stream
     /// out live rather than being batched at turn-end. Because the send is
@@ -875,15 +1052,14 @@ impl AkhAcpAgent {
         engine: Arc<Engine>,
         agent: Arc<RwLock<Agent>>,
         processor: Arc<Mutex<ChatProcessor>>,
-        session_contexts: Arc<Mutex<std::collections::HashMap<String, SessionContext>>>,
+        session_context: SessionContextHandle,
+        session_conversation: SessionConversation,
         agent_id: String,
         text: String,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
         session_id: String,
         mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
-        mcp_tool_cache: Arc<
-            Mutex<std::collections::HashMap<String, Vec<mcp_bridge::DiscoveredServerTools>>>,
-        >,
+        mcp_tool_cache: SessionMcpToolCache,
         sink: ChannelSink,
         cancel: Arc<std::sync::atomic::AtomicBool>,
         is_dispatch: bool,
@@ -918,24 +1094,6 @@ impl AkhAcpAgent {
                 &session_id,
                 session_cwd_candidate.as_deref(),
             ));
-            // Install the per-turn permission approver (if any) so tool calls
-            // made during the turn — by the LLM loop or the symbolic pipeline —
-            // can prompt the client.
-            if let Some(asker) = asker {
-                agent_r.set_permission_asker(asker);
-            }
-            // `guard` holds `&Agent` for the rest of the turn (accessed as
-            // `guard.agent`) so its `Drop` — which unregisters any
-            // session-scoped MCP proxy tools and clears the permission asker —
-            // is guaranteed to run even if `run_agentic_turn` /
-            // `process_input` panics, instead of being skipped by an unwind
-            // past a tail cleanup loop.
-            // `mut` is only exercised by `guard.register(..)` under the
-            // `daemon` feature (session MCP tools need the HTTP client); a
-            // non-daemon build never calls it, hence the blanket allow.
-            #[allow(unused_mut)]
-            let mut guard = SessionToolGuard::new(&agent_r);
-
             // Wrap the per-turn `ChannelSink` in a single strong `Arc` for the
             // turn's duration. The `ToolExecutionTracker` below takes a `Weak`
             // to this same allocation (see `tool_execution_tracker.rs`); keeping
@@ -959,7 +1117,13 @@ impl AkhAcpAgent {
             let tracker = Arc::new(crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
                 Arc::clone(&sink) as Arc<dyn crate::message::MessageSink>,
             ));
-            guard.set_tracker(tracker);
+            // Install a thread-confined registry overlay. Session MCP proxies,
+            // permission callbacks, and tracker callbacks never enter the
+            // workspace-global registry, so concurrent sessions cannot see or
+            // clear one another's credentials/state. The guard is panic-safe
+            // and remains installed through the symbolic fallback as well.
+            #[allow(unused_mut)]
+            let mut guard = SessionToolGuard::new(&agent_r, asker, tracker);
 
             // Session-scoped MCP tools: connect to the servers the client
             // pushed at `session/new`, discover their tools once per session
@@ -993,8 +1157,7 @@ impl AkhAcpAgent {
                 let cached = mcp_tool_cache
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .get(&session_id)
-                    .cloned();
+                    .clone();
                 let discovered = match cached {
                     Some(d) => d,
                     None => {
@@ -1017,10 +1180,9 @@ impl AkhAcpAgent {
                         } else {
                             mcp_bridge::discover_session_tools(&mcp_cfgs, &*sink)
                         };
-                        mcp_tool_cache
+                        *mcp_tool_cache
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(session_id.clone(), discovered.clone());
+                            .unwrap_or_else(|e| e.into_inner()) = Some(discovered.clone());
                         discovered
                     }
                 };
@@ -1042,9 +1204,16 @@ impl AkhAcpAgent {
                 source = mode_source,
                 "turn mode resolved"
             );
-            if guard
-                .agent
-                .run_agentic_turn(&engine, &agent_id, &text, &*sink, &cancel, is_dispatch)
+            if agent_r
+                .run_agentic_turn_with_conversation_state(
+                    &engine,
+                    &agent_id,
+                    &text,
+                    &*sink,
+                    &cancel,
+                    is_dispatch,
+                    session_conversation.as_ref(),
+                )
                 .is_none()
             {
                 // Symbolic fallback needs `&mut Agent` (it calls
@@ -1053,29 +1222,27 @@ impl AkhAcpAgent {
                 // borrows, then acquire a write lock. This serialises the
                 // rare symbolic fallback, but the agentic path (common case)
                 // proceeds concurrently under read locks.
-                drop(guard);
                 drop(agent_r);
                 let mut agent_w = agent.write().unwrap_or_else(|e| e.into_inner());
                 let mut processor_g2 = processor.lock().unwrap_or_else(|e| e.into_inner());
-                // Get or create this session's cognitive context. Held across
+                // Use this session's pre-registered cognitive context. Held across
                 // `process_input` so per-session state (kg_cache, eliza,
                 // trajectory) is mutated in place — no clone-and-writeback
                 // that would let concurrent turns for the same session lose
-                // updates. Inserted on first use; evicted with the session by
-                // `track_new_session`.
-                let mut ctx_map = session_contexts
+                // updates. It was allocated at `session/new` and checked out
+                // before this worker started, so an unknown/evicted session
+                // can never recreate context outside the bounded registry.
+                let mut ctx = session_context
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                let ctx = ctx_map
-                    .entry(session_id.clone())
-                    .or_default();
-                let out = processor_g2.process_input(ctx, &text, &mut agent_w, &engine);
+                let out = processor_g2.process_input(&mut ctx, &text, &mut agent_w, &engine);
                 sink.emit_batch(&out);
             }
-            // `guard` drops here (normal return *or* unwind), unregistering
-            // session tools and clearing the permission asker; then the
-            // locks + `sink` Arc drop. Dropping the last strong `Arc` closes
-            // the `UnboundedSender`, which is what signals the drain loop on
+            // Remove the thread-confined tool/asker/tracker overlay before the
+            // sink closes. An unwind reaches the guard's `Drop` automatically.
+            drop(guard);
+            // Then the locks + `sink` Arc drop. Dropping the last strong `Arc`
+            // closes the `UnboundedSender`, which signals the drain loop on
             // the async side — and because the tracker only holds a `Weak`,
             // no in-flight `ToolCallGuard` clone can keep the channel open
             // past this point.
@@ -1098,63 +1265,30 @@ enum TurnStartError {
     McpDiscoveryFailed(mcp_bridge::DiscoveryFailure),
 }
 
-/// RAII guard that unregisters this turn's session-scoped MCP proxy tools and
-/// clears the permission asker on `Drop` — including on panic/unwind.
-///
-/// Holds the exclusive `&mut Agent` for the guard's lifetime so nothing can
-/// register a tool through it without going through [`Self::register`] (and
-/// therefore being tracked for teardown). Constructed once per
-/// [`AkhAcpAgent::run_turn`] call and dropped at the end of that closure;
-/// because `spawn_blocking` closures unwind normally on panic (this crate
-/// does not build with `panic = "abort"`), `Drop` runs even when
-/// `run_agentic_turn` / `process_input` panics mid-turn — the defect this
-/// guard replaces was a tail cleanup loop that a panic simply jumped over,
-/// leaving another client's bearer-credentialed `mcp__*` proxies registered
-/// on the shared workspace `Agent` for whichever session ran next.
-struct SessionToolGuard<'a> {
-    agent: &'a Agent,
-    tool_names: Vec<String>,
-    /// The tracker we installed (if any), for teardown.
-    tracker: Option<Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>>,
+/// ACP-facing wrapper around the registry's thread-confined session overlay.
+/// Dropping it — normally or during unwind — removes this turn's tools,
+/// permission asker, and tracker without mutating workspace-global state.
+struct SessionToolGuard {
+    scope: crate::agent::tool::ToolSessionGuard,
 }
 
-impl<'a> SessionToolGuard<'a> {
-    fn new(agent: &'a Agent) -> Self {
+impl SessionToolGuard {
+    fn new(
+        agent: &Agent,
+        asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
+        tracker: Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
+    ) -> Self {
         Self {
-            agent,
-            tool_names: Vec::new(),
-            tracker: None,
+            scope: agent.begin_tool_session(asker, tracker),
         }
     }
 
-    /// Install a tool execution tracker for this turn (for ACP ToolCall events).
-    fn set_tracker(&mut self, tracker: Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>) {
-        self.agent.set_tool_tracker(tracker.clone());
-        self.tracker = Some(tracker);
-    }
-
-    /// Register one session-scoped tool and remember its name for teardown.
+    /// Register one tool in this turn's session scope.
     // Only called under the `daemon` feature (session MCP tools need the HTTP
     // client); a non-daemon build never calls it.
     #[cfg_attr(not(feature = "daemon"), allow(dead_code))]
     fn register(&mut self, tool: Box<dyn crate::agent::tool::Tool>) {
-        let name = tool.signature().name;
-        self.agent.register_tool(tool);
-        self.tool_names.push(name);
-    }
-}
-
-impl<'a> Drop for SessionToolGuard<'a> {
-    fn drop(&mut self) {
-        for name in &self.tool_names {
-            self.agent.unregister_tool(name);
-        }
-        self.agent.clear_permission_asker();
-        // Flush any coalesced search bursts before clearing the tracker.
-        if let Some(tracker) = &self.tracker {
-            tracker.flush_all_search_bursts();
-        }
-        self.agent.clear_tool_tracker();
+        self.scope.register(tool);
     }
 }
 
@@ -3699,9 +3833,6 @@ fn build_connection(
                     let me = me.clone();
                     async move {
                         let session_id = SessionId::new(format!("akh-{}", next_session_suffix()));
-                        // Track + cap-evict session state before recording
-                        // anything for this session — see `track_new_session`.
-                        me.track_new_session(&session_id.to_string());
                         // Resolve the target workspace, in precedence order:
                         // (1) an explicit `_meta["akh/workspace"]` string —
                         //     additive (A4): a client that can't/won't stuff
@@ -3727,12 +3858,7 @@ fn build_connection(
                                 .unwrap_or(""),
                             "session/new: cwd + _meta observed"
                         );
-                        if let Some(ws) = resolve_session_workspace(req.meta.as_ref(), &req.cwd) {
-                            me.sessions
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(session_id.to_string(), ws);
-                        }
+                        let workspace = resolve_session_workspace(req.meta.as_ref(), &req.cwd);
                         // WI-280: Detect dispatch mode from the session cwd. Anima
                         // dispatches work from worktree paths matching the pattern
                         // `/var/lib/anima-runner/worktrees/<UUID>`. The env var
@@ -3747,10 +3873,6 @@ fn build_connection(
                         } || std::env::var("AKH_DISPATCH_MODE")
                             .map(|v| v == "1")
                             .unwrap_or(false);
-                        me.session_is_dispatch
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(session_id.to_string(), is_dispatch);
                         // Session cwd: record the client's real cwd so this
                         // session's turns can run in the project the client
                         // has open, instead of always at the executor's
@@ -3767,12 +3889,8 @@ fn build_connection(
                         // Backend has not been resolved yet, and resolving
                         // it here just to validate a path would force eager
                         // agent construction this handler otherwise avoids.
-                        if req.cwd.is_absolute() && !is_workspace_sentinel(&req.cwd) {
-                            me.session_cwds
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(session_id.to_string(), req.cwd.clone());
-                        }
+                        let cwd = (req.cwd.is_absolute() && !is_workspace_sentinel(&req.cwd))
+                            .then(|| req.cwd.clone());
                         // Honor the MCP servers the client pushes at session
                         // setup (ACP's `mcp_servers`, the equivalent of a CLI's
                         // `--mcp-config`): record them so each prompt in this
@@ -3789,11 +3907,19 @@ fn build_connection(
                                 "recorded client-pushed MCP servers for session"
                             );
                         }
-                        if !mcp_cfgs.is_empty() {
-                            me.session_mcp
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .insert(session_id.to_string(), mcp_cfgs);
+                        if let Err(error) = me.track_new_session(
+                            &session_id.to_string(),
+                            SessionRegistration {
+                                workspace,
+                                is_dispatch,
+                                mcp_cfgs,
+                                cwd,
+                            },
+                        ) {
+                            return responder.respond_with_error(
+                                agent_client_protocol::Error::internal_error()
+                                    .data(error.message(&session_id.to_string())),
+                            );
                         }
                         responder.respond(NewSessionResponse::new(session_id))
                     }
@@ -3834,11 +3960,29 @@ fn build_connection(
                         let cx_for_spawn = cx.clone();
                         cx_for_spawn.spawn(async move {
                         let session_id = req.session_id.clone();
+                        let session_key = session_id.to_string();
                         let text = concat_prompt(&req.prompt);
 
-                        // Route to the session's workspace (recorded at
-                        // session/new).
-                        let ws = me.session_workspace(&session_id.to_string());
+                        // Atomically validate, touch, and exclusively check out
+                        // the session. Unknown/evicted ids fail closed instead
+                        // of routing to the default workspace; an overlapping
+                        // prompt for the same id is rejected before either turn
+                        // can append to its transcript.
+                        let session_lease = match me.begin_session_turn(&session_key) {
+                            Ok(lease) => lease,
+                            Err(error) => {
+                                let rpc_error = match error {
+                                    SessionAccessError::Unknown => {
+                                        agent_client_protocol::Error::invalid_params()
+                                    }
+                                    _ => agent_client_protocol::Error::internal_error(),
+                                };
+                                return responder.respond_with_error(
+                                    rpc_error.data(error.message(&session_key)),
+                                );
+                            }
+                        };
+                        let ws = session_lease.workspace.clone();
                         let idle = me.turn_idle_timeout;
 
                         // Busy fail-fast (turn-wedge fix, part b): if an
@@ -3943,10 +4087,9 @@ fn build_connection(
                         // in one batch at turn-end.
                         let (msg_tx, mut msg_rx) =
                             tokio::sync::mpsc::unbounded_channel::<AkhMessage>();
-                        // MCP servers this client pushed for the session — the
-                        // turn connects to them (once; later prompts reuse the
-                        // per-session discovery cache) and bridges their tools.
-                        let mcp_cfgs = me.session_mcp_cfgs(&session_id.to_string());
+                        // Session metadata was snapshotted by the exclusive
+                        // checkout above while its LRU entry was pinned.
+                        let mcp_cfgs = session_lease.mcp_cfgs.clone();
                         // Turn-wedge fix, part (a): a cancel flag the idle
                         // watchdog below sets once it gives up waiting on this
                         // turn. `run_agentic_turn`'s round loop polls it once
@@ -3971,34 +4114,27 @@ fn build_connection(
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .insert(session_id.to_string(), Arc::clone(&cancel));
-                        // WI-280: Resolve dispatch mode for this session — the
-                        // mode is a per-turn property, not a process-wide flag.
-                        let (is_dispatch, mode_source) = me.session_dispatch_mode(&session_id.to_string());
-                        // The candidate cwd recorded (unvalidated) at
-                        // `session/new`; `run_turn` clamps it against the
-                        // resolved workspace's executor sandbox root before
-                        // ever using it — see `resolve_session_cwd_for_turn`.
-                        let session_cwd_candidate = me
-                            .session_cwds
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .get(&session_id.to_string())
-                            .cloned();
+                        let is_dispatch = session_lease.is_dispatch;
+                        let session_cwd_candidate = session_lease.cwd.clone();
+                        let session_context = Arc::clone(&session_lease.context);
+                        let session_conversation = Arc::clone(&session_lease.conversation);
+                        let mcp_tool_cache = Arc::clone(&session_lease.mcp_tool_cache);
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
                             processor,
-                            me.session_contexts.clone(),
+                            session_context,
+                            session_conversation,
                             ws.clone(),
                             text,
                             Some(asker),
                             session_id.to_string(),
                             mcp_cfgs,
-                            me.session_mcp_tools.clone(),
+                            mcp_tool_cache,
                             ChannelSink { tx: msg_tx },
                             Arc::clone(&cancel),
                             is_dispatch,
-                            mode_source,
+                            "session-meta",
                             require_pushed_mcp,
                             session_cwd_candidate,
                         );
@@ -4016,8 +4152,13 @@ fn build_connection(
                             let end_session = session_id.clone();
                             let span_ws = end_ws.clone();
                             let span_session = end_session.clone();
+                            let session_lease = session_lease;
                             tokio::spawn(
                                 async move {
+                                    // Keep the LRU eviction pin and same-session
+                                    // exclusion live until the blocking worker
+                                    // has actually joined.
+                                    let session_lease = session_lease;
                                     let result = handle.await;
                                     end_me.end_turn(&end_ws);
                                     // A2: the turn is over — a `session/cancel`
@@ -4030,6 +4171,7 @@ fn build_connection(
                                         .lock()
                                         .unwrap_or_else(|e| e.into_inner())
                                         .remove(&end_session.to_string());
+                                    drop(session_lease);
                                     let _ = done_tx.send(result);
                                 }
                                 .instrument(tracing::info_span!(
@@ -5577,6 +5719,12 @@ mod tests {
         AkhAcpAgent::new(engine, shared_agent, processor)
     }
 
+    fn track_session(agent: &AkhAcpAgent, session_id: &str) {
+        agent
+            .track_new_session(session_id, SessionRegistration::default())
+            .expect("test session registration");
+    }
+
     /// Build a bare engine + shared agent (no ACP wrapper) for exercising the
     /// agent-read dispatch helpers directly.
     fn engine_and_agent() -> (Arc<Engine>, Arc<RwLock<Agent>>) {
@@ -5630,18 +5778,28 @@ mod tests {
         agent.list_tools().iter().any(|t| t.name == name)
     }
 
+    fn session_tool_guard<'a>(
+        agent: &'a Agent,
+    ) -> (SessionToolGuard, Arc<crate::message::VecSink>) {
+        let sink = Arc::new(crate::message::VecSink::new());
+        let tracker = Arc::new(
+            crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
+                Arc::clone(&sink) as Arc<dyn MessageSink>,
+            ),
+        );
+        (SessionToolGuard::new(agent, None, tracker), sink)
+    }
+
     #[test]
     fn session_tool_guard_unregisters_tools_on_normal_drop() {
         let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
         {
-            let mut guard = SessionToolGuard::new(&mut locked);
+            let (mut guard, _sink) = session_tool_guard(&locked);
             guard.register(Box::new(EchoTool));
-            assert!(has_tool(guard.agent, "mcp__pushed__echo"));
+            assert!(has_tool(&locked, "mcp__pushed__echo"));
         }
-        // Guard dropped at end of the block above: the session tool must be
-        // gone, and the permission asker cleared (clear is idempotent when
-        // none was set, so this only re-asserts no panic/leak).
+        // The overlay is gone without ever mutating the global registry.
         assert!(!has_tool(&locked, "mcp__pushed__echo"));
     }
 
@@ -5654,16 +5812,14 @@ mod tests {
         // `Drop` must still fire while the stack unwinds through the panic.
         let (_engine, agent) = engine_and_agent();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
-            let mut guard = SessionToolGuard::new(&mut locked);
+            let locked = agent.read().unwrap_or_else(|e| e.into_inner());
+            let (mut guard, _sink) = session_tool_guard(&locked);
             guard.register(Box::new(EchoTool));
-            assert!(has_tool(guard.agent, "mcp__pushed__echo"));
+            assert!(has_tool(&locked, "mcp__pushed__echo"));
             panic!("simulated mid-turn panic after tool registration");
         }));
         assert!(result.is_err(), "the simulated panic should propagate");
 
-        // The mutex is poisoned by the panic-while-held, matching every other
-        // lock site in this module; recover it the same way (`into_inner`).
         let locked = agent.read().unwrap_or_else(|e| e.into_inner());
         assert!(
             !has_tool(&locked, "mcp__pushed__echo"),
@@ -5672,30 +5828,226 @@ mod tests {
     }
 
     #[test]
-    fn session_tool_guard_clears_permission_asker_on_drop() {
-        use crate::agent::permission::PermissionAsker;
-        use crate::agent::tool_manifest::ToolManifest;
+    fn concurrent_session_tool_scopes_isolate_tools_askers_and_trackers() {
+        use crate::agent::permission::{PermissionAsker, PermissionMode};
+        use crate::agent::tool_manifest::{Capability, ToolManifest};
 
-        struct NeverAsker;
-        impl PermissionAsker for NeverAsker {
-            fn ask(&self, _manifest: &ToolManifest, _input_summary: &str) -> bool {
-                unreachable!("test never calls ask")
+        struct Rendezvous {
+            entered: std::sync::Mutex<usize>,
+            both_entered: std::sync::Condvar,
+        }
+
+        impl Rendezvous {
+            fn wait_for_peer(&self) -> bool {
+                let mut entered = self.entered.lock().unwrap_or_else(|e| e.into_inner());
+                *entered += 1;
+                self.both_entered.notify_all();
+                while *entered < 2 {
+                    let (next, timeout) = self
+                        .both_entered
+                        .wait_timeout(entered, std::time::Duration::from_secs(2))
+                        .unwrap_or_else(|e| e.into_inner());
+                    entered = next;
+                    if timeout.timed_out() && *entered < 2 {
+                        return false;
+                    }
+                }
+                true
             }
         }
 
-        let (_engine, agent) = engine_and_agent();
-        let mut locked = agent.write().unwrap_or_else(|e| e.into_inner());
-        locked.set_permission_asker(Arc::new(NeverAsker));
-        {
-            let _guard = SessionToolGuard::new(&mut locked);
+        struct TaggedTool {
+            tag: &'static str,
+            rendezvous: Option<Arc<Rendezvous>>,
         }
-        // No direct getter for "is an asker set", so the behavioral contract
-        // (`clear_permission_asker` was called) is exercised via
-        // `permission_mode`/no-panic; the compile-time guarantee is that
-        // `Drop::drop` unconditionally calls `clear_permission_asker`. This
-        // test mainly guards against someone removing that call by accident —
-        // a future refactor could assert via a permission-mode round trip.
+        impl crate::agent::tool::Tool for TaggedTool {
+            fn signature(&self) -> crate::agent::tool::ToolSignature {
+                crate::agent::tool::ToolSignature {
+                    name: "mcp__shared__same_name".into(),
+                    description: self.tag.into(),
+                    parameters: vec![],
+                }
+            }
+
+            fn execute(
+                &self,
+                _engine: &Engine,
+                _input: crate::agent::tool::ToolInput,
+            ) -> crate::agent::error::AgentResult<crate::agent::tool::ToolOutput> {
+                if let Some(rendezvous) = &self.rendezvous {
+                    assert!(
+                        rendezvous.wait_for_peer(),
+                        "session tool executions were serialized by the outer registry mutex"
+                    );
+                }
+                Ok(crate::agent::tool::ToolOutput::ok(self.tag))
+            }
+
+            fn manifest(&self) -> ToolManifest {
+                ToolManifest {
+                    name: "mcp__shared__same_name".into(),
+                    description: self.tag.into(),
+                    parameters: vec![],
+                    danger: crate::agent::tool_manifest::DangerInfo {
+                        level: crate::agent::tool_manifest::DangerLevel::Dangerous,
+                        capabilities: std::collections::HashSet::from([Capability::Network]),
+                        description: "session-scoped network proxy".into(),
+                        shadow_triggers: vec![],
+                    },
+                    source: crate::agent::tool_manifest::ToolSource::Native,
+                }
+            }
+        }
+
+        struct CountingAsker {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            rendezvous: Arc<Rendezvous>,
+        }
+        impl PermissionAsker for CountingAsker {
+            fn ask(&self, _manifest: &ToolManifest, _input_summary: &str) -> bool {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    self.rendezvous.wait_for_peer(),
+                    "session permission waits were serialized by a registry mutex"
+                );
+                true
+            }
+        }
+
+        struct PanickingGlobalAsker;
+        impl PermissionAsker for PanickingGlobalAsker {
+            fn ask(&self, _manifest: &ToolManifest, _input_summary: &str) -> bool {
+                panic!("a session scope must not consult the global permission asker")
+            }
+        }
+
+        let (engine, agent) = engine_and_agent();
+        let global_sink = Arc::new(crate::message::VecSink::new());
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
+        locked.set_permission_mode(PermissionMode::Standard);
+        locked.set_permission_asker(Arc::new(PanickingGlobalAsker));
+        locked.set_tool_tracker(Arc::new(
+            crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
+                Arc::clone(&global_sink) as Arc<dyn MessageSink>,
+            ),
+        ));
         drop(locked);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let permission_rendezvous = Arc::new(Rendezvous {
+            entered: std::sync::Mutex::new(0),
+            both_entered: std::sync::Condvar::new(),
+        });
+        let execution_rendezvous = Arc::new(Rendezvous {
+            entered: std::sync::Mutex::new(0),
+            both_entered: std::sync::Condvar::new(),
+        });
+        let calls_a = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_b = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let run = |tag: &'static str,
+                   calls: Arc<std::sync::atomic::AtomicUsize>,
+                   barrier: Arc<std::sync::Barrier>,
+                   permission_rendezvous: Arc<Rendezvous>,
+                   execution_rendezvous: Arc<Rendezvous>| {
+            let agent = Arc::clone(&agent);
+            let engine = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                let agent = agent.read().unwrap_or_else(|e| e.into_inner());
+                let sink = Arc::new(crate::message::VecSink::new());
+                let tracker = Arc::new(
+                    crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
+                        Arc::clone(&sink) as Arc<dyn MessageSink>,
+                    ),
+                );
+                let mut scope = SessionToolGuard::new(
+                    &agent,
+                    Some(Arc::new(CountingAsker {
+                        calls: Arc::clone(&calls),
+                        rendezvous: permission_rendezvous,
+                    })),
+                    tracker,
+                );
+                scope.register(Box::new(TaggedTool {
+                    tag,
+                    rendezvous: Some(execution_rendezvous),
+                }));
+                barrier.wait();
+                let registry = agent.tool_registry_handle();
+                let output = registry
+                    .execute(
+                        "mcp__shared__same_name",
+                        crate::agent::tool::ToolInput::new(),
+                        &engine,
+                    )
+                    .expect("session tool executes");
+                (output, sink.messages())
+            })
+        };
+
+        let thread_a = run(
+            "session-a",
+            Arc::clone(&calls_a),
+            Arc::clone(&barrier),
+            Arc::clone(&permission_rendezvous),
+            Arc::clone(&execution_rendezvous),
+        );
+        let thread_b = run(
+            "session-b",
+            Arc::clone(&calls_b),
+            Arc::clone(&barrier),
+            Arc::clone(&permission_rendezvous),
+            Arc::clone(&execution_rendezvous),
+        );
+        let (output_a, messages_a) = thread_a.join().expect("session A thread");
+        let (output_b, messages_b) = thread_b.join().expect("session B thread");
+
+        assert_eq!(output_a.result, "session-a");
+        assert_eq!(output_b.result, "session-b");
+        assert_eq!(calls_a.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(calls_b.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(messages_a.len(), 2, "session A gets only its tracker events");
+        assert_eq!(messages_b.len(), 2, "session B gets only its tracker events");
+        assert!(
+            global_sink.messages().is_empty(),
+            "session executions must not emit through the global tracker"
+        );
+
+        // A scope with no approver fails closed instead of borrowing a stale
+        // global callback from another use of the shared workspace agent.
+        let locked = agent.read().unwrap_or_else(|e| e.into_inner());
+        let (mut scope, _sink) = session_tool_guard(&locked);
+        scope.register(Box::new(TaggedTool {
+            tag: "no-asker",
+            rendezvous: None,
+        }));
+        locked.sync_live_tools();
+        assert!(
+            engine
+                .live_tools()
+                .iter()
+                .all(|tool| tool.name != "mcp__shared__same_name"),
+            "registry reconciliation must not publish a session proxy globally"
+        );
+        let denied = locked
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .execute(
+                "mcp__shared__same_name",
+                crate::agent::tool::ToolInput::new(),
+                &engine,
+            )
+            .expect("permission denial is a tool output");
+        assert!(!denied.success, "missing session approver must fail closed");
+        drop(scope);
+        drop(locked);
+        assert!(
+            !has_tool(
+                &agent.read().unwrap_or_else(|e| e.into_inner()),
+                "mcp__shared__same_name"
+            ),
+            "session tools never enter the workspace-global registry"
+        );
     }
 
     // ── Session cap eviction (Breakage/watch-item #3: insert-only maps) ──
@@ -5704,19 +6056,23 @@ mod tests {
     fn track_new_session_evicts_oldest_once_cap_exceeded() {
         let me = workspace();
         let victim = "akh-oldest".to_string();
-        me.track_new_session(&victim);
+        track_session(&me, &victim);
         me.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(victim.clone(), "some-workspace".into());
-        me.session_contexts
+        me.session_conversations
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(victim.clone(), SessionContext::new());
+            .get(&victim)
+            .expect("track_new_session creates neural state")
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_operator_turn("victim-only prompt");
 
         // Push exactly enough new sessions to trip the cap by one eviction.
         for i in 0..MAX_TRACKED_SESSIONS {
-            me.track_new_session(&format!("akh-fill-{i}"));
+            track_session(&me, &format!("akh-fill-{i}"));
         }
 
         assert_eq!(
@@ -5738,20 +6094,75 @@ mod tests {
                 .contains_key(&victim),
             "the oldest session's SessionContext must be evicted, not leaked"
         );
+        assert!(
+            !me.session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&victim),
+            "the oldest session's neural ConversationState must be evicted, not leaked"
+        );
+        let before = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert!(matches!(
+            me.begin_session_turn(&victim),
+            Err(SessionAccessError::Unknown)
+        ));
+        assert_eq!(
+            me.session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
+            before,
+            "accessing an evicted session must not resurrect transcript state"
+        );
+    }
+
+    #[test]
+    fn tracked_sessions_have_independent_neural_state_locks() {
+        let me = workspace();
+        track_session(&me, "akh-neural-a");
+        track_session(&me, "akh-neural-b");
+
+        let (a, a_again, b) = {
+            let conversations = me
+                .session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            (
+                Arc::clone(conversations.get("akh-neural-a").expect("state a")),
+                Arc::clone(conversations.get("akh-neural-a").expect("state a again")),
+                Arc::clone(conversations.get("akh-neural-b").expect("state b")),
+            )
+        };
+
+        assert!(Arc::ptr_eq(&a, &a_again), "one ACP session must reuse its neural state");
+        assert!(!Arc::ptr_eq(&a, &b), "different ACP sessions must not share neural state");
+
+        let _a_guard = a.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            b.try_lock().is_ok(),
+            "locking one session's transcript must not block another session"
+        );
     }
 
     #[test]
     fn track_new_session_evicts_the_oldest_sessions_recorded_cwd() {
         let me = workspace();
         let victim = "akh-oldest-cwd".to_string();
-        me.track_new_session(&victim);
-        me.session_cwds
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(victim.clone(), PathBuf::from("/home/toasty/ws/akh-medu"));
+        me.track_new_session(
+            &victim,
+            SessionRegistration {
+                cwd: Some(PathBuf::from("/home/toasty/ws/akh-medu")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         for i in 0..MAX_TRACKED_SESSIONS {
-            me.track_new_session(&format!("akh-fill-cwd-{i}"));
+            track_session(&me, &format!("akh-fill-cwd-{i}"));
         }
 
         assert!(
@@ -5764,38 +6175,105 @@ mod tests {
     }
 
     #[test]
-    fn track_new_session_spares_an_oldest_session_that_is_still_in_active_use() {
-        // Regression test: eviction must be true LRU-by-use, not raw
-        // creation order, or a long-lived-but-active client session gets
-        // silently misrouted to `default_ws` once enough newer sessions
-        // exist — a cross-workspace data-isolation break with no
-        // client-visible signal.
+    fn active_session_rejects_overlap_and_is_pinned_from_lru_eviction() {
         let me = workspace();
         let survivor = "akh-oldest-but-active".to_string();
-        me.track_new_session(&survivor);
+        me.track_new_session(
+            &survivor,
+            SessionRegistration {
+                workspace: Some("survivor-workspace".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let survivor_conversation = {
+            let conversations = me
+                .session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(conversations.get(&survivor).expect("survivor neural state"))
+        };
+
+        for i in 0..MAX_TRACKED_SESSIONS - 1 {
+            track_session(&me, &format!("akh-fill-{i}"));
+        }
+        let lease = me.begin_session_turn(&survivor).expect("survivor checkout");
+        assert_eq!(
+            lease.workspace,
+            "survivor-workspace",
+            "the checked-out session retains its workspace binding"
+        );
+        assert!(matches!(
+            me.begin_session_turn(&survivor),
+            Err(SessionAccessError::AlreadyActive)
+        ));
+
+        // Force an eviction while the oldest-created session is in flight.
+        // The first idle entry must be selected instead; the active entry is
+        // pinned even if its worker outlives the client watchdog response.
+        track_session(&me, "akh-overflow");
+
+        let retained = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&survivor)
+            .cloned()
+            .expect("an actively-used session's neural state must survive LRU eviction");
+        assert!(Arc::ptr_eq(&survivor_conversation, &retained));
+        drop(lease);
+        let next = me
+            .begin_session_turn(&survivor)
+            .expect("same session is available after its prior lease drops");
+        assert_eq!(next.workspace, "survivor-workspace");
+    }
+
+    #[test]
+    fn begin_session_turn_rejects_unknown_without_creating_any_state() {
+        let me = workspace();
+        assert!(matches!(
+            me.begin_session_turn("akh-never-created"),
+            Err(SessionAccessError::Unknown)
+        ));
+        assert!(
+            me.session_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+        assert!(
+            me.session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+        assert!(
+            me.session_contexts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn begin_session_turn_fails_closed_when_registered_state_is_incomplete() {
+        let me = workspace();
+        track_session(&me, "akh-incomplete");
         me.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(survivor.clone(), "survivor-workspace".into());
+            .remove("akh-incomplete");
 
-        // Fill most of the cap with other sessions, "using" the survivor
-        // partway through so it is bumped to the back of the eviction queue.
-        for i in 0..MAX_TRACKED_SESSIONS / 2 {
-            me.track_new_session(&format!("akh-fill-{i}"));
-        }
-        assert_eq!(
-            me.session_workspace(&survivor),
-            "survivor-workspace",
-            "sanity: the binding resolves and this use touches the session"
-        );
-        for i in MAX_TRACKED_SESSIONS / 2..MAX_TRACKED_SESSIONS {
-            me.track_new_session(&format!("akh-fill-{i}"));
-        }
-
-        assert_eq!(
-            me.session_workspace(&survivor),
-            "survivor-workspace",
-            "an actively-used session must survive cap eviction, not fall back to default_ws"
+        assert!(matches!(
+            me.begin_session_turn("akh-incomplete"),
+            Err(SessionAccessError::Incomplete)
+        ));
+        assert!(
+            !me.session_active_turns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains("akh-incomplete"),
+            "failed checkout must release the same-session gate"
         );
     }
 
@@ -5840,14 +6318,18 @@ mod tests {
         } || std::env::var("AKH_DISPATCH_MODE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        me.session_is_dispatch
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), is_dispatch);
-
-        let (mode, source) = me.session_dispatch_mode(session_id);
-        assert!(mode, "Anima worktree path must be detected as dispatch");
-        assert_eq!(source, "session-meta", "Source must be session-meta");
+        me.track_new_session(
+            session_id,
+            SessionRegistration {
+                is_dispatch,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            me.begin_session_turn(session_id).unwrap().is_dispatch,
+            "Anima worktree path must be detected as dispatch"
+        );
     }
 
     #[test]
@@ -5887,18 +6369,22 @@ mod tests {
         } || std::env::var("AKH_DISPATCH_MODE")
             .map(|v| v == "1")
             .unwrap_or(false);
-        me.session_is_dispatch
-            .lock()
-            .unwrap()
-            .insert(session_id.to_string(), is_dispatch);
-
-        let (mode, source) = me.session_dispatch_mode(session_id);
-        assert!(!mode, "Regular user path must be detected as interactive");
-        assert_eq!(source, "session-meta", "Source must be session-meta");
+        me.track_new_session(
+            session_id,
+            SessionRegistration {
+                is_dispatch,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !me.begin_session_turn(session_id).unwrap().is_dispatch,
+            "Regular user path must be detected as interactive"
+        );
     }
 
     #[test]
-    fn session_dispatch_mode_falls_back_to_env() {
+    fn session_dispatch_mode_applies_env_fallback_at_registration() {
         let _lock = ENV_TEST_LOCK.lock().unwrap();
         // Test the env var fallback when no session record exists.
         // Use a guard to ensure cleanup happens even if assertions panic.
@@ -5916,10 +6402,24 @@ mod tests {
             std::env::set_var("AKH_DISPATCH_MODE", "1");
         }
 
+        let is_dispatch = std::env::var("AKH_DISPATCH_MODE")
+            .map(|value| value == "1")
+            .unwrap_or(false);
         let me = workspace();
-        let (mode, source) = me.session_dispatch_mode("nonexistent-session");
-        assert!(mode, "Must detect dispatch mode from env var");
-        assert_eq!(source, "env-default", "Source must be env-default");
+        me.track_new_session(
+            "env-dispatch-session",
+            SessionRegistration {
+                is_dispatch,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            me.begin_session_turn("env-dispatch-session")
+                .unwrap()
+                .is_dispatch,
+            "the environment fallback is captured when the session is registered"
+        );
     }
 
     // --- turn-wedge fix, part (b): the `session/prompt` busy fail-fast guard ---

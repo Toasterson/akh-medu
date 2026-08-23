@@ -35,7 +35,7 @@ use miette::Diagnostic;
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use super::chat_backend::{ChatBackend, ChatBackendError, ModelCapabilities};
+use super::chat_backend::{ChatBackend, ChatBackendError, ModelCapabilities, PreparedChat};
 use super::ollama::{AssistantTurn, StreamEvent, ToolCall};
 
 // ---------------------------------------------------------------------------
@@ -706,6 +706,26 @@ impl OpenAiChatBackend {
             .map(|p| p.clone())
             .unwrap_or_default()
     }
+
+    fn refresh_prompt(
+        &self,
+        agent_id: &str,
+        psyche: Option<&crate::compartment::psyche::Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) -> String {
+        let assembled = super::model_manager::assemble_system_prompt(
+            agent_id,
+            agent_id,
+            psyche,
+            self.explicit_prompt.as_deref(),
+            super::model_manager::detect_prompt_mode(self.client.model()),
+            manifests,
+        );
+        if let Ok(mut slot) = self.system_prompt.write() {
+            *slot = assembled.clone();
+        }
+        assembled
+    }
 }
 
 impl ChatBackend for OpenAiChatBackend {
@@ -742,17 +762,16 @@ impl ChatBackend for OpenAiChatBackend {
         psyche: Option<&crate::compartment::psyche::Psyche>,
         manifests: &[&crate::agent::tool_manifest::ToolManifest],
     ) {
-        let assembled = super::model_manager::assemble_system_prompt(
-            agent_id,
-            agent_id,
-            psyche,
-            self.explicit_prompt.as_deref(),
-            super::model_manager::detect_prompt_mode(self.client.model()),
-            manifests,
-        );
-        if let Ok(mut slot) = self.system_prompt.write() {
-            *slot = assembled;
-        }
+        self.refresh_prompt(agent_id, psyche, manifests);
+    }
+
+    fn prepare_turn(
+        &self,
+        agent_id: &str,
+        psyche: Option<&crate::compartment::psyche::Psyche>,
+        manifests: &[&crate::agent::tool_manifest::ToolManifest],
+    ) -> PreparedChat {
+        PreparedChat::with_system_prompt(self.refresh_prompt(agent_id, psyche, manifests))
     }
 
     fn capabilities(&self) -> ModelCapabilities {
@@ -779,6 +798,27 @@ impl ChatBackend for OpenAiChatBackend {
             })
     }
 
+    fn chat_with_tools_prepared(
+        &self,
+        prepared: &PreparedChat,
+        _agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        self.client
+            .chat(
+                prepared.require_system_prompt("openai")?,
+                conversation,
+                tools,
+                request_seq,
+            )
+            .map_err(|e| ChatBackendError::TurnFailed {
+                backend: "openai".into(),
+                reason: e.to_string(),
+            })
+    }
+
     fn chat_with_tools_streaming(
         &self,
         _agent_id: &str,
@@ -789,6 +829,29 @@ impl ChatBackend for OpenAiChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         self.client
             .chat_stream(&self.prompt(), conversation, tools, request_seq, on_event)
+            .map_err(|e| ChatBackendError::TurnFailed {
+                backend: "openai".into(),
+                reason: e.to_string(),
+            })
+    }
+
+    fn chat_with_tools_streaming_prepared(
+        &self,
+        prepared: &PreparedChat,
+        _agent_id: &str,
+        conversation: &[Value],
+        tools: &[Value],
+        request_seq: usize,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<AssistantTurn, ChatBackendError> {
+        self.client
+            .chat_stream(
+                prepared.require_system_prompt("openai")?,
+                conversation,
+                tools,
+                request_seq,
+                on_event,
+            )
             .map_err(|e| ChatBackendError::TurnFailed {
                 backend: "openai".into(),
                 reason: e.to_string(),
