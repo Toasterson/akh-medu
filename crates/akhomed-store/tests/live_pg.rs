@@ -4,6 +4,8 @@
 //!   AKH_TEST_PG_URL=postgres://user@127.0.0.1:5439/akhmedu?sslmode=disable \
 //!     cargo test -p akhomed-store --test live_pg -- --ignored
 
+use akhomed_store::entity::fact;
+use akhomed_store::snapshots::{load_workspace_facts, replace_workspace_facts};
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
     MutationRow, PoolOptions, append_mutations, connect, ensure_akh, get_harvest_watermark,
@@ -61,6 +63,60 @@ async fn ensure_akh_is_idempotent_and_append_writes_rows() {
     // Empty batch is a no-op.
     assert_eq!(append_mutations(&db, akh, workspace, &[]).await.unwrap(), 0);
     assert_eq!(mutation_count(&db, akh).await, 2);
+}
+
+/// A fact has ten bound columns, so 7,000 rows exceed Postgres's 65,535 bind
+/// parameter ceiling and force `replace_workspace_facts` to issue more than
+/// one INSERT. Repeating the replacement proves the normal periodic-snapshot
+/// path remains exact after the first write.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn workspace_fact_replace_chunks_past_postgres_bind_limit() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&PoolOptions::new(url)).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    const ROW_COUNT: usize = 7_000;
+    let workspace = Uuid::new_v4();
+    let akh = Uuid::new_v4();
+    let asserted_at = akhomed_store::chrono::Utc::now();
+    let mut rows: Vec<fact::Model> = (0..ROW_COUNT)
+        .map(|index| fact::Model {
+            workspace_id: workspace,
+            subject: index as i64,
+            predicate: 1,
+            object: index as i64 + 10_000,
+            akh_id: akh,
+            confidence: 1.0,
+            asserted_at,
+            retracted_at: None,
+            provenance_id: None,
+            compartment: None,
+        })
+        .collect();
+
+    replace_workspace_facts(&db, workspace, rows.clone())
+        .await
+        .expect("first chunked replacement");
+    let first = load_workspace_facts(&db, workspace)
+        .await
+        .expect("load first replacement");
+    assert_eq!(first.len(), ROW_COUNT);
+
+    for row in &mut rows {
+        row.confidence = 0.25;
+    }
+    replace_workspace_facts(&db, workspace, rows)
+        .await
+        .expect("repeat chunked replacement");
+    let second = load_workspace_facts(&db, workspace)
+        .await
+        .expect("load repeat replacement");
+    assert_eq!(second.len(), ROW_COUNT);
+    assert!(second.iter().all(|row| row.confidence == 0.25));
 }
 
 #[tokio::test]

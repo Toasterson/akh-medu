@@ -7,11 +7,20 @@
 use sea_orm::ActiveValue::{NotSet, Set};
 use sea_orm::prelude::DateTimeUtc;
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, Iterable, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
+};
 use uuid::Uuid;
 
 use crate::entity::{akh, mutation_log};
 use crate::error::StoreResult;
+
+/// Postgres extended-query protocol bind-parameter limit.
+///
+/// A single prepared statement cannot carry more than 65,535 bind parameters,
+/// so any `insert_many` whose `rows × columns` exceeds this must be chunked.
+const PG_MAX_BIND_PARAMS: usize = 65_535;
 
 /// A `kind='turn'` WAL row — one captured transcript turn (ADR 091). The
 /// daily-log is the projection `WHERE kind='turn' ORDER BY seq`; these rows are
@@ -84,19 +93,26 @@ pub async fn append_mutations(
         return Ok(0);
     }
     let now = chrono::Utc::now();
-    let models: Vec<mutation_log::ActiveModel> = rows
-        .iter()
-        .map(|r| mutation_log::ActiveModel {
-            seq: NotSet,
-            akh_id: Set(akh_id),
-            workspace_id: Set(workspace_id),
-            kind: Set(r.kind.clone()),
-            payload: Set(r.payload.clone()),
-            applied_at: Set(now),
-        })
-        .collect();
-    mutation_log::Entity::insert_many(models).exec(db).await?;
-    Ok(rows.len() as u64)
+    let chunk_size = (PG_MAX_BIND_PARAMS / mutation_log::Column::iter().count()).max(1);
+    let mut inserted = 0u64;
+    let txn = db.begin().await?;
+    for chunk in rows.chunks(chunk_size) {
+        let models: Vec<mutation_log::ActiveModel> = chunk
+            .iter()
+            .map(|r| mutation_log::ActiveModel {
+                seq: NotSet,
+                akh_id: Set(akh_id),
+                workspace_id: Set(workspace_id),
+                kind: Set(r.kind.clone()),
+                payload: Set(r.payload.clone()),
+                applied_at: Set(now),
+            })
+            .collect();
+        mutation_log::Entity::insert_many(models).exec(&txn).await?;
+        inserted += chunk.len() as u64;
+    }
+    txn.commit().await?;
+    Ok(inserted)
 }
 
 /// Load `kind='turn'` rows for an Akh with `seq > after_seq`, ordered ascending
