@@ -8,6 +8,7 @@
 //!
 //! Usage:
 //!   hekad migrate [config_path]
+//!   hekad register-akh <name> [--description <desc>]   Register an akh in heka_akhs
 //!   hekad eval longmemeval --mode raw
 //!   hekad eval locomo --top-k auto
 //!   hekad embed [config_path]      Run the embed worker (foreground, Ctrl-C to stop)
@@ -41,6 +42,18 @@ enum Commands {
     /// Create the heka_* schema on the target PostgreSQL database.
     Migrate {
         /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
+        config_path: Option<PathBuf>,
+    },
+
+    /// Register an akh in the heka_akhs table.
+    RegisterAkh {
+        /// Unique akh name (e.g. "tecton", "thoth").
+        name: String,
+        /// Optional human-readable description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
+        #[arg(long)]
         config_path: Option<PathBuf>,
     },
 
@@ -83,6 +96,11 @@ async fn main() -> miette::Result<()> {
 
     match cli.command {
         Commands::Migrate { config_path } => run_migrate(config_path).await,
+        Commands::RegisterAkh {
+            name,
+            description,
+            config_path,
+        } => run_register_akh(&name, description, config_path).await,
         Commands::Eval { command } => heka::eval::run(&command).await,
         Commands::Embed { config_path } => run_embed(config_path).await,
         Commands::RepairLegacyTitleHashes {
@@ -133,6 +151,71 @@ async fn run_migrate(config_path: Option<PathBuf>) -> miette::Result<()> {
         .wrap_err("running migrations")?;
 
     tracing::info!("Heka migrations complete — 5 tables + HNSW index created");
+    Ok(())
+}
+
+/// Register an akh in `heka_akhs`.
+///
+/// Creates a new row with the given name and optional description. If an akh
+/// with the same name already exists, updates its description (upsert).
+async fn run_register_akh(
+    name: &str,
+    description: Option<String>,
+    config_path: Option<PathBuf>,
+) -> miette::Result<()> {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let config_path = config_path.unwrap_or_else(default_config_path);
+
+    let config = HekaConfig::from_file(&config_path)
+        .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
+
+    tracing::info!(url = %config.database.url, "connecting to PostgreSQL");
+    let db = Database::connect(&config.database.url)
+        .await
+        .into_diagnostic()
+        .wrap_err("connecting to PostgreSQL")?;
+
+    // Check if akh already exists — if so, update description and return.
+    if let Some(existing) = heka::entity::heka_akhs::Entity::find()
+        .filter(heka::entity::heka_akhs::Column::Name.eq(name))
+        .one(&db)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("looking up akh '{name}'"))?
+    {
+        if let Some(desc) = &description {
+            let mut active: heka::entity::heka_akhs::ActiveModel = existing.into();
+            active.description = Set(Some(desc.clone()));
+            active.updated_at = Set(chrono::Utc::now());
+            active.update(&db).await.into_diagnostic()?;
+            tracing::info!(akh = name, "updated existing akh registration");
+        } else {
+            tracing::info!(akh = name, "akh already registered — no changes");
+        }
+        return Ok(());
+    }
+
+    // Insert new akh row.
+    let now = chrono::Utc::now();
+    let new_akh = heka::entity::heka_akhs::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set(name.to_string()),
+        description: Set(description),
+        personality: Set(None),
+        avatar_url: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+
+    let saved = new_akh.insert(&db).await.into_diagnostic()?;
+
+    tracing::info!(
+        akh = name,
+        id = %saved.id,
+        "registered new akh in heka_akhs"
+    );
+
     Ok(())
 }
 
