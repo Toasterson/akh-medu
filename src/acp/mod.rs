@@ -1133,7 +1133,7 @@ impl AkhAcpAgent {
         mode_source: &'static str,
         require_pushed_mcp: bool,
         session_cwd_candidate: Option<PathBuf>,
-    ) -> tokio::task::JoinHandle<Result<(), TurnStartError>> {
+    ) -> tokio::task::JoinHandle<Result<(), TurnFailure>> {
         tokio::task::spawn_blocking(move || {
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
             // turns proceed in parallel). The agentic path never touches
@@ -1211,7 +1211,7 @@ impl AkhAcpAgent {
             // variant retries once (short backoff) to ride through
             // intermittent HTTP 401s, then surfaces the upstream status in an
             // `error[acp]` message and returns
-            // [`TurnStartError::McpDiscoveryFailed`] so the prompt handler
+            // [`TurnFailure::McpDiscoveryFailed`] so the prompt handler
             // can end the turn with a stop reason Anima can distinguish from
             // a clean completion. Either way, the cache is only written on a
             // discovery pass that actually ran (not the cache hit), so a
@@ -1241,7 +1241,7 @@ impl AkhAcpAgent {
                                     // `sink`; surface the aggregate failure to
                                     // the prompt handler so it can end the
                                     // turn with a distinct stop reason.
-                                    return Err(TurnStartError::McpDiscoveryFailed(failure));
+                                    return Err(TurnFailure::McpDiscoveryFailed(failure));
                                 }
                             }
                         } else {
@@ -1271,18 +1271,22 @@ impl AkhAcpAgent {
                 source = mode_source,
                 "turn mode resolved"
             );
-            if agent_r
-                .run_agentic_turn_with_conversation_state(
-                    &engine,
-                    &agent_id,
-                    &text,
-                    &*sink,
-                    &cancel,
-                    is_dispatch,
-                    session_conversation.as_ref(),
-                )
-                .is_none()
-            {
+            let agentic_outcome = agent_r.run_agentic_turn_with_conversation_state(
+                &engine,
+                &agent_id,
+                &text,
+                &*sink,
+                &cancel,
+                is_dispatch,
+                session_conversation.as_ref(),
+            );
+            if matches!(
+                agentic_outcome,
+                Some(crate::agent::agentic_chat::AgenticTurnOutcome::Refused)
+            ) {
+                return Err(TurnFailure::CompletionContractFailed);
+            }
+            if agentic_outcome.is_none() {
                 // Symbolic fallback needs `&mut Agent` (it calls
                 // `dispatch_abstree` / `escalate_to_goal` which mutate goals,
                 // working memory, cycle_count). Drop the read lock and all
@@ -1319,13 +1323,14 @@ impl AkhAcpAgent {
 }
 
 /// Failure returned by [`AkhAcpAgent::run_turn`] when the turn could not
-/// safely start — today, only MCP tool discovery failure (the work item
-/// "Turns die quietly" defect 2). The prompt handler matches on this to end
+/// safely finish. The prompt handler matches on this to end
 /// the turn with a [`StopReason::Refusal`] that Anima can distinguish from a
 /// clean completion (the crate's v1 `StopReason` has no `Other` variant),
 /// instead of letting the session continue tool-less.
 #[derive(Debug)]
-enum TurnStartError {
+enum TurnFailure {
+    /// A host-enforced completion contract rejected this turn's completion.
+    CompletionContractFailed,
     /// One or more client-pushed MCP servers did not come back after the
     /// bounded retry. The session must not continue without its tools.
     #[cfg(feature = "daemon")]
@@ -4828,7 +4833,7 @@ fn build_connection(
                         // `None` ⇒ not yet consumed, `Some(_)` ⇒ consumed.
                         let mut done_result: Option<
                             Result<
-                                Result<Result<(), TurnStartError>, tokio::task::JoinError>,
+                                Result<Result<(), TurnFailure>, tokio::task::JoinError>,
                                 tokio::sync::oneshot::error::RecvError,
                             >,
                         > = None;
@@ -5097,18 +5102,22 @@ fn build_connection(
                                 format!("turn task failed: {e}"),
                             )),
                             Ok(Ok(Err(start_err))) => {
-                                // The turn could not start safely. Today this
-                                // is only MCP discovery failure (defect 2):
-                                // the strict discovery variant already
-                                // streamed a per-server `error[acp]` message
-                                // through `sink`; surface the aggregate
-                                // failure here and end the turn with a
-                                // distinguishable stop reason so Anima does
-                                // not charge a tool-less session as a clean
-                                // no-op.
-                                #[cfg(feature = "daemon")]
+                                // The turn could not finish safely. Surface a
+                                // distinguishable refusal so Anima never
+                                // charges rejected/tool-less work as a clean
+                                // completion.
                                 match start_err {
-                                    TurnStartError::McpDiscoveryFailed(failure) => {
+                                    TurnFailure::CompletionContractFailed => {
+                                        tracing::warn!(
+                                            workspace = %ws,
+                                            "host-enforced completion contract refused the turn"
+                                        );
+                                        return responder.respond(PromptResponse::new(
+                                            StopReason::Refusal,
+                                        ));
+                                    }
+                                    #[cfg(feature = "daemon")]
+                                    TurnFailure::McpDiscoveryFailed(failure) => {
                                         tracing::error!(
                                             workspace = %ws,
                                             attempted = failure.attempted,
@@ -5130,15 +5139,6 @@ fn build_connection(
                                             StopReason::Refusal,
                                         ));
                                     }
-                                }
-                                #[cfg(not(feature = "daemon"))]
-                                {
-                                    // Non-daemon builds never produce a
-                                    // `TurnStartError` today; the variant is
-                                    // `#[cfg(feature = "daemon")]`-gated. Keep
-                                    // the match exhaustive without pulling in
-                                    // the daemon-only type.
-                                    let _ = start_err;
                                 }
                             }
                             Ok(Ok(Ok(()))) => {}

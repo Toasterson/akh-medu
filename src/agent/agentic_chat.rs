@@ -133,11 +133,25 @@ enum TurnStop {
     /// guard detected no work was performed (no mutating tool calls and
     /// clean worktree). Dispatch-only failure mode.
     DeclaredButIdle,
+    /// An explicit host-enforced completion contract remained unsatisfied
+    /// after the bounded retry budget.
+    ContractUnsatisfied,
     /// Wedge detected: the turn has been active but no LLM request has been
     /// issued for longer than the wedge timeout. This catches the WI-259
     /// failure mode where the model stopped requesting tools but the loop
     /// neither completed nor continued.
     WedgeTimeout,
+}
+
+/// Protocol-visible outcome of a neural turn.
+///
+/// `Refused` means the host rejected the model's completion claim (for
+/// example, because an explicit evidence contract could not be satisfied).
+/// ACP maps it to `StopReason::Refusal` instead of reporting a clean end turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgenticTurnOutcome {
+    Completed,
+    Refused,
 }
 
 impl TurnStop {
@@ -151,6 +165,9 @@ impl TurnStop {
                 "You declared completion but verification shows no work was performed. \
                  The worktree has no uncommitted changes and no mutating tool calls were made. \
                  Review the task requirements and use the appropriate tools to make the necessary changes"
+            }
+            TurnStop::ContractUnsatisfied => {
+                "The host-enforced completion contract is still unsatisfied. Report the task as incomplete and name the missing evidence"
             }
             TurnStop::WedgeTimeout => {
                 "The turn has been inactive for too long without making progress"
@@ -314,8 +331,8 @@ impl Agent {
     /// model generates, chain-of-thought as [`AkhMessage::Reasoning`] deltas, and
     /// each tool call + result as a collapsible [`AkhMessage::ToolResult`] step.
     ///
-    /// Returns `Some(())` when the turn was handled (answer emitted, or an error
-    /// surfaced through `sink`), or `None` when there is **no usable model
+    /// Returns `Some(())` when an answer or refusal was emitted, or `None`
+    /// when there is **no usable model
     /// backend** — no model manager attached, or Ollama unreachable — signalling
     /// the caller to fall back to the symbolic
     /// [`ChatProcessor`](crate::chat::ChatProcessor). `agent_id` keys the model
@@ -360,6 +377,7 @@ impl Agent {
             is_autonomous_dispatch,
             &self.conversation_state,
         )
+        .map(|_| ())
     }
 
     /// Run one neural turn using the supplied conversation state.
@@ -378,7 +396,7 @@ impl Agent {
         cancel: &std::sync::atomic::AtomicBool,
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
-    ) -> Option<()> {
+    ) -> Option<AgenticTurnOutcome> {
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
         // manager. Either way the loop is backend-agnostic. `None` ⇒ no usable
@@ -394,6 +412,18 @@ impl Agent {
         if !backend.available() {
             return None;
         }
+
+        // Explicit control is fail-closed. A malformed directive must not turn
+        // into an ordinary interactive turn whose unsupported completion is
+        // silently accepted.
+        let mut completion_controller =
+            match super::completion_controller::CompletionController::from_prompt(user_prompt) {
+                Ok(controller) => controller,
+                Err(error) => {
+                    sink.emit(&AkhMessage::error("completion_control", error.to_string()));
+                    return Some(AgenticTurnOutcome::Refused);
+                }
+            };
 
         // Capture the exact system prompt for this complete turn. Session-local
         // MCP manifests must not race through a workspace-keyed backend cache.
@@ -444,6 +474,22 @@ impl Agent {
             // against retrieval scoping. `0` runs the akh tool-free (pure chat).
             tracing::debug!(cap, from = tools.len(), "capping tool catalog (AKH_AGENT_MAX_TOOLS)");
             tools.truncate(cap);
+        }
+        // Contract gates are host post-conditions, so retrieval scoping may
+        // not hide the very tools needed to satisfy them.
+        if let Some(controller) = &completion_controller {
+            let missing = pin_required_tools(
+                &mut tools,
+                &full_catalog,
+                &controller.required_tools(),
+            );
+            if !missing.is_empty() {
+                sink.emit(&AkhMessage::error(
+                    "completion_contract_unavailable_tools",
+                    format!("controlled turn requires unavailable tools: {}", missing.join(", ")),
+                ));
+                return Some(AgenticTurnOutcome::Refused);
+            }
         }
 
         // Phase 44m (ADR 065 D12.1): capture the deferred-tool set — what was
@@ -558,6 +604,22 @@ impl Agent {
             }
         };
 
+        // Bounded, per-turn pre-action inputs. The configured context manager
+        // still owns durable core/recall/archival memory.
+        if let Some(vsa_context) = super::completion_controller::VsaReasoningContext::build(
+            engine,
+            user_prompt,
+            completion_controller
+                .as_ref()
+                .map(|controller| controller.vsa_seeds())
+                .unwrap_or(&[]),
+        ) {
+            insert_system_before_last_user(&mut conversation, vsa_context);
+        }
+        if let Some(controller) = &completion_controller {
+            insert_system_before_last_user(&mut conversation, controller.system_context());
+        }
+
         // Compact tool trace for the ADR 091 turn-capture hook: {tool, ok} per
         // call, accumulated across every round of this turn (not just the
         // final one) — never raw arguments/results, so a chatty tool loop
@@ -596,6 +658,10 @@ impl Agent {
             // streaming path failed and we silently retried non-streaming — in
             // which case nothing was streamed and we emit the result ourselves.
             let mut used_fallback = false;
+            // A controlled turn cannot expose candidate prose before the host
+            // has evaluated its evidence gates. Reasoning and tool results may
+            // still stream; narrative is released only on accepted completion.
+            let defer_narrative = completion_controller.is_some();
             // Throttle Keepalive emissions: tool-call chunks can arrive at token
             // rate (~100/sec for a 1k-char JSON payload at 100 tok/s), so we emit
             // at most one heartbeat per 30s to reset the watchdog without spam.
@@ -615,7 +681,9 @@ impl Agent {
                         // Content/thinking resets the implicit heartbeat — a model
                         // generating visible text is alive by definition.
                         last_keepalive = Instant::now();
-                        sink.emit(&AkhMessage::narrative(delta, "acp"));
+                        if !defer_narrative {
+                            sink.emit(&AkhMessage::narrative(delta, "acp"));
+                        }
                     }
                     StreamEvent::Thinking(delta) => {
                         last_keepalive = Instant::now();
@@ -668,7 +736,7 @@ impl Agent {
                             Ok(t) => t,
                             Err(e) => {
                                 sink.emit(&AkhMessage::error("llm", e.to_string()));
-                                return Some(());
+                                return Some(AgenticTurnOutcome::Refused);
                             }
                         }
                     }
@@ -698,6 +766,27 @@ impl Agent {
                     mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
                     "no tool calls: evaluating completion"
                 );
+
+                // Explicit contracts apply to interactive and dispatch turns.
+                // Evaluate before the empty-answer guard so every premature
+                // declaration receives actionable next-gate feedback.
+                if let Some(controller) = &completion_controller
+                    && let super::completion_controller::CompletionDecision::Continue { feedback } =
+                        controller.completion_decision()
+                {
+                    let retry_budget_exhausted = budget.note_no_work_retry();
+                    tracing::info!(
+                        agent_id,
+                        next_gate = controller.next_gate_label(),
+                        retry_budget_exhausted,
+                        "completion contract not yet satisfied"
+                    );
+                    if retry_budget_exhausted {
+                        break TurnStop::ContractUnsatisfied;
+                    }
+                    conversation.push(json!({"role": "user", "content": feedback}));
+                    continue;
+                }
 
                 // Check for empty answer first (WI-259 wedge fix): the model
                 // stopped calling tools but produced no answer text. This must
@@ -809,18 +898,19 @@ impl Agent {
                 // staging; a no-op if no sink is installed or capture is
                 // opted out).
                 self.emit_turn_wal(engine, agent_id, user_prompt, answer, &tool_trace);
-                // Streaming already emitted the answer as deltas; only the
-                // non-streaming fallback still needs to emit it.
-                if used_fallback {
+                // Ordinary streaming already emitted the answer as deltas.
+                // Controlled streaming held it provisionally until this host
+                // post-condition passed, so release the accepted answer now.
+                if used_fallback || defer_narrative {
                     sink.emit(&AkhMessage::narrative(answer, "acp"));
                 }
-                return Some(());
+                return Some(AgenticTurnOutcome::Completed);
             }
 
             // Tool round. Any prose the model emitted alongside its tool calls is
             // reasoning; on the fallback path it was not streamed, so surface it
             // as a thinking step here (the streaming path already did).
-            if used_fallback {
+            if used_fallback || defer_narrative {
                 let reasoning = turn.content.trim();
                 if !reasoning.is_empty() {
                     sink.emit(&AkhMessage::Reasoning {
@@ -854,6 +944,9 @@ impl Agent {
                     ),
                 ));
                 tool_trace.push(outcome.trace);
+                if let Some(controller) = &mut completion_controller {
+                    controller.observe(&outcome.exec_name, &outcome.exec_args, outcome.success);
+                }
                 conversation.push(json!({"role": "tool", "content": outcome.result}));
             }
         };
@@ -870,7 +963,27 @@ impl Agent {
                 agent_id,
                 "agentic turn cancelled (idle watchdog); ending without forced synthesis"
             );
-            return Some(());
+            return Some(AgenticTurnOutcome::Completed);
+        }
+
+        // An explicit contract is a hard post-condition, not a suggestion for
+        // the forced-synthesis path. Do not let a model narrate success, record
+        // a completed conversation turn, or write a completed-turn WAL entry
+        // after the controller's bounded retry budget is exhausted.
+        if completion_controller.as_ref().is_some_and(|controller| {
+            controller.completion_decision()
+                != super::completion_controller::CompletionDecision::Complete
+        }) {
+            let missing = completion_controller
+                .as_ref()
+                .and_then(|controller| controller.next_gate_label())
+                .unwrap_or("unknown evidence");
+            sink.emit(&AkhMessage::error(
+                "completion_contract_unsatisfied",
+                format!("controlled turn failed: missing `{missing}` evidence"),
+            ));
+            turn_metrics.log();
+            return Some(AgenticTurnOutcome::Refused);
         }
 
         // Budget exhausted — force one tool-free synthesis ("reflect and answer")
@@ -891,7 +1004,7 @@ impl Agent {
         );
         // Log turn-level metrics summary (total prompt size, request count).
         turn_metrics.log();
-        Some(())
+        Some(AgenticTurnOutcome::Completed)
     }
 
     /// Execute one model-requested tool call, running it through every ADR 089
@@ -1260,6 +1373,49 @@ fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
         .collect()
 }
 
+/// Re-add manifests named by a completion contract after catalog retrieval or
+/// capping. A contract is not satisfiable if its evidence producers are hidden.
+fn pin_required_tools(
+    selected: &mut Vec<Value>,
+    full: &[Value],
+    required: &[&str],
+) -> Vec<String> {
+    let mut offered: std::collections::HashSet<String> = selected
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(String::from))
+        .collect();
+    let mut missing = Vec::new();
+    for name in required {
+        if offered.contains(*name) {
+            continue;
+        }
+        if let Some(manifest) = full
+            .iter()
+            .find(|tool| tool["function"]["name"].as_str() == Some(*name))
+        {
+            selected.push(manifest.clone());
+            offered.insert((*name).to_string());
+        } else {
+            tracing::warn!(
+                tool = *name,
+                "completion contract names an unavailable tool"
+            );
+            missing.push((*name).to_string());
+        }
+    }
+    missing
+}
+
+/// Insert bounded host context adjacent to the active request while preserving
+/// the context manager's ordering of core memory and recalled history.
+fn insert_system_before_last_user(conversation: &mut Vec<Value>, content: String) {
+    let at = conversation
+        .iter()
+        .rposition(|message| message["role"] == "user")
+        .unwrap_or(conversation.len());
+    conversation.insert(at, json!({"role": "system", "content": content}));
+}
+
 /// Phase 44m (ADR 065 D12.1): group the deferred-tool set — what was in
 /// `full_catalog` but NOT in `tools` (the offered set) — by origin and reason
 /// for the ACP `_akh/usage` panel. The reason is inferred from which env var
@@ -1578,7 +1734,7 @@ mod tests {
                 false,
                 &state_a,
             ),
-            Some(())
+            Some(AgenticTurnOutcome::Completed)
         );
         assert_eq!(
             agent.run_agentic_turn_with_conversation_state(
@@ -1590,7 +1746,7 @@ mod tests {
                 false,
                 &state_b,
             ),
-            Some(())
+            Some(AgenticTurnOutcome::Completed)
         );
         assert_eq!(
             agent.run_agentic_turn_with_conversation_state(
@@ -1602,7 +1758,7 @@ mod tests {
                 false,
                 &state_a,
             ),
-            Some(())
+            Some(AgenticTurnOutcome::Completed)
         );
 
         let observed = observed.lock().unwrap_or_else(|e| e.into_inner());
@@ -1687,8 +1843,14 @@ mod tests {
             *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
             wake.notify_all();
 
-            assert_eq!(first.join().expect("first turn thread"), Some(()));
-            assert_eq!(second.join().expect("second turn thread"), Some(()));
+            assert_eq!(
+                first.join().expect("first turn thread"),
+                Some(AgenticTurnOutcome::Completed)
+            );
+            assert_eq!(
+                second.join().expect("second turn thread"),
+                Some(AgenticTurnOutcome::Completed)
+            );
             first_entered && second_entered
         });
 
@@ -2567,10 +2729,16 @@ mod tests {
             conversation: &[Value],
             tools: &[Value],
             request_seq: usize,
-            _on_event: &mut dyn FnMut(crate::agent::ollama::StreamEvent),
+            on_event: &mut dyn FnMut(crate::agent::ollama::StreamEvent),
         ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
         {
-            self.chat_with_tools(agent_id, conversation, tools, request_seq)
+            let turn = self.chat_with_tools(agent_id, conversation, tools, request_seq)?;
+            if !turn.content.is_empty() {
+                on_event(crate::agent::ollama::StreamEvent::Content(
+                    turn.content.clone(),
+                ));
+            }
+            Ok(turn)
         }
         fn capabilities(&self) -> crate::agent::chat_backend::ModelCapabilities {
             crate::agent::chat_backend::ModelCapabilities {
@@ -2730,5 +2898,283 @@ mod tests {
             2,
             "should make exactly 2 calls: one with tool calls, one with completion"
         );
+    }
+
+    // --- Evidence-gated completion controller ---
+
+    struct NamedSuccessTool(&'static str);
+
+    impl Tool for NamedSuccessTool {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: self.0.into(),
+                description: format!("test evidence producer {}", self.0),
+                parameters: vec![],
+            }
+        }
+
+        fn execute(&self, _engine: &Engine, _input: ToolInput) -> AgentResult<ToolOutput> {
+            Ok(ToolOutput::ok(format!("{} passed", self.0)))
+        }
+
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: self.0.into(),
+                description: format!("test evidence producer {}", self.0),
+                parameters: vec![],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: String::new(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+    }
+
+    struct OrderedEvidenceBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        saw_contract: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for OrderedEvidenceBackend {
+        fn label(&self) -> &str {
+            "ordered-evidence"
+        }
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            if conversation.iter().any(|message| {
+                message["role"] == "system"
+                    && message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("## Completion Contract"))
+            }) {
+                self.saw_contract
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool = match n {
+                0 => Some("memory_write"), // too early: must not be banked
+                1 => None,                 // premature declaration: must retry
+                2 => Some("edit"),
+                3 => Some("compile_feedback"),
+                4 => Some("memory_write"),
+                _ => None,
+            };
+            Ok(match tool {
+                Some(name) => crate::agent::ollama::AssistantTurn {
+                    content: String::new(),
+                    tool_calls: vec![crate::agent::ollama::ToolCall {
+                        name: name.into(),
+                        arguments: json!({}),
+                    }],
+                    ..Default::default()
+                },
+                None => crate::agent::ollama::AssistantTurn {
+                    content: if n == 1 {
+                        "I am done too early".into()
+                    } else {
+                        "All evidence gates passed".into()
+                    },
+                    tool_calls: vec![],
+                    ..Default::default()
+                },
+            })
+        }
+
+        fn chat_with_tools_streaming(
+            &self,
+            agent_id: &str,
+            conversation: &[Value],
+            tools: &[Value],
+            request_seq: usize,
+            on_event: &mut dyn FnMut(crate::agent::ollama::StreamEvent),
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            let turn = self.chat_with_tools(agent_id, conversation, tools, request_seq)?;
+            if !turn.content.is_empty() {
+                on_event(crate::agent::ollama::StreamEvent::Content(
+                    turn.content.clone(),
+                ));
+            }
+            Ok(turn)
+        }
+    }
+
+    #[test]
+    fn explicit_contract_enforces_ordered_evidence_in_interactive_turns() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        for name in ["edit", "compile_feedback", "memory_write"] {
+            agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .register(Box::new(NamedSuccessTool(name)));
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let saw_contract = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        agent.set_chat_backend(std::sync::Arc::new(OrderedEvidenceBackend {
+            calls: calls.clone(),
+            saw_contract: saw_contract.clone(),
+        }));
+        let prompt = r#"Train one slice.
+<akh:control>{"stages":[{"label":"mutation","any_of":[{"tool":"edit"}]},{"label":"verified","any_of":[{"tool":"compile_feedback"}]},{"label":"learned","any_of":[{"tool":"memory_write"}]}]}</akh:control>"#;
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "ptah",
+                prompt,
+                &sink,
+                &cancel,
+                false,
+                &agent.conversation_state,
+            ),
+            Some(AgenticTurnOutcome::Completed)
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "premature prose and out-of-order writeback must not end the turn"
+        );
+        assert!(saw_contract.load(std::sync::atomic::Ordering::SeqCst));
+        let narratives = sink
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                AkhMessage::Narrative { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            narratives,
+            ["All evidence gates passed"],
+            "premature streamed prose must remain provisional"
+        );
+    }
+
+    #[test]
+    fn exhausted_contract_fails_without_forced_synthesis() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .register(Box::new(NamedSuccessTool("edit")));
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(AlwaysIdleBackend {
+            calls: calls.clone(),
+        }));
+        let prompt = r#"Do controlled work.
+<akh:control>{"stages":[{"label":"mutation","any_of":[{"tool":"edit"}]}]}</akh:control>"#;
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "ptah",
+                prompt,
+                &sink,
+                &cancel,
+                false,
+                &agent.conversation_state,
+            ),
+            Some(AgenticTurnOutcome::Refused)
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "contract exhaustion must not spend a fifth forced-synthesis call"
+        );
+        let messages = sink.messages();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            AkhMessage::Error { code, .. } if code == "completion_contract_unsatisfied"
+        )));
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            AkhMessage::Narrative { .. }
+        )));
+    }
+
+    #[test]
+    fn repeat_loop_cannot_bypass_an_open_contract() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        {
+            let registry = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            registry.register(Box::new(DummyTool));
+            registry.register(Box::new(NamedSuccessTool("edit")));
+        }
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
+            calls: calls.clone(),
+            flip_after_first_call: None,
+        }));
+        let prompt = r#"Do controlled work.
+<akh:control>{"stages":[{"label":"mutation","any_of":[{"tool":"edit"}]}]}</akh:control>"#;
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "ptah",
+                prompt,
+                &sink,
+                &cancel,
+                false,
+                &agent.conversation_state,
+            ),
+            Some(AgenticTurnOutcome::Refused)
+        );
+        assert!(
+            calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the repeated tool call should trip the loop detector"
+        );
+        assert!(sink.messages().iter().any(|message| matches!(
+            message,
+            AkhMessage::Error { code, .. } if code == "completion_contract_unsatisfied"
+        )));
+    }
+
+    #[test]
+    fn required_contract_tools_are_pinned_after_catalog_scoping() {
+        let full = vec![
+            json!({"function":{"name":"edit"}}),
+            json!({"function":{"name":"compile_feedback"}}),
+            json!({"function":{"name":"memory_write"}}),
+        ];
+        let mut selected = vec![full[0].clone()];
+        let missing = pin_required_tools(
+            &mut selected,
+            &full,
+            &["edit", "compile_feedback", "memory_write"],
+        );
+        assert!(missing.is_empty());
+        let names = selected
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["edit", "compile_feedback", "memory_write"]);
     }
 }
