@@ -108,6 +108,37 @@ pub struct GoalGenerationResult {
     pub drive_strengths: [f32; 4],
 }
 
+/// Remove proposals whose canonical goal identity is already live, including
+/// collisions between the activated and dormant result sets.
+pub(crate) fn retain_novel_proposals(
+    result: &mut GoalGenerationResult,
+    existing: &[Goal],
+    engine: &Engine,
+) {
+    let mut seen_identities = existing
+        .iter()
+        .map(|goal| engine.resolve_label(goal.symbol_id))
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen_descriptions = existing
+        .iter()
+        .map(|goal| super::goal::canonical_goal_label(&goal.description))
+        .collect::<std::collections::HashSet<_>>();
+    let before = result.activated.len() + result.dormant.len();
+    let mut retain = |proposal: &GoalProposal| {
+        let key = super::goal::canonical_goal_label(&proposal.description);
+        if seen_identities.contains(&key) || seen_descriptions.contains(&key) {
+            false
+        } else {
+            seen_identities.insert(key.clone());
+            seen_descriptions.insert(key);
+            true
+        }
+    };
+    result.activated.retain(&mut retain);
+    result.dormant.retain(retain);
+    result.deduplicated += before - result.activated.len() - result.dormant.len();
+}
+
 // ---------------------------------------------------------------------------
 // Top-level orchestrator
 // ---------------------------------------------------------------------------
@@ -1058,6 +1089,56 @@ mod tests {
         assert_eq!(config.max_dormant, 20);
         assert_eq!(config.max_open_goals, 5);
         assert_eq!(config.abandon_after_cycles, 15);
+    }
+
+    #[test]
+    fn retain_novel_proposals_uses_canonical_goal_identity() {
+        let engine = Engine::new(crate::engine::EngineConfig::default()).unwrap();
+        let predicates = AgentPredicates::init(&engine).unwrap();
+        let existing = vec![
+            goal::create_goal(&engine, "alpha", 1, "done", &predicates).unwrap(),
+            goal::create_goal(&engine, "goal:desc:inner", 1, "done", &predicates).unwrap(),
+            goal::create_goal_with_identity(
+                &engine,
+                "scheduled review",
+                "recurrence:42:1000",
+                1,
+                "done",
+                &predicates,
+            )
+            .unwrap(),
+        ];
+        let proposal = |description: String| GoalProposal {
+            description,
+            rationale: "test".into(),
+            source: GoalSource::DriveExceeded {
+                drive: "curiosity".into(),
+                strength: 1.0,
+            },
+            priority_suggestion: 1,
+            success_criteria: "done".into(),
+            conflicts_with: Vec::new(),
+            feasibility: 1.0,
+        };
+        let shared_prefix = "x".repeat(120);
+        let mut result = GoalGenerationResult {
+            activated: vec![
+                proposal("goal: alpha".into()),
+                proposal("goal:desc:inner".into()),
+                proposal("scheduled review".into()),
+                proposal(format!("{shared_prefix}a")),
+            ],
+            dormant: vec![proposal(format!("{shared_prefix}b"))],
+            deduplicated: 0,
+            infeasible: 0,
+            drive_strengths: [0.0; 4],
+        };
+
+        retain_novel_proposals(&mut result, &existing, &engine);
+
+        assert_eq!(result.activated.len(), 1);
+        assert!(result.dormant.is_empty());
+        assert_eq!(result.deduplicated, 4);
     }
 
     #[test]

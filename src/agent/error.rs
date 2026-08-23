@@ -43,6 +43,19 @@ pub enum AgentError {
     )]
     GoalNotFound { goal_id: u64 },
 
+    #[error(
+        "goal {goal_id} already has parent {existing_parent}; cannot attach it to {requested_parent}"
+    )]
+    #[diagnostic(
+        code(akh::agent::goal_parent_conflict),
+        help("Use the existing parent or create a goal with a distinct description.")
+    )]
+    GoalParentConflict {
+        goal_id: u64,
+        existing_parent: u64,
+        requested_parent: u64,
+    },
+
     #[error("consolidation failed: {message}")]
     #[diagnostic(
         code(akh::agent::consolidation),

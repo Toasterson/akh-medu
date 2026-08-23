@@ -1017,6 +1017,11 @@ impl AgentDaemon {
 
         // Phase 3: Brief lock — apply results (push goals, store provenance).
         let mut agent = self.lock_agent();
+        super::goal_generation::retain_novel_proposals(
+            &mut gen_result,
+            &agent.goals,
+            &agent.engine,
+        );
 
         for proposal in &gen_result.activated {
             match super::goal::create_goal(
@@ -1041,7 +1046,7 @@ impl AgentDaemon {
                     if let Err(e) = agent.engine.store_provenance(&mut prov) {
                         tracing::debug!("failed to store goal provenance: {e}");
                     }
-                    agent.goals.push(g);
+                    super::goal::insert_if_novel(&mut agent.goals, g);
                 }
                 Err(e) => tracing::debug!("failed to create activated goal: {e}"),
             }
@@ -1063,7 +1068,7 @@ impl AgentDaemon {
                         super::goal::GoalStatus::Dormant,
                         &agent.predicates,
                     );
-                    agent.goals.push(g);
+                    super::goal::insert_if_novel(&mut agent.goals, g);
                 }
                 Err(e) => tracing::debug!("failed to create dormant goal: {e}"),
             }

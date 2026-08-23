@@ -1121,6 +1121,11 @@ impl Agent {
         priority: u8,
         criteria: &str,
     ) -> AgentResult<SymbolId> {
+        if let Some(existing) =
+            goal::existing_by_description(&self.engine, &self.goals, description)
+        {
+            return Ok(existing.symbol_id);
+        }
         let g = goal::create_goal(
             &self.engine,
             description,
@@ -1129,7 +1134,7 @@ impl Agent {
             &self.predicates,
         )?;
         let id = g.symbol_id;
-        self.goals.push(g);
+        goal::insert_if_novel(&mut self.goals, g);
         Ok(id)
     }
 
@@ -1154,6 +1159,41 @@ impl Agent {
         criteria: &str,
         parent: Option<SymbolId>,
     ) -> AgentResult<goal::Goal> {
+        if let Some(existing_idx) = self.goals.iter().position(|existing| {
+            self.engine.resolve_label(existing.symbol_id)
+                == goal::canonical_goal_label(description)
+        }) {
+            let existing_id = self.goals[existing_idx].symbol_id;
+            if let Some(parent_id) = parent {
+                if let Some(existing_parent) = self.goals[existing_idx].parent
+                    && existing_parent != parent_id
+                {
+                    return Err(AgentError::GoalParentConflict {
+                        goal_id: existing_id.get(),
+                        existing_parent: existing_parent.get(),
+                        requested_parent: parent_id.get(),
+                    });
+                }
+                self.engine.add_triple(&crate::graph::Triple::new(
+                    parent_id,
+                    self.predicates.child_goal,
+                    existing_id,
+                ))?;
+                self.engine.add_triple(&crate::graph::Triple::new(
+                    existing_id,
+                    self.predicates.parent_goal,
+                    parent_id,
+                ))?;
+                self.goals[existing_idx].parent = Some(parent_id);
+                if let Some(parent_goal) =
+                    self.goals.iter_mut().find(|goal| goal.symbol_id == parent_id)
+                    && !parent_goal.children.contains(&existing_id)
+                {
+                    parent_goal.children.push(existing_id);
+                }
+            }
+            return Ok(self.goals[existing_idx].clone());
+        }
         let mut g = goal::create_goal(
             &self.engine,
             description,
@@ -1175,11 +1215,13 @@ impl Agent {
             ))?;
             g.parent = Some(parent_id);
             if let Some(p) = self.goals.iter_mut().find(|x| x.symbol_id == parent_id) {
-                p.children.push(g.symbol_id);
+                if !p.children.contains(&g.symbol_id) {
+                    p.children.push(g.symbol_id);
+                }
             }
         }
 
-        self.goals.push(g.clone());
+        goal::insert_if_novel(&mut self.goals, g.clone());
         Ok(g)
     }
 
@@ -1770,6 +1812,15 @@ impl Agent {
             if vsa_goals_created >= goal_generation::MAX_COMPETENCE_GAP_GOALS {
                 break;
             }
+            if goal::existing_by_description(
+                &self.engine,
+                &self.goals,
+                &proposal.description,
+            )
+            .is_some()
+            {
+                continue;
+            }
             match goal::create_goal(
                 &self.engine,
                 &proposal.description,
@@ -1791,8 +1842,9 @@ impl Agent {
                     ) {
                         tracing::debug!("failed to set Proposed status for gap goal: {e}");
                     }
-                    self.goals.push(g);
-                    vsa_goals_created += 1;
+                    if goal::insert_if_novel(&mut self.goals, g) {
+                        vsa_goals_created += 1;
+                    }
                 }
                 Err(e) => {
                     tracing::debug!("failed to create competence gap goal: {e}");
@@ -2771,8 +2823,15 @@ impl Agent {
             .map(|(d, p, c)| (d.as_str(), *p, c.as_str()))
             .collect();
 
+        let existing_goals = self.goals.clone();
         let parent = &mut self.goals[parent_idx];
-        let children = goal::decompose_goal(&self.engine, parent, &sub_tuples, &self.predicates)?;
+        let children = goal::decompose_goal(
+            &self.engine,
+            parent,
+            &sub_tuples,
+            &existing_goals,
+            &self.predicates,
+        )?;
 
         let child_ids: Vec<SymbolId> = children.iter().map(|c| c.symbol_id).collect();
 
@@ -2811,7 +2870,7 @@ impl Agent {
                 .filter_map(|&(blocker, _)| child_ids.get(blocker).copied())
                 .collect();
             child.blocked_by = blockers;
-            self.goals.push(child);
+            goal::insert_if_novel(&mut self.goals, child);
         }
 
         // Record HTN provenance.
@@ -3021,11 +3080,13 @@ impl Agent {
                 } => {
                     // Find the goal, reformulate it, add the replacement.
                     if let Some(idx) = self.goals.iter().position(|g| g.symbol_id == *goal_id) {
+                        let existing_goals = self.goals.clone();
                         let original = &mut self.goals[idx];
                         if let Ok(replacement) = goal::reformulate_goal(
                             &self.engine,
                             original,
                             relaxed_criteria,
+                            &existing_goals,
                             &self.predicates,
                         ) {
                             let category = metacognition::categorize_goal(&replacement);
@@ -3046,8 +3107,9 @@ impl Agent {
                                 tracing::debug!("failed to store reformulation provenance: {e}");
                             }
 
-                            self.goals.push(replacement);
-                            applied += 1;
+                            if goal::insert_if_novel(&mut self.goals, replacement) {
+                                applied += 1;
+                            }
                         }
                     }
                 }
@@ -3175,6 +3237,7 @@ impl Agent {
                 gen_result.dormant.push(cp);
             }
         }
+        goal_generation::retain_novel_proposals(&mut gen_result, &self.goals, &self.engine);
 
         // Count currently open (non-terminal) goals to enforce the hard cap.
         let max_open = self.config.goal_generation.max_open_goals;
@@ -3228,7 +3291,7 @@ impl Agent {
                 tracing::debug!("failed to store goal generation provenance: {e}");
             }
 
-            self.goals.push(g);
+            goal::insert_if_novel(&mut self.goals, g);
         }
 
         // Store dormant proposals as goals with Dormant status,
@@ -3266,7 +3329,7 @@ impl Agent {
                 GoalStatus::Dormant,
                 &self.predicates,
             )?;
-            self.goals.push(g);
+            goal::insert_if_novel(&mut self.goals, g);
         }
 
         // Log generation result to WM (include open-goal count for observability).

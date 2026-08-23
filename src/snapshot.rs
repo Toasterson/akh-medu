@@ -327,8 +327,11 @@ pub fn capture_snapshot_at_fence(
         known_curiosity_factor: c.known_curiosity_factor,
     }];
 
-    let goals: Vec<goal::Model> = agent
-        .goals
+    // Goal symbols are relational primary keys. Autonomous proposal sources
+    // can converge on the same semantic goal, so capture one canonical row
+    // per symbol even if a legacy/imported in-memory list contains repeats.
+    let unique_goals = unique_goals_by_symbol(&agent.goals);
+    let goals: Vec<goal::Model> = unique_goals
         .iter()
         .map(|g| goal_to_model(akh_id, g))
         .collect::<SnapshotResult<_>>()?;
@@ -336,9 +339,17 @@ pub fn capture_snapshot_at_fence(
     // dependency edges.
     let mut goal_hierarchy = Vec::new();
     let mut goal_dependencies = Vec::new();
-    for g in &agent.goals {
+    for g in unique_goals {
         let goal_id = relational_symbol_id("goal", g.symbol_id)?;
-        for (position, child) in g.children.iter().enumerate() {
+        let children = unique_symbol_ids(&g.children);
+        if children.len() != g.children.len() {
+            tracing::warn!(
+                goal_id = g.symbol_id.get(),
+                discarded = g.children.len() - children.len(),
+                "discarding repeated goal hierarchy edges before relational snapshot"
+            );
+        }
+        for (position, child) in children.iter().enumerate() {
             goal_hierarchy.push(goal_hierarchy::Model {
                 akh_id,
                 parent_id: goal_id,
@@ -348,11 +359,19 @@ pub fn capture_snapshot_at_fence(
                 })?,
             });
         }
-        for blocker in &g.blocked_by {
+        let blockers = unique_symbol_ids(&g.blocked_by);
+        if blockers.len() != g.blocked_by.len() {
+            tracing::warn!(
+                goal_id = g.symbol_id.get(),
+                discarded = g.blocked_by.len() - blockers.len(),
+                "discarding repeated goal dependency edges before relational snapshot"
+            );
+        }
+        for blocker in blockers {
             goal_dependencies.push(goal_dependency::Model {
                 akh_id,
                 goal_id,
-                blocking_goal_id: relational_symbol_id("blocking goal", *blocker)?,
+                blocking_goal_id: relational_symbol_id("blocking goal", blocker)?,
             });
         }
     }
@@ -549,6 +568,40 @@ pub fn capture_snapshot_at_fence(
         psyche,
         extra: Some(extra),
     })
+}
+
+fn unique_goals_by_symbol(goals: &[crate::agent::Goal]) -> Vec<&crate::agent::Goal> {
+    // Agent goal lookups use `.iter().find(...)`, so the first occurrence is
+    // already the live authority. Preserve that same deterministic policy at
+    // the relational boundary and make divergent repeats observable.
+    let mut positions = std::collections::HashMap::with_capacity(goals.len());
+    let mut unique = Vec::with_capacity(goals.len());
+    for candidate in goals {
+        if let Some(&position) = positions.get(&candidate.symbol_id) {
+            let canonical: &crate::agent::Goal = unique[position];
+            let conflicting = match (
+                serde_json::to_value(canonical),
+                serde_json::to_value(candidate),
+            ) {
+                (Ok(canonical), Ok(candidate)) => canonical != candidate,
+                _ => true,
+            };
+            tracing::warn!(
+                goal_id = candidate.symbol_id.get(),
+                conflicting,
+                "discarding repeated goal symbol before relational snapshot; first live entry is authoritative"
+            );
+        } else {
+            positions.insert(candidate.symbol_id, unique.len());
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+fn unique_symbol_ids(ids: &[crate::symbol::SymbolId]) -> Vec<crate::symbol::SymbolId> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
 }
 
 /// Persist a previously-[captured](capture_snapshot) snapshot to Postgres
@@ -2555,6 +2608,36 @@ mod tests {
             back[0].blocked_by,
             vec![SymbolId::new(4).unwrap()],
             "blocked_by reconstructed from goal_dependencies",
+        );
+
+        let mut duplicate = goal.clone();
+        duplicate.status = GoalStatus::Dormant;
+        duplicate.children.push(SymbolId::new(10).unwrap());
+        let repeated = [goal, duplicate];
+        let unique = unique_goals_by_symbol(&repeated);
+        assert_eq!(
+            unique.len(),
+            1,
+            "relational goal primary keys must be unique"
+        );
+        assert_eq!(unique[0].symbol_id, SymbolId::new(7).unwrap());
+        assert!(matches!(unique[0].status, GoalStatus::Failed { .. }));
+        assert_eq!(
+            unique[0].children,
+            vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            "first live entry is the deterministic authority"
+        );
+
+        let repeated_edges = [
+            SymbolId::new(8).unwrap(),
+            SymbolId::new(8).unwrap(),
+            SymbolId::new(9).unwrap(),
+            SymbolId::new(8).unwrap(),
+        ];
+        assert_eq!(
+            unique_symbol_ids(&repeated_edges),
+            vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            "relational edges retain first-seen order with unique primary keys"
         );
     }
 
