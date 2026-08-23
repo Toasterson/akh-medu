@@ -26,6 +26,10 @@ pub struct Model {
     /// Heartbeat: last time any host reported this Akh alive. Part of the
     /// split-brain guard on relocation (see sub-phase 38g).
     pub last_seen: Option<DateTimeUtc>,
+
+    /// Monotonic fencing generation for the current residency owner. A
+    /// snapshot is publishable only by the owner that captured this epoch.
+    pub residency_epoch: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

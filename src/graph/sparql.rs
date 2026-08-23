@@ -22,6 +22,8 @@ const COMPARTMENT_NS: &str = "https://akh-medu.dev/compartment/";
 /// Persistent SPARQL-capable RDF store.
 pub struct SparqlStore {
     store: Store,
+    #[cfg(test)]
+    fail_next_transition: std::sync::atomic::AtomicBool,
 }
 
 impl SparqlStore {
@@ -30,7 +32,11 @@ impl SparqlStore {
         let store = Store::new().map_err(|e| GraphError::Sparql {
             message: format!("failed to create oxigraph store: {e}"),
         })?;
-        Ok(Self { store })
+        Ok(Self {
+            store,
+            #[cfg(test)]
+            fail_next_transition: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     /// Open or create a persistent SPARQL store at the given path.
@@ -47,7 +53,11 @@ impl SparqlStore {
             let store = Store::open(path).map_err(|e| GraphError::Sparql {
                 message: format!("failed to open oxigraph store at {}: {e}", path.display()),
             })?;
-            return Ok(Self { store });
+            return Ok(Self {
+                store,
+                #[cfg(test)]
+                fail_next_transition: std::sync::atomic::AtomicBool::new(false),
+            });
         }
         // sparql-persist not enabled — use an in-memory store instead.
         #[cfg(not(feature = "sparql-persist"))]
@@ -148,6 +158,76 @@ impl SparqlStore {
             message: format!("remove triple failed: {e}"),
         })?;
         Ok(())
+    }
+
+    fn quad_for_triple(triple: &Triple) -> GraphResult<Quad> {
+        let subject = Self::symbol_to_iri(triple.subject);
+        let predicate = Self::symbol_to_iri(triple.predicate);
+        let object = Self::symbol_to_iri(triple.object);
+        match triple.compartment_id.as_deref() {
+            Some(id) => Ok(Quad::new(
+                subject,
+                predicate,
+                object,
+                Self::compartment_to_iri(id)?,
+            )),
+            None => Ok(Quad::new(
+                subject,
+                predicate,
+                object,
+                GraphNameRef::DefaultGraph,
+            )),
+        }
+    }
+
+    /// Apply one live graph transition atomically to the RDF projection.
+    ///
+    /// Building every quad before opening the transaction makes malformed
+    /// compartments side-effect-free. The engine can therefore roll its
+    /// in-memory graph back if this returns an error without leaving a partial
+    /// replacement visible to SPARQL readers.
+    pub(crate) fn apply_transition(
+        &self,
+        retracts: &[Triple],
+        assertion: Option<&Triple>,
+    ) -> GraphResult<()> {
+        let retract_quads = retracts
+            .iter()
+            .map(Self::quad_for_triple)
+            .collect::<GraphResult<Vec<_>>>()?;
+        let assertion_quad = assertion.map(Self::quad_for_triple).transpose()?;
+
+        #[cfg(test)]
+        if self
+            .fail_next_transition
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return Err(GraphError::Sparql {
+                message: "injected SPARQL transition failure".into(),
+            });
+        }
+
+        let mut transaction = self
+            .store
+            .start_transaction()
+            .map_err(|e| GraphError::Sparql {
+                message: format!("start SPARQL transition failed: {e}"),
+            })?;
+        for quad in &retract_quads {
+            transaction.remove(quad);
+        }
+        if let Some(quad) = assertion_quad.as_ref() {
+            transaction.insert(quad);
+        }
+        transaction.commit().map_err(|e| GraphError::Sparql {
+            message: format!("commit SPARQL transition failed: {e}"),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_transition_for_test(&self) {
+        self.fail_next_transition
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Remove all triples in a named compartment graph.
@@ -251,25 +331,7 @@ impl SparqlStore {
         // before its named-graph IRI is rejected.
         let quads = triples
             .iter()
-            .map(|triple| {
-                let subject = Self::symbol_to_iri(triple.subject);
-                let predicate = Self::symbol_to_iri(triple.predicate);
-                let object = Self::symbol_to_iri(triple.object);
-                match triple.compartment_id.as_deref() {
-                    Some(id) => Ok(Quad::new(
-                        subject,
-                        predicate,
-                        object,
-                        Self::compartment_to_iri(id)?,
-                    )),
-                    None => Ok(Quad::new(
-                        subject,
-                        predicate,
-                        object,
-                        GraphNameRef::DefaultGraph,
-                    )),
-                }
-            })
+            .map(Self::quad_for_triple)
             .collect::<GraphResult<Vec<_>>>()?;
         let mut transaction = self
             .store

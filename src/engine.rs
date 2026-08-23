@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
@@ -183,6 +183,14 @@ pub struct Engine {
     nart_registry: RwLock<crate::graph::nart::NartRegistry>,
     predicate_hierarchy: RwLock<Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>,
     hierarchy_dirty: AtomicBool,
+    /// Serializes compound live graph transitions. In particular, functional
+    /// contradiction discovery, displaced-edge removal, merged insertion,
+    /// SPARQL publication, and WAL emission must describe one state change.
+    mutation_lock: Mutex<()>,
+    /// Set during sleep/relocation after the last capture begins draining.
+    /// Existing Arc handles then fail closed instead of mutating a detached
+    /// source engine after its WAL flusher and residency have moved on.
+    mutations_quiesced: AtomicBool,
     /// Phase 38b: optional write-ahead-log sink. Set once when the daemon wires
     /// a Postgres-backed `MutationLog` for this workspace; absent in local-only
     /// mode. Every successful assert/retract is recorded here (best-effort,
@@ -637,6 +645,8 @@ impl Engine {
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
             predicate_hierarchy: RwLock::new(None),
             hierarchy_dirty: AtomicBool::new(true),
+            mutation_lock: Mutex::new(()),
+            mutations_quiesced: AtomicBool::new(false),
             mutation_sink: std::sync::OnceLock::new(),
             turn_body_reader: std::sync::OnceLock::new(),
             inference_options: Arc::new(crate::inference_options::InferenceOptions::default()),
@@ -764,6 +774,13 @@ impl Engine {
     /// built by [`crate::agent::agentic_chat`]'s capture hook.
     #[inline]
     pub fn record_turn(&self, payload: serde_json::Value) {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.mutations_quiesced.load(Ordering::Acquire) {
+            return;
+        }
         self.record_mutation(crate::mutation::MutationKind::Turn, payload);
     }
 
@@ -850,6 +867,49 @@ impl Engine {
             identity: self.triple_identity(triple),
             provenance,
             symbols,
+        })
+    }
+
+    /// Reproduce [`KnowledgeGraph::insert_triple`]'s duplicate-edge merge
+    /// without mutating the graph. This lets the full post-insert WAL envelope
+    /// be validated before any displaced edge is removed.
+    fn merged_assertion(&self, incoming: &Triple) -> Triple {
+        let Some(existing) = self.knowledge_graph.triple(
+            incoming.subject,
+            incoming.predicate,
+            incoming.object,
+        ) else {
+            return incoming.clone();
+        };
+        Triple {
+            subject: incoming.subject,
+            predicate: incoming.predicate,
+            object: incoming.object,
+            confidence: existing.confidence.max(incoming.confidence),
+            timestamp: incoming.timestamp,
+            provenance_id: incoming.provenance_id.or(existing.provenance_id),
+            // Duplicate insertion historically retains the owning compartment.
+            compartment_id: existing.compartment_id,
+        }
+    }
+
+    fn assertion_payload(
+        &self,
+        triple: &Triple,
+        prepared: PreparedAssertion,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "v": crate::mutation::ASSERT_MUTATION_VERSION,
+            "subject": triple.subject.get(),
+            "predicate": triple.predicate.get(),
+            "object": triple.object.get(),
+            "confidence": triple.confidence,
+            "timestamp": triple.timestamp,
+            "compartment": triple.compartment_id.clone(),
+            "provenance_id": triple.provenance_id,
+            "provenance": prepared.provenance,
+            "symbols": prepared.symbols,
+            "identity": prepared.identity.to_hex(),
         })
     }
 
@@ -942,21 +1002,42 @@ impl Engine {
     /// 2. **Insert**: KG + hypervector creation + SPARQL sync
     /// 3. **Post-insert**: Hierarchy invalidation, Skolem auto-grounding, rule macro expansion
     pub fn add_triple(&self, triple: &Triple) -> AkhResult<()> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.add_triple_locked(triple)
+    }
+
+    /// `add_triple` with the encompassing mutation lock already held.
+    fn add_triple_locked(&self, triple: &Triple) -> AkhResult<()> {
+        if self.mutations_quiesced.load(Ordering::Acquire) {
+            return Err(EngineError::InvalidConfig {
+                message: "engine is quiesced for residency handoff".into(),
+            }
+            .into());
+        }
         // Construct the complete replay envelope before any subsystem is
         // mutated. In particular, ContradictionPolicy::Replace must not retract
         // a live edge and emit its WAL record only to discover later that the
         // incoming assertion has an invalid symbol, compartment, or provenance
         // link.
-        let prepared = self.prepare_assertion(triple)?;
+        self.prepare_assertion(triple)?;
 
         // --- Self-referential guard ---
         self.reject_self_referential_assertion(triple)?;
+
+        // Duplicate live insertions merge metadata. Pre-compute and validate
+        // that exact post-insert edge; logging `triple` would make wake replace
+        // the merged live edge with lower confidence or clear/forge provenance.
+        let stored_triple = self.merged_assertion(triple);
+        let prepared = self.prepare_assertion(&stored_triple)?;
 
         // --- Phase 9 pre-insert: constraint check ---
         if self.phase9_config.enforce_constraints {
             let registry = self.constraint_registry.read().unwrap();
             if !registry.is_empty() {
-                let violations = registry.check_triple(triple, self);
+                let violations = registry.check_triple(&stored_triple, self);
                 if let Some(v) = violations.first() {
                     let msg = match v {
                         crate::graph::arity::ConstraintViolation::Arity { expected, actual, .. } => {
@@ -994,7 +1075,7 @@ impl Engine {
             let temp = self.temporal_registry.read().unwrap();
             let mv = self.multi_valued_predicates.read().unwrap();
             let contradictions = crate::graph::contradiction::check_contradictions(
-                self, triple, &func, &disj, Some(&temp), Some(&mv),
+                self, &stored_triple, &func, &disj, Some(&temp), Some(&mv),
             );
 
             if !contradictions.is_empty() {
@@ -1048,23 +1129,16 @@ impl Engine {
                         // replay-complete assertion are then emitted as one
                         // overflow-atomic `replace` record.
                         for c in &contradictions {
-                            if self.knowledge_graph.remove_triple(
+                            if let Some(existing) = self.knowledge_graph.triple(
                                 c.existing.subject,
                                 c.existing.predicate,
                                 c.existing.object,
-                            ) {
-                                replacement_retracts.push((
-                                    c.existing.subject,
-                                    c.existing.predicate,
-                                    c.existing.object,
-                                ));
-                                if let Some(ref sparql) = self.sparql {
-                                    let _ = sparql.remove_triple(
-                                        c.existing.subject,
-                                        c.existing.predicate,
-                                        c.existing.object,
-                                    );
-                                }
+                            ) && !replacement_retracts.iter().any(|prior: &Triple| {
+                                prior.subject == existing.subject
+                                    && prior.predicate == existing.predicate
+                                    && prior.object == existing.object
+                            }) {
+                                replacement_retracts.push(existing);
                             }
                         }
                     }
@@ -1073,17 +1147,48 @@ impl Engine {
         }
 
         // --- Core insertion ---
-        self.knowledge_graph.insert_triple(triple)?;
+        // Capture a same-key prior edge separately so an injected/storage
+        // SPARQL failure can restore the exact pre-transition graph.
+        let prior_same = self.knowledge_graph.triple(
+            stored_triple.subject,
+            stored_triple.predicate,
+            stored_triple.object,
+        );
+        for displaced in &replacement_retracts {
+            self.knowledge_graph.remove_triple(
+                displaced.subject,
+                displaced.predicate,
+                displaced.object,
+            );
+        }
+        self.knowledge_graph.replace_triple_exact(&stored_triple)?;
+
+        // SPARQL sees the same compound transition as the in-memory KG. If it
+        // cannot commit, restore every exact edge and publish no WAL record.
+        if let Some(ref sparql) = self.sparql
+            && let Err(error) = sparql.apply_transition(&replacement_retracts, Some(&stored_triple))
+        {
+            self.knowledge_graph.remove_triple(
+                stored_triple.subject,
+                stored_triple.predicate,
+                stored_triple.object,
+            );
+            if let Some(previous) = prior_same.as_ref() {
+                self.knowledge_graph.replace_triple_exact(previous)?;
+            }
+            for displaced in &replacement_retracts {
+                self.knowledge_graph.replace_triple_exact(displaced)?;
+            }
+            return Err(error.into());
+        }
 
         // Ensure all symbols in the triple have hypervectors
-        self.item_memory.get_or_create(&self.ops, triple.subject);
-        self.item_memory.get_or_create(&self.ops, triple.predicate);
-        self.item_memory.get_or_create(&self.ops, triple.object);
-
-        // Sync to SPARQL store if persistent
-        if let Some(ref sparql) = self.sparql {
-            sparql.insert_triple(triple)?;
-        }
+        self.item_memory
+            .get_or_create(&self.ops, stored_triple.subject);
+        self.item_memory
+            .get_or_create(&self.ops, stored_triple.predicate);
+        self.item_memory
+            .get_or_create(&self.ops, stored_triple.object);
 
         // --- Phase 9 post-insert: hierarchy invalidation ---
         // Check if this triple touches rel:generalizes or rel:inverse predicates
@@ -1091,7 +1196,7 @@ impl Engine {
             self.registry.lookup("rel:generalizes").ok_or(()),
             self.registry.lookup("rel:inverse").ok_or(()),
         )
-            && (triple.predicate == gen_sym || triple.predicate == inv_sym)
+            && (stored_triple.predicate == gen_sym || stored_triple.predicate == inv_sym)
         {
             self.hierarchy_dirty.store(true, Ordering::Release);
         }
@@ -1112,12 +1217,17 @@ impl Engine {
         self.identity_index.insert(
             identity,
             IdentityKey {
-                subject: triple.subject,
-                predicate: triple.predicate,
-                object: triple.object,
-                compartment_id: triple.compartment_id.clone(),
+                subject: stored_triple.subject,
+                predicate: stored_triple.predicate,
+                object: stored_triple.object,
+                compartment_id: stored_triple.compartment_id.clone(),
             },
         );
+        // Displaced identities are now stale. A later identity lookup rebuilds
+        // the whole index from the authoritative graph.
+        if !replacement_retracts.is_empty() {
+            self.identity_index_built.store(false, Ordering::Release);
+        }
 
         // --- Phase 38b: write-ahead log ---
         // The assertion envelope is replay-complete rather than only carrying
@@ -1125,31 +1235,17 @@ impl Engine {
         // provenance record that do not exist in the relational snapshot; wake
         // must restore those records before publishing the edge and advance
         // both allocators beyond them.
-        let assertion = serde_json::json!({
-            "v": crate::mutation::ASSERT_MUTATION_VERSION,
-            "subject": triple.subject.get(),
-            "predicate": triple.predicate.get(),
-            "object": triple.object.get(),
-            "confidence": triple.confidence,
-            "timestamp": triple.timestamp,
-            "compartment": triple.compartment_id.clone(),
-            "provenance_id": triple.provenance_id,
-            "provenance": prepared.provenance,
-            "symbols": prepared.symbols,
-            // ADR 081 P2: content-addressed identity (stable across
-            // akhs/sessions) persisted with the mutation for diffing.
-            "identity": identity.to_hex(),
-        });
+        let assertion = self.assertion_payload(&stored_triple, prepared);
         if replacement_retracts.is_empty() {
             self.record_mutation(crate::mutation::MutationKind::Assert, assertion);
         } else {
             let retracts = replacement_retracts
                 .into_iter()
-                .map(|(subject, predicate, object)| {
+                .map(|triple| {
                     serde_json::json!({
-                        "subject": subject.get(),
-                        "predicate": predicate.get(),
-                        "object": object.get(),
+                        "subject": triple.subject.get(),
+                        "predicate": triple.predicate.get(),
+                        "object": triple.object.get(),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1895,12 +1991,49 @@ impl Engine {
         }
     }
 
+    /// Replay one edge from a versioned retract batch. An already-absent edge
+    /// is the expected at-least-once case when capture raced with the WAL
+    /// watermark. A present edge must match the recorded pre-removal metadata;
+    /// otherwise the tail is corrupt or out of order and wake fails closed.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn replay_retract_edge_exact(&self, expected: &Triple) -> AkhResult<()> {
+        if let Some(actual) = self.knowledge_graph.triple(
+            expected.subject,
+            expected.predicate,
+            expected.object,
+        ) {
+            if actual != *expected {
+                return Err(invalid_persistent_state(format!(
+                    "retract batch edge ({}, {}, {}) metadata does not match replay state",
+                    expected.subject.get(),
+                    expected.predicate.get(),
+                    expected.object.get()
+                )));
+            }
+            self.knowledge_graph.remove_triple(
+                expected.subject,
+                expected.predicate,
+                expected.object,
+            );
+            self.identity_index_built.store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
     /// Execute a SPARQL SELECT query.
     pub fn sparql_query(&self, sparql: &str) -> AkhResult<Vec<Vec<(String, String)>>> {
         let store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
             message: "SPARQL queries require persistence (--data-dir)".into(),
         })?;
         Ok(store.query_select(sparql)?)
+    }
+
+    #[cfg(test)]
+    fn fail_next_sparql_transition_for_test(&self) {
+        self.sparql
+            .as_ref()
+            .expect("test engine has no SPARQL projection")
+            .fail_next_transition_for_test();
     }
 
     // -----------------------------------------------------------------------
@@ -2832,62 +2965,121 @@ impl Engine {
         predicate: SymbolId,
         object: SymbolId,
     ) -> AkhResult<crate::tms::RetractionResult> {
-        let removed = self.knowledge_graph.remove_triple(subject, predicate, object);
-
-        if !removed {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.mutations_quiesced.load(Ordering::Acquire) {
+            return Err(EngineError::InvalidConfig {
+                message: "engine is quiesced for residency handoff".into(),
+            }
+            .into());
+        }
+        let Some(primary) = self
+            .knowledge_graph
+            .triple(subject, predicate, object)
+        else {
             return Ok(crate::tms::RetractionResult {
                 retracted: vec![],
                 re_evaluated: vec![],
                 cascade_depth: 0,
             });
-        }
+        };
 
-        // --- Phase 38b: write-ahead log (only the primary retract; TMS-cascaded
-        // removals are re-derived on replay since the TMS rebuilds from facts) ---
-        self.record_mutation(
-            crate::mutation::MutationKind::Retract,
-            serde_json::json!({
-                "subject": subject.get(),
-                "predicate": predicate.get(),
-                "object": object.get(),
-            }),
-        );
-
-        // Sync removal to SPARQL store
-        if let Some(ref sparql) = self.sparql {
-            let _ = sparql.remove_triple(subject, predicate, object);
-        }
-
-        // TMS cascade if enabled
-        if self.phase9_config.tms_enabled {
-            let mut tms = self.tms.write().unwrap();
-            // Retract the object symbol (the conclusion of this triple)
-            let result = tms.retract(object);
-
-            // Remove cascaded triples from the KG
-            for &retracted_sym in &result.retracted {
-                if retracted_sym == object {
-                    continue; // Already removed above
-                }
-                // Remove all triples where the retracted symbol is subject or object
-                let triples_from: Vec<_> = self.knowledge_graph.triples_from(retracted_sym);
-                for t in &triples_from {
-                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
-                }
-                let triples_to: Vec<_> = self.knowledge_graph.triples_to(retracted_sym);
-                for t in &triples_to {
-                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
-                }
-            }
-
-            Ok(result)
+        // Plan the TMS transition on a clone. The live TMS and every graph
+        // projection remain untouched until the complete edge envelope has
+        // been validated and SPARQL can commit the same batch.
+        let (planned_tms, result) = if self.phase9_config.tms_enabled {
+            let mut planned = self.tms.read().unwrap().clone();
+            let result = planned.retract(object);
+            (Some(planned), result)
         } else {
-            Ok(crate::tms::RetractionResult {
+            (None, crate::tms::RetractionResult {
                 retracted: vec![object],
                 re_evaluated: vec![],
                 cascade_depth: 0,
             })
+        };
+
+        let mut removals = std::collections::BTreeMap::new();
+        removals.insert((subject, predicate, object), primary);
+        for &retracted_symbol in &result.retracted {
+            if retracted_symbol == object {
+                continue;
+            }
+            for edge in self
+                .knowledge_graph
+                .triples_from(retracted_symbol)
+                .into_iter()
+                .chain(self.knowledge_graph.triples_to(retracted_symbol))
+            {
+                removals
+                    .entry((edge.subject, edge.predicate, edge.object))
+                    .or_insert(edge);
+            }
         }
+        let removals = removals.into_values().collect::<Vec<_>>();
+
+        // A retract batch carries the exact removed edges plus closed symbol
+        // metadata. Build and validate it before touching KG/TMS/SPARQL/WAL.
+        let mut symbol_metadata = std::collections::BTreeMap::new();
+        for edge in &removals {
+            for meta in self.prepare_assertion(edge)?.symbols {
+                symbol_metadata.entry(meta.id).or_insert(meta);
+            }
+        }
+
+        for edge in &removals {
+            self.knowledge_graph
+                .remove_triple(edge.subject, edge.predicate, edge.object);
+        }
+        if let Some(ref sparql) = self.sparql
+            && let Err(error) = sparql.apply_transition(&removals, None)
+        {
+            for edge in &removals {
+                self.knowledge_graph.replace_triple_exact(edge)?;
+            }
+            return Err(error.into());
+        }
+        if let Some(planned) = planned_tms {
+            *self.tms.write().unwrap() = planned;
+        }
+        self.identity_index_built.store(false, Ordering::Release);
+
+        let retracts = removals
+            .iter()
+            .map(|edge| {
+                serde_json::json!({
+                    "subject": edge.subject.get(),
+                    "predicate": edge.predicate.get(),
+                    "object": edge.object.get(),
+                    "confidence": edge.confidence,
+                    "timestamp": edge.timestamp,
+                    "compartment": edge.compartment_id.clone(),
+                    "provenance_id": edge.provenance_id,
+                })
+            })
+            .collect::<Vec<_>>();
+        self.record_mutation(
+            crate::mutation::MutationKind::RetractBatch,
+            serde_json::json!({
+                "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
+                "retracts": retracts,
+                "symbols": symbol_metadata.into_values().collect::<Vec<_>>(),
+            }),
+        );
+        Ok(result)
+    }
+
+    /// Stop accepting live graph transitions and wait for any transition that
+    /// already entered the mutation checkpoint. Used only by the daemon's
+    /// sleep/relocation handoff immediately before its final WAL drain.
+    pub fn quiesce_mutations(&self) {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.mutations_quiesced.store(true, Ordering::Release);
     }
 
     /// Add a triple with explicit TMS support tracking.
@@ -2899,7 +3091,11 @@ impl Engine {
         triple: &Triple,
         support: crate::tms::SupportSet,
     ) -> AkhResult<()> {
-        self.add_triple(triple)?;
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.add_triple_locked(triple)?;
         if self.phase9_config.tms_enabled {
             self.tms.write().unwrap().add_support(triple.object, support);
         }
@@ -3986,6 +4182,16 @@ impl std::fmt::Debug for Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mutation::{MutationRecord, MutationSink};
+
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<MutationRecord>>);
+
+    impl MutationSink for RecordingSink {
+        fn record(&self, mutation: MutationRecord) {
+            self.0.lock().unwrap().push(mutation);
+        }
+    }
 
     #[test]
     fn create_memory_only_engine() {
@@ -4148,6 +4354,197 @@ mod tests {
         assert_eq!(engine.triple_count(), 0);
         assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
         assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn duplicate_assert_wal_matches_exact_merged_live_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let predicate = engine.resolve_or_create_relation("duplicate-predicate").unwrap();
+        let mut keys = Vec::new();
+        for label in ["lower", "new-provenance", "incoming-none"] {
+            let subject = engine
+                .resolve_or_create_entity(&format!("{label}-subject"))
+                .unwrap();
+            let object = engine
+                .resolve_or_create_entity(&format!("{label}-object"))
+                .unwrap();
+            keys.push((subject, predicate, object));
+        }
+
+        engine
+            .add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(keys[1].0, predicate, keys[1].2).with_confidence(0.8))
+            .unwrap();
+        let mut old_record = ProvenanceRecord::new(keys[2].2, DerivationKind::Seed);
+        let old_provenance = engine.store_provenance(&mut old_record).unwrap();
+        engine
+            .add_triple(
+                &Triple::new(keys[2].0, predicate, keys[2].2)
+                    .with_confidence(0.7)
+                    .with_provenance(old_provenance.get()),
+            )
+            .unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+        engine
+            .add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.2))
+            .unwrap();
+        let mut new_record = ProvenanceRecord::new(keys[1].2, DerivationKind::Seed);
+        let new_provenance = engine.store_provenance(&mut new_record).unwrap();
+        engine
+            .add_triple(
+                &Triple::new(keys[1].0, predicate, keys[1].2)
+                    .with_confidence(0.3)
+                    .with_provenance(new_provenance.get()),
+            )
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(keys[2].0, predicate, keys[2].2).with_confidence(0.1))
+            .unwrap();
+
+        let records = sink.0.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        for (record, key) in records.iter().zip(keys) {
+            let live = engine
+                .knowledge_graph
+                .triple(key.0, key.1, key.2)
+                .unwrap();
+            assert_eq!(record.kind, crate::mutation::MutationKind::Assert);
+            assert_eq!(record.payload["confidence"].as_f64().unwrap() as f32, live.confidence);
+            assert_eq!(record.payload["timestamp"].as_u64().unwrap(), live.timestamp);
+            assert_eq!(record.payload["provenance_id"].as_u64(), live.provenance_id);
+            assert_eq!(
+                record.payload["compartment"].as_str().map(str::to_owned),
+                live.compartment_id
+            );
+        }
+        assert_eq!(
+            records[0].payload["confidence"].as_f64().unwrap() as f32,
+            0.9_f32
+        );
+        assert_eq!(records[1].payload["provenance_id"].as_u64(), Some(new_provenance.get()));
+        assert_eq!(records[2].payload["provenance_id"].as_u64(), Some(old_provenance.get()));
+    }
+
+    #[test]
+    fn replace_rolls_back_kg_and_emits_no_wal_on_sparql_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("rollback-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("rollback-functional").unwrap();
+        let old_object = engine.resolve_or_create_entity("rollback-old").unwrap();
+        let new_object = engine.resolve_or_create_entity("rollback-new").unwrap();
+        engine.functional_preds_mut().declare_functional(predicate);
+        let mut phase9 = engine.phase9_config().clone();
+        phase9.contradiction_policy = ContradictionPolicy::Replace;
+        engine.set_phase9_config(phase9);
+        engine
+            .add_triple(&Triple::new(subject, predicate, old_object))
+            .unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        engine.fail_next_sparql_transition_for_test();
+        assert!(engine
+            .add_triple(&Triple::new(subject, predicate, new_object))
+            .is_err());
+        assert!(engine.has_triple(subject, predicate, old_object));
+        assert!(!engine.has_triple(subject, predicate, new_object));
+        let rdf = engine.sparql.as_ref().unwrap().all_triples().unwrap();
+        assert_eq!(rdf.len(), 1);
+        assert_eq!(rdf[0].object, old_object);
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_functional_replacements_serialize_and_wal_replays_to_live_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("race-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("race-functional").unwrap();
+        let old_object = engine.resolve_or_create_entity("race-old").unwrap();
+        let object_b = engine.resolve_or_create_entity("race-b").unwrap();
+        let object_c = engine.resolve_or_create_entity("race-c").unwrap();
+        engine.functional_preds_mut().declare_functional(predicate);
+        let mut phase9 = engine.phase9_config().clone();
+        phase9.contradiction_policy = ContradictionPolicy::Replace;
+        engine.set_phase9_config(phase9);
+        engine
+            .add_triple(&Triple::new(subject, predicate, old_object))
+            .unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+        let engine = Arc::new(engine);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let writers = [object_b, object_c]
+            .into_iter()
+            .map(|object| {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    engine.add_triple(&Triple::new(subject, predicate, object))
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+
+        let live = engine
+            .knowledge_graph
+            .triples_from(subject)
+            .into_iter()
+            .filter(|triple| triple.predicate == predicate)
+            .collect::<Vec<_>>();
+        assert_eq!(live.len(), 1);
+        let records = sink.0.lock().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().all(|record| {
+            record.kind == crate::mutation::MutationKind::Replace
+        }));
+
+        let mut replay_object = old_object.get();
+        for record in records.iter() {
+            let displaced = record.payload["retracts"].as_array().unwrap();
+            assert_eq!(displaced.len(), 1);
+            assert_eq!(displaced[0]["object"].as_u64(), Some(replay_object));
+            replay_object = record.payload["assertion"]["object"].as_u64().unwrap();
+        }
+        assert_eq!(replay_object, live[0].object.get());
+        let rdf = engine.sparql.as_ref().unwrap().all_triples().unwrap();
+        let functional = rdf
+            .into_iter()
+            .filter(|triple| triple.subject == subject && triple.predicate == predicate)
+            .collect::<Vec<_>>();
+        assert_eq!(functional.len(), 1);
+        assert_eq!(functional[0].object, live[0].object);
     }
 
     #[test]

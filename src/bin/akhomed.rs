@@ -86,7 +86,7 @@ struct ServerState {
     /// unlock never runs (crash, network drop). Same pattern
     /// [`akhomed_store::run_migrations_locked`] already uses for the migration
     /// lock. Keyed by workspace name.
-    akh_lock_conns: RwLock<HashMap<String, Arc<akhomed_store::DatabaseConnection>>>,
+    akh_lock_conns: RwLock<HashMap<String, HeldResidency>>,
     /// Phase 38b: per-workspace WAL flusher tasks, keyed by workspace name.
     /// Drained on graceful shutdown so the final batch reaches Postgres.
     wal_flushers: RwLock<HashMap<String, WalFlusher>>,
@@ -98,6 +98,9 @@ struct ServerState {
     /// lock, so an older equal-watermark capture cannot publish after a newer
     /// capture from this daemon.
     snapshot_publication_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Workspaces being slept/relocated. New lazy loads fail while the runtime
+    /// is quiesced and its residency fence is being handed off.
+    handoffs: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Phase 38c: in-flight `_akh/akh/wake` workspace names — single-flights wake
     /// so two concurrent wakes of the same cold workspace can't race on the redb.
     waking: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -228,7 +231,13 @@ async fn snapshot_once(
     name: &str,
     akh_id: akhomed_store::uuid::Uuid,
     workspace_id: akhomed_store::uuid::Uuid,
+    residency_epoch: i64,
 ) -> Result<(), String> {
+    // Serialize sample-watermark -> capture -> DB-commit, and acquire this
+    // guard before cloning the resident agent. Eviction/handoff takes the same
+    // guard before dropping residency, so an old Arc can never be captured
+    // after ownership is released.
+    let _publication_guard = publication_lock.lock().await;
     let agent = {
         let map = agents.read().await;
         match map.get(name) {
@@ -236,10 +245,6 @@ async fn snapshot_once(
             None => return Ok(()),
         }
     };
-    // Serialize the complete sample-watermark -> capture -> DB-commit path.
-    // The store adds the cross-process advisory lock and stale-writer check;
-    // this local lock also orders legitimate equal-watermark captures.
-    let _publication_guard = publication_lock.lock().await;
     // The akh row is the identity these rows hang off; ensure it exists.
     akhomed_store::ensure_akh(pool, akh_id, name, None)
         .await
@@ -254,11 +259,12 @@ async fn snapshot_once(
     let started = std::time::Instant::now();
     let data = {
         let guard = agent.read().unwrap_or_else(|e| e.into_inner());
-        akh_medu::snapshot::capture_snapshot_at_watermark(
+        akh_medu::snapshot::capture_snapshot_at_fence(
             &guard,
             akh_id,
             workspace_id,
             watermark,
+            residency_epoch,
         )
         .map_err(|e| e.to_string())?
     };
@@ -286,6 +292,14 @@ struct WorkspaceDaemon {
     handle: tokio::task::JoinHandle<()>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
+}
+
+/// Dedicated session-lock connection plus the durable fencing generation
+/// acquired by that residency. Dropping the connection releases the advisory
+/// lock; the epoch permanently fences captures from every earlier owner.
+struct HeldResidency {
+    connection: Arc<akhomed_store::DatabaseConnection>,
+    epoch: i64,
 }
 
 /// Per-workspace psyche snapshot map.
@@ -392,6 +406,7 @@ impl ServerState {
             wal_flushers: RwLock::new(HashMap::new()),
             snapshot_tickers: RwLock::new(HashMap::new()),
             snapshot_publication_locks: Mutex::new(HashMap::new()),
+            handoffs: Arc::new(Mutex::new(std::collections::HashSet::new())),
             waking: Arc::new(Mutex::new(std::collections::HashSet::new())),
             engine_load_locks: RwLock::new(HashMap::new()),
             agent_load_locks: RwLock::new(HashMap::new()),
@@ -477,8 +492,8 @@ impl ServerState {
     /// back to local-only (boot-time network race, or PG transiently down),
     /// this task keeps retrying the connection with capped backoff. On success
     /// it swaps the live pool into `pg_pool` and re-enables durability for every
-    /// already-loaded akh — snapshotting each one's in-memory state (everything
-    /// accumulated while local-only) before wiring the WAL, so nothing is lost.
+    /// already-loaded akh. Existing durable state is authoritative after an
+    /// ownership gap; only a genuinely new Akh may promote its local image.
     /// No-op (returns immediately) when no `[postgres]` section is configured.
     /// Self-terminates once connected.
     fn spawn_pg_reconnector(self: &Arc<Self>) {
@@ -498,6 +513,21 @@ impl ServerState {
                 tokio::time::sleep(backoff).await;
                 match try_connect_pg(&opts, migrate).await {
                     Ok(pool) => {
+                        // Fence cached local-only runtimes before publishing the
+                        // newly connected pool. Rewire clears each gate only
+                        // after that workspace owns a durable epoch and is
+                        // hydrated/wired; a failed claim remains fail-closed.
+                        let loaded = me
+                            .workspaces
+                            .read()
+                            .await
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        me.handoffs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .extend(loaded);
                         *me.pg_pool.write().unwrap_or_else(|e| e.into_inner()) = Some(pool);
                         tracing::info!(
                             "reconnected to PostgreSQL backing store — re-enabling durability"
@@ -519,58 +549,191 @@ impl ServerState {
     }
 
     /// After a runtime reconnect, re-enable the WAL + periodic snapshot for
-    /// every already-loaded workspace and persist a full snapshot of each, so
-    /// the state accumulated during local-only mode reaches Postgres. New
-    /// workspaces loaded after this point wire normally via `get_engine`.
+    /// every already-loaded workspace. A pre-existing relational image wins
+    /// over a reused host-local graph after an ownership gap; a genuinely new
+    /// Akh promotes its local image only after acquiring a fenced residency.
+    /// New workspaces loaded after this point wire normally via `get_engine`.
     async fn rewire_after_reconnect(&self) {
-        // Capture names + engine handles under a short read lock, then release
-        // it before doing per-workspace work (wire_wal / snapshot take locks).
-        let loaded: Vec<(String, Arc<Engine>)> = {
+        // Capture names only. Holding an Engine Arc across the authoritative
+        // hydrate branch would keep its redb handle alive while wake rebuilds
+        // the canonical local image.
+        let loaded: Vec<String> = {
             let map = self.workspaces.read().await;
-            map.iter()
-                .map(|(n, e)| (n.clone(), Arc::clone(e)))
-                .collect()
+            map.keys().cloned().collect()
         };
         if loaded.is_empty() {
             return;
         }
         let pool = self.pg_pool();
-        for (name, engine) in loaded {
-            // Wire the WAL first so mutations from here on are captured, then
-            // snapshot the full current state (idempotent; materialises into the
-            // relational tables what was accumulated while local-only).
-            self.wire_wal(&name, &engine).await;
-
-            // Guard: an in-memory engine that came up empty (e.g. a k8s tmpfs
-            // pod that booted cold and hasn't been hydrated yet) must never
-            // overwrite durable Postgres state with an empty snapshot.
-            if engine.all_triples().is_empty()
-                && let Some(p) = pool.as_ref()
+        for name in loaded {
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name.clone());
+            let akh_id = akh_medu::wal::akh_id_for(&name);
+            let workspace_id = akh_medu::wal::workspace_id_for(&name);
+            let residency_epoch = match self
+                .acquire_akh_lock_or_refuse(&name, akh_id, "reconnect")
+                .await
             {
-                let akh_id = akh_medu::wal::akh_id_for(&name);
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    self.stop_workspace_daemon(&name).await;
+                    if let Some(engine) = self.workspaces.read().await.get(&name).cloned() {
+                        engine.quiesce_mutations();
+                    }
+                    tracing::error!(
+                        workspace = %name,
+                        error = %error,
+                        "Postgres reconnected but this daemon could not claim residency; \
+                         local runtime is fenced and remains unavailable"
+                    );
+                    continue;
+                }
+            };
+            let Some(engine) = self.workspaces.read().await.get(&name).cloned() else {
+                self.release_akh_lock(&name, akh_id).await;
+                self.handoffs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&name);
+                continue;
+            };
+
+            if let Some(p) = pool.as_ref() {
                 match akhomed_store::snapshots::load_akh_state(p, akh_id).await {
                     Ok(Some(_)) => {
-                        tracing::warn!(
-                            workspace = %name,
-                            "refusing post-reconnect snapshot: in-memory engine is empty but \
-                             the store has state for this akh — snapshot would destroy the \
-                             durable copy; wake/hydrate instead"
-                        );
+                        // Any durable image wins over a host-local engine used
+                        // while ownership could not be proven. Another owner
+                        // may have advanced it during the outage, so merging or
+                        // publishing the reused image would silently clobber
+                        // authoritative state.
+                        let agent_load_lock = fetch_load_lock(&self.agent_load_locks, &name).await;
+                        let agent_load_guard = agent_load_lock.lock().await;
+                        let engine_load_lock = fetch_load_lock(&self.engine_load_locks, &name).await;
+                        let engine_load_guard = engine_load_lock.lock().await;
+                        self.stop_workspace_daemon(&name).await;
+                        if let Some(mut ticker) = self.snapshot_tickers.write().await.remove(&name) {
+                            let _ = ticker.shutdown.send(true);
+                            if tokio::time::timeout(
+                                Duration::from_secs(5),
+                                &mut ticker.handle,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                tracing::warn!(
+                                    workspace = %name,
+                                    "snapshot ticker did not stop within 5s on reconnect handoff"
+                                );
+                                ticker.handle.abort();
+                            }
+                        }
+                        let publication_lock = self.snapshot_publication_lock(&name);
+                        let _publication_guard = publication_lock.lock().await;
+                        engine.quiesce_mutations();
+                        if let Some(mut flusher) = self.wal_flushers.write().await.remove(&name) {
+                            let _ = flusher.shutdown.send(true);
+                            match tokio::time::timeout(
+                                Duration::from_secs(5),
+                                &mut flusher.handle,
+                            )
+                            .await
+                            {
+                                Ok(_) => {}
+                                Err(_) => flusher.handle.abort(),
+                            }
+                        }
+                        self.agents.write().await.remove(&name);
+                        self.workspaces.write().await.remove(&name);
+                        self.psyche_snapshots.write().await.remove(&name);
+                        self.nlu_pipelines.write().await.remove(&name);
+                        self.daemon_pauses.write().await.remove(&name);
+                        drop(engine);
+
+                        let ws_paths = self.paths.workspace(&name);
+                        let redb = ws_paths.kg_dir.join("akh-medu.redb");
+                        let backup = ws_paths
+                            .kg_dir
+                            .join(format!("akh-medu.pre-residency-{residency_epoch}.redb"));
+                        if redb.exists()
+                            && let Err(error) = std::fs::rename(&redb, &backup)
+                        {
+                            tracing::error!(
+                                workspace = %name,
+                                %error,
+                                "cannot quarantine cold reconnect image"
+                            );
+                            drop(_publication_guard);
+                            drop(engine_load_guard);
+                            drop(agent_load_guard);
+                            continue;
+                        }
+                        match akh_medu::snapshot::wake(
+                            &ws_paths.kg_dir,
+                            akh_id,
+                            workspace_id,
+                            p,
+                        )
+                        .await
+                        {
+                            Ok(restored) => {
+                                drop(restored);
+                                drop(_publication_guard);
+                                drop(engine_load_guard);
+                                drop(agent_load_guard);
+                                self.handoffs
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .remove(&name);
+                                match self.get_agent(&name).await {
+                                    Ok(_) => tracing::info!(
+                                        workspace = %name,
+                                        residency_epoch,
+                                        "claimed and hydrated durable state after reconnect"
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        workspace = %name,
+                                        %error,
+                                        "durable reconnect hydrate succeeded but runtime resume failed"
+                                    ),
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(
+                                    workspace = %name,
+                                    %error,
+                                    "failed to hydrate durable state after reconnect; \
+                                     workspace remains fenced"
+                                );
+                                drop(_publication_guard);
+                                drop(engine_load_guard);
+                                drop(agent_load_guard);
+                            }
+                        }
                         continue;
                     }
-                    Ok(None) => {} // genuinely fresh akh with an empty engine: safe to snapshot
+                    Ok(None) => {} // genuinely fresh akh: safe to promote after fencing
                     Err(e) => {
+                        engine.quiesce_mutations();
                         tracing::warn!(
                             workspace = %name,
                             error = %e,
-                            "could not check Postgres state before post-reconnect snapshot of \
-                             an empty in-memory engine; skipping this snapshot to avoid a \
-                             possible destructive overwrite"
+                            "could not establish whether Postgres has authoritative state \
+                             after reconnect; workspace remains fenced"
                         );
                         continue;
                     }
                 }
             }
+
+            // Ownership is established before either WAL or snapshot becomes
+            // write-capable. The ticker carries the same immutable epoch.
+            self.wire_wal(&name, &engine, residency_epoch).await;
+            self.handoffs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&name);
 
             match self.snapshot_workspace(&name).await {
                 Ok(()) => tracing::info!(
@@ -589,7 +752,7 @@ impl ServerState {
     /// Phase 38b: install the mutation WAL on `engine` for workspace `name`,
     /// when a Postgres backing store is configured. Best-effort: any failure
     /// logs and leaves the workspace in local-only mode (no WAL).
-    async fn wire_wal(&self, name: &str, engine: &Engine) {
+    async fn wire_wal(&self, name: &str, engine: &Engine, residency_epoch: i64) {
         let pool = self.pg_pool();
         let Some(pool) = pool.as_ref() else {
             return;
@@ -668,6 +831,7 @@ impl ServerState {
                 name.to_string(),
                 Arc::clone(pool),
                 Duration::from_secs(snapshot_interval_secs),
+                residency_epoch,
             );
             self.snapshot_tickers
                 .write()
@@ -689,6 +853,7 @@ impl ServerState {
         name: String,
         pool: Arc<akhomed_store::DatabaseConnection>,
         interval: Duration,
+        residency_epoch: i64,
     ) -> SnapshotTicker {
         let agents = Arc::clone(&self.agents);
         let publication_lock = self.snapshot_publication_lock(&name);
@@ -723,6 +888,7 @@ impl ServerState {
                             &name,
                             akh_id,
                             workspace_id,
+                            residency_epoch,
                         ).await {
                             Ok(()) => {
                                 if consecutive_failures > 0 {
@@ -800,6 +966,7 @@ impl ServerState {
         self.get_agent(name).await?;
         let akh_id = akh_medu::wal::akh_id_for(name);
         let workspace_id = akh_medu::wal::workspace_id_for(name);
+        let residency_epoch = self.residency_epoch(name).await?;
         let publication_lock = self.snapshot_publication_lock(name);
         snapshot_once(
             pool,
@@ -808,6 +975,7 @@ impl ServerState {
             name,
             akh_id,
             workspace_id,
+            residency_epoch,
         )
         .await
     }
@@ -1014,9 +1182,9 @@ impl ServerState {
         name: &str,
         akh_id: akhomed_store::uuid::Uuid,
         op: &str,
-    ) -> Result<(), String> {
+    ) -> Result<i64, String> {
         if self.pg_pool().is_none() {
-            return Ok(());
+            return Ok(0);
         }
         // Serialize the check-then-acquire: two concurrent opens of the same
         // workspace must not each dial a connection, or the loser's lock
@@ -1028,12 +1196,12 @@ impl ServerState {
         // the ACP open re-checks the same akh moments later. Re-dialing there
         // would draw a second session and refuse against our own lock — the
         // deadlock this map exists to prevent.
-        if held.contains_key(name) {
-            return Ok(());
+        if let Some(residency) = held.get(name) {
+            return Ok(residency.epoch);
         }
 
         let Some(opts) = self.akh_lock_pool_options().await else {
-            return Ok(());
+            return Ok(0);
         };
         let conn = akhomed_store::connect(&opts).await.map_err(|e| {
             format!(
@@ -1044,8 +1212,41 @@ impl ServerState {
 
         match akhomed_store::try_acquire_akh_lock(&conn, akh_id).await {
             Ok(true) => {
-                held.insert(name.to_string(), Arc::new(conn));
-                Ok(())
+                // The identity row must exist before advancing its fencing
+                // generation. Both operations use the dedicated connection
+                // that owns the Akh's session advisory lock.
+                if let Err(error) = akhomed_store::ensure_akh(&conn, akh_id, name, None).await {
+                    let _ = akhomed_store::release_akh_lock(&conn, akh_id).await;
+                    return Err(format!(
+                        "could not ensure akh identity while claiming residency for \
+                         \"{name}\" ({error}); refusing to {op}"
+                    ));
+                }
+                let workspace_id = akh_medu::wal::workspace_id_for(name);
+                let epoch = match akhomed_store::claim_akh_residency(
+                    &conn,
+                    akh_id,
+                    workspace_id,
+                )
+                .await
+                {
+                    Ok(epoch) => epoch,
+                    Err(error) => {
+                        let _ = akhomed_store::release_akh_lock(&conn, akh_id).await;
+                        return Err(format!(
+                            "could not acquire the durable residency fence for \"{name}\" \
+                             ({error}); refusing to {op}"
+                        ));
+                    }
+                };
+                held.insert(
+                    name.to_string(),
+                    HeldResidency {
+                        connection: Arc::new(conn),
+                        epoch,
+                    },
+                );
+                Ok(epoch)
             }
             Ok(false) => Err(format!(
                 "refusing to {op} \"{name}\": another host already holds the akh's \
@@ -1059,6 +1260,22 @@ impl ServerState {
         }
     }
 
+    async fn residency_epoch(&self, name: &str) -> Result<i64, String> {
+        if self.pg_pool().is_none() {
+            return Ok(0);
+        }
+        self.akh_lock_conns
+            .read()
+            .await
+            .get(name)
+            .map(|residency| residency.epoch)
+            .ok_or_else(|| {
+                format!(
+                    "workspace \"{name}\" has no held residency fence; refusing durable write"
+                )
+            })
+    }
+
     /// Release the Akh's advisory lock — paired with
     /// [`Self::acquire_akh_lock_or_refuse`] so a later wake on this host can
     /// re-acquire. No-op when this daemon does not hold it.
@@ -1068,18 +1285,20 @@ impl ServerState {
     /// the socket teardown completes, but a failed unlock (or a dead socket)
     /// no longer strands the lock the way a pooled release did.
     async fn release_akh_lock(&self, name: &str, akh_id: akhomed_store::uuid::Uuid) {
-        let conn = self.akh_lock_conns.write().await.remove(name);
-        let Some(conn) = conn else {
+        let residency = self.akh_lock_conns.write().await.remove(name);
+        let Some(residency) = residency else {
             return;
         };
-        if let Err(e) = akhomed_store::release_akh_lock(&conn, akh_id).await {
+        if let Err(e) =
+            akhomed_store::release_akh_lock(&residency.connection, akh_id).await
+        {
             tracing::warn!(
                 workspace = %name, error = %e,
                 "explicit akh advisory-lock unlock failed; dropping the connection \
                  releases the session lock regardless"
             );
         }
-        drop(conn);
+        drop(residency);
     }
 
     /// Evict a workspace's cached engine + agent and stop its background tasks
@@ -1087,17 +1306,46 @@ impl ServerState {
     /// by `sleep_workspace`; the akh's durable state must already be persisted
     /// (snapshot + WAL flush) before calling this, or unflushed mutations are lost.
     async fn evict_workspace(&self, name: &str) {
+        {
+            let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
+            handoffs.insert(name.to_string());
+        }
+        // Drain any slow-path construction already in flight, then keep both
+        // load gates closed until the caches and ownership record are gone.
+        let agent_load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
+        let _agent_load_guard = agent_load_lock.lock().await;
+        let engine_load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
+        let _engine_load_guard = engine_load_lock.lock().await;
+
         // Stop the OODA daemon first so no further mutations are produced.
         self.stop_workspace_daemon(name).await;
 
         // Stop + drain the snapshot ticker.
-        if let Some(ticker) = self.snapshot_tickers.write().await.remove(name) {
+        if let Some(mut ticker) = self.snapshot_tickers.write().await.remove(name) {
             let _ = ticker.shutdown.send(true);
-            if tokio::time::timeout(Duration::from_secs(5), ticker.handle)
+            if tokio::time::timeout(Duration::from_secs(5), &mut ticker.handle)
                 .await
                 .is_err()
             {
                 tracing::warn!(workspace = %name, "snapshot ticker did not stop within 5s on evict");
+                ticker.handle.abort();
+            }
+        }
+
+        // Wait for every periodic/on-demand publisher that cloned the agent
+        // before quiescence. Holding this guard through cache removal and lock
+        // release prevents a stale capture from publishing after handoff.
+        let publication_lock = self.snapshot_publication_lock(name);
+        let _publication_guard = publication_lock.lock().await;
+
+        if let Some(engine) = self.workspaces.read().await.get(name).cloned() {
+            engine.quiesce_mutations();
+            if let Err(error) = engine.persist() {
+                tracing::warn!(
+                    workspace = %name,
+                    %error,
+                    "final local persist after handoff quiescence failed"
+                );
             }
         }
 
@@ -1142,6 +1390,10 @@ impl ServerState {
                 );
             }
         }
+        self.handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
     }
 
     /// Deep-sleep a workspace (control-plane `_akh/akh/sleep`).
@@ -1219,7 +1471,7 @@ impl ServerState {
     /// error telling the operator to configure `[postgres]`.
     async fn relocate_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
         let pool = self.pg_pool();
-        let Some(pool) = pool.as_ref() else {
+        let Some(_pool) = pool.as_ref() else {
             return Err(
                 "relocation requires a Postgres backing store (no [postgres] section configured). \
                  Add a [postgres] section to akhomed's config.toml (or set DATABASE_URL) so the \
@@ -1238,15 +1490,10 @@ impl ServerState {
         self.snapshot_workspace(name).await?;
         self.flush_wal(name).await;
 
-        // Mark the heartbeat so the recovery host sees a fresh `last_seen`.
-        if let Err(e) =
-            akhomed_store::touch_last_seen(pool, akh_id, akhomed_store::chrono::Utc::now()).await
-        {
-            tracing::warn!(workspace = %name, error = %e, "could not update last_seen on relocate");
-        }
-
-        // Release the lock so the recovery host can acquire it on wake.
-        self.release_akh_lock(name, akh_id).await;
+        // Relocation is a real handoff, not merely a lock release: stop the
+        // source ticker/WAL/agent, wait out in-flight snapshots, remove the
+        // runtime, then release ownership and clear its heartbeat.
+        self.evict_workspace(name).await;
 
         tracing::info!(workspace = %name, %akh_id, "akh prepared for relocation");
         Ok(serde_json::json!({
@@ -2059,6 +2306,14 @@ impl ServerState {
 
     /// Get or lazily open an engine for the given workspace.
     async fn get_engine(&self, name: &str) -> Result<Arc<Engine>, String> {
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
         // Check if already loaded.
         {
             let map = self.workspaces.read().await;
@@ -2072,6 +2327,15 @@ impl ServerState {
         // snapshot ticker, and all but the winner would leak as orphaned tasks).
         let load_lock = fetch_load_lock(&self.engine_load_locks, name).await;
         let _load_guard = load_lock.lock().await;
+
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
 
         // Double-check: a racing winner may have populated the cache while we
         // waited for the load lock.
@@ -2114,6 +2378,16 @@ impl ServerState {
         // durable state in the store (e.g. a k8s tmpfs pod that just
         // restarted). Must run before `Engine::new` opens the redb below —
         // that's the file hydration populates.
+        let residency_epoch = if self.pg_pool().is_some() {
+            self.acquire_akh_lock_or_refuse(
+                name,
+                akh_medu::wal::akh_id_for(name),
+                "open",
+            )
+            .await?
+        } else {
+            0
+        };
         let hydrated = self.try_hydrate_from_store(name, &ws_paths).await?;
 
         // Honour the akh's read-root unlock (ADR 076 §4): when `openclaw_import`
@@ -2182,7 +2456,7 @@ impl ServerState {
         }
 
         // Phase 38b: install the mutation WAL (no-op in local-only mode).
-        self.wire_wal(name, &engine).await;
+        self.wire_wal(name, &engine, residency_epoch).await;
 
         let engine = Arc::new(engine);
         let mut map = self.workspaces.write().await;
@@ -2196,6 +2470,14 @@ impl ServerState {
     /// share the same instance. Construction is heavy (Agent::resume
     /// deserializes + rebuilds KG state), so we cache in `self.agents`.
     async fn get_agent(&self, name: &str) -> Result<Arc<StdRwLock<Agent>>, String> {
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
         // Fast path: already cached.
         {
             let agents = self.agents.read().await;
@@ -2211,6 +2493,15 @@ impl ServerState {
         let load_lock = fetch_load_lock(&self.agent_load_locks, name).await;
         let _load_guard = load_lock.lock().await;
 
+        if self
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
+        {
+            return Err(format!("workspace \"{name}\" is being handed off"));
+        }
+
         // Double-check after acquiring the load lock.
         {
             let agents = self.agents.read().await;
@@ -2223,7 +2514,7 @@ impl ServerState {
         // attach a WAL + snapshot ticker to an akh another host owns.
         // Same guards as wake_workspace, applied to the accidental path
         // (e.g. `akh -w <name> acp status` on a non-owning host).
-        if let Some(pool) = self.pg_pool().as_ref() {
+        if self.pg_pool().is_some() {
             let akh_id = akh_medu::wal::akh_id_for(name);
             // Skip the lock re-acquisition if a wake on this host already
             // holds it — SeaORM uses a pool, so a second pg_try_advisory_lock
@@ -2237,21 +2528,6 @@ impl ServerState {
             if !waking_holds {
                 self.acquire_akh_lock_or_refuse(name, akh_id, "lazy-load")
                     .await?;
-            }
-            // Freshness: refuse if another host heartbeated recently.
-            if let Ok(Some(last_seen)) =
-                akhomed_store::get_last_seen(pool, akh_id).await
-            {
-                let age =
-                    (akhomed_store::chrono::Utc::now() - last_seen).num_seconds();
-                if age < 60 {
-                    return Err(format!(
-                        "workspace \"{name}\" was seen alive on another host \
-                         {age}s ago (last_seen < 60s). Refusing lazy-load to \
-                         prevent split-brain (ADR-049). Run `akh akh relocate` \
-                         on the owning host or wait for last_seen to age out."
-                    ));
-                }
             }
         }
 
@@ -4051,6 +4327,8 @@ async fn main() {
 mod control_plane_tests {
     use super::*;
     use akh_medu::acp::ServerControl;
+    use akh_medu::graph::Triple;
+    use akh_medu::symbol::SymbolKind;
     use serde_json::json;
 
     /// Build a `ServerState` rooted under a fresh tempdir.
@@ -4402,6 +4680,19 @@ mod control_plane_tests {
             .dispatch("_akh/workspace/create", &json!({ "name": "alpha" }))
             .await
             .expect("create");
+        let held_engine = state.get_engine("alpha").await.expect("open engine");
+        let subject = held_engine
+            .create_symbol(SymbolKind::Entity, "handoff-source")
+            .unwrap()
+            .id;
+        let predicate = held_engine
+            .create_symbol(SymbolKind::Relation, "handoff-relation")
+            .unwrap()
+            .id;
+        let object = held_engine
+            .create_symbol(SymbolKind::Entity, "handoff-object")
+            .unwrap()
+            .id;
         let r = state
             .dispatch("_akh/akh/sleep", &json!({ "workspace": "alpha" }))
             .await
@@ -4420,6 +4711,12 @@ mod control_plane_tests {
         assert!(
             state.workspaces.read().await.is_empty() && state.agents.read().await.is_empty(),
             "sleep must evict cached engine + agent",
+        );
+        assert!(
+            held_engine
+                .add_triple(&Triple::new(subject, predicate, object))
+                .is_err(),
+            "a handle retained across handoff must be quiesced"
         );
     }
 
@@ -4458,6 +4755,56 @@ mod control_plane_tests {
             );
         }
         assert_eq!(state.workspaces.read().await.len(), 1, "exactly one engine cached");
+    }
+
+    #[tokio::test]
+    async fn handoff_gate_refuses_new_engine_and_agent_residency() {
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "handoff" }))
+            .await
+            .expect("create");
+        state
+            .handoffs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert("handoff".to_string());
+
+        let engine = state.get_engine("handoff").await;
+        let agent = state.get_agent("handoff").await;
+        assert!(engine.is_err_and(|error| error.contains("handed off")));
+        assert!(agent.is_err_and(|error| error.contains("handed off")));
+        assert!(state.workspaces.read().await.is_empty());
+        assert!(state.agents.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eviction_waits_for_in_flight_snapshot_publication_guard() {
+        let (_tmp, state) = temp_state();
+        let state = Arc::new(state);
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "publishing" }))
+            .await
+            .expect("create");
+        state.get_agent("publishing").await.expect("load agent");
+        let publication_lock = state.snapshot_publication_lock("publishing");
+        let publication_guard = publication_lock.lock().await;
+
+        let evicting = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { state.evict_workspace("publishing").await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!evicting.is_finished(), "eviction bypassed publication guard");
+        assert!(
+            state.agents.read().await.contains_key("publishing"),
+            "eviction must not drop an agent while its snapshot owns the publication guard"
+        );
+
+        drop(publication_guard);
+        evicting.await.unwrap();
+        assert!(!state.agents.read().await.contains_key("publishing"));
+        assert!(!state.workspaces.read().await.contains_key("publishing"));
     }
 
     #[tokio::test]

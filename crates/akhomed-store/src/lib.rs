@@ -25,8 +25,8 @@ mod pool;
 
 pub use error::{StoreError, StoreResult};
 pub use memberships::{
-    clear_last_seen, get_last_seen, join_workspace, leave_workspace, list_members, release_akh_lock,
-    touch_last_seen, try_acquire_akh_lock,
+    claim_akh_residency, clear_last_seen, get_last_seen, join_workspace, leave_workspace,
+    list_members, release_akh_lock, touch_last_seen, try_acquire_akh_lock,
 };
 pub use migration::Migrator;
 pub use mutations::{

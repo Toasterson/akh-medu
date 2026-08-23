@@ -80,6 +80,8 @@ pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 pub struct SnapshotData {
     akh_id: Uuid,
     workspace_id: Uuid,
+    /// Durable residency generation held by the capturing daemon.
+    residency_epoch: i64,
     /// WAL sequence sampled before the in-memory capture began.  It is a safe
     /// lower bound: mutations racing with capture may be replayed twice, but a
     /// captured snapshot can never advance past a mutation it did not see.
@@ -152,9 +154,28 @@ pub fn capture_snapshot_at_watermark(
     workspace_id: Uuid,
     watermark: i64,
 ) -> SnapshotResult<SnapshotData> {
+    capture_snapshot_at_fence(agent, akh_id, workspace_id, watermark, 0)
+}
+
+/// Capture state at a WAL lower bound and a durable residency fencing epoch.
+/// Production daemon callers must pass the epoch returned by
+/// `claim_akh_residency`; the legacy wrapper above is intentionally usable
+/// only while the Akh remains at its unclaimed epoch zero.
+pub fn capture_snapshot_at_fence(
+    agent: &Agent,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    watermark: i64,
+    residency_epoch: i64,
+) -> SnapshotResult<SnapshotData> {
     if watermark < 0 {
         return Err(SnapshotError::Agent(
             "snapshot WAL watermark cannot be negative".into(),
+        ));
+    }
+    if residency_epoch < 0 {
+        return Err(SnapshotError::Agent(
+            "snapshot residency epoch cannot be negative".into(),
         ));
     }
     let engine = agent.engine();
@@ -501,6 +522,7 @@ pub fn capture_snapshot_at_watermark(
     Ok(SnapshotData {
         akh_id,
         workspace_id,
+        residency_epoch,
         watermark,
         symbols,
         facts,
@@ -537,6 +559,7 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
     let SnapshotData {
         akh_id,
         workspace_id,
+        residency_epoch,
         watermark,
         symbols,
         facts,
@@ -585,6 +608,7 @@ pub async fn persist_snapshot(data: SnapshotData, db: &DatabaseConnection) -> Sn
         workspace_id,
         akh_id,
         ops::SnapshotPublication {
+            residency_epoch,
             symbols,
             facts,
             provenance,
@@ -1557,6 +1581,26 @@ struct ReplayCompleteReplace {
     assertion: serde_json::Value,
 }
 
+#[derive(serde::Deserialize)]
+struct ReplayRetractEdge {
+    subject: u64,
+    predicate: u64,
+    object: u64,
+    confidence: f32,
+    timestamp: u64,
+    #[serde(default)]
+    compartment: Option<String>,
+    #[serde(default)]
+    provenance_id: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReplayCompleteRetractBatch {
+    v: u64,
+    retracts: Vec<ReplayRetractEdge>,
+    symbols: Vec<SymbolMeta>,
+}
+
 fn invalid_tail(message: impl Into<String>) -> SnapshotError {
     SnapshotError::Agent(format!("wake: invalid mutation tail: {}", message.into()))
 }
@@ -1676,6 +1720,92 @@ fn parse_replay_complete_replace(
     Ok(replacement)
 }
 
+fn parse_retract_edge(edge: &ReplayRetractEdge) -> SnapshotResult<Triple> {
+    let ids = retract_triple_ids(&ReplayRetract {
+        subject: edge.subject,
+        predicate: edge.predicate,
+        object: edge.object,
+    })?;
+    if !edge.confidence.is_finite() || !(0.0..=1.0).contains(&edge.confidence) {
+        return Err(invalid_tail(format!(
+            "retract batch confidence {} is outside [0,1]",
+            edge.confidence
+        )));
+    }
+    if let Some(compartment) = edge.compartment.as_deref() {
+        validate_compartment_id(compartment)?;
+    }
+    if edge.provenance_id == Some(0) {
+        return Err(invalid_tail("retract batch provenance ID must be non-zero"));
+    }
+    let mut triple = Triple::new(ids.0, ids.1, ids.2);
+    triple.confidence = edge.confidence;
+    triple.timestamp = edge.timestamp;
+    triple.compartment_id = edge.compartment.clone();
+    triple.provenance_id = edge.provenance_id;
+    Ok(triple)
+}
+
+fn parse_replay_complete_retract_batch(
+    payload: &serde_json::Value,
+) -> SnapshotResult<(Vec<Triple>, Vec<SymbolMeta>)> {
+    let batch: ReplayCompleteRetractBatch = serde_json::from_value(payload.clone())
+        .map_err(|error| invalid_tail(format!("retract-batch-v1 decode failed: {error}")))?;
+    if batch.v != crate::mutation::RETRACT_BATCH_MUTATION_VERSION {
+        return Err(invalid_tail(format!(
+            "unsupported retract batch mutation version {}",
+            batch.v
+        )));
+    }
+    if batch.retracts.is_empty() {
+        return Err(invalid_tail("retract batch has no removed edge"));
+    }
+
+    let mut metadata_ids = std::collections::HashMap::new();
+    let mut metadata_labels = std::collections::HashMap::new();
+    for meta in &batch.symbols {
+        if is_reserved_symbol_id(meta.id.get())
+            || metadata_ids.insert(meta.id.get(), meta).is_some()
+        {
+            return Err(invalid_tail(format!(
+                "duplicate/reserved retract symbol metadata ID {}",
+                meta.id.get()
+            )));
+        }
+        let normalized = crate::registry::normalize_label_key(&meta.label);
+        if let Some(previous) = metadata_labels.insert(normalized, meta.id.get())
+            && previous != meta.id.get()
+        {
+            return Err(invalid_tail(format!(
+                "retract symbol label {} is assigned to IDs {previous} and {}",
+                meta.label,
+                meta.id.get()
+            )));
+        }
+    }
+
+    let triples = batch
+        .retracts
+        .iter()
+        .map(parse_retract_edge)
+        .collect::<SnapshotResult<Vec<_>>>()?;
+    let mut keys = std::collections::HashSet::new();
+    for triple in &triples {
+        if !keys.insert((triple.subject, triple.predicate, triple.object)) {
+            return Err(invalid_tail("retract batch contains a duplicate edge"));
+        }
+        for id in [triple.subject, triple.predicate, triple.object] {
+            if !metadata_ids.contains_key(&id.get()) {
+                return Err(invalid_tail(format!(
+                    "retract batch is missing full metadata for symbol {}",
+                    id.get()
+                )));
+            }
+        }
+    }
+    Ok((triples, batch.symbols))
+}
+
 fn parse_replay_complete_assert(
     payload: &serde_json::Value,
 ) -> SnapshotResult<(Triple, Vec<SymbolMeta>, Option<crate::provenance::ProvenanceRecord>)> {
@@ -1781,6 +1911,54 @@ fn parse_replay_complete_assert(
     Ok((triple, envelope.symbols, envelope.provenance))
 }
 
+fn merge_tail_symbols(
+    incoming: Vec<SymbolMeta>,
+    symbols: &mut Vec<SymbolMeta>,
+    symbol_positions: &mut std::collections::HashMap<u64, usize>,
+    labels: &mut std::collections::HashMap<String, u64>,
+    tail_symbol_ids: &mut std::collections::HashSet<u64>,
+) -> SnapshotResult<()> {
+    for meta in incoming {
+        let normalized = crate::registry::normalize_label_key(&meta.label);
+        if let Some(other_id) = labels.get(&normalized)
+            && *other_id != meta.id.get()
+        {
+            return Err(invalid_tail(format!(
+                "symbol label {} conflicts with restored ID {other_id}",
+                meta.label
+            )));
+        }
+        if let Some(position) = symbol_positions.get(&meta.id.get()).copied() {
+            let existing = &symbols[position];
+            if existing.kind != meta.kind || existing.label != meta.label {
+                return Err(invalid_tail(format!(
+                    "symbol ID {} conflicts with restored metadata",
+                    meta.id.get()
+                )));
+            }
+            if tail_symbol_ids.contains(&meta.id.get())
+                && (existing.created_at != meta.created_at || existing.source != meta.source)
+            {
+                return Err(invalid_tail(format!(
+                    "symbol ID {} has conflicting replay metadata",
+                    meta.id.get()
+                )));
+            }
+            // The WAL carries full metadata fields that the legacy relational
+            // symbol row does not. Prefer it after identity/kind verification.
+            symbols[position] = meta;
+            tail_symbol_ids.insert(symbols[position].id.get());
+        } else {
+            let position = symbols.len();
+            labels.insert(normalized, meta.id.get());
+            symbol_positions.insert(meta.id.get(), position);
+            tail_symbol_ids.insert(meta.id.get());
+            symbols.push(meta);
+        }
+    }
+    Ok(())
+}
+
 /// Merge every replay prerequisite into the cold-restore image before opening
 /// the engine. Facts are still replayed in WAL order afterwards so retract/TMS
 /// behavior stays unchanged.
@@ -1808,65 +1986,37 @@ fn prepare_tail_restore(
     let mut tail_symbol_ids = std::collections::HashSet::new();
 
     for mutation in tail {
-        let assertion = match mutation.kind.as_str() {
-            "assert" => std::borrow::Cow::Borrowed(&mutation.payload),
-            "replace" => std::borrow::Cow::Owned(
-                parse_replay_complete_replace(&mutation.payload)?.assertion,
-            ),
-            _ => continue,
+        let (tail_symbols, tail_record) = if mutation.kind == "retract_batch" {
+            let (_, tail_symbols) = parse_replay_complete_retract_batch(&mutation.payload)?;
+            (tail_symbols, None)
+        } else {
+            let assertion = match mutation.kind.as_str() {
+                "assert" => std::borrow::Cow::Borrowed(&mutation.payload),
+                "replace" => std::borrow::Cow::Owned(
+                    parse_replay_complete_replace(&mutation.payload)?.assertion,
+                ),
+                _ => continue,
+            };
+            match assertion.get("v") {
+                None => continue,
+                Some(version)
+                    if version.as_u64() == Some(crate::mutation::ASSERT_MUTATION_VERSION) => {}
+                Some(version) => {
+                    return Err(invalid_tail(format!(
+                        "unsupported assert mutation version {version}"
+                    )));
+                }
+            }
+            let (_, tail_symbols, tail_record) = parse_replay_complete_assert(&assertion)?;
+            (tail_symbols, tail_record)
         };
-        match assertion.get("v") {
-            None => continue,
-            Some(version)
-                if version.as_u64() == Some(crate::mutation::ASSERT_MUTATION_VERSION) => {}
-            Some(version) => {
-                return Err(invalid_tail(format!(
-                    "unsupported assert mutation version {version}"
-                )));
-            }
-        }
-        let (_, tail_symbols, tail_record) = parse_replay_complete_assert(&assertion)?;
-        for meta in tail_symbols {
-            let normalized = crate::registry::normalize_label_key(&meta.label);
-            if let Some(other_id) = labels.get(&normalized)
-                && *other_id != meta.id.get()
-            {
-                return Err(invalid_tail(format!(
-                    "symbol label {} conflicts with restored ID {other_id}",
-                    meta.label
-                )));
-            }
-            if let Some(position) = symbol_positions.get(&meta.id.get()).copied() {
-                let existing = &symbols[position];
-                if existing.kind != meta.kind
-                    || existing.label != meta.label
-                {
-                    return Err(invalid_tail(format!(
-                        "symbol ID {} conflicts with restored metadata",
-                        meta.id.get()
-                    )));
-                }
-                if tail_symbol_ids.contains(&meta.id.get())
-                    && (existing.created_at != meta.created_at || existing.source != meta.source)
-                {
-                    return Err(invalid_tail(format!(
-                        "symbol ID {} has conflicting replay metadata",
-                        meta.id.get()
-                    )));
-                }
-                // The WAL carries the full metadata fields that the legacy
-                // relational symbol row does not, so prefer it once identity
-                // and kind have been verified.
-                symbols[position] = meta;
-                tail_symbol_ids.insert(symbols[position].id.get());
-            } else {
-                let position = symbols.len();
-                labels.insert(normalized, meta.id.get());
-                symbol_positions.insert(meta.id.get(), position);
-                tail_symbol_ids.insert(meta.id.get());
-                symbols.push(meta);
-            }
-        }
+        merge_tail_symbols(
+            tail_symbols,
+            symbols,
+            &mut symbol_positions,
+            &mut labels,
+            &mut tail_symbol_ids,
+        )?;
         if let Some(record) = tail_record {
             let id = record.id.expect("validated versioned provenance ID").get();
             if let Some(position) = provenance_by_id.get(&id).copied() {
@@ -1901,6 +2051,11 @@ fn prepare_tail_restore(
                 .iter()
                 .map(retract_triple_ids)
                 .collect::<SnapshotResult<Vec<_>>>()?,
+            "retract_batch" => parse_replay_complete_retract_batch(&mutation.payload)?
+                .0
+                .into_iter()
+                .map(|triple| (triple.subject, triple.predicate, triple.object))
+                .collect(),
             _ => continue,
         };
         for (subject, predicate, object) in referenced {
@@ -1910,6 +2065,17 @@ fn prepare_tail_restore(
                         "{} references unknown symbol {}",
                         mutation.kind,
                         id.get()
+                    )));
+                }
+            }
+        }
+        if mutation.kind == "retract_batch" {
+            for triple in parse_replay_complete_retract_batch(&mutation.payload)?.0 {
+                if let Some(id) = triple.provenance_id
+                    && !provenance_by_id.contains_key(&id)
+                {
+                    return Err(invalid_tail(format!(
+                        "retract batch references unknown provenance ID {id}"
                     )));
                 }
             }
@@ -2151,6 +2317,47 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
             engine
                 .remove_triple(triple.0, triple.1, triple.2)
                 .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            Ok(true)
+        }
+        "retract_batch" => {
+            // Decode and validate the complete batch before applying its first
+            // edge. `prepare_tail_restore` has already merged the closed symbol
+            // envelope into the registry, so every reference must resolve.
+            let (retracts, _) = parse_replay_complete_retract_batch(&m.payload)?;
+            for triple in &retracts {
+                validate_replay_symbols_registered(
+                    engine,
+                    (triple.subject, triple.predicate, triple.object),
+                    "retract batch",
+                )?;
+                if let Some(raw_id) = triple.provenance_id {
+                    let id = crate::provenance::ProvenanceId::new(raw_id)
+                        .ok_or_else(|| invalid_tail("retract batch provenance ID must be non-zero"))?;
+                    engine.get_provenance(id).map_err(|error| {
+                        invalid_tail(format!(
+                            "retract batch references unavailable provenance ID {raw_id}: {error}"
+                        ))
+                    })?;
+                }
+                if let Some(actual) = engine.knowledge_graph().triple(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                ) && actual != *triple
+                {
+                    return Err(invalid_tail(format!(
+                        "retract batch edge ({}, {}, {}) metadata does not match replay state",
+                        triple.subject.get(),
+                        triple.predicate.get(),
+                        triple.object.get()
+                    )));
+                }
+            }
+            for triple in &retracts {
+                engine
+                    .replay_retract_edge_exact(triple)
+                    .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            }
             Ok(true)
         }
         "replace" => {
@@ -3207,6 +3414,316 @@ triples_file = "triples.json"
         }
         assert!(!restored.has_triple(subject, predicate, old_object));
         assert!(restored.has_triple(subject, predicate, new_object));
+    }
+
+    #[test]
+    fn tms_cascade_retract_batch_replays_exactly_without_restored_tms() {
+        let live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let premise_subject = live
+            .create_symbol(SymbolKind::Entity, "cascade-premise-subject")
+            .unwrap()
+            .id;
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "cascade-predicate")
+            .unwrap()
+            .id;
+        let premise_object = live
+            .create_symbol(SymbolKind::Entity, "cascade-premise-object")
+            .unwrap()
+            .id;
+        let derived_subject = live
+            .create_symbol(SymbolKind::Entity, "cascade-derived-subject")
+            .unwrap()
+            .id;
+        let derived_object = live
+            .create_symbol(SymbolKind::Entity, "cascade-derived-object")
+            .unwrap()
+            .id;
+        let premise = Triple::new(premise_subject, predicate, premise_object);
+        live.add_triple(&premise).unwrap();
+        let derived = Triple::new(derived_subject, predicate, derived_object);
+        live.add_triple_with_support(
+            &derived,
+            crate::tms::SupportSet::new(
+                vec![premise_object],
+                crate::provenance::DerivationKind::Seed,
+                1.0,
+            ),
+        )
+        .unwrap();
+        let captured = live.all_triples();
+        let wal = Arc::new(crate::wal::MutationLog::new(
+            akhomed_store::DatabaseConnection::Disconnected,
+            Uuid::from_u128(1),
+            Uuid::from_u128(2),
+            crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
+        ));
+        assert!(live
+            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        live.remove_triple(premise_subject, predicate, premise_object)
+            .unwrap();
+        assert!(live.all_triples().is_empty());
+        let records = wal.drain_records_for_test();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, MutationKind::RetractBatch);
+        assert_eq!(records[0].payload["retracts"].as_array().unwrap().len(), 2);
+
+        // A fresh replay engine deliberately has no TMS supports. The exact
+        // compound tail must still remove both the primary and cascade edge.
+        let replay = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        for (kind, label) in [
+            (SymbolKind::Entity, "cascade-premise-subject"),
+            (SymbolKind::Relation, "cascade-predicate"),
+            (SymbolKind::Entity, "cascade-premise-object"),
+            (SymbolKind::Entity, "cascade-derived-subject"),
+            (SymbolKind::Entity, "cascade-derived-object"),
+        ] {
+            replay.create_symbol(kind, label).unwrap();
+        }
+        replay.restore_triples(&captured).unwrap();
+        let tail = akhomed_store::TailMutation {
+            kind: records[0].kind.as_str().to_string(),
+            payload: records[0].payload.clone(),
+        };
+        assert!(apply_mutation(&replay, &tail).unwrap());
+        assert!(replay.all_triples().is_empty());
+    }
+
+    #[test]
+    fn duplicate_live_assertions_wake_to_exact_merged_metadata() {
+        let live_dir = tempfile::tempdir().unwrap();
+        let live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            data_dir: Some(live_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "wake-duplicate-predicate")
+            .unwrap()
+            .id;
+        let mut keys = Vec::new();
+        for label in ["wake-lower", "wake-new-provenance", "wake-incoming-none"] {
+            keys.push((
+                live.create_symbol(SymbolKind::Entity, format!("{label}-subject"))
+                    .unwrap()
+                    .id,
+                predicate,
+                live.create_symbol(SymbolKind::Entity, format!("{label}-object"))
+                    .unwrap()
+                    .id,
+            ));
+        }
+        live.add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.9))
+            .unwrap();
+        live.add_triple(&Triple::new(keys[1].0, predicate, keys[1].2).with_confidence(0.8))
+            .unwrap();
+        let mut old_record = crate::provenance::ProvenanceRecord::new(
+            keys[2].2,
+            crate::provenance::DerivationKind::Seed,
+        );
+        let old_provenance = live.store_provenance(&mut old_record).unwrap();
+        live.add_triple(
+            &Triple::new(keys[2].0, predicate, keys[2].2)
+                .with_confidence(0.7)
+                .with_provenance(old_provenance.get()),
+        )
+        .unwrap();
+
+        let captured_triples = live.all_triples();
+        let mut restored_symbols = live.dump_symbols();
+        let mut restored_provenance = live.all_provenance().unwrap();
+        let wal = Arc::new(crate::wal::MutationLog::new(
+            akhomed_store::DatabaseConnection::Disconnected,
+            Uuid::from_u128(3),
+            Uuid::from_u128(4),
+            crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
+        ));
+        assert!(live
+            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+            .is_ok());
+        live.add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.2))
+            .unwrap();
+        let mut new_record = crate::provenance::ProvenanceRecord::new(
+            keys[1].2,
+            crate::provenance::DerivationKind::Seed,
+        );
+        let new_provenance = live.store_provenance(&mut new_record).unwrap();
+        live.add_triple(
+            &Triple::new(keys[1].0, predicate, keys[1].2)
+                .with_confidence(0.3)
+                .with_provenance(new_provenance.get()),
+        )
+        .unwrap();
+        live.add_triple(&Triple::new(keys[2].0, predicate, keys[2].2).with_confidence(0.1))
+            .unwrap();
+
+        // Exercise the production MutationLog sink and its bounded WalBuffer
+        // before simulating the crash, then reconstruct the ordered relational
+        // tail exactly as wake consumes it.
+        let tail = wal
+            .drain_records_for_test()
+            .into_iter()
+            .map(|record| akhomed_store::TailMutation {
+                kind: record.kind.as_str().to_string(),
+                payload: record.payload,
+            })
+            .collect::<Vec<_>>();
+        let allocator_next = prepare_tail_restore(
+            &tail,
+            &mut restored_symbols,
+            &mut restored_provenance,
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = TieredStore::with_persistence(dir.path(), "symbols").unwrap();
+            write_registry(&store, &restored_symbols).unwrap();
+            put_bincode_required(&store, b"sym_allocator_next", &allocator_next).unwrap();
+        }
+        let replay = Engine::new_for_restore(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        replay
+            .replace_all_provenance(&restored_provenance)
+            .unwrap();
+        replay.restore_triples(&captured_triples).unwrap();
+        for mutation in &tail {
+            assert!(apply_mutation(&replay, mutation).unwrap());
+        }
+
+        let by_key = |engine: &Engine| {
+            let mut triples = engine.all_triples();
+            triples.sort_by_key(|triple| {
+                (triple.subject, triple.predicate, triple.object)
+            });
+            triples
+        };
+        assert_eq!(by_key(&live), by_key(&replay));
+    }
+
+    #[test]
+    fn retract_batch_metadata_mismatch_is_atomic_and_fails_closed() {
+        let engine = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine
+            .create_symbol(SymbolKind::Entity, "mismatch-subject")
+            .unwrap()
+            .id;
+        let predicate = engine
+            .create_symbol(SymbolKind::Relation, "mismatch-predicate")
+            .unwrap()
+            .id;
+        let first_object = engine
+            .create_symbol(SymbolKind::Entity, "mismatch-first")
+            .unwrap()
+            .id;
+        let second_object = engine
+            .create_symbol(SymbolKind::Entity, "mismatch-second")
+            .unwrap()
+            .id;
+        let first = Triple::new(subject, predicate, first_object).with_confidence(0.8);
+        let second = Triple::new(subject, predicate, second_object).with_confidence(0.7);
+        engine.add_triple(&first).unwrap();
+        engine.add_triple(&second).unwrap();
+        let exact_first = engine
+            .knowledge_graph()
+            .triple(subject, predicate, first_object)
+            .unwrap();
+        let exact_second = engine
+            .knowledge_graph()
+            .triple(subject, predicate, second_object)
+            .unwrap();
+        let edge_json = |edge: &Triple, confidence: f32| {
+            serde_json::json!({
+                "subject": edge.subject.get(),
+                "predicate": edge.predicate.get(),
+                "object": edge.object.get(),
+                "confidence": confidence,
+                "timestamp": edge.timestamp,
+                "compartment": edge.compartment_id.clone(),
+                "provenance_id": edge.provenance_id,
+            })
+        };
+        let mutation = akhomed_store::TailMutation {
+            kind: "retract_batch".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
+                "retracts": [
+                    edge_json(&exact_first, exact_first.confidence),
+                    edge_json(&exact_second, 0.1),
+                ],
+                "symbols": engine.dump_symbols(),
+            }),
+        };
+
+        assert!(apply_mutation(&engine, &mutation).is_err());
+        assert!(engine.has_triple(subject, predicate, first_object));
+        assert!(engine.has_triple(subject, predicate, second_object));
+    }
+
+    #[test]
+    fn retract_batch_with_unknown_provenance_fails_before_removal() {
+        let engine = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine
+            .create_symbol(SymbolKind::Entity, "unknown-provenance-subject")
+            .unwrap()
+            .id;
+        let predicate = engine
+            .create_symbol(SymbolKind::Relation, "unknown-provenance-predicate")
+            .unwrap()
+            .id;
+        let object = engine
+            .create_symbol(SymbolKind::Entity, "unknown-provenance-object")
+            .unwrap()
+            .id;
+        let edge = Triple::new(subject, predicate, object);
+        engine.add_triple(&edge).unwrap();
+        let exact = engine
+            .knowledge_graph()
+            .triple(subject, predicate, object)
+            .unwrap();
+        let mutation = akhomed_store::TailMutation {
+            kind: "retract_batch".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
+                "retracts": [{
+                    "subject": exact.subject.get(),
+                    "predicate": exact.predicate.get(),
+                    "object": exact.object.get(),
+                    "confidence": exact.confidence,
+                    "timestamp": exact.timestamp,
+                    "compartment": exact.compartment_id,
+                    "provenance_id": 999,
+                }],
+                "symbols": engine.dump_symbols(),
+            }),
+        };
+
+        let error = apply_mutation(&engine, &mutation).unwrap_err();
+        assert!(error.to_string().contains("provenance ID 999"), "{error}");
+        assert!(engine.has_triple(subject, predicate, object));
     }
 
     #[test]

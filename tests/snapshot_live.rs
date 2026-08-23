@@ -16,13 +16,18 @@ use akh_medu::provenance::{
     DerivationKind, ProvenanceId, ProvenanceRecord, RULE_APPLICATION_V2_SENTINEL,
     RULE_SUPPORT_TRIPLES_V1_SENTINEL,
 };
-use akh_medu::snapshot::{capture_snapshot_at_watermark, persist_snapshot, wake, write_snapshot};
+use akh_medu::snapshot::{
+    capture_snapshot_at_fence, capture_snapshot_at_watermark, persist_snapshot, wake,
+    write_snapshot,
+};
 use akh_medu::symbol::SymbolKind;
 use akhomed_store::sea_orm::{
     self, ConnectionTrait, DbBackend, Statement, TransactionTrait,
 };
 use akhomed_store::uuid::Uuid;
-use akhomed_store::{MutationRow, append_mutations, connect, ensure_akh, run_migrations};
+use akhomed_store::{
+    MutationRow, append_mutations, claim_akh_residency, connect, ensure_akh, run_migrations,
+};
 
 async fn count(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
     let row = db
@@ -761,4 +766,74 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
         .await
         .unwrap();
     assert!(!woken.has_triple(subject.id, predicate.id, object.id));
+}
+
+/// A WAL watermark cannot distinguish two divergent captures when no mutation
+/// row was appended between them. Residency epoch is the cross-process fence:
+/// after ownership advances, the old equal-watermark image must fail closed.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    ensure_akh(&db, akh_id, "equal-watermark-fence", None)
+        .await
+        .unwrap();
+
+    let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+    let subject = engine.create_symbol(SymbolKind::Entity, "FenceSubject").unwrap();
+    let predicate = engine
+        .create_symbol(SymbolKind::Relation, "fence-predicate")
+        .unwrap();
+    let object = engine.create_symbol(SymbolKind::Entity, "FenceObject").unwrap();
+    engine
+        .add_triple(&Triple::new(subject.id, predicate.id, object.id))
+        .unwrap();
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+    let watermark = akhomed_store::snapshots::current_watermark(&db, akh_id)
+        .await
+        .unwrap();
+
+    let old_epoch = claim_akh_residency(&db, akh_id, workspace_id)
+        .await
+        .unwrap();
+    let stale = capture_snapshot_at_fence(
+        &agent,
+        akh_id,
+        workspace_id,
+        watermark,
+        old_epoch,
+    )
+    .unwrap();
+    engine
+        .remove_triple(subject.id, predicate.id, object.id)
+        .unwrap();
+    let new_epoch = claim_akh_residency(&db, akh_id, workspace_id)
+        .await
+        .unwrap();
+    let current = capture_snapshot_at_fence(
+        &agent,
+        akh_id,
+        workspace_id,
+        watermark,
+        new_epoch,
+    )
+    .unwrap();
+    persist_snapshot(current, &db).await.unwrap();
+    let error = persist_snapshot(stale, &db)
+        .await
+        .expect_err("previous owner must be fenced at equal watermark");
+    assert!(error.to_string().contains("stale snapshot owner"), "{error}");
+    assert!(
+        akhomed_store::snapshots::load_workspace_facts(&db, workspace_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

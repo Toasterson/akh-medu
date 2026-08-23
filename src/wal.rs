@@ -12,11 +12,11 @@
 //!   buffer (re-inserted at the front) and retry on the next tick.
 //! - **Bounded memory.** The buffer is capped at `max_buffer_bytes`; on overflow
 //!   the oldest unprotected entries are dropped first. Asserts, compound
-//!   replacements, and turns are dropped only as a last resort, with a counter
-//!   for observability.
+//!   replacements, replay-complete cascade retractions, and turns are dropped
+//!   only as a last resort, with a counter for observability.
 //!
-//! Replay (38c) re-applies mutations through `Engine::add_triple`, which is
-//! idempotent, so the WAL only needs at-least-once delivery.
+//! Replay (38c) validates each versioned envelope and applies its exact stored
+//! metadata idempotently; compound replace/retract records are indivisible.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -249,6 +249,11 @@ impl MutationLog {
         self.buffer.dropped_on_overflow()
     }
 
+    #[cfg(test)]
+    pub(crate) fn drain_records_for_test(&self) -> Vec<MutationRecord> {
+        self.buffer.drain_records_for_test()
+    }
+
     /// Flush up to one batch. Returns the number of rows committed.
     ///
     /// The batch is removed from the buffer **before** the await so a concurrent
@@ -398,6 +403,31 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].kind, MutationKind::Replace);
         assert_eq!(remaining[0].payload, replacement);
+    }
+
+    #[test]
+    fn overflow_keeps_tms_retract_batch_as_one_protected_entry() {
+        let cascade = json!({
+            "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
+            "retracts": [
+                {"subject": 1, "predicate": 2, "object": 3},
+                {"subject": 4, "predicate": 2, "object": 5},
+            ],
+            "symbols": [],
+        });
+        let cascade_bytes = cascade.to_string().len() + 64;
+        let buf = WalBuffer::new(cascade_bytes + 8);
+        buf.push(MutationKind::RetractBatch, cascade.clone());
+        buf.push(
+            MutationKind::Retract,
+            json!({"padding": "drop this legacy unprotected retract"}),
+        );
+
+        assert_eq!(buf.dropped_on_overflow(), 1);
+        let remaining = buf.drain_records_for_test();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].kind, MutationKind::RetractBatch);
+        assert_eq!(remaining[0].payload, cascade);
     }
 
     #[test]

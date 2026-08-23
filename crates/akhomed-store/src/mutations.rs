@@ -63,6 +63,7 @@ pub async fn ensure_akh(
         // Timestamps set app-side (no DB defaults) for backend portability.
         awakened_at: Set(chrono::Utc::now()),
         last_seen: NotSet,
+        residency_epoch: NotSet,
     };
     let result = akh::Entity::insert(model)
         .on_conflict(OnConflict::column(akh::Column::Id).do_nothing().to_owned())

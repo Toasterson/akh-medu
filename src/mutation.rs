@@ -20,6 +20,9 @@ pub const ASSERT_MUTATION_VERSION: u64 = 2;
 /// assertion must survive (or be dropped) together in the bounded WAL.
 pub const REPLACE_MUTATION_VERSION: u64 = 1;
 
+/// Version of the replay-complete, overflow-protected TMS cascade retraction.
+pub const RETRACT_BATCH_MUTATION_VERSION: u64 = 1;
+
 /// A single knowledge mutation captured at the engine boundary.
 #[derive(Debug, Clone)]
 pub struct MutationRecord {
@@ -47,6 +50,10 @@ pub enum MutationKind {
     Assert,
     /// A triple was retracted.
     Retract,
+    /// One primary retraction and every concrete edge removed by its TMS
+    /// cascade. Kept as one protected record so fresh-host replay does not
+    /// depend on an in-memory TMS that is absent from the relational snapshot.
+    RetractBatch,
     /// One or more conflicting triples were retracted and a replacement was
     /// asserted as one indivisible replay/overflow unit.
     Replace,
@@ -73,6 +80,7 @@ impl MutationKind {
         match self {
             MutationKind::Assert => "assert",
             MutationKind::Retract => "retract",
+            MutationKind::RetractBatch => "retract_batch",
             MutationKind::Replace => "replace",
             MutationKind::MicrotheoryLoad => "microtheory_load",
             MutationKind::MicrotheoryUnload => "microtheory_unload",
@@ -90,7 +98,10 @@ impl MutationKind {
     pub fn is_protected_on_overflow(self) -> bool {
         matches!(
             self,
-            MutationKind::Assert | MutationKind::Replace | MutationKind::Turn
+            MutationKind::Assert
+                | MutationKind::RetractBatch
+                | MutationKind::Replace
+                | MutationKind::Turn
         )
     }
 }
@@ -145,6 +156,7 @@ mod tests {
     fn kind_strings_are_stable() {
         assert_eq!(MutationKind::Assert.as_str(), "assert");
         assert_eq!(MutationKind::Retract.as_str(), "retract");
+        assert_eq!(MutationKind::RetractBatch.as_str(), "retract_batch");
         assert_eq!(MutationKind::Replace.as_str(), "replace");
         assert_eq!(MutationKind::MicrotheoryLoad.as_str(), "microtheory_load");
         assert_eq!(MutationKind::CompartmentDestroy.as_str(), "compartment_destroy");
@@ -154,6 +166,7 @@ mod tests {
     #[test]
     fn assert_and_turn_are_protected() {
         assert!(MutationKind::Assert.is_protected_on_overflow());
+        assert!(MutationKind::RetractBatch.is_protected_on_overflow());
         assert!(MutationKind::Replace.is_protected_on_overflow());
         assert!(MutationKind::Turn.is_protected_on_overflow());
         assert!(!MutationKind::Retract.is_protected_on_overflow());

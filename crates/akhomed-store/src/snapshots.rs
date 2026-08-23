@@ -19,7 +19,7 @@ use uuid::Uuid;
 // The macro-driven helpers fully-qualify their entity modules; only these are
 // referenced directly by the hand-written helpers below.
 use crate::entity::{
-    agenda, akh_state, competence_calibration, competence_category, competence_tool,
+    agenda, akh, akh_state, competence_calibration, competence_category, competence_tool,
     curiosity_config, drive, effort_case, fact, failure_case, goal, goal_dependency,
     goal_hierarchy, learned_method, learned_method_step, mutation_log, provenance_input,
     provenance_snapshot, sleep_metric, symbol, workspace_seed_pack,
@@ -133,6 +133,9 @@ akh_scoped_ops!(sleep_metric, replace_sleep_metrics, load_sleep_metrics, [cycle 
 /// transaction rather than exposing a half-replaced image between the former
 /// per-table transactions.
 pub struct SnapshotPublication {
+    /// Residency generation captured by the owning daemon. Must still match
+    /// `akhomed_akh.residency_epoch` at commit time.
+    pub residency_epoch: i64,
     pub symbols: Vec<symbol::Model>,
     pub facts: Vec<fact::Model>,
     pub provenance: Vec<provenance_snapshot::Model>,
@@ -194,6 +197,22 @@ pub async fn publish_snapshot(
                 [format!("snapshot:{workspace_id}").into()],
             ))
             .await?;
+    }
+
+    let owner = akh::Entity::find_by_id(akh_id)
+        .one(&transaction)
+        .await?
+        .ok_or_else(|| crate::error::StoreError::Conflict {
+            message: format!("snapshot owner akh {akh_id} does not exist"),
+        })?;
+    if owner.residency_epoch != publication.residency_epoch {
+        return Err(crate::error::StoreError::Conflict {
+            message: format!(
+                "stale snapshot owner for workspace {workspace_id}: captured residency epoch {}, \
+                 but current owner epoch is {}",
+                publication.residency_epoch, owner.residency_epoch
+            ),
+        });
     }
 
     let published = akh_state::Entity::find_by_id(akh_id)

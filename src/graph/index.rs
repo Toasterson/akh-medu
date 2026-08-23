@@ -281,6 +281,35 @@ impl KnowledgeGraph {
         }
     }
 
+    /// Return the exact stored edge, including all volatile metadata.
+    ///
+    /// Live assertions merge duplicate edges, so callers that publish a WAL
+    /// image must read back this value rather than serialising the incoming
+    /// assertion verbatim.
+    pub fn triple(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> Option<Triple> {
+        let subj_idx = *self.node_index.get(&subject)?.value();
+        let obj_idx = *self.node_index.get(&object)?.value();
+        let graph = self.graph.read().expect("graph lock poisoned");
+        let edge = graph
+            .edges_directed(subj_idx, Direction::Outgoing)
+            .find(|edge| edge.target() == obj_idx && edge.weight().predicate == predicate)?;
+        let data = edge.weight();
+        Some(Triple {
+            subject,
+            predicate,
+            object,
+            confidence: data.confidence,
+            timestamp: data.timestamp,
+            provenance_id: data.provenance_id,
+            compartment_id: data.compartment_id.clone(),
+        })
+    }
+
     /// Remove all triples in a given compartment.
     ///
     /// Iterates all edges, collects those whose `compartment_id` matches, then

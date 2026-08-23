@@ -32,6 +32,7 @@ fn akh_and_state_roundtrip() {
         home_host: Some("m2-cellar".into()),
         awakened_at: ts(),
         last_seen: None,
+        residency_epoch: 7,
     });
     roundtrip(&akh_state::Model {
         akh_id: Uuid::from_u128(1),
