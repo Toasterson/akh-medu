@@ -26,7 +26,7 @@ use akhomed_store::sea_orm::{
 };
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
-    MutationRow, append_mutations, claim_akh_residency, connect, ensure_akh, run_migrations,
+    MutationRow, append_mutations, connect, ensure_akh, run_migrations,
 };
 
 async fn count(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
@@ -778,7 +778,8 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let opts = akhomed_store::PoolOptions::new(url);
+    let db = connect(&opts).await.unwrap();
     run_migrations(&db).await.unwrap();
     let akh_id = Uuid::new_v4();
     let workspace_id = Uuid::new_v4();
@@ -800,7 +801,10 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
         .await
         .unwrap();
 
-    let old_epoch = claim_akh_residency(&db, akh_id, workspace_id)
+    let old_session = akhomed_store::StablePgSession::connect(&opts).await.unwrap();
+    assert!(old_session.try_acquire_akh_lock(akh_id).await.unwrap());
+    let old_epoch = old_session
+        .claim_akh_residency(akh_id, workspace_id)
         .await
         .unwrap();
     let stale = capture_snapshot_at_fence(
@@ -814,7 +818,11 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
     engine
         .remove_triple(subject.id, predicate.id, object.id)
         .unwrap();
-    let new_epoch = claim_akh_residency(&db, akh_id, workspace_id)
+    assert!(old_session.release_akh_lock(akh_id).await.unwrap());
+    let new_session = akhomed_store::StablePgSession::connect(&opts).await.unwrap();
+    assert!(new_session.try_acquire_akh_lock(akh_id).await.unwrap());
+    let new_epoch = new_session
+        .claim_akh_residency(akh_id, workspace_id)
         .await
         .unwrap();
     let current = capture_snapshot_at_fence(

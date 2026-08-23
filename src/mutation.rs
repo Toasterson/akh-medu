@@ -21,7 +21,9 @@ pub const ASSERT_MUTATION_VERSION: u64 = 2;
 pub const REPLACE_MUTATION_VERSION: u64 = 1;
 
 /// Version of the replay-complete, overflow-protected TMS cascade retraction.
-pub const RETRACT_BATCH_MUTATION_VERSION: u64 = 1;
+/// V2 closes every referenced provenance record so the batch can survive even
+/// when its older assertion is dropped by bounded-WAL overflow.
+pub const RETRACT_BATCH_MUTATION_VERSION: u64 = 2;
 
 /// A single knowledge mutation captured at the engine boundary.
 #[derive(Debug, Clone)]

@@ -95,6 +95,82 @@ impl StablePgSession {
         Ok(locked)
     }
 
+    /// Advance and return the durable residency fencing epoch while holding
+    /// the advisory lock on this exact physical PostgreSQL session.
+    ///
+    /// Keeping the ownership check, snapshot-publication fence, and epoch
+    /// update under `state` means a dropped/reconnected socket cannot advance
+    /// an epoch after the session advisory lock has disappeared. In
+    /// particular, this must never be implemented through a connection pool:
+    /// the pooled transaction would not be protected by this session's lock.
+    pub async fn claim_akh_residency(
+        &self,
+        akh_id: Uuid,
+        workspace_id: Uuid,
+    ) -> StoreResult<i64> {
+        let mut state = self.state.lock().await;
+        if state.locked_akh != Some(akh_id) {
+            return Err(StoreError::Conflict {
+                message: format!(
+                    "cannot claim residency for akh {akh_id}: the pinned session does not own its advisory lock"
+                ),
+            });
+        }
+        let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
+            message: format!(
+                "cannot claim residency for akh {akh_id}: pinned PostgreSQL session is closed"
+            ),
+        })?;
+        let mut transaction = connection.begin().await.map_err(query_error)?;
+        sea_orm::sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        )
+        .bind(format!("snapshot:{workspace_id}"))
+        .execute(&mut *transaction)
+        .await
+        .map_err(query_error)?;
+
+        let current: Option<i64> = sea_orm::sqlx::query_scalar(
+            "SELECT residency_epoch FROM akhomed_akh WHERE id = $1 FOR UPDATE",
+        )
+        .bind(akh_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(query_error)?;
+        let Some(current) = current else {
+            transaction.rollback().await.map_err(query_error)?;
+            return Err(StoreError::Conflict {
+                message: format!("cannot claim residency for unknown akh {akh_id}"),
+            });
+        };
+        let next = current.checked_add(1).ok_or_else(|| StoreError::Conflict {
+            message: format!("residency epoch exhausted for akh {akh_id}"),
+        })?;
+        sea_orm::sqlx::query(
+            "UPDATE akhomed_akh SET residency_epoch = $2 WHERE id = $1",
+        )
+        .bind(akh_id)
+        .bind(next)
+        .execute(&mut *transaction)
+        .await
+        .map_err(query_error)?;
+        transaction.commit().await.map_err(query_error)?;
+        Ok(next)
+    }
+
+    /// PostgreSQL backend PID for live ownership/failure tests and diagnostics.
+    /// The query runs on the same pinned connection that owns the lock.
+    pub async fn backend_process_id(&self) -> StoreResult<i32> {
+        let mut state = self.state.lock().await;
+        let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
+            message: "stable PostgreSQL residency session is closed".into(),
+        })?;
+        sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(connection)
+            .await
+            .map_err(query_error)
+    }
+
     /// Release this session's residency lock.  The local ownership marker is
     /// cleared before the query so a failed/unreachable unlock still fences
     /// every retained WAL handle immediately.  Dropping the connection is the

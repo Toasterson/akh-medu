@@ -3012,11 +3012,18 @@ impl Engine {
         let removals = removals.into_values().collect::<Vec<_>>();
 
         // A retract batch carries the exact removed edges plus closed symbol
-        // metadata. Build and validate it before touching KG/TMS/SPARQL/WAL.
+        // and provenance metadata. Build and validate it before touching
+        // KG/TMS/SPARQL/WAL.
         let mut symbol_metadata = std::collections::BTreeMap::new();
+        let mut provenance_records = std::collections::BTreeMap::new();
         for edge in &removals {
-            for meta in self.prepare_assertion(edge)?.symbols {
+            let prepared = self.prepare_assertion(edge)?;
+            for meta in prepared.symbols {
                 symbol_metadata.entry(meta.id).or_insert(meta);
+            }
+            if let Some(record) = prepared.provenance {
+                let id = record.id.expect("prepare_assertion validates provenance IDs");
+                provenance_records.entry(id).or_insert(record);
             }
         }
 
@@ -3057,6 +3064,7 @@ impl Engine {
                 "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
                 "retracts": retracts,
                 "symbols": symbol_metadata.into_values().collect::<Vec<_>>(),
+                "provenance": provenance_records.into_values().collect::<Vec<_>>(),
             }),
         );
         Ok(result)

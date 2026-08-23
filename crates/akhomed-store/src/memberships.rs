@@ -9,8 +9,8 @@
 //! keeps two hosts from waking/relocating the *same* Akh at once.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, FromQueryResult, QueryFilter, Statement, TransactionTrait,
+    ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter,
+    Statement,
 };
 use sea_orm::sea_query::OnConflict;
 use uuid::Uuid;
@@ -135,52 +135,6 @@ pub async fn release_akh_lock(db: &DatabaseConnection, akh_id: Uuid) -> StoreRes
     );
     let row = LockedRow::find_by_statement(stmt).one(db).await?;
     Ok(row.map(|r| r.locked).unwrap_or(false))
-}
-
-/// Advance and return the durable residency fencing epoch for `akh_id`.
-///
-/// The caller must already hold the Akh's session advisory lock on this same
-/// dedicated connection. Taking the snapshot publication advisory lock inside
-/// the transaction orders the generation hand-off against every in-flight
-/// publisher: old publications either commit before the epoch advances or see
-/// the new epoch and fail closed afterwards.
-pub async fn claim_akh_residency(
-    db: &DatabaseConnection,
-    akh_id: Uuid,
-    workspace_id: Uuid,
-) -> StoreResult<i64> {
-    use crate::entity::akh;
-
-    let transaction = db.begin().await?;
-    if transaction.get_database_backend() == DatabaseBackend::Postgres {
-        transaction
-            .query_one(Statement::from_sql_and_values(
-                DatabaseBackend::Postgres,
-                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                [format!("snapshot:{workspace_id}").into()],
-            ))
-            .await?;
-    }
-    let current = akh::Entity::find_by_id(akh_id)
-        .one(&transaction)
-        .await?
-        .ok_or_else(|| crate::error::StoreError::Conflict {
-            message: format!("cannot claim residency for unknown akh {akh_id}"),
-        })?;
-    let next = current.residency_epoch.checked_add(1).ok_or_else(|| {
-        crate::error::StoreError::Conflict {
-            message: format!("residency epoch exhausted for akh {akh_id}"),
-        }
-    })?;
-    akh::ActiveModel {
-        id: sea_orm::ActiveValue::Set(akh_id),
-        residency_epoch: sea_orm::ActiveValue::Set(next),
-        ..Default::default()
-    }
-    .update(&transaction)
-    .await?;
-    transaction.commit().await?;
-    Ok(next)
 }
 
 /// Update an Akh's `last_seen` heartbeat to `now` (38g). Best-effort presence

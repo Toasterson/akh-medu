@@ -159,7 +159,7 @@ pub fn capture_snapshot_at_watermark(
 
 /// Capture state at a WAL lower bound and a durable residency fencing epoch.
 /// Production daemon callers must pass the epoch returned by
-/// `claim_akh_residency`; the legacy wrapper above is intentionally usable
+/// `StablePgSession::claim_akh_residency`; the legacy wrapper above is intentionally usable
 /// only while the Akh remains at its unclaimed epoch zero.
 pub fn capture_snapshot_at_fence(
     agent: &Agent,
@@ -1599,6 +1599,8 @@ struct ReplayCompleteRetractBatch {
     v: u64,
     retracts: Vec<ReplayRetractEdge>,
     symbols: Vec<SymbolMeta>,
+    #[serde(default)]
+    provenance: Vec<crate::provenance::ProvenanceRecord>,
 }
 
 fn invalid_tail(message: impl Into<String>) -> SnapshotError {
@@ -1748,10 +1750,15 @@ fn parse_retract_edge(edge: &ReplayRetractEdge) -> SnapshotResult<Triple> {
 
 fn parse_replay_complete_retract_batch(
     payload: &serde_json::Value,
-) -> SnapshotResult<(Vec<Triple>, Vec<SymbolMeta>)> {
+) -> SnapshotResult<(
+    u64,
+    Vec<Triple>,
+    Vec<SymbolMeta>,
+    Vec<crate::provenance::ProvenanceRecord>,
+)> {
     let batch: ReplayCompleteRetractBatch = serde_json::from_value(payload.clone())
-        .map_err(|error| invalid_tail(format!("retract-batch-v1 decode failed: {error}")))?;
-    if batch.v != crate::mutation::RETRACT_BATCH_MUTATION_VERSION {
+        .map_err(|error| invalid_tail(format!("retract-batch decode failed: {error}")))?;
+    if !matches!(batch.v, 1 | crate::mutation::RETRACT_BATCH_MUTATION_VERSION) {
         return Err(invalid_tail(format!(
             "unsupported retract batch mutation version {}",
             batch.v
@@ -1803,7 +1810,65 @@ fn parse_replay_complete_retract_batch(
             }
         }
     }
-    Ok((triples, batch.symbols))
+
+    let referenced_provenance = triples
+        .iter()
+        .filter_map(|triple| triple.provenance_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut provenance_ids = std::collections::BTreeSet::new();
+    for record in &batch.provenance {
+        let id = record
+            .id
+            .ok_or_else(|| invalid_tail("retract batch provenance record has no ID"))?
+            .get();
+        if !provenance_ids.insert(id) {
+            return Err(invalid_tail(format!(
+                "retract batch contains duplicate provenance ID {id}"
+            )));
+        }
+        if !record.confidence.is_finite() || !(0.0..=1.0).contains(&record.confidence) {
+            return Err(invalid_tail(format!(
+                "retract batch provenance {id} confidence {} is outside [0,1]",
+                record.confidence
+            )));
+        }
+        let mut required = vec![record.derived_id];
+        required.extend(record.sources.iter().copied());
+        required.extend(record.kind.referenced_symbol_ids());
+        for symbol in required {
+            if !metadata_ids.contains_key(&symbol.get()) {
+                return Err(invalid_tail(format!(
+                    "retract batch provenance {id} is missing metadata for symbol {}",
+                    symbol.get()
+                )));
+            }
+        }
+    }
+    if batch.v == 1 {
+        if !batch.provenance.is_empty() {
+            return Err(invalid_tail(
+                "legacy retract batch must not carry a V2 provenance envelope",
+            ));
+        }
+    } else if referenced_provenance != provenance_ids {
+        return Err(invalid_tail(format!(
+            "retract batch provenance envelope does not exactly close referenced IDs: referenced {referenced_provenance:?}, enclosed {provenance_ids:?}"
+        )));
+    }
+    for triple in &triples {
+        if let Some(raw_id) = triple.provenance_id
+            && let Some(record) = batch
+                .provenance
+                .iter()
+                .find(|record| record.id.is_some_and(|id| id.get() == raw_id))
+        {
+            validate_rule_application_payload(
+                record,
+                (triple.subject, triple.predicate, triple.object),
+            )?;
+        }
+    }
+    Ok((batch.v, triples, batch.symbols, batch.provenance))
 }
 
 fn parse_replay_complete_assert(
@@ -1986,9 +2051,10 @@ fn prepare_tail_restore(
     let mut tail_symbol_ids = std::collections::HashSet::new();
 
     for mutation in tail {
-        let (tail_symbols, tail_record) = if mutation.kind == "retract_batch" {
-            let (_, tail_symbols) = parse_replay_complete_retract_batch(&mutation.payload)?;
-            (tail_symbols, None)
+        let (tail_symbols, tail_records) = if mutation.kind == "retract_batch" {
+            let (_, _, tail_symbols, tail_records) =
+                parse_replay_complete_retract_batch(&mutation.payload)?;
+            (tail_symbols, tail_records)
         } else {
             let assertion = match mutation.kind.as_str() {
                 "assert" => std::borrow::Cow::Borrowed(&mutation.payload),
@@ -2008,7 +2074,7 @@ fn prepare_tail_restore(
                 }
             }
             let (_, tail_symbols, tail_record) = parse_replay_complete_assert(&assertion)?;
-            (tail_symbols, tail_record)
+            (tail_symbols, tail_record.into_iter().collect())
         };
         merge_tail_symbols(
             tail_symbols,
@@ -2017,7 +2083,7 @@ fn prepare_tail_restore(
             &mut labels,
             &mut tail_symbol_ids,
         )?;
-        if let Some(record) = tail_record {
+        for record in tail_records {
             let id = record.id.expect("validated versioned provenance ID").get();
             if let Some(position) = provenance_by_id.get(&id).copied() {
                 let existing = bincode::serialize(&provenance[position])
@@ -2052,7 +2118,7 @@ fn prepare_tail_restore(
                 .map(retract_triple_ids)
                 .collect::<SnapshotResult<Vec<_>>>()?,
             "retract_batch" => parse_replay_complete_retract_batch(&mutation.payload)?
-                .0
+                .1
                 .into_iter()
                 .map(|triple| (triple.subject, triple.predicate, triple.object))
                 .collect(),
@@ -2065,17 +2131,6 @@ fn prepare_tail_restore(
                         "{} references unknown symbol {}",
                         mutation.kind,
                         id.get()
-                    )));
-                }
-            }
-        }
-        if mutation.kind == "retract_batch" {
-            for triple in parse_replay_complete_retract_batch(&mutation.payload)?.0 {
-                if let Some(id) = triple.provenance_id
-                    && !provenance_by_id.contains_key(&id)
-                {
-                    return Err(invalid_tail(format!(
-                        "retract batch references unknown provenance ID {id}"
                     )));
                 }
             }
@@ -2323,14 +2378,25 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
             // Decode and validate the complete batch before applying its first
             // edge. `prepare_tail_restore` has already merged the closed symbol
             // envelope into the registry, so every reference must resolve.
-            let (retracts, _) = parse_replay_complete_retract_batch(&m.payload)?;
+            let (_, retracts, _, _) = parse_replay_complete_retract_batch(&m.payload)?;
             for triple in &retracts {
                 validate_replay_symbols_registered(
                     engine,
                     (triple.subject, triple.predicate, triple.object),
                     "retract batch",
                 )?;
-                if let Some(raw_id) = triple.provenance_id {
+                let actual = engine.knowledge_graph().triple(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                );
+                // Legacy V1 batches did not enclose provenance. If the edge is
+                // already absent, the exact retraction is idempotently safe and
+                // does not need that record. A present edge still requires its
+                // provenance and exact metadata before any removal begins.
+                if actual.is_some()
+                    && let Some(raw_id) = triple.provenance_id
+                {
                     let id = crate::provenance::ProvenanceId::new(raw_id)
                         .ok_or_else(|| invalid_tail("retract batch provenance ID must be non-zero"))?;
                     engine.get_provenance(id).map_err(|error| {
@@ -2339,11 +2405,8 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
                         ))
                     })?;
                 }
-                if let Some(actual) = engine.knowledge_graph().triple(
-                    triple.subject,
-                    triple.predicate,
-                    triple.object,
-                ) && actual != *triple
+                if let Some(actual) = actual
+                    && actual != *triple
                 {
                     return Err(invalid_tail(format!(
                         "retract batch edge ({}, {}, {}) metadata does not match replay state",
@@ -3499,6 +3562,111 @@ triples_file = "triples.json"
     }
 
     #[test]
+    fn retained_retract_batch_restores_provenance_after_older_assert_overflows() {
+        use crate::provenance::{DerivationKind, ProvenanceRecord};
+
+        let live_dir = tempfile::tempdir().unwrap();
+        let live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            data_dir: Some(live_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = live
+            .create_symbol(SymbolKind::Entity, "overflow-retract-subject")
+            .unwrap()
+            .id;
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "overflow-retract-predicate")
+            .unwrap()
+            .id;
+        let object = live
+            .create_symbol(SymbolKind::Entity, "overflow-retract-object")
+            .unwrap()
+            .id;
+        let source = live
+            .create_symbol(SymbolKind::Entity, "overflow-retract-source")
+            .unwrap()
+            .id;
+        let mut provenance = ProvenanceRecord::new(object, DerivationKind::Extracted)
+            .with_sources(vec![source])
+            .with_confidence(0.84);
+        let provenance_id = live.store_provenance(&mut provenance).unwrap();
+
+        // Model a snapshot taken before these symbols, provenance, and edge.
+        let mut restored_symbols = Vec::new();
+        let mut restored_provenance = Vec::new();
+        let wal = Arc::new(crate::wal::MutationLog::new_buffered_for_test(
+            Uuid::from_u128(30),
+            Uuid::from_u128(31),
+            crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
+        ));
+        assert!(live
+            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+            .is_ok());
+        live.add_triple(
+            &Triple::new(subject, predicate, object)
+                .with_confidence(0.84)
+                .with_provenance(provenance_id.get()),
+        )
+        .unwrap();
+        live.remove_triple(subject, predicate, object).unwrap();
+
+        let records = wal.drain_records_for_test();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, MutationKind::Assert);
+        assert_eq!(records[1].kind, MutationKind::RetractBatch);
+        let batch_bytes = records[1].payload.to_string().len() + 64;
+        let overflow = crate::wal::WalBuffer::new(batch_bytes + 8);
+        for record in records {
+            overflow.push(record.kind, record.payload);
+        }
+        assert_eq!(overflow.dropped_on_overflow(), 1);
+        let retained = overflow.drain_records_for_test();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].kind, MutationKind::RetractBatch);
+        assert_eq!(
+            retained[0].payload["v"],
+            crate::mutation::RETRACT_BATCH_MUTATION_VERSION
+        );
+        assert_eq!(retained[0].payload["provenance"].as_array().unwrap().len(), 1);
+
+        let tail = vec![akhomed_store::TailMutation {
+            kind: retained[0].kind.as_str().into(),
+            payload: retained[0].payload.clone(),
+        }];
+        let allocator_next = prepare_tail_restore(
+            &tail,
+            &mut restored_symbols,
+            &mut restored_provenance,
+        )
+        .unwrap();
+        assert_eq!(restored_symbols.len(), 4);
+        assert_eq!(restored_provenance.len(), 1);
+
+        let replay_dir = tempfile::tempdir().unwrap();
+        {
+            let store = TieredStore::with_persistence(replay_dir.path(), "symbols").unwrap();
+            write_registry(&store, &restored_symbols).unwrap();
+            put_bincode_required(&store, b"sym_allocator_next", &allocator_next).unwrap();
+        }
+        let replay = Engine::new_for_restore(EngineConfig {
+            data_dir: Some(replay_dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        replay
+            .replace_all_provenance(&restored_provenance)
+            .unwrap();
+        assert!(apply_mutation(&replay, &tail[0]).unwrap());
+        assert!(replay.all_triples().is_empty());
+        assert_eq!(
+            replay.get_provenance(provenance_id).unwrap().sources,
+            vec![source]
+        );
+    }
+
+    #[test]
     fn duplicate_live_assertions_wake_to_exact_merged_metadata() {
         let live_dir = tempfile::tempdir().unwrap();
         let live = Engine::new(EngineConfig {
@@ -3705,7 +3873,7 @@ triples_file = "triples.json"
         let mutation = akhomed_store::TailMutation {
             kind: "retract_batch".into(),
             payload: serde_json::json!({
-                "v": crate::mutation::RETRACT_BATCH_MUTATION_VERSION,
+                "v": 1,
                 "retracts": [{
                     "subject": exact.subject.get(),
                     "predicate": exact.predicate.get(),
@@ -3722,6 +3890,43 @@ triples_file = "triples.json"
         let error = apply_mutation(&engine, &mutation).unwrap_err();
         assert!(error.to_string().contains("provenance ID 999"), "{error}");
         assert!(engine.has_triple(subject, predicate, object));
+    }
+
+    #[test]
+    fn legacy_retract_batch_may_idempotently_skip_absent_edge_without_provenance() {
+        let engine = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine
+            .create_symbol(SymbolKind::Entity, "legacy-absent-subject")
+            .unwrap();
+        let predicate = engine
+            .create_symbol(SymbolKind::Relation, "legacy-absent-predicate")
+            .unwrap();
+        let object = engine
+            .create_symbol(SymbolKind::Entity, "legacy-absent-object")
+            .unwrap();
+        let mutation = akhomed_store::TailMutation {
+            kind: "retract_batch".into(),
+            payload: serde_json::json!({
+                "v": 1,
+                "retracts": [{
+                    "subject": subject.id.get(),
+                    "predicate": predicate.id.get(),
+                    "object": object.id.get(),
+                    "confidence": 1.0,
+                    "timestamp": 0,
+                    "compartment": null,
+                    "provenance_id": 999,
+                }],
+                "symbols": [subject, predicate, object],
+            }),
+        };
+
+        assert!(apply_mutation(&engine, &mutation).unwrap());
+        assert!(engine.all_triples().is_empty());
     }
 
     #[test]

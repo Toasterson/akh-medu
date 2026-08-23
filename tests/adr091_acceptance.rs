@@ -127,10 +127,10 @@ async fn transcript_to_episodic_recall_survives_restart_across_pg() {
         .unwrap(),
     );
     assert!(residency.try_acquire_akh_lock(akh_id).await.unwrap());
-    let residency_epoch =
-        akhomed_store::claim_akh_residency(&db, akh_id, workspace_id)
-            .await
-            .unwrap();
+    let residency_epoch = residency
+        .claim_akh_residency(akh_id, workspace_id)
+        .await
+        .unwrap();
 
     // ---------------------------------------------------------------
     // Phase A — "session A": inject a fact, flush the WAL, close the session.

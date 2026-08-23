@@ -122,7 +122,7 @@ pub async fn append_mutations(
 /// residency advisory lock, rejecting a stale fencing generation atomically.
 ///
 /// The workspace publication advisory lock orders this transaction against
-/// [`crate::memberships::claim_akh_residency`].  Consequently an old owner can
+/// [`StablePgSession::claim_akh_residency`]. Consequently an old owner can
 /// either commit before the handoff advances the epoch, or observe the newer
 /// epoch and fail without inserting any row; it cannot straddle the handoff.
 pub async fn append_mutations_fenced(

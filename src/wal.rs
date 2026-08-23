@@ -19,6 +19,10 @@
 //! metadata idempotently; compound replace/retract records are indivisible.
 
 use std::collections::VecDeque;
+#[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
+use std::pin::Pin;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -214,7 +218,20 @@ pub struct MutationLog {
     config: WalConfig,
     buffer: WalBuffer,
     metrics: WalMetrics,
+    /// Serializes the complete take -> append -> commit/reinsert interval.
+    /// Without this gate, a second flusher can commit later rows while an
+    /// earlier failed batch is waiting to be reinserted at the front.
+    flush_gate: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    append_override: Option<TestAppender>,
 }
+
+#[cfg(test)]
+type TestAppender = std::sync::Arc<
+    dyn Fn(Vec<MutationRow>) -> Pin<Box<dyn Future<Output = akhomed_store::StoreResult<u64>> + Send>>
+        + Send
+        + Sync,
+>;
 
 impl MutationLog {
     /// Build a WAL for `(akh_id, workspace_id)` through the pinned residency
@@ -235,6 +252,9 @@ impl MutationLog {
             config,
             buffer,
             metrics: WalMetrics::default(),
+            flush_gate: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            append_override: None,
         }
     }
 
@@ -255,7 +275,21 @@ impl MutationLog {
             config,
             buffer,
             metrics: WalMetrics::default(),
+            flush_gate: tokio::sync::Mutex::new(()),
+            append_override: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_appender_for_test(
+        akh_id: Uuid,
+        workspace_id: Uuid,
+        config: WalConfig,
+        appender: TestAppender,
+    ) -> Self {
+        let mut log = Self::new_buffered_for_test(akh_id, workspace_id, config);
+        log.append_override = Some(appender);
+        log
     }
 
     /// Observability counters.
@@ -278,15 +312,21 @@ impl MutationLog {
         self.buffer.drain_records_for_test()
     }
 
-    /// Flush up to one batch. Returns the number of rows committed.
+    /// Flush up to one batch. Returns the number of rows committed, or the
+    /// storage/fencing failure that left the complete batch queued.
     ///
-    /// The batch is removed from the buffer **before** the await so a concurrent
-    /// overflow-drop cannot delete an in-flight entry; on failure it is
-    /// re-inserted at the front and retried next tick.
-    pub async fn flush_once(&self) -> usize {
+    /// One async gate spans take, append, and commit/reinsert. This both keeps
+    /// an in-flight entry out of the overflow policy and prevents another
+    /// caller from overtaking a failed earlier batch.
+    pub async fn flush_once_result(&self) -> akhomed_store::StoreResult<usize> {
+        let _flush_guard = self.flush_gate.lock().await;
+        self.flush_once_locked().await
+    }
+
+    async fn flush_once_locked(&self) -> akhomed_store::StoreResult<usize> {
         let batch = self.buffer.take_front(self.config.batch_size);
         if batch.is_empty() {
-            return 0;
+            return Ok(0);
         }
         let rows: Vec<MutationRow> = batch
             .iter()
@@ -298,7 +338,37 @@ impl MutationLog {
         let n = rows.len();
 
         let start = std::time::Instant::now();
-        let result = match self.residency.as_ref() {
+        #[cfg(test)]
+        let result = if let Some(appender) = &self.append_override {
+            appender(rows.clone()).await
+        } else {
+            self.append_rows(&rows).await
+        };
+        #[cfg(not(test))]
+        let result = self.append_rows(&rows).await;
+        match result {
+            Ok(_) => {
+                self.metrics.last_flush_size.store(n, Ordering::Relaxed);
+                self.metrics
+                    .last_flush_latency_ms
+                    .store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+                Ok(n)
+            }
+            Err(error) => {
+                self.buffer.reinsert_front(batch);
+                self.metrics.flush_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    error = %error,
+                    pending = self.pending(),
+                    "WAL flush failed; batch retained, will retry"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    async fn append_rows(&self, rows: &[MutationRow]) -> akhomed_store::StoreResult<u64> {
+        match self.residency.as_ref() {
             Some(residency) => {
                 akhomed_store::append_mutations_fenced(
                     residency,
@@ -312,24 +382,25 @@ impl MutationLog {
             None => Err(akhomed_store::StoreError::Conflict {
                 message: "buffer-only mutation log cannot flush".into(),
             }),
-        };
-        match result {
-            Ok(_) => {
-                self.metrics.last_flush_size.store(n, Ordering::Relaxed);
-                self.metrics
-                    .last_flush_latency_ms
-                    .store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
-                n
-            }
-            Err(e) => {
-                self.buffer.reinsert_front(batch);
-                self.metrics.flush_failures.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    error = %e,
-                    pending = self.pending(),
-                    "WAL flush failed; batch retained, will retry"
-                );
-                0
+        }
+    }
+
+    /// Compatibility wrapper for callers that only need best-effort progress.
+    /// Lifecycle/handoff paths must use the Result-bearing methods below.
+    pub async fn flush_once(&self) -> usize {
+        self.flush_once_result().await.unwrap_or(0)
+    }
+
+    /// Drain every row present until the buffer is empty, preserving strict
+    /// order and returning the first failure with its batch still queued.
+    pub async fn flush_all(&self) -> akhomed_store::StoreResult<usize> {
+        let _flush_guard = self.flush_gate.lock().await;
+        let mut total = 0usize;
+        loop {
+            let flushed = self.flush_once_locked().await?;
+            total += flushed;
+            if flushed == 0 {
+                return Ok(total);
             }
         }
     }
@@ -345,15 +416,15 @@ impl MutationLog {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        let _ = self.flush_once().await;
+                        let _ = self.flush_once_result().await;
                     }
                     _ = shutdown.changed() => {
-                        // Final drain: flush until the buffer is empty (or a flush
-                        // fails, in which case we stop to avoid spinning).
-                        while !self.buffer.is_empty() {
-                            if self.flush_once().await == 0 {
-                                break;
-                            }
+                        if let Err(error) = self.flush_all().await {
+                            tracing::warn!(
+                                error = %error,
+                                pending = self.pending(),
+                                "WAL shutdown drain failed; rows remain buffered"
+                            );
                         }
                         break;
                     }
@@ -373,6 +444,7 @@ impl MutationSink for MutationLog {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn stable_ids_are_deterministic_and_distinct() {
@@ -486,5 +558,74 @@ mod tests {
     fn wal_config_clamps_zero_batch() {
         let cfg = WalConfig::new(Duration::from_secs(2), 0, 1024);
         assert_eq!(cfg.batch_size, 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_flush_failure_is_reinserted_before_any_later_batch_can_commit() {
+        let attempts = Arc::new(Mutex::new(Vec::<i64>::new()));
+        let call = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let appender: TestAppender = Arc::new({
+            let attempts = Arc::clone(&attempts);
+            let call = Arc::clone(&call);
+            let first_entered = Arc::clone(&first_entered);
+            let release_first = Arc::clone(&release_first);
+            move |rows| {
+                let attempts = Arc::clone(&attempts);
+                let call = Arc::clone(&call);
+                let first_entered = Arc::clone(&first_entered);
+                let release_first = Arc::clone(&release_first);
+                Box::pin(async move {
+                    let value = rows[0].payload["i"].as_i64().unwrap();
+                    attempts.lock().unwrap().push(value);
+                    if call.fetch_add(1, Ordering::SeqCst) == 0 {
+                        first_entered.notify_one();
+                        release_first.notified().await;
+                        return Err(akhomed_store::StoreError::Conflict {
+                            message: "injected first append failure".into(),
+                        });
+                    }
+                    Ok(rows.len() as u64)
+                })
+            }
+        });
+        let log = Arc::new(MutationLog::new_with_appender_for_test(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            WalConfig::new(Duration::from_secs(60), 1, 1 << 20),
+            appender,
+        ));
+        log.record(MutationRecord::new(MutationKind::Assert, json!({"i": 0})));
+        log.record(MutationRecord::new(MutationKind::Assert, json!({"i": 1})));
+
+        let first = tokio::spawn({
+            let log = Arc::clone(&log);
+            async move { log.flush_once_result().await }
+        });
+        first_entered.notified().await;
+        let second = tokio::spawn({
+            let log = Arc::clone(&log);
+            async move { log.flush_once_result().await }
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![0],
+            "a concurrent flusher must not take or append the later row"
+        );
+
+        release_first.notify_one();
+        assert!(first.await.unwrap().is_err());
+        assert_eq!(second.await.unwrap().unwrap(), 1);
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![0, 0],
+            "the failed front row must retry before the later row"
+        );
+        assert_eq!(log.pending(), 1);
+        assert_eq!(log.flush_all().await.unwrap(), 1);
+        assert_eq!(*attempts.lock().unwrap(), vec![0, 0, 1]);
+        assert_eq!(log.pending(), 0);
     }
 }
