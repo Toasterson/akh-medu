@@ -111,7 +111,7 @@ async fn main() -> miette::Result<()> {
         .wrap_err_with(|| format!("looking up akh '{akh_name}'"))?
         .ok_or_else(|| {
             miette::miette!(
-                "akh '{akh_name}' not found in heka_akhs — create its heka_akhs registration before enabling the capture hook (no registration CLI exists yet)"
+                "akh '{akh_name}' not found in heka_akhs — run `hekad register-akh {akh_name}` to register it before enabling the capture hook"
             )
         })?;
 
