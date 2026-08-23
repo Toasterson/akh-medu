@@ -72,6 +72,54 @@ pub async fn write_drawer(
     contact: Option<&str>,
     topics: &[String],
 ) -> HekaResult<DrawerIngestSummary> {
+    write_drawer_inner(db, akh_id, session_id, speaker, body, contact, topics, None).await
+}
+
+/// Ingest a drawer with an explicit stable deduplication scope.
+///
+/// The stored hash binds both the scope and body. This preserves identical text
+/// from distinct source records while remaining idempotent when the same source
+/// record is replayed. LongMemEval uses `session_id + turn_index` as the scope;
+/// ordinary Claude capture continues to use [`write_drawer`]'s body-only hash.
+pub async fn write_drawer_scoped(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    session_id: Option<&str>,
+    speaker: Option<&str>,
+    body: &str,
+    contact: Option<&str>,
+    topics: &[String],
+    dedupe_scope: &str,
+) -> HekaResult<DrawerIngestSummary> {
+    if dedupe_scope.is_empty() {
+        return Err(HekaError::Config(
+            "write_drawer_scoped: dedupe_scope must not be empty".to_string(),
+        ));
+    }
+    write_drawer_inner(
+        db,
+        akh_id,
+        session_id,
+        speaker,
+        body,
+        contact,
+        topics,
+        Some(dedupe_scope),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_drawer_inner(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    session_id: Option<&str>,
+    speaker: Option<&str>,
+    body: &str,
+    contact: Option<&str>,
+    topics: &[String],
+    dedupe_scope: Option<&str>,
+) -> HekaResult<DrawerIngestSummary> {
     if body.trim().is_empty() {
         return Err(HekaError::Config(
             "write_drawer: body must not be empty".to_string(),
@@ -79,7 +127,7 @@ pub async fn write_drawer(
     }
 
     // SHA-256 content hash for idempotency.
-    let body_hash = hex_hash(body);
+    let body_hash = drawer_identity_hash(body, dedupe_scope);
 
     // Check for an existing drawer with the same (akh_id, body_hash).
     // The UNIQUE partial index `uq_heka_drawers_akh_body_hash` enforces this
@@ -206,11 +254,29 @@ pub async fn write_drawer(
     })
 }
 
+fn drawer_identity_hash(body: &str, scope: Option<&str>) -> String {
+    let Some(scope) = scope else {
+        return hex_hash(body);
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"heka-scoped-drawer-v1\0");
+    hasher.update((scope.len() as u64).to_be_bytes());
+    hasher.update(scope.as_bytes());
+    hasher.update((body.len() as u64).to_be_bytes());
+    hasher.update(body.as_bytes());
+    format_hash(hasher.finalize())
+}
+
 /// Compute the SHA-256 hex digest of a string.
 fn hex_hash(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
-    let bytes = hasher.finalize();
+    format_hash(hasher.finalize())
+}
+
+fn format_hash(bytes: impl AsRef<[u8]>) -> String {
+    let bytes = bytes.as_ref();
     let mut hex = String::with_capacity(64);
     for b in bytes {
         use std::fmt::Write;
@@ -286,5 +352,17 @@ mod tests {
             INSERT_DRAWER_SQL
                 .contains("ON CONFLICT (akh_id, body_hash) WHERE body_hash IS NOT NULL DO NOTHING")
         );
+    }
+
+    #[test]
+    fn scoped_hash_preserves_identical_bodies_from_distinct_source_records() {
+        let body = "The same short acknowledgement.";
+        let first = drawer_identity_hash(body, Some("session-a:turn-2"));
+        let replay = drawer_identity_hash(body, Some("session-a:turn-2"));
+        let other_session = drawer_identity_hash(body, Some("session-b:turn-2"));
+
+        assert_eq!(first, replay);
+        assert_ne!(first, other_session);
+        assert_ne!(first, hex_hash(body));
     }
 }

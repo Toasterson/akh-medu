@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use crate::eval::reporter::{ReportContext, Reporter};
-use crate::eval::{EvalMetrics, RetrievalParams, RetrievalResult};
+use crate::eval::{EvalMetrics, EvalScores, RetrievalParams, RetrievalResult};
 
 /// Run the LoCoMo benchmark.
 ///
@@ -102,12 +102,7 @@ pub async fn run(
         auto_top_k_cap,
     });
 
-    tracing::info!(
-        total_questions = metrics.total_questions,
-        hits = metrics.hits,
-        recall = %format!("{:.4}", metrics.recall_at_k),
-        "LoCoMo complete"
-    );
+    tracing::info!(total_questions = metrics.total_questions, "LoCoMo complete");
 
     // Generate report.
     let ctx = ReportContext {
@@ -225,8 +220,10 @@ fn aggregate_metrics(results: &[RetrievalResult], params: RetrievalParams) -> Ev
 
     EvalMetrics {
         total_questions: total,
-        hits,
-        recall_at_k: recall,
+        scores: EvalScores::BinaryRetrieval {
+            hits,
+            recall_at_k: recall,
+        },
         p50_latency_secs: p50,
         p99_latency_secs: p99,
         retrieval_params: params,

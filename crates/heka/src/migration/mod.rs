@@ -11,6 +11,7 @@ use sea_orm_migration::prelude::*;
 mod m20260427_000001_init;
 mod m20260604_000002_drawer_ingest;
 mod m20260604_000003_embedding_idempotency;
+mod m20260604_000004_repair_legacy_title_hashes;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260427_000001_init::Migration),
             Box::new(m20260604_000002_drawer_ingest::Migration),
             Box::new(m20260604_000003_embedding_idempotency::Migration),
+            Box::new(m20260604_000004_repair_legacy_title_hashes::Migration),
         ]
     }
 }

@@ -3,6 +3,7 @@
 //! Mirrors `crates/seshat/src/config.rs` — TOML config with environment-variable
 //! overrides for K8s secrets.
 
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use serde::{Deserialize, Serialize};
 
 /// Top-level Heka service configuration, parsed from `heka.toml`.
@@ -18,7 +19,7 @@ pub struct HekaConfig {
 }
 
 /// PostgreSQL connection settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL.
     /// Example: `postgres://user:pass@localhost:5432/akhmedu`
@@ -27,6 +28,16 @@ pub struct DatabaseConfig {
     /// Maximum number of connections in the pool.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+}
+
+impl std::fmt::Debug for DatabaseConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DatabaseConfig")
+            .field("url", &redact_database_url(&self.url))
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 /// Service (hekad) settings.
@@ -125,10 +136,14 @@ impl HekaConfig {
     /// - `DATABASE_URL` overrides `database.url`
     /// - `HEKA_BIND` overrides `server.bind`
     pub fn from_file(path: &std::path::Path) -> crate::HekaResult<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::HekaError::Config(format!("cannot read {}: {e}", path.display())))?;
-        let mut config: Self = toml::from_str(&content)
-            .map_err(|e| crate::HekaError::Config(format!("invalid TOML: {e}")))?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            crate::HekaError::Config(format!("cannot read {}: {e}", path.display()))
+        })?;
+        // `toml::de::Error` can render the source line that failed. Discard its
+        // display text because an adjacent database URL may contain secrets.
+        let mut config: Self = toml::from_str(&content).map_err(|_| {
+            crate::HekaError::Config("invalid TOML configuration (contents redacted)".to_string())
+        })?;
 
         // Allow DATABASE_URL env var to override the TOML value (K8s secrets).
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -161,4 +176,212 @@ fn dirs_fallback() -> Option<std::path::PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
         })
+}
+
+/// Return a log-safe database target without userinfo, database names, query
+/// parameters, or fragments. Invalid URLs are fully redacted rather than
+/// echoed back into logs.
+pub fn redact_database_url(url: &str) -> String {
+    let Some((scheme, _)) = url.split_once("://") else {
+        return "<redacted-database-url>".to_string();
+    };
+    if !matches!(scheme, "postgres" | "postgresql") {
+        return "<redacted-database-url>".to_string();
+    }
+    let Ok(parsed) = url.parse::<sea_orm::sqlx::postgres::PgConnectOptions>() else {
+        return "<redacted-database-url>".to_string();
+    };
+    let host = parsed.get_host();
+    if host.is_empty() || host.bytes().any(|byte| byte.is_ascii_control()) {
+        return "<redacted-database-url>".to_string();
+    }
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+
+    format!("{scheme}://{host}:{}/<database>", parsed.get_port())
+}
+
+/// Emit the standard connection event with a credential-safe target.
+pub fn log_database_connection(url: &str) {
+    tracing::info!(database = %redact_database_url(url), "connecting to PostgreSQL");
+}
+
+/// Connect without allowing SeaORM's URL-bearing parse/driver errors to reach
+/// user-facing diagnostics. The redacted target remains useful for operations;
+/// credentials, database names, and query secrets never enter the error.
+pub async fn connect_database(
+    url: &str,
+    max_connections: u32,
+) -> crate::HekaResult<DatabaseConnection> {
+    if max_connections == 0 {
+        return Err(crate::HekaError::Config(
+            "database max_connections must be greater than zero".to_string(),
+        ));
+    }
+    let target = redact_database_url(url);
+    log_database_connection(url);
+    let mut options = private_postgres_connect_options(url)?;
+    options.max_connections(max_connections).sqlx_logging(false);
+    Database::connect(options).await.map_err(|_| {
+        crate::HekaError::Config(format!(
+            "database connection to {target} failed; inspect server availability and credentials"
+        ))
+    })
+}
+
+/// Keep the credential-bearing URL out of SeaORM's instrumented
+/// `ConnectOptions`. The connector parses this harmless routing URL, then the
+/// skipped callback replaces it with the already-parsed private options.
+fn private_postgres_connect_options(url: &str) -> crate::HekaResult<ConnectOptions> {
+    let parsed: sea_orm::sqlx::postgres::PgConnectOptions = url.parse().map_err(|_| {
+        crate::HekaError::Config(format!(
+            "database URL {} is not a valid PostgreSQL connection string",
+            redact_database_url(url)
+        ))
+    })?;
+    let mut options = ConnectOptions::new("postgres://redacted.invalid/postgres");
+    options.map_sqlx_postgres_opts(move |_| parsed.clone());
+    Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        DatabaseConfig, HekaConfig, connect_database, log_database_connection,
+        private_postgres_connect_options, redact_database_url,
+    };
+
+    #[derive(Clone)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.lock().unwrap().flush()
+        }
+    }
+
+    #[test]
+    fn database_log_target_never_contains_credentials_or_query_secrets() {
+        let raw = "postgres://alice:p%40ssword@db.internal:5432/heka?password=second-secret&sslmode=require";
+        let redacted = redact_database_url(raw);
+        assert_eq!(redacted, "postgres://db.internal:5432/<database>");
+        for secret in ["alice", "p%40ssword", "heka", "second-secret", "sslmode"] {
+            assert!(!redacted.contains(secret));
+        }
+
+        assert_eq!(
+            redact_database_url("not-a-url-containing-super-secret"),
+            "<redacted-database-url>"
+        );
+    }
+
+    #[test]
+    fn emitted_connection_event_contains_no_url_secrets() {
+        let raw =
+            "postgres://alice:password@db.internal:5432/private_db?application_name=query-secret";
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer({
+                let output = Arc::clone(&output);
+                move || CapturedLog(Arc::clone(&output))
+            })
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || log_database_connection(raw));
+
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("postgres://db.internal:5432/<database>"));
+        for secret in [
+            "alice",
+            "password",
+            "private_db",
+            "query-secret",
+            "application_name",
+        ] {
+            assert!(!logged.contains(secret), "secret appeared in log: {logged}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_connection_error_never_echoes_the_raw_url() {
+        let raw = "postgres://alice:password@/private_db?sslpassword=query-secret";
+        let error = connect_database(raw, 1).await.unwrap_err().to_string();
+        for secret in [
+            "alice",
+            "password",
+            "private_db",
+            "query-secret",
+            "sslpassword",
+        ] {
+            assert!(!error.contains(secret), "secret appeared in error: {error}");
+        }
+        assert!(error.contains("<redacted-database-url>"));
+    }
+
+    #[test]
+    fn instrumented_connect_options_never_hold_the_raw_url() {
+        let raw =
+            "postgres://alice:password@db.internal:5432/private_db?application_name=query-secret";
+        let options = private_postgres_connect_options(raw).unwrap();
+        let debug = format!("{options:?}");
+
+        assert_eq!(options.get_url(), "postgres://redacted.invalid/postgres");
+        for secret in [
+            "alice",
+            "password",
+            "db.internal",
+            "private_db",
+            "query-secret",
+            "application_name",
+        ] {
+            assert!(
+                !debug.contains(secret),
+                "secret appeared in ConnectOptions debug output: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_debug_and_parse_errors_never_expose_database_credentials() {
+        let raw =
+            "postgres://alice:password@db.internal:5432/private_db?application_name=query-secret";
+        let database = DatabaseConfig {
+            url: raw.to_string(),
+            max_connections: 2,
+        };
+        let debug = format!("{database:?}");
+
+        let path = std::env::temp_dir().join(format!(
+            "heka-private-config-test-{}.toml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            format!("[database]\nurl = {raw:?}\nmax_connections = \"invalid\"\n"),
+        )
+        .unwrap();
+        let error = HekaConfig::from_file(&path).unwrap_err().to_string();
+        std::fs::remove_file(path).unwrap();
+
+        for rendered in [&debug, &error] {
+            for secret in ["alice", "password", "private_db", "query-secret"] {
+                assert!(
+                    !rendered.contains(secret),
+                    "secret appeared in config diagnostic: {rendered}"
+                );
+            }
+        }
+    }
 }

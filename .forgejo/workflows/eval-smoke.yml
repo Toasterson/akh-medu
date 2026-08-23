@@ -4,9 +4,8 @@ name: eval-smoke
 #
 # Runs the LongMemEval 10-session raw subset on every PR, captures the JSON
 # report as an artifact, and emits a delta vs the main-branch baseline.  This
-# job is intentionally non-blocking (continue-on-error: true) because the
-# harness retrieval is currently a stub and recall is expected to be 0.0 until
-# Phase 42c lands.
+# job is intentionally non-blocking (continue-on-error: true) because model and
+# pgvector provisioning remain environment-dependent in the shared CI lane.
 #
 # The baseline is stored in `.forgejo/baselines/eval_smoke_baseline.json`.  When
 # it is missing, the job still runs and records the current metrics so the next
@@ -66,7 +65,8 @@ jobs:
           echo "## LongMemEval smoke delta" > "$DELTA_MD"
           echo "" >> "$DELTA_MD"
 
-          RECALL=$(jq -r '.metrics.recall_at_k // "N/A"' "$REPORT")
+          RECALL_ALL=$(jq -r '.metrics.scores["recall_all@5"] // "N/A"' "$REPORT")
+          RECALL_ANY=$(jq -r '.metrics.scores["recall_any@5"] // "N/A"' "$REPORT")
           P50=$(jq -r '.metrics.p50_latency_secs // "N/A"' "$REPORT")
           P99=$(jq -r '.metrics.p99_latency_secs // "N/A"' "$REPORT")
           SESSIONS=$(jq -r '.sessions // "N/A"' "$REPORT")
@@ -75,23 +75,24 @@ jobs:
           echo "| Metric | This PR |" >> "$DELTA_MD"
           echo "|---|---|" >> "$DELTA_MD"
           echo "| Sessions | $SESSIONS |" >> "$DELTA_MD"
-          echo "| Recall@K | $RECALL |" >> "$DELTA_MD"
+          echo "| recall_all@5 (primary) | $RECALL_ALL |" >> "$DELTA_MD"
+          echo "| recall_any@5 | $RECALL_ANY |" >> "$DELTA_MD"
           echo "| p50 latency | ${P50}s |" >> "$DELTA_MD"
           echo "| p99 latency | ${P99}s |" >> "$DELTA_MD"
           echo "| Host | $HARDWARE |" >> "$DELTA_MD"
           echo "" >> "$DELTA_MD"
 
           if [ -f "$BASELINE" ]; then
-            BASE_RECALL=$(jq -r '.metrics.recall_at_k // "N/A"' "$BASELINE")
+            BASE_RECALL_ALL=$(jq -r '.metrics.scores["recall_all@5"] // "N/A"' "$BASELINE")
             BASE_P50=$(jq -r '.metrics.p50_latency_secs // "N/A"' "$BASELINE")
             BASE_P99=$(jq -r '.metrics.p99_latency_secs // "N/A"' "$BASELINE")
 
-            if command -v python3 >/dev/null 2>&1 && [ "$RECALL" != "N/A" ] && [ "$BASE_RECALL" != "N/A" ]; then
-              DELTA_RECALL=$(python3 -c "print(f'{float('$RECALL') - float('$BASE_RECALL'):+.4f}')")
+            if command -v python3 >/dev/null 2>&1 && [ "$RECALL_ALL" != "N/A" ] && [ "$BASE_RECALL_ALL" != "N/A" ]; then
+              DELTA_RECALL_ALL=$(python3 -c "print(f'{float('$RECALL_ALL') - float('$BASE_RECALL_ALL'):+.4f}')")
               DELTA_P50=$(python3 -c "print(f'{float('$P50') - float('$BASE_P50'):+.6f}')")
               DELTA_P99=$(python3 -c "print(f'{float('$P99') - float('$BASE_P99'):+.6f}')")
             else
-              DELTA_RECALL="N/A"
+              DELTA_RECALL_ALL="N/A"
               DELTA_P50="N/A"
               DELTA_P99="N/A"
             fi
@@ -100,7 +101,7 @@ jobs:
             echo "" >> "$DELTA_MD"
             echo "| Metric | Δ (PR - baseline) |" >> "$DELTA_MD"
             echo "|---|---|" >> "$DELTA_MD"
-            echo "| Recall@K | $DELTA_RECALL |" >> "$DELTA_MD"
+            echo "| recall_all@5 (primary) | $DELTA_RECALL_ALL |" >> "$DELTA_MD"
             echo "| p50 latency | ${DELTA_P50}s |" >> "$DELTA_MD"
             echo "| p99 latency | ${DELTA_P99}s |" >> "$DELTA_MD"
             echo "" >> "$DELTA_MD"
@@ -114,7 +115,8 @@ jobs:
 
           echo "### Notes" >> "$DELTA_MD"
           echo "" >> "$DELTA_MD"
-          echo "- Retrieval is currently a stub (Phase 42b), so recall is expected to be 0.0." >> "$DELTA_MD"
+          echo "- This reports evidence-session retrieval, not answer accuracy." >> "$DELTA_MD"
+          echo "- The acceptance metric follows LongMemEval session recall_all@5." >> "$DELTA_MD"
           echo "- This job is non-blocking." >> "$DELTA_MD"
 
           cat "$DELTA_MD"

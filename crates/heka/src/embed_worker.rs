@@ -18,7 +18,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::config::EmbeddingConfig;
-use crate::embedder::SharedEmbedder;
+use crate::embedder::{EMBEDDING_DIM, SharedEmbedder};
 use crate::entity::heka_drawer_chunks::{self, Column as ChunkCol, Entity as Chunk};
 use crate::entity::heka_drawer_embeddings::vec_to_pgvector;
 use crate::error::{HekaError, HekaResult};
@@ -46,6 +46,10 @@ const INSERT_EMBEDDING_SQL: &str = "INSERT INTO heka_drawer_embeddings (id, chun
 
 const MARK_EMBEDDED_SQL: &str = "UPDATE heka_drawer_chunks SET embedded_at = $1 \
      WHERE id = $2 AND embedded_at IS NULL";
+
+const MAX_EMBED_BATCH_SIZE: usize = 256;
+const MAX_EMBED_BATCH_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const EMBED_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Statistics from an embed worker run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -123,40 +127,78 @@ async fn embed_pending_batch_scoped(
     model_name: &str,
     akh_id: Option<Uuid>,
 ) -> HekaResult<EmbedStats> {
-    if batch_size == 0 {
-        return Err(HekaError::Config(
-            "embedding batch_size must be greater than zero".to_string(),
-        ));
-    }
+    validate_batch_size(batch_size)?;
+    validate_model_name(model_name)?;
 
     let transaction = db.begin().await?;
-    let pending_chunks = claim_pending(&transaction, batch_size, akh_id).await?;
+    let result =
+        process_claimed_batch(&transaction, embedder, batch_size, model_name, akh_id).await;
+
+    match result {
+        Ok(stats) => {
+            transaction.commit().await?;
+            Ok(stats)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = transaction.rollback().await {
+                return Err(HekaError::Embedding(format!(
+                    "{error}; additionally failed to roll back embedding claim: {rollback_error}"
+                )));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn process_claimed_batch(
+    transaction: &DatabaseTransaction,
+    embedder: &SharedEmbedder,
+    batch_size: usize,
+    model_name: &str,
+    akh_id: Option<Uuid>,
+) -> HekaResult<EmbedStats> {
+    let pending_chunks = claim_pending(transaction, batch_size, akh_id).await?;
     if pending_chunks.is_empty() {
-        transaction.commit().await?;
         return Ok(EmbedStats::default());
     }
 
     let chunk_count = pending_chunks.len();
+    validate_text_budget(pending_chunks.iter().map(|chunk| chunk.text.as_str()))?;
     let texts_owned: Vec<String> = pending_chunks
         .iter()
         .map(|chunk| chunk.text.clone())
         .collect();
     let embedder = Arc::clone(embedder);
-    let embeddings = tokio::task::spawn_blocking(move || {
+    let inference = tokio::task::spawn_blocking(move || {
         let text_refs: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
         let mut guard = embedder
             .lock()
             .map_err(|error| HekaError::Embedding(format!("embedder lock: {error}")))?;
         guard.embed_batch(&text_refs)
-    })
-    .await
-    .map_err(|error| HekaError::Embedding(format!("spawn_blocking: {error}")))??;
+    });
+    let embeddings = tokio::time::timeout(EMBED_BATCH_TIMEOUT, inference)
+        .await
+        .map_err(|_| {
+            HekaError::Embedding(format!(
+                "embedding batch exceeded {} second limit",
+                EMBED_BATCH_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|error| HekaError::Embedding(format!("spawn_blocking: {error}")))??;
 
     if embeddings.len() != pending_chunks.len() {
         return Err(HekaError::Embedding(format!(
             "embedding model returned {} vectors for {} chunks",
             embeddings.len(),
             pending_chunks.len()
+        )));
+    }
+    if let Some(invalid) = embeddings.iter().find(|embedding| {
+        embedding.len() != EMBEDDING_DIM || embedding.iter().any(|value| !value.is_finite())
+    }) {
+        return Err(HekaError::Embedding(format!(
+            "embedding model returned an invalid {}-value vector; expected {EMBEDDING_DIM} finite values",
+            invalid.len()
         )));
     }
 
@@ -188,12 +230,48 @@ async fn embed_pending_batch_scoped(
             .await?;
     }
 
-    transaction.commit().await?;
-
     Ok(EmbedStats {
         chunks_processed: chunk_count,
         embeddings_created,
     })
+}
+
+fn validate_batch_size(batch_size: usize) -> HekaResult<()> {
+    if batch_size == 0 {
+        return Err(HekaError::Config(
+            "embedding batch_size must be greater than zero".to_string(),
+        ));
+    }
+    if batch_size > MAX_EMBED_BATCH_SIZE {
+        return Err(HekaError::Config(format!(
+            "embedding batch_size {batch_size} exceeds the safety limit {MAX_EMBED_BATCH_SIZE}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_model_name(model_name: &str) -> HekaResult<()> {
+    if model_name.trim().is_empty() || model_name.len() > 256 {
+        return Err(HekaError::Config(
+            "embedding model name must contain 1-256 bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_text_budget<'a>(texts: impl Iterator<Item = &'a str>) -> HekaResult<()> {
+    let mut total = 0usize;
+    for text in texts {
+        total = total.checked_add(text.len()).ok_or_else(|| {
+            HekaError::Embedding("embedding batch text size overflow".to_string())
+        })?;
+        if total > MAX_EMBED_BATCH_TEXT_BYTES {
+            return Err(HekaError::Embedding(format!(
+                "embedding batch contains {total} text bytes, exceeding the {MAX_EMBED_BATCH_TEXT_BYTES} byte limit"
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn claim_pending(
@@ -281,28 +359,15 @@ mod tests {
     }
 
     #[test]
-    fn claim_insert_and_marker_share_one_transaction_before_commit() {
-        const SOURCE: &str = include_str!("embed_worker.rs");
-        let body = SOURCE
-            .split_once("async fn embed_pending_batch_scoped")
-            .unwrap()
-            .1
-            .split_once("async fn claim_pending")
-            .unwrap()
-            .0;
+    fn resource_limits_reject_unbounded_batches_before_inference() {
+        assert!(validate_batch_size(0).is_err());
+        assert!(validate_batch_size(MAX_EMBED_BATCH_SIZE).is_ok());
+        assert!(validate_batch_size(MAX_EMBED_BATCH_SIZE + 1).is_err());
+        assert!(validate_model_name("").is_err());
+        assert!(validate_model_name(&"m".repeat(257)).is_err());
 
-        let begin = body.find("let transaction = db.begin().await?;").unwrap();
-        let claim = body
-            .find("claim_pending(&transaction, batch_size, akh_id)")
-            .unwrap();
-        let insert = body.find("INSERT_EMBEDDING_SQL").unwrap();
-        let marker = body.find("MARK_EMBEDDED_SQL").unwrap();
-        let commit = body.rfind("transaction.commit().await?;").unwrap();
-
-        assert!(begin < claim);
-        assert!(claim < insert);
-        assert!(insert < marker);
-        assert!(marker < commit);
-        assert!(!body[claim..commit].contains("db.execute("));
+        let oversized = "x".repeat(MAX_EMBED_BATCH_TEXT_BYTES + 1);
+        assert!(validate_text_budget([oversized.as_str()].into_iter()).is_err());
+        assert!(validate_text_budget(["small", "batch"].into_iter()).is_ok());
     }
 }

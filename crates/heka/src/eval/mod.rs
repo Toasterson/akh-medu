@@ -5,8 +5,9 @@
 //!
 //! # Datasets
 //!
-//! - **LongMemEval**: multi-session conversational memory evaluation. Run with
-//!   `heka eval longmemeval --mode raw|hybrid`.
+//! - **LongMemEval**: multi-session conversational-memory evidence retrieval.
+//!   Phase 42c implements `heka eval longmemeval --mode raw`; unsupported modes
+//!   are refused rather than mislabeled.
 //! - **LoCoMo**: long conversational memory benchmark. Run with
 //!   `heka eval locomo --top-k auto`.
 //!
@@ -27,8 +28,8 @@ use clap::Subcommand;
 pub enum EvalCommand {
     /// Run the LongMemEval benchmark suite.
     Longmemeval {
-        /// Retrieval mode: `raw` (direct embedding search) or `hybrid`
-        /// (embedding + symbolic re-rank candidate stage).
+        /// Retrieval mode. Phase 42c supports only `raw` vector retrieval;
+        /// `hybrid` is rejected until a symbolic reranker exists.
         #[arg(long, default_value = "raw")]
         mode: String,
 
@@ -74,7 +75,7 @@ pub enum EvalCommand {
 /// Result of a single retrieval query.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RetrievalResult {
-    /// Whether the gold answer was found in the retrieved top-K.
+    /// Whether this benchmark's binary retrieval target was found in top-K.
     pub hit: bool,
     /// Number of items retrieved.
     pub retrieved_count: usize,
@@ -87,16 +88,33 @@ pub struct RetrievalResult {
 pub struct EvalMetrics {
     /// Total number of questions evaluated.
     pub total_questions: usize,
-    /// Number of hits (gold answer in top-K).
-    pub hits: usize,
-    /// Recall@K = hits / total_questions.
-    pub recall_at_k: f64,
+    /// Benchmark-specific retrieval score with an explicit semantic label.
+    pub scores: EvalScores,
     /// p50 latency in seconds.
     pub p50_latency_secs: f64,
     /// p99 latency in seconds.
     pub p99_latency_secs: f64,
     /// Exact retrieval parameters used.
     pub retrieval_params: RetrievalParams,
+}
+
+/// Explicit metric semantics. Evidence-session retrieval is not answer
+/// accuracy and is kept distinct from a generic binary retrieval hit rate.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EvalScores {
+    BinaryRetrieval {
+        hits: usize,
+        recall_at_k: f64,
+    },
+    EvidenceSessionRetrieval {
+        retrieved_any_at_5: usize,
+        retrieved_all_at_5: usize,
+        #[serde(rename = "recall_any@5")]
+        recall_any_at_5: f64,
+        #[serde(rename = "recall_all@5")]
+        recall_all_at_5: f64,
+    },
 }
 
 /// Exact retrieval parameters recorded for reproducibility.

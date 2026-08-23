@@ -44,14 +44,14 @@
 //! Database URL is read from `DATABASE_URL` env var or `heka.toml`.
 //! The akh is identified by `HEKA_AKH_NAME` env var (default: "tecton").
 
-use std::io::Read;
 use std::path::PathBuf;
 
 use miette::{IntoDiagnostic, WrapErr};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 use heka::HekaConfig;
-use heka::capture::parse_capture_input;
+use heka::capture::{parse_capture_input, read_hook_input};
+use heka::config::connect_database;
 use heka::entity::heka_akhs;
 use heka::ingest::write_drawer;
 
@@ -65,9 +65,7 @@ async fn main() -> miette::Result<()> {
         .init();
 
     // Read stdin.
-    let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
+    let input = read_hook_input(std::io::stdin().lock())
         .into_diagnostic()
         .wrap_err("reading stdin")?;
 
@@ -87,18 +85,18 @@ async fn main() -> miette::Result<()> {
     }
 
     // Connect to the database.
-    let db_url = match std::env::var("DATABASE_URL") {
-        Ok(url) => url,
+    let (db_url, max_connections) = match std::env::var("DATABASE_URL") {
+        Ok(url) => (url, 10),
         Err(_) => {
             let config_path = default_config_path();
-            HekaConfig::from_file(&config_path)
+            let database = HekaConfig::from_file(&config_path)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("loading config from {}", config_path.display()))?
-                .database
-                .url
+                .database;
+            (database.url, database.max_connections)
         }
     };
-    let db = sea_orm::Database::connect(&db_url)
+    let db = connect_database(&db_url, max_connections)
         .await
         .into_diagnostic()
         .wrap_err("connecting to PostgreSQL")?;

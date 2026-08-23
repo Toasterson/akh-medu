@@ -81,7 +81,13 @@ The JSON report contains:
 - `models`: embedding model and optional LLM model identifiers
 - `dataset_hash`: content fingerprint of the dataset directory
 - `sessions`: number of sessions evaluated
-- `metrics`: `total_questions`, `hits`, `recall_at_k`, `p50_latency_secs`, `p99_latency_secs`, `retrieval_params`
+- `metrics`: `total_questions`, benchmark-specific `scores`,
+  `p50_latency_secs`, `p99_latency_secs`, and `retrieval_params`
+
+For LongMemEval, `scores` reports the official evidence-session retrieval
+metrics `recall_any@5` and `recall_all@5`; `recall_all@5` is the primary
+acceptance metric. These are retrieval metrics, not answer accuracy. LoCoMo's
+separate baseline score remains a generic binary `recall_at_k`.
 
 The Markdown report is a human-readable rendering of the same data, including
 an explicit warning when `--top-k-explicit` bypasses the auto-cap safety guard.

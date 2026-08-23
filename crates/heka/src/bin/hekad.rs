@@ -18,10 +18,9 @@ use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, WrapErr};
-use sea_orm::Database;
 use sea_orm_migration::MigratorTrait;
 
-use heka::config::HekaConfig;
+use heka::config::{HekaConfig, connect_database};
 #[cfg(feature = "embedding")]
 use heka::embedder::{SentenceEmbedder, resolve_model_dir};
 use heka::eval::EvalCommand;
@@ -80,8 +79,7 @@ async fn run_migrate(config_path: Option<PathBuf>) -> miette::Result<()> {
     let config = HekaConfig::from_file(&config_path)
         .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
 
-    tracing::info!(url = %config.database.url, "connecting to PostgreSQL");
-    let db = Database::connect(&config.database.url)
+    let db = connect_database(&config.database.url, config.database.max_connections)
         .await
         .into_diagnostic()
         .wrap_err("connecting to PostgreSQL")?;
@@ -115,8 +113,7 @@ async fn run_embed(config_path: Option<PathBuf>) -> miette::Result<()> {
     let config = HekaConfig::from_file(&config_path)
         .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
 
-    tracing::info!(url = %config.database.url, "connecting to PostgreSQL");
-    let db = Database::connect(&config.database.url)
+    let db = connect_database(&config.database.url, config.database.max_connections)
         .await
         .into_diagnostic()
         .wrap_err("connecting to PostgreSQL")?;
