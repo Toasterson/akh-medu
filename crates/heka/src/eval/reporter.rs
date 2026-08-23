@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use crate::eval::EvalMetrics;
+use crate::eval::{EvalMetrics, EvalScores};
 
 /// Context for a single evaluation report.
 #[derive(Debug, Clone, Serialize)]
@@ -70,10 +70,17 @@ pub struct Reporter {
 impl Reporter {
     /// Build a reporter from a context, capturing hardware info at construction time.
     pub fn new(ctx: ReportContext) -> Self {
+        Self::new_with_embedding_model(ctx, "stub (no retrieval)")
+    }
+
+    /// Build a reporter and record the concrete embedding model used.
+    pub fn new_with_embedding_model(
+        ctx: ReportContext,
+        embedding_model: impl Into<String>,
+    ) -> Self {
         let hardware = capture_hardware();
         let models = ModelInfo {
-            // Default embedding model — 42c will make this configurable.
-            embedding_model: "stub (no retrieval)".to_string(),
+            embedding_model: embedding_model.into(),
             llm_model: None,
         };
 
@@ -128,16 +135,42 @@ impl Reporter {
             "| Sessions | {} |\n", r.sessions
         ));
         md.push_str(&format!(
-            "| Total Questions | {} |\n", r.metrics.total_questions
+            "| Total Questions | {} |\n",
+            r.metrics.total_questions
         ));
-        md.push_str(&format!(
-            "| Hits | {} |\n", r.metrics.hits
-        ));
-        md.push_str(&format!(
-            "| Recall@K | {:.4} ({:.2}%) |\n",
-            r.metrics.recall_at_k,
-            r.metrics.recall_at_k * 100.0
-        ));
+        match &r.metrics.scores {
+            EvalScores::BinaryRetrieval { hits, recall_at_k } => {
+                md.push_str(&format!("| Hits | {hits} |\n"));
+                md.push_str(&format!(
+                    "| Recall@K | {:.4} ({:.2}%) |\n",
+                    recall_at_k,
+                    recall_at_k * 100.0
+                ));
+            }
+            EvalScores::EvidenceSessionRetrieval {
+                retrieved_any_at_5,
+                retrieved_all_at_5,
+                recall_any_at_5,
+                recall_all_at_5,
+            } => {
+                md.push_str(&format!(
+                    "| Questions retrieving any evidence session @5 | {retrieved_any_at_5} |\n"
+                ));
+                md.push_str(&format!(
+                    "| Questions retrieving all evidence sessions @5 | {retrieved_all_at_5} |\n"
+                ));
+                md.push_str(&format!(
+                    "| recall_any@5 | {:.4} ({:.2}%) |\n",
+                    recall_any_at_5,
+                    recall_any_at_5 * 100.0
+                ));
+                md.push_str(&format!(
+                    "| **recall_all@5 (primary)** | **{:.4} ({:.2}%)** |\n",
+                    recall_all_at_5,
+                    recall_all_at_5 * 100.0
+                ));
+            }
+        }
         md.push_str(&format!(
             "| p50 Latency | {:.6}s |\n", r.metrics.p50_latency_secs
         ));
@@ -214,7 +247,11 @@ impl Reporter {
         }
 
         // ── Baseline note ──
-        if r.metrics.recall_at_k == 0.0 {
+        if matches!(
+            &r.metrics.scores,
+            EvalScores::BinaryRetrieval { recall_at_k, .. } if *recall_at_k == 0.0
+        ) && r.models.embedding_model.starts_with("stub")
+        {
             md.push_str("## Baseline Note\n\n");
             md.push_str(
                 "Recall is 0.0 because retrieval is a stub (Phase 42b). \
@@ -257,5 +294,46 @@ fn capture_hardware() -> HardwareInfo {
         cpu_cores,
         total_memory_mb,
         hostname,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::eval::RetrievalParams;
+
+    #[test]
+    fn longmemeval_report_labels_primary_retrieval_metric_without_accuracy_claim() {
+        let reporter = Reporter::new_with_embedding_model(
+            ReportContext {
+                benchmark: "longmemeval".to_string(),
+                mode: "raw".to_string(),
+                dataset_hash: Some("fixture".to_string()),
+                sessions: 1,
+                metrics: EvalMetrics {
+                    total_questions: 1,
+                    scores: EvalScores::EvidenceSessionRetrieval {
+                        retrieved_any_at_5: 1,
+                        retrieved_all_at_5: 0,
+                        recall_any_at_5: 1.0,
+                        recall_all_at_5: 0.0,
+                    },
+                    p50_latency_secs: 0.1,
+                    p99_latency_secs: 0.1,
+                    retrieval_params: RetrievalParams {
+                        mode: "raw".to_string(),
+                        top_k: "5".to_string(),
+                        top_k_explicit: None,
+                        auto_top_k_cap: None,
+                    },
+                },
+            },
+            "all-MiniLM-L6-v2",
+        );
+
+        let markdown = reporter.render_markdown();
+        assert!(markdown.contains("recall_any@5"));
+        assert!(markdown.contains("recall_all@5 (primary)"));
+        assert!(!markdown.to_ascii_lowercase().contains("answer accuracy"));
     }
 }

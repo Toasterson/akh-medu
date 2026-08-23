@@ -20,10 +20,7 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let sql = include_str!("../../migrations/20260427_000001_init.sql");
-        manager
-            .get_connection()
-            .execute_unprepared(sql)
-            .await?;
+        manager.get_connection().execute_unprepared(sql).await?;
         Ok(())
     }
 
@@ -43,5 +40,24 @@ impl MigrationTrait for Migration {
             .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    const MIGRATION_SQL: &str = include_str!("../../migrations/20260427_000001_init.sql");
+
+    #[test]
+    fn untagged_index_uses_a_jsonb_native_empty_array_predicate() {
+        let normalized = MIGRATION_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains(
+            "CREATE INDEX IF NOT EXISTS idx_heka_drawers_untagged ON heka_drawers(akh_id) WHERE tags = '[]'::jsonb;"
+        ));
+        assert!(!normalized.contains("tags::text[]"));
+        assert!(!normalized.contains("array_length(tags"));
     }
 }

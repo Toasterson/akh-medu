@@ -9,12 +9,10 @@ DATA_DIR="$ROOT_DIR/eval_data"
 
 mkdir -p "$DATA_DIR/longmemeval" "$DATA_DIR/locomo"
 
-echo "Downloading LongMemEval (multi-session conversational memory benchmark)..."
-curl -fsSL -o "$DATA_DIR/longmemeval/longmemeval.zip" \
-    "https://huggingface.co/datasets/Priyankalel/longmemeval/resolve/main/longmemeval.zip" \
+echo "Downloading LongMemEval oracle split (bounded retrieval smoke benchmark)..."
+curl -fsSL -o "$DATA_DIR/longmemeval/longmemeval_oracle.json" \
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json" \
     || { echo "LongMemEval download failed — dataset may require HuggingFace authentication"; exit 1; }
-unzip -q "$DATA_DIR/longmemeval/longmemeval.zip" -d "$DATA_DIR/longmemeval/"
-rm "$DATA_DIR/longmemeval/longmemeval.zip"
 
 echo "Downloading LoCoMo (long conversational memory benchmark)..."
 curl -fsSL -o "$DATA_DIR/locomo/locomo.tar.gz" \

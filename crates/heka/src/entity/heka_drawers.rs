@@ -29,6 +29,27 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub metadata: Json,
 
+    // --- Phase 42c: drawer ingest path columns ---
+
+    /// SHA-256 hex digest of the drawer body. Used for idempotent re-ingest:
+    /// the UNIQUE(akh_id, body_hash) index ensures re-capturing the same
+    /// session produces no duplicate rows.
+    pub body_hash: Option<String>,
+
+    /// Claude Code session identifier (from the stop-hook payload).
+    /// Links this drawer to the session that produced it.
+    pub session_id: Option<String>,
+
+    /// Speaker who produced this turn: "user", "assistant", or "system".
+    pub speaker: Option<String>,
+
+    /// Freeform contact label (e.g. "claude-code@laptop", "tecton@worktree-3").
+    pub contact: Option<String>,
+
+    /// Topic tags extracted from the turn (JSONB array of strings).
+    #[sea_orm(column_type = "JsonBinary")]
+    pub topics: Json,
+
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

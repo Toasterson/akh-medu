@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS heka_drawers (
 
 CREATE INDEX IF NOT EXISTS idx_heka_drawers_akh     ON heka_drawers(akh_id);
 CREATE INDEX IF NOT EXISTS idx_heka_drawers_proj   ON heka_drawers(project_id);
--- Partial index: find drawers without embeddings efficiently
+-- Partial index: find drawers whose JSONB tag array is empty efficiently.
 CREATE INDEX IF NOT EXISTS idx_heka_drawers_untagged
-    ON heka_drawers(akh_id) WHERE array_length(tags::text[], 1) IS NULL;
+    ON heka_drawers(akh_id) WHERE tags = '[]'::jsonb;
 
 -- ===========================================================================
 -- 4. heka_drawer_chunks — text chunks within a drawer

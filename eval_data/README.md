@@ -12,6 +12,12 @@ Run from the repository root:
 bash eval_data/fetch_datasets.sh
 ```
 
+The helper downloads the official cleaned LongMemEval oracle split for a
+bounded local smoke run. For a full retrieval benchmark, place
+`longmemeval_s_cleaned.json` from the same Hugging Face dataset in
+`eval_data/longmemeval/`; the evaluator prefers that file when both are
+present.
+
 ### `eval_data/fetch_datasets.sh`
 
 ```bash
@@ -26,12 +32,10 @@ DATA_DIR="$ROOT_DIR/eval_data"
 
 mkdir -p "$DATA_DIR/longmemeval" "$DATA_DIR/locomo"
 
-echo "Downloading LongMemEval (multi-session conversational memory benchmark)..."
-curl -fsSL -o "$DATA_DIR/longmemeval/longmemeval.zip" \
-    "https://huggingface.co/datasets/Priyankalel/longmemeval/resolve/main/longmemeval.zip" \
+echo "Downloading LongMemEval oracle split (bounded retrieval smoke benchmark)..."
+curl -fsSL -o "$DATA_DIR/longmemeval/longmemeval_oracle.json" \
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_oracle.json" \
     || { echo "LongMemEval download failed — dataset may require HuggingFace authentication"; exit 1; }
-unzip -q "$DATA_DIR/longmemeval/longmemeval.zip" -d "$DATA_DIR/longmemeval/"
-rm "$DATA_DIR/longmemeval/longmemeval.zip"
 
 echo "Downloading LoCoMo (long conversational memory benchmark)..."
 curl -fsSL -o "$DATA_DIR/locomo/locomo.tar.gz" \
@@ -50,7 +54,7 @@ eval_data/
 ├── README.md
 ├── fetch_datasets.sh
 ├── longmemeval/
-│   └── longmemeval.json
+│   └── longmemeval_oracle.json
 └── locomo/
     └── locomo.json
 ```
@@ -77,7 +81,13 @@ The JSON report contains:
 - `models`: embedding model and optional LLM model identifiers
 - `dataset_hash`: content fingerprint of the dataset directory
 - `sessions`: number of sessions evaluated
-- `metrics`: `total_questions`, `hits`, `recall_at_k`, `p50_latency_secs`, `p99_latency_secs`, `retrieval_params`
+- `metrics`: `total_questions`, benchmark-specific `scores`,
+  `p50_latency_secs`, `p99_latency_secs`, and `retrieval_params`
+
+For LongMemEval, `scores` reports the official evidence-session retrieval
+metrics `recall_any@5` and `recall_all@5`; `recall_all@5` is the primary
+acceptance metric. These are retrieval metrics, not answer accuracy. LoCoMo's
+separate baseline score remains a generic binary `recall_at_k`.
 
 The Markdown report is a human-readable rendering of the same data, including
 an explicit warning when `--top-k-explicit` bypasses the auto-cap safety guard.

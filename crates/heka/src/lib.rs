@@ -21,10 +21,17 @@
 //!
 //! See `migrations/20260427_000001_init.sql` for the full DDL.
 
+pub mod chunker;
+pub mod capture;
 pub mod config;
+#[cfg(feature = "embedding")]
+pub mod embed_worker;
+#[cfg(feature = "embedding")]
+pub mod embedder;
 pub mod entity;
 pub mod error;
 pub mod eval;
+pub mod ingest;
 pub mod migration;
 
 pub use config::HekaConfig;
