@@ -17,3 +17,6 @@ runs/
 # Python bytecode caches (scripts/, benchmarks/*.py harness drivers).
 __pycache__/
 *.pyc
+
+# Ignore the per-worktree Anima owner marker.
+.anima-owner
