@@ -311,13 +311,15 @@ impl CompartmentManager {
             return Ok(());
         }
 
-        // Remove all KG triples tagged with this compartment (includes psyche-injected triples).
-        engine.remove_triples_in_compartment(id);
-
-        // Remove triples from the named graph in SPARQL store.
-        if let Some(sparql) = engine.sparql() {
-            let _ = sparql.remove_graph(id);
-        }
+        // Remove all KG triples tagged with this compartment (includes
+        // psyche-injected triples) and clear its named SPARQL graph under the
+        // Engine's canonical mutation/quiescence checkpoint.
+        engine
+            .remove_triples_in_compartment_checked(id)
+            .map_err(|error| CompartmentError::InvalidManifest {
+                path: id.to_string(),
+                message: format!("failed to unload compartment: {error}"),
+            })?;
 
         if id == "psyche" {
             *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = None;
@@ -774,6 +776,44 @@ tags = []
         let m = mgr.get("tecton").unwrap();
         assert_eq!(m.kind, CompartmentKind::Workspace);
         assert_eq!(m.scope, CompartmentScope::Private);
+    }
+
+    #[test]
+    fn unload_keeps_compartment_loaded_when_engine_is_quiesced() {
+        use crate::engine::{Engine, EngineConfig};
+        use crate::graph::Triple;
+        use crate::vsa::Dimension;
+
+        let (tmp, manager) = tmp_manager();
+        manager
+            .create_compartment(workspace_manifest("retained"))
+            .unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(tmp.path().join("engine-data")),
+            ..Default::default()
+        })
+        .unwrap();
+        manager.load("retained", &engine).unwrap();
+        let subject = engine.resolve_or_create_entity("retained-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("retained-predicate").unwrap();
+        let object = engine.resolve_or_create_entity("retained-object").unwrap();
+        engine
+            .add_triple(
+                &Triple::new(subject, predicate, object)
+                    .with_compartment("retained".into()),
+            )
+            .unwrap();
+
+        engine.quiesce_mutations();
+        assert!(manager.unload("retained", &engine).is_err());
+        let (_, state, _) = manager
+            .all_compartments()
+            .into_iter()
+            .find(|(manifest, _, _)| manifest.id == "retained")
+            .unwrap();
+        assert_eq!(state, CompartmentState::Loaded);
+        assert!(engine.has_triple(subject, predicate, object));
     }
 
     #[test]

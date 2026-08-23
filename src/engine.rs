@@ -995,6 +995,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Admit a plain triple batch against an isolated sequential graph view.
+    /// Skill activation uses this before publishing its first live edge, so a
+    /// later deterministic constraint, contradiction, shape, or provenance
+    /// failure cannot leave a half-loaded skill in KG/SPARQL/WAL.
+    fn preflight_triple_batch(&self, triples: &[Triple]) -> AkhResult<()> {
+        let shadow = self.batch_admission_shadow()?;
+        for triple in triples {
+            shadow.add_triple(triple)?;
+        }
+        Ok(())
+    }
+
     /// Add a triple to the knowledge graph.
     ///
     /// The full Phase 9 pipeline runs around insertion (all configurable):
@@ -1011,12 +1023,7 @@ impl Engine {
 
     /// `add_triple` with the encompassing mutation lock already held.
     fn add_triple_locked(&self, triple: &Triple) -> AkhResult<()> {
-        if self.mutations_quiesced.load(Ordering::Acquire) {
-            return Err(EngineError::InvalidConfig {
-                message: "engine is quiesced for residency handoff".into(),
-            }
-            .into());
-        }
+        self.ensure_mutations_active()?;
         // Construct the complete replay envelope before any subsystem is
         // mutated. In particular, ContradictionPolicy::Replace must not retract
         // a live edge and emit its WAL record only to discover later that the
@@ -1259,6 +1266,17 @@ impl Engine {
             );
         }
 
+        Ok(())
+    }
+
+    #[inline]
+    fn ensure_mutations_active(&self) -> AkhResult<()> {
+        if self.mutations_quiesced.load(Ordering::Acquire) {
+            return Err(EngineError::InvalidConfig {
+                message: "engine is quiesced for residency handoff".into(),
+            }
+            .into());
+        }
         Ok(())
     }
 
@@ -1686,40 +1704,53 @@ impl Engine {
     /// Load a skill: discover → warm → activate.
     /// Automatically detects label-based triples and resolves them.
     pub fn load_skill(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.load_skill_locked(name)
+    }
+
+    fn load_skill_locked(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
+        // A retained Engine handle must not discover, warm, or publish a skill
+        // after residency handoff has quiesced its graph and WAL.
+        self.ensure_mutations_active()?;
         let mgr = self
             .skill_manager
             .as_ref()
             .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
 
-        // Check if the skill has label-based triples.
-        let skill_dir = mgr.skills_dir().join(name);
-        let triples_path = skill_dir.join("triples.json");
-        let has_label_triples = if triples_path.exists() {
-            std::fs::read_to_string(&triples_path)
-                .ok()
-                .and_then(|c| serde_json::from_str::<Vec<serde_json::Value>>(&c).ok())
-                .is_some_and(|v| v.first().is_some_and(|e| e.get("subject").is_some()))
-        } else {
-            false
-        };
-
-        // Discover first so we can check current state.
+        // Preserve discovery/idempotent behavior while keeping it behind the
+        // Engine checkpoint. `activate_with` independently rechecks lifecycle
+        // state under the manager's activation gate.
         let _ = mgr.discover();
-
-        // If already Hot, return existing activation (idempotent).
         if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot)
             && let Some(activation) = mgr.hot_activation(name)
         {
             return Ok(activation);
         }
 
-        if has_label_triples {
-            return self.load_skill_with_labels(name);
-        }
+        mgr.activate_with(name, true, |plan| -> AkhResult<usize> {
+            let mut triples = plan.triples().to_vec();
+            for (subject, predicate, object, confidence) in plan.label_triples() {
+                let subject = self.resolve_or_create_entity(subject)?;
+                let predicate = self.resolve_or_create_relation(predicate)?;
+                let object = self.resolve_or_create_entity(object)?;
+                triples.push(
+                    Triple::new(subject, predicate, object).with_confidence(*confidence),
+                );
+            }
 
-        // Standard numeric path: Cold → Warm → Hot.
-        mgr.warm(name)?;
-        Ok(mgr.activate(name, &self.knowledge_graph)?)
+            // Parse/resolve and sequentially pre-admit the complete pack before
+            // any live projection or WAL record changes. The encompassing
+            // mutation lock keeps the live graph identical to the shadow's
+            // starting point until publication finishes.
+            self.preflight_triple_batch(&triples)?;
+            for triple in &triples {
+                self.add_triple_locked(triple)?;
+            }
+            Ok(triples.len())
+        })
     }
 
     /// Unload (deactivate) a skill.
@@ -2193,79 +2224,13 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Load a skill with label-based triple resolution.
-    /// Pre-resolves labels to symbol IDs, then delegates to standard SkillManager.
+    /// Uses the same canonical, gated activation path as [`Self::load_skill`].
     pub fn load_skill_with_labels(&self, name: &str) -> AkhResult<crate::skills::SkillActivation> {
-        let mgr = self
-            .skill_manager
-            .as_ref()
-            .ok_or(crate::error::SkillError::NotFound { name: name.into() })?;
-
-        // Ensure discovered.
-        let _ = mgr.discover();
-
-        // If already Hot, return existing activation (idempotent).
-        if mgr.skill_state(name) == Some(crate::skills::SkillState::Hot)
-            && let Some(activation) = mgr.hot_activation(name)
-        {
-            return Ok(activation);
-        }
-
-        mgr.warm(name)?;
-
-        // Read the skill's triples file before activation.
-        let skill_dir = mgr.skills_dir().join(name);
-        let triples_path = skill_dir.join("triples.json");
-        let mut label_triples_count = 0usize;
-
-        if triples_path.exists() {
-            let content = std::fs::read_to_string(&triples_path).map_err(|e| {
-                crate::error::SkillError::Io {
-                    skill_id: name.into(),
-                    source: e,
-                }
-            })?;
-
-            let raw: Vec<serde_json::Value> = serde_json::from_str(&content).map_err(|e| {
-                crate::error::SkillError::InvalidManifest {
-                    path: triples_path.display().to_string(),
-                    message: format!("triples parse error: {e}"),
-                }
-            })?;
-
-            // Detect label-based format by checking first element.
-            let is_label_format = raw.first().is_some_and(|v| v.get("subject").is_some());
-
-            if is_label_format {
-                for val in &raw {
-                    let subject = val["subject"].as_str().unwrap_or("");
-                    let predicate = val["predicate"].as_str().unwrap_or("");
-                    let object = val["object"].as_str().unwrap_or("");
-                    let confidence = val["confidence"].as_f64().unwrap_or(1.0) as f32;
-
-                    if !subject.is_empty() && !predicate.is_empty() && !object.is_empty() {
-                        let s = self.resolve_or_create_entity(subject)?;
-                        let p = self.resolve_or_create_relation(predicate)?;
-                        let o = self.resolve_or_create_entity(object)?;
-
-                        let triple = Triple::new(s, p, o).with_confidence(confidence);
-                        let _ = self.add_triple(&triple); // ignore duplicates
-                        label_triples_count += 1;
-                    }
-                }
-            }
-        }
-
-        // Now activate via the standard path (which handles numeric triples and rules).
-        let mut activation = mgr.activate(name, &self.knowledge_graph)?;
-
-        // If we loaded label triples, add them to the activation count
-        // and sync back to the SkillManager so idempotent reloads report correctly.
-        if label_triples_count > 0 {
-            activation.triples_loaded += label_triples_count;
-            mgr.add_triple_count(name, label_triples_count);
-        }
-
-        Ok(activation)
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.load_skill_locked(name)
     }
 
     // -----------------------------------------------------------------------
@@ -2343,6 +2308,11 @@ impl Engine {
         use crate::autonomous::rule_engine::{
             is_invalid_type_hierarchy_participant, is_noise_entity,
         };
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
 
         let is_a_id = self.lookup_symbol("is-a").ok();
         let child_of_id = self.lookup_symbol("child-of").ok();
@@ -2369,12 +2339,13 @@ impl Engine {
                 || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
 
             if contaminated {
-                self.knowledge_graph
-                    .remove_triple(triple.subject, triple.predicate, triple.object);
-                if let Some(ref sparql) = self.sparql {
-                    let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
-                }
-                removed += 1;
+                let existed = self.knowledge_graph.triple(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                ).is_some();
+                self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
+                removed += usize::from(existed);
             }
         }
 
@@ -2395,6 +2366,11 @@ impl Engine {
     ///
     /// Returns the number of triples removed.
     pub fn purge_runtime_artifacts(&self) -> AkhResult<usize> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
         let artifact_ids: Vec<SymbolId> = self
             .all_symbols()
             .into_iter()
@@ -2417,13 +2393,15 @@ impl Engine {
             })
             .collect();
 
-        let removed = to_remove.len();
+        let mut removed = 0;
         for triple in to_remove {
-            self.knowledge_graph
-                .remove_triple(triple.subject, triple.predicate, triple.object);
-            if let Some(ref sparql) = self.sparql {
-                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
-            }
+            let existed = self.knowledge_graph.triple(
+                triple.subject,
+                triple.predicate,
+                triple.object,
+            ).is_some();
+            self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
+            removed += usize::from(existed);
         }
 
         tracing::info!(
@@ -2443,6 +2421,11 @@ impl Engine {
     ///
     /// Returns the number of triples removed.
     pub fn purge_self_referential_triples(&self) -> AkhResult<usize> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
         let candidates: Vec<Triple> = self
             .all_triples()
             .into_iter()
@@ -2451,12 +2434,13 @@ impl Engine {
 
         let mut removed = 0usize;
         for triple in candidates {
-            self.knowledge_graph
-                .remove_triple(triple.subject, triple.predicate, triple.object);
-            if let Some(ref sparql) = self.sparql {
-                let _ = sparql.remove_triple(triple.subject, triple.predicate, triple.object);
-            }
-            removed += 1;
+            let existed = self.knowledge_graph.triple(
+                triple.subject,
+                triple.predicate,
+                triple.object,
+            ).is_some();
+            self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
+            removed += usize::from(existed);
         }
 
         Ok(removed)
@@ -2969,12 +2953,19 @@ impl Engine {
             .mutation_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.mutations_quiesced.load(Ordering::Acquire) {
-            return Err(EngineError::InvalidConfig {
-                message: "engine is quiesced for residency handoff".into(),
-            }
-            .into());
-        }
+        self.remove_triple_locked(subject, predicate, object)
+    }
+
+    /// `remove_triple` with the encompassing mutation checkpoint already held.
+    /// Every bulk/cleanup API delegates here so TMS, SPARQL, identity state,
+    /// and the replay-complete WAL transition cannot diverge.
+    fn remove_triple_locked(
+        &self,
+        subject: SymbolId,
+        predicate: SymbolId,
+        object: SymbolId,
+    ) -> AkhResult<crate::tms::RetractionResult> {
+        self.ensure_mutations_active()?;
         let Some(primary) = self
             .knowledge_graph
             .triple(subject, predicate, object)
@@ -3107,8 +3098,48 @@ impl Engine {
     /// Useful for clean re-ingestion: remove old triples before inserting new ones.
     /// Returns the number of triples removed.
     pub fn remove_triples_in_compartment(&self, compartment_id: &str) -> usize {
-        self.knowledge_graph
-            .remove_triples_in_compartment(compartment_id)
+        match self.remove_triples_in_compartment_checked(compartment_id) {
+            Ok(removed) => removed,
+            Err(error) => {
+                tracing::warn!(%error, compartment = compartment_id, "compartment removal refused");
+                0
+            }
+        }
+    }
+
+    /// Checked compartment removal for lifecycle callers that must not publish
+    /// a Dormant state when the Engine has already entered residency handoff.
+    pub(crate) fn remove_triples_in_compartment_checked(
+        &self,
+        compartment_id: &str,
+    ) -> AkhResult<usize> {
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+        let candidates = self
+            .knowledge_graph
+            .all_triples()
+            .into_iter()
+            .filter(|triple| triple.compartment_id.as_deref() == Some(compartment_id))
+            .collect::<Vec<_>>();
+        let mut removed = 0;
+        for triple in candidates {
+            let existed = self
+                .knowledge_graph
+                .triple(triple.subject, triple.predicate, triple.object)
+                .is_some();
+            self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
+            removed += usize::from(existed);
+        }
+        // Clear any legacy/stale named-graph quads only while this same
+        // mutation checkpoint is active. CompartmentManager must not perform a
+        // second raw SPARQL mutation after a residency handoff.
+        if let Some(sparql) = self.sparql.as_ref() {
+            sparql.remove_graph(compartment_id)?;
+        }
+        Ok(removed)
     }
 
     /// Adjust the confidence of an existing triple by `delta`, clamped to `[min_conf, max_conf]`.
@@ -3128,8 +3159,32 @@ impl Engine {
         min_conf: f32,
         max_conf: f32,
     ) -> bool {
-        self.knowledge_graph
-            .update_triple_confidence(subject, predicate, object, delta, min_conf, max_conf)
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.ensure_mutations_active().is_err() {
+            return false;
+        }
+        let Some(mut updated) = self.knowledge_graph.triple(subject, predicate, object) else {
+            return false;
+        };
+        updated.confidence = (updated.confidence + delta).clamp(min_conf, max_conf);
+        let Ok(prepared) = self.prepare_assertion(&updated) else {
+            return false;
+        };
+        if self
+            .knowledge_graph
+            .replace_triple_exact(&updated)
+            .is_err()
+        {
+            return false;
+        }
+        self.record_mutation(
+            crate::mutation::MutationKind::Assert,
+            self.assertion_payload(&updated, prepared),
+        );
+        true
     }
 
     /// Add multiple triples in a single operation.
@@ -3190,9 +3245,8 @@ impl Engine {
 
     /// Remove multiple triples from the knowledge graph.
     ///
-    /// All resolutions happen upfront; each triple is removed from the KG
-    /// and SPARQL store. TMS cascade (if enabled) fires once per symbol
-    /// at the end rather than after each individual triple.
+    /// All resolutions happen upfront; each present edge then passes through
+    /// the same serialized TMS/SPARQL/WAL transition as [`Self::remove_triple`].
     ///
     /// Returns the number of triples actually removed.
     pub fn remove_triples_batch(
@@ -3213,40 +3267,18 @@ impl Engine {
             resolved.push(Resolved { s, p, o });
         }
 
-        // Phase 2: remove all from the KG + SPARQL
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+
+        // Phase 2: remove every still-present edge through the canonical path.
         let mut removed = 0usize;
         for r in &resolved {
-            if self.knowledge_graph.remove_triple(r.s, r.p, r.o) {
-                if let Some(ref sparql) = self.sparql {
-                    let _ = sparql.remove_triple(r.s, r.p, r.o);
-                }
-                removed += 1;
-            }
-        }
-
-        // Phase 3: TMS cascade (if enabled) — collect unique symbols from removed triples
-        if self.phase9_config.tms_enabled && removed > 0 {
-            let mut tms = self.tms.write().unwrap();
-            let mut tms_retracted = Vec::new();
-            for r in &resolved {
-                let result = tms.retract(r.o);
-                for &rs in &result.retracted {
-                    if rs != r.o && !tms_retracted.contains(&rs) {
-                        tms_retracted.push(rs);
-                    }
-                }
-            }
-            // Remove cascaded triples from KG
-            for &sym in &tms_retracted {
-                let triples_from: Vec<_> = self.knowledge_graph.triples_from(sym);
-                for t in &triples_from {
-                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
-                }
-                let triples_to: Vec<_> = self.knowledge_graph.triples_to(sym);
-                for t in &triples_to {
-                    self.knowledge_graph.remove_triple(t.subject, t.predicate, t.object);
-                }
-            }
+            let existed = self.knowledge_graph.triple(r.s, r.p, r.o).is_some();
+            self.remove_triple_locked(r.s, r.p, r.o)?;
+            removed += usize::from(existed);
         }
 
         Ok(removed)
@@ -3301,7 +3333,14 @@ impl Engine {
 
         let chunk_sz = chunk_size.clamp(1, 500);
 
-        // Collect matching (s, p, o) SymbolId triples without holding graph lock.
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
+
+        // Collect matching (s, p, o) SymbolId triples while the encompassing
+        // mutation checkpoint prevents a handoff or concurrent live writer.
         let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = self
             .knowledge_graph
             .all_triples()
@@ -3323,12 +3362,9 @@ impl Engine {
 
         for chunk in candidates.chunks(chunk_sz) {
             for &(s, p, o) in chunk {
-                if self.knowledge_graph.remove_triple(s, p, o) {
-                    if let Some(ref sparql) = self.sparql {
-                        let _ = sparql.remove_triple(s, p, o);
-                    }
-                    removed += 1;
-                }
+                let existed = self.knowledge_graph.triple(s, p, o).is_some();
+                self.remove_triple_locked(s, p, o)?;
+                removed += usize::from(existed);
             }
             // Persist metadata after each chunk to bound redb write-transaction size.
             let _ = self.persist();
@@ -3349,6 +3385,12 @@ impl Engine {
     /// Returns the number of triples removed.
     pub fn sparql_delete(&self, query: &str) -> AkhResult<usize> {
         use crate::graph::sparql::SparqlStore;
+
+        let _mutation_guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.ensure_mutations_active()?;
 
         let sparql_store = self.sparql.as_ref().ok_or(EngineError::InvalidConfig {
             message: "SPARQL DELETE requires persistence (--data-dir)".into(),
@@ -3371,7 +3413,12 @@ impl Engine {
             .filter_map(|row| {
                 let find = |var: &str| {
                     row.iter()
-                        .find(|(k, _)| k.as_str() == var)
+                        .find(|(key, _)| {
+                            key.strip_prefix('?')
+                                .or_else(|| key.strip_prefix('$'))
+                                .unwrap_or(key)
+                                == var
+                        })
                         .map(|(_, v)| v.trim_matches(|c: char| c == '<' || c == '>').to_string())
                 };
                 let s_iri = find("s")?;
@@ -3386,10 +3433,9 @@ impl Engine {
 
         let mut removed = 0usize;
         for &(s, p, o) in &candidates {
-            if self.knowledge_graph.remove_triple(s, p, o) {
-                let _ = sparql_store.remove_triple(s, p, o);
-                removed += 1;
-            }
+            let existed = self.knowledge_graph.triple(s, p, o).is_some();
+            self.remove_triple_locked(s, p, o)?;
+            removed += usize::from(existed);
         }
 
         Ok(removed)
@@ -4193,6 +4239,32 @@ mod tests {
         }
     }
 
+    fn write_numeric_skill(
+        data_dir: &std::path::Path,
+        skill_id: &str,
+        triples: &[serde_json::Value],
+    ) {
+        let skill_dir = data_dir.join("skills").join(skill_id);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let manifest = serde_json::json!({
+            "id": skill_id,
+            "name": skill_id,
+            "version": "1.0.0",
+            "domains": [],
+            "triples_file": "triples.json",
+        });
+        std::fs::write(
+            skill_dir.join("skill.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("triples.json"),
+            serde_json::to_vec(triples).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn create_memory_only_engine() {
         let engine = Engine::new(EngineConfig {
@@ -4435,6 +4507,321 @@ mod tests {
         );
         assert_eq!(records[1].payload["provenance_id"].as_u64(), Some(new_provenance.get()));
         assert_eq!(records[2].payload["provenance_id"].as_u64(), Some(old_provenance.get()));
+    }
+
+    #[test]
+    fn quiesced_retained_handle_refuses_every_public_graph_mutator() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("retained-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("retained-predicate").unwrap();
+        let object = engine.resolve_or_create_entity("retained-object").unwrap();
+        let triple = Triple::new(subject, predicate, object)
+            .with_confidence(0.8)
+            .with_compartment("retained-compartment".into());
+        engine.add_triple(&triple).unwrap();
+        let before = engine.all_triples();
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        // Models an Arc<Engine> retained by a request/OODA task after the
+        // daemon has started a residency handoff.
+        engine.quiesce_mutations();
+
+        assert!(engine.remove_triple(subject, predicate, object).is_err());
+        assert_eq!(
+            engine.remove_triples_in_compartment("retained-compartment"),
+            0
+        );
+        assert!(!engine.update_triple_confidence(
+            subject, predicate, object, -0.5, 0.0, 1.0
+        ));
+        assert!(engine
+            .remove_triples_batch(&[(
+                "retained-subject",
+                "retained-predicate",
+                "retained-object",
+            )])
+            .is_err());
+        assert!(engine
+            .purge_by_pattern(Some("retained-subject"), None, None, 1)
+            .is_err());
+        assert!(engine
+            .sparql_delete("DELETE WHERE { ?s ?p ?o }")
+            .is_err());
+        assert!(engine.purge_contaminated_inferences().is_err());
+        assert!(engine.purge_runtime_artifacts().is_err());
+        assert!(engine.purge_self_referential_triples().is_err());
+
+        assert_eq!(engine.all_triples(), before);
+        assert!(sink.0.lock().unwrap().is_empty());
+        let sparql_triples = engine.sparql.as_ref().unwrap().all_triples().unwrap();
+        assert_eq!(sparql_triples.len(), 1);
+        assert!(sparql_triples.iter().any(|triple| {
+            triple.subject == subject
+                && triple.predicate == predicate
+                && triple.object == object
+        }));
+    }
+
+    #[test]
+    fn quiesced_retained_handle_refuses_both_public_skill_load_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("skill-quiesced-subject").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("skill-quiesced-predicate")
+            .unwrap();
+        let object = engine.resolve_or_create_entity("skill-quiesced-object").unwrap();
+        write_numeric_skill(
+            dir.path(),
+            "quiesced-skill",
+            &[serde_json::json!({
+                "s": subject.get(),
+                "p": predicate.get(),
+                "o": object.get(),
+            })],
+        );
+        let manager = engine.skill_manager.as_ref().unwrap();
+        manager.discover().unwrap();
+        assert_eq!(
+            manager.skill_state("quiesced-skill"),
+            Some(crate::skills::SkillState::Cold)
+        );
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+        let before = engine.all_triples();
+
+        engine.quiesce_mutations();
+        assert!(engine.load_skill("quiesced-skill").is_err());
+        assert!(engine.load_skill_with_labels("quiesced-skill").is_err());
+
+        assert_eq!(
+            manager.skill_state("quiesced-skill"),
+            Some(crate::skills::SkillState::Cold)
+        );
+        assert_eq!(engine.all_triples(), before);
+        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn numeric_skill_load_publishes_through_canonical_graph_sparql_and_wal_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = engine.resolve_or_create_entity("skill-canonical-subject").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("skill-canonical-predicate")
+            .unwrap();
+        let object = engine.resolve_or_create_entity("skill-canonical-object").unwrap();
+        write_numeric_skill(
+            dir.path(),
+            "canonical-skill",
+            &[serde_json::json!({
+                "s": subject.get(),
+                "p": predicate.get(),
+                "o": object.get(),
+            })],
+        );
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        let activation = engine.load_skill("canonical-skill").unwrap();
+
+        assert_eq!(activation.triples_loaded, 1);
+        assert_eq!(
+            engine
+                .skill_manager
+                .as_ref()
+                .unwrap()
+                .skill_state("canonical-skill"),
+            Some(crate::skills::SkillState::Hot)
+        );
+        assert!(engine.has_triple(subject, predicate, object));
+        let rdf = engine.sparql.as_ref().unwrap().all_triples().unwrap();
+        assert!(rdf.iter().any(|triple| {
+            triple.subject == subject
+                && triple.predicate == predicate
+                && triple.object == object
+        }));
+        let records = sink.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, crate::mutation::MutationKind::Assert);
+        assert_eq!(
+            records[0].payload["subject"].as_u64(),
+            Some(subject.get())
+        );
+        assert_eq!(
+            records[0].payload["predicate"].as_u64(),
+            Some(predicate.get())
+        );
+        assert_eq!(
+            records[0].payload["object"].as_u64(),
+            Some(object.get())
+        );
+    }
+
+    #[test]
+    fn skill_batch_preflight_rejects_late_member_without_partial_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let first_subject = engine.resolve_or_create_entity("skill-first-subject").unwrap();
+        let predicate = engine.resolve_or_create_relation("skill-preflight-predicate").unwrap();
+        let first_object = engine.resolve_or_create_entity("skill-first-object").unwrap();
+        let self_ref = engine.resolve_or_create_entity("skill-self-reference").unwrap();
+        write_numeric_skill(
+            dir.path(),
+            "invalid-skill",
+            &[
+                serde_json::json!({
+                    "s": first_subject.get(),
+                    "p": predicate.get(),
+                    "o": first_object.get(),
+                }),
+                serde_json::json!({
+                    "s": self_ref.get(),
+                    "p": predicate.get(),
+                    "o": self_ref.get(),
+                }),
+            ],
+        );
+        let manager = engine.skill_manager.as_ref().unwrap();
+        manager.discover().unwrap();
+        assert_eq!(
+            manager.skill_state("invalid-skill"),
+            Some(crate::skills::SkillState::Cold)
+        );
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        assert!(engine.load_skill("invalid-skill").is_err());
+
+        assert_eq!(
+            manager.skill_state("invalid-skill"),
+            Some(crate::skills::SkillState::Cold)
+        );
+        assert_eq!(engine.triple_count(), 0);
+        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn bulk_update_and_delete_apis_emit_canonical_wal_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            dimension: Dimension::TEST,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let predicate = engine.resolve_or_create_relation("bulk-predicate").unwrap();
+        let mut triples = Vec::new();
+        for label in ["confidence", "batch", "pattern", "sparql", "compartment"] {
+            let subject = engine.resolve_or_create_entity(&format!("{label}-subject")).unwrap();
+            let object = engine.resolve_or_create_entity(&format!("{label}-object")).unwrap();
+            let mut triple = Triple::new(subject, predicate, object).with_confidence(0.8);
+            if label == "compartment" {
+                triple = triple.with_compartment("bulk-compartment".into());
+            }
+            engine.add_triple(&triple).unwrap();
+            triples.push(triple);
+        }
+        let sink = Arc::new(RecordingSink::default());
+        assert!(engine
+            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+            .is_ok());
+
+        assert!(engine.update_triple_confidence(
+            triples[0].subject,
+            predicate,
+            triples[0].object,
+            -0.3,
+            0.0,
+            1.0,
+        ));
+        assert_eq!(
+            engine
+                .remove_triples_batch(&[("batch-subject", "bulk-predicate", "batch-object")])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .purge_by_pattern(Some("^pattern-subject$"), None, None, 1)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .sparql_delete(&format!(
+                    "DELETE WHERE {{ ?s ?p ?o . FILTER(?s = <https://akh-medu.dev/sym/{}>) }}",
+                    triples[3].subject.get()
+                ))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.remove_triples_in_compartment("bulk-compartment"),
+            1
+        );
+
+        let records = sink.0.lock().unwrap();
+        assert_eq!(records[0].kind, crate::mutation::MutationKind::Assert);
+        assert!(
+            (records[0].payload["confidence"].as_f64().unwrap() as f32 - 0.5).abs() < 1e-6
+        );
+        assert!(records[1..]
+            .iter()
+            .all(|record| record.kind == crate::mutation::MutationKind::RetractBatch));
+        assert_eq!(records.len(), 5);
+        assert!(!engine.has_triple(
+            triples[1].subject,
+            predicate,
+            triples[1].object
+        ));
+        assert!(!engine.has_triple(
+            triples[2].subject,
+            predicate,
+            triples[2].object
+        ));
+        assert!(!engine.has_triple(
+            triples[3].subject,
+            predicate,
+            triples[3].object
+        ));
+        assert!(!engine.has_triple(
+            triples[4].subject,
+            predicate,
+            triples[4].object
+        ));
     }
 
     #[test]

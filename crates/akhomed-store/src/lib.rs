@@ -30,9 +30,10 @@ pub use memberships::{
 };
 pub use migration::Migrator;
 pub use mutations::{
-    MutationRow, TurnRow, append_mutations, ensure_akh, load_turn_by_seq, load_turns_since,
+    MutationRow, TurnRow, append_mutations, append_mutations_fenced, ensure_akh,
+    load_turn_by_seq, load_turns_since,
 };
-pub use pool::{PoolOptions, connect};
+pub use pool::{PoolOptions, StablePgSession, connect};
 pub use schema_registry::{
     SchemaPackRow, admit_pack, get_pack, latest_pack, list_active_microtheories, list_packs,
     record_pack_activation,

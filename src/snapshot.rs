@@ -3456,8 +3456,7 @@ triples_file = "triples.json"
         )
         .unwrap();
         let captured = live.all_triples();
-        let wal = Arc::new(crate::wal::MutationLog::new(
-            akhomed_store::DatabaseConnection::Disconnected,
+        let wal = Arc::new(crate::wal::MutationLog::new_buffered_for_test(
             Uuid::from_u128(1),
             Uuid::from_u128(2),
             crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
@@ -3543,8 +3542,7 @@ triples_file = "triples.json"
         let captured_triples = live.all_triples();
         let mut restored_symbols = live.dump_symbols();
         let mut restored_provenance = live.all_provenance().unwrap();
-        let wal = Arc::new(crate::wal::MutationLog::new(
-            akhomed_store::DatabaseConnection::Disconnected,
+        let wal = Arc::new(crate::wal::MutationLog::new_buffered_for_test(
             Uuid::from_u128(3),
             Uuid::from_u128(4),
             crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),

@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use akhomed_store::uuid::Uuid;
-use akhomed_store::{DatabaseConnection, MutationRow};
+use akhomed_store::MutationRow;
 
 use crate::mutation::{MutationKind, MutationRecord, MutationSink};
 
@@ -207,27 +207,51 @@ pub struct WalMetrics {
 /// Per-workspace write-ahead log: a [`WalBuffer`] plus the async flush path to
 /// `akhomed.mutation_log`.
 pub struct MutationLog {
-    db: DatabaseConnection,
+    residency: Option<std::sync::Arc<akhomed_store::StablePgSession>>,
     akh_id: Uuid,
     workspace_id: Uuid,
+    residency_epoch: i64,
     config: WalConfig,
     buffer: WalBuffer,
     metrics: WalMetrics,
 }
 
 impl MutationLog {
-    /// Build a WAL for `(akh_id, workspace_id)` writing to `db`.
+    /// Build a WAL for `(akh_id, workspace_id)` through the pinned residency
+    /// session and fencing epoch owned by this daemon instance.
     pub fn new(
-        db: DatabaseConnection,
+        residency: std::sync::Arc<akhomed_store::StablePgSession>,
+        akh_id: Uuid,
+        workspace_id: Uuid,
+        residency_epoch: i64,
+        config: WalConfig,
+    ) -> Self {
+        let buffer = WalBuffer::new(config.max_buffer_bytes);
+        Self {
+            residency: Some(residency),
+            akh_id,
+            workspace_id,
+            residency_epoch,
+            config,
+            buffer,
+            metrics: WalMetrics::default(),
+        }
+    }
+
+    /// In-memory-only construction for unit tests that inspect the bounded
+    /// buffer without ever flushing to PostgreSQL.
+    #[cfg(test)]
+    pub(crate) fn new_buffered_for_test(
         akh_id: Uuid,
         workspace_id: Uuid,
         config: WalConfig,
     ) -> Self {
         let buffer = WalBuffer::new(config.max_buffer_bytes);
         Self {
-            db,
+            residency: None,
             akh_id,
             workspace_id,
+            residency_epoch: 0,
             config,
             buffer,
             metrics: WalMetrics::default(),
@@ -274,8 +298,22 @@ impl MutationLog {
         let n = rows.len();
 
         let start = std::time::Instant::now();
-        match akhomed_store::append_mutations(&self.db, self.akh_id, self.workspace_id, &rows).await
-        {
+        let result = match self.residency.as_ref() {
+            Some(residency) => {
+                akhomed_store::append_mutations_fenced(
+                    residency,
+                    self.akh_id,
+                    self.workspace_id,
+                    self.residency_epoch,
+                    &rows,
+                )
+                .await
+            }
+            None => Err(akhomed_store::StoreError::Conflict {
+                message: "buffer-only mutation log cannot flush".into(),
+            }),
+        };
+        match result {
             Ok(_) => {
                 self.metrics.last_flush_size.store(n, Ordering::Relaxed);
                 self.metrics

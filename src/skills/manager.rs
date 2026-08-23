@@ -11,15 +11,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use egg::{Pattern, Rewrite};
 
 use crate::error::{SkillError, SkillResult};
-use crate::graph::index::KnowledgeGraph;
 use crate::graph::Triple;
+use crate::graph::index::KnowledgeGraph;
 use crate::reason::AkhLang;
 use crate::symbol::SymbolId;
 use crate::vsa::HyperVec;
@@ -34,6 +34,12 @@ use super::{
 pub struct SkillManager {
     skills_dir: PathBuf,
     skills: RwLock<HashMap<String, LoadedSkill>>,
+    /// Serializes lifecycle transitions across the legacy direct-KG API and
+    /// the Engine-owned canonical activation path.  The latter deliberately
+    /// keeps this guard while the Engine admits and publishes every planned
+    /// triple so a concurrent deactivate/activate cannot invalidate the plan
+    /// before it is committed Hot.
+    activation_gate: Mutex<()>,
     loaded_bytes: AtomicUsize,
     max_bytes: usize,
     /// Stored rule text per skill: skill_id -> Vec<(name, lhs, rhs)>.
@@ -47,6 +53,33 @@ pub struct SkillManager {
     prototypes: DashMap<String, Vec<u8>>,
     /// Last-access timestamp per Hot skill (Phase 31c idle-deactivation).
     last_used: DashMap<String, Instant>,
+}
+
+/// Fully parsed, side-effect-free activation input.
+///
+/// The Engine consumes `triples` through its canonical mutation pipeline and
+/// only then asks the manager to publish the lifecycle/rule/action state.  No
+/// graph reference is exposed to the manager on that path.
+pub(crate) struct SkillActivationPlan {
+    skill_id: String,
+    source_state: SkillState,
+    manifest: SkillManifest,
+    triples: Vec<Triple>,
+    label_triples: Vec<(String, String, String, f32)>,
+    rules: Vec<(String, String, String)>,
+    actions: Vec<SkillAction>,
+    plans: Vec<SkillPlan>,
+    memory_bytes: usize,
+}
+
+impl SkillActivationPlan {
+    pub(crate) fn triples(&self) -> &[Triple] {
+        &self.triples
+    }
+
+    pub(crate) fn label_triples(&self) -> &[(String, String, String, f32)] {
+        &self.label_triples
+    }
 }
 
 impl std::fmt::Debug for SkillManager {
@@ -67,6 +100,7 @@ impl SkillManager {
         Self {
             skills_dir,
             skills: RwLock::new(HashMap::new()),
+            activation_gate: Mutex::new(()),
             loaded_bytes: AtomicUsize::new(0),
             max_bytes: max_memory_mb * 1024 * 1024,
             rule_sources: RwLock::new(HashMap::new()),
@@ -85,6 +119,14 @@ impl SkillManager {
     ///
     /// Registers each found skill as Cold. Returns the number of skills discovered.
     pub fn discover(&self) -> SkillResult<usize> {
+        let _activation_guard = self
+            .activation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.discover_locked()
+    }
+
+    fn discover_locked(&self) -> SkillResult<usize> {
         if !self.skills_dir.exists() {
             return Err(SkillError::NoSkillsDir {
                 path: self.skills_dir.display().to_string(),
@@ -165,6 +207,14 @@ impl SkillManager {
 
     /// Parse the manifest for a Cold skill, transitioning it to Warm.
     pub fn warm(&self, skill_id: &str) -> SkillResult<SkillManifest> {
+        let _activation_guard = self
+            .activation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.warm_locked(skill_id)
+    }
+
+    fn warm_locked(&self, skill_id: &str) -> SkillResult<SkillManifest> {
         let mut skills = self.skills.write().expect("skills lock poisoned");
         let skill = skills
             .get_mut(skill_id)
@@ -180,17 +230,7 @@ impl SkillManager {
             });
         }
 
-        let manifest_path = self.skills_dir.join(skill_id).join("skill.json");
-        let content = std::fs::read_to_string(&manifest_path).map_err(|e| SkillError::Io {
-            skill_id: skill_id.into(),
-            source: e,
-        })?;
-
-        let manifest: SkillManifest =
-            serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
-                path: manifest_path.display().to_string(),
-                message: e.to_string(),
-            })?;
+        let manifest = self.read_manifest(skill_id)?;
 
         skill.manifest = manifest.clone();
         skill.state = SkillState::Warm;
@@ -208,47 +248,96 @@ impl SkillManager {
         skill_id: &str,
         knowledge_graph: &KnowledgeGraph,
     ) -> SkillResult<SkillActivation> {
-        // Phase 31a: conflict check against currently active skills.
-        let active_ids = self.active_skill_ids();
-        {
+        self.activate_with::<SkillError, _>(skill_id, false, |plan| {
+            for triple in plan.triples() {
+                // Preserve the legacy manager-only API: callers that choose
+                // it still publish directly to the supplied graph. Engine
+                // callers use `activate_with` below and never enter here.
+                let _ = knowledge_graph.insert_triple(triple);
+            }
+            Ok(plan.triples().len())
+        })
+    }
+
+    /// Parse an activation completely, let the Engine publish its triples, and
+    /// only then mark the skill Hot. The activation gate spans all three
+    /// phases, so the plan cannot race a direct lifecycle transition.
+    pub(crate) fn activate_with<E, F>(
+        &self,
+        skill_id: &str,
+        allow_cold: bool,
+        publish_triples: F,
+    ) -> Result<SkillActivation, E>
+    where
+        E: From<SkillError>,
+        F: FnOnce(&SkillActivationPlan) -> Result<usize, E>,
+    {
+        let _activation_guard = self
+            .activation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let plan = self
+            .build_activation_plan_locked(skill_id, allow_cold)
+            .map_err(E::from)?;
+        let triples_loaded = publish_triples(&plan)?;
+        self.commit_activation_locked(plan, triples_loaded)
+            .map_err(E::from)
+    }
+
+    fn read_manifest(&self, skill_id: &str) -> SkillResult<SkillManifest> {
+        let manifest_path = self.skills_dir.join(skill_id).join("skill.json");
+        let content = std::fs::read_to_string(&manifest_path).map_err(|e| SkillError::Io {
+            skill_id: skill_id.into(),
+            source: e,
+        })?;
+        serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
+            path: manifest_path.display().to_string(),
+            message: e.to_string(),
+        })
+    }
+
+    /// Build the entire activation without changing lifecycle state or any
+    /// graph projection. All filesystem parsing and the memory/conflict checks
+    /// therefore complete before the Engine is invited to publish a triple.
+    fn build_activation_plan_locked(
+        &self,
+        skill_id: &str,
+        allow_cold: bool,
+    ) -> SkillResult<SkillActivationPlan> {
+        let (source_state, manifest) = {
             let skills = self.skills.read().expect("skills lock poisoned");
-            if let Some(skill) = skills.get(skill_id) {
-                if let Some(conflict) = super::graph::SkillDependencyGraph::check_conflicts(
-                    &skill.manifest,
-                    &active_ids,
-                ) {
-                    return Err(SkillError::SkillConflict {
+            let skill = skills.get(skill_id).ok_or_else(|| SkillError::NotFound {
+                name: skill_id.into(),
+            })?;
+            match skill.state {
+                SkillState::Cold if allow_cold => (SkillState::Cold, self.read_manifest(skill_id)?),
+                SkillState::Warm => (SkillState::Warm, skill.manifest.clone()),
+                state => {
+                    return Err(SkillError::InvalidTransition {
                         skill_id: skill_id.into(),
-                        conflict,
+                        from: state.to_string(),
+                        to: "Hot".into(),
                     });
                 }
             }
-        }
+        };
 
-        let mut skills = self.skills.write().expect("skills lock poisoned");
-        let skill = skills
-            .get_mut(skill_id)
-            .ok_or_else(|| SkillError::NotFound {
-                name: skill_id.into(),
-            })?;
-
-        if skill.state != SkillState::Warm {
-            return Err(SkillError::InvalidTransition {
+        let active_ids = self.active_skill_ids();
+        if let Some(conflict) =
+            super::graph::SkillDependencyGraph::check_conflicts(&manifest, &active_ids)
+        {
+            return Err(SkillError::SkillConflict {
                 skill_id: skill_id.into(),
-                from: skill.state.to_string(),
-                to: "Hot".into(),
+                conflict,
             });
         }
 
         let skill_dir = self.skills_dir.join(skill_id);
-        let mut triples_loaded = 0usize;
-        let mut rules_loaded = 0usize;
-        let mut memory_estimate = 0usize;
-        let mut loaded_triples: Vec<Triple> = Vec::new();
+        let mut memory_bytes = 0usize;
+        let mut triples = Vec::new();
+        let mut label_triples = Vec::new();
 
-        // Load triples if available.
-        let triples_file = skill
-            .manifest
+        let triples_file = manifest
             .triples_file
             .clone()
             .unwrap_or_else(|| "triples.json".into());
@@ -258,138 +347,191 @@ impl SkillManager {
                 skill_id: skill_id.into(),
                 source: e,
             })?;
-
             let raw_triples: Vec<serde_json::Value> =
                 serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
                     path: triples_path.display().to_string(),
                     message: format!("triples parse error: {e}"),
                 })?;
-
-            for val in &raw_triples {
-                let s = val["s"].as_u64().unwrap_or(0);
-                let p = val["p"].as_u64().unwrap_or(0);
-                let o = val["o"].as_u64().unwrap_or(0);
-
-                if let (Some(s), Some(p), Some(o)) =
-                    (SymbolId::new(s), SymbolId::new(p), SymbolId::new(o))
-                {
-                    let triple = Triple::new(s, p, o);
-                    // Ignore duplicate triple errors.
-                    let _ = knowledge_graph.insert_triple(&triple);
-                    loaded_triples.push(triple);
-                    triples_loaded += 1;
+            let is_label_format = raw_triples
+                .first()
+                .is_some_and(|value| value.get("subject").is_some());
+            for value in &raw_triples {
+                let subject = value["s"].as_u64().unwrap_or(0);
+                let predicate = value["p"].as_u64().unwrap_or(0);
+                let object = value["o"].as_u64().unwrap_or(0);
+                if let (Some(subject), Some(predicate), Some(object)) = (
+                    SymbolId::new(subject),
+                    SymbolId::new(predicate),
+                    SymbolId::new(object),
+                ) {
+                    triples.push(Triple::new(subject, predicate, object));
+                }
+                if is_label_format {
+                    let subject = value["subject"].as_str().unwrap_or("");
+                    let predicate = value["predicate"].as_str().unwrap_or("");
+                    let object = value["object"].as_str().unwrap_or("");
+                    if !subject.is_empty() && !predicate.is_empty() && !object.is_empty() {
+                        label_triples.push((
+                            subject.to_string(),
+                            predicate.to_string(),
+                            object.to_string(),
+                            value["confidence"].as_f64().unwrap_or(1.0) as f32,
+                        ));
+                    }
                 }
             }
-
-            memory_estimate += content.len();
+            memory_bytes += content.len();
         }
 
-        // Load rules if available.
-        let rules_file = skill
-            .manifest
+        let rules_file = manifest
             .rules_file
             .clone()
             .unwrap_or_else(|| "rules.txt".into());
         let rules_path = skill_dir.join(&rules_file);
-        let mut rule_tuples: Vec<(String, String, String)> = Vec::new();
+        let mut rules = Vec::new();
         if rules_path.exists() {
             let content = std::fs::read_to_string(&rules_path).map_err(|e| SkillError::Io {
                 skill_id: skill_id.into(),
                 source: e,
             })?;
-
-            for (i, line) in content.lines().enumerate() {
+            for (index, line) in content.lines().enumerate() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
                 if let Some((lhs, rhs)) = line.split_once("=>") {
-                    let name = format!("{}-rule-{}", skill_id, i);
-                    rule_tuples.push((name, lhs.trim().to_string(), rhs.trim().to_string()));
-                    rules_loaded += 1;
+                    rules.push((
+                        format!("{skill_id}-rule-{index}"),
+                        lhs.trim().to_string(),
+                        rhs.trim().to_string(),
+                    ));
                 } else {
                     return Err(SkillError::InvalidRule {
                         skill_id: skill_id.into(),
-                        message: format!("line {}: missing '=>' separator", i + 1),
+                        message: format!("line {}: missing '=>' separator", index + 1),
                     });
                 }
             }
-
-            memory_estimate += content.len();
+            memory_bytes += content.len();
         }
 
-        // ── Phase 30: Load action schemas (actions.json) ────────────────────
-        let actions_file = skill
-            .manifest
+        let actions_file = manifest
             .actions_file
             .clone()
             .unwrap_or_else(|| "actions.json".into());
         let actions_path = skill_dir.join(&actions_file);
-        let mut loaded_actions: Vec<SkillAction> = Vec::new();
-        if actions_path.exists() {
+        let actions = if actions_path.exists() {
             let content = std::fs::read_to_string(&actions_path).map_err(|e| SkillError::Io {
                 skill_id: skill_id.into(),
                 source: e,
             })?;
-            loaded_actions =
-                serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
-                    path: actions_path.display().to_string(),
-                    message: format!("actions parse error: {e}"),
-                })?;
-            memory_estimate += content.len();
-        }
+            memory_bytes += content.len();
+            serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
+                path: actions_path.display().to_string(),
+                message: format!("actions parse error: {e}"),
+            })?
+        } else {
+            Vec::new()
+        };
 
-        // ── Phase 30: Load plan templates (plans.json) ───────────────────────
-        let plans_file = skill
-            .manifest
+        let plans_file = manifest
             .plans_file
             .clone()
             .unwrap_or_else(|| "plans.json".into());
         let plans_path = skill_dir.join(&plans_file);
-        let mut loaded_plans: Vec<SkillPlan> = Vec::new();
-        if plans_path.exists() {
+        let plans = if plans_path.exists() {
             let content = std::fs::read_to_string(&plans_path).map_err(|e| SkillError::Io {
                 skill_id: skill_id.into(),
                 source: e,
             })?;
-            loaded_plans =
-                serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
-                    path: plans_path.display().to_string(),
-                    message: format!("plans parse error: {e}"),
-                })?;
-            memory_estimate += content.len();
-        }
+            memory_bytes += content.len();
+            serde_json::from_str(&content).map_err(|e| SkillError::InvalidManifest {
+                path: plans_path.display().to_string(),
+                message: format!("plans parse error: {e}"),
+            })?
+        } else {
+            Vec::new()
+        };
 
-        let actions_loaded = loaded_actions.len();
-        let plans_loaded = loaded_plans.len();
-
-        // Check memory budget.
         let current = self.loaded_bytes.load(Ordering::Relaxed);
-        if current + memory_estimate > self.max_bytes {
+        if current + memory_bytes > self.max_bytes {
             return Err(SkillError::MemoryBudgetExceeded {
-                required_mb: memory_estimate / (1024 * 1024) + 1,
+                required_mb: memory_bytes / (1024 * 1024) + 1,
                 available_mb: (self.max_bytes.saturating_sub(current)) / (1024 * 1024),
             });
         }
 
-        // Commit.
-        self.loaded_bytes
-            .fetch_add(memory_estimate, Ordering::Relaxed);
+        Ok(SkillActivationPlan {
+            skill_id: skill_id.into(),
+            source_state,
+            manifest,
+            triples,
+            label_triples,
+            rules,
+            actions,
+            plans,
+            memory_bytes,
+        })
+    }
+
+    fn commit_activation_locked(
+        &self,
+        plan: SkillActivationPlan,
+        triples_loaded: usize,
+    ) -> SkillResult<SkillActivation> {
+        let SkillActivationPlan {
+            skill_id,
+            source_state,
+            manifest,
+            triples,
+            label_triples: _,
+            rules,
+            actions,
+            plans,
+            memory_bytes,
+        } = plan;
+        let rules_loaded = rules.len();
+        let actions_loaded = actions.len();
+        let plans_loaded = plans.len();
+        let now = Instant::now();
+
+        let mut skills = self.skills.write().expect("skills lock poisoned");
+        let skill = skills
+            .get_mut(&skill_id)
+            .ok_or_else(|| SkillError::NotFound {
+                name: skill_id.clone(),
+            })?;
+        if skill.state != source_state {
+            return Err(SkillError::InvalidTransition {
+                skill_id,
+                from: skill.state.to_string(),
+                to: "Hot".into(),
+            });
+        }
+
+        self.loaded_bytes.fetch_add(memory_bytes, Ordering::Relaxed);
+        skill.manifest = manifest;
         skill.state = SkillState::Hot;
         skill.triple_count = triples_loaded;
         skill.rule_count = rules_loaded;
-        skill.memory_bytes = memory_estimate;
-        skill.actions = loaded_actions;
-        skill.plans = loaded_plans;
-        // Phase 31c: record activation time.
-        skill.last_used_at = Some(Instant::now());
+        skill.memory_bytes = memory_bytes;
+        skill.actions = actions;
+        skill.plans = plans;
+        skill.last_used_at = Some(now);
 
-        if !rule_tuples.is_empty() {
+        if !rules.is_empty() {
             self.rule_sources
                 .write()
                 .expect("rule_sources lock poisoned")
-                .insert(skill_id.to_string(), rule_tuples);
+                .insert(skill_id.clone(), rules);
         }
+        if !triples.is_empty() {
+            self.skill_triples
+                .write()
+                .expect("skill_triples lock poisoned")
+                .insert(skill_id.clone(), triples);
+        }
+        self.last_used.insert(skill_id.clone(), now);
 
         if actions_loaded > 0 {
             tracing::debug!(skill_id, actions_loaded, "loaded procedural action schemas");
@@ -398,23 +540,11 @@ impl SkillManager {
             tracing::debug!(skill_id, plans_loaded, "loaded procedural plan templates");
         }
 
-        // Phase 31b: store triples for prototype computation.
-        if !loaded_triples.is_empty() {
-            self.skill_triples
-                .write()
-                .expect("skill_triples lock poisoned")
-                .insert(skill_id.to_string(), loaded_triples);
-        }
-
-        // Phase 31c: record last-used timestamp.
-        self.last_used.insert(skill_id.to_string(), Instant::now());
-
-
         Ok(SkillActivation {
-            skill_id: skill_id.into(),
+            skill_id,
             triples_loaded,
             rules_loaded,
-            memory_bytes: memory_estimate,
+            memory_bytes,
             actions_loaded,
             plans_loaded,
         })
@@ -423,6 +553,10 @@ impl SkillManager {
     /// Deactivate a Hot skill: mark inactive, free budget.
     /// Triples already in the KG persist until engine restart.
     pub fn deactivate(&self, skill_id: &str) -> SkillResult<()> {
+        let _activation_guard = self
+            .activation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut skills = self.skills.write().expect("skills lock poisoned");
         let skill = skills
             .get_mut(skill_id)
@@ -488,6 +622,10 @@ impl SkillManager {
 
     /// Add extra triples to a Hot skill's count (e.g. label triples loaded externally).
     pub fn add_triple_count(&self, skill_id: &str, extra: usize) {
+        let _activation_guard = self
+            .activation_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut skills = self.skills.write().expect("skills lock poisoned");
         if let Some(skill) = skills.get_mut(skill_id) {
             skill.triple_count += extra;
@@ -1001,6 +1139,8 @@ mod tests {
             result,
             Err(SkillError::MemoryBudgetExceeded { .. })
         ));
+        assert_eq!(mgr.skill_state("astronomy"), Some(SkillState::Warm));
+        assert_eq!(kg.triple_count(), 0, "a rejected plan must not touch the KG");
     }
 
     #[test]

@@ -233,7 +233,7 @@ impl SparqlStore {
     /// Remove all triples in a named compartment graph.
     pub fn remove_graph(&self, compartment_id: &str) -> GraphResult<()> {
         let graph_iri = Self::compartment_to_iri(compartment_id)?;
-        let drop_query = format!("DROP GRAPH <{}>", graph_iri.as_str());
+        let drop_query = format!("DROP SILENT GRAPH <{}>", graph_iri.as_str());
         // Oxigraph may not support DROP GRAPH via query(), so we use update().
         self.store
             .update(&drop_query)
@@ -492,6 +492,14 @@ mod tests {
                 .unwrap_err(),
         );
         assert_invalid_compartment(store.remove_graph("bad compartment").unwrap_err());
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn removing_an_absent_compartment_graph_is_idempotent() {
+        let store = SparqlStore::in_memory().unwrap();
+        store.remove_graph("already-empty").unwrap();
+        store.remove_graph("already-empty").unwrap();
         assert!(store.is_empty().unwrap());
     }
 
