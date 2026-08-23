@@ -18,7 +18,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::config::EmbeddingConfig;
-use crate::embedder::{EMBEDDING_DIM, SharedEmbedder};
+use crate::embedder::{EMBEDDING_DIM, InferencePermit, SharedEmbedder};
 use crate::entity::heka_drawer_chunks::{self, Column as ChunkCol, Entity as Chunk};
 use crate::entity::heka_drawer_embeddings::vec_to_pgvector;
 use crate::error::{HekaError, HekaResult};
@@ -65,13 +65,14 @@ pub async fn run_embed_worker(
     embedder: SharedEmbedder,
     config: EmbeddingConfig,
 ) {
-    let interval = Duration::from_secs(config.poll_interval_secs);
+    let interval = poll_interval(config.poll_interval_secs);
     let batch_size = config.batch_size;
     let model_name = config.model.clone();
 
     tracing::info!(
         batch_size,
-        poll_secs = config.poll_interval_secs,
+        configured_poll_secs = config.poll_interval_secs,
+        effective_poll_secs = interval.as_secs(),
         "heka embed worker started"
     );
 
@@ -130,9 +131,20 @@ async fn embed_pending_batch_scoped(
     validate_batch_size(batch_size)?;
     validate_model_name(model_name)?;
 
+    // Acquire the single-flight lease before opening a transaction or claiming
+    // rows. If a previous timed-out blocking task is still running, retries
+    // backpressure here without holding database locks or spawning more work.
+    let inference_permit = embedder.acquire_inference(EMBED_BATCH_TIMEOUT).await?;
     let transaction = db.begin().await?;
-    let result =
-        process_claimed_batch(&transaction, embedder, batch_size, model_name, akh_id).await;
+    let result = process_claimed_batch(
+        &transaction,
+        embedder,
+        inference_permit,
+        batch_size,
+        model_name,
+        akh_id,
+    )
+    .await;
 
     match result {
         Ok(stats) => {
@@ -153,6 +165,7 @@ async fn embed_pending_batch_scoped(
 async fn process_claimed_batch(
     transaction: &DatabaseTransaction,
     embedder: &SharedEmbedder,
+    inference_permit: InferencePermit,
     batch_size: usize,
     model_name: &str,
     akh_id: Option<Uuid>,
@@ -168,23 +181,12 @@ async fn process_claimed_batch(
         .iter()
         .map(|chunk| chunk.text.clone())
         .collect();
-    let embedder = Arc::clone(embedder);
-    let inference = tokio::task::spawn_blocking(move || {
-        let text_refs: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
-        let mut guard = embedder
-            .lock()
-            .map_err(|error| HekaError::Embedding(format!("embedder lock: {error}")))?;
-        guard.embed_batch(&text_refs)
-    });
-    let embeddings = tokio::time::timeout(EMBED_BATCH_TIMEOUT, inference)
-        .await
-        .map_err(|_| {
-            HekaError::Embedding(format!(
-                "embedding batch exceeded {} second limit",
-                EMBED_BATCH_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|error| HekaError::Embedding(format!("spawn_blocking: {error}")))??;
+    let embeddings = embedder
+        .infer_with_permit(inference_permit, EMBED_BATCH_TIMEOUT, move |model| {
+            let text_refs: Vec<&str> = texts_owned.iter().map(String::as_str).collect();
+            model.embed_batch(&text_refs)
+        })
+        .await?;
 
     if embeddings.len() != pending_chunks.len() {
         return Err(HekaError::Embedding(format!(
@@ -248,6 +250,18 @@ fn validate_batch_size(batch_size: usize) -> HekaResult<()> {
         )));
     }
     Ok(())
+}
+
+fn poll_interval(configured_secs: u64) -> Duration {
+    const MIN_POLL_INTERVAL_SECS: u64 = 1;
+    if configured_secs < MIN_POLL_INTERVAL_SECS {
+        tracing::warn!(
+            configured_poll_secs = configured_secs,
+            effective_poll_secs = MIN_POLL_INTERVAL_SECS,
+            "clamping embedding poll interval to prevent a busy loop"
+        );
+    }
+    Duration::from_secs(configured_secs.max(MIN_POLL_INTERVAL_SECS))
 }
 
 fn validate_model_name(model_name: &str) -> HekaResult<()> {
@@ -369,5 +383,11 @@ mod tests {
         let oversized = "x".repeat(MAX_EMBED_BATCH_TEXT_BYTES + 1);
         assert!(validate_text_budget([oversized.as_str()].into_iter()).is_err());
         assert!(validate_text_budget(["small", "batch"].into_iter()).is_ok());
+    }
+
+    #[test]
+    fn zero_poll_interval_is_clamped_away_from_a_busy_loop() {
+        assert_eq!(poll_interval(0), Duration::from_secs(1));
+        assert_eq!(poll_interval(7), Duration::from_secs(7));
     }
 }

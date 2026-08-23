@@ -13,6 +13,10 @@ mod m20260604_000002_drawer_ingest;
 mod m20260604_000003_embedding_idempotency;
 mod m20260604_000004_repair_legacy_title_hashes;
 
+pub use m20260604_000004_repair_legacy_title_hashes::{
+    LegacyTitleHashRepairStats, repair_rejected_legacy_title_hashes,
+};
+
 pub struct Migrator;
 
 #[async_trait::async_trait]

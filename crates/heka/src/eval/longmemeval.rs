@@ -24,7 +24,6 @@ use {
     crate::ingest::write_drawer_scoped,
     miette::{IntoDiagnostic, WrapErr},
     sea_orm::{ConnectionTrait, DatabaseBackend, DatabaseConnection, FromQueryResult, Statement},
-    std::sync::{Arc, Mutex},
     std::time::{Duration, Instant},
     uuid::Uuid,
 };
@@ -85,6 +84,13 @@ struct EvidenceRetrievalResult {
     retrieved_session_ids: Vec<String>,
 }
 
+#[derive(Debug)]
+struct RetrievalSelection<'a> {
+    cases: Vec<&'a LongMemEvalCase>,
+    available_questions: usize,
+    abstention_questions: usize,
+}
+
 /// Run the LongMemEval benchmark.
 ///
 /// `sessions` is retained as the public CLI name for compatibility; it limits
@@ -135,24 +141,14 @@ async fn run_with_embeddings(
     let cases = load_dataset(&dataset_path)?;
     validate_dataset(&cases)?;
     let dataset_hash = compute_dataset_hash(&dataset_path);
-    let selected: Vec<_> = cases
-        .iter()
-        // The official retrieval protocol excludes the 30 abstention questions
-        // because they have no evidence-session ground truth.
-        .filter(|case| !is_abstention(case))
-        .take(sessions)
-        .collect();
-    if selected.len() != sessions {
-        return Err(miette::miette!(
-            "LongMemEval requested {sessions} non-abstention questions but the validated dataset contains only {}",
-            selected.len()
-        ));
-    }
+    let selection = select_retrieval_cases(&cases, sessions)?;
 
     tracing::info!(
         mode,
         requested_sessions = sessions,
-        evaluated_questions = selected.len(),
+        evaluated_questions = selection.cases.len(),
+        available_retrieval_questions = selection.available_questions,
+        abstention_questions = selection.abstention_questions,
         dataset = %dataset_path.display(),
         "starting LongMemEval"
     );
@@ -166,15 +162,15 @@ async fn run_with_embeddings(
     let model_dir = resolve_model_dir(&config.model_dir(), &model_name)
         .into_diagnostic()
         .wrap_err_with(|| format!("resolving embedding model `{model_name}`"))?;
-    let embedder: SharedEmbedder = Arc::new(Mutex::new(
+    let embedder = SharedEmbedder::new(
         SentenceEmbedder::load(&model_dir)
             .into_diagnostic()
             .wrap_err("loading ONNX embedding model")?,
-    ));
+    );
 
     let run_id = Uuid::new_v4();
-    let mut results = Vec::with_capacity(selected.len());
-    for case in &selected {
+    let mut results = Vec::with_capacity(selection.cases.len());
+    for case in &selection.cases {
         let result = evaluate_case_isolated(
             &db,
             &embedder,
@@ -203,7 +199,7 @@ async fn run_with_embeddings(
             top_k_explicit: None,
             auto_top_k_cap: None,
         },
-    );
+    )?;
     tracing::info!(
         total_questions = metrics.total_questions,
         "LongMemEval evidence-session retrieval complete; primary metric is recall_all@5"
@@ -214,7 +210,7 @@ async fn run_with_embeddings(
             benchmark: "longmemeval".to_string(),
             mode: mode.to_string(),
             dataset_hash,
-            sessions: selected.len(),
+            sessions: selection.cases.len(),
             metrics,
         },
         model_name,
@@ -314,6 +310,39 @@ fn validate_dataset(cases: &[LongMemEvalCase]) -> miette::Result<()> {
         validate_case(case)?;
     }
     Ok(())
+}
+
+fn select_retrieval_cases(
+    cases: &[LongMemEvalCase],
+    requested: usize,
+) -> miette::Result<RetrievalSelection<'_>> {
+    if requested == 0 {
+        return Err(miette::miette!(
+            "LongMemEval retrieval denominator must be greater than zero"
+        ));
+    }
+    let abstention_questions = cases.iter().filter(|case| is_abstention(case)).count();
+    let available_questions = cases.len().saturating_sub(abstention_questions);
+    if available_questions == 0 {
+        return Err(miette::miette!(
+            "LongMemEval contains no non-abstention questions for retrieval evaluation"
+        ));
+    }
+    if requested > available_questions {
+        return Err(miette::miette!(
+            "LongMemEval requested {requested} non-abstention questions but the validated dataset contains only {available_questions}"
+        ));
+    }
+    let cases = cases
+        .iter()
+        .filter(|case| !is_abstention(case))
+        .take(requested)
+        .collect();
+    Ok(RetrievalSelection {
+        cases,
+        available_questions,
+        abstention_questions,
+    })
 }
 
 fn validate_case(case: &LongMemEvalCase) -> miette::Result<()> {
@@ -419,17 +448,7 @@ fn validate_case(case: &LongMemEvalCase) -> miette::Result<()> {
         }
     }
 
-    if is_abstention(case) {
-        if !case.answer_session_ids.is_empty() {
-            return Err(miette::miette!(
-                "LongMemEval abstention case {} unexpectedly has answer_session_ids",
-                case.question_id
-            ));
-        }
-        return Ok(());
-    }
-
-    if case.answer_session_ids.is_empty() {
+    if !is_abstention(case) && case.answer_session_ids.is_empty() {
         return Err(miette::miette!(
             "LongMemEval non-abstention case {} has no answer_session_ids",
             case.question_id
@@ -457,9 +476,9 @@ fn validate_case(case: &LongMemEvalCase) -> miette::Result<()> {
 }
 
 fn is_abstention(case: &LongMemEvalCase) -> bool {
-    // Match the official metric aggregator, which excludes every question ID
-    // containing the `_abs` marker before computing session recall.
-    case.question_id.contains("_abs")
+    // Match the official dataset contract: abstention question IDs end in
+    // `_abs` and are excluded from evidence-session retrieval recall.
+    case.question_id.ends_with("_abs")
 }
 
 #[cfg(feature = "embedding")]
@@ -678,19 +697,12 @@ async fn drain_case_embeddings(
 
 #[cfg(feature = "embedding")]
 async fn embed_question(embedder: &SharedEmbedder, question: &str) -> miette::Result<Vec<f32>> {
-    let embedder = Arc::clone(embedder);
     let question = question.to_string();
-    let inference = tokio::task::spawn_blocking(move || {
-        let mut guard = embedder
-            .lock()
-            .map_err(|error| crate::HekaError::Embedding(format!("embedder lock: {error}")))?;
-        guard.embed_text(&question)
-    });
-    tokio::time::timeout(Duration::from_secs(30), inference)
+    embedder
+        .infer(Duration::from_secs(30), move |model| {
+            model.embed_text(&question)
+        })
         .await
-        .map_err(|_| miette::miette!("LongMemEval query embedding exceeded 30 seconds"))?
-        .into_diagnostic()
-        .wrap_err("joining LongMemEval query embedding task")?
         .into_diagnostic()
         .wrap_err("embedding LongMemEval question")
 }
@@ -764,23 +776,25 @@ fn compute_dataset_hash(path: &Path) -> Option<String> {
     Some(format!("{:x}", hasher.finalize()))
 }
 
-fn aggregate_metrics(results: &[EvidenceRetrievalResult], params: RetrievalParams) -> EvalMetrics {
+fn aggregate_metrics(
+    results: &[EvidenceRetrievalResult],
+    params: RetrievalParams,
+) -> miette::Result<EvalMetrics> {
     let total = results.len();
+    if total == 0 {
+        return Err(miette::miette!(
+            "LongMemEval retrieval metrics require a nonzero denominator"
+        ));
+    }
     let any_hits = results.iter().filter(|result| result.recalled_any).count();
     let all_hits = results.iter().filter(|result| result.recalled_all).count();
-    let (recall_any, recall_all) = if total > 0 {
-        (
-            any_hits as f64 / total as f64,
-            all_hits as f64 / total as f64,
-        )
-    } else {
-        (0.0, 0.0)
-    };
+    let recall_any = any_hits as f64 / total as f64;
+    let recall_all = all_hits as f64 / total as f64;
 
     let mut latencies: Vec<f64> = results.iter().map(|result| result.latency_secs).collect();
     latencies.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-    EvalMetrics {
+    Ok(EvalMetrics {
         total_questions: total,
         scores: EvalScores::EvidenceSessionRetrieval {
             retrieved_any_at_5: any_hits,
@@ -791,7 +805,7 @@ fn aggregate_metrics(results: &[EvidenceRetrievalResult], params: RetrievalParam
         p50_latency_secs: percentile(&latencies, 50),
         p99_latency_secs: percentile(&latencies, 99),
         retrieval_params: params,
-    }
+    })
 }
 
 fn percentile(sorted: &[f64], percentile: usize) -> f64 {
@@ -849,12 +863,113 @@ mod tests {
     }
 
     #[test]
-    fn official_abstention_cases_are_excluded_from_retrieval_recall() {
+    fn official_abstention_with_answer_ids_is_valid_but_not_retrievable() {
         let mut cases: Vec<LongMemEvalCase> = serde_json::from_str(fixture()).unwrap();
-        cases[0].question_id = "q1_abs".to_string();
-        cases[0].answer_session_ids.clear();
+        cases[0].question_id = "gpt4_70e84552_abs".to_string();
         validate_case(&cases[0]).unwrap();
         assert!(is_abstention(&cases[0]));
+        assert!(select_retrieval_cases(&cases, 1).is_err());
+
+        cases[0].question_id = "gpt4_70e84552_abs_revised".to_string();
+        assert!(!is_abstention(&cases[0]));
+    }
+
+    #[test]
+    fn abstention_answer_references_still_fail_closed() {
+        let mut cases: Vec<LongMemEvalCase> = serde_json::from_str(fixture()).unwrap();
+        cases[0].question_id = "gpt4_70e84552_abs".to_string();
+
+        let mut missing = cases[0].clone();
+        missing.answer_session_ids = vec!["not-in-haystack".to_string()];
+        assert!(validate_case(&missing).is_err());
+
+        let mut empty = cases[0].clone();
+        empty.answer_session_ids = vec![String::new()];
+        assert!(validate_case(&empty).is_err());
+
+        let mut duplicate = cases[0].clone();
+        duplicate.answer_session_ids = vec![
+            "evidence-session".to_string(),
+            "evidence-session".to_string(),
+        ];
+        assert!(validate_case(&duplicate).is_err());
+    }
+
+    #[test]
+    fn non_abstention_requires_an_answer_session() {
+        let mut cases: Vec<LongMemEvalCase> = serde_json::from_str(fixture()).unwrap();
+        cases[0].answer_session_ids.clear();
+        assert!(validate_case(&cases[0]).is_err());
+    }
+
+    #[test]
+    fn official_470_30_partition_excludes_abstentions_from_metrics() {
+        let template: Vec<LongMemEvalCase> = serde_json::from_str(fixture()).unwrap();
+        let mut cases = Vec::with_capacity(500);
+        for index in 0..500 {
+            let mut case = template[0].clone();
+            case.question_id = if index < 470 {
+                format!("q{index:03}")
+            } else {
+                format!("q{index:03}_abs")
+            };
+            cases.push(case);
+        }
+        validate_dataset(&cases).unwrap();
+
+        let selection = select_retrieval_cases(&cases, 470).unwrap();
+        assert_eq!(selection.available_questions, 470);
+        assert_eq!(selection.abstention_questions, 30);
+        assert_eq!(selection.cases.len(), 470);
+        assert!(selection.cases.iter().all(|case| !is_abstention(case)));
+        assert!(select_retrieval_cases(&cases, 471).is_err());
+
+        let results: Vec<_> = (0..selection.cases.len())
+            .map(|index| EvidenceRetrievalResult {
+                recalled_any: index < 235,
+                recalled_all: index < 235,
+                retrieved_count: 1,
+                latency_secs: 0.01,
+                retrieved_session_ids: vec!["evidence-session".to_string()],
+            })
+            .collect();
+        let metrics = aggregate_metrics(
+            &results,
+            RetrievalParams {
+                mode: "raw".to_string(),
+                top_k: "5".to_string(),
+                top_k_explicit: None,
+                auto_top_k_cap: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(metrics.total_questions, 470);
+        match metrics.scores {
+            EvalScores::EvidenceSessionRetrieval {
+                retrieved_any_at_5,
+                retrieved_all_at_5,
+                recall_any_at_5,
+                recall_all_at_5,
+            } => {
+                assert_eq!(retrieved_any_at_5, 235);
+                assert_eq!(retrieved_all_at_5, 235);
+                assert_eq!(recall_any_at_5, 0.5);
+                assert_eq!(recall_all_at_5, 0.5);
+            }
+            other => panic!("unexpected metric kind: {other:?}"),
+        }
+        assert!(
+            aggregate_metrics(
+                &[],
+                RetrievalParams {
+                    mode: "raw".to_string(),
+                    top_k: "5".to_string(),
+                    top_k_explicit: None,
+                    auto_top_k_cap: None,
+                },
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "embedding")]
@@ -890,7 +1005,8 @@ mod tests {
                 top_k_explicit: None,
                 auto_top_k_cap: None,
             },
-        );
+        )
+        .unwrap();
         match metrics.scores {
             EvalScores::EvidenceSessionRetrieval {
                 retrieved_any_at_5,

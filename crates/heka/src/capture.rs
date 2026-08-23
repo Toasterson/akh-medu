@@ -5,7 +5,9 @@
 //! response, so `last_assistant_message` is used as a lossless fallback for the
 //! just-completed assistant turn.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -108,6 +110,11 @@ struct TranscriptEntry {
     is_compact_summary: bool,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
+    // Real Claude transcripts can move between a project root, nested
+    // directories, and alternate worktrees within one stable session. The
+    // trusted transcript path and sessionId bind the capture; per-row cwd is
+    // descriptive metadata rather than an authorization boundary.
+    #[allow(dead_code)]
     cwd: Option<PathBuf>,
     message: Option<TranscriptMessage>,
 }
@@ -126,8 +133,7 @@ pub fn read_hook_input(reader: impl Read) -> HekaResult<String> {
 /// Parse stdin accepted by `heka-capture` using the current user's canonical
 /// Claude transcript root.
 pub fn parse_capture_input(input: &str) -> HekaResult<CaptureBatch> {
-    let policy = CapturePolicy::for_current_user()?;
-    parse_capture_input_with_policy(input, &policy)
+    parse_capture_input_with_policy_factory(input, None, CapturePolicy::for_current_user)
 }
 
 /// Parse hook input with an explicit trusted transcript policy.
@@ -138,6 +144,19 @@ pub fn parse_capture_input_with_policy(
     input: &str,
     policy: &CapturePolicy,
 ) -> HekaResult<CaptureBatch> {
+    parse_capture_input_with_policy_factory(input, Some(policy), || {
+        unreachable!("an explicit capture policy was already supplied")
+    })
+}
+
+fn parse_capture_input_with_policy_factory<F>(
+    input: &str,
+    explicit_policy: Option<&CapturePolicy>,
+    default_policy: F,
+) -> HekaResult<CaptureBatch>
+where
+    F: FnOnce() -> HekaResult<CapturePolicy>,
+{
     if input.len() > MAX_HOOK_STDIN_BYTES {
         return Err(resource_limit_error("hook stdin", MAX_HOOK_STDIN_BYTES));
     }
@@ -157,24 +176,30 @@ pub fn parse_capture_input_with_policy(
     }
 
     let payload: StopHookPayload = serde_json::from_str(input)?;
+    let max_turns = explicit_policy.map_or(MAX_CAPTURE_TURNS, |policy| policy.max_turns);
     let mut turns = if let Some(turns) = payload.transcript.or(payload.turns) {
-        if turns.len() > policy.max_turns {
-            return Err(resource_limit_error(
-                "inline capture turns",
-                policy.max_turns,
-            ));
+        if turns.len() > max_turns {
+            return Err(resource_limit_error("inline capture turns", max_turns));
         }
         turns
     } else if let Some(path) = payload.transcript_path.as_deref() {
+        let owned_policy;
+        let policy = if let Some(policy) = explicit_policy {
+            policy
+        } else {
+            owned_policy = default_policy()?;
+            &owned_policy
+        };
         let session_id = validate_hook_session_id(payload.session_id.as_deref())?;
         let cwd = payload.cwd.as_deref().ok_or_else(|| {
-            HekaError::Config("Claude Stop payload with transcript_path is missing cwd".to_string())
+            HekaError::Config(
+                "Claude Stop payload with transcript_path is missing project cwd".to_string(),
+            )
         })?;
-        let (transcript, canonical_cwd) = read_validated_transcript(path, session_id, cwd, policy)?;
+        let transcript = read_validated_transcript(path, session_id, cwd, policy)?;
         parse_transcript_jsonl_for_session(
             &transcript,
             session_id,
-            &canonical_cwd,
             policy.max_transcript_lines,
             policy.max_turns,
         )?
@@ -186,11 +211,10 @@ pub fn parse_capture_input_with_policy(
     // assistant response. Append the dedicated field unless the transcript
     // already ends with exactly that response.
     if let Some(last_message) = useful_text(payload.last_assistant_message.as_deref()) {
-        let already_present = turns
-            .iter()
-            .rev()
-            .find(|turn| turn.speaker.as_deref() == Some("assistant"))
-            .is_some_and(|turn| turn.body.as_deref().map(str::trim) == Some(last_message));
+        let already_present = turns.last().is_some_and(|turn| {
+            turn.speaker.as_deref() == Some("assistant")
+                && turn.body.as_deref().map(str::trim) == Some(last_message)
+        });
         if !already_present {
             turns.push(CaptureTurn {
                 speaker: Some("assistant".to_string()),
@@ -200,8 +224,8 @@ pub fn parse_capture_input_with_policy(
         }
     }
 
-    if turns.len() > policy.max_turns {
-        return Err(resource_limit_error("captured turns", policy.max_turns));
+    if turns.len() > max_turns {
+        return Err(resource_limit_error("captured turns", max_turns));
     }
 
     turns.retain(|turn| useful_text(turn.body.as_deref()).is_some());
@@ -217,35 +241,21 @@ pub fn parse_capture_input_with_policy(
 /// user and assistant turns. Tool results, thinking blocks, progress events,
 /// sidechains, and other bookkeeping records are deliberately excluded.
 pub fn parse_transcript_jsonl(transcript: &str) -> HekaResult<Vec<CaptureTurn>> {
-    parse_transcript_jsonl_inner(
-        transcript,
-        None,
-        None,
-        MAX_TRANSCRIPT_LINES,
-        MAX_CAPTURE_TURNS,
-    )
+    parse_transcript_jsonl_inner(transcript, None, MAX_TRANSCRIPT_LINES, MAX_CAPTURE_TURNS)
 }
 
 fn parse_transcript_jsonl_for_session(
     transcript: &str,
     expected_session_id: &str,
-    expected_cwd: &Path,
     max_lines: usize,
     max_turns: usize,
 ) -> HekaResult<Vec<CaptureTurn>> {
-    parse_transcript_jsonl_inner(
-        transcript,
-        Some(expected_session_id),
-        Some(expected_cwd),
-        max_lines,
-        max_turns,
-    )
+    parse_transcript_jsonl_inner(transcript, Some(expected_session_id), max_lines, max_turns)
 }
 
 fn parse_transcript_jsonl_inner(
     transcript: &str,
     expected_session_id: Option<&str>,
-    expected_cwd: Option<&Path>,
     max_lines: usize,
     max_turns: usize,
 ) -> HekaResult<Vec<CaptureTurn>> {
@@ -293,9 +303,9 @@ fn parse_transcript_jsonl_inner(
         if let Some(expected) = expected_session_id {
             match entry.session_id.as_deref() {
                 Some(actual) if actual == expected => {}
-                Some(actual) => {
+                Some(_) => {
                     return Err(HekaError::Config(format!(
-                        "Claude transcript session mismatch at line {}: expected `{expected}`, got `{actual}`",
+                        "Claude transcript session mismatch at line {}",
                         line_index + 1
                     )));
                 }
@@ -306,9 +316,6 @@ fn parse_transcript_jsonl_inner(
                     )));
                 }
             }
-        }
-        if let Some(expected) = expected_cwd {
-            validate_transcript_entry_cwd(entry.cwd.as_deref(), expected, line_index + 1)?;
         }
         let Some(body) = message.content.as_ref().and_then(content_text) else {
             continue;
@@ -332,142 +339,155 @@ fn read_validated_transcript(
     session_id: &str,
     cwd: &Path,
     policy: &CapturePolicy,
-) -> HekaResult<(String, PathBuf)> {
+) -> HekaResult<String> {
     let raw_root = expand_tilde(&policy.allowed_transcript_root);
     let raw_path = expand_tilde(path);
+    let raw_cwd = expand_tilde(cwd);
+    if !raw_root.is_absolute() || !raw_path.is_absolute() || !raw_cwd.is_absolute() {
+        return Err(HekaError::Config(
+            "Claude transcript root, transcript_path, and Stop project cwd must be absolute"
+                .to_string(),
+        ));
+    }
     let relative = raw_path.strip_prefix(&raw_root).map_err(|_| {
         HekaError::Config(format!(
             "Claude transcript must be beneath the allowed root {}",
             raw_root.display()
         ))
     })?;
-    if relative.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
+    let relative_components = relative.components().collect::<Vec<_>>();
+    if relative_components.len() != 2
+        || relative_components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
         return Err(HekaError::Config(
-            "Claude transcript path contains a disallowed path component".to_string(),
+            "Claude transcript path must be one project directory and one session file beneath the allowed root"
+                .to_string(),
         ));
-    }
-
-    let mut cursor = raw_root.clone();
-    for component in relative.components() {
-        cursor.push(component.as_os_str());
-        let metadata = std::fs::symlink_metadata(&cursor)?;
-        if metadata.file_type().is_symlink() {
-            return Err(HekaError::Config(format!(
-                "Claude transcript path contains a symlink: {}",
-                cursor.display()
-            )));
-        }
     }
 
     let root = raw_root.canonicalize()?;
-    let transcript_path = raw_path.canonicalize()?;
-    let cwd = expand_tilde(cwd).canonicalize()?;
+    let cwd = raw_cwd.canonicalize().map_err(|error| {
+        HekaError::Config(format!(
+            "Claude Stop project cwd cannot be canonicalized: {error}"
+        ))
+    })?;
     if !cwd.is_dir() {
         return Err(HekaError::Config(
-            "Claude Stop payload cwd is not a directory".to_string(),
+            "Claude Stop project cwd is not a directory".to_string(),
         ));
     }
-
-    let expected_project = root.join(claude_project_dir_name(&cwd));
-    if transcript_path.parent() != Some(expected_project.as_path()) {
-        return Err(HekaError::Config(format!(
-            "Claude transcript is not bound to the Stop payload cwd under {}",
-            root.display()
-        )));
+    let project_component = relative_components[0].as_os_str();
+    let filename_component = relative_components[1].as_os_str();
+    // A Stop hook can fire while Claude's current cwd is nested beneath the
+    // project root used to name its transcript directory. Authorize only when
+    // that exact project key corresponds to the canonical cwd or one of its
+    // non-filesystem-root ancestors. Per-row cwd remains descriptive metadata.
+    let authorized_project = cwd
+        .ancestors()
+        .filter(|ancestor| ancestor.parent().is_some())
+        .any(|ancestor| {
+            project_component == std::ffi::OsStr::new(&claude_project_dir_name(ancestor))
+        });
+    if !authorized_project {
+        return Err(HekaError::Config(
+            "Claude transcript project does not match the authorized Stop project".to_string(),
+        ));
     }
     let expected_filename = format!("{session_id}.jsonl");
-    if transcript_path.file_name().and_then(|name| name.to_str()) != Some(&expected_filename) {
+    if filename_component.to_str() != Some(&expected_filename) {
         return Err(HekaError::Config(
             "Claude transcript filename does not match the Stop payload session_id".to_string(),
         ));
     }
 
-    let metadata = std::fs::metadata(&transcript_path)?;
-    if !metadata.is_file() {
+    let file = open_transcript_beneath_root(&root, project_component, filename_component)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.is_file() {
         return Err(HekaError::Config(
             "Claude transcript_path is not a regular file".to_string(),
         ));
     }
-    if metadata.len() > policy.max_transcript_bytes as u64 {
+    if opened_metadata.len() > policy.max_transcript_bytes as u64 {
         return Err(resource_limit_error(
             "Claude transcript bytes",
             policy.max_transcript_bytes,
         ));
     }
-
-    let file = open_transcript_without_following(&transcript_path)?;
-    let opened_metadata = file.metadata()?;
-    if !opened_metadata.is_file() {
-        return Err(HekaError::Config(
-            "Claude transcript_path changed and is no longer a regular file".to_string(),
-        ));
-    }
-    if !same_file_identity(&metadata, &opened_metadata) {
-        return Err(HekaError::Config(
-            "Claude transcript_path changed while it was being opened".to_string(),
-        ));
-    }
     let transcript =
         read_utf8_bounded(file, policy.max_transcript_bytes, "Claude transcript bytes")?;
-    Ok((transcript, cwd))
-}
-
-fn validate_transcript_entry_cwd(
-    entry_cwd: Option<&Path>,
-    expected_cwd: &Path,
-    line_number: usize,
-) -> HekaResult<()> {
-    let entry_cwd = entry_cwd.ok_or_else(|| {
-        HekaError::Config(format!(
-            "Claude transcript entry at line {line_number} has no cwd"
-        ))
-    })?;
-    let canonical_entry_cwd = expand_tilde(entry_cwd).canonicalize().map_err(|error| {
-        HekaError::Config(format!(
-            "Claude transcript cwd at line {line_number} cannot be canonicalized: {error}"
-        ))
-    })?;
-    if canonical_entry_cwd != expected_cwd {
-        return Err(HekaError::Config(format!(
-            "Claude transcript cwd mismatch at line {line_number}"
-        )));
-    }
-    Ok(())
+    Ok(transcript)
 }
 
 #[cfg(unix)]
-fn open_transcript_without_following(path: &Path) -> std::io::Result<File> {
+fn open_transcript_beneath_root(
+    root: &Path,
+    project_component: &std::ffi::OsStr,
+    filename_component: &std::ffi::OsStr,
+) -> std::io::Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
 
-    OpenOptions::new()
+    fn component_name(component: &std::ffi::OsStr) -> std::io::Result<CString> {
+        CString::new(component.as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transcript path component contains NUL",
+            )
+        })
+    }
+
+    let root_dir = OpenOptions::new()
         .read(true)
-        // Non-blocking prevents a path swapped to a FIFO from hanging the Stop
-        // hook. O_NOFOLLOW closes the final-component symlink race; the inode
-        // comparison below covers parent-component replacement.
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(root)?;
+    let project_name = component_name(project_component)?;
+    // SAFETY: project_name is NUL-terminated, root_dir is a live directory
+    // descriptor, and the returned descriptor is immediately owned by File.
+    let project_fd = unsafe {
+        libc::openat(
+            root_dir.as_raw_fd(),
+            project_name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if project_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor on success.
+    let project_dir = unsafe { File::from_raw_fd(project_fd) };
+
+    let filename = component_name(filename_component)?;
+    // SAFETY: filename is NUL-terminated, project_dir is live, and the
+    // returned descriptor is immediately owned by File. O_NOFOLLOW anchors
+    // every untrusted component, while O_NONBLOCK prevents FIFO hangs.
+    let transcript_fd = unsafe {
+        libc::openat(
+            project_dir.as_raw_fd(),
+            filename.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if transcript_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new owned descriptor on success.
+    Ok(unsafe { File::from_raw_fd(transcript_fd) })
 }
 
 #[cfg(not(unix))]
-fn open_transcript_without_following(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).open(path)
-}
-
-#[cfg(unix)]
-fn same_file_identity(before: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    before.dev() == opened.dev() && before.ino() == opened.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file_identity(_before: &std::fs::Metadata, _opened: &std::fs::Metadata) -> bool {
-    true
+fn open_transcript_beneath_root(
+    _root: &Path,
+    _project_component: &std::ffi::OsStr,
+    _filename_component: &std::ffi::OsStr,
+) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "secure Claude transcript capture requires Unix openat semantics; inline and raw capture remain available",
+    ))
 }
 
 fn validate_hook_session_id(session_id: Option<&str>) -> HekaResult<&str> {
@@ -595,10 +615,14 @@ mod tests {
         }
 
         fn payload(&self, last_assistant_message: Option<&str>) -> String {
+            self.payload_with_cwd(last_assistant_message, &self.cwd)
+        }
+
+        fn payload_with_cwd(&self, last_assistant_message: Option<&str>, cwd: &Path) -> String {
             serde_json::json!({
                 "session_id": self.session_id,
                 "transcript_path": self.transcript,
-                "cwd": self.cwd,
+                "cwd": cwd,
                 "hook_event_name": "Stop",
                 "last_assistant_message": last_assistant_message,
             })
@@ -619,6 +643,10 @@ mod tests {
     #[test]
     fn real_stop_payload_reads_jsonl_and_appends_lagging_final_message() {
         let layout = HookLayout::new();
+        let nested_cwd = layout.cwd.join("nested/source");
+        let alternate_cwd = layout.base.join("alternate-worktree");
+        std::fs::create_dir_all(&nested_cwd).unwrap();
+        std::fs::create_dir_all(&alternate_cwd).unwrap();
         let records = [
             serde_json::json!({
                 "type": "user", "sessionId": layout.session_id,
@@ -628,12 +656,18 @@ mod tests {
             }),
             serde_json::json!({
                 "type": "assistant", "sessionId": layout.session_id,
-                "cwd": layout.cwd,
+                "cwd": nested_cwd,
                 "isSidechain": false,
                 "message": {"role": "assistant", "content": [
                     {"type": "thinking", "thinking": "private"},
                     {"type": "text", "text": "I will remember it."}
                 ]}
+            }),
+            serde_json::json!({
+                "type": "user", "sessionId": layout.session_id,
+                "cwd": alternate_cwd,
+                "isSidechain": false,
+                "message": {"role": "user", "content": "Continue from the alternate worktree."}
             }),
             serde_json::json!({
                 "type": "user", "sessionId": layout.session_id,
@@ -670,14 +704,15 @@ mod tests {
             .join("\n");
         std::fs::write(&layout.transcript, transcript).unwrap();
 
-        let input = layout.payload(Some("Final answer not flushed to JSONL yet."));
+        let input =
+            layout.payload_with_cwd(Some("Final answer not flushed to JSONL yet."), &nested_cwd);
         let batch = parse_capture_input_with_policy(&input, &layout.policy()).unwrap();
 
         assert_eq!(
             batch.session_id.as_deref(),
             Some(layout.session_id.as_str())
         );
-        assert_eq!(batch.turns.len(), 3);
+        assert_eq!(batch.turns.len(), 4);
         assert_eq!(batch.turns[0].speaker.as_deref(), Some("user"));
         assert_eq!(
             batch.turns[0].body.as_deref(),
@@ -686,6 +721,10 @@ mod tests {
         assert_eq!(batch.turns[1].body.as_deref(), Some("I will remember it."));
         assert_eq!(
             batch.turns[2].body.as_deref(),
+            Some("Continue from the alternate worktree.")
+        );
+        assert_eq!(
+            batch.turns[3].body.as_deref(),
             Some("Final answer not flushed to JSONL yet.")
         );
         assert!(batch.turns.iter().all(|turn| {
@@ -730,14 +769,30 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_unreadable_path_is_rejected_even_with_a_final_message() {
+    fn repeated_final_text_is_kept_when_transcript_ends_with_user() {
+        let input = serde_json::json!({
+            "session_id": "abc123",
+            "transcript": [
+                {"speaker": "assistant", "body": "same answer"},
+                {"speaker": "user", "body": "please repeat it"}
+            ],
+            "last_assistant_message": "same answer"
+        })
+        .to_string();
+
+        let batch = parse_capture_input_with_policy(&input, &inline_policy()).unwrap();
+        assert_eq!(batch.turns.len(), 3);
+        assert_eq!(batch.turns[2].body.as_deref(), Some("same answer"));
+    }
+
+    #[test]
+    fn arbitrary_readable_path_is_rejected_even_with_a_final_message() {
         let layout = HookLayout::new();
+        let outside = layout.base.join(format!("{}.jsonl", layout.session_id));
+        std::fs::write(&outside, "{}").unwrap();
         let input = serde_json::json!({
             "session_id": layout.session_id,
-            "transcript_path": std::env::temp_dir().join(format!(
-                "missing-heka-transcript-{}.jsonl",
-                uuid::Uuid::new_v4()
-            )),
+            "transcript_path": outside,
             "cwd": layout.cwd,
             "hook_event_name": "Stop",
             "last_assistant_message": "The final response survives."
@@ -785,6 +840,27 @@ mod tests {
     }
 
     #[test]
+    fn inline_and_raw_inputs_do_not_require_a_home_transcript_policy() {
+        let unavailable_policy = || -> HekaResult<CapturePolicy> {
+            Err(HekaError::Config(
+                "HOME is not set; sentinel transcript policy failure".to_string(),
+            ))
+        };
+        let inline = parse_capture_input_with_policy_factory(
+            r#"{"session_id":"legacy","turns":[{"speaker":"user","body":"hello"}]}"#,
+            None,
+            unavailable_policy,
+        )
+        .unwrap();
+        assert_eq!(inline.turns.len(), 1);
+
+        let raw =
+            parse_capture_input_with_policy_factory("plain pipe input", None, unavailable_policy)
+                .unwrap();
+        assert_eq!(raw.turns.len(), 1);
+    }
+
+    #[test]
     fn incomplete_final_jsonl_line_preserves_complete_turns() {
         let transcript = concat!(
             r#"{"type":"user","message":{"role":"user","content":"complete"}}"#,
@@ -821,59 +897,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("session mismatch"));
+        assert!(!error.contains("other-session"));
     }
 
     #[test]
-    fn mismatched_entry_cwd_fails_closed_even_when_encoded_project_names_collide() {
+    fn transcript_path_shape_and_filename_fail_closed() {
         let layout = HookLayout::new();
-        let colliding_cwd = layout.base.join("work-space");
-        let expected_cwd = layout.base.join("work/space");
-        std::fs::create_dir_all(&colliding_cwd).unwrap();
-        std::fs::create_dir_all(&expected_cwd).unwrap();
-        let colliding_cwd = colliding_cwd.canonicalize().unwrap();
-        let expected_cwd = expected_cwd.canonicalize().unwrap();
-        assert_eq!(
-            claude_project_dir_name(&colliding_cwd),
-            claude_project_dir_name(&expected_cwd)
-        );
-
-        let project = layout.root.join(claude_project_dir_name(&expected_cwd));
-        std::fs::create_dir_all(&project).unwrap();
-        let transcript = project.join(format!("{}.jsonl", layout.session_id));
-        let record = serde_json::json!({
-            "type": "user",
-            "sessionId": layout.session_id,
-            "cwd": colliding_cwd,
-            "message": {"role": "user", "content": "wrong project"},
-        });
-        std::fs::write(&transcript, record.to_string()).unwrap();
-        let payload = serde_json::json!({
+        let nested_project = layout.root.join("project/nested");
+        std::fs::create_dir_all(&nested_project).unwrap();
+        let nested_path = nested_project.join(format!("{}.jsonl", layout.session_id));
+        std::fs::write(&nested_path, "{}").unwrap();
+        let nested_payload = serde_json::json!({
             "session_id": layout.session_id,
-            "transcript_path": transcript,
-            "cwd": expected_cwd,
-        })
-        .to_string();
-
-        let error = parse_capture_input_with_policy(&payload, &layout.policy())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cwd mismatch"));
-    }
-
-    #[test]
-    fn project_and_filename_binding_fail_closed() {
-        let layout = HookLayout::new();
-        let other_project = layout.root.join("other-project");
-        std::fs::create_dir_all(&other_project).unwrap();
-        let wrong_path = other_project.join(format!("{}.jsonl", layout.session_id));
-        std::fs::write(&wrong_path, "{}").unwrap();
-        let wrong_project = serde_json::json!({
-            "session_id": layout.session_id,
-            "transcript_path": wrong_path,
+            "transcript_path": nested_path,
             "cwd": layout.cwd,
         })
         .to_string();
-        assert!(parse_capture_input_with_policy(&wrong_project, &layout.policy()).is_err());
+        assert!(parse_capture_input_with_policy(&nested_payload, &layout.policy()).is_err());
 
         std::fs::write(&layout.transcript, "{}").unwrap();
         let wrong_session = serde_json::json!({
@@ -883,6 +923,63 @@ mod tests {
         })
         .to_string();
         assert!(parse_capture_input_with_policy(&wrong_session, &layout.policy()).is_err());
+    }
+
+    #[test]
+    fn stop_project_authorization_rejects_cross_project_selection() {
+        let layout = HookLayout::new();
+        let other_cwd = layout.base.join("other-workspace");
+        std::fs::create_dir_all(&other_cwd).unwrap();
+        let other_cwd = other_cwd.canonicalize().unwrap();
+        let other_project = layout.root.join(claude_project_dir_name(&other_cwd));
+        std::fs::create_dir_all(&other_project).unwrap();
+        let other_transcript = other_project.join(format!("{}.jsonl", layout.session_id));
+        std::fs::write(&other_transcript, "{}").unwrap();
+        let cross_project = serde_json::json!({
+            "session_id": layout.session_id,
+            "transcript_path": other_transcript,
+            "cwd": layout.cwd,
+        })
+        .to_string();
+        assert!(parse_capture_input_with_policy(&cross_project, &layout.policy()).is_err());
+    }
+
+    #[test]
+    fn transcript_capture_requires_valid_top_level_project_metadata() {
+        let layout = HookLayout::new();
+        std::fs::write(&layout.transcript, "{}").unwrap();
+        let missing_cwd = serde_json::json!({
+            "session_id": layout.session_id,
+            "transcript_path": layout.transcript,
+        })
+        .to_string();
+        assert!(parse_capture_input_with_policy(&missing_cwd, &layout.policy()).is_err());
+
+        for invalid_cwd in ["", "."] {
+            let invalid = serde_json::json!({
+                "session_id": layout.session_id,
+                "transcript_path": layout.transcript,
+                "cwd": invalid_cwd,
+            })
+            .to_string();
+            assert!(parse_capture_input_with_policy(&invalid, &layout.policy()).is_err());
+        }
+
+        let missing_project = serde_json::json!({
+            "session_id": layout.session_id,
+            "transcript_path": layout.transcript,
+            "cwd": layout.base.join("does-not-exist"),
+        })
+        .to_string();
+        assert!(parse_capture_input_with_policy(&missing_project, &layout.policy()).is_err());
+
+        let file_cwd = serde_json::json!({
+            "session_id": layout.session_id,
+            "transcript_path": layout.transcript,
+            "cwd": layout.transcript,
+        })
+        .to_string();
+        assert!(parse_capture_input_with_policy(&file_cwd, &layout.policy()).is_err());
     }
 
     #[cfg(unix)]
@@ -897,6 +994,25 @@ mod tests {
         assert!(parse_capture_input_with_policy(&layout.payload(None), &layout.policy()).is_err());
 
         std::fs::remove_file(&layout.transcript).unwrap();
+        let project_layout = HookLayout::new();
+        let expected_project = project_layout.transcript.parent().unwrap();
+        std::fs::remove_dir(expected_project).unwrap();
+        let project_target = project_layout.base.join("project-symlink-target");
+        std::fs::create_dir(&project_target).unwrap();
+        std::fs::write(
+            project_target.join(format!("{}.jsonl", project_layout.session_id)),
+            "{}",
+        )
+        .unwrap();
+        symlink(&project_target, expected_project).unwrap();
+        assert!(
+            parse_capture_input_with_policy(
+                &project_layout.payload(None),
+                &project_layout.policy()
+            )
+            .is_err()
+        );
+
         let status = std::process::Command::new("mkfifo")
             .arg(&layout.transcript)
             .status()
@@ -934,6 +1050,6 @@ mod tests {
 
         // Empty rows still consume parsing work and count toward the physical
         // line ceiling; an all-whitespace file cannot bypass the CPU guard.
-        assert!(parse_transcript_jsonl_inner("\n\n", None, None, 1, 10).is_err());
+        assert!(parse_transcript_jsonl_inner("\n\n", None, 1, 10).is_err());
     }
 }

@@ -14,6 +14,10 @@ impl MigrationName for Migration {
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let sql = include_str!("../../migrations/20260604_000003_embedding_idempotency.sql");
+        // SeaORM's Migrator wraps each migration and its ledger write in one
+        // transaction. Consequently this table lock remains held across the
+        // duplicate cleanup, unique-index creation, and migration commit; a
+        // writer cannot reintroduce a duplicate between those operations.
         manager.get_connection().execute_unprepared(sql).await?;
         Ok(())
     }
