@@ -24,6 +24,12 @@ use candle_core::{Device, IndexOp, Tensor};
 pub enum ModelFamily {
     /// Qwen2.5 (ChatML `<|im_start|>` template, `<|im_end|>` / `<|endoftext|>`).
     Qwen2,
+    /// Qwen3.5/Qwen3.8 hybrid decoder (ChatML, gated-delta + full-attention layers).
+    ///
+    /// Family recognition lands before the loader deliberately: until the dedicated
+    /// tensor schema is implemented, loading fails closed instead of interpreting a
+    /// Qwen3.8 GGUF as the superficially similar Qwen2 architecture.
+    Qwen35,
     /// Gemma 2/3 (`<start_of_turn>` template, `<end_of_turn>` EOS).
     Gemma,
     /// Gemma 4 — unified encoder-free multimodal (native audio). Shares Gemma's
@@ -42,9 +48,22 @@ impl ModelFamily {
             ModelFamily::Gemma4
         } else if a.contains("gemma") {
             ModelFamily::Gemma
+        } else if a.contains("qwen35") || a.contains("qwen3.5") || a.contains("qwen3_5") {
+            ModelFamily::Qwen35
         } else {
             ModelFamily::Qwen2
         }
+    }
+}
+
+#[cfg(feature = "candle-backend")]
+fn qwen35_loader_unavailable(architecture: &str) -> NluError {
+    NluError::ModelLoadFailed {
+        reason: format!(
+            "GGUF architecture {architecture:?} is Qwen3.5/Qwen3.8, but its hybrid \
+             gated-delta Candle loader is not implemented yet; refusing to load it \
+             through the incompatible Qwen2 tensor schema"
+        ),
     }
 }
 
@@ -448,6 +467,9 @@ impl CandleBackend {
         tracing::info!(context_length, architecture = %architecture, "model context window (from GGUF)");
 
         let model = match family {
+            ModelFamily::Qwen35 => {
+                return Err(qwen35_loader_unavailable(&architecture));
+            }
             ModelFamily::Gemma4 => {
                 let m = super::vendored::quantized_gemma4::ModelWeights::from_gguf(
                     content, &mut file, &device,
@@ -1510,7 +1532,7 @@ impl CandleBackend {
             ModelFamily::Gemma4 => format!(
                 "<|turn>user\n{system}\n\n{user}<turn|>\n<|turn>model\n"
             ),
-            ModelFamily::Qwen2 => format!(
+            ModelFamily::Qwen2 | ModelFamily::Qwen35 => format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
                  <|im_start|>assistant\n"
@@ -2831,7 +2853,9 @@ fn eos_ids_for_family(family: ModelFamily, token_to_id: impl Fn(&str) -> Option<
         ModelFamily::Gemma4 => &["<turn|>", "<eos>", "</s>"],
         // Qwen2.5: <|endoftext|> (base EOS, always present) *and* <|im_end|> (ChatML turn end) —
         // both are live stop markers, not alternatives, so both must resolve when present.
-        ModelFamily::Qwen2 => &["<|endoftext|>", "<|im_end|>", "</s>"],
+        ModelFamily::Qwen2 | ModelFamily::Qwen35 => {
+            &["<|endoftext|>", "<|im_end|>", "</s>"]
+        }
     };
     let mut ids: Vec<u32> = markers.iter().filter_map(|m| token_to_id(m)).collect();
     ids.sort_unstable();
@@ -3006,6 +3030,38 @@ Some trailing text."#;
         let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
         let ids = eos_ids_for_family(ModelFamily::Gemma, lookup);
         assert_eq!(ids, vec![1, 107]);
+    }
+
+    /// Qwen3.8 GGUFs use the qwen35 architecture family. They must be recognized
+    /// explicitly: treating an unknown architecture as Qwen2 can make the loader
+    /// interpret a hybrid gated-delta model with the wrong tensor schema.
+    #[cfg(feature = "candle-backend")]
+    #[test]
+    fn qwen35_architecture_tags_never_fall_through_to_qwen2() {
+        for architecture in ["qwen35", "qwen3.5", "qwen3_5", "QWEN35"] {
+            assert_eq!(
+                ModelFamily::from_architecture(architecture),
+                ModelFamily::Qwen35,
+                "{architecture} must select the dedicated hybrid-model family"
+            );
+        }
+    }
+
+    #[cfg(feature = "candle-backend")]
+    #[test]
+    fn qwen35_loader_failure_names_the_incompatible_schema() {
+        let error = qwen35_loader_unavailable("qwen35").to_string();
+        assert!(error.contains("Qwen3.5/Qwen3.8"), "{error}");
+        assert!(error.contains("gated-delta Candle loader"), "{error}");
+        assert!(error.contains("incompatible Qwen2 tensor schema"), "{error}");
+    }
+
+    #[test]
+    fn qwen35_uses_both_chatml_stop_markers() {
+        let vocab = [("<|endoftext|>", 151643u32), ("<|im_end|>", 151645u32)];
+        let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
+        let ids = eos_ids_for_family(ModelFamily::Qwen35, lookup);
+        assert_eq!(ids, vec![151643, 151645]);
     }
 
     #[test]

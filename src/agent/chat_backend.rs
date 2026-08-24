@@ -463,7 +463,7 @@ fn render_tool_prompt(
     );
 
     let (sys_open, sys_close, user_open, asst_open, turn_close) = match family {
-        ModelFamily::Qwen2 => (
+        ModelFamily::Qwen2 | ModelFamily::Qwen35 => (
             "<|im_start|>system\n",
             "<|im_end|>\n",
             "<|im_start|>user\n",
@@ -754,6 +754,7 @@ mod prompt_isolation_tests {
 #[cfg(all(test, feature = "candle-backend"))]
 mod tests {
     use super::*;
+    use crate::nlu::candle_backend::ModelFamily;
 
     #[test]
     fn parses_a_tool_call_block() {
@@ -777,5 +778,18 @@ mod tests {
         let raw = "<tool_call>\n{\"name\": \"x\", \"arguments\": {oops}}\n</tool_call>";
         let (_content, calls) = parse_tool_calls(raw);
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn qwen35_tool_prompt_uses_chatml_turns() {
+        let conversation = vec![serde_json::json!({"role": "user", "content": "hello"})];
+        let prompt = render_tool_prompt("system", &conversation, &[], ModelFamily::Qwen35);
+
+        assert!(prompt.starts_with("<|im_start|>system\n"), "{prompt}");
+        assert!(
+            prompt.contains("<|im_start|>user\nhello<|im_end|>"),
+            "{prompt}"
+        );
+        assert!(prompt.ends_with("<|im_start|>assistant\n"), "{prompt}");
     }
 }
