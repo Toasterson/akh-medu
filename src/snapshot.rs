@@ -802,7 +802,8 @@ pub async fn wake(
             );
         }
     }
-    let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    let mut tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    rewrite_tail_after_symbol_merges(&mut tail, &symbol_metas)?;
     let tail_allocator_next =
         prepare_tail_restore(&tail, &mut symbol_metas, &mut provenance_records)?;
     let restored_allocator_next = base_allocator_next.max(tail_allocator_next);
@@ -1233,7 +1234,9 @@ pub async fn repair_duplicate_symbols(
         .map(|merge| (merge.duplicate_id, merge.canonical_id))
         .collect();
     let facts = fact::Entity::find()
-        .filter(fact::Column::AkhId.eq(akh_id))
+        // Match wake/apply semantics: the durable graph image is selected by
+        // workspace, regardless of which Akh originally asserted each fact.
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
         .all(db)
         .await
         .map_err(akhomed_store::StoreError::from)?;
@@ -2291,6 +2294,209 @@ fn merge_tail_symbols(
     Ok(())
 }
 
+fn remap_tail_number(
+    value: &mut serde_json::Value,
+    mapping: &std::collections::HashMap<u64, u64>,
+) -> bool {
+    let Some(id) = value.as_u64() else {
+        return false;
+    };
+    let Some(canonical) = mapping.get(&id).copied() else {
+        return false;
+    };
+    *value = serde_json::Value::from(canonical);
+    true
+}
+
+/// Rewrite replayable symbol references through any WI-338 merge audit in the
+/// same post-watermark tail. The audit is appended by the repair transaction,
+/// after the historical records it repairs, so collecting the complete map
+/// first makes the very first repaired wake safe before a new snapshot exists.
+fn rewrite_tail_symbol_value(
+    value: &mut serde_json::Value,
+    mapping: &std::collections::HashMap<u64, u64>,
+    canonical_symbols: &std::collections::HashMap<u64, SymbolMeta>,
+) -> SnapshotResult<bool> {
+    const SCALAR_FIELDS: &[&str] = &[
+        "symbol_id",
+        "episode_id",
+        "derived_id",
+        "derived_symbol",
+        "subject",
+        "predicate",
+        "object",
+        "from",
+        "goal",
+        "gap_entity",
+        "reactivated_goal",
+        "goal_id",
+        "parent",
+        "reformulated_from",
+        "replacement",
+        "primary",
+        "source_note",
+        "spawned_from",
+        "input_symbol_id",
+        "context",
+        "ancestor",
+        "from_context",
+        "to_context",
+        "specific",
+        "general",
+        "inverse",
+        "winner",
+        "loser",
+        "existing_object",
+        "incoming_object",
+        "existential_relation",
+        "bound_var",
+        "skolem",
+        "concrete_entity",
+        "function",
+        "source_goal",
+        "concept",
+        "tool",
+        "source",
+        "a",
+        "b",
+        "c",
+    ];
+    const ARRAY_FIELDS: &[&str] = &[
+        "sources",
+        "inputs",
+        "children",
+        "blocked_by",
+        "antecedents",
+        "supporting",
+        "learnings",
+        "tags",
+    ];
+
+    match value {
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= rewrite_tail_symbol_value(value, mapping, canonical_symbols)?;
+            }
+            Ok(changed)
+        }
+        serde_json::Value::Object(object) => {
+            let mut changed = false;
+            for (key, child) in object {
+                if key == "symbols" {
+                    let serde_json::Value::Array(symbols) = child else {
+                        return Err(invalid_tail("symbol metadata envelope is not an array"));
+                    };
+                    let mut seen = std::collections::HashSet::with_capacity(symbols.len());
+                    let mut rewritten = Vec::with_capacity(symbols.len());
+                    for mut symbol in std::mem::take(symbols) {
+                        let id = symbol
+                            .get("id")
+                            .and_then(serde_json::Value::as_u64)
+                            .ok_or_else(|| invalid_tail("symbol metadata has no valid ID"))?;
+                        let final_id = mapping.get(&id).copied().unwrap_or(id);
+                        if final_id != id {
+                            let canonical = canonical_symbols.get(&final_id).ok_or_else(|| {
+                                invalid_tail(format!(
+                                    "symbol merge maps {id} to missing canonical {final_id}"
+                                ))
+                            })?;
+                            symbol = serde_json::to_value(canonical).map_err(|error| {
+                                invalid_tail(format!(
+                                    "could not encode canonical symbol {final_id}: {error}"
+                                ))
+                            })?;
+                            changed = true;
+                        }
+                        if seen.insert(final_id) {
+                            rewritten.push(symbol);
+                        } else {
+                            changed = true;
+                        }
+                    }
+                    *symbols = rewritten;
+                } else if SCALAR_FIELDS.contains(&key.as_str()) {
+                    changed |= remap_tail_number(child, mapping);
+                    changed |= rewrite_tail_symbol_value(child, mapping, canonical_symbols)?;
+                } else if ARRAY_FIELDS.contains(&key.as_str()) {
+                    if let serde_json::Value::Array(values) = child {
+                        for value in values {
+                            changed |= remap_tail_number(value, mapping);
+                            changed |=
+                                rewrite_tail_symbol_value(value, mapping, canonical_symbols)?;
+                        }
+                    }
+                } else {
+                    changed |= rewrite_tail_symbol_value(child, mapping, canonical_symbols)?;
+                }
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn rewrite_tail_after_symbol_merges(
+    tail: &mut [akhomed_store::TailMutation],
+    base_symbols: &[SymbolMeta],
+) -> SnapshotResult<()> {
+    let mut mapping = std::collections::HashMap::new();
+    for mutation in tail.iter().filter(|row| row.kind == "symbol_merge") {
+        let parse_id = |side: &str| {
+            mutation
+                .payload
+                .get(side)
+                .and_then(|value| value.get("id"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|id| *id > 0 && !is_reserved_symbol_id(*id))
+                .ok_or_else(|| invalid_tail(format!("symbol merge has invalid {side} ID")))
+        };
+        let canonical = parse_id("canonical")?;
+        let duplicate = parse_id("duplicate")?;
+        if canonical >= duplicate {
+            return Err(invalid_tail(format!(
+                "symbol merge {duplicate} -> {canonical} is not canonical"
+            )));
+        }
+        if mapping.insert(duplicate, canonical).is_some() {
+            return Err(invalid_tail(format!(
+                "symbol merge repeats duplicate ID {duplicate}"
+            )));
+        }
+    }
+    if mapping.is_empty() {
+        return Ok(());
+    }
+    if let Some(chained) = mapping.values().find(|id| mapping.contains_key(id)) {
+        return Err(invalid_tail(format!(
+            "symbol merge contains chained canonical ID {chained}"
+        )));
+    }
+
+    let canonical_symbols: std::collections::HashMap<u64, SymbolMeta> = base_symbols
+        .iter()
+        .filter(|meta| mapping.values().any(|id| *id == meta.id.get()))
+        .map(|meta| (meta.id.get(), meta.clone()))
+        .collect();
+    for canonical in mapping.values() {
+        if !canonical_symbols.contains_key(canonical) {
+            return Err(invalid_tail(format!(
+                "symbol merge references missing canonical symbol {canonical}"
+            )));
+        }
+    }
+
+    for mutation in tail {
+        if matches!(
+            mutation.kind.as_str(),
+            "assert" | "retract" | "replace" | "retract_batch"
+        ) {
+            rewrite_tail_symbol_value(&mut mutation.payload, &mapping, &canonical_symbols)?;
+        }
+    }
+    Ok(())
+}
+
 /// Merge every replay prerequisite into the cold-restore image before opening
 /// the engine. Facts are still replayed in WAL order afterwards so retract/TMS
 /// behavior stays unchanged.
@@ -2768,6 +2974,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(12, 7), (30, 7)]
         );
+    }
+
+    #[test]
+    fn symbol_merge_audit_rewrites_earlier_replay_complete_tail() {
+        let canonical = replay_symbol(7, SymbolKind::Entity, "OReilly", 0);
+        let duplicate = replay_symbol(12, SymbolKind::Entity, "O’Reilly", 5);
+        let predicate = replay_symbol(20, SymbolKind::Relation, "relation", 0);
+        let object = replay_symbol(21, SymbolKind::Entity, "object", 0);
+        let mut tail = vec![
+            akhomed_store::TailMutation {
+                kind: "assert".into(),
+                payload: serde_json::json!({
+                    "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                    "subject": duplicate.id.get(),
+                    "predicate": predicate.id.get(),
+                    "object": object.id.get(),
+                    "confidence": 1.0,
+                    "timestamp": 5,
+                    "compartment": null,
+                    "provenance_id": null,
+                    "provenance": null,
+                    "symbols": [duplicate, predicate.clone(), object.clone()],
+                }),
+            },
+            akhomed_store::TailMutation {
+                kind: "symbol_merge".into(),
+                payload: serde_json::json!({
+                    "v": 1,
+                    "canonical": {"id": canonical.id.get()},
+                    "duplicate": {"id": 12},
+                }),
+            },
+        ];
+        let mut symbols = vec![canonical.clone(), predicate, object];
+
+        rewrite_tail_after_symbol_merges(&mut tail, &symbols).unwrap();
+        assert_eq!(tail[0].payload["subject"], canonical.id.get());
+        assert_eq!(tail[0].payload["symbols"][0]["id"], canonical.id.get());
+        assert_eq!(tail[0].payload["symbols"][0]["label"], canonical.label);
+        prepare_tail_restore(&tail, &mut symbols, &mut Vec::new()).unwrap();
     }
 
     fn replay_symbol(id: u64, kind: SymbolKind, label: &str, created_at: u64) -> SymbolMeta {

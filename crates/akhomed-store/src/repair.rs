@@ -54,6 +54,7 @@ pub struct SymbolRepairCounts {
     pub learned_method_steps_rewritten: usize,
     pub learned_method_steps_collapsed: usize,
     pub episodes_rewritten: usize,
+    pub episodes_collapsed: usize,
     pub wal_records: usize,
 }
 
@@ -280,7 +281,10 @@ pub async fn apply_symbol_repair(
     let mut counts = SymbolRepairCounts::default();
 
     let mut facts = fact::Entity::find()
-        .filter(fact::Column::AkhId.eq(akh_id))
+        // Wake binds facts through the workspace, not through the Akh which
+        // originally asserted each row. Repair that same relational image so
+        // shared/imported facts cannot retain a losing symbol ID.
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
         .all(&txn)
         .await?;
     facts.sort_by_key(|row| (row.workspace_id, row.subject, row.predicate, row.object));
@@ -294,6 +298,11 @@ pub async fn apply_symbol_repair(
         counts.facts_rewritten += usize::from(before != (row.subject, row.predicate, row.object));
         fact_map
             .entry((row.workspace_id, row.subject, row.predicate, row.object))
+            .and_modify(|existing: &mut fact::Model| {
+                if row.confidence > existing.confidence {
+                    *existing = row.clone();
+                }
+            })
             .or_insert(row);
     }
     let facts: Vec<_> = fact_map.into_values().collect();
@@ -463,14 +472,25 @@ pub async fn apply_symbol_repair(
         .filter(episode::Column::AkhId.eq(akh_id))
         .all(&txn)
         .await?;
-    for row in &mut episodes {
-        counts.episodes_rewritten += usize::from(rewrite_symbol_json(&mut row.payload, &mapping));
+    episodes.sort_by_key(|row| row.episode_id);
+    let episodes_input_len = episodes.len();
+    let mut episode_map = BTreeMap::new();
+    for mut row in episodes {
+        let mut changed = false;
+        let rewritten = remap(row.episode_id, &mapping);
+        changed |= rewritten != row.episode_id;
+        row.episode_id = rewritten;
+        changed |= rewrite_symbol_json(&mut row.payload, &mapping);
+        counts.episodes_rewritten += usize::from(changed);
+        episode_map.entry(row.episode_id).or_insert(row);
     }
+    let episodes: Vec<_> = episode_map.into_values().collect();
+    counts.episodes_collapsed = episodes_input_len - episodes.len();
 
     // Once all replacement images are ready, replace each affected table while
     // holding the same transaction and snapshot publication lock.
     fact::Entity::delete_many()
-        .filter(fact::Column::AkhId.eq(akh_id))
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
         .exec(&txn)
         .await?;
     insert_chunks!(

@@ -895,6 +895,30 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
     let canonical_id = canonical.id.get() as i64;
     let duplicate_id = duplicate.id.get() as i64;
     let predicate_id = predicate.id.get() as i64;
+    let foreign_akh_id = Uuid::new_v4();
+    ensure_akh(&db, foreign_akh_id, "wi-338-shared-fact-writer", None)
+        .await
+        .unwrap();
+    // This post-watermark legacy record predates the merge audit which repair
+    // appends. The first wake after repair must translate its losing ID rather
+    // than rejecting it before a fresh snapshot can be published.
+    append_mutations(
+        &db,
+        akh_id,
+        workspace_id,
+        &[MutationRow {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "subject": duplicate_id,
+                "predicate": predicate_id,
+                "object": object.id.get(),
+                "confidence": 0.95,
+                "compartment": null,
+            }),
+        }],
+    )
+    .await
+    .unwrap();
     let provenance_id = (i64::from_be_bytes(akh_id.as_bytes()[0..8].try_into().unwrap())
         & 0x3fff_ffff_ffff_ffff)
         .max(1);
@@ -904,6 +928,10 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
         &format!(
             "UPDATE akhomed_symbols SET label = 'O’Reilly' \
              WHERE akh_id = '{akh_id}' AND id = {duplicate_id};
+             UPDATE akhomed_facts SET confidence = 0.25 \
+             WHERE workspace_id = '{workspace_id}' AND subject = {canonical_id};
+             UPDATE akhomed_facts SET confidence = 0.90, akh_id = '{foreign_akh_id}' \
+             WHERE workspace_id = '{workspace_id}' AND subject = {duplicate_id};
              INSERT INTO akhomed_agenda (akh_id, project_id, priority, is_active)
              VALUES ('{akh_id}', {duplicate_id}, 1, true);
              INSERT INTO akhomed_goals
@@ -945,7 +973,13 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
              INSERT INTO akhomed_episodes
                (episode_id,akh_id,workspace_id,started_at,ended_at,payload)
              VALUES ({episode_id}, '{akh_id}', '{workspace_id}', now(), NULL,
-                     jsonb_build_object('symbol_id',{duplicate_id},'created_at',{duplicate_id}));"
+                     jsonb_build_object('symbol_id',{duplicate_id},'created_at',{duplicate_id}));
+             INSERT INTO akhomed_episodes
+               (episode_id,akh_id,workspace_id,started_at,ended_at,payload)
+             VALUES ({canonical_id}, '{akh_id}', '{workspace_id}', now(), NULL,
+                     jsonb_build_object('marker','canonical')),
+                    ({duplicate_id}, '{akh_id}', '{workspace_id}', now(), NULL,
+                     jsonb_build_object('marker','duplicate'));"
         ),
     )
     .await;
@@ -988,7 +1022,21 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
     assert!(repaired.applied);
     assert_eq!(repaired.counts.symbols_deleted, 1);
     assert_eq!(repaired.counts.facts_collapsed, 1);
+    assert_eq!(repaired.counts.episodes_collapsed, 1);
     assert_eq!(repaired.counts.wal_records, 1);
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT round(confidence * 100)::bigint AS c FROM akhomed_facts \
+                 WHERE workspace_id = '{workspace_id}' AND subject = {canonical_id} \
+                   AND predicate = {predicate_id}"
+            ),
+        )
+        .await,
+        90,
+        "fact-key collisions preserve the maximum confidence even when that row was asserted by another Akh",
+    );
     assert_eq!(
         count(
             &db,
@@ -1002,7 +1050,7 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
     );
 
     for (table, predicate) in [
-        ("akhomed_facts", format!("akh_id = '{akh_id}' AND ({duplicate_id} IN (subject,predicate,object))")),
+        ("akhomed_facts", format!("workspace_id = '{workspace_id}' AND ({duplicate_id} IN (subject,predicate,object))")),
         ("akhomed_agenda", format!("akh_id = '{akh_id}' AND project_id = {duplicate_id}")),
         ("akhomed_goals", format!("akh_id = '{akh_id}' AND (id = {duplicate_id} OR parent = {duplicate_id})")),
         ("akhomed_goal_hierarchy", format!("akh_id = '{akh_id}' AND ({duplicate_id} IN (parent_id,child_id))")),
@@ -1016,6 +1064,7 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
         ("akhomed_provenance", format!("akh_id = '{akh_id}' AND derivation::text LIKE '%{duplicate_id}%'")),
         ("akhomed_provenance_snapshot", format!("akh_id = '{akh_id}' AND (sources::jsonb @> '[{duplicate_id}]'::jsonb OR derivation::text LIKE '%{duplicate_id}%')")),
         ("akhomed_episodes", format!("akh_id = '{akh_id}' AND payload->>'symbol_id' = '{duplicate_id}'")),
+        ("akhomed_episodes", format!("akh_id = '{akh_id}' AND episode_id = {duplicate_id}")),
     ] {
         assert_eq!(
             count(&db, &format!("SELECT count(*)::bigint AS c FROM {table} WHERE {predicate}"))
@@ -1024,6 +1073,19 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
             "loser reference remains in {table}",
         );
     }
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_episodes \
+                 WHERE akh_id = '{akh_id}' AND episode_id = {canonical_id} \
+                   AND payload->>'marker' = 'canonical'"
+            ),
+        )
+        .await,
+        1,
+        "episode ID collisions keep the deterministic canonical-ID row",
+    );
     assert_eq!(
         count(
             &db,
@@ -1068,6 +1130,16 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
             .count(),
         1,
         "colliding facts keep one row",
+    );
+    assert_eq!(
+        woken
+            .all_triples()
+            .iter()
+            .find(|triple| triple.predicate == predicate.id)
+            .unwrap()
+            .confidence,
+        0.95,
+        "the pre-repair WAL assertion is replayed through the merge map",
     );
     assert_eq!(woken.resolve_label(canonical.id), "OReilly");
     assert!(woken.get_symbol_meta(duplicate.id).is_err());
