@@ -7,7 +7,8 @@
 - **Related:** [ADR 037](../decisions/037-llm-vsa-deep-integration.md),
   [ADR 065](../decisions/065-context-assembly-runtime.md),
   [ADR 073](../decisions/073-full-candle-hip-device-backend.md),
-  [ADR 074](../decisions/074-candle-static-shape-inference-and-training.md)
+  [ADR 074](../decisions/074-candle-static-shape-inference-and-training.md),
+  [ADR 098](../decisions/098-candle-qwen35-rdna3-inference-stack.md)
 - **Kernel reference:** [tinygrad PR #17512](https://github.com/tinygrad/tinygrad/pull/17512),
   merged 2026-08-24 under the MIT license
 
@@ -71,8 +72,8 @@ storage.
 - Recognize GGUF architecture tags `qwen35`, `qwen3.5`, and `qwen3_5` as one explicit
   `Qwen35` family.
 - Give Qwen35 its native ChatML stop/prompt behavior.
-- Until the loader lands, return a precise `ModelLoadFailed` diagnostic rather than
-  interpreting Qwen3.8 tensors as Qwen2.
+- Until the loader lands, return a precise, actionable unsupported-architecture
+  diagnostic rather than interpreting Qwen3.8 tensors as Qwen2.
 - Gate: focused architecture-classification and stop-token tests pass with and without
   the Candle feature.
 

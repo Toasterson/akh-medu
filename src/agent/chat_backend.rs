@@ -455,22 +455,22 @@ fn render_tool_prompt(
     tools: &[Value],
     family: crate::nlu::candle_backend::ModelFamily,
 ) -> String {
-    use crate::nlu::candle_backend::ModelFamily;
+    use crate::nlu::candle_backend::ChatTemplate;
 
     let tools_json = serde_json::to_string_pretty(tools).unwrap_or_else(|_| "[]".into());
     let sys = format!(
         "{system_prompt}\n\n# Tools\nYou can call functions. Available tools (JSON schema):\n{tools_json}\n\nTo call a tool, reply with exactly:\n<tool_call>\n{{\"name\": <tool-name>, \"arguments\": <args-object>}}\n</tool_call>\nOtherwise, answer directly."
     );
 
-    let (sys_open, sys_close, user_open, asst_open, turn_close) = match family {
-        ModelFamily::Qwen2 | ModelFamily::Qwen35 => (
+    let (sys_open, sys_close, user_open, asst_open, turn_close) = match family.chat_template() {
+        ChatTemplate::ChatMl => (
             "<|im_start|>system\n",
             "<|im_end|>\n",
             "<|im_start|>user\n",
             "<|im_start|>assistant\n",
             "<|im_end|>\n",
         ),
-        ModelFamily::Gemma | ModelFamily::Gemma4 => (
+        ChatTemplate::Gemma | ChatTemplate::Gemma4 => (
             "<start_of_turn>user\n",
             "<end_of_turn>\n",
             "<start_of_turn>user\n",
