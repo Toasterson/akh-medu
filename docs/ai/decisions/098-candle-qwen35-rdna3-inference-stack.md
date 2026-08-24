@@ -10,7 +10,8 @@
 
 Anima: existing “Lane: activate ptah on hephaistos…” work item; ID unavailable
 because no Anima project tool is exposed in this session.
-Seshat sync: not performed; no `seshat_ingest` tool is available in this session.
+Seshat sync: ingested 2026-08-24 after Slice 1 completion under the
+`akh-medu-adr-098-candle-qwen35-rdna3-slice1` slug.
 This file is the offline canonical paste source.
 
 ## Context
@@ -53,8 +54,8 @@ model pass or splice position-dependent KV from another context.
 ## Consequences
 
 - The exact custom model and projector remain the only acceptance target.
-- Unsupported Qwen35 Candle loads fail with an actionable diagnostic and cannot
-  fall through to Qwen2.
+- Qwen35 loads validate the complete typed metadata and tensor schema before
+  weight allocation; malformed or unsupported artifacts cannot fall through to Qwen2.
 - Session state has one owner, making ACP isolation and rollback testable.
 - Kernel choices stay private and replaceable; correctness is established against
   the reference adapter before performance changes compose.

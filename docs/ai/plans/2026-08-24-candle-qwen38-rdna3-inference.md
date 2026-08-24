@@ -1,7 +1,7 @@
 # Plan: Candle Qwen3.8 inference on RDNA3
 
 - **Date:** 2026-08-24
-- **Status:** In progress — slice 0 complete, slice 1 next
+- **Status:** In progress — slices 0–1 complete, slice 2 next
 - **Scope:** inference only; target-model training remains out of scope
 - **Production oracle:** Ptah's exact custom Qwen3.8-27B Q4_K_M + vision projector
 - **Related:** [ADR 037](../decisions/037-llm-vsa-deep-integration.md),
@@ -11,6 +11,11 @@
   [ADR 098](../decisions/098-candle-qwen35-rdna3-inference-stack.md)
 - **Kernel reference:** [tinygrad PR #17512](https://github.com/tinygrad/tinygrad/pull/17512),
   merged 2026-08-24 under the MIT license
+- **Concurrency reference:** [bounded batched decode and MTP research](../research/2026-08-24-batched-mtp-concurrency-reference.md)
+- **Anima:** existing “Lane: activate ptah on hephaistos…” work item; ID unavailable
+  because no Anima project tool is exposed in this session
+- **Seshat:** ingested 2026-08-24 after Slice 1 completion under the
+  `akh-medu-plan-candle-qwen38-rdna3-slice1` slug
 
 ## Outcome
 
@@ -119,6 +124,21 @@ not tinygrad's headline IQ4_XS model.
 - Gates: two-session isolation, no duplicate target forward for signals, retrieval A/B,
   real non-zero virtual-context statistics.
 
+### Follow-up 3b — Bounded, session-safe batched decode
+
+Once each ACP session owns an `InferenceSession`, add admission-controlled C1/C2/C4/C8
+decode rounds around the shared resident target model. Compact ready rows only at round
+boundaries. Each row retains independent KV pages, gated-delta/conv state, sampling RNG,
+checkpoint state, image positions, and VSA hidden taps. Start target-only; MTP-3 remains a
+later optional composition, not a prerequisite for batching.
+
+- Gates: greedy token/logit parity and two-session cancellation/rewind isolation at every
+  concurrency; saturation and mixed-agent sweeps report aggregate and per-stream throughput,
+  TTFT, occupancy, live KV/recurrent bytes, VRAM high-water mark, and HBM bytes per committed
+  token; one batched setting must reach 1.5x C1 aggregate; the selected mixed-workload setting
+  must improve makespan by 25% while keeping p95 TTFT below 2x C1; 100K total live physical
+  tokens must queue or reject cleanly rather than corrupt another session.
+
 ### Slice 4 — Exact vision path
 
 - Accept structured text/image content rather than flattening chat content to strings.
@@ -169,9 +189,12 @@ tinygrad 46 tok/s IQ4_XS result is a feasibility reference, not Ptah's acceptanc
 - [x] Architecture and kernel audit completed.
 - [x] Sequence and gates recorded locally.
 - [x] Slice 0: explicit Qwen35 family recognition and fail-closed load.
-- [ ] Slice 1: reference text forward.
+- [x] Slice 1: reference text forward (exact schema; GGUF tiled-head contract; hermetic
+  non-zero chunk/state replay; exact-model multi-token CPU prefill and HIP stepped-decode
+  greedy + log-probability parity with llama.cpp).
 - [ ] Slice 2: RDNA3 target kernels.
 - [ ] Slice 3: inference session + VSA context signals.
+- [ ] Follow-up 3b: bounded C1/C2/C4/C8 session-safe decode.
 - [ ] Slice 4: vision.
 - [ ] Slice 5: TurboQuant.
 - [ ] Slice 6: target-only canary.

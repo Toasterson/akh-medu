@@ -86,13 +86,6 @@ impl ModelFamily {
     }
 }
 
-#[cfg(feature = "candle-backend")]
-fn qwen35_loader_unavailable(architecture: &str) -> NluError {
-    NluError::CandleArchitectureUnsupported {
-        architecture: architecture.to_string(),
-    }
-}
-
 /// A loaded quantized model, dispatched by family. Uses the vendored model
 /// loaders (see [`crate::nlu::vendored`]) which expose hidden states. Both
 /// backends share the same `forward(x, index_pos)` / `forward_with_hidden`
@@ -100,6 +93,7 @@ fn qwen35_loader_unavailable(architecture: &str) -> NluError {
 #[cfg(feature = "candle-backend")]
 enum LoadedModel {
     Qwen2(super::vendored::quantized_qwen2::ModelWeights),
+    Qwen35(super::vendored::quantized_qwen35::ModelWeights),
     Gemma(super::vendored::quantized_gemma3::ModelWeights),
     Gemma4(super::vendored::quantized_gemma4::ModelWeights),
 }
@@ -109,6 +103,7 @@ impl LoadedModel {
     fn forward(&mut self, x: &Tensor, index_pos: usize) -> candle_core::Result<Tensor> {
         match self {
             LoadedModel::Qwen2(m) => m.forward(x, index_pos),
+            LoadedModel::Qwen35(m) => m.forward(x, index_pos),
             LoadedModel::Gemma(m) => m.forward(x, index_pos),
             LoadedModel::Gemma4(m) => m.forward(x, index_pos),
         }
@@ -123,6 +118,7 @@ impl LoadedModel {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         match self {
             LoadedModel::Qwen2(m) => m.forward_with_hidden(x, index_pos),
+            LoadedModel::Qwen35(m) => m.forward_with_hidden(x, index_pos),
             LoadedModel::Gemma(m) => m.forward_with_hidden(x, index_pos),
             LoadedModel::Gemma4(m) => m.forward_with_hidden(x, index_pos),
         }
@@ -494,7 +490,13 @@ impl CandleBackend {
 
         let model = match family {
             ModelFamily::Qwen35 => {
-                return Err(qwen35_loader_unavailable(&architecture));
+                let m = super::vendored::quantized_qwen35::ModelWeights::from_gguf(
+                    content, &mut file, &device,
+                )
+                .map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("load Qwen3.5/Qwen3.8 weights: {e}"),
+                })?;
+                LoadedModel::Qwen35(m)
             }
             ModelFamily::Gemma4 => {
                 let m = super::vendored::quantized_gemma4::ModelWeights::from_gguf(
@@ -3062,23 +3064,6 @@ Some trailing text."#;
                 "{architecture} must select the dedicated hybrid-model family"
             );
         }
-    }
-
-    #[cfg(feature = "candle-backend")]
-    #[test]
-    fn qwen35_loader_failure_is_typed_and_actionable() {
-        let error = qwen35_loader_unavailable("qwen35");
-        assert!(matches!(
-            error,
-            NluError::CandleArchitectureUnsupported { ref architecture }
-                if architecture == "qwen35"
-        ));
-
-        let help = miette::Diagnostic::help(&error)
-            .expect("unsupported Candle architecture should explain the fallback")
-            .to_string();
-        assert!(help.contains("Ollama/llama.cpp"), "{help}");
-        assert!(help.contains("hybrid loader"), "{help}");
     }
 
     #[test]
