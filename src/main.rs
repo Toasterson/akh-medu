@@ -87,7 +87,14 @@ enum Commands {
     /// Wake a cold akh from its Postgres snapshot into the local workspace
     /// (ACP `_akh/akh/wake`). Refuses if another host holds the akh (advisory
     /// lock / fresh `last_seen`) — see docs/ops/relocate-akh.md.
-    Wake,
+    Wake {
+        /// Repair legacy duplicate normalized symbol labels before hydration.
+        #[arg(long)]
+        repair: bool,
+        /// Print the deterministic repair plan without changing or waking the store.
+        #[arg(long, requires = "repair")]
+        dry_run: bool,
+    },
 
     /// Deep-sleep the akh: snapshot + flush, then free its in-memory engine
     /// and stop its background tasks. Wake later with `akh wake`.
@@ -225,7 +232,14 @@ enum AkhAction {
     Snapshot,
     /// Wake a cold akh from its Postgres snapshot into the local workspace
     /// (targets the global `-w` workspace).
-    Wake,
+    Wake {
+        /// Repair legacy duplicate normalized symbol labels before hydration.
+        #[arg(long)]
+        repair: bool,
+        /// Print the deterministic repair plan without changing or waking the store.
+        #[arg(long, requires = "repair")]
+        dry_run: bool,
+    },
     /// Deep-sleep the akh: snapshot + flush, then free its in-memory engine and
     /// stop its background tasks. Wake it later with `akh akh wake`. Targets
     /// the global `-w` workspace.
@@ -969,7 +983,10 @@ fn run_akh_acp(current_ws: &str, action: AkhAction) -> Result<()> {
     let ws = current_ws.to_string();
     let (method, params): (&str, serde_json::Value) = match action {
         AkhAction::Snapshot => ("_akh/akh/snapshot", serde_json::json!({ "workspace": ws })),
-        AkhAction::Wake => ("_akh/akh/wake", serde_json::json!({ "workspace": ws })),
+        AkhAction::Wake { repair, dry_run } => (
+            "_akh/akh/wake",
+            serde_json::json!({ "workspace": ws, "repair": repair, "dry_run": dry_run }),
+        ),
         AkhAction::Sleep => ("_akh/akh/sleep", serde_json::json!({ "workspace": ws })),
         AkhAction::Relocate => ("_akh/akh/relocate", serde_json::json!({ "workspace": ws })),
     };
@@ -1194,7 +1211,9 @@ fn main() -> Result<()> {
 
         Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
         Commands::Snapshot => run_akh_acp(&cli.workspace, AkhAction::Snapshot)?,
-        Commands::Wake => run_akh_acp(&cli.workspace, AkhAction::Wake)?,
+        Commands::Wake { repair, dry_run } => {
+            run_akh_acp(&cli.workspace, AkhAction::Wake { repair, dry_run })?
+        }
         Commands::Sleep => run_akh_acp(&cli.workspace, AkhAction::Sleep)?,
         Commands::Relocate => run_akh_acp(&cli.workspace, AkhAction::Relocate)?,
 
@@ -1592,5 +1611,4 @@ fn dispatch_setup(action: SetupAction) -> Result<()> {
 
     Ok(())
 }
-
 

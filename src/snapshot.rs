@@ -1106,6 +1106,273 @@ fn validate_symbol_snapshot(metas: &[SymbolMeta], allocator_next: i64) -> Snapsh
     Ok(allocator_next)
 }
 
+/// One losing legacy symbol and the deterministic canonical row it will merge
+/// into. Labels and kinds make dry-run output self-contained.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannedSymbolMerge {
+    pub normalized_label: String,
+    pub canonical_id: i64,
+    pub canonical_label: String,
+    pub canonical_kind: String,
+    pub duplicate_id: i64,
+    pub duplicate_label: String,
+    pub duplicate_kind: String,
+}
+
+/// Dry-run/apply plan for WI-338 duplicate-label hydration repair.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolRepairPlan {
+    pub akh_id: Uuid,
+    pub duplicate_groups: usize,
+    pub extra_symbols: usize,
+    pub merges: Vec<PlannedSymbolMerge>,
+}
+
+/// Result returned to the daemon control plane.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolRepairReport {
+    pub dry_run: bool,
+    pub applied: bool,
+    pub plan: SymbolRepairPlan,
+    pub counts: akhomed_store::repair::SymbolRepairCounts,
+}
+
+/// Detect duplicate labels with exactly the normalization function used by
+/// wake's fail-closed validator. Lowest relational ID is always canonical.
+pub async fn plan_duplicate_symbol_repair(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+) -> SnapshotResult<SymbolRepairPlan> {
+    let rows = akhomed_store::snapshots::load_symbols(db, akh_id).await?;
+    Ok(build_symbol_repair_plan(akh_id, rows))
+}
+
+fn build_symbol_repair_plan(
+    akh_id: Uuid,
+    mut rows: Vec<symbol::Model>,
+) -> SymbolRepairPlan {
+    rows.sort_by_key(|row| row.id);
+    let mut groups: std::collections::BTreeMap<String, Vec<symbol::Model>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        groups
+            .entry(crate::registry::normalize_label_key(&row.label))
+            .or_default()
+            .push(row);
+    }
+
+    let duplicate_groups = groups.values().filter(|rows| rows.len() > 1).count();
+    let mut merges = Vec::new();
+    for (normalized_label, rows) in groups {
+        let Some(canonical) = rows.first().filter(|_| rows.len() > 1) else {
+            continue;
+        };
+        for duplicate in &rows[1..] {
+            merges.push(PlannedSymbolMerge {
+                normalized_label: normalized_label.clone(),
+                canonical_id: canonical.id,
+                canonical_label: canonical.label.clone(),
+                canonical_kind: canonical.kind.clone(),
+                duplicate_id: duplicate.id,
+                duplicate_label: duplicate.label.clone(),
+                duplicate_kind: duplicate.kind.clone(),
+            });
+        }
+    }
+    SymbolRepairPlan {
+        akh_id,
+        duplicate_groups,
+        extra_symbols: merges.len(),
+        merges,
+    }
+}
+
+fn json_contains_symbol_id(value: &serde_json::Value, id: i64) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64() == Some(id),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_contains_symbol_id(value, id))
+        }
+        serde_json::Value::Object(object) => object
+            .values()
+            .any(|value| json_contains_symbol_id(value, id)),
+        _ => false,
+    }
+}
+
+/// Apply a duplicate-label plan transactionally. Every merge gets a
+/// `symbol_merge` WAL audit record containing stable TripleIdentity changes and
+/// the provenance records which referenced the losing ID.
+pub async fn repair_duplicate_symbols(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    dry_run: bool,
+) -> SnapshotResult<SymbolRepairReport> {
+    use akhomed_store::entity::{fact, provenance, provenance_input, provenance_snapshot};
+    use akhomed_store::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let plan = plan_duplicate_symbol_repair(db, akh_id).await?;
+    if dry_run || plan.merges.is_empty() {
+        return Ok(SymbolRepairReport {
+            dry_run,
+            applied: false,
+            plan,
+            counts: akhomed_store::repair::SymbolRepairCounts::default(),
+        });
+    }
+
+    let symbols = akhomed_store::snapshots::load_symbols(db, akh_id).await?;
+    let symbol_labels: std::collections::HashMap<i64, String> = symbols
+        .iter()
+        .map(|row| (row.id, row.label.clone()))
+        .collect();
+    let final_ids: std::collections::HashMap<i64, i64> = plan
+        .merges
+        .iter()
+        .map(|merge| (merge.duplicate_id, merge.canonical_id))
+        .collect();
+    let facts = fact::Entity::find()
+        .filter(fact::Column::AkhId.eq(akh_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+    let provenance_rows = provenance::Entity::find()
+        .filter(provenance::Column::AkhId.eq(akh_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+    let provenance_ids: Vec<i64> = provenance_rows.iter().map(|row| row.provenance_id).collect();
+    let provenance_inputs = if provenance_ids.is_empty() {
+        Vec::new()
+    } else {
+        provenance_input::Entity::find()
+            .filter(provenance_input::Column::ProvenanceId.is_in(provenance_ids))
+            .all(db)
+            .await
+            .map_err(akhomed_store::StoreError::from)?
+    };
+    let provenance_snapshots = provenance_snapshot::Entity::find()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+
+    let final_id = |id: i64| final_ids.get(&id).copied().unwrap_or(id);
+    let label = |id: i64| {
+        symbol_labels
+            .get(&id)
+            .map(String::as_str)
+            .unwrap_or("<missing-symbol>")
+    };
+    let mut audits = Vec::with_capacity(plan.merges.len());
+    for merge in &plan.merges {
+        let mut triple_changes = Vec::new();
+        let mut workspace_ids = std::collections::BTreeSet::new();
+        for row in &facts {
+            if ![row.subject, row.predicate, row.object].contains(&merge.duplicate_id) {
+                continue;
+            }
+            workspace_ids.insert(row.workspace_id);
+            let before = crate::graph::identity::TripleIdentity::compute(
+                label(row.subject),
+                label(row.predicate),
+                label(row.object),
+                row.compartment.as_deref(),
+            );
+            let after_ids = (
+                final_id(row.subject),
+                final_id(row.predicate),
+                final_id(row.object),
+            );
+            let after = crate::graph::identity::TripleIdentity::compute(
+                label(after_ids.0),
+                label(after_ids.1),
+                label(after_ids.2),
+                row.compartment.as_deref(),
+            );
+            triple_changes.push(serde_json::json!({
+                "before": [row.subject, row.predicate, row.object],
+                "after": [after_ids.0, after_ids.1, after_ids.2],
+                "before_identity": before.to_hex(),
+                "after_identity": after.to_hex(),
+                "compartment": row.compartment,
+            }));
+        }
+        if workspace_ids.is_empty() {
+            workspace_ids.insert(workspace_id);
+        }
+
+        let mut affected_provenance = std::collections::BTreeSet::new();
+        for row in &provenance_rows {
+            if row.subject == merge.duplicate_id
+                || json_contains_symbol_id(&row.derivation, merge.duplicate_id)
+            {
+                affected_provenance.insert(format!("legacy:{}", row.provenance_id));
+            }
+        }
+        for row in &provenance_inputs {
+            if row.input_symbol_id == merge.duplicate_id {
+                affected_provenance.insert(format!("legacy:{}", row.provenance_id));
+            }
+        }
+        for row in &provenance_snapshots {
+            if row.derived_symbol == merge.duplicate_id
+                || json_contains_symbol_id(&row.sources, merge.duplicate_id)
+                || json_contains_symbol_id(&row.derivation, merge.duplicate_id)
+            {
+                affected_provenance.insert(format!("snapshot:{}", row.provenance_id));
+            }
+        }
+
+        audits.push(akhomed_store::MutationRow {
+            kind: crate::mutation::MutationKind::SymbolMerge.as_str().to_owned(),
+            payload: serde_json::json!({
+                "v": 1,
+                "work_item": "WI-338",
+                "akh_id": akh_id,
+                "workspace_ids": workspace_ids,
+                "normalized_label": merge.normalized_label,
+                "canonical": {
+                    "id": merge.canonical_id,
+                    "label": merge.canonical_label,
+                    "kind": merge.canonical_kind,
+                },
+                "duplicate": {
+                    "id": merge.duplicate_id,
+                    "label": merge.duplicate_label,
+                    "kind": merge.duplicate_kind,
+                },
+                "triple_identity_changes": triple_changes,
+                "provenance_records": affected_provenance,
+            }),
+        });
+    }
+
+    let store_merges: Vec<_> = plan
+        .merges
+        .iter()
+        .map(|merge| akhomed_store::repair::SymbolMerge {
+            canonical_id: merge.canonical_id,
+            duplicate_id: merge.duplicate_id,
+        })
+        .collect();
+    let counts = akhomed_store::repair::apply_symbol_repair(
+        db,
+        akh_id,
+        workspace_id,
+        &store_merges,
+        &audits,
+    )
+    .await?;
+    Ok(SymbolRepairReport {
+        dry_run: false,
+        applied: true,
+        plan,
+        counts,
+    })
+}
+
 fn drive_kind_from(label: &str) -> Option<crate::agent::drives::DriveKind> {
     use crate::agent::drives::DriveKind;
     Some(match label {
@@ -2450,7 +2717,7 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
         // just means "not counted in `replayed`" here (see the caller at
         // `wake`, ~line 690-696) — it is NOT treated as an error or an unknown
         // kind; wake proceeds normally with `turn` rows present.
-        "turn" => Ok(false),
+        "turn" | "symbol_merge" => Ok(false),
         _ => Ok(false),
     }
 }
@@ -2471,6 +2738,36 @@ mod tests {
         fn record(&self, mutation: MutationRecord) {
             self.0.lock().unwrap().push(mutation);
         }
+    }
+
+    #[test]
+    fn duplicate_symbol_repair_plan_uses_wake_normalization_and_lowest_id() {
+        let akh_id = Uuid::nil();
+        let row = |id, label: &str| symbol::Model {
+            akh_id,
+            id,
+            kind: "Entity".into(),
+            glyph_codepoint: None,
+            label: label.into(),
+        };
+        let plan = build_symbol_repair_plan(
+            akh_id,
+            vec![
+                row(30, "O’Reilly"),
+                row(12, "O'Reilly"),
+                row(7, "OReilly"),
+                row(40, "distinct"),
+            ],
+        );
+        assert_eq!(plan.duplicate_groups, 1);
+        assert_eq!(plan.extra_symbols, 2);
+        assert_eq!(
+            plan.merges
+                .iter()
+                .map(|merge| (merge.duplicate_id, merge.canonical_id))
+                .collect::<Vec<_>>(),
+            vec![(12, 7), (30, 7)]
+        );
     }
 
     fn replay_symbol(id: u64, kind: SymbolKind, label: &str, created_at: u64) -> SymbolMeta {
