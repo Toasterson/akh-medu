@@ -63,7 +63,7 @@ pub struct IngestRequest {
     pub title: String,
     /// URL-safe unique slug. Auto-derived from title if `None`.
     pub slug: Option<String>,
-    /// Document format: `markdown`, `text`, `html`, `pdf`, `epub`, …
+    /// Document format: `markdown`, `text`, `agent_session_transcript`, …
     pub format: String,
     /// Full document body.
     pub body: String,
@@ -104,7 +104,7 @@ pub async fn ingest_document(
         ));
     }
 
-    let chunks = chunk_paragraph_aware(&req.body, req.target_chunk_chars, &req.format);
+    let chunks = chunks_for_request(&req)?;
     if chunks.is_empty() {
         return Err(SeshatError::Config(
             "ingest: chunker produced zero chunks — is body non-empty whitespace only?"
@@ -168,6 +168,23 @@ pub async fn ingest_document(
         chunk_count,
         word_count: total_words,
     })
+}
+
+fn chunks_for_request(req: &IngestRequest) -> SeshatResult<Vec<ChunkDraft>> {
+    if req.format == crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT {
+        crate::transcript::chunk_agent_session_transcript(
+            &req.body,
+            req.target_chunk_chars,
+            &req.tags,
+            &req.metadata,
+        )
+    } else {
+        Ok(chunk_paragraph_aware(
+            &req.body,
+            req.target_chunk_chars,
+            &req.format,
+        ))
+    }
 }
 
 /// Derive a URL-safe slug from a title. Appends an 8-char UUID suffix
@@ -427,6 +444,35 @@ fn hard_split(s: &str, target: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ingest_request_selects_transcript_extraction_and_preserves_anima_fields() {
+        let tags = vec!["WI-341".to_string(), "outcome:completed".to_string()];
+        let metadata = serde_json::json!({
+            "work_item_id": "01a03511-6678-7e93-89d7-64fdb0033c44",
+            "executor": "codex",
+            "outcome": "completed",
+            "producer_extension": { "retry": 2 }
+        });
+        let req = IngestRequest {
+            title: "WI-341 completed session".to_string(),
+            slug: None,
+            format: crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT.to_string(),
+            body: include_str!("../tests/fixtures/completed_agent_session.jsonl").to_string(),
+            source_path: Some("anima://session/session-wi341/transcript".to_string()),
+            tags: tags.clone(),
+            metadata: metadata.clone(),
+            ingested_by: Some("anima-upload-transcript".to_string()),
+            target_chunk_chars: DEFAULT_TARGET_CHUNK_CHARS,
+        };
+
+        let chunks = chunks_for_request(&req).expect("transcript request should prepare chunks");
+
+        assert!(chunks.iter().any(|chunk| chunk.text.contains("17 passed")));
+        assert!(!chunks.iter().any(|chunk| chunk.text.contains("tool_use_id")));
+        assert_eq!(req.tags, tags);
+        assert_eq!(req.metadata, metadata);
+    }
 
     #[test]
     fn packs_small_paragraphs_into_one_chunk() {
