@@ -139,6 +139,11 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use sea_orm::MockDatabase;
+
+    const COMPLETED_SESSION: &str = include_str!("../tests/fixtures/completed_agent_session.jsonl");
 
     #[test]
     fn transcript_search_filters_are_parameterized_and_composable() {
@@ -177,6 +182,75 @@ mod tests {
         assert!(!statement.sql.contains("d.metadata ->>"));
         assert!(statement.sql.ends_with("LIMIT $3"));
         assert_eq!(statement.values.expect("bound values").0.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn filtered_search_returns_transcript_content_with_anima_provenance() {
+        let tags = serde_json::json!(["WI-341", "agent-session"]);
+        let metadata = serde_json::json!({
+            "work_item_id": "01a03511-6678-7e93-89d7-64fdb0033c44",
+            "executor": "codex",
+            "outcome": "completed",
+            "producer_extension": { "retry": 2 }
+        });
+        let transcript_chunks = crate::transcript::chunk_agent_session_transcript(
+            COMPLETED_SESSION,
+            crate::ingest::DEFAULT_TARGET_CHUNK_CHARS,
+            &["WI-341".to_string(), "agent-session".to_string()],
+            &metadata,
+        )
+        .expect("representative completed transcript should produce searchable chunks");
+        let document_id = Uuid::new_v4();
+        let chunk_id = Uuid::new_v4();
+        let row = BTreeMap::from([
+            ("chunk_id", chunk_id.into()),
+            ("document_id", document_id.into()),
+            ("document_title", "WI-341 completed session".into()),
+            ("text", transcript_chunks[0].text.clone().into()),
+            ("chunk_index", 0i32.into()),
+            ("similarity", 0.91f32.into()),
+            ("heading", transcript_chunks[0].heading.clone().into()),
+            (
+                "document_format",
+                crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT.into(),
+            ),
+            ("document_tags", tags.clone().into()),
+            ("document_metadata", metadata.clone().into()),
+        ]);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[row]])
+            .into_connection();
+        let filters = SearchFilters {
+            work_item_id: Some("01a03511-6678-7e93-89d7-64fdb0033c44".to_string()),
+            executor: Some("CODEX".to_string()),
+            outcome: Some("Completed".to_string()),
+        };
+
+        let hits = search_similar_filtered(&db, &[0.1, 0.2], 5, 0.3, &filters)
+            .await
+            .expect("filtered transcript search should succeed");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, document_id);
+        assert_eq!(hits[0].chunk_id, chunk_id);
+        assert_eq!(
+            hits[0].document_format,
+            crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT
+        );
+        assert_eq!(hits[0].document_tags, tags);
+        assert_eq!(hits[0].document_metadata, metadata);
+        assert!(hits[0].text.contains("Work item: 01a03511"));
+        assert!(
+            hits[0]
+                .text
+                .contains("Implemented metadata-preserving transcript extraction.")
+        );
+
+        let transaction_log = db.into_transaction_log();
+        let statement = &transaction_log[0].statements()[0];
+        assert!(statement.sql.contains("d.metadata ->> 'work_item_id' = $3"));
+        assert!(statement.sql.contains("LOWER(d.metadata ->> 'executor')"));
+        assert!(statement.sql.contains("LOWER(d.metadata ->> 'outcome')"));
     }
 }
 

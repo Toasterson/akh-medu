@@ -444,9 +444,10 @@ fn hard_split(s: &str, target: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Value};
 
-    #[test]
-    fn ingest_request_selects_transcript_extraction_and_preserves_anima_fields() {
+    #[tokio::test]
+    async fn ingest_transcript_persists_anima_fields_and_extracted_chunks() {
         let tags = vec!["WI-341".to_string(), "outcome:completed".to_string()];
         let metadata = serde_json::json!({
             "work_item_id": "01a03511-6678-7e93-89d7-64fdb0033c44",
@@ -465,13 +466,66 @@ mod tests {
             ingested_by: Some("anima-upload-transcript".to_string()),
             target_chunk_chars: DEFAULT_TARGET_CHUNK_CHARS,
         };
+        let returned_document = pa_document::Model {
+            id: Uuid::nil(),
+            title: req.title.clone(),
+            slug: "ignored-by-ingest-summary".to_string(),
+            source_path: req.source_path.clone(),
+            format: req.format.clone(),
+            tags: serde_json::to_value(&tags).unwrap(),
+            metadata: metadata.clone(),
+            chunk_count: 3,
+            ingested_at: chrono::Utc::now(),
+            ingested_by: req.ingested_by.clone(),
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[returned_document]])
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 3,
+            }])
+            .into_connection();
 
-        let chunks = chunks_for_request(&req).expect("transcript request should prepare chunks");
+        let summary = ingest_document(&db, req)
+            .await
+            .expect("representative completed transcript should ingest");
+        let transaction_log = db.into_transaction_log();
+        let statements = transaction_log[0].statements();
+        let document_statement = statements
+            .iter()
+            .find(|statement| statement.sql.contains("INSERT INTO \"pa_documents\""))
+            .expect("transaction should insert the document");
+        let chunk_statement = statements
+            .iter()
+            .find(|statement| statement.sql.contains("INSERT INTO \"pa_chunks\""))
+            .expect("transaction should insert extracted chunks");
 
-        assert!(chunks.iter().any(|chunk| chunk.text.contains("17 passed")));
-        assert!(!chunks.iter().any(|chunk| chunk.text.contains("tool_use_id")));
-        assert_eq!(req.tags, tags);
-        assert_eq!(req.metadata, metadata);
+        assert_eq!(summary.chunk_count, 3);
+        let document_values = &document_statement
+            .values
+            .as_ref()
+            .expect("document insert should bind values")
+            .0;
+        let expected_tags: Value = serde_json::to_value(tags).unwrap().into();
+        let expected_metadata: Value = metadata.into();
+        assert!(document_values.contains(&expected_tags));
+        assert!(document_values.contains(&expected_metadata));
+
+        let chunk_values = chunk_statement
+            .values
+            .as_ref()
+            .expect("chunk insert should bind values")
+            .0
+            .iter()
+            .filter_map(|value| match value {
+                Value::String(Some(value)) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(chunk_values.contains("17 passed"));
+        assert!(!chunk_values.contains("tool_use_id"));
+        assert!(!chunk_values.contains("session_id"));
     }
 
     #[test]
