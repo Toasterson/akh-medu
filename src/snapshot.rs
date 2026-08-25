@@ -2395,18 +2395,17 @@ fn rewrite_tail_symbol_value(
                             .and_then(serde_json::Value::as_u64)
                             .ok_or_else(|| invalid_tail("symbol metadata has no valid ID"))?;
                         let final_id = mapping.get(&id).copied().unwrap_or(id);
-                        if final_id != id {
-                            let canonical = canonical_symbols.get(&final_id).ok_or_else(|| {
-                                invalid_tail(format!(
-                                    "symbol merge maps {id} to missing canonical {final_id}"
-                                ))
-                            })?;
+                        if let Some(canonical) = canonical_symbols.get(&final_id) {
                             symbol = serde_json::to_value(canonical).map_err(|error| {
                                 invalid_tail(format!(
                                     "could not encode canonical symbol {final_id}: {error}"
                                 ))
                             })?;
-                            changed = true;
+                            changed |= final_id != id;
+                        } else if final_id != id {
+                            return Err(invalid_tail(format!(
+                                "symbol merge maps {id} to missing canonical {final_id}"
+                            )));
                         }
                         if seen.insert(final_id) {
                             rewritten.push(symbol);
@@ -2434,6 +2433,63 @@ fn rewrite_tail_symbol_value(
         }
         _ => Ok(false),
     }
+}
+
+fn collect_tail_canonical_symbols(
+    value: &serde_json::Value,
+    base_symbols: &std::collections::HashMap<u64, SymbolMeta>,
+    tail_symbols: &mut std::collections::HashMap<u64, SymbolMeta>,
+) -> SnapshotResult<()> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_tail_canonical_symbols(value, base_symbols, tail_symbols)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if key != "symbols" {
+                    collect_tail_canonical_symbols(child, base_symbols, tail_symbols)?;
+                    continue;
+                }
+                let serde_json::Value::Array(symbols) = child else {
+                    return Err(invalid_tail("symbol metadata envelope is not an array"));
+                };
+                for symbol in symbols {
+                    let Some(id) = symbol.get("id").and_then(serde_json::Value::as_u64) else {
+                        return Err(invalid_tail("symbol metadata has no valid ID"));
+                    };
+                    let Some(base) = base_symbols.get(&id) else {
+                        continue;
+                    };
+                    let meta: SymbolMeta =
+                        serde_json::from_value(symbol.clone()).map_err(|error| {
+                            invalid_tail(format!("could not decode canonical symbol {id}: {error}"))
+                        })?;
+                    if meta.kind != base.kind || meta.label != base.label {
+                        return Err(invalid_tail(format!(
+                            "canonical symbol {id} conflicts with repaired snapshot metadata"
+                        )));
+                    }
+                    if let Some(existing) = tail_symbols.get(&id) {
+                        if existing.kind != meta.kind
+                            || existing.label != meta.label
+                            || existing.created_at != meta.created_at
+                            || existing.source != meta.source
+                        {
+                            return Err(invalid_tail(format!(
+                                "canonical symbol {id} has conflicting replay metadata"
+                            )));
+                        }
+                    } else {
+                        tail_symbols.insert(id, meta);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn rewrite_tail_after_symbol_merges(
@@ -2473,7 +2529,7 @@ fn rewrite_tail_after_symbol_merges(
         )));
     }
 
-    let canonical_symbols: std::collections::HashMap<u64, SymbolMeta> = base_symbols
+    let mut canonical_symbols: std::collections::HashMap<u64, SymbolMeta> = base_symbols
         .iter()
         .filter(|meta| mapping.values().any(|id| *id == meta.id.get()))
         .map(|meta| (meta.id.get(), meta.clone()))
@@ -2485,6 +2541,26 @@ fn rewrite_tail_after_symbol_merges(
             )));
         }
     }
+
+    // Relational symbol rows do not retain `created_at` or `source`. If the
+    // tail contains richer metadata for a canonical symbol, use one consistent
+    // copy for both that symbol and every loser rewritten to it. Otherwise an
+    // earlier loser envelope followed by a canonical envelope could restore
+    // the same ID with conflicting metadata on the first repaired wake.
+    let mut tail_canonical_symbols = std::collections::HashMap::new();
+    for mutation in tail.iter().filter(|row| {
+        matches!(
+            row.kind.as_str(),
+            "assert" | "retract" | "replace" | "retract_batch"
+        )
+    }) {
+        collect_tail_canonical_symbols(
+            &mutation.payload,
+            &canonical_symbols,
+            &mut tail_canonical_symbols,
+        )?;
+    }
+    canonical_symbols.extend(tail_canonical_symbols);
 
     for mutation in tail {
         if matches!(
@@ -2979,6 +3055,7 @@ mod tests {
     #[test]
     fn symbol_merge_audit_rewrites_earlier_replay_complete_tail() {
         let canonical = replay_symbol(7, SymbolKind::Entity, "OReilly", 0);
+        let tail_canonical = replay_symbol(7, SymbolKind::Entity, "OReilly", 11);
         let duplicate = replay_symbol(12, SymbolKind::Entity, "O’Reilly", 5);
         let predicate = replay_symbol(20, SymbolKind::Relation, "relation", 0);
         let object = replay_symbol(21, SymbolKind::Entity, "object", 0);
@@ -2999,6 +3076,21 @@ mod tests {
                 }),
             },
             akhomed_store::TailMutation {
+                kind: "assert".into(),
+                payload: serde_json::json!({
+                    "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                    "subject": tail_canonical.id.get(),
+                    "predicate": predicate.id.get(),
+                    "object": object.id.get(),
+                    "confidence": 1.0,
+                    "timestamp": 11,
+                    "compartment": null,
+                    "provenance_id": null,
+                    "provenance": null,
+                    "symbols": [tail_canonical, predicate.clone(), object.clone()],
+                }),
+            },
+            akhomed_store::TailMutation {
                 kind: "symbol_merge".into(),
                 payload: serde_json::json!({
                     "v": 1,
@@ -3013,6 +3105,8 @@ mod tests {
         assert_eq!(tail[0].payload["subject"], canonical.id.get());
         assert_eq!(tail[0].payload["symbols"][0]["id"], canonical.id.get());
         assert_eq!(tail[0].payload["symbols"][0]["label"], canonical.label);
+        assert_eq!(tail[0].payload["symbols"][0]["created_at"], 11);
+        assert_eq!(tail[0].payload["symbols"][0], tail[1].payload["symbols"][0]);
         prepare_tail_restore(&tail, &mut symbols, &mut Vec::new()).unwrap();
     }
 

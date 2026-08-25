@@ -214,6 +214,56 @@ fn rewrite_goal_status(status: &mut String, mapping: &HashMap<i64, i64>) -> bool
     false
 }
 
+fn remap_and_collapse_facts(
+    mut rows: Vec<fact::Model>,
+    mapping: &HashMap<i64, i64>,
+) -> (Vec<fact::Model>, usize, usize) {
+    rows.sort_by_key(|row| (row.workspace_id, row.subject, row.predicate, row.object));
+    let input_len = rows.len();
+    let mut rewritten = 0;
+    let mut by_key = BTreeMap::new();
+    for mut row in rows {
+        let before = (row.subject, row.predicate, row.object);
+        row.subject = remap(row.subject, mapping);
+        row.predicate = remap(row.predicate, mapping);
+        row.object = remap(row.object, mapping);
+        rewritten += usize::from(before != (row.subject, row.predicate, row.object));
+        by_key
+            .entry((row.workspace_id, row.subject, row.predicate, row.object))
+            .and_modify(|existing: &mut fact::Model| {
+                if row.confidence > existing.confidence {
+                    *existing = row.clone();
+                }
+            })
+            .or_insert(row);
+    }
+    let rows: Vec<_> = by_key.into_values().collect();
+    let collapsed = input_len - rows.len();
+    (rows, rewritten, collapsed)
+}
+
+fn remap_and_collapse_episodes(
+    mut rows: Vec<episode::Model>,
+    mapping: &HashMap<i64, i64>,
+) -> (Vec<episode::Model>, usize, usize) {
+    rows.sort_by_key(|row| row.episode_id);
+    let input_len = rows.len();
+    let mut rewritten = 0;
+    let mut by_id = BTreeMap::new();
+    for mut row in rows {
+        let mut changed = false;
+        let new_id = remap(row.episode_id, mapping);
+        changed |= new_id != row.episode_id;
+        row.episode_id = new_id;
+        changed |= rewrite_symbol_json(&mut row.payload, mapping);
+        rewritten += usize::from(changed);
+        by_id.entry(row.episode_id).or_insert(row);
+    }
+    let rows: Vec<_> = by_id.into_values().collect();
+    let collapsed = input_len - rows.len();
+    (rows, rewritten, collapsed)
+}
+
 macro_rules! delete_akh_rows {
     ($entity:ident, $txn:expr, $akh_id:expr) => {
         $entity::Entity::delete_many()
@@ -280,33 +330,17 @@ pub async fn apply_symbol_repair(
 
     let mut counts = SymbolRepairCounts::default();
 
-    let mut facts = fact::Entity::find()
+    let facts = fact::Entity::find()
         // Wake binds facts through the workspace, not through the Akh which
         // originally asserted each row. Repair that same relational image so
         // shared/imported facts cannot retain a losing symbol ID.
         .filter(fact::Column::WorkspaceId.eq(workspace_id))
         .all(&txn)
         .await?;
-    facts.sort_by_key(|row| (row.workspace_id, row.subject, row.predicate, row.object));
-    let fact_input_len = facts.len();
-    let mut fact_map = BTreeMap::new();
-    for mut row in facts {
-        let before = (row.subject, row.predicate, row.object);
-        row.subject = remap(row.subject, &mapping);
-        row.predicate = remap(row.predicate, &mapping);
-        row.object = remap(row.object, &mapping);
-        counts.facts_rewritten += usize::from(before != (row.subject, row.predicate, row.object));
-        fact_map
-            .entry((row.workspace_id, row.subject, row.predicate, row.object))
-            .and_modify(|existing: &mut fact::Model| {
-                if row.confidence > existing.confidence {
-                    *existing = row.clone();
-                }
-            })
-            .or_insert(row);
-    }
-    let facts: Vec<_> = fact_map.into_values().collect();
-    counts.facts_collapsed = fact_input_len - facts.len();
+    let (facts, facts_rewritten, facts_collapsed) =
+        remap_and_collapse_facts(facts, &mapping);
+    counts.facts_rewritten = facts_rewritten;
+    counts.facts_collapsed = facts_collapsed;
 
     let mut provenance_rows = provenance::Entity::find()
         .filter(provenance::Column::AkhId.eq(akh_id))
@@ -468,24 +502,14 @@ pub async fn apply_symbol_repair(
     let steps: Vec<_> = step_map.into_values().collect();
     counts.learned_method_steps_collapsed = steps_input_len - steps.len();
 
-    let mut episodes = episode::Entity::find()
+    let episodes = episode::Entity::find()
         .filter(episode::Column::AkhId.eq(akh_id))
         .all(&txn)
         .await?;
-    episodes.sort_by_key(|row| row.episode_id);
-    let episodes_input_len = episodes.len();
-    let mut episode_map = BTreeMap::new();
-    for mut row in episodes {
-        let mut changed = false;
-        let rewritten = remap(row.episode_id, &mapping);
-        changed |= rewritten != row.episode_id;
-        row.episode_id = rewritten;
-        changed |= rewrite_symbol_json(&mut row.payload, &mapping);
-        counts.episodes_rewritten += usize::from(changed);
-        episode_map.entry(row.episode_id).or_insert(row);
-    }
-    let episodes: Vec<_> = episode_map.into_values().collect();
-    counts.episodes_collapsed = episodes_input_len - episodes.len();
+    let (episodes, episodes_rewritten, episodes_collapsed) =
+        remap_and_collapse_episodes(episodes, &mapping);
+    counts.episodes_rewritten = episodes_rewritten;
+    counts.episodes_collapsed = episodes_collapsed;
 
     // Once all replacement images are ready, replace each affected table while
     // holding the same transaction and snapshot publication lock.
@@ -620,6 +644,26 @@ pub async fn apply_symbol_repair(
 mod tests {
     use super::*;
 
+    fn fact_row(
+        workspace_id: Uuid,
+        akh_id: Uuid,
+        subject: i64,
+        confidence: f32,
+    ) -> fact::Model {
+        fact::Model {
+            workspace_id,
+            subject,
+            predicate: 3,
+            object: 4,
+            akh_id,
+            confidence,
+            asserted_at: chrono::Utc::now(),
+            retracted_at: None,
+            provenance_id: None,
+            compartment: None,
+        }
+    }
+
     #[test]
     fn mapping_rejects_chains_and_noncanonical_direction() {
         assert!(
@@ -671,5 +715,56 @@ mod tests {
         let mut root_sources = serde_json::json!([7, 9]);
         assert!(rewrite_symbol_array(&mut root_sources, &mapping));
         assert_eq!(root_sources, serde_json::json!([2, 9]));
+    }
+
+    #[test]
+    fn fact_collision_preserves_the_maximum_confidence_row() {
+        let workspace_id = Uuid::new_v4();
+        let low_confidence_akh = Uuid::new_v4();
+        let high_confidence_akh = Uuid::new_v4();
+        let (rows, rewritten, collapsed) = remap_and_collapse_facts(
+            vec![
+                fact_row(workspace_id, low_confidence_akh, 2, 0.25),
+                fact_row(workspace_id, high_confidence_akh, 7, 0.9),
+            ],
+            &HashMap::from([(7, 2)]),
+        );
+
+        assert_eq!(rewritten, 1);
+        assert_eq!(collapsed, 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].confidence, 0.9);
+        assert_eq!(rows[0].akh_id, high_confidence_akh);
+    }
+
+    #[test]
+    fn episode_id_collision_keeps_the_existing_canonical_row() {
+        let akh_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let episode = |episode_id, payload| episode::Model {
+            episode_id,
+            akh_id,
+            workspace_id,
+            started_at: now,
+            ended_at: None,
+            payload,
+        };
+        let (rows, rewritten, collapsed) = remap_and_collapse_episodes(
+            vec![
+                episode(2, serde_json::json!({"marker": "canonical"})),
+                episode(7, serde_json::json!({"marker": "duplicate"})),
+                episode(9, serde_json::json!({"symbol_id": 7})),
+            ],
+            &HashMap::from([(7, 2)]),
+        );
+
+        assert_eq!(rewritten, 2);
+        assert_eq!(collapsed, 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].episode_id, 2);
+        assert_eq!(rows[0].payload["marker"], "canonical");
+        assert_eq!(rows[1].payload["symbol_id"], 2);
+        assert!(rows.iter().all(|row| row.episode_id != 7));
     }
 }
