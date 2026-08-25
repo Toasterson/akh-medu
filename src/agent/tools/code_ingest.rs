@@ -950,7 +950,8 @@ struct RepoIdentity {
     remote_url: Option<String>,
 }
 
-/// Detect repository identity by walking up from `path` looking for `.git/`.
+/// Detect repository identity by walking up from `path` looking for a `.git`
+/// directory or linked-worktree file.
 ///
 /// If `override_name` is given, it takes precedence over the auto-detected name.
 /// Returns `None` only if `path` resolution fails entirely.
@@ -962,17 +963,23 @@ fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIde
         &canonical
     };
 
-    // Walk up looking for .git/
+    // Walk up looking for a .git directory or linked-worktree marker file.
     let mut current = start.to_path_buf();
     loop {
-        let git_dir = current.join(".git");
-        if git_dir.is_dir() {
-            let remote_url = parse_git_remote(&git_dir);
+        let git_marker = current.join(".git");
+        if let Some(git_dir) = resolve_git_dir(&git_marker) {
+            let common_git_dir = resolve_common_git_dir(&git_dir);
+            let remote_url = parse_git_remote(&common_git_dir).or_else(|| {
+                (common_git_dir != git_dir)
+                    .then(|| parse_git_remote(&git_dir))
+                    .flatten()
+            });
             let auto_name = remote_url
                 .as_deref()
                 .map(extract_repo_name_from_url)
                 .unwrap_or_else(|| {
-                    current
+                    linked_worktree_main_root(&git_dir, &common_git_dir)
+                        .unwrap_or(&current)
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -1013,6 +1020,63 @@ fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIde
         root_path,
         remote_url: None,
     })
+}
+
+/// Resolve the actual git directory represented by a `.git` marker.
+///
+/// Normal checkouts use a directory. Linked worktrees use a text file whose
+/// first line is `gitdir: <path>`; relative paths are relative to that file.
+fn resolve_git_dir(git_marker: &Path) -> Option<PathBuf> {
+    if git_marker.is_dir() {
+        return Some(git_marker.to_path_buf());
+    }
+    if !git_marker.is_file() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(git_marker).ok()?;
+    let path = content.lines().next()?.trim().strip_prefix("gitdir:")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(path);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        git_marker.parent()?.join(path)
+    };
+    Some(resolved.canonicalize().unwrap_or(resolved))
+}
+
+/// Resolve the common git directory used by a linked worktree.
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let Ok(content) = std::fs::read_to_string(git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    let path = PathBuf::from(content.trim());
+    if path.as_os_str().is_empty() {
+        return git_dir.to_path_buf();
+    }
+
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        git_dir.join(path)
+    };
+    resolved.canonicalize().unwrap_or(resolved)
+}
+
+/// Return the main checkout root for the standard `.git/worktrees/<name>`
+/// linked-worktree layout.
+fn linked_worktree_main_root<'a>(git_dir: &Path, common_git_dir: &'a Path) -> Option<&'a Path> {
+    let is_linked_worktree = git_dir
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "worktrees");
+    is_linked_worktree
+        .then(|| common_git_dir.parent())
+        .flatten()
 }
 
 /// Parse the remote origin URL from `.git/config`.
@@ -1230,6 +1294,32 @@ mod tests {
         let repo = repo.unwrap();
         assert_eq!(repo.name, "akh-medu");
         assert!(repo.mt_label.starts_with("mt:repo:"));
+    }
+
+    #[test]
+    fn detect_repository_git_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let main_root = temp.path().join("main-repository");
+        let common_git_dir = main_root.join(".git");
+        let worktree_git_dir = common_git_dir.join("worktrees/session");
+        std::fs::create_dir_all(&worktree_git_dir).unwrap();
+        std::fs::write(worktree_git_dir.join("commondir"), "../..\n").unwrap();
+
+        let worktree_root = temp.path().join("linked-session");
+        let source_dir = worktree_root.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_file = source_dir.join("lib.rs");
+        std::fs::write(&source_file, "// linked worktree fixture\n").unwrap();
+        std::fs::write(
+            worktree_root.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+
+        let repo = detect_repository(&source_file, None).unwrap();
+        assert_eq!(repo.name, "main-repository");
+        assert_eq!(repo.mt_label, "mt:repo:main-repository");
+        assert_eq!(repo.root_path, worktree_root.to_string_lossy());
     }
 
     #[test]
