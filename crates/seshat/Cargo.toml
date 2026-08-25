@@ -83,6 +83,8 @@ tar = "0.4"
 # Phase 51 P3d-2: the semantic-retrieval corpus + retrievers, to measure
 # learned-embedding recall vs the surface floor (examples/semantic_recall_minilm).
 grug-data = { path = "../grug-data" }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["embedding", "tracing-otel"]

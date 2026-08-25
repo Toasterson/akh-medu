@@ -5,6 +5,16 @@ Expand the name of the chart.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
+{{/* Mandatory shared ingress-auth Secret name. */}}
+{{- define "akh-medu.ingressAuth.secretName" -}}
+{{- if .Values.ingressAuth.existingSecret -}}
+{{- .Values.ingressAuth.existingSecret -}}
+{{- else -}}
+{{- $_ := required "ingressAuth.sharedSecret is required when ingressAuth.existingSecret is empty" .Values.ingressAuth.sharedSecret -}}
+{{- printf "%s-ingress-auth" (include "akh-medu.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Create a default fully qualified app name.
 */}}

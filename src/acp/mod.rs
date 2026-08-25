@@ -89,6 +89,122 @@ type SessionMcpToolCache =
 type SessionMcpToolCacheMap =
     Arc<Mutex<std::collections::HashMap<String, SessionMcpToolCache>>>;
 
+/// ACP initialize metadata key carrying the standard bearer value.
+pub const AUTH_META_KEY: &str = "authorization";
+/// Inline shared secret, used by local clients and non-Kubernetes installs.
+pub const SHARED_SECRET_ENV: &str = "AKHOMED_SHARED_SECRET";
+/// Projected Kubernetes Secret file. Non-empty lines are accepted tokens.
+pub const SHARED_SECRET_FILE_ENV: &str = "AKHOMED_SHARED_SECRET_FILE";
+
+#[derive(Clone)]
+enum SecretSource {
+    Inline(Arc<str>),
+    File(Arc<PathBuf>),
+}
+
+/// Reloadable shared-secret verifier for ACP/TCP ingress.
+///
+/// File-backed sources are re-read for every `initialize`, so projected Secret
+/// updates and overlapping old/new tokens take effect without restarting the
+/// singleton daemon.
+#[derive(Clone)]
+pub struct SharedSecretAuth {
+    source: SecretSource,
+}
+
+impl SharedSecretAuth {
+    /// Load the mandatory server-side secret source from the environment.
+    pub fn from_env() -> Result<Self, String> {
+        if let Some(path) = std::env::var_os(SHARED_SECRET_FILE_ENV) {
+            return Self::from_file(path.into());
+        }
+        let value = std::env::var(SHARED_SECRET_ENV).map_err(|_| {
+            format!("neither {SHARED_SECRET_FILE_ENV} nor {SHARED_SECRET_ENV} is set")
+        })?;
+        Self::from_inline(value)
+    }
+
+    pub fn from_file(path: PathBuf) -> Result<Self, String> {
+        let auth = Self {
+            source: SecretSource::File(Arc::new(path)),
+        };
+        auth.tokens()?;
+        Ok(auth)
+    }
+
+    pub fn from_inline(value: impl Into<String>) -> Result<Self, String> {
+        let auth = Self {
+            source: SecretSource::Inline(Arc::from(value.into())),
+        };
+        auth.tokens()?;
+        Ok(auth)
+    }
+
+    fn contents(&self) -> Result<String, String> {
+        match &self.source {
+            SecretSource::Inline(value) => Ok(value.to_string()),
+            SecretSource::File(path) => std::fs::read_to_string(path.as_ref())
+                .map_err(|e| format!("cannot read shared-secret file {}: {e}", path.display())),
+        }
+    }
+
+    fn tokens(&self) -> Result<Vec<String>, String> {
+        let tokens: Vec<_> = self
+            .contents()?
+            .lines()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if tokens.is_empty() {
+            Err("shared-secret source contains no non-empty tokens".into())
+        } else {
+            Ok(tokens)
+        }
+    }
+
+    fn authorizes(&self, candidate: &str) -> Result<bool, String> {
+        Ok(self
+            .tokens()?
+            .iter()
+            .any(|expected| constant_time_eq(expected.as_bytes(), candidate.as_bytes())))
+    }
+
+    fn client_bearer(&self) -> Result<String, String> {
+        Ok(format!("Bearer {}", self.tokens()?.remove(0)))
+    }
+}
+
+fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
+    let mut difference = expected.len() ^ candidate.len();
+    let width = expected.len().max(candidate.len());
+    for index in 0..width {
+        difference |= usize::from(
+            expected.get(index).copied().unwrap_or(0)
+                ^ candidate.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
+
+fn client_initialize_request() -> InitializeRequest {
+    let request = InitializeRequest::new(ProtocolVersion::V1);
+    let Ok(auth) = SharedSecretAuth::from_env() else {
+        return request;
+    };
+    match auth.client_bearer() {
+        Ok(value) => {
+            let mut meta = Meta::new();
+            meta.insert(AUTH_META_KEY.into(), value.into());
+            request.meta(meta)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "cannot load ACP client shared secret");
+            request
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Errors
 // ──────────────────────────────────────────────────────────────────────────
@@ -421,6 +537,9 @@ pub struct AkhAcpAgent {
     /// Consulted before issuing client-side `fs/*` or `terminal/*` requests
     /// (the Remote-FS path); `None` until the client initializes.
     client_caps: Arc<Mutex<Option<ClientCapabilities>>>,
+    /// When set, every connection must authenticate in its initialize request
+    /// before any capabilities or session state are accepted.
+    ingress_auth: Option<SharedSecretAuth>,
     /// Server-level control-plane backend (akhomed's `ServerState`). Handles the
     /// `_akh/{workspace,daemon,config}/*` methods that span the whole daemon
     /// rather than one workspace. `None` for in-process single-workspace setups
@@ -612,6 +731,7 @@ impl AkhAcpAgent {
             session_active_turns: Arc::new(Mutex::new(std::collections::HashSet::new())),
             name: "akh-medu".to_string(),
             client_caps: Arc::new(Mutex::new(None)),
+            ingress_auth: None,
             control: None,
             turn_idle_timeout: turn_idle_timeout_from_env(),
             socket_read_timeout: socket_read_timeout_from_env(),
@@ -643,6 +763,7 @@ impl AkhAcpAgent {
             session_order: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             session_active_turns: Arc::new(Mutex::new(std::collections::HashSet::new())),
             client_caps: Arc::new(Mutex::new(None)),
+            ingress_auth: None,
             control: Some(control),
             turn_idle_timeout: turn_idle_timeout_from_env(),
             socket_read_timeout: socket_read_timeout_from_env(),
@@ -665,6 +786,13 @@ impl AkhAcpAgent {
     #[must_use]
     pub fn with_socket_read_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.socket_read_timeout = timeout;
+        self
+    }
+
+    /// Require shared-secret authentication during ACP initialization.
+    #[must_use]
+    pub fn with_ingress_auth(mut self, auth: SharedSecretAuth) -> Self {
+        self.ingress_auth = Some(auth);
         self
     }
 
@@ -4303,6 +4431,41 @@ fn build_connection(
                 move |req: InitializeRequest, responder: Responder<InitializeResponse>, _cx| {
                     let me = me.clone();
                     async move {
+                        if let Some(auth) = &me.ingress_auth {
+                            let supplied = req
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get(AUTH_META_KEY))
+                                .and_then(serde_json::Value::as_str);
+                            let Some(supplied) = supplied else {
+                                return responder.respond_with_error(
+                                    agent_client_protocol::Error::new(401, "authentication required")
+                                        .data(serde_json::json!({"status": 401})),
+                                );
+                            };
+                            let Some(token) = supplied.strip_prefix("Bearer ") else {
+                                return responder.respond_with_error(
+                                    agent_client_protocol::Error::new(403, "invalid credentials")
+                                        .data(serde_json::json!({"status": 403})),
+                                );
+                            };
+                            match auth.authorizes(token) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return responder.respond_with_error(
+                                        agent_client_protocol::Error::new(403, "invalid credentials")
+                                            .data(serde_json::json!({"status": 403})),
+                                    );
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "shared-secret source unavailable; denying ACP initialize");
+                                    return responder.respond_with_error(
+                                        agent_client_protocol::Error::new(503, "authentication unavailable")
+                                            .data(serde_json::json!({"status": 503})),
+                                    );
+                                }
+                            }
+                        }
                         // Capture the client's fs/terminal capabilities for the
                         // Remote-FS path (P4.5 (c)); gating fs/* + terminal/*
                         // requests on what the client advertised.
@@ -5831,7 +5994,7 @@ where
         .builder()
         .name(name.to_string())
         .connect_with(transport, async move |cx| {
-            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            cx.send_request(client_initialize_request())
                 .block_task()
                 .await?;
             let session = cx
@@ -5986,7 +6149,7 @@ where
         .builder()
         .name("akh-ext-client")
         .connect_with(transport, async move |cx| {
-            cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+            cx.send_request(client_initialize_request())
                 .block_task()
                 .await?;
             let resp: AkhExtResponse = cx
@@ -8551,6 +8714,76 @@ tags = []
             .await
             .expect("tcp client lifecycle timed out (transport/protocol deadlock)")
             .expect("tcp client lifecycle completed")
+    }
+
+    async fn authenticated_tcp_initialize(
+        auth: SharedSecretAuth,
+        bearer: Option<&str>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+        let addr = listener.local_addr().expect("local addr");
+        let me = workspace().with_ingress_auth(auth);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept tcp");
+            serve_tcp_stream(me, stream).await
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect tcp");
+        let (read_half, write_half) = stream.into_split();
+        let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
+        let bearer = bearer.map(str::to_owned);
+        let result = Client
+            .builder()
+            .name("akh-auth-test-client")
+            .connect_with(transport, async move |cx| {
+                let mut request = InitializeRequest::new(ProtocolVersion::V1);
+                if let Some(bearer) = bearer {
+                    let mut meta = Meta::new();
+                    meta.insert(AUTH_META_KEY.into(), bearer.into());
+                    request = request.meta(meta);
+                }
+                cx.send_request(request).block_task().await?;
+                Ok(())
+            })
+            .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
+        result
+    }
+
+    #[tokio::test]
+    async fn acp_tcp_shared_secret_rejects_missing_and_invalid_credentials() {
+        let auth = SharedSecretAuth::from_inline("current-token\nprevious-token\n").unwrap();
+        let missing = authenticated_tcp_initialize(auth.clone(), None)
+            .await
+            .expect_err("missing credential must fail");
+        assert_eq!(i32::from(missing.code), 401);
+
+        let invalid = authenticated_tcp_initialize(auth, Some("Bearer wrong-token"))
+            .await
+            .expect_err("invalid credential must fail");
+        assert_eq!(i32::from(invalid.code), 403);
+    }
+
+    #[tokio::test]
+    async fn acp_tcp_shared_secret_accepts_rotation_overlap() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tokens");
+        std::fs::write(&path, "current-token\nprevious-token\n").unwrap();
+        let auth = SharedSecretAuth::from_file(path.clone()).unwrap();
+        for bearer in ["Bearer current-token", "Bearer previous-token"] {
+            authenticated_tcp_initialize(auth.clone(), Some(bearer))
+                .await
+                .expect("accepted token must initialize ACP");
+        }
+
+        std::fs::write(path, "next-token\n").unwrap();
+        authenticated_tcp_initialize(auth.clone(), Some("Bearer next-token"))
+            .await
+            .expect("updated projected token must be accepted without rebuilding the agent");
+        let retired = authenticated_tcp_initialize(auth, Some("Bearer current-token"))
+            .await
+            .expect_err("retired token must stop working after the file update");
+        assert_eq!(i32::from(retired.code), 403);
     }
 
     /// Same prompt turn as the Unix test, but over a real **TCP** socket —
