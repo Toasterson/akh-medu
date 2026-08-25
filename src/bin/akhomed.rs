@@ -351,6 +351,11 @@ struct WorkspaceDaemon {
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
 }
 
+#[cfg(not(test))]
+const DAEMON_STOP_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const DAEMON_STOP_GRACE: Duration = Duration::from_millis(25);
+
 /// Dedicated session-lock connection plus the durable fencing generation
 /// acquired by that residency. Eviction explicitly unlocks and clears the
 /// session's local ownership marker; dropping the final session Arc is the
@@ -3151,11 +3156,32 @@ impl ServerState {
     /// Stop a workspace's background daemon. Returns `true` if one was running,
     /// `false` if there was nothing to stop.
     async fn stop_workspace_daemon(&self, ws_name: &str) -> bool {
-        let mut daemons = self.daemons.write().await;
-        if let Some(d) = daemons.remove(ws_name) {
+        let daemon = self.daemons.write().await.remove(ws_name);
+        if let Some(mut d) = daemon {
             let _ = d.shutdown_tx.send(true);
-            // Give the task a moment to finish.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+            // Give cooperative shutdown a moment to finish. A timed-out
+            // JoinHandle must not simply be dropped: dropping detaches the
+            // task, and run_daemon_task owns an Arc<Agent> which in turn owns
+            // the Engine and its redb Database. That detached reference made
+            // a successful sleep leave the redb lock held in-process, so wake
+            // could not open the newly hydrated store until akhomed restarted.
+            if tokio::time::timeout(DAEMON_STOP_GRACE, &mut d.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    "workspace daemon did not stop within the grace period; aborting before eviction"
+                );
+                d.handle.abort();
+                // Joining after abort is the ownership barrier: when this
+                // returns, the task future (and its Agent/Engine Arcs) have
+                // definitely been dropped. A task currently inside
+                // block_in_place is allowed to finish that synchronous unit
+                // before cancellation is observed; sleep must wait for it
+                // rather than claim that the redb handle was freed.
+                let _ = d.handle.await;
+            }
             true
         } else {
             false
@@ -4496,6 +4522,37 @@ mod control_plane_tests {
         (tmp, state)
     }
 
+    async fn install_non_cooperative_daemon_owner(state: &ServerState, name: &str) {
+        // A production WorkspaceDaemon owns an Agent (and therefore its
+        // Engine). Reuse that exact chain when an agent is already resident;
+        // otherwise retaining the cached Engine directly exercises the same
+        // redb ownership boundary without paying Agent::resume's heavy setup
+        // cost in this focused lifecycle test.
+        let retained_agent = state.resident_agent(name).await;
+        let retained_engine = if retained_agent.is_none() {
+            Some(state.get_engine(name).await.expect("load engine"))
+        } else {
+            None
+        };
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let status = Arc::new(tokio::sync::Mutex::new(
+            state.daemon_status_snapshot(name).await,
+        ));
+        let handle = tokio::spawn(async move {
+            let _retained_agent = retained_agent;
+            let _retained_engine = retained_engine;
+            std::future::pending::<()>().await;
+        });
+        state.daemons.write().await.insert(
+            name.to_string(),
+            WorkspaceDaemon {
+                handle,
+                shutdown_tx,
+                status,
+            },
+        );
+    }
+
     #[test]
     fn redb_quarantine_never_overwrites_an_earlier_image() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4615,7 +4672,7 @@ mod control_plane_tests {
 
     #[tokio::test]
     #[ignore = "requires AKH_TEST_PG_URL"]
-    async fn control_wake_quarantines_stale_graph_and_optional_metadata() {
+    async fn control_wake_quarantines_stale_graph_and_round_trips_in_process() {
         let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
             eprintln!("skipping: set AKH_TEST_PG_URL");
             return;
@@ -4738,6 +4795,20 @@ mod control_plane_tests {
             b"agent:stale-extra".as_slice(),
         ] {
             assert_eq!(quarantined.store().get_meta(key).unwrap().as_deref(), Some(sentinel));
+        }
+
+        drop(quarantined);
+        drop(restored);
+        for _ in 0..2 {
+            install_non_cooperative_daemon_owner(&second, &workspace).await;
+            second
+                .sleep_workspace(&workspace)
+                .await
+                .expect("production sleep must release every redb owner");
+            second
+                .wake_workspace(&workspace)
+                .await
+                .expect("production wake must reopen redb in the same process");
         }
         second.evict_workspace(&workspace).await.unwrap();
     }
@@ -5199,6 +5270,43 @@ mod control_plane_tests {
                 .is_err(),
             "a handle retained across handoff must be quiesced"
         );
+    }
+
+    #[tokio::test]
+    async fn sleep_joins_daemon_owner_before_in_process_redb_reopen() {
+        let (_tmp, state) = temp_state();
+        for name in ["alpha", "beta"] {
+            state
+                .dispatch("_akh/workspace/create", &json!({ "name": name }))
+                .await
+                .expect("create workspace");
+        }
+
+        // A/B/A catches both per-workspace cleanup and a second lifecycle on
+        // the same redb path. The synthetic daemon deliberately ignores its
+        // cooperative shutdown channel, forcing stop_workspace_daemon through
+        // the timeout path that previously detached the task and leaked this
+        // runtime owner -> Engine -> redb ownership chain.
+        for name in ["alpha", "beta", "alpha"] {
+            install_non_cooperative_daemon_owner(&state, name).await;
+
+            state
+                .sleep_workspace(name)
+                .await
+                .expect("sleep must fully release daemon-owned redb handles");
+            assert!(!state.daemons.read().await.contains_key(name));
+            assert!(!state.workspaces.read().await.contains_key(name));
+            assert!(!state.agents.read().await.contains_key(name));
+
+            let reopened = state
+                .get_engine(name)
+                .await
+                .expect("wake-style in-process reopen must reacquire redb");
+            reopened
+                .resolve_or_create_entity(&format!("reopened-{name}"))
+                .expect("reopened store is writable");
+            drop(reopened);
+        }
     }
 
     #[tokio::test]
