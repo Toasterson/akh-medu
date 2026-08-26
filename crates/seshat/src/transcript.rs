@@ -234,6 +234,8 @@ mod tests {
     use super::*;
 
     const COMPLETED_SESSION: &str = include_str!("../tests/fixtures/completed_agent_session.jsonl");
+    const COMPLETED_CODEX_SESSION: &str =
+        include_str!("../tests/fixtures/completed_codex_agent_session.jsonl");
 
     fn metadata() -> Value {
         serde_json::json!({
@@ -317,17 +319,13 @@ mod tests {
 
     #[test]
     fn accepts_codex_response_item_envelopes_without_indexing_calls() {
-        let body = concat!(
-            r#"{"timestamp":"2026-08-26T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex implementation summary."}]}}"#,
-            "\n",
-            r#"{"timestamp":"2026-08-26T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test -p seshat\"}"}}"#,
-            "\n",
-            r#"{"timestamp":"2026-08-26T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_01","output":"test result: ok"}}"#,
-            "\n"
-        );
-
-        let chunks = chunk_agent_session_transcript(body, 1500, &[], &serde_json::json!({}))
-            .expect("Codex rollout events should ingest");
+        let chunks = chunk_agent_session_transcript(
+            COMPLETED_CODEX_SESSION,
+            1500,
+            &[],
+            &serde_json::json!({}),
+        )
+        .expect("completed Codex rollout should ingest");
         let text = chunks
             .iter()
             .map(|chunk| chunk.text.as_str())
