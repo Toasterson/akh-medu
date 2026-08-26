@@ -331,8 +331,29 @@ pub fn create_goal(
     criteria: &str,
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
+    create_goal_with_identity(
+        engine,
+        description,
+        description,
+        priority,
+        criteria,
+        predicates,
+    )
+}
+
+/// Create a goal whose registry identity is distinct from its display
+/// description. This is reserved for repeated instances (for example a PIM
+/// recurrence) that legitimately share human-readable text.
+pub(crate) fn create_goal_with_identity(
+    engine: &Engine,
+    description: &str,
+    identity: &str,
+    priority: u8,
+    criteria: &str,
+    predicates: &AgentPredicates,
+) -> AgentResult<Goal> {
+    let label = canonical_goal_label(identity);
     let description = normalize_goal_description(description);
-    let label = format!("goal:{}", truncate_at_boundary(description, 120));
     let goal_id = engine.resolve_or_create_entity(&label)?;
 
     let now = std::time::SystemTime::now()
@@ -343,7 +364,12 @@ pub fn create_goal(
     // Remove any stale property triples from a previous generation cycle through
     // the engine so SPARQL stays in sync (resolve_or_create_entity reuses the same
     // goal_id for the same label, so old triples must be cleared first).
-    for pred in [predicates.has_description, predicates.has_status, predicates.has_priority] {
+    for pred in [
+        predicates.has_description,
+        predicates.has_status,
+        predicates.has_priority,
+        predicates.has_criteria,
+    ] {
         let old: Vec<_> = engine
             .knowledge_graph()
             .triples_from(goal_id)
@@ -364,6 +390,19 @@ pub fn create_goal(
     // Store priority.
     let priority_sym = engine.resolve_or_create_entity(&format!("priority:{priority}"))?;
     let _ = engine.add_triple(&Triple::new(goal_id, predicates.has_priority, priority_sym));
+
+    // Ordinary goals encode their display description directly in the entity
+    // label. Instance-identified goals need an explicit display property so a
+    // KG-only restore does not expose the internal recurrence/decomposition ID.
+    if canonical_goal_label(description) != label {
+        let description_sym =
+            engine.resolve_or_create_entity(&format!("desc:{description}"))?;
+        let _ = engine.add_triple(&Triple::new(
+            goal_id,
+            predicates.has_description,
+            description_sym,
+        ));
+    }
 
     // Store criteria.
     let criteria_sym = engine.resolve_or_create_entity(&format!("criteria:{criteria}"))?;
@@ -389,16 +428,91 @@ pub fn create_goal(
     })
 }
 
+/// Canonical registry label used as a goal's semantic identity.
+///
+/// Keep duplicate detection on this seam: prefix normalization and bounded
+/// labels must match [`create_goal`] exactly or two descriptions can still
+/// resolve to one `SymbolId`.
+pub(crate) fn canonical_goal_label(description: &str) -> String {
+    let description = normalize_goal_description(description);
+    format!("goal:{}", truncate_at_boundary(description, 120))
+}
+
+/// Find the live goal whose registry identity would be reused for `description`.
+pub(crate) fn existing_by_description<'a>(
+    engine: &Engine,
+    goals: &'a [Goal],
+    description: &str,
+) -> Option<&'a Goal> {
+    existing_by_identity(engine, goals, description)
+}
+
+pub(crate) fn existing_by_identity<'a>(
+    engine: &Engine,
+    goals: &'a [Goal],
+    identity: &str,
+) -> Option<&'a Goal> {
+    let label = canonical_goal_label(identity);
+    goals
+        .iter()
+        .find(|goal| engine.resolve_label(goal.symbol_id) == label)
+}
+
+/// Insert a goal into the live goal set, or reconcile scalar fields if its
+/// semantic symbol is already present. `create_goal` deliberately reuses
+/// symbols, so every insertion path must pass through this boundary to keep
+/// the in-memory set relationally safe and consistent with KG property writes.
+pub(crate) fn insert_if_novel(goals: &mut Vec<Goal>, candidate: Goal) -> bool {
+    if let Some(existing) = goals
+        .iter_mut()
+        .find(|goal| goal.symbol_id == candidate.symbol_id)
+    {
+        tracing::debug!(
+            goal_id = candidate.symbol_id.get(),
+            "reconciling repeated goal symbol at live insertion boundary"
+        );
+        // `create_goal` updates the scalar KG properties when it reuses a
+        // symbol. Mirror those values while retaining live-only structural and
+        // progress state that creation does not rewrite.
+        existing.description = candidate.description;
+        existing.status = candidate.status;
+        existing.priority = candidate.priority;
+        existing.success_criteria = candidate.success_criteria;
+        false
+    } else {
+        goals.push(candidate);
+        true
+    }
+}
+
 /// Decompose a parent goal into sub-goals.
 pub fn decompose_goal(
     engine: &Engine,
     parent: &mut Goal,
     sub_descriptions: &[(&str, u8, &str)],
+    existing_goals: &[Goal],
     predicates: &AgentPredicates,
 ) -> AgentResult<Vec<Goal>> {
     let mut children = Vec::new();
-    for (desc, priority, criteria) in sub_descriptions {
-        let mut child = create_goal(engine, desc, *priority, criteria, predicates)?;
+    for (position, (desc, priority, criteria)) in sub_descriptions.iter().enumerate() {
+        let identity = format!(
+            "decomposed:{}:{position}:{desc}",
+            parent.symbol_id.get()
+        );
+        let mut child = if let Some(existing) =
+            existing_by_identity(engine, existing_goals, &identity)
+        {
+            existing.clone()
+        } else {
+            create_goal_with_identity(
+                engine,
+                desc,
+                &identity,
+                *priority,
+                criteria,
+                predicates,
+            )?
+        };
         child.parent = Some(parent.symbol_id);
 
         // Store parent→child relation.
@@ -413,8 +527,10 @@ pub fn decompose_goal(
             parent.symbol_id,
         ));
 
-        parent.children.push(child.symbol_id);
-        children.push(child);
+        if !parent.children.contains(&child.symbol_id) {
+            parent.children.push(child.symbol_id);
+        }
+        insert_if_novel(&mut children, child);
     }
     Ok(children)
 }
@@ -660,11 +776,15 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             } else if triple.predicate == predicates.has_criteria {
                 criteria = obj_label.trim_start_matches("criteria:").to_string();
             } else if triple.predicate == predicates.child_goal {
-                children.push(triple.object);
+                if !children.contains(&triple.object) {
+                    children.push(triple.object);
+                }
             } else if triple.predicate == predicates.parent_goal {
                 parent = Some(triple.object);
             } else if triple.predicate == predicates.blocked_by {
-                blocked_by.push(triple.object);
+                if !blocked_by.contains(&triple.object) {
+                    blocked_by.push(triple.object);
+                }
             }
         }
 
@@ -680,7 +800,7 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             }
         }
 
-        goals.push(Goal {
+        insert_if_novel(&mut goals, Goal {
             symbol_id: meta.id,
             description,
             status,
@@ -795,10 +915,25 @@ pub fn reformulate_goal(
     engine: &Engine,
     original: &mut Goal,
     relaxed_criteria: &str,
+    existing_goals: &[Goal],
     predicates: &AgentPredicates,
 ) -> AgentResult<Goal> {
     let desc = format!("(reformulated) {}", original.description);
-    let mut replacement = create_goal(engine, &desc, original.priority, relaxed_criteria, predicates)?;
+    let identity = format!("reformulated:{}", original.symbol_id.get());
+    let mut replacement = if let Some(existing) =
+        existing_by_identity(engine, existing_goals, &identity)
+    {
+        existing.clone()
+    } else {
+        create_goal_with_identity(
+            engine,
+            &desc,
+            &identity,
+            original.priority,
+            relaxed_criteria,
+            predicates,
+        )?
+    };
     replacement.parent = original.parent;
     replacement.reformulated_from = Some(original.symbol_id);
     replacement.justification = Some(GoalJustification::DecomposedFrom {
@@ -1253,5 +1388,68 @@ mod tests {
         let label = engine.resolve_label(goal.symbol_id);
         assert_eq!(label, "goal:investigate who Tecton is");
         assert_eq!(goal.description, "investigate who Tecton is");
+    }
+
+    #[test]
+    fn canonical_label_matches_single_prefix_normalization_at_creation() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+        let raw = "goal:desc:inner";
+
+        let goal = create_goal(&engine, raw, 128, "done", &preds).unwrap();
+
+        assert_eq!(canonical_goal_label(raw), "goal:desc:inner");
+        assert_eq!(engine.resolve_label(goal.symbol_id), canonical_goal_label(raw));
+        assert_eq!(goal.description, "desc:inner");
+    }
+
+    #[test]
+    fn live_goal_insertion_is_idempotent_by_symbol() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+        let mut first = create_goal(&engine, "same", 1, "first", &preds).unwrap();
+        first.children.push(SymbolId::new(999).unwrap());
+        let mut goals = Vec::new();
+        assert!(insert_if_novel(&mut goals, first));
+
+        let repeated = create_goal(&engine, "same", 2, "second", &preds).unwrap();
+
+        assert!(!insert_if_novel(&mut goals, repeated));
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].priority, 2);
+        assert_eq!(goals[0].success_criteria, "second");
+        assert_eq!(goals[0].children, vec![SymbolId::new(999).unwrap()]);
+        let restored = restore_goals(&engine, &preds).unwrap();
+        let restored = restored
+            .iter()
+            .find(|goal| goal.symbol_id == goals[0].symbol_id)
+            .unwrap();
+        assert_eq!(restored.success_criteria, "second");
+    }
+
+    #[test]
+    fn instance_identity_restores_its_display_description() {
+        let engine = test_engine();
+        let preds = crate::agent::agent::AgentPredicates::init(&engine).unwrap();
+        let created = create_goal_with_identity(
+            &engine,
+            "review the queue",
+            "recurrence:42:1000",
+            128,
+            "review complete",
+            &preds,
+        )
+        .unwrap();
+
+        let restored = restore_goals(&engine, &preds).unwrap();
+        let restored = restored
+            .iter()
+            .find(|goal| goal.symbol_id == created.symbol_id)
+            .unwrap();
+        assert_eq!(restored.description, "review the queue");
+        assert_eq!(
+            engine.resolve_label(restored.symbol_id),
+            "goal:recurrence:42:1000"
+        );
     }
 }

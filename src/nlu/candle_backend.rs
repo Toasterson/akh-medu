@@ -24,6 +24,12 @@ use candle_core::{Device, IndexOp, Tensor};
 pub enum ModelFamily {
     /// Qwen2.5 (ChatML `<|im_start|>` template, `<|im_end|>` / `<|endoftext|>`).
     Qwen2,
+    /// Qwen3.5/Qwen3.8 hybrid decoder (ChatML, gated-delta + full-attention layers).
+    ///
+    /// Family recognition lands before the loader deliberately: until the dedicated
+    /// tensor schema is implemented, loading fails closed instead of interpreting a
+    /// Qwen3.8 GGUF as the superficially similar Qwen2 architecture.
+    Qwen35,
     /// Gemma 2/3 (`<start_of_turn>` template, `<end_of_turn>` EOS).
     Gemma,
     /// Gemma 4 — unified encoder-free multimodal (native audio). Shares Gemma's
@@ -32,9 +38,20 @@ pub enum ModelFamily {
     Gemma4,
 }
 
+/// Token-level chat dialect selected once from the model family.
+///
+/// Keeping this mapping beside [`ModelFamily`] means adding a family cannot
+/// silently require the same grouping change in every prompt renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "candle-backend")]
+pub(crate) enum ChatTemplate {
+    ChatMl,
+    Gemma,
+    Gemma4,
+}
+
 impl ModelFamily {
     /// Detect the family from a GGUF `general.architecture` string.
-    #[cfg(feature = "candle-backend")]
     fn from_architecture(arch: &str) -> Self {
         let a = arch.to_lowercase();
         // Check the more specific `gemma4` before the generic `gemma` substring.
@@ -42,8 +59,29 @@ impl ModelFamily {
             ModelFamily::Gemma4
         } else if a.contains("gemma") {
             ModelFamily::Gemma
+        } else if a.contains("qwen35") || a.contains("qwen3.5") || a.contains("qwen3_5") {
+            ModelFamily::Qwen35
         } else {
             ModelFamily::Qwen2
+        }
+    }
+
+    #[cfg(feature = "candle-backend")]
+    pub(crate) const fn chat_template(self) -> ChatTemplate {
+        match self {
+            ModelFamily::Qwen2 | ModelFamily::Qwen35 => ChatTemplate::ChatMl,
+            ModelFamily::Gemma => ChatTemplate::Gemma,
+            ModelFamily::Gemma4 => ChatTemplate::Gemma4,
+        }
+    }
+
+    const fn eos_markers(self) -> &'static [&'static str] {
+        match self {
+            ModelFamily::Gemma => &["<end_of_turn>", "<eos>", "</s>"],
+            ModelFamily::Gemma4 => &["<turn|>", "<eos>", "</s>"],
+            ModelFamily::Qwen2 | ModelFamily::Qwen35 => {
+                &["<|endoftext|>", "<|im_end|>", "</s>"]
+            }
         }
     }
 }
@@ -55,6 +93,7 @@ impl ModelFamily {
 #[cfg(feature = "candle-backend")]
 enum LoadedModel {
     Qwen2(super::vendored::quantized_qwen2::ModelWeights),
+    Qwen35(super::vendored::quantized_qwen35::ModelWeights),
     Gemma(super::vendored::quantized_gemma3::ModelWeights),
     Gemma4(super::vendored::quantized_gemma4::ModelWeights),
 }
@@ -64,6 +103,7 @@ impl LoadedModel {
     fn forward(&mut self, x: &Tensor, index_pos: usize) -> candle_core::Result<Tensor> {
         match self {
             LoadedModel::Qwen2(m) => m.forward(x, index_pos),
+            LoadedModel::Qwen35(m) => m.forward(x, index_pos),
             LoadedModel::Gemma(m) => m.forward(x, index_pos),
             LoadedModel::Gemma4(m) => m.forward(x, index_pos),
         }
@@ -78,6 +118,7 @@ impl LoadedModel {
     ) -> candle_core::Result<(Tensor, Tensor)> {
         match self {
             LoadedModel::Qwen2(m) => m.forward_with_hidden(x, index_pos),
+            LoadedModel::Qwen35(m) => m.forward_with_hidden(x, index_pos),
             LoadedModel::Gemma(m) => m.forward_with_hidden(x, index_pos),
             LoadedModel::Gemma4(m) => m.forward_with_hidden(x, index_pos),
         }
@@ -448,6 +489,15 @@ impl CandleBackend {
         tracing::info!(context_length, architecture = %architecture, "model context window (from GGUF)");
 
         let model = match family {
+            ModelFamily::Qwen35 => {
+                let m = super::vendored::quantized_qwen35::ModelWeights::from_gguf(
+                    content, &mut file, &device,
+                )
+                .map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("load Qwen3.5/Qwen3.8 weights: {e}"),
+                })?;
+                LoadedModel::Qwen35(m)
+            }
             ModelFamily::Gemma4 => {
                 let m = super::vendored::quantized_gemma4::ModelWeights::from_gguf(
                     content, &mut file, &device,
@@ -1500,17 +1550,17 @@ impl CandleBackend {
     /// Build a family-appropriate chat prompt from system + user turns.
     #[cfg(feature = "candle-backend")]
     fn build_chat_prompt(&self, system: &str, user: &str) -> String {
-        match self.family {
+        match self.family.chat_template() {
             // Gemma 2/3 has no system role; fold it into the user turn.
-            ModelFamily::Gemma => format!(
+            ChatTemplate::Gemma => format!(
                 "<start_of_turn>user\n{system}\n\n{user}<end_of_turn>\n<start_of_turn>model\n"
             ),
             // Gemma 4 uses a new turn format: `<|turn>role\n ... <turn|>\n` with the
             // generation prompt `<|turn>model\n`. (BOS is prepended in generate_inner.)
-            ModelFamily::Gemma4 => format!(
+            ChatTemplate::Gemma4 => format!(
                 "<|turn>user\n{system}\n\n{user}<turn|>\n<|turn>model\n"
             ),
-            ModelFamily::Qwen2 => format!(
+            ChatTemplate::ChatMl => format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
                  <|im_start|>assistant\n"
@@ -2824,15 +2874,9 @@ struct DecodeState {
 /// vocab without a real tokenizer/model.
 #[cfg_attr(not(feature = "candle-backend"), allow(dead_code))]
 fn eos_ids_for_family(family: ModelFamily, token_to_id: impl Fn(&str) -> Option<u32>) -> Vec<u32> {
-    let markers: &[&str] = match family {
-        // Gemma 2/3: <end_of_turn> (chat) or <eos>.
-        ModelFamily::Gemma => &["<end_of_turn>", "<eos>", "</s>"],
-        // Gemma 4: the turn-end marker `<turn|>` is the chat EOS; <eos> covers raw completion.
-        ModelFamily::Gemma4 => &["<turn|>", "<eos>", "</s>"],
-        // Qwen2.5: <|endoftext|> (base EOS, always present) *and* <|im_end|> (ChatML turn end) —
-        // both are live stop markers, not alternatives, so both must resolve when present.
-        ModelFamily::Qwen2 => &["<|endoftext|>", "<|im_end|>", "</s>"],
-    };
+    // Qwen's <|endoftext|> base EOS and <|im_end|> ChatML turn end are both
+    // live stop markers, not alternatives, so resolve every available marker.
+    let markers = family.eos_markers();
     let mut ids: Vec<u32> = markers.iter().filter_map(|m| token_to_id(m)).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -3006,6 +3050,28 @@ Some trailing text."#;
         let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
         let ids = eos_ids_for_family(ModelFamily::Gemma, lookup);
         assert_eq!(ids, vec![1, 107]);
+    }
+
+    /// Qwen3.8 GGUFs use the qwen35 architecture family. They must be recognized
+    /// explicitly: treating an unknown architecture as Qwen2 can make the loader
+    /// interpret a hybrid gated-delta model with the wrong tensor schema.
+    #[test]
+    fn qwen35_architecture_tags_never_fall_through_to_qwen2() {
+        for architecture in ["qwen35", "qwen3.5", "qwen3_5", "QWEN35"] {
+            assert_eq!(
+                ModelFamily::from_architecture(architecture),
+                ModelFamily::Qwen35,
+                "{architecture} must select the dedicated hybrid-model family"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen35_uses_both_chatml_stop_markers() {
+        let vocab = [("<|endoftext|>", 151643u32), ("<|im_end|>", 151645u32)];
+        let lookup = |s: &str| vocab.iter().find(|(k, _)| *k == s).map(|(_, v)| *v);
+        let ids = eos_ids_for_family(ModelFamily::Qwen35, lookup);
+        assert_eq!(ids, vec![151643, 151645]);
     }
 
     #[test]

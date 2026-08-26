@@ -58,6 +58,13 @@ fn gemv_batch_enabled() -> bool {
     std::env::var("AKH_GEMV_BATCH").as_deref() != Ok("0")
 }
 
+/// The parity-gated Q8/Q4_K decode route, with an explicit f32 escape hatch. Any
+/// allocation or kernel error is returned to the caller; it never silently retries the f32
+/// path, because that would make canary measurements lie about which implementation ran.
+fn q8_gemv_enabled() -> bool {
+    std::env::var("AKH_HIP_Q8_GEMV").as_deref() != Ok("0")
+}
+
 /// `(total_nanos, calls)` spent in the fused GEMV since process start. Flushes any
 /// pending event-profiler samples first (event mode) so the read is complete.
 pub fn gemv_profile() -> (u64, u64) {
@@ -73,6 +80,10 @@ type DequantQ6K =
     unsafe extern "C" fn(*const u8, *mut f32, usize, usize) -> c_int;
 // Fused GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], dequant inline.
 type GemvQK = unsafe extern "C" fn(*const u8, *const f32, *mut f32, usize, usize) -> c_int;
+// Q8 activation + packed Q4_K dp4a GEMV. Scratch is explicit caller-owned storage:
+// `q8[in_dim]` and `scales[in_dim/32]`.
+type GemvQ4KQ8 =
+    unsafe extern "C" fn(*const u8, *const f32, *mut f32, *mut i8, *mut f32, usize, usize) -> c_int;
 // Fused *batched* GEMV (Phase 47d): out[m,n_rows] = X[m,in_dim] · W[n_rows,in_dim]ᵀ, dequant
 // inline and reused across the m rows. Trailing `m` selects the template instantiation;
 // returns -1 if `m` is outside `1..=AKH_GEMV_BATCH_MAX` (caller routes larger m to GEMM).
@@ -91,6 +102,9 @@ struct QuantKernels {
     dequant_q6k: DequantQ6K,
     gemv_q4k: GemvQK,
     gemv_q6k: GemvQK,
+    // Optional so a stale kernel sidecar cannot disable the established f32
+    // adapter. Selecting Q8 without the symbol still fails explicitly.
+    gemv_q4k_q8: Option<GemvQ4KQ8>,
     gemv_batched_q4k: GemvBatchedQK,
     gemv_batched_q6k: GemvBatchedQK,
     get_rows_q4k: GetRowsQK,
@@ -121,6 +135,10 @@ impl QuantKernels {
             let gemv_q6k: GemvQK = *lib
                 .get(b"akh_gemv_q6k_f32\0")
                 .map_err(|e| format!("missing akh_gemv_q6k_f32: {e}"))?;
+            let gemv_q4k_q8 = lib
+                .get::<GemvQ4KQ8>(b"akh_gemv_q4k_q8\0")
+                .ok()
+                .map(|symbol| *symbol);
             let gemv_batched_q4k: GemvBatchedQK = *lib
                 .get(b"akh_gemv_batched_q4k_f32\0")
                 .map_err(|e| format!("missing akh_gemv_batched_q4k_f32: {e}"))?;
@@ -142,6 +160,7 @@ impl QuantKernels {
                 dequant_q6k,
                 gemv_q4k,
                 gemv_q6k,
+                gemv_q4k_q8,
                 gemv_batched_q4k,
                 gemv_batched_q6k,
                 get_rows_q4k,
@@ -201,6 +220,32 @@ impl QuantKernels {
         let rc = unsafe { f(w, x, out, n_rows, in_dim) };
         if rc != 0 {
             return Err(format!("akh_gemv ({dtype:?}) kernel failed (hipError={rc})"));
+        }
+        Ok(())
+    }
+
+    /// Q8-activation packed-Q4_K decode. Two ordered launches perform activation
+    /// quantization and the dp4a GEMV on the currently selected HIP stream.
+    fn gemv_q4k_q8(
+        &self,
+        w: *const u8,
+        x: *const f32,
+        out: *mut f32,
+        q8: *mut i8,
+        scales: *mut f32,
+        n_rows: usize,
+        in_dim: usize,
+    ) -> std::result::Result<(), String> {
+        let kernel = self.gemv_q4k_q8.ok_or_else(|| {
+            "akh_gemv_q4k_q8 is unavailable in the loaded HIP kernel library; rebuild the \
+             kernel sidecar or set AKH_HIP_Q8_GEMV=0 to retain the f32 reference route"
+                .to_owned()
+        })?;
+        let rc = unsafe { kernel(w, x, out, q8, scales, n_rows, in_dim) };
+        if rc != 0 {
+            return Err(format!(
+                "akh_gemv_q4k_q8 kernel failed (hipError/code={rc}, n_rows={n_rows}, in_dim={in_dim})"
+            ));
         }
         Ok(())
     }
@@ -659,7 +704,50 @@ impl QCudaStorage {
             let x_ptr =
                 unsafe { (storage.device_ptr() as *const f32).add(layout.start_offset()) };
             let out_ptr = h.malloc(n * std::mem::size_of::<f32>()).map_err(Error::Msg)?;
-            let run = || kern.gemv(self.dtype, self.data as *const u8, x_ptr, out_ptr as *mut f32, n, k);
+            // The Q8 tracer is Q4_K-only. Scratch remains explicit and is recycled by the
+            // HIP allocation pool after both ordered launches have been enqueued. Reuse is
+            // sound under this backend's documented externally-synchronized, single compute
+            // stream: later users are ordered after the consumer kernel. A future multi-stream
+            // backend must add stream-aware reclamation before sharing this pool.
+            let q8_scratch = if self.dtype == GgmlDType::Q4K && q8_gemv_enabled() {
+                let q8 = match h.malloc(k) {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        h.free(out_ptr);
+                        return Err(Error::Msg(e));
+                    }
+                };
+                let scales = match h.malloc((k / 32) * std::mem::size_of::<f32>()) {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        h.free(q8);
+                        h.free(out_ptr);
+                        return Err(Error::Msg(e));
+                    }
+                };
+                Some((q8, scales))
+            } else {
+                None
+            };
+            let run = || match q8_scratch {
+                Some((q8, scales)) => kern.gemv_q4k_q8(
+                    self.data as *const u8,
+                    x_ptr,
+                    out_ptr as *mut f32,
+                    q8 as *mut i8,
+                    scales as *mut f32,
+                    n,
+                    k,
+                ),
+                None => kern.gemv(
+                    self.dtype,
+                    self.data as *const u8,
+                    x_ptr,
+                    out_ptr as *mut f32,
+                    n,
+                    k,
+                ),
+            };
             // Three profile modes (mirrors hip_backend::profiled!): event markers (pure
             // GPU time, no drain), legacy sync-bracket, or off.
             let res = if crate::hip_backend::event_profiling() {
@@ -676,6 +764,10 @@ impl QCudaStorage {
             } else {
                 run()
             };
+            if let Some((q8, scales)) = q8_scratch {
+                h.free(q8);
+                h.free(scales);
+            }
             if let Err(e) = res {
                 h.free(out_ptr);
                 return Err(Error::Msg(e));
@@ -793,6 +885,34 @@ pub fn load_quantized<T: super::GgmlType + Send + Sync + 'static>(
 mod test {
     use crate::quantized::{GgmlDType, QMatMul, QTensor};
     use crate::{Device, Module, Result, Tensor};
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
+
+    struct EnvOverride {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvOverride {
+        fn new(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: every test mutating this process-wide selector holds
+            // `Q8_ROUTE_ENV`; production never mutates it after startup.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn gpu() -> Option<Device> {
         Device::new_cuda(0).ok()
@@ -947,10 +1067,16 @@ mod test {
     /// both Q4_K and Q6_K. Exercises `fwd`'s `b·m == 1` branch (Phase 45g).
     #[test]
     fn hip_gemv_decode_parity() -> Result<()> {
+        let _route_lock = Q8_ROUTE_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _route = EnvOverride::new("AKH_HIP_Q8_GEMV", "0");
         let Some(dev) = gpu() else {
             eprintln!("no HIP GPU visible; skipping hip_gemv_decode_parity");
             return Ok(());
         };
+        // This test remains the f32 adapter's reference gate. The Q8 replacement has
+        // its own independent quantized-activation oracle immediately below.
         let cpu = Device::Cpu;
         let (n, k) = (16usize, 512usize); // k % 256 == 0
         for dtype in [GgmlDType::Q4K, GgmlDType::Q6K] {
@@ -978,6 +1104,72 @@ mod test {
                 d / scale
             );
         }
+        Ok(())
+    }
+
+    /// The opt-in Q8-activation + packed Q4_K decode path matches an independent CPU
+    /// oracle that applies the same symmetric 32-value activation quantization before
+    /// multiplying by Candle's dequantized Q4_K weights. A shared RAII guard serializes and
+    /// restores the process-wide route selector even under the parallel test harness.
+    #[test]
+    fn hip_q8_q4k_decode_matches_quantized_activation_oracle() -> Result<()> {
+        let _route_lock = Q8_ROUTE_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _route = EnvOverride::new("AKH_HIP_Q8_GEMV", "1");
+        let Some(dev) = gpu() else {
+            eprintln!(
+                "no HIP GPU visible; skipping hip_q8_q4k_decode_matches_quantized_activation_oracle"
+            );
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let (n, k) = (20usize, 512usize);
+        let w: Vec<f32> = (0..n * k)
+            .map(|i| ((i as f32) * 0.019).sin() * 0.55 - 0.04)
+            .collect();
+        let w_cpu = Tensor::from_vec(w, (n, k), &cpu)?;
+        let qt_gpu = QTensor::quantize_onto(&w_cpu, GgmlDType::Q4K, &dev)?;
+        let w_deq = qt_gpu.dequantize(&cpu)?;
+
+        // Give every group one large value and many much smaller ones. The difference
+        // between f32 and Q8 activations is then large enough that this test cannot pass
+        // accidentally through the existing f32 GEMV.
+        let x: Vec<f32> = (0..k)
+            .map(|i| {
+                let lane = i % 32;
+                if lane == 0 {
+                    if (i / 32) % 2 == 0 { 1.0 } else { -0.9 }
+                } else {
+                    ((lane as f32) * 0.0017 - 0.026) * if i % 3 == 0 { -1.0 } else { 1.0 }
+                }
+            })
+            .collect();
+        let mut xq = x.clone();
+        for group in xq.chunks_mut(32) {
+            let scale = (group.iter().map(|v| v.abs()).fold(0.0f32, f32::max) / 127.0).max(1e-8);
+            for value in group {
+                *value = (*value / scale).round().clamp(-127.0, 127.0) * scale;
+            }
+        }
+        let x_ref = Tensor::from_vec(xq, (1, k), &cpu)?;
+        let y_ref = x_ref.matmul(&w_deq.t()?)?.flatten_all()?.to_vec1::<f32>()?;
+
+        let x_gpu = Tensor::from_vec(x, (1, k), &dev)?;
+        let mm = QMatMul::from_qtensor(qt_gpu)?;
+        let y_gpu = mm.forward(&x_gpu)?.flatten_all()?.to_vec1::<f32>()?;
+        let scale = y_ref
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0f32, f32::max)
+            .max(1e-6);
+        let d = max_abs_diff(&y_gpu, &y_ref);
+        eprintln!("Q8/Q4_K GEMV rel(gpu-q8-oracle) = {}", d / scale);
+        assert!(
+            d / scale < 2e-4,
+            "Q8/Q4_K GEMV vs quantized-activation oracle: rel diff {} >= 2e-4",
+            d / scale
+        );
         Ok(())
     }
 

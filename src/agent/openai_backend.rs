@@ -198,7 +198,7 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 
 /// Translate the loop's Ollama-shaped conversation into strict OpenAI messages.
 ///
-/// Three fixes are applied, in one pass:
+/// Four fixes are applied during translation:
 ///
 /// 1. **Assistant tool calls** gain an `id` and a `type: "function"`, and their
 ///    `arguments` object is stringified (OpenAI transports arguments as a JSON
@@ -208,14 +208,31 @@ fn tool_call_id(round: usize, idx: usize) -> String {
 ///    order [`agentic_chat`](super::agentic_chat) appends them in.
 /// 3. **Assistant turns that only called tools** get their empty `content`
 ///    dropped rather than sent as `""`, which some strict servers reject.
+/// 4. **System messages** are coalesced into one leading message.  Some strict
+///    chat templates (including Qwen) reject a system role anywhere else in
+///    the conversation.
 ///
 /// A tool result with no outstanding call (malformed history) is passed through
 /// without `tool_call_id` rather than dropped: losing the observation would be a
 /// worse failure than letting the server complain about it.
 pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Value> {
     let mut out = Vec::with_capacity(conversation.len() + 1);
-    if !system_prompt.is_empty() {
-        out.push(json!({"role": "system", "content": system_prompt}));
+
+    let mut system_sections = Vec::new();
+    if !system_prompt.trim().is_empty() {
+        system_sections.push(system_prompt.to_owned());
+    }
+    for msg in conversation {
+        if msg.get("role").and_then(Value::as_str) == Some("system") {
+            if let Some(content) = msg.get("content").and_then(Value::as_str) {
+                if !content.trim().is_empty() {
+                    system_sections.push(content.to_owned());
+                }
+            }
+        }
+    }
+    if !system_sections.is_empty() {
+        out.push(json!({"role": "system", "content": system_sections.join("\n\n")}));
     }
 
     // Ids minted by the most recent assistant turn, consumed in order by the
@@ -226,6 +243,9 @@ pub fn to_openai_messages(system_prompt: &str, conversation: &[Value]) -> Vec<Va
     for msg in conversation {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
         match role {
+            // Already coalesced above.  Never let a later system role reach a
+            // strict chat template.
+            "system" => {}
             "assistant" => {
                 let calls = msg.get("tool_calls").and_then(Value::as_array);
                 let mut translated = json!({"role": "assistant"});
@@ -978,6 +998,46 @@ mod tests {
         let conv = vec![json!({"role": "user", "content": "hi"})];
         assert_eq!(to_openai_messages("sys", &conv).len(), 2);
         assert_eq!(to_openai_messages("", &conv).len(), 1);
+    }
+
+    #[test]
+    fn conversation_system_messages_are_coalesced_at_the_front() {
+        let conv = vec![
+            json!({"role": "user", "content": "first"}),
+            json!({"role": "system", "content": "context update"}),
+            json!({"role": "assistant", "content": "noted"}),
+            json!({"role": "system", "content": "memory update"}),
+            json!({"role": "user", "content": "continue"}),
+        ];
+
+        let out = to_openai_messages("base instructions", &conv);
+
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(
+            out[0]["content"],
+            "base instructions\n\ncontext update\n\nmemory update"
+        );
+        assert_eq!(out[1]["content"], "first");
+        assert_eq!(out[2]["content"], "noted");
+        assert_eq!(out[3]["content"], "continue");
+        assert_eq!(out.iter().filter(|msg| msg["role"] == "system").count(), 1);
+    }
+
+    #[test]
+    fn conversation_system_message_becomes_leading_without_base_prompt() {
+        let conv = vec![
+            json!({"role": "user", "content": "first"}),
+            json!({"role": "system", "content": "late instructions"}),
+        ];
+
+        let out = to_openai_messages("", &conv);
+
+        assert_eq!(
+            out[0],
+            json!({"role": "system", "content": "late instructions"})
+        );
+        assert_eq!(out[1], json!({"role": "user", "content": "first"}));
     }
 
     #[test]

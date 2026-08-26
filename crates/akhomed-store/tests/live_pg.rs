@@ -4,8 +4,10 @@
 //!   AKH_TEST_PG_URL=postgres://user@127.0.0.1:5439/akhmedu?sslmode=disable \
 //!     cargo test -p akhomed-store --test live_pg -- --ignored
 
-use akhomed_store::entity::fact;
-use akhomed_store::snapshots::{load_workspace_facts, replace_workspace_facts};
+use akhomed_store::entity::{fact, symbol};
+use akhomed_store::snapshots::{
+    load_symbols, load_workspace_facts, replace_symbols, replace_workspace_facts,
+};
 use akhomed_store::uuid::Uuid;
 use akhomed_store::{
     MutationRow, PoolOptions, append_mutations, connect, ensure_akh, get_harvest_watermark,
@@ -117,6 +119,44 @@ async fn workspace_fact_replace_chunks_past_postgres_bind_limit() {
         .expect("load repeat replacement");
     assert_eq!(second.len(), ROW_COUNT);
     assert!(second.iter().all(|row| row.confidence == 0.25));
+}
+
+/// Arbitrary knowledge text is a valid symbol label. The Postgres migration
+/// must keep a label larger than a B-tree index tuple from aborting snapshots.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn symbol_snapshot_accepts_label_larger_than_postgres_btree_tuple() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&PoolOptions::new(url)).await.expect("connect");
+    run_migrations(&db).await.expect("migrate");
+
+    let akh = Uuid::new_v4();
+    ensure_akh(&db, akh, "long-label-test-akh", None)
+        .await
+        .unwrap();
+    let label = "knowledge ".repeat(500);
+    replace_symbols(
+        &db,
+        akh,
+        vec![symbol::Model {
+            akh_id: akh,
+            id: 1,
+            kind: "Entity".into(),
+            glyph_codepoint: None,
+            label: label.clone(),
+        }],
+    )
+    .await
+    .expect("long symbol label must persist");
+
+    let restored = load_symbols(&db, akh)
+        .await
+        .expect("load long symbol label");
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].label, label);
 }
 
 #[tokio::test]

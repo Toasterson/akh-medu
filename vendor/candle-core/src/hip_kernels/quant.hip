@@ -232,6 +232,86 @@ __global__ void akh_get_rows_q6k_f32_kernel(const unsigned char* __restrict__ bl
 #define AKH_GEMV_WARPS 8
 #define AKH_GEMV_BLOCK (AKH_GEMV_WARP * AKH_GEMV_WARPS)
 
+// Symmetric Q8 activation groups for the RDNA3 packed-Q4_K
+// decode kernel. Keeping this as a separate launch quantizes x once per linear,
+// instead of redundantly once per weight row. The two buffers are caller-owned
+// scratch and therefore never become hidden mutable model state.
+#define AKH_Q8_GROUP 32
+
+__global__ void akh_quantize_q8_f32_kernel(const float* __restrict__ x,
+                                            signed char* __restrict__ q8,
+                                            float* __restrict__ scales,
+                                            unsigned long in_dim) {
+    int lane = threadIdx.x;
+    unsigned long group = (unsigned long)blockIdx.x;
+    unsigned long idx = group * AKH_Q8_GROUP + (unsigned long)lane;
+    if (idx >= in_dim) return;
+
+    float maximum = fabsf(x[idx]);
+    for (int off = AKH_GEMV_WARP / 2; off > 0; off >>= 1) {
+        maximum = fmaxf(maximum, __shfl_down(maximum, off));
+    }
+    maximum = __shfl(maximum, 0);
+    float scale = fmaxf(maximum / 127.0f, 1.0e-8f);
+    float rounded = roundf(x[idx] / scale);
+    rounded = fminf(127.0f, fmaxf(-127.0f, rounded));
+    q8[idx] = (signed char)rounded;
+    if (lane == 0) scales[group] = scale;
+}
+
+// gfx11 V_DOT4_I32_I8 consumes four packed bytes per instruction. Q4_K's
+// unsigned nibbles are all < 128 while the Q8 activation bytes are signed, so
+// the mixed-sign dot intrinsic exactly computes Σ(q4 * q8) for four elements.
+__device__ __forceinline__ int akh_sudot4(unsigned int q4, unsigned int q8, int acc) {
+    return __builtin_amdgcn_sudot4(true, (int)q4, true, (int)q8, acc, false);
+}
+
+__global__ void akh_gemv_q4k_q8_kernel(const unsigned char* __restrict__ W,
+                                        const signed char* __restrict__ xq,
+                                        const float* __restrict__ xd,
+                                        float* __restrict__ out,
+                                        unsigned long n_rows,
+                                        unsigned long in_dim) {
+    int lane = threadIdx.x & (AKH_GEMV_WARP - 1);
+    int warp = threadIdx.x / AKH_GEMV_WARP;
+    unsigned long row = (unsigned long)blockIdx.x * AKH_GEMV_WARPS + warp;
+    if (row >= n_rows) return;
+
+    unsigned long groups = in_dim / AKH_Q8_GROUP;
+    unsigned long bpr = in_dim / AKH_Q4K_QK;
+    const unsigned char* row_base = W + row * bpr * AKH_Q4K_BLOCK_BYTES;
+    float acc = 0.0f;
+    for (unsigned long chunk = 0; chunk * AKH_GEMV_WARP < groups; chunk++) {
+        unsigned long group = chunk * AKH_GEMV_WARP + (unsigned long)lane;
+        if (group >= groups) continue;
+        unsigned long sb = group / 8;
+        int subgroup = (int)(group & 7);
+        const unsigned char* b = row_base + sb * AKH_Q4K_BLOCK_BYTES;
+        const unsigned char* qs = b + 16 + (subgroup / 2) * 32;
+        const unsigned int* qw = reinterpret_cast<const unsigned int*>(qs);
+        const unsigned int* xw = reinterpret_cast<const unsigned int*>(xq + group * 32);
+
+        int dot = 0;
+        int qsum = 0;
+        #pragma unroll
+        for (int word = 0; word < 8; word++) {
+            unsigned int packed = qw[word];
+            unsigned int nibbles = subgroup & 1 ? (packed >> 4) : packed;
+            nibbles &= 0x0f0f0f0fU;
+            dot = akh_sudot4(nibbles, xw[word], dot);
+            qsum = akh_sudot4(0x01010101U, xw[word], qsum);
+        }
+
+        unsigned char sc, mn;
+        akh_q4k_scale_min(subgroup, b + 4, &sc, &mn);
+        float d = __half2float(*reinterpret_cast<const __half*>(b + 0));
+        float dmin = __half2float(*reinterpret_cast<const __half*>(b + 2));
+        acc += ((float)dot * d * (float)sc - (float)qsum * dmin * (float)mn) * xd[group];
+    }
+    for (int off = AKH_GEMV_WARP / 2; off > 0; off >>= 1) acc += __shfl_down(acc, off);
+    if (lane == 0) out[row] = acc;
+}
+
 __global__ void akh_gemv_q4k_f32_kernel(const unsigned char* __restrict__ W,
                                  const float* __restrict__ x, float* __restrict__ out,
                                  unsigned long n_rows, unsigned long in_dim) {
@@ -442,6 +522,24 @@ extern "C" {
 
 // Phase 46c: set the launch stream for this kernel library (null = default stream).
 void akh_set_stream(void* s) { g_akh_stream = (hipStream_t)s; }
+
+// Quantize one f32 activation to Q8 groups and consume it directly from the packed Q4_K
+// weights with gfx11 dp4a. `q8` holds in_dim bytes and `scales` in_dim/32 floats.
+int akh_gemv_q4k_q8(const unsigned char* W, const float* x, float* out,
+                    signed char* q8, float* scales, size_t n_rows, size_t in_dim) {
+    if (n_rows == 0) return 0;
+    if (in_dim == 0 || in_dim % AKH_Q4K_QK != 0) return -1;
+    unsigned groups = (unsigned)(in_dim / AKH_Q8_GROUP);
+    hipLaunchKernelGGL(akh_quantize_q8_f32_kernel, dim3(groups), dim3(AKH_Q8_GROUP), 0,
+                       g_akh_stream, x, q8, scales, (unsigned long)in_dim);
+    hipError_t rc = hipGetLastError();
+    if (rc != hipSuccess) return (int)rc;
+    unsigned grid = (unsigned)((n_rows + AKH_GEMV_WARPS - 1) / AKH_GEMV_WARPS);
+    hipLaunchKernelGGL(akh_gemv_q4k_q8_kernel, dim3(grid), dim3(AKH_GEMV_BLOCK), 0,
+                       g_akh_stream, W, q8, scales, out,
+                       (unsigned long)n_rows, (unsigned long)in_dim);
+    return (int)hipGetLastError();
+}
 
 // Fused Q4_K/Q6_K GEMV: out[n_rows] = W[n_rows,in_dim] · x[in_dim], no f32 temp.
 // One warp per output row, AKH_GEMV_WARPS rows per block.

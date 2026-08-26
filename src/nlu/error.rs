@@ -52,6 +52,16 @@ pub enum NluError {
     )]
     ModelLoadFailed { reason: String },
 
+    /// A valid GGUF belongs to an architecture whose Candle loader has not landed.
+    #[error("Candle does not yet support GGUF architecture {architecture:?}")]
+    #[diagnostic(
+        code(akh::nlu::candle_architecture_unsupported),
+        help(
+            "Keep this exact model on its Ollama/llama.cpp backing until the Qwen3.5/Qwen3.8 hybrid loader is implemented"
+        )
+    )]
+    CandleArchitectureUnsupported { architecture: String },
+
     /// The LLM could not produce valid structured output.
     #[error("LLM generation failed: {reason}")]
     #[diagnostic(

@@ -327,8 +327,11 @@ pub fn capture_snapshot_at_fence(
         known_curiosity_factor: c.known_curiosity_factor,
     }];
 
-    let goals: Vec<goal::Model> = agent
-        .goals
+    // Goal symbols are relational primary keys. Autonomous proposal sources
+    // can converge on the same semantic goal, so capture one canonical row
+    // per symbol even if a legacy/imported in-memory list contains repeats.
+    let unique_goals = unique_goals_by_symbol(&agent.goals);
+    let goals: Vec<goal::Model> = unique_goals
         .iter()
         .map(|g| goal_to_model(akh_id, g))
         .collect::<SnapshotResult<_>>()?;
@@ -336,9 +339,17 @@ pub fn capture_snapshot_at_fence(
     // dependency edges.
     let mut goal_hierarchy = Vec::new();
     let mut goal_dependencies = Vec::new();
-    for g in &agent.goals {
+    for g in unique_goals {
         let goal_id = relational_symbol_id("goal", g.symbol_id)?;
-        for (position, child) in g.children.iter().enumerate() {
+        let children = unique_symbol_ids(&g.children);
+        if children.len() != g.children.len() {
+            tracing::warn!(
+                goal_id = g.symbol_id.get(),
+                discarded = g.children.len() - children.len(),
+                "discarding repeated goal hierarchy edges before relational snapshot"
+            );
+        }
+        for (position, child) in children.iter().enumerate() {
             goal_hierarchy.push(goal_hierarchy::Model {
                 akh_id,
                 parent_id: goal_id,
@@ -348,11 +359,19 @@ pub fn capture_snapshot_at_fence(
                 })?,
             });
         }
-        for blocker in &g.blocked_by {
+        let blockers = unique_symbol_ids(&g.blocked_by);
+        if blockers.len() != g.blocked_by.len() {
+            tracing::warn!(
+                goal_id = g.symbol_id.get(),
+                discarded = g.blocked_by.len() - blockers.len(),
+                "discarding repeated goal dependency edges before relational snapshot"
+            );
+        }
+        for blocker in blockers {
             goal_dependencies.push(goal_dependency::Model {
                 akh_id,
                 goal_id,
-                blocking_goal_id: relational_symbol_id("blocking goal", *blocker)?,
+                blocking_goal_id: relational_symbol_id("blocking goal", blocker)?,
             });
         }
     }
@@ -549,6 +568,40 @@ pub fn capture_snapshot_at_fence(
         psyche,
         extra: Some(extra),
     })
+}
+
+fn unique_goals_by_symbol(goals: &[crate::agent::Goal]) -> Vec<&crate::agent::Goal> {
+    // Agent goal lookups use `.iter().find(...)`, so the first occurrence is
+    // already the live authority. Preserve that same deterministic policy at
+    // the relational boundary and make divergent repeats observable.
+    let mut positions = std::collections::HashMap::with_capacity(goals.len());
+    let mut unique = Vec::with_capacity(goals.len());
+    for candidate in goals {
+        if let Some(&position) = positions.get(&candidate.symbol_id) {
+            let canonical: &crate::agent::Goal = unique[position];
+            let conflicting = match (
+                serde_json::to_value(canonical),
+                serde_json::to_value(candidate),
+            ) {
+                (Ok(canonical), Ok(candidate)) => canonical != candidate,
+                _ => true,
+            };
+            tracing::warn!(
+                goal_id = candidate.symbol_id.get(),
+                conflicting,
+                "discarding repeated goal symbol before relational snapshot; first live entry is authoritative"
+            );
+        } else {
+            positions.insert(candidate.symbol_id, unique.len());
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+fn unique_symbol_ids(ids: &[crate::symbol::SymbolId]) -> Vec<crate::symbol::SymbolId> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
 }
 
 /// Persist a previously-[captured](capture_snapshot) snapshot to Postgres
@@ -899,12 +952,7 @@ pub async fn wake(
 
     // 6. Replay the WAL tail newer than the snapshot watermark. No sink is
     //    installed yet, so these mutations are applied but not re-logged.
-    let mut replayed = 0usize;
-    for m in &tail {
-        if apply_mutation(&engine, m)? {
-            replayed += 1;
-        }
-    }
+    let replayed = apply_mutation_tail(&engine, &tail)?;
     // Disk-backed compartments and skills may publish provenance-linked
     // triples.  Start them only after the restored ledger/allocator is live,
     // otherwise replacing the ledger above would immediately dangle their
@@ -2901,12 +2949,116 @@ fn prepare_assert_for_replay(
     Ok(triple)
 }
 
-/// Apply one replayed WAL mutation. Returns whether it was applied. Unknown
-/// future kinds are ignored, while malformed known KG mutations fail wake so
-/// corruption cannot silently drop a fact. Microtheory/compartment replay is
-/// deferred (38d). `kind="turn"` rows (ADR 091) are explicitly skipped — raw
-/// transcript-capture staging, never a KG mutation.
-fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
+type ReplayEdge = (SymbolId, SymbolId, SymbolId);
+
+enum FutureEdgeTouch {
+    Assert(Triple),
+    NonAssert,
+}
+
+#[derive(Default)]
+struct FutureTouchIndex {
+    by_edge: std::collections::HashMap<ReplayEdge, Vec<(usize, FutureEdgeTouch)>>,
+}
+
+impl FutureTouchIndex {
+    fn push(&mut self, edge: ReplayEdge, index: usize, touch: FutureEdgeTouch) {
+        self.by_edge.entry(edge).or_default().push((index, touch));
+    }
+
+    /// Return the first transition for `edge` after `index`. The vectors are
+    /// populated in WAL order, so lookup is logarithmic rather than rescanning
+    /// the remaining tail once for every edge in a retract batch.
+    fn first_after(&self, edge: ReplayEdge, index: usize) -> Option<&FutureEdgeTouch> {
+        let touches = self.by_edge.get(&edge)?;
+        let position = touches.partition_point(|(touch_index, _)| *touch_index <= index);
+        touches.get(position).map(|(_, touch)| touch)
+    }
+}
+
+/// Parse the ordered tail once and index every edge transition. This both
+/// bounds overlap lookup to O(log n) per mismatched edge and validates future
+/// known mutations before replay changes the graph.
+fn build_future_touch_index(
+    engine: &Engine,
+    tail: &[akhomed_store::TailMutation],
+) -> SnapshotResult<FutureTouchIndex> {
+    let mut touches = FutureTouchIndex::default();
+    for (index, mutation) in tail.iter().enumerate() {
+        match mutation.kind.as_str() {
+            "assert" => {
+                let triple = prepare_assert_for_replay(engine, &mutation.payload)?;
+                touches.push(
+                    (triple.subject, triple.predicate, triple.object),
+                    index,
+                    FutureEdgeTouch::Assert(triple),
+                );
+            }
+            "retract" => touches.push(
+                payload_triple_ids(&mutation.payload)?,
+                index,
+                FutureEdgeTouch::NonAssert,
+            ),
+            "retract_batch" => {
+                for triple in parse_replay_complete_retract_batch(&mutation.payload)?.1 {
+                    touches.push(
+                        (triple.subject, triple.predicate, triple.object),
+                        index,
+                        FutureEdgeTouch::NonAssert,
+                    );
+                }
+            }
+            "replace" => {
+                let replacement = parse_replay_complete_replace(&mutation.payload)?;
+                for retract in &replacement.retracts {
+                    touches.push(
+                        retract_triple_ids(retract)?,
+                        index,
+                        FutureEdgeTouch::NonAssert,
+                    );
+                }
+                // Compound replacement semantics are deliberately not
+                // weakened, even if its assertion is byte-equivalent.
+                touches.push(
+                    payload_triple_ids(&replacement.assertion)?,
+                    index,
+                    FutureEdgeTouch::NonAssert,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(touches)
+}
+
+/// Decide whether a mismatched retract is a safe snapshot/WAL overlap. The
+/// first later mutation touching the same edge must be an exact assertion of
+/// the edge already present in the snapshot; any other transition keeps the
+/// fail-closed mismatch behavior.
+fn later_assertion_matches_snapshot_edge(
+    actual: &Triple,
+    index: usize,
+    future_touches: &FutureTouchIndex,
+) -> bool {
+    matches!(
+        future_touches.first_after(
+            (actual.subject, actual.predicate, actual.object),
+            index,
+        ),
+        Some(FutureEdgeTouch::Assert(assertion)) if assertion == actual
+    )
+}
+
+/// Apply one replayed WAL mutation with its ordered future visible for the
+/// narrow snapshot-overlap reconciliation above. Unknown future kinds are
+/// ignored, while malformed known KG mutations fail wake so corruption cannot
+/// silently drop a fact. Microtheory/compartment replay is deferred (38d).
+fn apply_mutation_with_future(
+    engine: &Engine,
+    m: &akhomed_store::TailMutation,
+    index: usize,
+    future_touches: &FutureTouchIndex,
+) -> SnapshotResult<bool> {
     match m.kind.as_str() {
         "assert" => {
             let triple = prepare_assert_for_replay(engine, &m.payload)?;
@@ -2928,6 +3080,7 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
             // edge. `prepare_tail_restore` has already merged the closed symbol
             // envelope into the registry, so every reference must resolve.
             let (_, retracts, _, _) = parse_replay_complete_retract_batch(&m.payload)?;
+            let mut snapshot_overlap = std::collections::HashSet::new();
             for triple in &retracts {
                 validate_replay_symbols_registered(
                     engine,
@@ -2957,18 +3110,41 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
                 if let Some(actual) = actual
                     && actual != *triple
                 {
-                    return Err(invalid_tail(format!(
-                        "retract batch edge ({}, {}, {}) metadata does not match replay state",
-                        triple.subject.get(),
-                        triple.predicate.get(),
-                        triple.object.get()
-                    )));
+                    if later_assertion_matches_snapshot_edge(&actual, index, future_touches) {
+                        snapshot_overlap.insert((
+                            triple.subject,
+                            triple.predicate,
+                            triple.object,
+                        ));
+                    } else {
+                        return Err(invalid_tail(format!(
+                            "retract batch edge ({}, {}, {}) metadata does not match replay state",
+                            triple.subject.get(),
+                            triple.predicate.get(),
+                            triple.object.get()
+                        )));
+                    }
                 }
             }
             for triple in &retracts {
+                if snapshot_overlap.contains(&(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                )) {
+                    continue;
+                }
                 engine
                     .replay_retract_edge_exact(triple)
                     .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            }
+            for (subject, predicate, object) in snapshot_overlap {
+                tracing::info!(
+                    subject = subject.get(),
+                    predicate = predicate.get(),
+                    object = object.get(),
+                    "wake: reconciled snapshot/WAL overlap before matching assertion"
+                );
             }
             Ok(true)
         }
@@ -3002,6 +3178,28 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
         "turn" | "symbol_merge" => Ok(false),
         _ => Ok(false),
     }
+}
+
+/// Strict single-record replay used by focused tests and callers without an
+/// ordered tail. No future means metadata mismatches still fail closed.
+#[cfg(test)]
+fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
+    apply_mutation_with_future(engine, m, 0, &FutureTouchIndex::default())
+}
+
+/// Replay one ordered tail, exposing only later records to each transition.
+fn apply_mutation_tail(
+    engine: &Engine,
+    tail: &[akhomed_store::TailMutation],
+) -> SnapshotResult<usize> {
+    let future_touches = build_future_touch_index(engine, tail)?;
+    let mut replayed = 0;
+    for (index, mutation) in tail.iter().enumerate() {
+        if apply_mutation_with_future(engine, mutation, index, &future_touches)? {
+            replayed += 1;
+        }
+    }
+    Ok(replayed)
 }
 
 #[cfg(test)]
@@ -3192,6 +3390,36 @@ mod tests {
             back[0].blocked_by,
             vec![SymbolId::new(4).unwrap()],
             "blocked_by reconstructed from goal_dependencies",
+        );
+
+        let mut duplicate = goal.clone();
+        duplicate.status = GoalStatus::Dormant;
+        duplicate.children.push(SymbolId::new(10).unwrap());
+        let repeated = [goal, duplicate];
+        let unique = unique_goals_by_symbol(&repeated);
+        assert_eq!(
+            unique.len(),
+            1,
+            "relational goal primary keys must be unique"
+        );
+        assert_eq!(unique[0].symbol_id, SymbolId::new(7).unwrap());
+        assert!(matches!(unique[0].status, GoalStatus::Failed { .. }));
+        assert_eq!(
+            unique[0].children,
+            vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            "first live entry is the deterministic authority"
+        );
+
+        let repeated_edges = [
+            SymbolId::new(8).unwrap(),
+            SymbolId::new(8).unwrap(),
+            SymbolId::new(9).unwrap(),
+            SymbolId::new(8).unwrap(),
+        ];
+        assert_eq!(
+            unique_symbol_ids(&repeated_edges),
+            vec![SymbolId::new(8).unwrap(), SymbolId::new(9).unwrap()],
+            "relational edges retain first-seen order with unique primary keys"
         );
     }
 
@@ -4480,6 +4708,128 @@ triples_file = "triples.json"
         assert!(apply_mutation(&engine, &mutation).is_err());
         assert!(engine.has_triple(subject, predicate, first_object));
         assert!(engine.has_triple(subject, predicate, second_object));
+    }
+
+    #[test]
+    fn snapshot_overlap_skips_stale_retract_when_later_assert_matches_image() {
+        let live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = live
+            .create_symbol(SymbolKind::Entity, "overlap-subject")
+            .unwrap()
+            .id;
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "overlap-predicate")
+            .unwrap()
+            .id;
+        let object = live
+            .create_symbol(SymbolKind::Entity, "overlap-object")
+            .unwrap()
+            .id;
+        let mut old = Triple::new(subject, predicate, object);
+        old.timestamp = 10;
+        live.add_triple(&old).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
+        live.remove_triple(subject, predicate, object).unwrap();
+        let mut newer = Triple::new(subject, predicate, object);
+        newer.timestamp = 20;
+        live.add_triple(&newer).unwrap();
+        let captured = live.all_triples();
+        let mut tail = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| akhomed_store::TailMutation {
+                kind: record.kind.as_str().into(),
+                payload: record.payload.clone(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].kind, "retract_batch");
+        assert_eq!(tail[1].kind, "assert");
+        tail.insert(
+            1,
+            akhomed_store::TailMutation {
+                kind: "turn".into(),
+                payload: serde_json::json!({"unrelated": true}),
+            },
+        );
+
+        let restored_replay = || {
+            let replay = Engine::new(EngineConfig {
+                dimension: crate::vsa::Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap();
+            for (kind, label) in [
+                (SymbolKind::Entity, "overlap-subject"),
+                (SymbolKind::Relation, "overlap-predicate"),
+                (SymbolKind::Entity, "overlap-object"),
+            ] {
+                replay.create_symbol(kind, label).unwrap();
+            }
+            replay.restore_triples(&captured).unwrap();
+            replay
+        };
+
+        let replay = restored_replay();
+        let replayed = apply_mutation_tail(&replay, &tail).unwrap();
+        assert_eq!(replayed, 2);
+        assert_eq!(replay.all_triples(), captured);
+
+        let mut non_matching_tail = tail.clone();
+        non_matching_tail[2].payload["timestamp"] = serde_json::json!(21);
+        let rejected = restored_replay();
+        assert!(apply_mutation_tail(&rejected, &non_matching_tail).is_err());
+        assert_eq!(rejected.all_triples(), captured);
+
+        let direct_retract = akhomed_store::TailMutation {
+            kind: "retract".into(),
+            payload: serde_json::json!({
+                "subject": subject.get(),
+                "predicate": predicate.get(),
+                "object": object.get(),
+            }),
+        };
+        let repeated_batch = tail[0].clone();
+        let replacement = akhomed_store::TailMutation {
+            kind: "replace".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::REPLACE_MUTATION_VERSION,
+                "retracts": [{
+                    "subject": subject.get(),
+                    "predicate": predicate.get(),
+                    "object": object.get(),
+                }],
+                "assertion": tail[2].payload.clone(),
+            }),
+        };
+        for (name, first_same_edge_touch) in [
+            ("retract", direct_retract),
+            ("retract_batch", repeated_batch),
+            ("replace", replacement),
+        ] {
+            let rejected = restored_replay();
+            let guarded_tail = vec![
+                tail[0].clone(),
+                first_same_edge_touch,
+                tail[2].clone(),
+            ];
+            assert!(
+                apply_mutation_tail(&rejected, &guarded_tail).is_err(),
+                "first same-edge {name} must fail closed"
+            );
+            assert_eq!(rejected.all_triples(), captured, "{name} changed graph");
+        }
     }
 
     #[test]

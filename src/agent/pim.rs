@@ -1279,19 +1279,58 @@ impl PimManager {
             .collect();
 
         for (old_id, recurrence, description) in completed_recurring {
-            let next_due = recurrence.next_occurrence(now);
+            // Persist a stable completion anchor before creating the next
+            // instance. Retries after a partial failure must derive the same
+            // identity instead of minting another goal from a later wall clock.
+            let completion_anchor = self
+                .metadata
+                .get(&old_id)
+                .and_then(|meta| meta.last_completed)
+                .unwrap_or(now);
+            if self
+                .metadata
+                .get(&old_id)
+                .is_some_and(|meta| meta.last_completed.is_none())
+            {
+                let old_symbol = SymbolId::new(old_id).ok_or(PimError::TaskNotFound {
+                    goal_id: old_id,
+                })?;
+                self.metadata.get_mut(&old_id).unwrap().last_completed =
+                    Some(completion_anchor);
+                let snapshot = self.metadata[&old_id].clone();
+                self.sync_to_kg(engine, old_symbol, &snapshot)?;
+                self.persist(engine)?;
+            }
+            let next_due = recurrence.next_occurrence(completion_anchor);
 
             // Create a new goal for the next occurrence.
             let criteria = format!("{description} completed");
-            let new_goal =
-                super::goal::create_goal(engine, &description, 128, &criteria, agent_predicates)
-                    .map_err(|e| PimError::Engine(Box::new(
-                        crate::error::AkhError::Store(crate::error::StoreError::Serialization {
-                            message: format!("goal creation failed: {e}"),
-                        }),
-                    )))?;
-            let new_sym = new_goal.symbol_id;
-            goals.push(new_goal);
+            let identity = format!("recurrence:{old_id}:{next_due}");
+            let identity_label = super::goal::canonical_goal_label(&identity);
+            let existing_symbol = engine
+                .lookup_symbol(&identity_label)
+                .ok()
+                .filter(|symbol| goals.iter().any(|goal| goal.symbol_id == *symbol));
+            let new_sym = if let Some(symbol) = existing_symbol {
+                symbol
+            } else {
+                let new_goal = super::goal::create_goal_with_identity(
+                    engine,
+                    &description,
+                    &identity,
+                    128,
+                    &criteria,
+                    agent_predicates,
+                )
+                .map_err(|e| PimError::Engine(Box::new(
+                    crate::error::AkhError::Store(crate::error::StoreError::Serialization {
+                        message: format!("goal creation failed: {e}"),
+                    }),
+                )))?;
+                let symbol = new_goal.symbol_id;
+                super::goal::insert_if_novel(goals, new_goal);
+                symbol
+            };
 
             // Add PIM metadata for the new occurrence.
             self.add_task(engine, new_sym, GtdState::Next, 0.5, 0.5)?;
@@ -2113,6 +2152,51 @@ mod tests {
         assert!(pim
             .transition_gtd(&engine, goal.symbol_id, GtdState::Inbox)
             .is_err());
+    }
+
+    #[test]
+    fn recurring_completion_creates_one_stable_instance() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(crate::engine::EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            data_dir: Some(data_dir.path().join("kg")),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut pim = PimManager::new(&engine).unwrap();
+        let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
+        let goal = super::super::goal::create_goal(
+            &engine,
+            "review queue",
+            128,
+            "review complete",
+            &agent_preds,
+        )
+        .unwrap();
+        let old_id = goal.symbol_id;
+        let mut goals = vec![goal];
+        pim.add_task(&engine, old_id, GtdState::Next, 0.5, 0.5)
+            .unwrap();
+        pim.set_recurrence(&engine, old_id, Recurrence::Daily)
+            .unwrap();
+        pim.transition_gtd(&engine, old_id, GtdState::Done)
+            .unwrap();
+        pim.persist(&engine).unwrap();
+
+        let created = pim
+            .process_recurring_completions(&engine, &mut goals, &agent_preds)
+            .unwrap();
+        let mut restored = PimManager::restore(&engine).unwrap();
+        let retry = restored
+            .process_recurring_completions(&engine, &mut goals, &agent_preds)
+            .unwrap();
+
+        assert_eq!(created.len(), 1);
+        assert_eq!(retry, created, "restored retry must reuse the same instance");
+        assert_eq!(goals.len(), 2);
+        assert_ne!(created[0], old_id);
+        assert_eq!(goals[1].description, "review queue");
+        assert!(engine.resolve_label(created[0]).starts_with("goal:recurrence:"));
     }
 
     #[test]
