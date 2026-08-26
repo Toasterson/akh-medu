@@ -899,9 +899,11 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
     ensure_akh(&db, foreign_akh_id, "wi-338-shared-fact-writer", None)
         .await
         .unwrap();
-    // This post-watermark legacy record predates the merge audit which repair
-    // appends. The first wake after repair must translate its losing ID rather
-    // than rejecting it before a fresh snapshot can be published.
+    // This replay-complete post-watermark record predates the merge audit which
+    // repair appends. It deliberately encloses the soon-to-be-deleted symbol,
+    // so the first wake after repair must canonicalize both the triple and its
+    // metadata before fail-closed tail validation, without waiting for a fresh
+    // snapshot to be published.
     append_mutations(
         &db,
         akh_id,
@@ -909,11 +911,16 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
         &[MutationRow {
             kind: "assert".into(),
             payload: serde_json::json!({
+                "v": akh_medu::mutation::ASSERT_MUTATION_VERSION,
                 "subject": duplicate_id,
                 "predicate": predicate_id,
                 "object": object.id.get(),
                 "confidence": 0.95,
+                "timestamp": 42,
                 "compartment": null,
+                "provenance_id": null,
+                "provenance": null,
+                "symbols": [duplicate.clone(), predicate.clone(), object.clone()],
             }),
         }],
     )
