@@ -951,12 +951,7 @@ pub async fn wake(
 
     // 6. Replay the WAL tail newer than the snapshot watermark. No sink is
     //    installed yet, so these mutations are applied but not re-logged.
-    let mut replayed = 0usize;
-    for m in &tail {
-        if apply_mutation(&engine, m)? {
-            replayed += 1;
-        }
-    }
+    let replayed = apply_mutation_tail(&engine, &tail)?;
     // Disk-backed compartments and skills may publish provenance-linked
     // triples.  Start them only after the restored ledger/allocator is live,
     // otherwise replacing the ledger above would immediately dangle their
@@ -2405,12 +2400,116 @@ fn prepare_assert_for_replay(
     Ok(triple)
 }
 
-/// Apply one replayed WAL mutation. Returns whether it was applied. Unknown
-/// future kinds are ignored, while malformed known KG mutations fail wake so
-/// corruption cannot silently drop a fact. Microtheory/compartment replay is
-/// deferred (38d). `kind="turn"` rows (ADR 091) are explicitly skipped — raw
-/// transcript-capture staging, never a KG mutation.
-fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
+type ReplayEdge = (SymbolId, SymbolId, SymbolId);
+
+enum FutureEdgeTouch {
+    Assert(Triple),
+    NonAssert,
+}
+
+#[derive(Default)]
+struct FutureTouchIndex {
+    by_edge: std::collections::HashMap<ReplayEdge, Vec<(usize, FutureEdgeTouch)>>,
+}
+
+impl FutureTouchIndex {
+    fn push(&mut self, edge: ReplayEdge, index: usize, touch: FutureEdgeTouch) {
+        self.by_edge.entry(edge).or_default().push((index, touch));
+    }
+
+    /// Return the first transition for `edge` after `index`. The vectors are
+    /// populated in WAL order, so lookup is logarithmic rather than rescanning
+    /// the remaining tail once for every edge in a retract batch.
+    fn first_after(&self, edge: ReplayEdge, index: usize) -> Option<&FutureEdgeTouch> {
+        let touches = self.by_edge.get(&edge)?;
+        let position = touches.partition_point(|(touch_index, _)| *touch_index <= index);
+        touches.get(position).map(|(_, touch)| touch)
+    }
+}
+
+/// Parse the ordered tail once and index every edge transition. This both
+/// bounds overlap lookup to O(log n) per mismatched edge and validates future
+/// known mutations before replay changes the graph.
+fn build_future_touch_index(
+    engine: &Engine,
+    tail: &[akhomed_store::TailMutation],
+) -> SnapshotResult<FutureTouchIndex> {
+    let mut touches = FutureTouchIndex::default();
+    for (index, mutation) in tail.iter().enumerate() {
+        match mutation.kind.as_str() {
+            "assert" => {
+                let triple = prepare_assert_for_replay(engine, &mutation.payload)?;
+                touches.push(
+                    (triple.subject, triple.predicate, triple.object),
+                    index,
+                    FutureEdgeTouch::Assert(triple),
+                );
+            }
+            "retract" => touches.push(
+                payload_triple_ids(&mutation.payload)?,
+                index,
+                FutureEdgeTouch::NonAssert,
+            ),
+            "retract_batch" => {
+                for triple in parse_replay_complete_retract_batch(&mutation.payload)?.1 {
+                    touches.push(
+                        (triple.subject, triple.predicate, triple.object),
+                        index,
+                        FutureEdgeTouch::NonAssert,
+                    );
+                }
+            }
+            "replace" => {
+                let replacement = parse_replay_complete_replace(&mutation.payload)?;
+                for retract in &replacement.retracts {
+                    touches.push(
+                        retract_triple_ids(retract)?,
+                        index,
+                        FutureEdgeTouch::NonAssert,
+                    );
+                }
+                // Compound replacement semantics are deliberately not
+                // weakened, even if its assertion is byte-equivalent.
+                touches.push(
+                    payload_triple_ids(&replacement.assertion)?,
+                    index,
+                    FutureEdgeTouch::NonAssert,
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(touches)
+}
+
+/// Decide whether a mismatched retract is a safe snapshot/WAL overlap. The
+/// first later mutation touching the same edge must be an exact assertion of
+/// the edge already present in the snapshot; any other transition keeps the
+/// fail-closed mismatch behavior.
+fn later_assertion_matches_snapshot_edge(
+    actual: &Triple,
+    index: usize,
+    future_touches: &FutureTouchIndex,
+) -> bool {
+    matches!(
+        future_touches.first_after(
+            (actual.subject, actual.predicate, actual.object),
+            index,
+        ),
+        Some(FutureEdgeTouch::Assert(assertion)) if assertion == actual
+    )
+}
+
+/// Apply one replayed WAL mutation with its ordered future visible for the
+/// narrow snapshot-overlap reconciliation above. Unknown future kinds are
+/// ignored, while malformed known KG mutations fail wake so corruption cannot
+/// silently drop a fact. Microtheory/compartment replay is deferred (38d).
+fn apply_mutation_with_future(
+    engine: &Engine,
+    m: &akhomed_store::TailMutation,
+    index: usize,
+    future_touches: &FutureTouchIndex,
+) -> SnapshotResult<bool> {
     match m.kind.as_str() {
         "assert" => {
             let triple = prepare_assert_for_replay(engine, &m.payload)?;
@@ -2432,6 +2531,7 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
             // edge. `prepare_tail_restore` has already merged the closed symbol
             // envelope into the registry, so every reference must resolve.
             let (_, retracts, _, _) = parse_replay_complete_retract_batch(&m.payload)?;
+            let mut snapshot_overlap = std::collections::HashSet::new();
             for triple in &retracts {
                 validate_replay_symbols_registered(
                     engine,
@@ -2461,18 +2561,41 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
                 if let Some(actual) = actual
                     && actual != *triple
                 {
-                    return Err(invalid_tail(format!(
-                        "retract batch edge ({}, {}, {}) metadata does not match replay state",
-                        triple.subject.get(),
-                        triple.predicate.get(),
-                        triple.object.get()
-                    )));
+                    if later_assertion_matches_snapshot_edge(&actual, index, future_touches) {
+                        snapshot_overlap.insert((
+                            triple.subject,
+                            triple.predicate,
+                            triple.object,
+                        ));
+                    } else {
+                        return Err(invalid_tail(format!(
+                            "retract batch edge ({}, {}, {}) metadata does not match replay state",
+                            triple.subject.get(),
+                            triple.predicate.get(),
+                            triple.object.get()
+                        )));
+                    }
                 }
             }
             for triple in &retracts {
+                if snapshot_overlap.contains(&(
+                    triple.subject,
+                    triple.predicate,
+                    triple.object,
+                )) {
+                    continue;
+                }
                 engine
                     .replay_retract_edge_exact(triple)
                     .map_err(|error| SnapshotError::Engine(error.to_string()))?;
+            }
+            for (subject, predicate, object) in snapshot_overlap {
+                tracing::info!(
+                    subject = subject.get(),
+                    predicate = predicate.get(),
+                    object = object.get(),
+                    "wake: reconciled snapshot/WAL overlap before matching assertion"
+                );
             }
             Ok(true)
         }
@@ -2506,6 +2629,28 @@ fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotR
         "turn" => Ok(false),
         _ => Ok(false),
     }
+}
+
+/// Strict single-record replay used by focused tests and callers without an
+/// ordered tail. No future means metadata mismatches still fail closed.
+#[cfg(test)]
+fn apply_mutation(engine: &Engine, m: &akhomed_store::TailMutation) -> SnapshotResult<bool> {
+    apply_mutation_with_future(engine, m, 0, &FutureTouchIndex::default())
+}
+
+/// Replay one ordered tail, exposing only later records to each transition.
+fn apply_mutation_tail(
+    engine: &Engine,
+    tail: &[akhomed_store::TailMutation],
+) -> SnapshotResult<usize> {
+    let future_touches = build_future_touch_index(engine, tail)?;
+    let mut replayed = 0;
+    for (index, mutation) in tail.iter().enumerate() {
+        if apply_mutation_with_future(engine, mutation, index, &future_touches)? {
+            replayed += 1;
+        }
+    }
+    Ok(replayed)
 }
 
 #[cfg(test)]
@@ -3926,6 +4071,128 @@ triples_file = "triples.json"
         assert!(apply_mutation(&engine, &mutation).is_err());
         assert!(engine.has_triple(subject, predicate, first_object));
         assert!(engine.has_triple(subject, predicate, second_object));
+    }
+
+    #[test]
+    fn snapshot_overlap_skips_stale_retract_when_later_assert_matches_image() {
+        let live = Engine::new(EngineConfig {
+            dimension: crate::vsa::Dimension::TEST,
+            ..Default::default()
+        })
+        .unwrap();
+        let subject = live
+            .create_symbol(SymbolKind::Entity, "overlap-subject")
+            .unwrap()
+            .id;
+        let predicate = live
+            .create_symbol(SymbolKind::Relation, "overlap-predicate")
+            .unwrap()
+            .id;
+        let object = live
+            .create_symbol(SymbolKind::Entity, "overlap-object")
+            .unwrap()
+            .id;
+        let mut old = Triple::new(subject, predicate, object);
+        old.timestamp = 10;
+        live.add_triple(&old).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
+        live.remove_triple(subject, predicate, object).unwrap();
+        let mut newer = Triple::new(subject, predicate, object);
+        newer.timestamp = 20;
+        live.add_triple(&newer).unwrap();
+        let captured = live.all_triples();
+        let mut tail = sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|record| akhomed_store::TailMutation {
+                kind: record.kind.as_str().into(),
+                payload: record.payload.clone(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].kind, "retract_batch");
+        assert_eq!(tail[1].kind, "assert");
+        tail.insert(
+            1,
+            akhomed_store::TailMutation {
+                kind: "turn".into(),
+                payload: serde_json::json!({"unrelated": true}),
+            },
+        );
+
+        let restored_replay = || {
+            let replay = Engine::new(EngineConfig {
+                dimension: crate::vsa::Dimension::TEST,
+                ..Default::default()
+            })
+            .unwrap();
+            for (kind, label) in [
+                (SymbolKind::Entity, "overlap-subject"),
+                (SymbolKind::Relation, "overlap-predicate"),
+                (SymbolKind::Entity, "overlap-object"),
+            ] {
+                replay.create_symbol(kind, label).unwrap();
+            }
+            replay.restore_triples(&captured).unwrap();
+            replay
+        };
+
+        let replay = restored_replay();
+        let replayed = apply_mutation_tail(&replay, &tail).unwrap();
+        assert_eq!(replayed, 2);
+        assert_eq!(replay.all_triples(), captured);
+
+        let mut non_matching_tail = tail.clone();
+        non_matching_tail[2].payload["timestamp"] = serde_json::json!(21);
+        let rejected = restored_replay();
+        assert!(apply_mutation_tail(&rejected, &non_matching_tail).is_err());
+        assert_eq!(rejected.all_triples(), captured);
+
+        let direct_retract = akhomed_store::TailMutation {
+            kind: "retract".into(),
+            payload: serde_json::json!({
+                "subject": subject.get(),
+                "predicate": predicate.get(),
+                "object": object.get(),
+            }),
+        };
+        let repeated_batch = tail[0].clone();
+        let replacement = akhomed_store::TailMutation {
+            kind: "replace".into(),
+            payload: serde_json::json!({
+                "v": crate::mutation::REPLACE_MUTATION_VERSION,
+                "retracts": [{
+                    "subject": subject.get(),
+                    "predicate": predicate.get(),
+                    "object": object.get(),
+                }],
+                "assertion": tail[2].payload.clone(),
+            }),
+        };
+        for (name, first_same_edge_touch) in [
+            ("retract", direct_retract),
+            ("retract_batch", repeated_batch),
+            ("replace", replacement),
+        ] {
+            let rejected = restored_replay();
+            let guarded_tail = vec![
+                tail[0].clone(),
+                first_same_edge_touch,
+                tail[2].clone(),
+            ];
+            assert!(
+                apply_mutation_tail(&rejected, &guarded_tail).is_err(),
+                "first same-edge {name} must fail closed"
+            );
+            assert_eq!(rejected.all_triples(), captured, "{name} changed graph");
+        }
     }
 
     #[test]

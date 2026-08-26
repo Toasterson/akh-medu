@@ -1,7 +1,7 @@
 # ADR 049 — Relocatable Session-Based Akh: Postgres-backed truth with in-process cache
 
 > Date: 2026-04-25
-> Status: Accepted — 38a–38c implemented (see **Amendment 2026-06-20** for the as-built revisions to the schema sketch below)
+> Status: Accepted — 38a–38c implemented (see **Amendments 2026-06-20 and 2026-08-26** for as-built revisions)
 > Phase: 38
 > Depends on: Phase 14 (identity, provenance), Phase 17 (evidence intervals),
 >             ADR-047 (Seshat / Postgres precedent), ADR-029 (MCP server)
@@ -376,6 +376,22 @@ Auto boot-from-Postgres (38e), workspaces-as-rows (38f), and the split-brain
 advisory lock / cross-host harness (38g) remain as originally planned.
 
 ## Resolutions log
+
+### 2026-08-26 (snapshot/WAL overlap reconciliation)
+
+- **Captured images may outrun WAL flush.** Snapshot capture samples the durable
+  pre-capture watermark, while its in-memory graph can already contain a
+  retract-then-reassert pair still buffered for PostgreSQL. Replay must therefore
+  tolerate the snapshot already representing the pair's final assertion.
+- **The exception is narrow and ordered.** A retract-batch metadata mismatch is
+  skipped only when the first later tail mutation touching that exact edge is a
+  replay-complete assertion byte-equivalent at the typed `Triple` level to the
+  edge in the snapshot. A missing/different assertion, intervening retract, batch,
+  or compound replacement still fails wake before removing anything.
+- **Postgres truth is not rewritten.** Recovery reconciles the overlap in memory
+  and replays the remaining tail normally. The daemon's next periodic or
+  operator-requested fenced snapshot publishes the reconstructed state. The
+  historical WAL remains intact for audit.
 
 ### 2026-06-20 (38c as-built)
 
