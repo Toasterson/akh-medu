@@ -89,15 +89,26 @@ fn extract_segments(body: &str) -> SeshatResult<Vec<TranscriptSegment>> {
             ))
         })?;
 
-        let event_type = event.get("type").and_then(Value::as_str);
-        let message = event.get("message").filter(|value| value.is_object());
+        // Codex rollout JSONL wraps model messages and tool outputs in a
+        // `response_item` envelope. Claude-style transcripts put those fields
+        // directly on the event. Normalize both shapes before extracting text.
+        let record = if event.get("type").and_then(Value::as_str) == Some("response_item") {
+            event
+                .get("payload")
+                .filter(|value| value.is_object())
+                .unwrap_or(&event)
+        } else {
+            &event
+        };
+        let event_type = record.get("type").and_then(Value::as_str);
+        let message = record.get("message").filter(|value| value.is_object());
         let role = message
             .and_then(|value| value.get("role"))
-            .or_else(|| event.get("role"))
+            .or_else(|| record.get("role"))
             .and_then(Value::as_str);
         let content = message
             .and_then(|value| value.get("content"))
-            .or_else(|| event.get("content"));
+            .or_else(|| record.get("content"));
 
         if event_type == Some("assistant") || role == Some("assistant") {
             if let Some(text) = assistant_text(content) {
@@ -121,10 +132,14 @@ fn extract_segments(body: &str) -> SeshatResult<Vec<TranscriptSegment>> {
             }
         }
 
-        if matches!(event_type, Some("tool_result" | "tool-result"))
-            || matches!(role, Some("tool" | "tool_result"))
+        if matches!(
+            event_type,
+            Some(
+                "tool_result" | "tool-result" | "function_call_output" | "custom_tool_call_output"
+            )
+        ) || matches!(role, Some("tool" | "tool_result"))
         {
-            if let Some(text) = content_text(content) {
+            if let Some(text) = content_text(content.or_else(|| record.get("output"))) {
                 push_segment(&mut segments, SegmentKind::ToolResult, text);
             }
         }
@@ -146,16 +161,8 @@ fn push_segment(segments: &mut Vec<TranscriptSegment>, kind: SegmentKind, text: 
 fn assistant_text(content: Option<&Value>) -> Option<String> {
     match content? {
         Value::String(text) => useful_text(text),
-        Value::Array(blocks) => joined_text(blocks.iter().filter_map(|block| {
-            if matches!(
-                block.get("type").and_then(Value::as_str),
-                Some("text" | "output_text")
-            ) {
-                block.get("text").and_then(Value::as_str)
-            } else {
-                None
-            }
-        })),
+        value @ Value::Object(_) => text_block(value).and_then(useful_text),
+        Value::Array(blocks) => joined_text(blocks.iter().filter_map(|block| text_block(block))),
         _ => None,
     }
 }
@@ -163,16 +170,21 @@ fn assistant_text(content: Option<&Value>) -> Option<String> {
 fn content_text(content: Option<&Value>) -> Option<String> {
     match content? {
         Value::String(text) => useful_text(text),
-        Value::Array(blocks) => joined_text(blocks.iter().filter_map(|block| match block {
-            Value::String(text) => Some(text.as_str()),
-            Value::Object(_) => block.get("text").and_then(Value::as_str).filter(|_| {
-                block
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .is_none_or(|kind| matches!(kind, "text" | "output_text"))
-            }),
-            _ => None,
-        })),
+        value @ Value::Object(_) => text_block(value).and_then(useful_text),
+        Value::Array(blocks) => joined_text(blocks.iter().filter_map(text_block)),
+        _ => None,
+    }
+}
+
+fn text_block(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) => Some(text),
+        Value::Object(_) => value.get("text").and_then(Value::as_str).filter(|_| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .is_none_or(|kind| matches!(kind, "text" | "output_text"))
+        }),
         _ => None,
     }
 }
@@ -301,5 +313,33 @@ mod tests {
             .expect("direct tool result should ingest");
         assert_eq!(chunks[0].text, "direct output");
         assert_eq!(chunks[0].heading.as_deref(), Some("Tool result"));
+    }
+
+    #[test]
+    fn accepts_codex_response_item_envelopes_without_indexing_calls() {
+        let body = concat!(
+            r#"{"timestamp":"2026-08-26T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex implementation summary."}]}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-26T00:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo test -p seshat\"}"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-08-26T00:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_01","output":"test result: ok"}}"#,
+            "\n"
+        );
+
+        let chunks = chunk_agent_session_transcript(body, 1500, &[], &serde_json::json!({}))
+            .expect("Codex rollout events should ingest");
+        let text = chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(chunks.len(), 2);
+        assert!(text.contains("Codex implementation summary."));
+        assert!(text.contains("test result: ok"));
+        assert!(!text.contains("exec_command"));
+        assert!(!text.contains("cargo test -p seshat"));
+        assert!(!text.contains("call_01"));
+        assert!(!text.contains("timestamp"));
     }
 }
