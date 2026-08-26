@@ -7,6 +7,8 @@
 //! - `initialize` → advertise capabilities, echo the protocol version, report
 //!   agent name/version.
 //! - `session/new` → mint a fresh session id (a handle for one workspace).
+//! - `session/load` → reattach a client to a retained session's exact
+//!   per-session cognitive and neural conversation state.
 //! - `session/prompt` → run [`ChatProcessor::process_input`] under the ADR-027
 //!   discipline (lock the agent inside [`tokio::task::spawn_blocking`], never
 //!   across an `.await`), then stream each structured [`AkhMessage`] back as a
@@ -14,6 +16,17 @@
 //!   introspective content → `AgentThoughtChunk`), and respond
 //!   [`StopReason::EndTurn`].
 //! - Everything else falls through to the crate's default handler.
+//!
+//! # Session retention boundary
+//!
+//! ACP sessions are retained in memory for the lifetime of the daemon and are
+//! bounded by [`MAX_TRACKED_SESSIONS`]. `session/load` succeeds only while the
+//! requested id and all of its isolated state are still present. LRU eviction
+//! or a daemon restart makes the id unavailable; the handler returns a clean
+//! invalid-params error so the client can deliberately fall back to
+//! `session/new`. Transcripts are not serialized to disk: persisting them would
+//! also require a credential-safe design for the session's MCP configuration,
+//! which is outside WI-337's live-daemon resume boundary.
 //!
 //! # Transport
 //!
@@ -46,8 +59,8 @@ use tracing::Instrument;
 
 use agent_client_protocol::schema::{
     AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
-    InitializeRequest, InitializeResponse, McpCapabilities, Meta, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    McpCapabilities, Meta, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
     ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::util::{json_cast, MatchDispatch};
@@ -847,6 +860,60 @@ impl AkhAcpAgent {
                 session_id.to_string(),
                 Arc::new(Mutex::new(ConversationState::new(session_id, "narrative"))),
             );
+        order.push_back(session_id.to_string());
+        Ok(())
+    }
+
+    /// Reattach to a retained session without recreating any of its state.
+    ///
+    /// The access-order queue remains the canonical registry, exactly as it is
+    /// for prompt checkout. Holding it while checking every required backing
+    /// map makes load atomic with session creation and eviction: callers either
+    /// get the complete, original session or fail closed. A successful load
+    /// touches the id so a corrective dispatch counts as recent use in the
+    /// bounded LRU.
+    fn load_retained_session(&self, session_id: &str) -> Result<(), SessionAccessError> {
+        let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(pos) = order.iter().position(|tracked| tracked == session_id) else {
+            return Err(SessionAccessError::Unknown);
+        };
+
+        let has_workspace = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id);
+        let has_dispatch_mode = self
+            .session_is_dispatch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id);
+        let has_tool_cache = self
+            .session_mcp_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id);
+        let has_context = self
+            .session_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id);
+        let has_conversation = self
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(session_id);
+
+        if !(has_workspace
+            && has_dispatch_mode
+            && has_tool_cache
+            && has_context
+            && has_conversation)
+        {
+            return Err(SessionAccessError::Incomplete);
+        }
+
+        order.remove(pos);
         order.push_back(session_id.to_string());
         Ok(())
     }
@@ -4324,6 +4391,7 @@ fn build_connection(
                         let resp = InitializeResponse::new(negotiated_version)
                             .agent_capabilities(
                                 AgentCapabilities::default()
+                                    .load_session(true)
                                     .mcp_capabilities(McpCapabilities::new().http(true)),
                             )
                             .agent_info(agent_client_protocol::schema::Implementation::new(
@@ -4434,6 +4502,43 @@ fn build_connection(
                             );
                         }
                         responder.respond(NewSessionResponse::new(session_id))
+                    }
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        // ── session/load ─────────────────────────────────────────────
+        .on_receive_request_from(
+            Client,
+            {
+                let me = me.clone();
+                move |req: LoadSessionRequest,
+                      responder: Responder<LoadSessionResponse>,
+                      _cx| {
+                    let me = me.clone();
+                    async move {
+                        let session_key = req.session_id.to_string();
+                        match me.load_retained_session(&session_key) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    session = %session_key,
+                                    cwd = %req.cwd.display(),
+                                    "session/load resumed retained in-memory ACP session"
+                                );
+                                responder.respond(LoadSessionResponse::new())
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    session = %session_key,
+                                    error = ?error,
+                                    "session/load could not resume ACP session"
+                                );
+                                responder.respond_with_error(
+                                    agent_client_protocol::Error::invalid_params()
+                                        .data(error.message(&session_key)),
+                                )
+                            }
+                        }
                     }
                 }
             },
@@ -7239,6 +7344,93 @@ tags = []
     }
 
     #[test]
+    fn load_retained_session_reuses_transcript_and_refreshes_lru() {
+        let me = workspace();
+        let retained = "akh-retained";
+        track_session(&me, retained);
+        let original_conversation = {
+            let conversations = me
+                .session_conversations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            Arc::clone(conversations.get(retained).expect("retained conversation"))
+        };
+        original_conversation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_operator_turn("WI-337 first-turn finding");
+
+        for i in 0..MAX_TRACKED_SESSIONS - 1 {
+            track_session(&me, &format!("akh-load-fill-{i}"));
+        }
+        assert_eq!(
+            me.session_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .front()
+                .map(String::as_str),
+            Some(retained),
+            "the retained session begins as the LRU victim"
+        );
+
+        me.load_retained_session(retained)
+            .expect("a complete retained session must load");
+        assert_eq!(
+            me.session_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .back()
+                .map(String::as_str),
+            Some(retained),
+            "load must count as recent access"
+        );
+
+        track_session(&me, "akh-load-overflow");
+        let resumed_conversation = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(retained)
+            .cloned()
+            .expect("loaded session survives the next LRU eviction");
+        assert!(
+            Arc::ptr_eq(&original_conversation, &resumed_conversation),
+            "load must reattach the exact ConversationState, not create a blank replacement"
+        );
+        let conversation = resumed_conversation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(conversation.len(), 1);
+        assert_eq!(conversation.turns[0].text, "WI-337 first-turn finding");
+    }
+
+    #[test]
+    fn load_retained_session_fails_closed_for_unknown_or_incomplete_ids() {
+        let me = workspace();
+        assert!(matches!(
+            me.load_retained_session("akh-never-created"),
+            Err(SessionAccessError::Unknown)
+        ));
+        assert!(
+            me.session_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "unknown load must not register or resurrect an id"
+        );
+
+        track_session(&me, "akh-load-incomplete");
+        me.session_contexts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove("akh-load-incomplete");
+        assert!(matches!(
+            me.load_retained_session("akh-load-incomplete"),
+            Err(SessionAccessError::Incomplete)
+        ));
+    }
+
+    #[test]
     fn track_new_session_evicts_the_oldest_sessions_recorded_cwd() {
         let me = workspace();
         let victim = "akh-oldest-cwd".to_string();
@@ -7796,6 +7988,125 @@ tags = []
             row.get("pct").is_none(),
             "deferred rows carry no pct — not in the window"
         );
+    }
+
+    /// WI-337 regression: a second ACP connection can load a session created
+    /// by the first connection, while an unknown id receives a clean error
+    /// rather than either `Method not found` or a blank replacement session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acp_session_load_resumes_retained_state_across_connections() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-load.sock");
+        let listener = UnixListener::bind(&sock).expect("bind ACP test socket");
+        let me = workspace();
+        let server_agent = me.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(async move {
+            serve_unix_loop(server_agent, listener, shutdown_rx).await
+        });
+
+        let first_stream = connect_with_retry(&sock).await;
+        let (first_read, first_write) = first_stream.into_split();
+        let first_transport = ByteStreams::new(first_write.compat_write(), first_read.compat());
+        let session_id = Client
+            .builder()
+            .name("akh-load-create-client")
+            .connect_with(first_transport, async move |cx| {
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                let response: NewSessionResponse = cx
+                    .send_request(NewSessionRequest::new(
+                        "/var/lib/anima-runner/worktrees/wi-337-probe",
+                    ))
+                    .block_task()
+                    .await?;
+                Ok(response.session_id)
+            })
+            .await
+            .expect("first connection creates a session");
+        let session_key = session_id.to_string();
+        let original_conversation = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&session_key)
+            .cloned()
+            .expect("session/new registered ConversationState");
+        original_conversation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_operator_turn("first connection already inspected src/acp/mod.rs");
+
+        let second_stream = connect_with_retry(&sock).await;
+        let (second_read, second_write) = second_stream.into_split();
+        let second_transport = ByteStreams::new(second_write.compat_write(), second_read.compat());
+        let load_id = session_id.clone();
+        Client
+            .builder()
+            .name("akh-load-resume-client")
+            .connect_with(second_transport, async move |cx| {
+                let initialized: InitializeResponse = cx
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+                assert!(
+                    initialized.agent_capabilities.load_session,
+                    "initialize must advertise session/load support"
+                );
+
+                let _: LoadSessionResponse = cx
+                    .send_request(LoadSessionRequest::new(
+                        load_id,
+                        "/var/lib/anima-runner/worktrees/wi-337-probe",
+                    ))
+                    .block_task()
+                    .await?;
+
+                let missing: Result<LoadSessionResponse, agent_client_protocol::Error> = cx
+                    .send_request(LoadSessionRequest::new(
+                        "akh-evicted-or-unknown",
+                        "/var/lib/anima-runner/worktrees/wi-337-probe",
+                    ))
+                    .block_task()
+                    .await;
+                let error = missing.expect_err("unknown session/load must fail closed");
+                assert_eq!(
+                    error.code,
+                    agent_client_protocol::ErrorCode::InvalidParams,
+                    "unknown load should be invalid params"
+                );
+                Ok(())
+            })
+            .await
+            .expect("second connection loads the retained session");
+
+        let resumed_conversation = me
+            .session_conversations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&session_key)
+            .cloned()
+            .expect("loaded conversation remains registered");
+        assert!(Arc::ptr_eq(
+            &original_conversation,
+            &resumed_conversation
+        ));
+        assert_eq!(
+            resumed_conversation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .turns[0]
+                .text,
+            "first connection already inspected src/acp/mod.rs"
+        );
+
+        shutdown_tx.send(true).expect("signal ACP loop shutdown");
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("ACP loop stopped")
+            .expect("ACP loop task joined")
+            .expect("ACP loop completed cleanly");
     }
 
     /// Full ACP lifecycle over a REAL Unix domain socket:
