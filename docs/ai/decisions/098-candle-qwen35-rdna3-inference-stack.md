@@ -11,8 +11,18 @@
 Anima: existing “Lane: activate ptah on hephaistos…” work item; ID unavailable
 because no Anima project tool is exposed in this session.
 Seshat sync: ingested 2026-08-24 after Slice 1 completion under the
-`akh-medu-adr-098-candle-qwen35-rdna3-slice1` slug.
+`akh-medu-adr-098-candle-qwen35-rdna3-slice1` slug. The Slice 2a update remains
+pending because no Anima/Seshat integration is available in this session.
 This file is the offline canonical paste source.
+
+Implementation evidence, 2026-08-26: Slice 2a adds symmetric 32-value Q8
+activation quantization and a packed Q4_K gfx11 `dp4a` decode GEMV behind the
+existing private `QMatMul` seam. Exact-model hidden cosine is `0.999968273`, the
+minimum hidden cosine across three accumulated decode steps is `0.999960874`, minimum
+full-logit cosine is `0.999991194`, every greedy token is unchanged, and twelve
+counterbalanced warm runs measure `1.162x` median speedup. It is default-on with
+`AKH_HIP_Q8_GEMV=0` as the explicit
+f32 reference escape hatch; selected-kernel failures never fall back silently.
 
 ## Context
 
@@ -59,6 +69,9 @@ model pass or splice position-dependent KV from another context.
 - Session state has one owner, making ACP isolation and rollback testable.
 - Kernel choices stay private and replaceable; correctness is established against
   the reference adapter before performance changes compose.
+- Operation-owned Q8 scratch is explicit and stream-ordered rather than mutable
+  state on shared model weights; the packed decode kernel remains invisible above
+  Candle's quantized-matmul boundary.
 - Hidden-state/VSA integration, vision, TurboQuant, and optional DFlash share one
   forward/session boundary instead of becoming separate inference stacks.
 - Inference work can start now, while target-model training remains deferred.

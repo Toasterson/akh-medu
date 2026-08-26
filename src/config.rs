@@ -612,6 +612,7 @@ pub fn env_var_registry() -> &'static [EnvVarSpec] {
         EnvVarSpec { name: "AKH_EXTRACTION_API_KEY", description: "API key for the LLM used by triple/knowledge extraction.", default: "unset: extraction falls back to configured key or is disabled" },
         EnvVarSpec { name: "AKH_FONT", description: "Override glyph catalog font path.", default: "unset: built-in catalog default" },
         EnvVarSpec { name: "AKH_GEMV_BATCH", description: "Enable batched GEMV verify path (Phase 47d) in the Candle backend.", default: "on by default; \"0\" disables" },
+        EnvVarSpec { name: "AKH_HIP_Q8_GEMV", description: "Select the parity-gated Q8-activation/packed-Q4_K RDNA3 decode path.", default: "on by default; \"0\" restores f32" },
         EnvVarSpec { name: "AKH_GPU_MATMUL", description: "Route quantized matmul through the GPU backend.", default: "off by default; \"1\" enables" },
         EnvVarSpec { name: "AKH_GPU_QUANT", description: "Enable GPU-side quantization for quantized model backends.", default: "off by default; \"1\" enables" },
         EnvVarSpec { name: "AKH_GRAMMAR_AGGREGATE", description: "Enable Phase-33a grammar aggregation (N triples -> one fluent sentence).", default: "on by default; \"0\" disables" },

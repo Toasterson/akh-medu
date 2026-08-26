@@ -17,6 +17,7 @@ mod m20260711_000001_schema_registry;
 mod m20260711_000002_librarian_watermark;
 mod m20260822_000001_provenance_snapshot;
 mod m20260823_000001_residency_epoch;
+mod m20260826_000001_bound_symbol_label_index;
 
 pub struct Migrator;
 
@@ -34,6 +35,21 @@ impl MigratorTrait for Migrator {
             Box::new(m20260711_000002_librarian_watermark::Migration),
             Box::new(m20260822_000001_provenance_snapshot::Migration),
             Box::new(m20260823_000001_residency_epoch::Migration),
+            Box::new(m20260826_000001_bound_symbol_label_index::Migration),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_symbol_label_index_replacement_is_the_latest_migration() {
+        let migrations = Migrator::migrations();
+        assert_eq!(
+            migrations.last().expect("at least one migration").name(),
+            "m20260826_000001_bound_symbol_label_index"
+        );
     }
 }

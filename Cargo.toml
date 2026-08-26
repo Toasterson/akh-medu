@@ -285,12 +285,19 @@ remote-executor = ["dep:russh", "dep:base64", "tokio"]
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+sha2 = "0.10"
 # Phase 50 / W3 runner (examples/phase50_w3_runner.rs): links the RunRecord
 # schema + hashing/storage helpers. `chrono` is pulled in separately here
 # (rather than relying on the optional main-crate feature that also gates
 # it) because examples only see [dev-dependencies] unconditionally.
 harness-core = { path = "benchmarks/harness-core" }
 chrono = { version = "0.4", features = ["serde"] }
+
+# Exact-model hardware canaries stream a 16.8 GB GGUF through SHA-256. Keep the
+# digest implementation optimized even in the test profile so identity checks
+# remain practical; application/test code itself stays unoptimized.
+[profile.dev.package.sha2]
+opt-level = 3
 
 [[bin]]
 name = "akh"

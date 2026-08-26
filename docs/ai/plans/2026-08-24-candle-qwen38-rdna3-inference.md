@@ -1,7 +1,7 @@
 # Plan: Candle Qwen3.8 inference on RDNA3
 
 - **Date:** 2026-08-24
-- **Status:** In progress — slices 0–1 complete, slice 2 next
+- **Status:** In progress — slices 0–1 and Slice 2a complete; Slice 2b next
 - **Scope:** inference only; target-model training remains out of scope
 - **Production oracle:** Ptah's exact custom Qwen3.8-27B Q4_K_M + vision projector
 - **Related:** [ADR 037](../decisions/037-llm-vsa-deep-integration.md),
@@ -15,7 +15,8 @@
 - **Anima:** existing “Lane: activate ptah on hephaistos…” work item; ID unavailable
   because no Anima project tool is exposed in this session
 - **Seshat:** ingested 2026-08-24 after Slice 1 completion under the
-  `akh-medu-plan-candle-qwen38-rdna3-slice1` slug
+  `akh-medu-plan-candle-qwen38-rdna3-slice1` slug; the Slice 2a update is pending
+  because no Anima/Seshat integration is available in this session
 
 ## Outcome
 
@@ -96,10 +97,10 @@ storage.
 
 Port the algorithms from tinygrad PR #17512 into the existing Candle HIP kernel library:
 
-1. Q8 activation quantization plus packed Q4_K `dp4a` decode GEMV.
-2. WMMA Q4_K prefill/short-batch matrix multiplication.
-3. Fused gated-delta prefill scan with in-place recurrent state.
-4. RDNA3 WMMA flash attention; retain the current split-K kernel when it wins.
+1. [x] Q8 activation quantization plus packed Q4_K `dp4a` decode GEMV.
+2. [ ] WMMA Q4_K prefill/short-batch matrix multiplication.
+3. [ ] Fused gated-delta prefill scan with in-place recurrent state.
+4. [ ] RDNA3 WMMA flash attention; retain the current split-K kernel when it wins.
 
 The existing f32/Q4_K kernels remain the reference adapter until each replacement passes
 operation parity and full-forward hidden/logit parity. Benchmark the exact custom Q4_K_M,
@@ -108,6 +109,26 @@ not tinygrad's headline IQ4_XS model.
 - Gates: operation parity; hidden cosine >= 0.999; coherent exact-model output; measured
   decode and 32-token/long-prefill throughput; no regression accepted without an explained
   quality or memory win.
+
+Slice 2a evidence (hephaistos, RX 7900 XTX, ROCm 6.3.4, exact installed custom
+Qwen3.8-27B Q4_K_M, 2026-08-26): the packed kernel matches an independent CPU
+Q8-group oracle at `3.51e-7` relative error. Twelve counterbalanced warm f32/Q8 runs
+from the same post-`Hello` checkpoint compare three forced continuation steps, not
+only the first token: minimum hidden-state cosine is `0.999960874`, minimum full-logit
+cosine is `0.999991194`, and every greedy token (`[0, 369, 271]`) is unchanged.
+Median three-step time improves from `0.171 s` to `0.147 s` (`1.162x`). Q8/Q4_K is
+therefore the default decode
+adapter; `AKH_HIP_Q8_GEMV=0` restores the f32 reference, and selected-kernel errors
+fail closed rather than silently falling back.
+
+Ptah reviewed the adapter in a fresh ACP turn and found four concrete hygiene risks:
+an optional sidecar ABI symbol must not disable the f32 escape hatch; scratch lifetime
+depends on the backend's single ordered stream; process-global route selectors require
+serialized RAII restoration in tests; and the path performs two ordered launches, not
+one. All four findings are reflected in the implementation and tests. The same review
+discipline is stored in Ptah's KG-backed core memory and was recalled verbatim in a new
+session. The label-index migration restoring Ptah's long-symbol snapshots has also been
+applied and observed through subsequent persisted snapshot ticks.
 
 ### Slice 3 — Owned inference session and VSA hidden taps
 
@@ -192,7 +213,7 @@ tinygrad 46 tok/s IQ4_XS result is a feasibility reference, not Ptah's acceptanc
 - [x] Slice 1: reference text forward (exact schema; GGUF tiled-head contract; hermetic
   non-zero chunk/state replay; exact-model multi-token CPU prefill and HIP stepped-decode
   greedy + log-probability parity with llama.cpp).
-- [ ] Slice 2: RDNA3 target kernels.
+- [ ] Slice 2: RDNA3 target kernels (2a Q8/Q4_K decode complete; 2b WMMA prefill next).
 - [ ] Slice 3: inference session + VSA context signals.
 - [ ] Follow-up 3b: bounded C1/C2/C4/C8 session-safe decode.
 - [ ] Slice 4: vision.

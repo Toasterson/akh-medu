@@ -1120,7 +1120,68 @@ impl ModelWeights {
 mod tests {
     use super::*;
     use candle_core::{Shape, quantized::GgmlDType};
-    use std::io::Cursor;
+    use sha2::{Digest, Sha256};
+    use std::ffi::OsString;
+    use std::io::{BufReader, Cursor, Read};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());
+    static VERIFIED_PTAH_MODEL: OnceLock<PathBuf> = OnceLock::new();
+    const PTAH_MODEL_SHA256: &str =
+        "3445102e9cde5d562508642c100a2f5ac3368a5a3f748442811d7a95daee3bec";
+
+    struct EnvOverride {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvOverride {
+        fn new(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: every test mutating this process-wide selector holds
+            // `Q8_ROUTE_ENV`; production never mutates it after startup.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvOverride {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    fn assert_ptah_model_fingerprint(path: &Path) {
+        let verified = VERIFIED_PTAH_MODEL.get_or_init(|| {
+            let file = std::fs::File::open(path).expect("open Ptah model for fingerprinting");
+            let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0u8; 8 * 1024 * 1024];
+            loop {
+                let read = reader
+                    .read(&mut buffer)
+                    .expect("read Ptah model while fingerprinting");
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            let actual = format!("{:x}", hasher.finalize());
+            assert_eq!(
+                actual, PTAH_MODEL_SHA256,
+                "hardware acceptance must run against Ptah's exact custom Qwen3.8 artifact"
+            );
+            path.to_owned()
+        });
+        assert_eq!(
+            path, verified,
+            "all exact-model gates in one test process must use the same Ptah artifact"
+        );
+    }
 
     fn exact_shape_metadata() -> HashMap<String, gguf_file::Value> {
         use gguf_file::Value::{F32, U32};
@@ -1679,9 +1740,14 @@ mod tests {
     #[cfg(feature = "hip")]
     #[test]
     fn installed_artifact_stepped_decode_matches_llama_cpp() {
+        let _route_lock = Q8_ROUTE_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _route = EnvOverride::new("AKH_HIP_Q8_GEMV", "0");
         let Some(path) = std::env::var_os("AKH_QWEN35_TEST_MODEL") else {
             return;
         };
+        assert_ptah_model_fingerprint(Path::new(&path));
         let device = Device::new_cuda(0).unwrap();
         let mut reader = std::fs::File::open(path).unwrap();
         let content = gguf_file::Content::read(&mut reader).unwrap();
@@ -1745,6 +1811,141 @@ mod tests {
         assert!(
             (actual_log_probability - -1.457_515_6).abs() < 0.05,
             "HIP log-probability {actual_log_probability}, llama.cpp -1.4575156"
+        );
+    }
+
+    /// Exact-model gate for the RDNA3 Q8-activation/packed-Q4_K
+    /// decode tracer. It compares two forwards from the same owned checkpoint,
+    /// so recurrent and KV state cannot disguise a kernel difference.
+    #[cfg(feature = "hip")]
+    #[test]
+    fn installed_artifact_q8_q4k_hidden_and_token_parity() {
+        let _route_lock = Q8_ROUTE_ENV
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let Some(path) = std::env::var_os("AKH_QWEN35_TEST_MODEL") else {
+            return;
+        };
+        assert_ptah_model_fingerprint(Path::new(&path));
+        let device = Device::new_cuda(0).unwrap();
+        let mut reader = std::fs::File::open(path).unwrap();
+        let content = gguf_file::Content::read(&mut reader).unwrap();
+        let mut model = ModelWeights::from_gguf(content, &mut reader, &device).unwrap();
+        let hello = Tensor::new(&[[9_419u32]], &device).unwrap();
+        model.prefill(&hello).unwrap();
+        let checkpoint = model.checkpoint();
+        // `world` followed by two forced continuation tokens exercises recurrent/KV
+        // accumulation instead of proving only an isolated one-step forward.
+        let continuation = [1_814u32, 1, 1];
+
+        let mut run = |q8: bool| {
+            model.rewind(checkpoint.clone()).unwrap();
+            let _route = EnvOverride::new("AKH_HIP_Q8_GEMV", if q8 { "1" } else { "0" });
+            let started = std::time::Instant::now();
+            let mut steps = Vec::with_capacity(continuation.len());
+            for (offset, token) in continuation.into_iter().enumerate() {
+                let token = Tensor::new(&[[token]], &device).unwrap();
+                let (logits, hidden) = model.decode_step_with_hidden(&token, 1 + offset).unwrap();
+                let logits = logits
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                let hidden = hidden
+                    .to_device(&Device::Cpu)
+                    .unwrap()
+                    .flatten_all()
+                    .unwrap()
+                    .to_vec1::<f32>()
+                    .unwrap();
+                steps.push((logits, hidden));
+            }
+            let elapsed = started.elapsed();
+            (steps, elapsed)
+        };
+
+        // Warm both routes before measuring, then alternate order so allocation-pool and
+        // GPU-clock ramp do not masquerade as a kernel speedup.
+        let _ = run(false);
+        let _ = run(true);
+        let mut reference_times = Vec::new();
+        let mut q8_times = Vec::new();
+        let mut parity_pair = None;
+        for iteration in 0..12 {
+            let (reference, q8) = if iteration % 2 == 0 {
+                let q8 = run(true);
+                let reference = run(false);
+                (reference, q8)
+            } else {
+                let reference = run(false);
+                let q8 = run(true);
+                (reference, q8)
+            };
+            reference_times.push(reference.1);
+            q8_times.push(q8.1);
+            parity_pair = Some((reference, q8));
+        }
+        reference_times.sort_unstable();
+        q8_times.sort_unstable();
+        let middle = reference_times.len() / 2;
+        let reference_elapsed = (reference_times[middle - 1] + reference_times[middle]) / 2;
+        let q8_elapsed = (q8_times[middle - 1] + q8_times[middle]) / 2;
+        let ((reference_steps, _), (q8_steps, _)) = parity_pair.unwrap();
+        let greedy = |values: &[f32]| {
+            values
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index)
+                .unwrap()
+        };
+        let cosine = |left_values: &[f32], right_values: &[f32]| {
+            let (mut dot, mut left_norm, mut right_norm) = (0.0f64, 0.0f64, 0.0f64);
+            for (&left, &right) in left_values.iter().zip(right_values) {
+                let (left, right) = (left as f64, right as f64);
+                dot += left * right;
+                left_norm += left * left;
+                right_norm += right * right;
+            }
+            dot / (left_norm.sqrt() * right_norm.sqrt()).max(f64::MIN_POSITIVE)
+        };
+        let mut hidden_cosine = 1.0f64;
+        let mut logit_cosine = 1.0f64;
+        let mut reference_tokens = Vec::with_capacity(reference_steps.len());
+        let mut q8_tokens = Vec::with_capacity(q8_steps.len());
+        for ((reference_logits, reference_hidden), (q8_logits, q8_hidden)) in
+            reference_steps.iter().zip(&q8_steps)
+        {
+            hidden_cosine = hidden_cosine.min(cosine(reference_hidden, q8_hidden));
+            logit_cosine = logit_cosine.min(cosine(reference_logits, q8_logits));
+            reference_tokens.push(greedy(reference_logits));
+            q8_tokens.push(greedy(q8_logits));
+        }
+        eprintln!(
+            "exact Qwen3.8 Q8/Q4_K: hidden cosine={hidden_cosine:.9}, \
+             logit cosine={logit_cosine:.9}, greedy={q8_tokens:?}, \
+             f32={:.3}s q8={:.3}s speedup={:.3}x",
+            reference_elapsed.as_secs_f64(),
+            q8_elapsed.as_secs_f64(),
+            reference_elapsed.as_secs_f64() / q8_elapsed.as_secs_f64()
+        );
+        assert!(
+            hidden_cosine >= 0.999,
+            "Q8/Q4_K exact-model hidden cosine {hidden_cosine} is below the acceptance gate"
+        );
+        assert!(
+            logit_cosine >= 0.999,
+            "Q8/Q4_K exact-model logit cosine {logit_cosine} is below the acceptance gate"
+        );
+        assert_eq!(
+            q8_tokens, reference_tokens,
+            "Q8/Q4_K changed an exact-model greedy token after recurrent-state accumulation"
+        );
+        assert_eq!(
+            q8_tokens[0], 0,
+            "Q8/Q4_K must preserve llama.cpp's `Hello world` oracle token"
         );
     }
 }

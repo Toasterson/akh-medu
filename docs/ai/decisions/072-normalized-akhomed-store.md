@@ -7,6 +7,16 @@
 >          ("use strongly typed idiomatic rust… express the function in datatypes",
 >          "never use raw SQL, use SeaORM entities")
 
+> Amendment, 2026-08-26: arbitrary symbol labels remain relational text, but
+> PostgreSQL no longer places the unbounded `label` value in the composite
+> `(akh_id, label)` B-tree. Long learned-memory text exceeded PostgreSQL's B-tree
+> tuple limit and aborted an otherwise atomic snapshot. PostgreSQL now uses an
+> exact-equality hash index on `label`; the primary key remains the ordered index
+> for `akh_id`, so the two lookup shapes retain bounded index entries without
+> imposing an application-level length limit or truncating knowledge. SQLite and
+> other backends remain unchanged. The forward migration deliberately has a
+> no-op rollback: recreating the unsafe B-tree would reintroduce the outage.
+
 ## Context
 
 Phase 38a–c shipped the `akhomed.*` / `workspaces.*` schema fast, and several
@@ -61,6 +71,11 @@ non-`akh_id`-keyed `provenance_input` / `workspace_seed_pack`).
 - Entities keep app-side referential integrity (no hard DB FK constraints), matching
   the existing store style and SQLite portability; new child/edge entities use the
   same minimal `Relation`/`ActiveModelBehavior` shape.
+- Symbol-label equality remains indexed on PostgreSQL without constraining or
+  hashing the stored label itself; queries by Akh continue to use the primary-key
+  prefix. The backend-specific hash index is an operational exception to the
+  otherwise portable schema because PostgreSQL's B-tree tuple limit is likewise
+  backend-specific.
 
 ## Verification
 
@@ -69,3 +84,6 @@ non-`akh_id`-keyed `provenance_input` / `workspace_seed_pack`).
   preserved (out-of-order input rows re-sorted on load).
 - `cargo build` (default) + `cargo test -p akhomed-store` green; snapshot
   round-trip tests (`--features postgres`) 13 pass; `cargo test --lib` 2587 pass.
+- The 2026-08-26 amendment has a migration-shape unit test, an ignored live-PG
+  regression that persists and restores a label larger than a B-tree tuple, and
+  production evidence from Ptah snapshots persisting again after migration.
