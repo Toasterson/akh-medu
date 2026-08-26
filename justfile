@@ -16,6 +16,14 @@ site_out := "benchmarks/site/index.html"
 default:
     @just --list
 
+# Run every test quarantined by WI-306. This suite may open loopback sockets,
+# contact the configured Ollama endpoint, and perform live model inference.
+test-ollama-manual:
+    cargo test --features postgres --lib agent::ollama::tests:: -- --ignored --test-threads=1
+    cargo test --features postgres --lib agent::chat_backend::prompt_isolation_tests:: -- --ignored --test-threads=1
+    cargo test --features postgres --lib agent::model_manager::tests:: -- --ignored --test-threads=1
+    cargo test --features postgres --lib agent::librarian::tests::ollama_librarian_model_extracts_against_a_live_backend -- --ignored --exact --test-threads=1
+
 # Run one benchmark harness against one model and record the result.
 #
 # TODO(W3 — illumos E2E corpus + runner): wire `illumos-e2e` to the

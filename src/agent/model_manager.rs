@@ -1321,6 +1321,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): unloading sends a
+    // best-effort HTTP request to Ollama and therefore belongs in the manual suite.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn unload_agent_removes_entry() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
         mgr.load_agent("a1", "Alice", None, &[]);
@@ -1340,6 +1343,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): the backend selection
+    // assertion performs an Ollama health request and is manual-only.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn generate_returns_no_backend_when_ollama_down_and_no_fallback() {
         // Use an unreachable Ollama endpoint — health_check returns false.
         let cfg = ModelManagerConfig {
@@ -1361,6 +1367,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): evicting the last agent
+    // sends an Ollama unload hint and therefore belongs in the manual suite.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn unload_idle_evicts_expired_entries() {
         let cfg = ModelManagerConfig {
             idle_ttl_secs: 0, // zero TTL: every entry is immediately idle
