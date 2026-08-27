@@ -62,6 +62,8 @@ spec:
                 secretKeyRef:
                   name: {{ $dbSecretName }}
                   key: DATABASE_URL
+            - name: SESHAT_SHARED_SECRET_FILE
+              value: {{ printf "%s/%s" (.Values.ingressAuth.mountPath | default "/var/run/secrets/akh-medu/ingress-auth") (.Values.ingressAuth.secretKey | default "tokens") | quote }}
             # OTLP service instance ID from the pod name.
             - name: OTEL_SERVICE_INSTANCE_ID
               valueFrom:
@@ -70,6 +72,9 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+            - name: ingress-auth
+              mountPath: {{ .Values.ingressAuth.mountPath | default "/var/run/secrets/akh-medu/ingress-auth" }}
+              readOnly: true
             {{- if .Values.seshd.models.enabled }}
             - name: models
               mountPath: /models
@@ -85,6 +90,13 @@ spec:
           resources:
             {{- toYaml .Values.seshd.resources | nindent 12 }}
       volumes:
+        - name: ingress-auth
+          secret:
+            secretName: {{ include "akh-medu.ingressAuth.secretName" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.ingressAuth.secretKey | default "tokens" }}
+                path: {{ .Values.ingressAuth.secretKey | default "tokens" }}
         - name: config
           configMap:
             name: {{ include "akh-medu.fullname" . }}-seshd-config

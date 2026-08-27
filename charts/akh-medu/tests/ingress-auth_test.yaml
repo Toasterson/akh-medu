@@ -1,0 +1,45 @@
+suite: shared ingress authentication
+templates:
+  - templates/akhomed-deployment.yaml
+  - templates/seshd-deployment.yaml
+tests:
+  - it: injects the same projected Secret into akhomed
+    template: templates/akhomed-deployment.yaml
+    set:
+      ingressAuth.existingSecret: anima-akh-ingress
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AKHOMED_SHARED_SECRET_FILE
+            value: /var/run/secrets/akh-medu/ingress-auth/tokens
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ingress-auth
+            secret:
+              secretName: anima-akh-ingress
+              defaultMode: 288
+              items:
+                - key: tokens
+                  path: tokens
+  - it: injects the same projected Secret into seshd
+    template: templates/seshd-deployment.yaml
+    set:
+      ingressAuth.existingSecret: anima-akh-ingress
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SESHAT_SHARED_SECRET_FILE
+            value: /var/run/secrets/akh-medu/ingress-auth/tokens
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: ingress-auth
+            secret:
+              secretName: anima-akh-ingress
+              defaultMode: 288
+              items:
+                - key: tokens
+                  path: tokens

@@ -5,6 +5,22 @@ global:
   security:
     allowInsecureImages: true
 
+# Mandatory credential shared by akhomed ACP/TCP clients and every seshd HTTP
+# client. The default references an externally provisioned Secret so credentials
+# never land in chart defaults or rendered release history. It must contain the
+# `tokens` key with one accepted token per non-empty line. Multiple lines enable
+# overlap rotation; see docs/ops/ingress-shared-secret.md.
+ingressAuth:
+  existingSecret: "akh-medu-ingress-auth"
+  secretKey: tokens
+  # Dev-only alternative: set existingSecret="" and provide the current token
+  # here. Helm will create <release>-akh-medu-ingress-auth. Prefer an external
+  # secret controller in production.
+  sharedSecret: ""
+  # Optional overlap token used only by the chart-created Secret.
+  previousSharedSecret: ""
+  mountPath: /var/run/secrets/akh-medu/ingress-auth
+
 # CPU architectures for which akhomed and seshd images have been built.
 # Pods are pinned to nodes matching one of these via required nodeAffinity
 # on `kubernetes.io/arch`. Add "arm64" here only after publishing arm64 images.
