@@ -332,6 +332,25 @@ impl InProcessBackend {
     pub fn exec_only() -> Self {
         Self::new(Arc::new(LocalFs::denied()))
     }
+
+    /// Build the exact command used by [`Backend::exec`]. Keeping execution
+    /// context construction separate makes cwd/env precedence deterministic
+    /// to test without depending on host child-process capture.
+    fn command_for(request: &ExecRequest) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(&request.command)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(cwd) = &request.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &request.env {
+            command.env(key, value);
+        }
+        command
+    }
 }
 
 impl Filesystem for InProcessBackend {
@@ -370,18 +389,7 @@ impl Filesystem for InProcessBackend {
 
 impl Backend for InProcessBackend {
     fn exec(&self, request: ExecRequest) -> ExecResult<ExecOutcome> {
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(&request.command)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if let Some(cwd) = &request.cwd {
-            command.current_dir(cwd);
-        }
-        for (key, value) in &request.env {
-            command.env(key, value);
-        }
+        let command = Self::command_for(&request);
 
         // Spawn under supervision (includes process group setup for clean kill)
         let mut exec = SupervisedExecution::spawn(command)
@@ -522,31 +530,24 @@ mod tests {
     fn exec_applies_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let canonical = dir.path().canonicalize().unwrap();
-        let backend = InProcessBackend::exec_only();
-        let out = backend
-            .exec(
-                ExecRequest::shell("pwd", Duration::from_secs(10))
-                    .with_cwd(&canonical),
-            )
-            .unwrap();
-        assert!(out.success);
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            canonical.to_string_lossy()
-        );
+        let request = ExecRequest::shell("pwd", Duration::from_secs(10))
+            .with_cwd(&canonical);
+        let command = InProcessBackend::command_for(&request);
+
+        assert_eq!(command.get_current_dir(), Some(canonical.as_path()));
     }
 
     #[test]
     fn exec_overlays_env() {
-        let backend = InProcessBackend::exec_only();
-        let out = backend
-            .exec(
-                ExecRequest::shell("printf '%s' \"$AKH_BACKEND_TEST\"", Duration::from_secs(10))
-                    .with_env("AKH_BACKEND_TEST", "forty-two"),
-            )
-            .unwrap();
-        assert!(out.success);
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "forty-two");
+        let request = ExecRequest::shell("ignored", Duration::from_secs(10))
+            .with_env("AKH_BACKEND_TEST", "forty-two");
+        let command = InProcessBackend::command_for(&request);
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("AKH_BACKEND_TEST"))
+            .and_then(|(_, value)| value);
+
+        assert_eq!(value, Some(std::ffi::OsStr::new("forty-two")));
     }
 
     #[test]

@@ -143,9 +143,9 @@ impl DrainHandle {
         })
     }
 
-    /// Join both drain threads, discarding errors (the child may have been
-    /// killed, causing read errors on the pipes).
-    pub fn join(mut self) {
+    /// Join both drain threads, retaining the receiver so callers can collect
+    /// events that raced with child exit.
+    pub fn join(&mut self) {
         if let Some(h) = self.stdout_thread.take() {
             let _ = h.join();
         }
@@ -446,7 +446,7 @@ impl SupervisedExecution {
     fn wait_with_drain_bounded(
         mut self,
         tracker: &mut ProgressTracker,
-        drain: DrainHandle,
+        mut drain: DrainHandle,
         max_stdout_bytes: Option<usize>,
     ) -> SupervisorResult<(ExitStatus, DrainedOutput)> {
         let mut stdout_buf = Vec::new();
@@ -524,8 +524,17 @@ impl SupervisedExecution {
                 // Kill the process group
                 self.kill_process_group();
 
-                // Join drain threads to clean up
+                // Killing closes the pipes. Join the readers, then collect
+                // chunks they may have sent after the pre-kill drain above.
                 drain.join();
+                while let Ok(Some(event)) = drain.try_recv() {
+                    match event {
+                        DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
+                        DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
+                        DrainEvent::StdoutEof => stdout_eof = true,
+                        DrainEvent::StderrEof => stderr_eof = true,
+                    }
+                }
 
                 let _ = self.child.wait(); // Reap the zombie
 
@@ -540,15 +549,18 @@ impl SupervisedExecution {
             // Check if the process has exited
             match self.child.try_wait() {
                 Ok(Some(status)) => {
-                    // Process exited — drain any remaining output from the channel
+                    // Process exit can win the race against the reader threads.
+                    // Join first so every final pipe read reaches the channel,
+                    // then drain it to completion.
+                    drain.join();
                     while let Ok(Some(event)) = drain.try_recv() {
                         match event {
                             DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
                             DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
-                            _ => {}
+                            DrainEvent::StdoutEof => stdout_eof = true,
+                            DrainEvent::StderrEof => stderr_eof = true,
                         }
                     }
-                    drain.join();
                     return Ok((status, DrainedOutput { stdout: stdout_buf, stderr: stderr_buf }));
                 }
                 Ok(None) => {
@@ -707,6 +719,31 @@ mod tests {
 
         let status = exec.wait_with_progress(&tracker).unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn short_lived_children_never_lose_their_final_capture() {
+        // Regression for WI-346: `try_wait` can observe exit before the drain
+        // threads forward their final pipe reads.
+        for attempt in 0..20 {
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg("printf stdout; printf stderr >&2")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut execution = SupervisedExecution::spawn(command).unwrap();
+            let drain = execution.take_drain();
+            let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(5));
+
+            let (status, output) = execution
+                .wait_with_drain(&mut tracker, drain)
+                .unwrap_or_else(|error| panic!("attempt {attempt} failed: {error}"));
+
+            assert!(status.success(), "attempt {attempt}");
+            assert_eq!(output.stdout, b"stdout", "attempt {attempt}");
+            assert_eq!(output.stderr, b"stderr", "attempt {attempt}");
+        }
     }
 
     #[test]
