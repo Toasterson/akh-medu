@@ -139,7 +139,7 @@ fn init_otel(
         Resource,
         propagation::TraceContextPropagator,
         runtime::Tokio,
-        trace::{Sampler, TracerProvider},
+        trace::TracerProvider,
     };
     use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
 

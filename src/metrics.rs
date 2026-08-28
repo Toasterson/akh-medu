@@ -375,7 +375,7 @@ pub mod labels {
     }
 }
 
-#[cfg(all(test, any(feature = "tracing-otel", feature = "metrics")))]
+#[cfg(all(test, feature = "tracing-otel"))]
 mod tests {
     use super::*;
     use opentelemetry::metrics::MeterProvider;
