@@ -203,6 +203,7 @@ async fn run_register_akh(
         description: Set(description),
         personality: Set(None),
         avatar_url: Set(None),
+        token_hash: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };
