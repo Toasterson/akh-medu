@@ -115,13 +115,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# Phase 38i: OpenTelemetry OTLP tracing skeleton. Exact-pinned per research
-# §2.1 so all five crates move in lockstep on Renovate bumps (no double-versions).
-# Optional + feature-gated so the lean `akh` client binary (default-features
-# build) links zero OTel crates.
+# Phase 38i/38j.1: OpenTelemetry OTLP tracing + metrics skeleton. Exact-pinned
+# per research §2.1 so all five crates move in lockstep on Renovate bumps
+# (no double-versions). Optional + feature-gated so the lean `akh` client
+# binary (default-features build) links zero OTel crates.
 opentelemetry = { version = "=0.27", optional = true }
-opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio", "metrics"], optional = true }
+opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "=0.28", optional = true }
 opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_experimental"], optional = true }
 
