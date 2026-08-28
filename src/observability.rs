@@ -260,7 +260,9 @@ mod tests {
     #[test]
     fn fallback_when_endpoint_unset() {
         let prev = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
-        env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        unsafe {
+            env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        }
         // Cannot init a tracing subscriber twice in the same process, but we
         // can still exercise the endpoint gate if a subscriber is already set.
         // This test is therefore a smoke test of env handling: no endpoint
@@ -269,7 +271,9 @@ mod tests {
         // No panic and guard is empty.
         assert!(_guard.inner.is_none());
         if let Some(v) = prev {
-            env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v);
+            unsafe {
+                env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v);
+            }
         }
     }
 
@@ -306,12 +310,12 @@ mod tests {
 
         let _counter = meter.u64_counter("akh_ooda_cycles_total")
             .with_description("OODA cycle count")
-            .with_unit(opentelemetry::metrics::Unit::new("cycle"))
-            .init();
+            .with_unit("cycle")
+            .build();
         let _histogram = meter.f64_histogram("akh_ooda_cycle_duration_seconds")
             .with_description("OODA phase duration")
-            .with_unit(opentelemetry::metrics::Unit::new("s"))
-            .init();
+            .with_unit("s")
+            .build();
 
         // No collector required; just confirm construction succeeds.
         drop(provider);

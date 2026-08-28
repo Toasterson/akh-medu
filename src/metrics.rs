@@ -18,7 +18,7 @@
 //! unbounded text, or anything derived from user input. Workspace *name* is
 //! allowed only as the caller-supplied short workspace alias, never as a UUID.
 
-use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge, UpDownCounter};
+use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 
 /// Root metric registry for the akhomed daemon.
 ///
@@ -180,146 +180,144 @@ pub struct AkhomedMetrics {
 impl AkhomedMetrics {
     /// Build the registry from the supplied `Meter`.
     pub fn new(meter: Meter) -> Self {
-        use opentelemetry::metrics::Unit;
-
         Self {
             meter: meter.clone(),
 
             ooda_cycles_total: meter
                 .u64_counter("akh_ooda_cycles_total")
                 .with_description("Completed OODA cycles")
-                .with_unit(Unit::new("cycle"))
-                .init(),
+                .with_unit("cycle")
+                .build(),
             ooda_cycle_duration_seconds: meter
                 .f64_histogram("akh_ooda_cycle_duration_seconds")
                 .with_description("Wall-clock duration of a full OODA cycle")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
             active_goals: meter
                 .i64_observable_gauge("akh_active_goals")
                 .with_description("Goals currently in working memory")
-                .with_unit(Unit::new("goal"))
-                .init(),
+                .with_unit("goal")
+                .build(),
             working_memory_size: meter
                 .i64_observable_gauge("akh_working_memory_size")
                 .with_description("Symbols/entities held in working memory")
-                .with_unit(Unit::new("symbol"))
-                .init(),
+                .with_unit("symbol")
+                .build(),
 
             tool_invocations_total: meter
                 .u64_counter("akh_tool_invocations_total")
                 .with_description("Tool calls dispatched by the daemon")
-                .with_unit(Unit::new("invocation"))
-                .init(),
+                .with_unit("invocation")
+                .build(),
             tool_duration_seconds: meter
                 .f64_histogram("akh_tool_duration_seconds")
                 .with_description("Wall-clock time spent inside a tool")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
             tool_failures_total: meter
                 .u64_counter("akh_tool_failures_total")
                 .with_description("Tool calls that returned an error")
-                .with_unit(Unit::new("failure"))
-                .init(),
+                .with_unit("failure")
+                .build(),
 
             goals_activated_total: meter
                 .u64_counter("akh_goals_activated_total")
                 .with_description("Goals moved into active pursuit")
-                .with_unit(Unit::new("goal"))
-                .init(),
+                .with_unit("goal")
+                .build(),
             goals_completed_total: meter
                 .u64_counter("akh_goals_completed_total")
                 .with_description("Goals that reached a terminal success state")
-                .with_unit(Unit::new("goal"))
-                .init(),
+                .with_unit("goal")
+                .build(),
             goals_failed_total: meter
                 .u64_counter("akh_goals_failed_total")
                 .with_description("Goals that reached a terminal failure state")
-                .with_unit(Unit::new("goal"))
-                .init(),
+                .with_unit("goal")
+                .build(),
 
             kg_entities_total: meter
                 .i64_observable_gauge("akh_kg_entities_total")
                 .with_description("Entities in the workspace KG")
-                .with_unit(Unit::new("entity"))
-                .init(),
+                .with_unit("entity")
+                .build(),
             kg_triples_total: meter
                 .i64_observable_gauge("akh_kg_triples_total")
                 .with_description("Triples in the workspace KG")
-                .with_unit(Unit::new("triple"))
-                .init(),
+                .with_unit("triple")
+                .build(),
             kg_query_duration_seconds: meter
                 .f64_histogram("akh_kg_query_duration_seconds")
                 .with_description("SPARQL/similarity query latency")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
             triples_created_total: meter
                 .u64_counter("akh_triples_created_total")
                 .with_description("Triples asserted by reflection or mutation")
-                .with_unit(Unit::new("triple"))
-                .init(),
+                .with_unit("triple")
+                .build(),
 
             reflection_cycles_total: meter
                 .u64_counter("akh_reflection_cycles_total")
                 .with_description("Completed reflection passes")
-                .with_unit(Unit::new("cycle"))
-                .init(),
+                .with_unit("cycle")
+                .build(),
             reflection_duration_seconds: meter
                 .f64_histogram("akh_reflection_duration_seconds")
                 .with_description("Reflection pass latency")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
             consolidation_cycles_total: meter
                 .u64_counter("akh_consolidation_cycles_total")
                 .with_description("Completed consolidation passes")
-                .with_unit(Unit::new("cycle"))
-                .init(),
+                .with_unit("cycle")
+                .build(),
             consolidation_duration_seconds: meter
                 .f64_histogram("akh_consolidation_duration_seconds")
                 .with_description("Consolidation pass latency")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
 
             acp_turns_total: meter
                 .u64_counter("akh_acp_turns_total")
                 .with_description("ACP request/response turns handled")
-                .with_unit(Unit::new("turn"))
-                .init(),
+                .with_unit("turn")
+                .build(),
             acp_turn_duration_seconds: meter
                 .f64_histogram("akh_acp_turn_duration_seconds")
                 .with_description("Latency of an ACP turn")
-                .with_unit(Unit::new("s"))
-                .init(),
+                .with_unit("s")
+                .build(),
             acp_turn_input_tokens: meter
                 .u64_counter("akh_acp_turn_input_tokens")
                 .with_description("Prompt tokens submitted in a turn")
-                .with_unit(Unit::new("token"))
-                .init(),
+                .with_unit("token")
+                .build(),
             acp_turn_output_tokens: meter
                 .u64_counter("akh_acp_turn_output_tokens")
                 .with_description("Completion tokens returned in a turn")
-                .with_unit(Unit::new("token"))
-                .init(),
+                .with_unit("token")
+                .build(),
             acp_turn_tool_calls_total: meter
                 .u64_counter("akh_acp_turn_tool_calls_total")
                 .with_description("Native tool calls requested by the model")
-                .with_unit(Unit::new("call"))
-                .init(),
+                .with_unit("call")
+                .build(),
             acp_turn_tool_results_total: meter
                 .u64_counter("akh_acp_turn_tool_results_total")
                 .with_description("Tool results delivered back to the model")
-                .with_unit(Unit::new("result"))
-                .init(),
+                .with_unit("result")
+                .build(),
             acp_turn_errors_total: meter
                 .u64_counter("akh_acp_turn_errors_total")
                 .with_description("Turns that ended in an error response")
-                .with_unit(Unit::new("turn"))
-                .init(),
+                .with_unit("turn")
+                .build(),
             acp_turn_retries_total: meter
                 .u64_counter("akh_acp_turn_retries_total")
                 .with_description("Retry attempts for a turn")
-                .with_unit(Unit::new("retry"))
-                .init(),
+                .with_unit("retry")
+                .build(),
         }
     }
 
