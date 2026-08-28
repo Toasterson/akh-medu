@@ -165,9 +165,9 @@ fn rewrite_symbol_json(value: &mut serde_json::Value, mapping: &HashMap<i64, i64
     ];
 
     match value {
-        serde_json::Value::Array(values) => values.iter_mut().fold(false, |changed, value| {
-            rewrite_symbol_json(value, mapping) || changed
-        }),
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .any(|value| rewrite_symbol_json(value, mapping)),
         serde_json::Value::Object(object) => {
             let mut changed = false;
             for (key, child) in object {
@@ -196,7 +196,7 @@ fn rewrite_symbol_array(value: &mut serde_json::Value, mapping: &HashMap<i64, i6
     };
     values
         .iter_mut()
-        .fold(false, |changed, value| rewrite_number(value, mapping) || changed)
+        .any(|value| rewrite_number(value, mapping))
 }
 
 fn rewrite_goal_status(status: &mut String, mapping: &HashMap<i64, i64>) -> bool {

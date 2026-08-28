@@ -77,6 +77,7 @@ enum AkhState {
     UpdatedAt,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(DeriveIden)]
 enum Provenance {
     #[sea_orm(iden = "akhomed_provenance")]
