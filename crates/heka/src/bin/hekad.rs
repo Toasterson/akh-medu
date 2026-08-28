@@ -8,7 +8,8 @@
 //!
 //! Usage:
 //!   hekad migrate [config_path]
-//!   hekad register-akh <name> [--description <desc>]   Register an akh in heka_akhs
+//!   hekad register-akh <name> [--description <desc>] [--token]   Register an akh
+//!   hekad set-token <name>                                        Set/rotate bearer token
 //!   hekad eval longmemeval --mode raw
 //!   hekad eval locomo --top-k auto
 //!   hekad embed [config_path]      Run the embed worker (foreground, Ctrl-C to stop)
@@ -52,6 +53,19 @@ enum Commands {
         /// Optional human-readable description.
         #[arg(long)]
         description: Option<String>,
+        /// Mint a bearer token and store its SHA-256 hash. The plaintext
+        /// token is printed once and never stored. Required for MCP access.
+        #[arg(long)]
+        token: bool,
+        /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
+        #[arg(long)]
+        config_path: Option<PathBuf>,
+    },
+
+    /// Set or rotate the bearer token for an existing akh.
+    SetToken {
+        /// Name of the akh to update.
+        name: String,
         /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
         #[arg(long)]
         config_path: Option<PathBuf>,
@@ -99,8 +113,10 @@ async fn main() -> miette::Result<()> {
         Commands::RegisterAkh {
             name,
             description,
+            token,
             config_path,
-        } => run_register_akh(&name, description, config_path).await,
+        } => run_register_akh(&name, description, token, config_path).await,
+        Commands::SetToken { name, config_path } => run_set_token(&name, config_path).await,
         Commands::Eval { command } => heka::eval::run(&command).await,
         Commands::Embed { config_path } => run_embed(config_path).await,
         Commands::RepairLegacyTitleHashes {
@@ -158,9 +174,12 @@ async fn run_migrate(config_path: Option<PathBuf>) -> miette::Result<()> {
 ///
 /// Creates a new row with the given name and optional description. If an akh
 /// with the same name already exists, updates its description (upsert).
+/// When `mint_token` is true, mints a bearer token and stores its SHA-256
+/// hash; the plaintext token is printed once to stdout.
 async fn run_register_akh(
     name: &str,
     description: Option<String>,
+    mint_token: bool,
     config_path: Option<PathBuf>,
 ) -> miette::Result<()> {
     use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
@@ -183,9 +202,17 @@ async fn run_register_akh(
         .into_diagnostic()
         .wrap_err_with(|| format!("looking up akh '{name}'"))?
     {
+        let mut active: heka::entity::heka_akhs::ActiveModel = existing.into();
         if let Some(desc) = &description {
-            let mut active: heka::entity::heka_akhs::ActiveModel = existing.into();
             active.description = Set(Some(desc.clone()));
+        }
+        if mint_token {
+            let (plaintext, hash) = heka::auth::mint_token();
+            active.token_hash = Set(Some(hash));
+            println!("Bearer token for {name}: {plaintext}");
+            tracing::info!(akh = name, "minted new bearer token");
+        }
+        if description.is_some() || mint_token {
             active.updated_at = Set(chrono::Utc::now());
             active.update(&db).await.into_diagnostic()?;
             tracing::info!(akh = name, "updated existing akh registration");
@@ -196,6 +223,14 @@ async fn run_register_akh(
     }
 
     // Insert new akh row.
+    let token_hash = if mint_token {
+        let (plaintext, hash) = heka::auth::mint_token();
+        println!("Bearer token for {name}: {plaintext}");
+        Some(hash)
+    } else {
+        None
+    };
+
     let now = chrono::Utc::now();
     let new_akh = heka::entity::heka_akhs::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -203,7 +238,7 @@ async fn run_register_akh(
         description: Set(description),
         personality: Set(None),
         avatar_url: Set(None),
-        token_hash: Set(None),
+        token_hash: Set(token_hash),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -215,6 +250,42 @@ async fn run_register_akh(
         id = %saved.id,
         "registered new akh in heka_akhs"
     );
+
+    Ok(())
+}
+
+/// Set or rotate the bearer token for an existing akh.
+///
+/// Mints a fresh 32-byte token, stores its SHA-256 hash in `heka_akhs.token_hash`,
+/// and prints the plaintext once to stdout. The old token (if any) is
+/// immediately invalidated.
+async fn run_set_token(name: &str, config_path: Option<PathBuf>) -> miette::Result<()> {
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let config_path = config_path.unwrap_or_else(default_config_path);
+    let config = HekaConfig::from_file(&config_path)
+        .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
+    let db = connect_database(&config.database.url, config.database.max_connections)
+        .await
+        .into_diagnostic()
+        .wrap_err("connecting to PostgreSQL")?;
+
+    let existing = heka::entity::heka_akhs::Entity::find()
+        .filter(heka::entity::heka_akhs::Column::Name.eq(name))
+        .one(&db)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("looking up akh '{name}'"))?
+        .ok_or_else(|| miette::miette!("akh '{name}' not found — register it first with `hekad register-akh {name} --token`"))?;
+
+    let (plaintext, hash) = heka::auth::mint_token();
+    let mut active: heka::entity::heka_akhs::ActiveModel = existing.into();
+    active.token_hash = Set(Some(hash));
+    active.updated_at = Set(chrono::Utc::now());
+    active.update(&db).await.into_diagnostic()?;
+
+    println!("Bearer token for {name}: {plaintext}");
+    tracing::info!(akh = name, "bearer token set (plaintext shown once)");
 
     Ok(())
 }

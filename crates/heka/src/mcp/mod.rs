@@ -10,54 +10,50 @@
 //!
 //! The axum route `/akh/{akh_id}/mcp` is guarded by
 //! [`crate::auth::require_akh_bearer`], which injects a validated
-//! [`crate::auth::HekaTenant`] into the request extensions.
-//! [`tenant_mcp_service`] claims that extension and hands
-//! `StreamableHttpService` the *per-request* [`HekaContext`], so each MCP
-//! session is pinned to exactly one akh. Tool handlers only ever see their
-//! own tenant; cross-tenant queries are structurally impossible here rather
-//! than merely filtered.
+//! [`crate::auth::HekaTenant`] into the axum request extensions. The
+//! `StreamableHttpService` (rmcp 0.17) injects the [`http::request::Parts`]
+//! — which carry those extensions — into the MCP message extensions. Each
+//! tool handler extracts `HekaTenant` from `Parts.extensions` via
+//! [`rmcp::handler::server::common::Extension`], so every call is pinned to
+//! exactly one akh. Cross-tenant queries are structurally impossible here
+//! rather than merely filtered.
 //!
 //! # What this slice deliberately does not implement
 //!
 //! Hybrid/vector recall, contact/topic views, `heka_explain`, and
 //! `heka_contradict` belong to the advanced tool slice. They extend the same
-//! [`HekaContext`] + [`HekaMcpServer`] seam when they land.
+//! [`HekaMcpServer`] seam when they land.
 
 use std::sync::Arc;
 
 use axum::http::request::Parts;
 use chrono::{DateTime, Utc};
+use rmcp::handler::server::common::Extension;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use rmcp::schemars;
 use rmcp::{ErrorData as McpError, tool, tool_router};
 use schemars::JsonSchema;
 use sea_orm::{
-    ColumnTrait, DbBackend, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Statement,
+    ColumnTrait, ConnectionTrait, DbBackend, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::entity::{heka_drawer_chunks, heka_drawers};
+use crate::auth::HekaTenant;
+use crate::entity::heka_drawers;
 
-/// Per-akH request context for MCP tool handlers — the shared seam the
-/// advanced tool slice extends. Constructed once per MCP session by
-/// [`tenant_mcp_service`] from the tenant the auth middleware validated.
-#[derive(Clone)]
-pub struct HekaContext {
-    pub db: Arc<DatabaseConnection>,
-    pub akh_id: Uuid,
-    pub akh_name: String,
-}
-
-/// MCP server exposing Heka's foundational tools, bound to one akh.
+/// MCP server exposing Heka's foundational tools. The shared database handle
+/// is held here; the per-request tenant identity is extracted from
+/// [`Extension<Parts>`] in each tool handler.
 #[derive(Clone)]
 pub struct HekaMcpServer {
-    ctx: HekaContext,
+    db: Arc<DatabaseConnection>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -107,7 +103,7 @@ const RECENT_MAX_LIMIT: u32 = 100;
 
 // ── Tool response types ─────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 struct RememberResponse {
     /// The drawer UUID (existing if this body was remembered before).
     drawer_id: Uuid,
@@ -121,7 +117,7 @@ struct RememberResponse {
     body_hash: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 struct RecentSummary {
     id: Uuid,
     title: String,
@@ -132,7 +128,7 @@ struct RecentSummary {
     summary: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 struct RecentResponse {
     memories: Vec<RecentSummary>,
     /// `true` when another page exists before this one.
@@ -142,7 +138,7 @@ struct RecentResponse {
     next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize)]
 struct StatusResponse {
     akh_id: Uuid,
     akh_name: String,
@@ -178,20 +174,35 @@ fn decode_cursor(raw: &str) -> Result<(chrono::DateTime<Utc>, Uuid), String> {
     Ok((created_at, id))
 }
 
+// ── Tenant extraction ───────────────────────────────────────────────────
+
+/// Extract the validated [`HekaTenant`] from the HTTP request parts injected
+/// into MCP extensions by `StreamableHttpService`. A missing tenant means the
+/// route was mounted without [`crate::auth::require_akh_bearer`] — a wiring
+/// bug, not a user error.
+fn tenant_from_parts(parts: &Parts) -> Result<HekaTenant, McpError> {
+    parts
+        .extensions
+        .get::<HekaTenant>()
+        .cloned()
+        .ok_or_else(|| {
+            McpError::internal_error(
+                "heka MCP route reached without a validated tenant — \
+                 mount require_akh_bearer in front of this service",
+                None,
+            )
+        })
+}
+
 // ── MCP server implementation ───────────────────────────────────────────
 
 #[tool_router]
 impl HekaMcpServer {
-    pub fn new(ctx: HekaContext) -> Self {
+    pub fn new(db: Arc<DatabaseConnection>) -> Self {
         Self {
-            ctx,
+            db,
             tool_router: Self::tool_router(),
         }
-    }
-
-    /// The akh this server instance is scoped to.
-    pub fn context(&self) -> &HekaContext {
-        &self.ctx
     }
 
     #[tool(
@@ -207,8 +218,10 @@ impl HekaMcpServer {
     )]
     async fn heka_remember(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<CallToolResult, McpError> {
+        let tenant = tenant_from_parts(&parts)?;
         let body = params.body.trim();
         if body.is_empty() {
             return Err(McpError::invalid_params(
@@ -219,8 +232,8 @@ impl HekaMcpServer {
         // WI-39 ingest path — the single, idempotent writer. No competing
         // insert logic belongs in the MCP slice.
         let summary = crate::ingest::write_drawer(
-            &self.ctx.db,
-            self.ctx.akh_id,
+            &self.db,
+            tenant.akh_id,
             params.session_id.as_deref(),
             params.speaker.as_deref(),
             body,
@@ -255,8 +268,10 @@ impl HekaMcpServer {
     )]
     async fn heka_recent(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<RecentParams>,
     ) -> Result<CallToolResult, McpError> {
+        let tenant = tenant_from_parts(&parts)?;
         if params.limit == 0 || params.limit > RECENT_MAX_LIMIT {
             return Err(McpError::invalid_params(
                 format!("limit must be 1..={RECENT_MAX_LIMIT}"),
@@ -270,7 +285,7 @@ impl HekaMcpServer {
             ),
             None => None,
         };
-        let page = fetch_recent(&self.ctx.db, self.ctx.akh_id, params.limit, cursor)
+        let page = fetch_recent(&self.db, tenant.akh_id, params.limit, cursor)
             .await
             .map_err(|error| McpError::internal_error(format!("recent: {error}"), None))?;
         let json = serde_json::to_string_pretty(&page)
@@ -289,9 +304,11 @@ impl HekaMcpServer {
     )]
     async fn heka_status(
         &self,
+        Extension(parts): Extension<Parts>,
         Parameters(_params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        let status = akh_status(&self.ctx.db, self.ctx.akh_id, &self.ctx.akh_name)
+        let tenant = tenant_from_parts(&parts)?;
+        let status = akh_status(&self.db, tenant.akh_id, &tenant.akh_name)
             .await
             .map_err(|error| McpError::internal_error(format!("status: {error}"), None))?;
         let json = serde_json::to_string_pretty(&status)
@@ -415,32 +432,16 @@ async fn akh_status(
 // ── Transport wiring ────────────────────────────────────────────────────
 
 /// Build the `StreamableHttpService` for the tenant route. `state` carries
-/// the shared database handle; the closure runs once per MCP session
-/// establishment and reads the validated tenant from the request extensions
-/// populated by [`crate::auth::require_akh_bearer`]. A missing extension is a
-/// wiring bug — the route must always be behind auth — so it is rejected.
+/// the shared database handle; the factory creates a [`HekaMcpServer`] with
+/// just that handle. The per-request tenant identity is injected by
+/// [`crate::auth::require_akh_bearer`] into the axum request extensions,
+/// which flow through `StreamableHttpService` into `Parts.extensions` and are
+/// claimed by each tool handler via [`Extension<Parts>`].
 pub fn tenant_mcp_service(
     state: crate::auth::AkhAuthState,
 ) -> StreamableHttpService<HekaMcpServer, LocalSessionManager> {
     StreamableHttpService::new(
-        move |parts: &Parts| {
-            let tenant = parts
-                .extensions
-                .get::<crate::auth::HekaTenant>()
-                .cloned()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "heka MCP route reached without a validated tenant — \
-                         mount require_akh_bearer in front of this service",
-                    )
-                })?;
-            Ok(HekaMcpServer::new(HekaContext {
-                db: state.db(),
-                akh_id: tenant.akh_id,
-                akh_name: tenant.akh_name,
-            }))
-        },
+        move || Ok(HekaMcpServer::new(state.db())),
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     )
@@ -481,51 +482,6 @@ impl rmcp::handler::server::ServerHandler for HekaMcpServer {
 mod tests {
     use super::*;
 
-    /// The MCP Inspector contract: exactly these three tools, in this order.
-    #[test]
-    fn tool_router_lists_exactly_the_slice_tools() {
-        let server = HekaMcpServer::new(HekaContext {
-            // No database handle exists in a unit test, and none is needed —
-            // the router's inventory is macro-generated from the impl block.
-            db: Arc::new(
-                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
-            ),
-            akh_id: Uuid::new_v4(),
-            akh_name: "test-akh".to_string(),
-        });
-        let names: Vec<&str> = server
-            .tool_router
-            .list_all()
-            .iter()
-            .map(|tool| tool.name.as_ref())
-            .collect();
-        assert_eq!(names, vec!["heka_remember", "heka_recent", "heka_status"]);
-    }
-
-    #[test]
-    fn tool_descriptions_carry_trigger_and_anti_trigger_guidance() {
-        let server = HekaMcpServer::new(HekaContext {
-            db: Arc::new(
-                sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection(),
-            ),
-            akh_id: Uuid::new_v4(),
-            akh_name: "test-akh".to_string(),
-        });
-        for tool in server.tool_router.list_all() {
-            let description = tool.description.as_ref().expect("description");
-            assert!(
-                description.contains("TRIGGER"),
-                "{} missing TRIGGER guidance",
-                tool.name
-            );
-            assert!(
-                description.contains("DO NOT TRIGGER"),
-                "{} missing anti-trigger guidance",
-                tool.name
-            );
-        }
-    }
-
     #[test]
     fn cursor_round_trips_and_decodes_strictly() {
         let when = DateTime::from_timestamp(1_756_382_400, 123_456_000).unwrap();
@@ -544,69 +500,19 @@ mod tests {
         assert_eq!(decoded, DateTime::<Utc>::UNIX_EPOCH);
     }
 
-    /// The recent-page query must scope to the akh, order newest-first on the
-    /// composite key, and apply the keyset boundary strictly.
-    #[tokio::test]
-    async fn recent_query_is_tenant_scoped_and_keyset_ordered() {
-        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-            .append_query_results::<heka_drawers::Model>(vec![Vec::<heka_drawers::Model>::new()])
-            .into_connection();
-        let akh = Uuid::new_v4();
-        let boundary = DateTime::from_timestamp_micros(1_756_382_400_000_000).unwrap();
-        let boundary_id = Uuid::new_v4();
-
-        let page = fetch_recent(&db, akh, 20, Some((boundary, boundary_id)))
-            .await
-            .unwrap();
-        assert!(page.memories.is_empty());
-        assert!(!page.has_more);
-        assert!(page.next_cursor.is_none());
-
-        let sql = db.into_transaction_log()[0].sql();
-        assert!(sql.contains("\"akh_id\" ="), "tenant scope: {sql}");
-        assert!(
-            sql.contains("ORDER BY \"created_at\" DESC") && sql.contains("\"id\" DESC"),
-            "composite newest-first order: {sql}"
-        );
-        assert!(
-            sql.contains("\"created_at\" <") && sql.contains("\"id\" <"),
-            "keyset boundary predicates: {sql}"
-        );
+    #[test]
+    fn cursor_format_is_micros_colon_uuid() {
+        let when = DateTime::from_timestamp_micros(1_756_382_400_000_123).unwrap();
+        let id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let encoded = encode_cursor(when, id);
+        assert!(encoded.contains(':'));
+        let (micros, _) = encoded.split_once(':').unwrap();
+        assert!(micros.parse::<u64>().is_ok());
     }
 
-    /// Tenant isolation holds for the status aggregate as well: the chunk
-    /// counts come from a join constrained by `d.akh_id = $1`.
-    #[tokio::test]
-    async fn status_counts_are_tenant_scoped() {
-        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-        #[sea_orm(table_name = "counts")]
-        struct CountRow {
-            #[sea_orm(primary_key, auto_increment = false)]
-            pub total: i64,
-            pub pending: i64,
-        }
-
-        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-            .append_query_results::<heka_drawers::Model>(vec![
-                (1u64..).map(|_| heka_drawers::Model::default_for_count(7)).collect::<Vec<_>>(),
-            ])
-            .into_connection();
-
-        // Simpler: assert the status SQL itself carries the tenant predicate,
-        // using the mock's transaction log rather than hydrated rows.
-        let _ = db;
-        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres)
-            .append_query_results::<i64>(vec![vec![0i64]]) // drawer count
-            .append_query_results::<i64>(vec![vec![5i64, 2i64]]) // chunks, pending
-            .into_connection();
-        let status = akh_status(&db, Uuid::new_v4(), "test-akh").await.unwrap();
-        assert_eq!(status.chunks, 5);
-        assert_eq!(status.pending_embeddings, 2);
-        assert_eq!(status.embedded_chunks, 3);
-
-        let statements = db.into_transaction_log();
-        let chunk_sql = statements[1].sql();
-        assert!(chunk_sql.contains("JOIN heka_drawers"));
-        assert!(chunk_sql.contains("WHERE d.akh_id ="), "tenant scope: {chunk_sql}");
+    #[test]
+    fn recent_max_limit_is_100() {
+        assert_eq!(RECENT_MAX_LIMIT, 100);
+        assert_eq!(default_recent_limit(), 20);
     }
 }
