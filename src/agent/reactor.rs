@@ -235,6 +235,17 @@ impl ReactorSchedule {
             },
         })
     }
+
+    /// Validate the full durable schedule invariant after deserialization.
+    /// Callers that cross a persistence boundary must not treat a structurally
+    /// valid JSON object as executable until these semantic checks pass.
+    pub(crate) fn validate(&self) -> AgentResult<()> {
+        if self.id.trim().is_empty() {
+            return Err(reactor_error("schedule id may not be empty"));
+        }
+        validate_rule(&self.rule)?;
+        validate_action(&self.rule, &self.action)
+    }
 }
 
 /// A leased occurrence returned to the daemon for execution.
@@ -403,12 +414,13 @@ impl<'a> ReactorStore<'a> {
             if value.is_empty() {
                 continue;
             }
-            let schedule = serde_json::from_slice(&value).map_err(|error| {
+            let schedule: ReactorSchedule = serde_json::from_slice(&value).map_err(|error| {
                 reactor_error(format!(
                     "decode durable schedule {:?}: {error}",
                     String::from_utf8_lossy(&key)
                 ))
             })?;
+            schedule.validate()?;
             schedules.push(schedule);
         }
         schedules.sort_by(|a: &ReactorSchedule, b| a.id.cmp(&b.id));
@@ -444,8 +456,7 @@ impl<'a> ReactorStore<'a> {
                     reactor_error(format!("decode durable schedule {id:?}: {error}"))
                 })?;
             let result = mutation(&mut schedule)?;
-            validate_rule(&schedule.rule)?;
-            validate_action(&schedule.rule, &schedule.action)?;
+            schedule.validate()?;
             let replacement = serde_json::to_vec(&schedule)
                 .map_err(|error| reactor_error(format!("serialize schedule: {error}")))?;
             let swapped = self
@@ -464,11 +475,7 @@ impl<'a> ReactorStore<'a> {
 
     pub fn put(&self, schedule: &ReactorSchedule) -> AgentResult<()> {
         self.ensure_durable()?;
-        if schedule.id.trim().is_empty() {
-            return Err(reactor_error("schedule id may not be empty"));
-        }
-        validate_rule(&schedule.rule)?;
-        validate_action(&schedule.rule, &schedule.action)?;
+        schedule.validate()?;
         let data = serde_json::to_vec(schedule)
             .map_err(|error| reactor_error(format!("serialize schedule: {error}")))?;
         self.engine
