@@ -261,6 +261,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "ureq",
+ "uuid",
  "wasmtime",
 ]
 

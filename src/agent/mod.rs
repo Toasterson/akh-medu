@@ -47,6 +47,7 @@ pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod decomposition;
+pub mod djehuty;
 pub mod drives;
 pub mod epistemic;
 pub mod error;
@@ -292,3 +293,8 @@ pub use response_strategy::{
 };
 pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
 pub use openclaw::{OpenClawConfig, OpenClawError};
+pub use djehuty::{
+    DjehutyAgentId, DjehutyCheckpoint, DjehutyClient, DjehutyConfig, DjehutyError,
+    DjehutyMessageContent, DjehutyMessageId, DjehutyMessageView, DjehutyPage, DjehutyResult,
+    DjehutyRetention, DjehutyRetryPolicy, DjehutyThreadView, board_note,
+};
