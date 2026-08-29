@@ -52,6 +52,24 @@ pub enum ReactorAction {
         #[serde(default)]
         agent_id: Option<String>,
     },
+    /// Respond to a Djehuty thread event with a real model turn, then post the
+    /// final answer back to the originating thread with a stable idempotency
+    /// key. Board ingestion supplies the triggering message as event payload.
+    DjehutyReply {
+        thread_id: String,
+        #[serde(default)]
+        prompt_prefix: String,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        allowed_message_types: Vec<String>,
+        #[serde(default = "default_board_prompt_chars")]
+        max_prompt_chars: usize,
+        #[serde(default = "default_board_reply_chars")]
+        max_reply_chars: usize,
+        #[serde(default = "default_board_reply_interval")]
+        min_reply_interval_seconds: u64,
+    },
     /// Reuse an existing deterministic trigger action.
     Trigger { action: TriggerAction },
     /// Inspect a BabyLLM/LoRA training heartbeat and emit only meaningful
@@ -83,6 +101,18 @@ fn default_progress_steps() -> u64 {
 
 fn default_min_disk_free() -> u64 {
     5 * 1024 * 1024 * 1024
+}
+
+fn default_board_prompt_chars() -> usize {
+    12_000
+}
+
+fn default_board_reply_chars() -> usize {
+    8_000
+}
+
+fn default_board_reply_interval() -> u64 {
+    15
 }
 
 /// What to do when the daemon returns after a schedule is substantially late.
@@ -177,6 +207,7 @@ impl ReactorSchedule {
         now: u64,
     ) -> AgentResult<Self> {
         validate_rule(&rule)?;
+        validate_action(&rule, &action)?;
         let next_due_at = first_due(&rule, now)?;
         Ok(Self {
             id: id.into(),
@@ -234,15 +265,33 @@ impl<'a> ReactorStore<'a> {
     }
 
     pub fn list(&self) -> Vec<ReactorSchedule> {
-        let Ok(entries) = self.engine.store().scan_prefix(SCHEDULE_PREFIX) else {
-            return Vec::new();
-        };
-        let mut schedules: Vec<_> = entries
-            .into_iter()
-            .filter_map(|(_, value)| serde_json::from_slice(&value).ok())
-            .collect();
+        self.list_checked().unwrap_or_default()
+    }
+
+    /// List schedules without hiding durable-store or decoding failures.
+    /// Execution paths use this fail-closed form so corruption cannot silently
+    /// turn an enabled schedule into a no-op.
+    pub fn list_checked(&self) -> AgentResult<Vec<ReactorSchedule>> {
+        let entries = self
+            .engine
+            .store()
+            .scan_prefix(SCHEDULE_PREFIX)
+            .map_err(|error| AgentError::Engine(Box::new(error.into())))?;
+        let mut schedules = Vec::new();
+        for (key, value) in entries {
+            if value.is_empty() {
+                continue;
+            }
+            let schedule = serde_json::from_slice(&value).map_err(|error| {
+                reactor_error(format!(
+                    "decode durable schedule {:?}: {error}",
+                    String::from_utf8_lossy(&key)
+                ))
+            })?;
+            schedules.push(schedule);
+        }
         schedules.sort_by(|a: &ReactorSchedule, b| a.id.cmp(&b.id));
-        schedules
+        Ok(schedules)
     }
 
     pub fn get(&self, id: &str) -> Option<ReactorSchedule> {
@@ -260,6 +309,7 @@ impl<'a> ReactorStore<'a> {
             return Err(reactor_error("schedule id may not be empty"));
         }
         validate_rule(&schedule.rule)?;
+        validate_action(&schedule.rule, &schedule.action)?;
         let data = serde_json::to_vec(schedule)
             .map_err(|error| reactor_error(format!("serialize schedule: {error}")))?;
         self.engine
@@ -328,11 +378,22 @@ impl<'a> ReactorStore<'a> {
     /// until the lease expires.
     pub fn poll_due(&self, now: u64) -> AgentResult<ReactorPoll> {
         let mut poll = ReactorPoll::default();
-        for mut schedule in self.list() {
+        for mut schedule in self.list_checked()? {
             if !schedule.enabled || schedule.state.completed {
                 continue;
             }
             if schedule.state.lease_until.is_some_and(|until| until > now) {
+                continue;
+            }
+            if let ReactorAction::DjehutyReply {
+                min_reply_interval_seconds,
+                ..
+            } = &schedule.action
+                && schedule
+                    .state
+                    .last_success_at
+                    .is_some_and(|last| last.saturating_add(*min_reply_interval_seconds) > now)
+            {
                 continue;
             }
 
@@ -468,6 +529,32 @@ fn validate_rule(rule: &ScheduleRule) -> AgentResult<()> {
         }
         ScheduleRule::Event { .. } => Ok(()),
     }
+}
+
+fn validate_action(rule: &ScheduleRule, action: &ReactorAction) -> AgentResult<()> {
+    let ReactorAction::DjehutyReply {
+        thread_id,
+        max_prompt_chars,
+        max_reply_chars,
+        ..
+    } = action
+    else {
+        return Ok(());
+    };
+    let expected = format!("djehuty:thread:{thread_id}");
+    if !matches!(rule, ScheduleRule::Event { source } if source == &expected) {
+        return Err(reactor_error(format!(
+            "djehuty_reply requires event source {expected:?}"
+        )));
+    }
+    uuid::Uuid::parse_str(thread_id)
+        .map_err(|error| reactor_error(format!("invalid Djehuty thread id: {error}")))?;
+    if *max_prompt_chars == 0 || *max_reply_chars == 0 {
+        return Err(reactor_error(
+            "Djehuty prompt and reply limits must be greater than zero",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_cron(expression: &str) -> String {
@@ -679,6 +766,17 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn corrupt_durable_schedule_fails_poll_closed() {
+        let engine = engine();
+        engine
+            .store()
+            .put_meta(b"reactor:schedule:corrupt", b"not-json")
+            .unwrap();
+        let error = ReactorStore::new(&engine).poll_due(10).unwrap_err();
+        assert!(error.to_string().contains("decode durable schedule"));
     }
 
     #[test]

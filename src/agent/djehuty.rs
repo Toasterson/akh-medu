@@ -46,6 +46,7 @@
 //! files:
 //!   `DJEHUTY_BOARD_TOKEN`   — bearer token (required when enabled)
 //!   `DJEHUTY_BOARD_URL`     — board base URL (default `http://127.0.0.1:8080`)
+//!   `DJEHUTY_AGENT_ID`      — authenticated agent UUID (required by reactor ingress)
 
 use std::path::Path;
 use std::time::Duration;

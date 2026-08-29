@@ -35,6 +35,22 @@ class TrainingRunReporterTests(unittest.TestCase):
                 kill.assert_called_once()
                 self.assertEqual(kill.call_args.args[1], 2)
 
+    def test_checkpoint_mtime_is_published_as_progress_not_just_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            reporter = TrainingRunReporter("run-1", run_dir)
+            checkpoint = run_dir / "adapter.safetensors"
+            checkpoint.write_bytes(b"first")
+            reporter.publish()
+            first = json.loads(reporter.status_path.read_text())
+            checkpoint.write_bytes(b"second")
+            reporter.publish()
+            second = json.loads(reporter.status_path.read_text())
+            self.assertIn("checkpoint_mtime_ns", second["metrics"])
+            self.assertGreaterEqual(
+                second["progress_updated_at"], first["progress_updated_at"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

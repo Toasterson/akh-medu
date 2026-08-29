@@ -46,6 +46,8 @@ pub mod delegation;
 pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+#[cfg(feature = "daemon")]
+pub mod board_reactor;
 pub mod decomposition;
 pub mod djehuty;
 pub mod drives;

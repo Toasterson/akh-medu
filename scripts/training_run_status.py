@@ -40,11 +40,13 @@ class TrainingRunReporter:
             "run_id": run_id,
             "state": "starting",
             "updated_at": int(time.time()),
+            "progress_updated_at": int(time.time()),
             "step": 0,
             "total_steps": total_steps,
             "metrics": {},
         }
         self._control_seen = False
+        self._last_checkpoint_mtime_ns: int | None = None
 
     def start(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +61,7 @@ class TrainingRunReporter:
     def update(self, state: str, **facts: Any) -> None:
         with self._lock:
             self._status["state"] = state
+            self._status["progress_updated_at"] = int(time.time())
             self._status.update(facts)
         self.publish()
 
@@ -73,6 +76,17 @@ class TrainingRunReporter:
         checkpoint = self._latest_checkpoint()
         if checkpoint is not None:
             status["checkpoint_path"] = str(checkpoint)
+            try:
+                checkpoint_mtime_ns = checkpoint.stat().st_mtime_ns
+            except OSError:
+                checkpoint_mtime_ns = None
+            if checkpoint_mtime_ns is not None:
+                with self._lock:
+                    if checkpoint_mtime_ns != self._last_checkpoint_mtime_ns:
+                        self._last_checkpoint_mtime_ns = checkpoint_mtime_ns
+                        self._status["progress_updated_at"] = int(time.time())
+                    status["progress_updated_at"] = self._status["progress_updated_at"]
+                status.setdefault("metrics", {})["checkpoint_mtime_ns"] = checkpoint_mtime_ns
         _atomic_json(self.status_path, status)
 
     def finish(self) -> None:

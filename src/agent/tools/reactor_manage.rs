@@ -82,7 +82,7 @@ impl Tool for ReactorManageTool {
         let operation = input.require("operation", "reactor_manage")?;
         let store = ReactorStore::new(engine);
         match operation {
-            "list" => serde_json::to_string_pretty(&store.list())
+            "list" => serde_json::to_string_pretty(&store.list_checked()?)
                 .map(ToolOutput::ok)
                 .map_err(|error| tool_error(format!("serialize schedules: {error}"))),
             "add" => {
@@ -161,7 +161,7 @@ impl Tool for ReactorManageTool {
                 },
                 "action": {
                     "type": "object",
-                    "description": "Tagged action: llm_turn, trigger, or training_monitor."
+                    "description": "Tagged action: llm_turn, djehuty_reply, trigger, or training_monitor."
                 },
                 "misfire_policy": {"type": "string", "enum": ["skip", "run_once"]},
                 "misfire_grace_seconds": {"type": "integer", "minimum": 0},

@@ -458,6 +458,7 @@ impl AgentDaemon {
     /// or another background task). The daemon uses this to yield to
     /// session work: if a turn is in progress, the daemon skips its
     /// cycle rather than blocking the turn.
+    #[cfg(test)]
     fn try_write_agent(&self) -> Option<std::sync::RwLockWriteGuard<'_, Agent>> {
         self.agent.try_write().ok()
     }
@@ -1504,12 +1505,25 @@ impl AgentDaemon {
         use super::memory::index_system_episode;
         use super::reactor::{ReactorAction, ReactorStore};
 
-        let Some(mut guard) = self.try_write_agent() else {
-            tracing::debug!("daemon: agent lock contended; skipping reactor tick");
-            return;
-        };
         let now = now_secs();
-        let poll = match ReactorStore::new(&guard.engine).poll_due(now) {
+        let (engine, predicates) = match self.agent.try_read() {
+            Ok(agent) => (Arc::clone(&agent.engine), agent.predicates().clone()),
+            Err(_) => {
+                tracing::debug!("daemon: agent lock contended; skipping reactor ingress");
+                return;
+            }
+        };
+        match super::board_reactor::ingest_board_events_from_env(&engine, now) {
+            Ok(report) if report.events_queued > 0 => tracing::info!(
+                events_queued = report.events_queued,
+                messages_seen = report.messages_seen,
+                "daemon: Djehuty events queued"
+            ),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "daemon: Djehuty ingress failed"),
+        }
+
+        let poll = match ReactorStore::new(&engine).poll_due(now) {
             Ok(poll) => poll,
             Err(error) => {
                 tracing::warn!(error = %error, "daemon: reactor poll failed");
@@ -1527,8 +1541,8 @@ impl AgentDaemon {
                 misfire.schedule_name, misfire.scheduled_for, misfire.observed_at
             );
             if let Err(error) = index_system_episode(
-                &guard.engine,
-                guard.predicates(),
+                &engine,
+                &predicates,
                 &key,
                 &summary,
                 &["reactor_run", "misfire", "skipped"],
@@ -1539,10 +1553,7 @@ impl AgentDaemon {
 
         for claim in poll.claims {
             let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
-            let start_key = format!(
-                "reactor:{}:attempt:{}:started",
-                claim.run_id, claim.attempt
-            );
+            let start_key = format!("reactor:{}:attempt:{}:started", claim.run_id, claim.attempt);
             let start_summary = format!(
                 "reactor schedule {} started run {} attempt {} scheduled_for={} trigger={}",
                 claim.schedule.name,
@@ -1556,8 +1567,8 @@ impl AgentDaemon {
                     .unwrap_or_else(|| "time".into())
             );
             if let Err(error) = index_system_episode(
-                &guard.engine,
-                guard.predicates(),
+                &engine,
+                &predicates,
                 &start_key,
                 &start_summary,
                 &["reactor_run", "started", schedule_tag.as_str()],
@@ -1565,24 +1576,22 @@ impl AgentDaemon {
                 // An autonomous action without a durable start record would be
                 // unauditable. Fail closed and let bounded retry policy decide.
                 tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: reactor audit start failed; action not executed");
-                let _ = ReactorStore::new(&guard.engine).complete(&claim, now_secs(), false);
+                let _ = ReactorStore::new(&engine).complete(&claim, now_secs(), false);
                 continue;
             }
 
             let result: AgentResult<String> = match &claim.schedule.action {
-                ReactorAction::LlmTurn { prompt, agent_id } => {
+                ReactorAction::LlmTurn { prompt, agent_id } => (|| {
+                    let guard = self.agent.try_read().map_err(|_| {
+                        super::error::AgentError::ToolExecution {
+                            tool_name: "reactor_llm_turn".into(),
+                            message: "agent lock contended; retrying scheduled LLM turn".into(),
+                        }
+                    })?;
                     let sink = crate::message::VecSink::new();
                     let cancel = AtomicBool::new(false);
-                    let engine = Arc::clone(&guard.engine);
                     let agent_id = agent_id.as_deref().unwrap_or("daemon-reactor");
-                    match guard.run_agentic_turn(
-                        &engine,
-                        agent_id,
-                        prompt,
-                        &sink,
-                        &cancel,
-                        true,
-                    ) {
+                    match guard.run_agentic_turn(&engine, agent_id, prompt, &sink, &cancel, true) {
                         Some(()) => Ok(format!(
                             "LLM action completed through configured backend ({} emitted messages)",
                             sink.len()
@@ -1592,8 +1601,23 @@ impl AgentDaemon {
                             message: "configured LLM backend is absent or unavailable".into(),
                         }),
                     }
-                }
-                ReactorAction::Trigger { action } => {
+                })(),
+                ReactorAction::DjehutyReply { .. } => (|| {
+                    let guard = self.agent.try_read().map_err(|_| {
+                        super::error::AgentError::ToolExecution {
+                            tool_name: "djehuty_board_reactor".into(),
+                            message: "agent lock contended; retrying board reply".into(),
+                        }
+                    })?;
+                    super::board_reactor::execute_board_reply_from_env(&guard, &claim)
+                })(),
+                ReactorAction::Trigger { action } => (|| {
+                    let mut guard = self.agent.try_write().map_err(|_| {
+                        super::error::AgentError::ToolExecution {
+                            tool_name: "reactor_trigger".into(),
+                            message: "agent lock contended; retrying trigger action".into(),
+                        }
+                    })?;
                     let trigger = super::trigger::Trigger {
                         id: claim.run_id.clone(),
                         name: claim.schedule.name.clone(),
@@ -1603,7 +1627,7 @@ impl AgentDaemon {
                         last_fired: 0,
                     };
                     super::trigger::execute_trigger(&trigger, &mut guard)
-                }
+                })(),
                 ReactorAction::TrainingMonitor {
                     run_id,
                     status_path,
@@ -1613,16 +1637,14 @@ impl AgentDaemon {
                     min_disk_free_bytes,
                     checkpoint_and_stop_on_stall,
                 } => {
-                    let mut config = super::training_monitor::TrainingMonitorConfig::new(
-                        run_id,
-                        status_path,
-                    );
+                    let mut config =
+                        super::training_monitor::TrainingMonitorConfig::new(run_id, status_path);
                     config.control_path = control_path.as_ref().map(std::path::PathBuf::from);
                     config.stall_after_seconds = *stall_after_seconds;
                     config.progress_report_every_steps = *progress_report_every_steps;
                     config.min_disk_free_bytes = *min_disk_free_bytes;
                     config.checkpoint_and_stop_on_stall = *checkpoint_and_stop_on_stall;
-                    super::training_monitor::inspect_training(&guard.engine, &config, now)
+                    super::training_monitor::inspect_training(&engine, &config, now)
                         .map(|observation| observation.summary)
                 }
             };
@@ -1633,7 +1655,7 @@ impl AgentDaemon {
                 Err(error) => (false, error.to_string()),
             };
             let completion =
-                ReactorStore::new(&guard.engine).complete(&claim, finished_at, action_success);
+                ReactorStore::new(&engine).complete(&claim, finished_at, action_success);
             let success = action_success && completion.is_ok();
             if let Err(error) = completion {
                 outcome_summary.push_str(&format!("; durable completion failed: {error}"));
@@ -1648,8 +1670,8 @@ impl AgentDaemon {
                 claim.schedule.name, claim.run_id, claim.attempt, outcome_summary
             );
             if let Err(error) = index_system_episode(
-                &guard.engine,
-                guard.predicates(),
+                &engine,
+                &predicates,
                 &finish_key,
                 &finish_summary,
                 &["reactor_run", outcome, schedule_tag.as_str()],

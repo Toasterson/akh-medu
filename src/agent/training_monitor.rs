@@ -29,6 +29,10 @@ pub struct TrainingStatus {
     pub run_id: String,
     pub state: String,
     pub updated_at: u64,
+    /// Last observed trainer progress (step/state/checkpoint), distinct from
+    /// the process heartbeat in `updated_at`.
+    #[serde(default)]
+    pub progress_updated_at: Option<u64>,
     #[serde(default)]
     pub step: u64,
     #[serde(default)]
@@ -58,7 +62,9 @@ struct MonitorWatermark {
     last_state: String,
     last_step: u64,
     last_updated_at: u64,
+    last_progress_updated_at: u64,
     last_reported_bucket: u64,
+    last_checkpoint_mtime_ns: u64,
     stalled_reported: bool,
     control_requested: bool,
 }
@@ -143,10 +149,12 @@ pub fn inspect_training(
 
     let bucket_size = config.progress_report_every_steps.max(1);
     let bucket = status.step / bucket_size;
+    let progress_updated_at = status.progress_updated_at.unwrap_or(status.updated_at);
     let stalled = !is_terminal(&status.state)
-        && now.saturating_sub(status.updated_at) > config.stall_after_seconds;
-    let regressed =
-        status.step < previous.last_step || status.updated_at < previous.last_updated_at;
+        && now.saturating_sub(progress_updated_at) > config.stall_after_seconds;
+    let regressed = status.step < previous.last_step
+        || status.updated_at < previous.last_updated_at
+        || progress_updated_at < previous.last_progress_updated_at;
     let disk_critical = status
         .disk_free_bytes
         .is_some_and(|free| free < config.min_disk_free_bytes);
@@ -156,19 +164,27 @@ pub fn inspect_training(
             .as_ref()
             .is_none_or(|path| !Path::new(path).exists());
     let state_changed = previous.last_state.is_empty() || previous.last_state != status.state;
-    let progress_changed = bucket > previous.last_reported_bucket;
+    let checkpoint_mtime_ns = status
+        .metrics
+        .get("checkpoint_mtime_ns")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default();
+    let checkpoint_changed = checkpoint_mtime_ns > previous.last_checkpoint_mtime_ns;
+    let progress_changed = bucket > previous.last_reported_bucket || checkpoint_changed;
 
     let (changed, severity, summary, recommended_control) = if regressed {
         (
             true,
             TrainingSeverity::Critical,
             format!(
-                "training {} telemetry regressed: step {} after {}, updated_at {} after {}",
+                "training {} telemetry regressed: step {} after {}, updated_at {} after {}, progress_updated_at {} after {}",
                 status.run_id,
                 status.step,
                 previous.last_step,
                 status.updated_at,
-                previous.last_updated_at
+                previous.last_updated_at,
+                progress_updated_at,
+                previous.last_progress_updated_at
             ),
             Some(TrainingControl::CheckpointAndStop),
         )
@@ -199,9 +215,9 @@ pub fn inspect_training(
             true,
             TrainingSeverity::Warning,
             format!(
-                "training {} heartbeat stalled for {} seconds at step {}",
+                "training {} progress stalled for {} seconds at step {} (heartbeat may still be live)",
                 status.run_id,
-                now.saturating_sub(status.updated_at),
+                now.saturating_sub(progress_updated_at),
                 status.step
             ),
             config
@@ -232,19 +248,26 @@ pub fn inspect_training(
         (
             true,
             TrainingSeverity::Info,
-            format!(
-                "training {} progressed to step {}{}{}",
-                status.run_id,
-                status.step,
-                status
-                    .total_steps
-                    .map(|total| format!("/{total}"))
-                    .unwrap_or_default(),
-                status
-                    .loss
-                    .map(|loss| format!(", loss={loss:.6}"))
-                    .unwrap_or_default()
-            ),
+            if checkpoint_changed && bucket <= previous.last_reported_bucket {
+                format!(
+                    "training {} wrote a new durable checkpoint at step {}",
+                    status.run_id, status.step
+                )
+            } else {
+                format!(
+                    "training {} progressed to step {}{}{}",
+                    status.run_id,
+                    status.step,
+                    status
+                        .total_steps
+                        .map(|total| format!("/{total}"))
+                        .unwrap_or_default(),
+                    status
+                        .loss
+                        .map(|loss| format!(", loss={loss:.6}"))
+                        .unwrap_or_default()
+                )
+            },
             None,
         )
     } else {
@@ -263,7 +286,9 @@ pub fn inspect_training(
         last_state: status.state.clone(),
         last_step: status.step,
         last_updated_at: status.updated_at,
+        last_progress_updated_at: progress_updated_at,
         last_reported_bucket: previous.last_reported_bucket.max(bucket),
+        last_checkpoint_mtime_ns: previous.last_checkpoint_mtime_ns.max(checkpoint_mtime_ns),
         stalled_reported: stalled,
         control_requested: previous.control_requested,
     };
@@ -374,6 +399,7 @@ mod tests {
             run_id: "run-1".into(),
             state: "training".into(),
             updated_at,
+            progress_updated_at: Some(updated_at),
             step,
             total_steps: Some(1000),
             epoch: Some(0.5),
@@ -428,5 +454,23 @@ mod tests {
         write_status(&status_path, 90, 102, 20 * 1024 * 1024 * 1024);
         let observation = inspect_training(&engine, &config, 103).unwrap();
         assert_eq!(observation.severity, TrainingSeverity::Critical);
+    }
+
+    #[test]
+    fn live_heartbeat_does_not_hide_stalled_training_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let status_path = temp.path().join("status.json");
+        write_status(&status_path, 10, 1_000, 20 * 1024 * 1024 * 1024);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+        value["progress_updated_at"] = serde_json::json!(100);
+        std::fs::write(&status_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let mut config = TrainingMonitorConfig::new("run-1", &status_path);
+        config.stall_after_seconds = 300;
+
+        let observation = inspect_training(&engine(), &config, 1_001).unwrap();
+        assert!(observation.changed);
+        assert_eq!(observation.severity, TrainingSeverity::Warning);
+        assert!(observation.summary.contains("progress stalled"));
     }
 }
