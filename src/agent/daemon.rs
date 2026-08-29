@@ -165,6 +165,12 @@ pub struct DaemonConfig {
     /// Evaluates user-defined triggers against the current agent state and
     /// fires any whose conditions are met.
     pub trigger_evaluation_interval: Duration,
+    /// Durable reactor evaluation interval (default: 5s).
+    ///
+    /// Time schedules and queued event wakes are opt-in by existing in the
+    /// durable reactor store. Reactor actions may run real configured LLM
+    /// turns; they are not restricted to deterministic daemon maintenance.
+    pub reactor_evaluation_interval: Duration,
     /// Knowledge extraction interval (default: 45 min).
     ///
     /// Runs LLM-backed triple extraction on recently-fetched content that
@@ -254,6 +260,7 @@ impl Default for DaemonConfig {
             goal_generation_interval: Duration::from_secs(300),
             sleep_cycle_interval: Duration::from_secs(3600),
             trigger_evaluation_interval: Duration::from_secs(15),
+            reactor_evaluation_interval: Duration::from_secs(5),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
             bridge_training_interval: Duration::from_secs(7200), // 2 hours
             openclaw_sync_interval: Duration::from_secs(86400), // 24 hours
@@ -485,6 +492,7 @@ impl AgentDaemon {
         let mut goal_gen_tick = interval(self.config.goal_generation_interval);
         let mut sleep_tick = interval(self.config.sleep_cycle_interval);
         let mut trigger_tick = interval(self.config.trigger_evaluation_interval);
+        let mut reactor_tick = interval(self.config.reactor_evaluation_interval);
         let mut extraction_tick = interval(self.config.knowledge_extraction_interval);
         let mut bridge_training_tick = interval(self.config.bridge_training_interval);
         let mut openclaw_sync_tick = interval(self.config.openclaw_sync_interval);
@@ -593,6 +601,12 @@ impl AgentDaemon {
                 _ = trigger_tick.tick() => {
                     // Always on: user-authored triggers are opt-in by existing.
                     tokio::task::block_in_place(|| self.run_trigger_evaluation());
+                }
+                _ = reactor_tick.tick() => {
+                    // Always on: durable schedules are opt-in by existing. In
+                    // particular, LlmTurn actions deliberately use the real
+                    // configured backend from this daemon interval.
+                    tokio::task::block_in_place(|| self.run_reactor_evaluation());
                 }
                 _ = extraction_tick.tick() => {
                     if self.task_enabled("knowledge_extraction") {
@@ -1486,6 +1500,170 @@ impl AgentDaemon {
         }
     }
 
+    fn run_reactor_evaluation(&mut self) {
+        use super::memory::index_system_episode;
+        use super::reactor::{ReactorAction, ReactorStore};
+
+        let Some(mut guard) = self.try_write_agent() else {
+            tracing::debug!("daemon: agent lock contended; skipping reactor tick");
+            return;
+        };
+        let now = now_secs();
+        let poll = match ReactorStore::new(&guard.engine).poll_due(now) {
+            Ok(poll) => poll,
+            Err(error) => {
+                tracing::warn!(error = %error, "daemon: reactor poll failed");
+                return;
+            }
+        };
+
+        for misfire in poll.misfires {
+            let key = format!(
+                "reactor:{}:{}:misfire",
+                misfire.schedule_id, misfire.scheduled_for
+            );
+            let summary = format!(
+                "reactor schedule {} skipped occurrence {} at {} by misfire policy",
+                misfire.schedule_name, misfire.scheduled_for, misfire.observed_at
+            );
+            if let Err(error) = index_system_episode(
+                &guard.engine,
+                guard.predicates(),
+                &key,
+                &summary,
+                &["reactor_run", "misfire", "skipped"],
+            ) {
+                tracing::warn!(error = %error, "daemon: failed to record reactor misfire episode");
+            }
+        }
+
+        for claim in poll.claims {
+            let schedule_tag = format!("reactor_schedule_{}", claim.schedule.id);
+            let start_key = format!(
+                "reactor:{}:attempt:{}:started",
+                claim.run_id, claim.attempt
+            );
+            let start_summary = format!(
+                "reactor schedule {} started run {} attempt {} scheduled_for={} trigger={}",
+                claim.schedule.name,
+                claim.run_id,
+                claim.attempt,
+                claim.scheduled_for,
+                claim
+                    .event
+                    .as_ref()
+                    .map(|event| format!("event:{}:{}", event.source, event.id))
+                    .unwrap_or_else(|| "time".into())
+            );
+            if let Err(error) = index_system_episode(
+                &guard.engine,
+                guard.predicates(),
+                &start_key,
+                &start_summary,
+                &["reactor_run", "started", schedule_tag.as_str()],
+            ) {
+                // An autonomous action without a durable start record would be
+                // unauditable. Fail closed and let bounded retry policy decide.
+                tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: reactor audit start failed; action not executed");
+                let _ = ReactorStore::new(&guard.engine).complete(&claim, now_secs(), false);
+                continue;
+            }
+
+            let result: AgentResult<String> = match &claim.schedule.action {
+                ReactorAction::LlmTurn { prompt, agent_id } => {
+                    let sink = crate::message::VecSink::new();
+                    let cancel = AtomicBool::new(false);
+                    let engine = Arc::clone(&guard.engine);
+                    let agent_id = agent_id.as_deref().unwrap_or("daemon-reactor");
+                    match guard.run_agentic_turn(
+                        &engine,
+                        agent_id,
+                        prompt,
+                        &sink,
+                        &cancel,
+                        true,
+                    ) {
+                        Some(()) => Ok(format!(
+                            "LLM action completed through configured backend ({} emitted messages)",
+                            sink.len()
+                        )),
+                        None => Err(super::error::AgentError::ToolExecution {
+                            tool_name: "reactor_llm_turn".into(),
+                            message: "configured LLM backend is absent or unavailable".into(),
+                        }),
+                    }
+                }
+                ReactorAction::Trigger { action } => {
+                    let trigger = super::trigger::Trigger {
+                        id: claim.run_id.clone(),
+                        name: claim.schedule.name.clone(),
+                        condition: super::trigger::TriggerCondition::Interval { seconds: 1 },
+                        action: action.clone(),
+                        enabled: true,
+                        last_fired: 0,
+                    };
+                    super::trigger::execute_trigger(&trigger, &mut guard)
+                }
+                ReactorAction::TrainingMonitor {
+                    run_id,
+                    status_path,
+                    control_path,
+                    stall_after_seconds,
+                    progress_report_every_steps,
+                    min_disk_free_bytes,
+                    checkpoint_and_stop_on_stall,
+                } => {
+                    let mut config = super::training_monitor::TrainingMonitorConfig::new(
+                        run_id,
+                        status_path,
+                    );
+                    config.control_path = control_path.as_ref().map(std::path::PathBuf::from);
+                    config.stall_after_seconds = *stall_after_seconds;
+                    config.progress_report_every_steps = *progress_report_every_steps;
+                    config.min_disk_free_bytes = *min_disk_free_bytes;
+                    config.checkpoint_and_stop_on_stall = *checkpoint_and_stop_on_stall;
+                    super::training_monitor::inspect_training(&guard.engine, &config, now)
+                        .map(|observation| observation.summary)
+                }
+            };
+
+            let finished_at = now_secs();
+            let (action_success, mut outcome_summary) = match result {
+                Ok(summary) => (true, summary),
+                Err(error) => (false, error.to_string()),
+            };
+            let completion =
+                ReactorStore::new(&guard.engine).complete(&claim, finished_at, action_success);
+            let success = action_success && completion.is_ok();
+            if let Err(error) = completion {
+                outcome_summary.push_str(&format!("; durable completion failed: {error}"));
+            }
+            let outcome = if success { "succeeded" } else { "failed" };
+            let finish_key = format!(
+                "reactor:{}:attempt:{}:{outcome}",
+                claim.run_id, claim.attempt
+            );
+            let finish_summary = format!(
+                "reactor schedule {} run {} attempt {} {outcome}: {}",
+                claim.schedule.name, claim.run_id, claim.attempt, outcome_summary
+            );
+            if let Err(error) = index_system_episode(
+                &guard.engine,
+                guard.predicates(),
+                &finish_key,
+                &finish_summary,
+                &["reactor_run", outcome, schedule_tag.as_str()],
+            ) {
+                tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor completion episode");
+            }
+            if success {
+                tracing::info!(run_id = %claim.run_id, attempt = claim.attempt, "daemon: reactor action completed");
+            } else {
+                tracing::warn!(run_id = %claim.run_id, attempt = claim.attempt, summary = %outcome_summary, "daemon: reactor action failed");
+            }
+        }
+    }
+
     fn run_idle_cycle(&mut self) {
         use super::goal;
 
@@ -2232,6 +2410,7 @@ mod tests {
         assert_eq!(config.goal_generation_interval, Duration::from_secs(300));
         assert_eq!(config.sleep_cycle_interval, Duration::from_secs(3600));
         assert_eq!(config.trigger_evaluation_interval, Duration::from_secs(15));
+        assert_eq!(config.reactor_evaluation_interval, Duration::from_secs(5));
         assert_eq!(
             config.knowledge_extraction_interval,
             Duration::from_secs(2700)
@@ -2274,6 +2453,7 @@ mod tests {
 
         let engine = Engine::new(EngineConfig {
             dimension: Dimension::TEST,
+            data_dir: Some(tempfile::tempdir().unwrap().keep()),
             ..Default::default()
         })
         .expect("engine");
@@ -2363,5 +2543,87 @@ mod tests {
             "run_idle_cycle must skip its cycle when the agent read lock is \
              held by a live turn, not block waiting for the write lock"
         );
+    }
+
+    /// Production-path proof that a daemon interval is allowed to invoke the
+    /// configured model backend. This does not mirror a scheduling formula: it
+    /// inserts a real durable schedule and calls the same reactor entry used by
+    /// the Tokio interval arm.
+    #[test]
+    fn reactor_interval_executes_real_llm_action_and_records_episodes() {
+        use std::sync::atomic::AtomicUsize;
+
+        use crate::agent::chat_backend::{ChatBackend, ChatBackendError};
+        use crate::agent::ollama::AssistantTurn;
+        use crate::agent::reactor::{ReactorAction, ReactorSchedule, ReactorStore, ScheduleRule};
+
+        struct RecordingBackend(AtomicUsize);
+
+        impl ChatBackend for RecordingBackend {
+            fn label(&self) -> &str {
+                "recording"
+            }
+
+            fn available(&self) -> bool {
+                true
+            }
+
+            fn chat_with_tools(
+                &self,
+                _agent_id: &str,
+                _conversation: &[serde_json::Value],
+                _tools: &[serde_json::Value],
+                _request_seq: usize,
+            ) -> Result<AssistantTurn, ChatBackendError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AssistantTurn {
+                    content: "scheduled model response".into(),
+                    ..AssistantTurn::default()
+                })
+            }
+        }
+
+        let shared = test_shared_agent();
+        let backend = Arc::new(RecordingBackend(AtomicUsize::new(0)));
+        {
+            let mut agent = shared.write().unwrap();
+            agent.set_chat_backend(backend.clone());
+            let schedule = ReactorSchedule::new(
+                "llm-proof",
+                "LLM proof",
+                ScheduleRule::Once { at: 0 },
+                ReactorAction::LlmTurn {
+                    prompt: "Respond once from the daemon reactor".into(),
+                    agent_id: Some("test-akh".into()),
+                },
+                0,
+            )
+            .unwrap();
+            ReactorStore::new(&agent.engine).put(&schedule).unwrap();
+        }
+
+        let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
+        daemon.run_reactor_evaluation();
+
+        // The agentic loop may ask the backend for more than one round while
+        // assembling a final answer. The production-path guarantee here is
+        // that the daemon schedule reaches the configured backend at all.
+        assert!(backend.0.load(Ordering::SeqCst) >= 1);
+        let agent = shared.read().unwrap();
+        assert!(
+            ReactorStore::new(&agent.engine)
+                .get("llm-proof")
+                .unwrap()
+                .state
+                .completed
+        );
+        let episodes = crate::agent::memory::recall_recent_episodes(
+            &agent.engine,
+            agent.predicates(),
+            10,
+        )
+        .unwrap();
+        assert!(episodes.iter().any(|episode| episode.summary.contains("started")));
+        assert!(episodes.iter().any(|episode| episode.summary.contains("succeeded")));
     }
 }

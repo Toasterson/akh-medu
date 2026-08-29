@@ -189,6 +189,7 @@ grug-data = { path = "crates/grug-data" }
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
+cron = { version = "0.17", optional = true }
 
 # Akhipedia wiki (feature-gated)
 comrak = { version = "0.31", optional = true, default-features = false, features = ["syntect"] }
@@ -219,7 +220,7 @@ base64 = { version = "0.22.1", optional = true }
 
 [features]
 default = ["nlu-candle", "acp"]
-daemon = ["tokio"]
+daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
@@ -234,7 +235,7 @@ tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry
 postgres = ["dep:akhomed-store", "tokio"]
 oxifed = ["daemon", "lapin", "deadpool-lapin", "futures-util"]
 email = ["mail-parser", "imap", "native-tls", "lettre"]
-calendar = ["icalendar", "chrono"]
+calendar = ["icalendar", "dep:chrono"]
 wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]

@@ -196,6 +196,7 @@ dependencies = [
  "clap",
  "comrak 0.31.0",
  "criterion",
+ "cron",
  "crossterm",
  "dashmap",
  "deadpool-lapin",
@@ -2725,6 +2726,18 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "cron"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5dcd6f69605c2956916ce24e8af637b754964c9a83f4662d3a2361654cdba09"
+dependencies = [
+ "chrono",
+ "once_cell",
+ "phf",
+ "winnow 0.7.14",
+]
 
 [[package]]
 name = "crossbeam-channel"

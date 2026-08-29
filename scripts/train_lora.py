@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from training_run_status import TrainingRunReporter
+
 # ── Agent definitions ──────────────────────────────────────────────────────────
 
 AGENTS = {
@@ -374,32 +376,69 @@ def train_agent(
 
     adapter_dir = data_dir / "adapters" / agent_id
     adapter_dir.mkdir(parents=True, exist_ok=True)
-
-    train_path, eval_path = prepare_dataset(agent_id, data_dir)
-    train_pairs = sum(1 for _ in open(train_path))
-
+    total_steps = cfg.epochs * 500 if backend == "mlx" else None
+    reporter = TrainingRunReporter(
+        f"lora-{agent_id}", adapter_dir, total_steps=total_steps
+    )
+    reporter.start()
     t0 = time.time()
-
-    if backend == "mlx":
-        adapter_path = train_mlx(agent_id, train_path, eval_path, adapter_dir, cfg, resume)
-    else:
-        adapter_path = train_llamacpp(
-            agent_id, train_path, eval_path, adapter_dir, cfg, llamacpp_dir, resume
+    try:
+        reporter.update("preparing", message="preparing deterministic train/eval split")
+        train_path, eval_path = prepare_dataset(agent_id, data_dir)
+        train_pairs = sum(1 for _ in open(train_path))
+        reporter.update(
+            "training",
+            backend=backend,
+            training_pairs=train_pairs,
+            message="training backend active",
         )
 
-    duration = time.time() - t0
+        if backend == "mlx":
+            adapter_path = train_mlx(agent_id, train_path, eval_path, adapter_dir, cfg, resume)
+        else:
+            adapter_path = train_llamacpp(
+                agent_id, train_path, eval_path, adapter_dir, cfg, llamacpp_dir, resume
+            )
 
-    # Evaluate on the eval set (keyword-overlap proxy; scripts/benchmark_adapter.py for full eval).
-    eval_accuracy = _quick_eval(agent_id, eval_path)
+        duration = time.time() - t0
+        reporter.update("evaluating", checkpoint_path=str(adapter_path))
 
-    write_meta(agent_id, adapter_dir, adapter_path, cfg, train_pairs, eval_accuracy, duration)
+        # Evaluate on the eval set (keyword-overlap proxy;
+        # scripts/benchmark_adapter.py for full eval).
+        eval_accuracy = _quick_eval(agent_id, eval_path)
 
-    size_mb = adapter_path.stat().st_size / 1024**2 if adapter_path.exists() else 0
-    print(
-        f"[{agent_id}] Done: {duration/60:.1f} min | "
-        f"eval_acc={eval_accuracy:.2%} | "
-        f"adapter={size_mb:.1f} MB"
-    )
+        write_meta(agent_id, adapter_dir, adapter_path, cfg, train_pairs, eval_accuracy, duration)
+
+        size_mb = adapter_path.stat().st_size / 1024**2 if adapter_path.exists() else 0
+        reporter.update(
+            "completed",
+            step=total_steps or 0,
+            checkpoint_path=str(adapter_path),
+            eval_accuracy=eval_accuracy,
+            duration_seconds=duration,
+        )
+        print(
+            f"[{agent_id}] Done: {duration/60:.1f} min | "
+            f"eval_acc={eval_accuracy:.2%} | "
+            f"adapter={size_mb:.1f} MB"
+        )
+    except KeyboardInterrupt:
+        if not reporter.checkpoint_stop_requested:
+            reporter.update("failed", message="training interrupted without a supervisor request")
+            raise
+        reporter.update(
+            "stopped",
+            message="training stopped after deterministic checkpoint-and-stop request",
+        )
+        print(f"[{agent_id}] Stopped after preserving the latest checkpoint")
+    except BaseException as error:
+        reporter.update(
+            "failed",
+            message=f"{type(error).__name__}: {error}",
+        )
+        raise
+    finally:
+        reporter.finish()
 
 
 def _quick_eval(agent_id: str, eval_path: Path) -> float:

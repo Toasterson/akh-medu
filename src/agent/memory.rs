@@ -793,6 +793,57 @@ pub fn index_cycle_episode(
     Ok(())
 }
 
+/// Persist a deterministic system/daemon event directly as episodic memory.
+///
+/// Reactor attempts use this path before and after execution. The caller
+/// supplies a stable `key` (for example `reactor:<run-id>:attempt:2:started`),
+/// making replay after a crash idempotent while still leaving every distinct
+/// attempt visible to ordinary episodic recall.
+pub fn index_system_episode(
+    engine: &Engine,
+    predicates: &AgentPredicates,
+    key: &str,
+    summary: &str,
+    tags: &[&str],
+) -> AgentResult<SymbolId> {
+    if key.trim().is_empty() {
+        return Err(super::error::AgentError::ToolExecution {
+            tool_name: "episodic_memory".into(),
+            message: "system episode key may not be empty".into(),
+        });
+    }
+
+    let episode_id = engine.resolve_or_create_entity(&format!("system_episode:{key}"))?;
+    let summary = truncate_chars(summary, 320);
+    let summary_sym = engine.resolve_or_create_entity(&format!("summary:{summary}"))?;
+    let memory_type = engine.resolve_or_create_entity("episodic_memory")?;
+    let system_tag = engine.resolve_or_create_entity("tag:system_event")?;
+
+    let mut triples = vec![
+        Triple::new(episode_id, predicates.has_summary, summary_sym),
+        Triple::new(episode_id, predicates.memory_type, memory_type),
+        Triple::new(episode_id, predicates.has_tag, system_tag),
+    ];
+    for tag in tags {
+        let normalized = tag.trim().trim_start_matches("tag:");
+        if !normalized.is_empty() {
+            let tag_sym = engine.resolve_or_create_entity(&format!("tag:{normalized}"))?;
+            triples.push(Triple::new(episode_id, predicates.has_tag, tag_sym));
+        }
+    }
+
+    let mut provenance = ProvenanceRecord::new(
+        episode_id,
+        DerivationKind::AgentConsolidation {
+            reason: format!("Direct durable system episode {key}"),
+            relevance_score: 1.0,
+        },
+    )
+    .with_confidence(1.0);
+    engine.add_triples_with_provenance(&mut triples, &mut provenance)?;
+    Ok(episode_id)
+}
+
 /// Cap on the paged-in turn body surfaced as an episode's summary/content
 /// (ADR 091 decision 5). The context manager budgets the recalled section
 /// further; this cap just bounds a single entry's contribution.
