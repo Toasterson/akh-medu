@@ -14,7 +14,7 @@ resolver = "3"
 
 [package]
 name = "akh-medu"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "Neuro-symbolic AI engine: VSA + knowledge graphs + symbolic reasoning"
 license = "GPL-3.0-only"
