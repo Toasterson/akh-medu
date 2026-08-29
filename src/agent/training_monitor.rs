@@ -7,6 +7,7 @@
 //! the safety controller.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,7 @@ struct MonitorWatermark {
     last_reported_bucket: u64,
     last_checkpoint_mtime_ns: u64,
     stalled_reported: bool,
+    checkpoint_hazard_reported: bool,
     control_requested: bool,
 }
 
@@ -95,6 +97,8 @@ pub struct TrainingObservation {
 
 #[derive(Debug, Clone)]
 pub struct TrainingMonitorConfig {
+    /// Exact run id, or `*` to follow whichever uniquely-identified run owns
+    /// the current status file.
     pub run_id: String,
     pub status_path: PathBuf,
     pub control_path: Option<PathBuf>,
@@ -139,7 +143,7 @@ pub fn inspect_training(
         .map_err(|error| monitor_error(format!("parse training status: {error}")))?;
     validate_status(&status, &config.run_id)?;
 
-    let key = format!("{MONITOR_PREFIX}{}", config.run_id);
+    let key = format!("{MONITOR_PREFIX}{}", status.run_id);
     let previous = engine
         .store()
         .get_meta(key.as_bytes())
@@ -162,7 +166,7 @@ pub fn inspect_training(
         && status
             .checkpoint_path
             .as_ref()
-            .is_none_or(|path| !Path::new(path).exists());
+            .is_none_or(|path| !is_nonempty_file(Path::new(path)));
     let state_changed = previous.last_state.is_empty() || previous.last_state != status.state;
     let checkpoint_mtime_ns = status
         .metrics
@@ -200,7 +204,7 @@ pub fn inspect_training(
             ),
             Some(TrainingControl::CheckpointAndStop),
         )
-    } else if checkpoint_hazard {
+    } else if checkpoint_hazard && !previous.checkpoint_hazard_reported {
         (
             true,
             TrainingSeverity::Warning,
@@ -290,6 +294,7 @@ pub fn inspect_training(
         last_reported_bucket: previous.last_reported_bucket.max(bucket),
         last_checkpoint_mtime_ns: previous.last_checkpoint_mtime_ns.max(checkpoint_mtime_ns),
         stalled_reported: stalled,
+        checkpoint_hazard_reported: checkpoint_hazard,
         control_requested: previous.control_requested,
     };
     if let Some(control) = recommended_control
@@ -316,7 +321,7 @@ pub fn inspect_training(
 }
 
 fn validate_status(status: &TrainingStatus, expected_run_id: &str) -> AgentResult<()> {
-    if status.run_id != expected_run_id {
+    if expected_run_id != "*" && status.run_id != expected_run_id {
         return Err(monitor_error(format!(
             "status run_id {:?} does not match configured run {:?}",
             status.run_id, expected_run_id
@@ -344,6 +349,11 @@ fn is_terminal(state: &str) -> bool {
         || state.eq_ignore_ascii_case("stopped")
 }
 
+fn is_nonempty_file(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
 fn write_control_request(
     path: &Path,
     run_id: &str,
@@ -351,6 +361,7 @@ fn write_control_request(
     now: u64,
     reason: &str,
 ) -> AgentResult<()> {
+    #[cfg(unix)]
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
             monitor_error(format!(
@@ -368,8 +379,14 @@ fn write_control_request(
     let bytes = serde_json::to_vec_pretty(&request)
         .map_err(|error| monitor_error(format!("serialize control request: {error}")))?;
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    std::fs::write(&tmp, bytes).map_err(|error| {
+    let mut file = std::fs::File::create(&tmp).map_err(|error| {
+        monitor_error(format!("create control request {}: {error}", tmp.display()))
+    })?;
+    file.write_all(&bytes).map_err(|error| {
         monitor_error(format!("write control request {}: {error}", tmp.display()))
+    })?;
+    file.sync_all().map_err(|error| {
+        monitor_error(format!("sync control request {}: {error}", tmp.display()))
     })?;
     std::fs::rename(&tmp, path).map_err(|error| {
         monitor_error(format!(
@@ -377,7 +394,18 @@ fn write_control_request(
             tmp.display(),
             path.display()
         ))
-    })
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                monitor_error(format!(
+                    "sync control directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -472,5 +500,22 @@ mod tests {
         assert!(observation.changed);
         assert_eq!(observation.severity, TrainingSeverity::Warning);
         assert!(observation.summary.contains("progress stalled"));
+    }
+
+    #[test]
+    fn missing_completed_checkpoint_is_reported_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let status_path = temp.path().join("status.json");
+        write_status(&status_path, 1_000, 100, 20 * 1024 * 1024 * 1024);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&status_path).unwrap()).unwrap();
+        value["state"] = serde_json::json!("completed");
+        value["checkpoint_path"] = serde_json::json!(temp.path().join("missing.bin"));
+        std::fs::write(&status_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let config = TrainingMonitorConfig::new("run-1", &status_path);
+        let engine = engine();
+
+        assert!(inspect_training(&engine, &config, 101).unwrap().changed);
+        assert!(!inspect_training(&engine, &config, 102).unwrap().changed);
     }
 }

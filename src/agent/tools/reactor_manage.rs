@@ -17,6 +17,8 @@ use crate::engine::Engine;
 
 pub struct ReactorManageTool;
 
+const ENABLE_ENV: &str = "AKH_REACTOR_ENABLE";
+
 #[derive(Debug, Deserialize)]
 struct AddRequest {
     #[serde(default)]
@@ -113,8 +115,13 @@ impl Tool for ReactorManageTool {
                 if let Some(retry) = request.retry {
                     schedule.retry = retry;
                 }
+                // Model-authored schedules are always staged. Enabling a
+                // persistent autonomous action is a separate operator gate.
+                schedule.enabled = false;
                 store.put(&schedule)?;
-                Ok(ToolOutput::ok(format!("durable schedule {id} added")))
+                Ok(ToolOutput::ok(format!(
+                    "durable schedule {id} added disabled; set {ENABLE_ENV}=1 and enable it explicitly"
+                )))
             }
             "remove" => {
                 let id = input.require("id", "reactor_manage")?;
@@ -124,6 +131,11 @@ impl Tool for ReactorManageTool {
             "enable" | "disable" => {
                 let id = input.require("id", "reactor_manage")?;
                 let enabled = operation == "enable";
+                if enabled && std::env::var(ENABLE_ENV).as_deref() != Ok("1") {
+                    return Err(tool_error(format!(
+                        "enabling autonomous schedules requires operator gate {ENABLE_ENV}=1"
+                    )));
+                }
                 store.set_enabled(id, enabled)?;
                 Ok(ToolOutput::ok(format!(
                     "schedule {id} {}",
@@ -161,7 +173,7 @@ impl Tool for ReactorManageTool {
                 },
                 "action": {
                     "type": "object",
-                    "description": "Tagged action: llm_turn, djehuty_reply, trigger, or training_monitor."
+                    "description": "Tagged action: llm_turn (tool-free by default; allow_tools is explicit), djehuty_reply, trigger, or training_monitor."
                 },
                 "misfire_policy": {"type": "string", "enum": ["skip", "run_once"]},
                 "misfire_grace_seconds": {"type": "integer", "minimum": 0},
@@ -237,5 +249,6 @@ mod tests {
         assert!(output.success);
         let schedule = ReactorStore::new(&engine).get("daily-review").unwrap();
         assert!(matches!(schedule.action, ReactorAction::LlmTurn { .. }));
+        assert!(!schedule.enabled);
     }
 }

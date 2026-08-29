@@ -17,6 +17,7 @@ use super::trigger::TriggerAction;
 use crate::engine::Engine;
 
 const SCHEDULE_PREFIX: &[u8] = b"reactor:schedule:";
+const LLM_RESULT_PREFIX: &str = "reactor:llm-result:";
 const MAX_PENDING_EVENTS: usize = 256;
 
 fn reactor_error(message: impl Into<String>) -> AgentError {
@@ -51,6 +52,15 @@ pub enum ReactorAction {
         prompt: String,
         #[serde(default)]
         agent_id: Option<String>,
+        /// Offer the agent tool catalog. Disabled by default so an unattended
+        /// prompt cannot inherit the standalone akh permission bypass merely
+        /// by being scheduled.
+        #[serde(default)]
+        allow_tools: bool,
+        /// Require the autonomous-dispatch postcondition that at least one
+        /// mutating tool call succeeded before model completion is accepted.
+        #[serde(default)]
+        require_mutation: bool,
     },
     /// Respond to a Djehuty thread event with a real model turn, then post the
     /// final answer back to the originating thread with a stable idempotency
@@ -492,6 +502,56 @@ impl<'a> ReactorStore<'a> {
         self.put(&schedule)
     }
 
+    /// Release a claim that could not begin because the live agent lock was
+    /// contended. This is not an action failure: it preserves the occurrence,
+    /// does not consume retry budget, and makes it eligible after `delay`.
+    pub fn defer_claim(&self, claim: &ReactorClaim, now: u64, delay: u64) -> AgentResult<()> {
+        let mut schedule = self
+            .get(&claim.schedule.id)
+            .ok_or_else(|| reactor_error("schedule disappeared while leased"))?;
+        if schedule.state.active_scheduled_for != Some(claim.scheduled_for)
+            || schedule.state.attempt != claim.attempt
+        {
+            return Err(reactor_error("stale reactor claim deferral rejected"));
+        }
+        schedule.state.lease_until = None;
+        schedule.state.retry_at = Some(now.saturating_add(delay.max(1)));
+        schedule.state.attempt = schedule.state.attempt.saturating_sub(1);
+        self.put(&schedule)
+    }
+
+    /// Cache the bounded output of a tool-free LLM occurrence before schedule
+    /// completion. A completion-write failure can then replay the durable
+    /// result without paying for or varying a second model turn.
+    pub fn cache_llm_result(&self, run_id: &str, summary: &str) -> AgentResult<()> {
+        self.ensure_durable()?;
+        if run_id.is_empty() || summary.is_empty() {
+            return Err(reactor_error(
+                "cached LLM run id and summary may not be empty",
+            ));
+        }
+        self.engine
+            .store()
+            .put_meta(
+                format!("{LLM_RESULT_PREFIX}{run_id}").as_bytes(),
+                summary.as_bytes(),
+            )
+            .map_err(|error| AgentError::Engine(Box::new(error.into())))
+    }
+
+    pub fn cached_llm_result(&self, run_id: &str) -> AgentResult<Option<String>> {
+        self.ensure_durable()?;
+        self.engine
+            .store()
+            .get_meta(format!("{LLM_RESULT_PREFIX}{run_id}").as_bytes())
+            .map_err(|error| AgentError::Engine(Box::new(error.into())))?
+            .map(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|error| reactor_error(format!("decode cached LLM result: {error}")))
+            })
+            .transpose()
+    }
+
     fn ensure_durable(&self) -> AgentResult<()> {
         if self.engine.store().durable.is_none() {
             return Err(reactor_error(
@@ -532,6 +592,18 @@ fn validate_rule(rule: &ScheduleRule) -> AgentResult<()> {
 }
 
 fn validate_action(rule: &ScheduleRule, action: &ReactorAction) -> AgentResult<()> {
+    if let ReactorAction::LlmTurn {
+        allow_tools,
+        require_mutation,
+        ..
+    } = action
+        && *require_mutation
+        && !*allow_tools
+    {
+        return Err(reactor_error(
+            "require_mutation requires allow_tools for scheduled LLM turns",
+        ));
+    }
     let ReactorAction::DjehutyReply {
         thread_id,
         max_prompt_chars,
@@ -673,6 +745,8 @@ mod tests {
         ReactorAction::LlmTurn {
             prompt: "summarize status".into(),
             agent_id: None,
+            allow_tools: false,
+            require_mutation: false,
         }
     }
 
@@ -777,6 +851,24 @@ mod tests {
             .unwrap();
         let error = ReactorStore::new(&engine).poll_due(10).unwrap_err();
         assert!(error.to_string().contains("decode durable schedule"));
+    }
+
+    #[test]
+    fn lock_deferral_preserves_occurrence_and_retry_budget() {
+        let engine = engine();
+        let store = ReactorStore::new(&engine);
+        let schedule =
+            ReactorSchedule::new("defer", "defer", ScheduleRule::Once { at: 10 }, action(), 0)
+                .unwrap();
+        store.put(&schedule).unwrap();
+        let claim = store.poll_due(10).unwrap().claims.remove(0);
+        assert_eq!(claim.attempt, 1);
+        store.defer_claim(&claim, 10, 5).unwrap();
+        let deferred = store.get("defer").unwrap();
+        assert_eq!(deferred.state.attempt, 0);
+        assert_eq!(deferred.state.retry_at, Some(15));
+        assert!(store.poll_due(14).unwrap().claims.is_empty());
+        assert_eq!(store.poll_due(15).unwrap().claims.remove(0).attempt, 1);
     }
 
     #[test]

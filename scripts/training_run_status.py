@@ -46,6 +46,7 @@ class TrainingRunReporter:
             "metrics": {},
         }
         self._control_seen = False
+        self._control_pending_reported = False
         self._last_checkpoint_mtime_ns: int | None = None
 
     def start(self) -> None:
@@ -112,7 +113,13 @@ class TrainingRunReporter:
         checkpoint_dir = self.run_dir / "checkpoints"
         if checkpoint_dir.exists():
             candidates.extend(path for path in checkpoint_dir.iterdir() if path.is_file())
-        existing = [path for path in candidates if path.exists()]
+        existing: list[Path] = []
+        for path in candidates:
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    existing.append(path)
+            except OSError:
+                continue
         return max(existing, key=lambda path: path.stat().st_mtime_ns, default=None)
 
     def _honor_control_if_safe(self) -> None:
@@ -128,10 +135,12 @@ class TrainingRunReporter:
             return
         checkpoint = self._latest_checkpoint()
         if checkpoint is None:
-            self.update(
-                "checkpoint_stop_pending",
-                message="checkpoint-and-stop requested; waiting for a durable checkpoint",
-            )
+            if not self._control_pending_reported:
+                self._control_pending_reported = True
+                self.update(
+                    "checkpoint_stop_pending",
+                    message="checkpoint-and-stop requested; waiting for a durable checkpoint",
+                )
             return
         self._control_seen = True
         self.update(

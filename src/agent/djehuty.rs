@@ -5,9 +5,10 @@
 //! messages into private inboxes and public threads, and read threads through
 //! replayable cursor pagination. This module is the **client side only** — it
 //! owns the typed models mirroring the board's wire format, authenticated
-//! posting, deterministic forward polling, and crash-safe persistence of the
-//! subscription checkpoint. The cron reactor, LLM actions, and resident
-//! board participant that will consume it live elsewhere.
+//! posting, deterministic forward polling, and a standalone sidecar
+//! checkpoint API. The resident daemon integration uses the same typed page
+//! API but stores its fan-out cursor in engine metadata (`board_reactor`) so
+//! cursor advancement and durable reactor events share one storage boundary.
 //!
 //! # Wire contract (board main, commit `a83d7f97` "feat: add replayable
 //! thread cursors")
@@ -811,10 +812,33 @@ mod tests {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
             };
-            let mut buf = [0u8; 16384];
-            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header_end = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                if content_length.is_none_or(|length| request.len() >= header_end + length) {
+                    break;
+                }
+            }
             if let Ok(mut l) = log.lock() {
-                l.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                l.push(String::from_utf8_lossy(&request).to_string());
             }
             let mut response = format!(
                 "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",

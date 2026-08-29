@@ -11,7 +11,7 @@
 //! in both deployment modes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use super::Agent;
@@ -1514,12 +1514,18 @@ impl AgentDaemon {
             }
         };
         match super::board_reactor::ingest_board_events_from_env(&engine, now) {
-            Ok(report) if report.events_queued > 0 => tracing::info!(
-                events_queued = report.events_queued,
-                messages_seen = report.messages_seen,
-                "daemon: Djehuty events queued"
-            ),
-            Ok(_) => {}
+            Ok(report) => {
+                if report.events_queued > 0 {
+                    tracing::info!(
+                        events_queued = report.events_queued,
+                        messages_seen = report.messages_seen,
+                        "daemon: Djehuty events queued"
+                    );
+                }
+                for error in report.thread_errors {
+                    tracing::warn!(error = %error, "daemon: Djehuty thread ingestion deferred");
+                }
+            }
             Err(error) => tracing::warn!(error = %error, "daemon: Djehuty ingress failed"),
         }
 
@@ -1566,13 +1572,17 @@ impl AgentDaemon {
                     .map(|event| format!("event:{}:{}", event.source, event.id))
                     .unwrap_or_else(|| "time".into())
             );
-            if let Err(error) = index_system_episode(
-                &engine,
-                &predicates,
-                &start_key,
-                &start_summary,
-                &["reactor_run", "started", schedule_tag.as_str()],
-            ) {
+            let requires_start_audit =
+                !matches!(&claim.schedule.action, ReactorAction::TrainingMonitor { .. });
+            if requires_start_audit
+                && let Err(error) = index_system_episode(
+                    &engine,
+                    &predicates,
+                    &start_key,
+                    &start_summary,
+                    &["reactor_run", "started", schedule_tag.as_str()],
+                )
+            {
                 // An autonomous action without a durable start record would be
                 // unauditable. Fail closed and let bounded retry policy decide.
                 tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: reactor audit start failed; action not executed");
@@ -1580,8 +1590,13 @@ impl AgentDaemon {
                 continue;
             }
 
-            let result: AgentResult<String> = match &claim.schedule.action {
-                ReactorAction::LlmTurn { prompt, agent_id } => (|| {
+            let result: AgentResult<(String, bool)> = match &claim.schedule.action {
+                ReactorAction::LlmTurn {
+                    prompt,
+                    agent_id,
+                    allow_tools,
+                    require_mutation,
+                } => (|| {
                     let guard = self.agent.try_read().map_err(|_| {
                         super::error::AgentError::ToolExecution {
                             tool_name: "reactor_llm_turn".into(),
@@ -1591,11 +1606,59 @@ impl AgentDaemon {
                     let sink = crate::message::VecSink::new();
                     let cancel = AtomicBool::new(false);
                     let agent_id = agent_id.as_deref().unwrap_or("daemon-reactor");
-                    match guard.run_agentic_turn(&engine, agent_id, prompt, &sink, &cancel, true) {
-                        Some(()) => Ok(format!(
-                            "LLM action completed through configured backend ({} emitted messages)",
-                            sink.len()
-                        )),
+                    if !allow_tools {
+                        if let Some(cached) =
+                            ReactorStore::new(&engine).cached_llm_result(&claim.run_id)?
+                        {
+                            return Ok((cached, true));
+                        }
+                        let reply = super::board_reactor::run_tool_free_turn(
+                            &guard, agent_id, prompt,
+                        )?;
+                        let excerpt: String = reply.chars().take(240).collect();
+                        let summary = format!(
+                            "tool-free LLM action completed through configured backend: {excerpt}"
+                        );
+                        ReactorStore::new(&engine)
+                            .cache_llm_result(&claim.run_id, &summary)?;
+                        return Ok((summary, true));
+                    }
+                    match guard.run_agentic_turn_with_conversation_state(
+                        &engine,
+                        agent_id,
+                        prompt,
+                        &sink,
+                        &cancel,
+                        *require_mutation,
+                        &guard.conversation_state,
+                    ) {
+                        Some(super::agentic_chat::AgenticTurnOutcome::Completed) => {
+                            let mutation_completed = sink.messages().iter().any(|message| {
+                                matches!(
+                                    message,
+                                    AkhMessage::ToolResult { tool, success: true, .. }
+                                        if matches!(tool.as_str(), "file_io" | "edit" | "shell_exec")
+                                )
+                            });
+                            if *require_mutation && !mutation_completed {
+                                Err(super::error::AgentError::ToolExecution {
+                                    tool_name: "reactor_llm_turn".into(),
+                                    message: "scheduled LLM turn completed without the required successful mutation".into(),
+                                })
+                            } else {
+                                Ok((
+                                    format!(
+                                        "LLM action completed through configured backend ({} emitted messages)",
+                                        sink.len()
+                                    ),
+                                    true,
+                                ))
+                            }
+                        }
+                        Some(outcome) => Err(super::error::AgentError::ToolExecution {
+                            tool_name: "reactor_llm_turn".into(),
+                            message: format!("scheduled LLM turn did not complete: {outcome:?}"),
+                        }),
                         None => Err(super::error::AgentError::ToolExecution {
                             tool_name: "reactor_llm_turn".into(),
                             message: "configured LLM backend is absent or unavailable".into(),
@@ -1610,6 +1673,7 @@ impl AgentDaemon {
                         }
                     })?;
                     super::board_reactor::execute_board_reply_from_env(&guard, &claim)
+                        .map(|summary| (summary, true))
                 })(),
                 ReactorAction::Trigger { action } => (|| {
                     let mut guard = self.agent.try_write().map_err(|_| {
@@ -1627,6 +1691,7 @@ impl AgentDaemon {
                         last_fired: 0,
                     };
                     super::trigger::execute_trigger(&trigger, &mut guard)
+                        .map(|summary| (summary, true))
                 })(),
                 ReactorAction::TrainingMonitor {
                     run_id,
@@ -1645,14 +1710,44 @@ impl AgentDaemon {
                     config.min_disk_free_bytes = *min_disk_free_bytes;
                     config.checkpoint_and_stop_on_stall = *checkpoint_and_stop_on_stall;
                     super::training_monitor::inspect_training(&engine, &config, now)
-                        .map(|observation| observation.summary)
+                        .map(|observation| (observation.summary, observation.changed))
                 }
             };
 
+            let lock_contention = matches!(
+                &result,
+                Err(super::error::AgentError::ToolExecution { message, .. })
+                    if message.starts_with("agent lock contended;")
+            );
+            if lock_contention
+                && ReactorStore::new(&engine)
+                    .defer_claim(&claim, now_secs(), 5)
+                    .is_ok()
+            {
+                let defer_key = format!(
+                    "reactor:{}:attempt:{}:deferred",
+                    claim.run_id, claim.attempt
+                );
+                let defer_summary = format!(
+                    "reactor schedule {} run {} deferred without consuming retry budget because a live agent turn held the required lock",
+                    claim.schedule.name, claim.run_id
+                );
+                if let Err(error) = index_system_episode(
+                    &engine,
+                    &predicates,
+                    &defer_key,
+                    &defer_summary,
+                    &["reactor_run", "deferred", schedule_tag.as_str()],
+                ) {
+                    tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor deferral episode");
+                }
+                continue;
+            }
+
             let finished_at = now_secs();
-            let (action_success, mut outcome_summary) = match result {
-                Ok(summary) => (true, summary),
-                Err(error) => (false, error.to_string()),
+            let (action_success, mut outcome_summary, noteworthy) = match result {
+                Ok((summary, noteworthy)) => (true, summary, noteworthy),
+                Err(error) => (false, error.to_string(), true),
             };
             let completion =
                 ReactorStore::new(&engine).complete(&claim, finished_at, action_success);
@@ -1669,13 +1764,15 @@ impl AgentDaemon {
                 "reactor schedule {} run {} attempt {} {outcome}: {}",
                 claim.schedule.name, claim.run_id, claim.attempt, outcome_summary
             );
-            if let Err(error) = index_system_episode(
-                &engine,
-                &predicates,
-                &finish_key,
-                &finish_summary,
-                &["reactor_run", outcome, schedule_tag.as_str()],
-            ) {
+            if noteworthy
+                && let Err(error) = index_system_episode(
+                    &engine,
+                    &predicates,
+                    &finish_key,
+                    &finish_summary,
+                    &["reactor_run", outcome, schedule_tag.as_str()],
+                )
+            {
                 tracing::warn!(error = %error, run_id = %claim.run_id, "daemon: failed to record reactor completion episode");
             }
             if success {
@@ -2617,6 +2714,8 @@ mod tests {
                 ReactorAction::LlmTurn {
                     prompt: "Respond once from the daemon reactor".into(),
                     agent_id: Some("test-akh".into()),
+                    allow_tools: false,
+                    require_mutation: false,
                 },
                 0,
             )
@@ -2627,11 +2726,17 @@ mod tests {
         let mut daemon = AgentDaemon::new(Arc::clone(&shared), DaemonConfig::default());
         daemon.run_reactor_evaluation();
 
-        // The agentic loop may ask the backend for more than one round while
-        // assembling a final answer. The production-path guarantee here is
-        // that the daemon schedule reaches the configured backend at all.
-        assert!(backend.0.load(Ordering::SeqCst) >= 1);
+        // The default unattended LLM action is one tool-free backend request.
+        assert_eq!(backend.0.load(Ordering::SeqCst), 1);
         let agent = shared.read().unwrap();
+        assert_eq!(
+            agent.engine
+                .store()
+                .scan_prefix(b"reactor:llm-result:")
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(
             ReactorStore::new(&agent.engine)
                 .get("llm-proof")

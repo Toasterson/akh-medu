@@ -27,10 +27,18 @@ class TrainingRunReporterTests(unittest.TestCase):
             reporter.control_path.write_text(
                 json.dumps({"run_id": "run-1", "command": "checkpoint_and_stop"})
             )
-            with mock.patch("os.kill") as kill:
+            with mock.patch("os.kill") as kill, mock.patch.object(
+                reporter, "update", wraps=reporter.update
+            ) as update:
+                reporter._honor_control_if_safe()
                 reporter._honor_control_if_safe()
                 kill.assert_not_called()
-                (run_dir / "adapter.safetensors").write_bytes(b"checkpoint")
+                self.assertEqual(update.call_count, 1)
+                checkpoint = run_dir / "adapter.safetensors"
+                checkpoint.touch()
+                reporter._honor_control_if_safe()
+                kill.assert_not_called()
+                checkpoint.write_bytes(b"checkpoint")
                 reporter._honor_control_if_safe()
                 kill.assert_called_once()
                 self.assertEqual(kill.call_args.args[1], 2)

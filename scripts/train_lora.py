@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -377,9 +378,11 @@ def train_agent(
     adapter_dir = data_dir / "adapters" / agent_id
     adapter_dir.mkdir(parents=True, exist_ok=True)
     total_steps = cfg.epochs * 500 if backend == "mlx" else None
+    run_id = f"lora-{agent_id}-{uuid.uuid4().hex[:16]}"
     reporter = TrainingRunReporter(
-        f"lora-{agent_id}", adapter_dir, total_steps=total_steps
+        run_id, adapter_dir, total_steps=total_steps
     )
+    print(f"[{agent_id}] Training run id: {run_id}")
     reporter.start()
     t0 = time.time()
     try:
