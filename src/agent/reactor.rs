@@ -243,6 +243,11 @@ impl ReactorSchedule {
         if self.id.trim().is_empty() {
             return Err(reactor_error("schedule id may not be empty"));
         }
+        if self.id.chars().any(char::is_control) {
+            return Err(reactor_error(
+                "schedule id may not contain control characters",
+            ));
+        }
         validate_rule(&self.rule)?;
         validate_action(&self.rule, &self.action)
     }
