@@ -26,6 +26,7 @@ class TrainingRunReporter:
         *,
         total_steps: int | None = None,
         heartbeat_seconds: float = 10.0,
+        checkpoint_stable_seconds: float = 2.0,
     ) -> None:
         self.run_id = run_id
         self.run_dir = run_dir
@@ -33,6 +34,7 @@ class TrainingRunReporter:
         self.control_path = run_dir / "training-control.json"
         self.total_steps = total_steps
         self.heartbeat_seconds = heartbeat_seconds
+        self.checkpoint_stable_seconds = checkpoint_stable_seconds
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -48,6 +50,10 @@ class TrainingRunReporter:
         self._control_seen = False
         self._control_pending_reported = False
         self._last_checkpoint_mtime_ns: int | None = None
+        self._checkpoint_lock = threading.Lock()
+        self._checkpoint_fingerprint: tuple[str, int, int] | None = None
+        self._checkpoint_unchanged_since: float | None = None
+        self._child_process_group: int | None = None
 
     def start(self) -> None:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -74,7 +80,7 @@ class TrainingRunReporter:
             status["disk_free_bytes"] = shutil.disk_usage(self.run_dir).free
         except OSError:
             pass
-        checkpoint = self._latest_checkpoint()
+        checkpoint = self._latest_checkpoint_candidate()
         if checkpoint is not None:
             status["checkpoint_path"] = str(checkpoint)
             try:
@@ -88,6 +94,7 @@ class TrainingRunReporter:
                         self._status["progress_updated_at"] = int(time.time())
                     status["progress_updated_at"] = self._status["progress_updated_at"]
                 status.setdefault("metrics", {})["checkpoint_mtime_ns"] = checkpoint_mtime_ns
+        status["checkpoint_durable"] = self._durable_checkpoint() is not None
         _atomic_json(self.status_path, status)
 
     def finish(self) -> None:
@@ -105,7 +112,16 @@ class TrainingRunReporter:
             self.publish()
             self._honor_control_if_safe()
 
-    def _latest_checkpoint(self) -> Path | None:
+    def attach_child_process_group(self, process_group: int) -> None:
+        with self._checkpoint_lock:
+            self._child_process_group = process_group
+
+    def detach_child_process_group(self, process_group: int) -> None:
+        with self._checkpoint_lock:
+            if self._child_process_group == process_group:
+                self._child_process_group = None
+
+    def _latest_checkpoint_candidate(self) -> Path | None:
         candidates = [
             self.run_dir / "adapter.safetensors",
             self.run_dir / "adapter.bin",
@@ -122,6 +138,42 @@ class TrainingRunReporter:
                 continue
         return max(existing, key=lambda path: path.stat().st_mtime_ns, default=None)
 
+    def _durable_checkpoint(self) -> Path | None:
+        checkpoint = self._latest_checkpoint_candidate()
+        if checkpoint is None:
+            return None
+        try:
+            stat = checkpoint.stat()
+        except OSError:
+            return None
+        fingerprint = (str(checkpoint), stat.st_size, stat.st_mtime_ns)
+        now = time.monotonic()
+        with self._checkpoint_lock:
+            if fingerprint != self._checkpoint_fingerprint:
+                self._checkpoint_fingerprint = fingerprint
+                self._checkpoint_unchanged_since = now
+                return None
+            unchanged_since = self._checkpoint_unchanged_since
+        if unchanged_since is None:
+            return None
+        if now - unchanged_since < self.checkpoint_stable_seconds:
+            return None
+        return checkpoint
+
+    @property
+    def latest_durable_checkpoint(self) -> Path | None:
+        return self._durable_checkpoint()
+
+    def wait_for_durable_checkpoint(self, timeout_seconds: float = 30.0) -> Path:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            checkpoint = self._durable_checkpoint()
+            if checkpoint is not None:
+                self.publish()
+                return checkpoint
+            time.sleep(min(0.1, max(0.01, self.checkpoint_stable_seconds / 2)))
+        raise TimeoutError("checkpoint did not become stable before timeout")
+
     def _honor_control_if_safe(self) -> None:
         if self._control_seen or not self.control_path.exists():
             return
@@ -133,7 +185,7 @@ class TrainingRunReporter:
             return
         if request.get("command") != "checkpoint_and_stop":
             return
-        checkpoint = self._latest_checkpoint()
+        checkpoint = self._durable_checkpoint()
         if checkpoint is None:
             if not self._control_pending_reported:
                 self._control_pending_reported = True
@@ -148,6 +200,10 @@ class TrainingRunReporter:
             checkpoint_path=str(checkpoint),
             message="checkpoint-and-stop requested by deterministic supervisor",
         )
+        with self._checkpoint_lock:
+            child_process_group = self._child_process_group
+        if child_process_group is not None and hasattr(os, "killpg"):
+            os.killpg(child_process_group, signal.SIGINT)
         # Python delivers SIGINT to the main thread. The training wrapper catches
         # KeyboardInterrupt, preserves the checkpoint path, and exits cleanly.
         os.kill(os.getpid(), signal.SIGINT)

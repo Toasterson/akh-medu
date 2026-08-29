@@ -23,11 +23,14 @@ class TrainingRunReporterTests(unittest.TestCase):
     def test_control_waits_for_checkpoint_then_only_sends_sigint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             run_dir = Path(directory)
-            reporter = TrainingRunReporter("run-1", run_dir)
+            reporter = TrainingRunReporter(
+                "run-1", run_dir, checkpoint_stable_seconds=0
+            )
             reporter.control_path.write_text(
                 json.dumps({"run_id": "run-1", "command": "checkpoint_and_stop"})
             )
-            with mock.patch("os.kill") as kill, mock.patch.object(
+            reporter.attach_child_process_group(1234)
+            with mock.patch("os.kill") as kill, mock.patch("os.killpg") as killpg, mock.patch.object(
                 reporter, "update", wraps=reporter.update
             ) as update:
                 reporter._honor_control_if_safe()
@@ -40,8 +43,24 @@ class TrainingRunReporterTests(unittest.TestCase):
                 kill.assert_not_called()
                 checkpoint.write_bytes(b"checkpoint")
                 reporter._honor_control_if_safe()
+                kill.assert_not_called()
+                reporter._honor_control_if_safe()
                 kill.assert_called_once()
+                killpg.assert_called_once_with(1234, 2)
                 self.assertEqual(kill.call_args.args[1], 2)
+
+    def test_changing_checkpoint_is_not_treated_as_durable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            reporter = TrainingRunReporter(
+                "run-1", run_dir, checkpoint_stable_seconds=0
+            )
+            checkpoint = run_dir / "adapter.safetensors"
+            checkpoint.write_bytes(b"first")
+            self.assertIsNone(reporter.latest_durable_checkpoint)
+            checkpoint.write_bytes(b"second-longer")
+            self.assertIsNone(reporter.latest_durable_checkpoint)
+            self.assertEqual(reporter.latest_durable_checkpoint, checkpoint)
 
     def test_checkpoint_mtime_is_published_as_progress_not_just_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -123,6 +123,19 @@ impl TieredStore {
         }
     }
 
+    /// Compare and replace one durable metadata value atomically.
+    pub fn compare_and_swap_meta(
+        &self,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        value: &[u8],
+    ) -> StoreResult<bool> {
+        match &self.durable {
+            Some(d) => d.compare_and_swap(key, expected, value),
+            None => Ok(false),
+        }
+    }
+
     /// Delete a metadata entry from the durable tier.
     ///
     /// Returns `true` if an entry was found and removed, `false` otherwise.

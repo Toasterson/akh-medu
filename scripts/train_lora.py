@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -222,6 +223,7 @@ def train_mlx(
     checkpoint_dir = adapter_dir / "checkpoints"
     checkpoint_dir.mkdir(exist_ok=True)
 
+    training_path = checkpoint_dir / "adapter.safetensors"
     adapter_path = adapter_dir / "adapter.safetensors"
 
     lora_args = lora.TrainingArgs(
@@ -239,7 +241,7 @@ def train_mlx(
             "dropout": cfg.lora_dropout,
             "scale": cfg.alpha / cfg.rank,
         },
-        adapter_path=str(adapter_path),
+        adapter_path=str(training_path),
         resume_adapter_file=str(adapter_path) if resume and adapter_path.exists() else None,
         save_every=100,
         max_seq_length=cfg.max_seq_len,
@@ -248,7 +250,7 @@ def train_mlx(
 
     print(f"[{agent_id}] Starting MLX training (rank={cfg.rank}, alpha={cfg.alpha})")
     lora.train(lora_args)
-
+    _atomic_install_checkpoint(training_path, adapter_path)
     return adapter_path
 
 
@@ -262,6 +264,7 @@ def train_llamacpp(
     cfg: LoraConfig,
     llamacpp_dir: Path | None = None,
     resume: bool = False,
+    reporter: TrainingRunReporter | None = None,
 ) -> Path:
     """Train with llama.cpp finetune (cross-platform fallback)."""
     llamacpp_bin = Path(llamacpp_dir or os.environ.get("LLAMACPP_DIR", "")) / "llama-finetune"
@@ -293,10 +296,32 @@ def train_llamacpp(
         cmd += ["--lora-init-scale", "0"]
 
     print(f"[{agent_id}] Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        print(f"[ERROR] llama-finetune failed with exit code {result.returncode}")
-        sys.exit(result.returncode)
+    process = subprocess.Popen(cmd, start_new_session=True)
+    if reporter is not None:
+        reporter.attach_child_process_group(process.pid)
+    try:
+        returncode = process.wait()
+    except KeyboardInterrupt:
+        if process.poll() is None:
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGINT)
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait()
+        raise
+    finally:
+        if reporter is not None:
+            reporter.detach_child_process_group(process.pid)
+    if returncode != 0:
+        print(f"[ERROR] llama-finetune failed with exit code {returncode}")
+        sys.exit(returncode)
 
     # llama.cpp outputs .bin; convert to safetensors for uniform loading.
     safetensors_path = adapter_dir / "adapter.safetensors"
@@ -319,8 +344,25 @@ def _find_gguf_model(model_name: str) -> Path | None:
 def _convert_bin_to_safetensors(bin_path: Path, out_path: Path) -> None:
     """Minimal .bin→.safetensors conversion (placeholder; use convert_lora_to_gguf.py)."""
     print(f"[WARN] Copying {bin_path.name} as safetensors (no format conversion)")
+    _atomic_install_checkpoint(bin_path, out_path)
+
+
+def _atomic_install_checkpoint(source: Path, destination: Path) -> None:
+    """Install a completed checkpoint with fsync + atomic rename."""
     import shutil
-    shutil.copy2(bin_path, out_path)
+
+    tmp = destination.with_suffix(f"{destination.suffix}.tmp.{os.getpid()}")
+    with open(source, "rb") as input_handle, open(tmp, "wb") as output_handle:
+        shutil.copyfileobj(input_handle, output_handle)
+        output_handle.flush()
+        os.fsync(output_handle.fileno())
+    os.replace(tmp, destination)
+    if os.name != "nt":
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 # ── Post-training metadata ────────────────────────────────────────────────────
@@ -400,9 +442,17 @@ def train_agent(
             adapter_path = train_mlx(agent_id, train_path, eval_path, adapter_dir, cfg, resume)
         else:
             adapter_path = train_llamacpp(
-                agent_id, train_path, eval_path, adapter_dir, cfg, llamacpp_dir, resume
+                agent_id,
+                train_path,
+                eval_path,
+                adapter_dir,
+                cfg,
+                llamacpp_dir,
+                resume,
+                reporter,
             )
 
+        adapter_path = reporter.wait_for_durable_checkpoint()
         duration = time.time() - t0
         reporter.update("evaluating", checkpoint_path=str(adapter_path))
 

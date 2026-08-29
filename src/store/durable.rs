@@ -78,6 +78,47 @@ impl DurableStore {
         Ok(())
     }
 
+    /// Atomically replace `key` only when its current bytes equal `expected`.
+    ///
+    /// The comparison and insert share one redb write transaction, so this is
+    /// safe across threads and across processes opening the same database.
+    pub fn compare_and_swap(
+        &self,
+        key: &[u8],
+        expected: Option<&[u8]>,
+        value: &[u8],
+    ) -> StoreResult<bool> {
+        let db = self.db.lock().expect("redb mutex poisoned");
+        let txn = db.begin_write().map_err(|e| StoreError::Redb {
+            message: format!("begin_write failed: {e}"),
+        })?;
+        let swapped = {
+            let mut table = txn.open_table(META_TABLE).map_err(|e| StoreError::Redb {
+                message: format!("open_table failed: {e}"),
+            })?;
+            let current = table
+                .get(key)
+                .map_err(|e| StoreError::Redb {
+                    message: format!("get failed: {e}"),
+                })?
+                .map(|guard| guard.value().to_vec());
+            if current.as_deref() != expected {
+                false
+            } else {
+                table.insert(key, value).map_err(|e| StoreError::Redb {
+                    message: format!("insert failed: {e}"),
+                })?;
+                true
+            }
+        };
+        if swapped {
+            txn.commit().map_err(|e| StoreError::Redb {
+                message: format!("commit failed: {e}"),
+            })?;
+        }
+        Ok(swapped)
+    }
+
     /// Read a value by key. Returns `Ok(None)` if the key doesn't exist
     /// or if the table hasn't been created yet (fresh database).
     ///

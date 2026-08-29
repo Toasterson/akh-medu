@@ -264,6 +264,117 @@ pub struct ReactorPoll {
     pub misfires: Vec<ReactorMisfire>,
 }
 
+enum PollSchedule {
+    Idle,
+    Misfire(ReactorMisfire),
+    Claim(ReactorClaim),
+}
+
+fn is_poll_candidate(schedule: &ReactorSchedule, now: u64) -> bool {
+    if !schedule.enabled
+        || schedule.state.completed
+        || schedule.state.lease_until.is_some_and(|until| until > now)
+    {
+        return false;
+    }
+    if let ReactorAction::DjehutyReply {
+        min_reply_interval_seconds,
+        ..
+    } = &schedule.action
+        && schedule
+            .state
+            .last_success_at
+            .is_some_and(|last| last.saturating_add(*min_reply_interval_seconds) > now)
+    {
+        return false;
+    }
+    if schedule.state.active_scheduled_for.is_some() {
+        return schedule
+            .state
+            .retry_at
+            .is_none_or(|retry_at| retry_at <= now);
+    }
+    match &schedule.rule {
+        ScheduleRule::Event { .. } => !schedule.state.pending_events.is_empty(),
+        _ => schedule.state.next_due_at.is_some_and(|due| due <= now),
+    }
+}
+
+fn poll_schedule(schedule: &mut ReactorSchedule, now: u64) -> AgentResult<PollSchedule> {
+    if !schedule.enabled || schedule.state.completed {
+        return Ok(PollSchedule::Idle);
+    }
+    if schedule.state.lease_until.is_some_and(|until| until > now) {
+        return Ok(PollSchedule::Idle);
+    }
+    if let ReactorAction::DjehutyReply {
+        min_reply_interval_seconds,
+        ..
+    } = &schedule.action
+        && schedule
+            .state
+            .last_success_at
+            .is_some_and(|last| last.saturating_add(*min_reply_interval_seconds) > now)
+    {
+        return Ok(PollSchedule::Idle);
+    }
+
+    let event = match &schedule.rule {
+        ScheduleRule::Event { .. } => schedule.state.pending_events.front().cloned(),
+        _ => None,
+    };
+    let scheduled_for = if let Some(active) = schedule.state.active_scheduled_for {
+        if schedule
+            .state
+            .retry_at
+            .is_some_and(|retry_at| retry_at > now)
+        {
+            return Ok(PollSchedule::Idle);
+        }
+        active
+    } else if let Some(event) = &event {
+        event.observed_at
+    } else if let Some(due) = schedule.state.next_due_at {
+        if due > now {
+            return Ok(PollSchedule::Idle);
+        }
+        due
+    } else {
+        return Ok(PollSchedule::Idle);
+    };
+
+    let lateness = now.saturating_sub(scheduled_for);
+    if schedule.misfire_policy == MisfirePolicy::Skip
+        && lateness > schedule.misfire_grace_seconds
+        && schedule.state.active_scheduled_for.is_none()
+    {
+        let misfire = ReactorMisfire {
+            schedule_id: schedule.id.clone(),
+            schedule_name: schedule.name.clone(),
+            scheduled_for,
+            observed_at: now,
+        };
+        advance_after_terminal(schedule, scheduled_for, now, event.as_ref())?;
+        return Ok(PollSchedule::Misfire(misfire));
+    }
+
+    schedule.state.active_scheduled_for = Some(scheduled_for);
+    schedule.state.retry_at = None;
+    schedule.state.attempt = schedule.state.attempt.saturating_add(1);
+    schedule.state.last_started_at = Some(now);
+    schedule.state.lease_until = Some(now.saturating_add(schedule.lease_seconds.max(1)));
+    let attempt = schedule.state.attempt;
+    let run_id = stable_run_id(&schedule.id, scheduled_for, event.as_ref());
+    Ok(PollSchedule::Claim(ReactorClaim {
+        schedule: schedule.clone(),
+        run_id,
+        scheduled_for,
+        attempt,
+        claimed_at: now,
+        event,
+    }))
+}
+
 /// Durable schedule storage and leasing.
 pub struct ReactorStore<'a> {
     engine: &'a Engine,
@@ -313,6 +424,44 @@ impl<'a> ReactorStore<'a> {
         serde_json::from_slice(&data).ok()
     }
 
+    fn mutate_schedule<R>(
+        &self,
+        id: &str,
+        mut mutation: impl FnMut(&mut ReactorSchedule) -> AgentResult<R>,
+    ) -> AgentResult<R> {
+        self.ensure_durable()?;
+        let key = schedule_key(id);
+        for _ in 0..32 {
+            let current = self
+                .engine
+                .store()
+                .get_meta(&key)
+                .map_err(|error| AgentError::Engine(Box::new(error.into())))?
+                .filter(|bytes| !bytes.is_empty())
+                .ok_or_else(|| reactor_error(format!("unknown schedule {id:?}")))?;
+            let mut schedule: ReactorSchedule =
+                serde_json::from_slice(&current).map_err(|error| {
+                    reactor_error(format!("decode durable schedule {id:?}: {error}"))
+                })?;
+            let result = mutation(&mut schedule)?;
+            validate_rule(&schedule.rule)?;
+            validate_action(&schedule.rule, &schedule.action)?;
+            let replacement = serde_json::to_vec(&schedule)
+                .map_err(|error| reactor_error(format!("serialize schedule: {error}")))?;
+            let swapped = self
+                .engine
+                .store()
+                .compare_and_swap_meta(&key, Some(&current), &replacement)
+                .map_err(|error| AgentError::Engine(Box::new(error.into())))?;
+            if swapped {
+                return Ok(result);
+            }
+        }
+        Err(reactor_error(format!(
+            "schedule {id:?} remained contended after 32 atomic retries"
+        )))
+    }
+
     pub fn put(&self, schedule: &ReactorSchedule) -> AgentResult<()> {
         self.ensure_durable()?;
         if schedule.id.trim().is_empty() {
@@ -337,50 +486,47 @@ impl<'a> ReactorStore<'a> {
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> AgentResult<()> {
-        let mut schedule = self
-            .get(id)
-            .ok_or_else(|| reactor_error(format!("unknown schedule {id:?}")))?;
-        schedule.enabled = enabled;
-        if !enabled {
-            schedule.state.lease_until = None;
-        }
-        self.put(&schedule)
+        self.mutate_schedule(id, |schedule| {
+            schedule.enabled = enabled;
+            if !enabled {
+                schedule.state.lease_until = None;
+            }
+            Ok(())
+        })
     }
 
     /// Queue an idempotent event. Duplicate source/id pairs are ignored.
     pub fn wake(&self, id: &str, event: ReactorEvent) -> AgentResult<bool> {
-        let mut schedule = self
-            .get(id)
-            .ok_or_else(|| reactor_error(format!("unknown schedule {id:?}")))?;
-        let expected_source = match &schedule.rule {
-            ScheduleRule::Event { source } => source,
-            _ => return Err(reactor_error("only event schedules can be woken")),
-        };
-        if expected_source != &event.source {
-            return Err(reactor_error(format!(
-                "event source {:?} does not match schedule source {:?}",
-                event.source, expected_source
-            )));
-        }
-        if schedule
-            .state
-            .pending_events
-            .iter()
-            .any(|queued| queued.source == event.source && queued.id == event.id)
-            || schedule
+        self.mutate_schedule(id, |schedule| {
+            let expected_source = match &schedule.rule {
+                ScheduleRule::Event { source } => source,
+                _ => return Err(reactor_error("only event schedules can be woken")),
+            };
+            if expected_source != &event.source {
+                return Err(reactor_error(format!(
+                    "event source {:?} does not match schedule source {:?}",
+                    event.source, expected_source
+                )));
+            }
+            if schedule
                 .state
-                .processed_event_keys
+                .pending_events
                 .iter()
-                .any(|key| key == &event_key(&event))
-        {
-            return Ok(false);
-        }
-        if schedule.state.pending_events.len() >= MAX_PENDING_EVENTS {
-            return Err(reactor_error("event queue is full"));
-        }
-        schedule.state.pending_events.push_back(event);
-        self.put(&schedule)?;
-        Ok(true)
+                .any(|queued| queued.source == event.source && queued.id == event.id)
+                || schedule
+                    .state
+                    .processed_event_keys
+                    .iter()
+                    .any(|key| key == &event_key(&event))
+            {
+                return Ok(false);
+            }
+            if schedule.state.pending_events.len() >= MAX_PENDING_EVENTS {
+                return Err(reactor_error("event queue is full"));
+            }
+            schedule.state.pending_events.push_back(event.clone());
+            Ok(true)
+        })
     }
 
     /// Lease every currently-due occurrence. A lease is persisted before the
@@ -388,81 +534,19 @@ impl<'a> ReactorStore<'a> {
     /// until the lease expires.
     pub fn poll_due(&self, now: u64) -> AgentResult<ReactorPoll> {
         let mut poll = ReactorPoll::default();
-        for mut schedule in self.list_checked()? {
-            if !schedule.enabled || schedule.state.completed {
-                continue;
+        let schedule_ids: Vec<String> = self
+            .list_checked()?
+            .into_iter()
+            .filter(|schedule| is_poll_candidate(schedule, now))
+            .map(|schedule| schedule.id)
+            .collect();
+        for id in schedule_ids {
+            let outcome = self.mutate_schedule(&id, |schedule| poll_schedule(schedule, now))?;
+            match outcome {
+                PollSchedule::Idle => {}
+                PollSchedule::Misfire(misfire) => poll.misfires.push(misfire),
+                PollSchedule::Claim(claim) => poll.claims.push(claim),
             }
-            if schedule.state.lease_until.is_some_and(|until| until > now) {
-                continue;
-            }
-            if let ReactorAction::DjehutyReply {
-                min_reply_interval_seconds,
-                ..
-            } = &schedule.action
-                && schedule
-                    .state
-                    .last_success_at
-                    .is_some_and(|last| last.saturating_add(*min_reply_interval_seconds) > now)
-            {
-                continue;
-            }
-
-            let event = match &schedule.rule {
-                ScheduleRule::Event { .. } => schedule.state.pending_events.front().cloned(),
-                _ => None,
-            };
-            let scheduled_for = if let Some(active) = schedule.state.active_scheduled_for {
-                if schedule
-                    .state
-                    .retry_at
-                    .is_some_and(|retry_at| retry_at > now)
-                {
-                    continue;
-                }
-                active
-            } else if let Some(event) = &event {
-                event.observed_at
-            } else if let Some(due) = schedule.state.next_due_at {
-                if due > now {
-                    continue;
-                }
-                due
-            } else {
-                continue;
-            };
-
-            let lateness = now.saturating_sub(scheduled_for);
-            if schedule.misfire_policy == MisfirePolicy::Skip
-                && lateness > schedule.misfire_grace_seconds
-                && schedule.state.active_scheduled_for.is_none()
-            {
-                poll.misfires.push(ReactorMisfire {
-                    schedule_id: schedule.id.clone(),
-                    schedule_name: schedule.name.clone(),
-                    scheduled_for,
-                    observed_at: now,
-                });
-                advance_after_terminal(&mut schedule, scheduled_for, now, event.as_ref())?;
-                self.put(&schedule)?;
-                continue;
-            }
-
-            schedule.state.active_scheduled_for = Some(scheduled_for);
-            schedule.state.retry_at = None;
-            schedule.state.attempt = schedule.state.attempt.saturating_add(1);
-            schedule.state.last_started_at = Some(now);
-            schedule.state.lease_until = Some(now.saturating_add(schedule.lease_seconds.max(1)));
-            let attempt = schedule.state.attempt;
-            let run_id = stable_run_id(&schedule.id, scheduled_for, event.as_ref());
-            self.put(&schedule)?;
-            poll.claims.push(ReactorClaim {
-                schedule,
-                run_id,
-                scheduled_for,
-                attempt,
-                claimed_at: now,
-                event,
-            });
         }
         Ok(poll)
     }
@@ -470,54 +554,42 @@ impl<'a> ReactorStore<'a> {
     /// Finish one leased attempt and either advance the schedule or persist a
     /// bounded retry due time.
     pub fn complete(&self, claim: &ReactorClaim, now: u64, success: bool) -> AgentResult<()> {
-        let mut schedule = self
-            .get(&claim.schedule.id)
-            .ok_or_else(|| reactor_error("schedule disappeared while leased"))?;
-        if schedule.state.active_scheduled_for != Some(claim.scheduled_for)
-            || schedule.state.attempt != claim.attempt
-        {
-            return Err(reactor_error("stale reactor claim completion rejected"));
-        }
-        schedule.state.last_finished_at = Some(now);
-        schedule.state.lease_until = None;
-        if success {
-            schedule.state.last_success_at = Some(now);
-            advance_after_terminal(
-                &mut schedule,
-                claim.scheduled_for,
-                now,
-                claim.event.as_ref(),
-            )?;
-        } else if claim.attempt <= schedule.retry.max_retries {
-            let delay = schedule.retry.delay_for_attempt(claim.attempt);
-            schedule.state.retry_at = Some(now.saturating_add(delay));
-        } else {
-            advance_after_terminal(
-                &mut schedule,
-                claim.scheduled_for,
-                now,
-                claim.event.as_ref(),
-            )?;
-        }
-        self.put(&schedule)
+        self.mutate_schedule(&claim.schedule.id, |schedule| {
+            if schedule.state.active_scheduled_for != Some(claim.scheduled_for)
+                || schedule.state.attempt != claim.attempt
+            {
+                return Err(reactor_error("stale reactor claim completion rejected"));
+            }
+            schedule.state.last_finished_at = Some(now);
+            schedule.state.lease_until = None;
+            if success {
+                schedule.state.last_success_at = Some(now);
+                advance_after_terminal(schedule, claim.scheduled_for, now, claim.event.as_ref())?;
+            } else if claim.attempt <= schedule.retry.max_retries {
+                let delay = schedule.retry.delay_for_attempt(claim.attempt);
+                schedule.state.retry_at = Some(now.saturating_add(delay));
+            } else {
+                advance_after_terminal(schedule, claim.scheduled_for, now, claim.event.as_ref())?;
+            }
+            Ok(())
+        })
     }
 
     /// Release a claim that could not begin because the live agent lock was
     /// contended. This is not an action failure: it preserves the occurrence,
     /// does not consume retry budget, and makes it eligible after `delay`.
     pub fn defer_claim(&self, claim: &ReactorClaim, now: u64, delay: u64) -> AgentResult<()> {
-        let mut schedule = self
-            .get(&claim.schedule.id)
-            .ok_or_else(|| reactor_error("schedule disappeared while leased"))?;
-        if schedule.state.active_scheduled_for != Some(claim.scheduled_for)
-            || schedule.state.attempt != claim.attempt
-        {
-            return Err(reactor_error("stale reactor claim deferral rejected"));
-        }
-        schedule.state.lease_until = None;
-        schedule.state.retry_at = Some(now.saturating_add(delay.max(1)));
-        schedule.state.attempt = schedule.state.attempt.saturating_sub(1);
-        self.put(&schedule)
+        self.mutate_schedule(&claim.schedule.id, |schedule| {
+            if schedule.state.active_scheduled_for != Some(claim.scheduled_for)
+                || schedule.state.attempt != claim.attempt
+            {
+                return Err(reactor_error("stale reactor claim deferral rejected"));
+            }
+            schedule.state.lease_until = None;
+            schedule.state.retry_at = Some(now.saturating_add(delay.max(1)));
+            schedule.state.attempt = schedule.state.attempt.saturating_sub(1);
+            Ok(())
+        })
     }
 
     /// Cache the bounded output of a tool-free LLM occurrence before schedule
@@ -840,6 +912,82 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn concurrent_wakes_preserve_every_event() {
+        let engine = std::sync::Arc::new(engine());
+        let schedule = ReactorSchedule::new(
+            "concurrent-board",
+            "concurrent board",
+            ScheduleRule::Event {
+                source: "djehuty:thread:atomic".into(),
+            },
+            action(),
+            10,
+        )
+        .unwrap();
+        ReactorStore::new(&engine).put(&schedule).unwrap();
+
+        let mut workers = Vec::new();
+        for worker in 0..8 {
+            let engine = std::sync::Arc::clone(&engine);
+            workers.push(std::thread::spawn(move || {
+                for offset in 0..8 {
+                    ReactorStore::new(&engine)
+                        .wake(
+                            "concurrent-board",
+                            ReactorEvent {
+                                source: "djehuty:thread:atomic".into(),
+                                id: format!("{worker}-{offset}"),
+                                observed_at: 11,
+                                payload: "{}".into(),
+                            },
+                        )
+                        .unwrap();
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let stored = ReactorStore::new(&engine).get("concurrent-board").unwrap();
+        assert_eq!(stored.state.pending_events.len(), 64);
+    }
+
+    #[test]
+    fn concurrent_pollers_issue_one_lease() {
+        let engine = std::sync::Arc::new(engine());
+        let schedule = ReactorSchedule::new(
+            "one-lease",
+            "one lease",
+            ScheduleRule::Once { at: 10 },
+            action(),
+            0,
+        )
+        .unwrap();
+        ReactorStore::new(&engine).put(&schedule).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let engine = std::sync::Arc::clone(&engine);
+            let barrier = std::sync::Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                ReactorStore::new(&engine)
+                    .poll_due(10)
+                    .unwrap()
+                    .claims
+                    .len()
+            }));
+        }
+        barrier.wait();
+        let claims: usize = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum();
+        assert_eq!(claims, 1);
     }
 
     #[test]

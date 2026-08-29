@@ -143,34 +143,39 @@ pub fn ingest_board_events(
 
     let mut report = BoardIngressReport::default();
     for (thread_id, thread_subscriptions) in subscriptions {
-        if let Err(error) = ingest_thread(
-            engine,
-            client,
-            &store,
-            own_agent_id,
-            now,
-            thread_id,
-            &thread_subscriptions,
-            &mut report,
-        ) {
-            report.thread_errors.push(error.to_string());
+        for subscription in &thread_subscriptions {
+            if let Err(error) = ingest_subscription(
+                engine,
+                client,
+                &store,
+                own_agent_id,
+                now,
+                thread_id,
+                subscription,
+                &mut report,
+            ) {
+                report.thread_errors.push(format!(
+                    "thread {thread_id} schedule {}: {error}",
+                    subscription.schedule_id
+                ));
+            }
         }
     }
     Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn ingest_thread(
+fn ingest_subscription(
     engine: &Engine,
     client: &impl DjehutyBoardApi,
     store: &ReactorStore<'_>,
     own_agent_id: DjehutyAgentId,
     now: u64,
     thread_id: DjehutyThreadId,
-    subscriptions: &[BoardSubscription],
+    subscription: &BoardSubscription,
     report: &mut BoardIngressReport,
 ) -> AgentResult<()> {
-    let mut cursor = load_cursor(engine, thread_id)?;
+    let mut cursor = load_cursor(engine, thread_id, &subscription.schedule_id)?;
     for _ in 0..MAX_PAGES_PER_TICK {
         let page = client
             .read_page(thread_id, cursor, PAGE_LIMIT)
@@ -187,35 +192,31 @@ fn ingest_thread(
                 continue;
             }
             let payload = bounded_event_payload(message)?;
-            for subscription in subscriptions {
-                if subscription
-                    .allowed_message_types
-                    .as_ref()
-                    .is_some_and(|allowed| {
-                        !allowed.iter().any(|kind| kind == &message.message_type)
-                    })
-                {
-                    report.policy_ignored += 1;
-                    continue;
-                }
-                let queued = store.wake(
-                    &subscription.schedule_id,
-                    ReactorEvent {
-                        source: format!("{SOURCE_PREFIX}{thread_id}"),
-                        id: message.id.to_string(),
-                        observed_at: now,
-                        payload: payload.clone(),
-                    },
-                )?;
-                report.events_queued += usize::from(queued);
+            if subscription
+                .allowed_message_types
+                .as_ref()
+                .is_some_and(|allowed| !allowed.iter().any(|kind| kind == &message.message_type))
+            {
+                report.policy_ignored += 1;
+                continue;
             }
+            let queued = store.wake(
+                &subscription.schedule_id,
+                ReactorEvent {
+                    source: format!("{SOURCE_PREFIX}{thread_id}"),
+                    id: message.id.to_string(),
+                    observed_at: now,
+                    payload: payload.clone(),
+                },
+            )?;
+            report.events_queued += usize::from(queued);
         }
 
         let page_cursor = page
             .next_cursor
             .or_else(|| page.messages.last().map(|message| message.id))
             .ok_or_else(|| board_error("non-empty Djehuty page had no terminal cursor"))?;
-        save_cursor(engine, thread_id, page_cursor)?;
+        save_cursor(engine, thread_id, &subscription.schedule_id, page_cursor)?;
         cursor = Some(page_cursor);
         if page.next_cursor.is_none() {
             break;
@@ -369,17 +370,18 @@ pub(crate) fn run_tool_free_turn(
     Ok(turn.content)
 }
 
-fn cursor_key(thread_id: DjehutyThreadId) -> Vec<u8> {
-    format!("{CURSOR_PREFIX}{thread_id}").into_bytes()
+fn cursor_key(thread_id: DjehutyThreadId, schedule_id: &str) -> Vec<u8> {
+    format!("{CURSOR_PREFIX}{thread_id}:{schedule_id}").into_bytes()
 }
 
 fn load_cursor(
     engine: &Engine,
     thread_id: DjehutyThreadId,
+    schedule_id: &str,
 ) -> AgentResult<Option<DjehutyMessageId>> {
     let bytes = engine
         .store()
-        .get_meta(&cursor_key(thread_id))
+        .get_meta(&cursor_key(thread_id, schedule_id))
         .map_err(|error| AgentError::Engine(Box::new(error.into())))?;
     bytes
         .map(|bytes| {
@@ -393,6 +395,7 @@ fn load_cursor(
 fn save_cursor(
     engine: &Engine,
     thread_id: DjehutyThreadId,
+    schedule_id: &str,
     message_id: DjehutyMessageId,
 ) -> AgentResult<()> {
     let bytes = serde_json::to_vec(&DurableCursor {
@@ -401,7 +404,7 @@ fn save_cursor(
     .map_err(|error| board_error(format!("serialize durable board cursor: {error}")))?;
     engine
         .store()
-        .put_meta(&cursor_key(thread_id), &bytes)
+        .put_meta(&cursor_key(thread_id, schedule_id), &bytes)
         .map_err(|error| AgentError::Engine(Box::new(error.into())))
 }
 
@@ -561,7 +564,7 @@ mod tests {
             DjehutyMessageId(id(10)).to_string()
         );
         assert_eq!(
-            load_cursor(&engine, thread).unwrap(),
+            load_cursor(&engine, thread, "board-participant").unwrap(),
             Some(DjehutyMessageId(id(12)))
         );
     }
@@ -711,10 +714,69 @@ mod tests {
         let report = ingest_board_events(&engine, &board, DjehutyAgentId(id(42)), 100).unwrap();
         assert_eq!(report.thread_errors.len(), 1);
         assert_eq!(report.events_queued, 1);
-        assert_eq!(load_cursor(&engine, blocked_thread).unwrap(), None);
         assert_eq!(
-            load_cursor(&engine, healthy_thread).unwrap(),
+            load_cursor(&engine, blocked_thread, &blocked.id).unwrap(),
+            None
+        );
+        assert_eq!(
+            load_cursor(&engine, healthy_thread, &healthy.id).unwrap(),
             Some(DjehutyMessageId(id(2000)))
+        );
+    }
+
+    #[test]
+    fn backpressured_schedule_does_not_freeze_sibling_on_same_thread() {
+        struct SharedThreadBoard(DjehutyPage);
+        impl DjehutyBoardApi for SharedThreadBoard {
+            fn read_page(
+                &self,
+                _thread_id: DjehutyThreadId,
+                _after: Option<DjehutyMessageId>,
+                _limit: u64,
+            ) -> Result<DjehutyPage, String> {
+                Ok(self.0.clone())
+            }
+            fn post_thread_message(
+                &self,
+                _thread_id: DjehutyThreadId,
+                _content: DjehutyMessageContent,
+            ) -> Result<DjehutyMessageView, String> {
+                Err("not used".into())
+            }
+        }
+
+        let engine = engine();
+        let thread = DjehutyThreadId(id(3));
+        let blocked = schedule(thread);
+        let mut healthy = schedule(thread);
+        healthy.id = "same-thread-healthy".into();
+        ReactorStore::new(&engine).put(&blocked).unwrap();
+        ReactorStore::new(&engine).put(&healthy).unwrap();
+        for event_id in 0..256 {
+            ReactorStore::new(&engine)
+                .wake(
+                    &blocked.id,
+                    ReactorEvent {
+                        source: format!("{SOURCE_PREFIX}{thread}"),
+                        id: format!("queued-{event_id}"),
+                        observed_at: 1,
+                        payload: "{}".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let board = SharedThreadBoard(DjehutyPage {
+            messages: vec![message(3000, 7, thread)],
+            next_cursor: None,
+        });
+
+        let report = ingest_board_events(&engine, &board, DjehutyAgentId(id(42)), 100).unwrap();
+        assert_eq!(report.thread_errors.len(), 1);
+        assert_eq!(report.events_queued, 1);
+        assert_eq!(load_cursor(&engine, thread, &blocked.id).unwrap(), None);
+        assert_eq!(
+            load_cursor(&engine, thread, &healthy.id).unwrap(),
+            Some(DjehutyMessageId(id(3000)))
         );
     }
 }

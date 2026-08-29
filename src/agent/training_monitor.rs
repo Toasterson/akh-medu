@@ -48,6 +48,10 @@ pub struct TrainingStatus {
     pub learning_rate: Option<f64>,
     #[serde(default)]
     pub checkpoint_path: Option<String>,
+    /// True only after the trainer observed an unchanged non-empty checkpoint
+    /// across a stability window (or atomically installed its final file).
+    #[serde(default)]
+    pub checkpoint_durable: bool,
     #[serde(default)]
     pub disk_free_bytes: Option<u64>,
     #[serde(default)]
@@ -163,10 +167,11 @@ pub fn inspect_training(
         .disk_free_bytes
         .is_some_and(|free| free < config.min_disk_free_bytes);
     let checkpoint_hazard = status.state.eq_ignore_ascii_case("completed")
-        && status
-            .checkpoint_path
-            .as_ref()
-            .is_none_or(|path| !is_nonempty_file(Path::new(path)));
+        && (!status.checkpoint_durable
+            || status
+                .checkpoint_path
+                .as_ref()
+                .is_none_or(|path| !is_nonempty_file(Path::new(path))));
     let state_changed = previous.last_state.is_empty() || previous.last_state != status.state;
     let checkpoint_mtime_ns = status
         .metrics
@@ -435,6 +440,7 @@ mod tests {
             eval_loss: None,
             learning_rate: Some(0.0002),
             checkpoint_path: None,
+            checkpoint_durable: false,
             disk_free_bytes: Some(disk),
             message: None,
             metrics: BTreeMap::new(),
