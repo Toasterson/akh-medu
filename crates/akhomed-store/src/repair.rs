@@ -165,9 +165,13 @@ fn rewrite_symbol_json(value: &mut serde_json::Value, mapping: &HashMap<i64, i64
     ];
 
     match value {
-        serde_json::Value::Array(values) => values
-            .iter_mut()
-            .any(|value| rewrite_symbol_json(value, mapping)),
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= rewrite_symbol_json(value, mapping);
+            }
+            changed
+        }
         serde_json::Value::Object(object) => {
             let mut changed = false;
             for (key, child) in object {
@@ -194,9 +198,11 @@ fn rewrite_symbol_array(value: &mut serde_json::Value, mapping: &HashMap<i64, i6
     let serde_json::Value::Array(values) = value else {
         return rewrite_symbol_json(value, mapping);
     };
-    values
-        .iter_mut()
-        .any(|value| rewrite_number(value, mapping))
+    let mut changed = false;
+    for value in values {
+        changed |= rewrite_number(value, mapping);
+    }
+    changed
 }
 
 fn rewrite_goal_status(status: &mut String, mapping: &HashMap<i64, i64>) -> bool {
@@ -690,14 +696,14 @@ mod tests {
 
     #[test]
     fn json_rewrite_is_field_aware() {
-        let mapping = HashMap::from([(7, 2)]);
+        let mapping = HashMap::from([(7, 2), (8, 3)]);
         let mut value = serde_json::json!({
             "symbol_id": 7,
             "created_at": 7,
             "source": {"ContradictionDetected": {
                 "existing": {"subject": 7, "predicate": 3, "object": 4, "timestamp": 7}
             }},
-            "sources": [7, 9],
+            "sources": [7, 8, 9],
         });
         assert!(rewrite_symbol_json(&mut value, &mapping));
         assert_eq!(value["symbol_id"], 2);
@@ -710,11 +716,24 @@ mod tests {
             value["source"]["ContradictionDetected"]["existing"]["timestamp"],
             7
         );
-        assert_eq!(value["sources"], serde_json::json!([2, 9]));
+        assert_eq!(value["sources"], serde_json::json!([2, 3, 9]));
 
-        let mut root_sources = serde_json::json!([7, 9]);
+        let mut root_sources = serde_json::json!([7, 8, 9]);
         assert!(rewrite_symbol_array(&mut root_sources, &mapping));
-        assert_eq!(root_sources, serde_json::json!([2, 9]));
+        assert_eq!(root_sources, serde_json::json!([2, 3, 9]));
+
+        let mut root_objects = serde_json::json!([
+            {"symbol_id": 7},
+            {"symbol_id": 8},
+        ]);
+        assert!(rewrite_symbol_json(&mut root_objects, &mapping));
+        assert_eq!(
+            root_objects,
+            serde_json::json!([
+                {"symbol_id": 2},
+                {"symbol_id": 3},
+            ])
+        );
     }
 
     #[test]
