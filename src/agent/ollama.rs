@@ -783,15 +783,21 @@ impl OllamaClient {
 
         // Heartbeat thread: emit Keepalive on a timer.
         let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel::<StreamEvent>();
+        let (heartbeat_stop_tx, heartbeat_stop_rx) = std::sync::mpsc::channel::<()>();
         let heartbeat_alive = Arc::clone(&request_alive);
         let heartbeat_thread = std::thread::spawn(move || {
             while heartbeat_alive.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-                if heartbeat_alive.load(Ordering::Relaxed) {
-                    if heartbeat_tx.send(StreamEvent::Keepalive).is_err() {
-                        // Receiver dropped.
-                        break;
-                    }
+                match heartbeat_stop_rx.recv_timeout(std::time::Duration::from_secs(
+                    HEARTBEAT_INTERVAL_SECS,
+                )) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if heartbeat_alive.load(Ordering::Relaxed)
+                    && heartbeat_tx.send(StreamEvent::Keepalive).is_err()
+                {
+                    // Receiver dropped.
+                    break;
                 }
             }
         });
@@ -920,6 +926,7 @@ impl OllamaClient {
 
         // Signal both threads to stop.
         request_alive.store(false, Ordering::Relaxed);
+        let _ = heartbeat_stop_tx.send(());
         let _ = reader_thread.join();
         let _ = heartbeat_thread.join();
 
@@ -1007,12 +1014,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf); // drain request (best-effort)
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("accept mock Ollama connection: {error}"),
+                }
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf); // drain request (best-effort)
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            // Keep the peer alive briefly after flushing. Dropping immediately
+            // can turn an otherwise complete response into a reset/EINVAL on
+            // heavily parallel CI hosts before the client drains its buffer.
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
         let client = OllamaClient::new(OllamaConfig {
@@ -1091,31 +1107,36 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                // Write header
-                let _ = stream.write_all(response.as_bytes());
-                // Write first 43 chunks fast
-                for i in 0..43 {
-                    let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
-                    let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
-                    let _ = stream.write_all(chunk.as_bytes());
-                    let _ = stream.write_all(b"\r\n");
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("accept mock Ollama connection: {error}"),
                 }
-                // 12s gap simulating tool-call generation (no chunks)
-                std::thread::sleep(std::time::Duration::from_secs(12));
-                // Tool call chunk
-                let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
-                let _ = stream.write_all(tool_call_chunk.as_bytes());
+            };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            // Write header
+            let _ = stream.write_all(response.as_bytes());
+            // Write first 43 chunks fast
+            for i in 0..43 {
+                let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
+                let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                let _ = stream.write_all(chunk.as_bytes());
                 let _ = stream.write_all(b"\r\n");
-                // Done chunk
-                let done = "{\"done\":true}\n";
-                let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
-                let _ = stream.write_all(done.as_bytes());
-                let _ = stream.write_all(b"\r\n0\r\n\r\n");
-                let _ = stream.flush();
             }
+            // 12s gap simulating tool-call generation (no chunks)
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            // Tool call chunk
+            let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
+            let _ = stream.write_all(tool_call_chunk.as_bytes());
+            let _ = stream.write_all(b"\r\n");
+            // Done chunk
+            let done = "{\"done\":true}\n";
+            let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
+            let _ = stream.write_all(done.as_bytes());
+            let _ = stream.write_all(b"\r\n0\r\n\r\n");
+            let _ = stream.flush();
         });
 
         let client = OllamaClient::new(OllamaConfig {
@@ -1124,8 +1145,12 @@ mod tests {
             ..OllamaConfig::default()
         });
 
+        // Exercise one transport attempt directly. This regression is about
+        // heartbeat delivery during provider silence, not retry policy; a
+        // retry would need a second mock connection and can hide which stream
+        // attempt actually produced the heartbeat.
         let turn = client
-            .chat_stream(
+            .chat_stream_once(
                 &[serde_json::json!({"role": "user", "content": "hi"})],
                 &[serde_json::json!({"name": "write_file", "parameters": {}})],
                 0,

@@ -143,15 +143,22 @@ impl DrainHandle {
         })
     }
 
-    /// Join both drain threads, discarding errors (the child may have been
-    /// killed, causing read errors on the pipes).
-    pub fn join(mut self) {
+    /// Join both drain threads and return every event they queued before
+    /// exiting. Errors are discarded because the child may have been killed,
+    /// causing read errors on the pipes.
+    ///
+    /// Joining before the final receive is important for fast children: the
+    /// process can be reaped before a drain thread has scheduled its final
+    /// output chunk. Dropping the receiver immediately after `join` loses that
+    /// output even though the reader completed successfully.
+    pub fn join(mut self) -> Vec<DrainEvent> {
         if let Some(h) = self.stdout_thread.take() {
             let _ = h.join();
         }
         if let Some(h) = self.stderr_thread.take() {
             let _ = h.join();
         }
+        self.rx.try_iter().collect()
     }
 }
 
@@ -525,7 +532,14 @@ impl SupervisedExecution {
                 self.kill_process_group();
 
                 // Join drain threads to clean up
-                drain.join();
+                for event in drain.join() {
+                    match event {
+                        DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
+                        DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
+                        DrainEvent::StdoutEof => stdout_eof = true,
+                        DrainEvent::StderrEof => stderr_eof = true,
+                    }
+                }
 
                 let _ = self.child.wait(); // Reap the zombie
 
@@ -548,14 +562,20 @@ impl SupervisedExecution {
                             _ => {}
                         }
                     }
-                    drain.join();
+                    for event in drain.join() {
+                        match event {
+                            DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
+                            DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
+                            _ => {}
+                        }
+                    }
                     return Ok((status, DrainedOutput { stdout: stdout_buf, stderr: stderr_buf }));
                 }
                 Ok(None) => {
                     // Still running — continue polling
                 }
                 Err(source) => {
-                    drain.join();
+                    let _ = drain.join();
                     return Err(SupervisorError::Wait { source });
                 }
             }
@@ -822,6 +842,29 @@ mod tests {
             result.is_ok(),
             "slow-but-alive process must not be killed: {result:?}"
         );
+    }
+
+    /// A fast child may exit before its drain threads have delivered their
+    /// final pipe chunks to the supervisor. Joining those readers must not
+    /// discard the late events they queued while the join was in progress.
+    #[test]
+    fn fast_child_output_is_never_lost_during_drain_join() {
+        for _ in 0..64 {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg("printf stdout; printf stderr >&2")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            let mut exec = SupervisedExecution::spawn(cmd).unwrap();
+            let drain = exec.take_drain();
+            let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(5));
+            let (status, output) = exec.wait_with_drain(&mut tracker, drain).unwrap();
+
+            assert!(status.success());
+            assert_eq!(output.stdout, b"stdout");
+            assert_eq!(output.stderr, b"stderr");
+        }
     }
 
     /// Regression test: a child that stays fully silent AND never exits
