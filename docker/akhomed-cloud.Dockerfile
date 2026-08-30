@@ -35,7 +35,10 @@ RUN apt-get update && \
         apt-get install -y --no-install-recommends \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross && \
         rustup target add aarch64-unknown-linux-gnu ;; \
-      *) rustup target add x86_64-unknown-linux-gnu ;; \
+      *) \
+        apt-get install -y --no-install-recommends \
+          gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross && \
+        rustup target add x86_64-unknown-linux-gnu ;; \
     esac && \
     rm -rf /var/lib/apt/lists/*
 
@@ -57,6 +60,9 @@ RUN mkdir -p src/bin crates/seshat/src crates/akhomed-store/src crates/heka/src 
     echo 'fn main() {}' > benches/phase26.rs
 
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+    CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc \
+    CXX_x86_64_unknown_linux_gnu=x86_64-linux-gnu-g++
 # Resolve the rust target triple once.
 RUN case "$TARGETPLATFORM" in \
       linux/arm64) echo aarch64-unknown-linux-gnu ;; \

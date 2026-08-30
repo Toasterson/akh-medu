@@ -29,6 +29,32 @@ use crate::store::TieredStore;
 use crate::symbol::{SymbolId, SymbolKind, SymbolMeta};
 
 const PROVENANCE_SNAPSHOT_VERSION: u64 = 1;
+const REACTOR_SNAPSHOT_VERSION: u64 = 2;
+const REACTOR_SCHEDULE_PREFIX: &[u8] = b"reactor:schedule:";
+const REACTOR_DJEHUTY_CURSOR_PREFIX: &[u8] = b"reactor:djehuty:cursor:";
+
+/// Recovery-critical reactor metadata carried in the relational snapshot.
+///
+/// Values use exact-byte hex so redb JSON containing NUL separators remains
+/// valid PostgreSQL JSONB. Wake decodes and semantically validates each value;
+/// only the two explicitly allow-listed namespaces are ever restored.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PortableReactorMetadata {
+    key: String,
+    /// Hex preserves the exact local JSON bytes while keeping control
+    /// characters such as the reactor event-key NUL separator out of JSONB
+    /// strings (PostgreSQL rejects `\\u0000` in `jsonb`).
+    value_hex: String,
+}
+
+/// Version 1 embedded reactor values directly in JSON. It remains readable so
+/// pods can roll forward from snapshots written before the JSONB/NUL boundary
+/// was discovered; all new captures use the byte-exact v2 representation.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LegacyPortableReactorMetadata {
+    key: String,
+    value: serde_json::Value,
+}
 
 /// Errors from the snapshot/wake path.
 #[derive(Debug, Error, Diagnostic)]
@@ -529,6 +555,7 @@ pub fn capture_snapshot_at_fence(
         agent.session_start_cycle,
         agent.cycle_count,
     );
+    let reactor_metadata = capture_reactor_metadata(engine)?;
     let extra = serde_json::json!({
         "provenance_snapshot_version": PROVENANCE_SNAPSHOT_VERSION,
         "audience": agent.audience,
@@ -536,6 +563,10 @@ pub fn capture_snapshot_at_fence(
         "method_stats": agent.method_registry_htn.export_stats(),
         "session_summary": session_summary,
         "person_memory": agent.person_memory.to_portable(),
+        "reactor": {
+            "version": REACTOR_SNAPSHOT_VERSION,
+            "metadata": reactor_metadata,
+        },
     });
 
     Ok(SnapshotData {
@@ -922,6 +953,7 @@ pub async fn wake(
             put_bincode(&store, b"agent:psyche", &psyche);
         }
         restore_extra(&store, state.extra.as_ref());
+        restore_reactor_metadata(&store, state.extra.as_ref())?;
     }
 
     // 4. Open the engine over the reconstructed redb (registry + allocator come
@@ -1753,6 +1785,265 @@ fn restore_extra(store: &TieredStore, extra: Option<&serde_json::Value>) {
         let index = crate::agent::contact_memory::PersonMemoryIndex::from_portable(portable);
         put_bincode(store, b"agent:person_memory", &index);
     }
+}
+
+/// Capture schedules and board cursors from one durable-store read
+/// transaction. Two independent scans could observe a cursor after ingress
+/// advanced it but schedule state from before the same event was queued.
+fn capture_reactor_metadata(engine: &Engine) -> SnapshotResult<Vec<PortableReactorMetadata>> {
+    let entries = engine
+        .store()
+        .scan_prefix(b"reactor:")
+        .map_err(|error| SnapshotError::Agent(format!("snapshot reactor metadata: {error}")))?;
+    let mut captured = Vec::new();
+    for (key, bytes) in entries {
+        if bytes.is_empty()
+            || !(key.starts_with(REACTOR_SCHEDULE_PREFIX)
+                || key.starts_with(REACTOR_DJEHUTY_CURSOR_PREFIX))
+        {
+            continue;
+        }
+        let key = String::from_utf8(key).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "snapshot reactor metadata key is not UTF-8: {error}"
+            ))
+        })?;
+        let value = serde_json::from_slice(&bytes).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "snapshot reactor metadata {key} is not valid JSON: {error}"
+            ))
+        })?;
+        validate_reactor_metadata_entry(&key, &value)?;
+        captured.push(PortableReactorMetadata {
+            key,
+            value_hex: encode_reactor_bytes(&bytes),
+        });
+    }
+    captured.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(captured)
+}
+
+/// Restore the allow-listed namespaces atomically per prefix. A missing
+/// reactor envelope from an older Postgres snapshot is authoritative empty:
+/// production hydration quarantines host-local redb before this point.
+fn restore_reactor_metadata(
+    store: &TieredStore,
+    extra: Option<&serde_json::Value>,
+) -> SnapshotResult<()> {
+    let entries = match extra.and_then(|value| value.get("reactor")) {
+        Some(envelope) => {
+            let version = envelope.get("version").and_then(serde_json::Value::as_u64);
+            let metadata = envelope.get("metadata").cloned().ok_or_else(|| {
+                SnapshotError::Agent("wake: reactor snapshot has no metadata array".into())
+            })?;
+            match version {
+                Some(REACTOR_SNAPSHOT_VERSION) => {
+                    serde_json::from_value::<Vec<PortableReactorMetadata>>(metadata).map_err(
+                        |error| {
+                            SnapshotError::Agent(format!(
+                                "wake: decode reactor metadata: {error}"
+                            ))
+                        },
+                    )?
+                }
+                Some(1) => serde_json::from_value::<Vec<LegacyPortableReactorMetadata>>(metadata)
+                    .map_err(|error| {
+                        SnapshotError::Agent(format!(
+                            "wake: decode legacy reactor metadata: {error}"
+                        ))
+                    })?
+                    .into_iter()
+                    .map(|entry| {
+                        let bytes = serde_json::to_vec(&entry.value).map_err(|error| {
+                            SnapshotError::Agent(format!(
+                                "wake: encode legacy reactor metadata {}: {error}",
+                                entry.key
+                            ))
+                        })?;
+                        Ok(PortableReactorMetadata {
+                            key: entry.key,
+                            value_hex: encode_reactor_bytes(&bytes),
+                        })
+                    })
+                    .collect::<SnapshotResult<Vec<_>>>()?,
+                _ => {
+                    return Err(SnapshotError::Agent(format!(
+                        "wake: unsupported reactor snapshot version {version:?}"
+                    )));
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    let mut schedules = Vec::new();
+    let mut cursors = Vec::new();
+    for entry in entries {
+        if !seen.insert(entry.key.clone()) {
+            return Err(SnapshotError::Agent(format!(
+                "wake: duplicate reactor metadata key {}",
+                entry.key
+            )));
+        }
+        let bytes = decode_reactor_bytes(&entry.value_hex).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "wake: decode reactor metadata {}: {error}",
+                entry.key
+            ))
+        })?;
+        let value = serde_json::from_slice(&bytes).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "wake: reactor metadata {} is not valid JSON: {error}",
+                entry.key
+            ))
+        })?;
+        validate_reactor_metadata_entry(&entry.key, &value)?;
+        let key = entry.key.into_bytes();
+        if key.starts_with(REACTOR_SCHEDULE_PREFIX) {
+            schedules.push((key, bytes));
+        } else {
+            cursors.push((key, bytes));
+        }
+    }
+
+    replace_reactor_namespace(store, REACTOR_SCHEDULE_PREFIX, &schedules)?;
+    replace_reactor_namespace(store, REACTOR_DJEHUTY_CURSOR_PREFIX, &cursors)?;
+    Ok(())
+}
+
+fn encode_reactor_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn decode_reactor_bytes(encoded: &str) -> Result<Vec<u8>, &'static str> {
+    if !encoded.len().is_multiple_of(2) {
+        return Err("hex value has odd length");
+    }
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = decode_hex_nibble(pair[0]).ok_or("hex value contains a non-hex digit")?;
+            let low = decode_hex_nibble(pair[1]).ok_or("hex value contains a non-hex digit")?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn replace_reactor_namespace(
+    store: &TieredStore,
+    prefix: &[u8],
+    entries: &[(Vec<u8>, Vec<u8>)],
+) -> SnapshotResult<()> {
+    let borrowed = entries
+        .iter()
+        .map(|(key, value)| (key.as_slice(), value.as_slice()))
+        .collect::<Vec<_>>();
+    store.replace_meta_prefix(prefix, &borrowed).map_err(|error| {
+        SnapshotError::Agent(format!(
+            "wake: replace reactor metadata {}: {error}",
+            String::from_utf8_lossy(prefix)
+        ))
+    })
+}
+
+fn validate_reactor_metadata_entry(
+    key: &str,
+    value: &serde_json::Value,
+) -> SnapshotResult<()> {
+    if key.chars().any(char::is_control) {
+        return Err(SnapshotError::Agent(
+            "reactor snapshot metadata key contains a control character".into(),
+        ));
+    }
+    if let Some(schedule_id) = key.strip_prefix("reactor:schedule:") {
+        if schedule_id.is_empty() {
+            return Err(SnapshotError::Agent(
+                "reactor snapshot contains an empty schedule id".into(),
+            ));
+        }
+        #[cfg(feature = "daemon")]
+        let payload_id = {
+            let schedule = serde_json::from_value::<crate::agent::reactor::ReactorSchedule>(
+                value.clone(),
+            )
+            .map_err(|error| {
+                SnapshotError::Agent(format!(
+                    "reactor snapshot schedule {schedule_id} is invalid: {error}"
+                ))
+            })?;
+            schedule.validate().map_err(|error| {
+                SnapshotError::Agent(format!(
+                    "reactor snapshot schedule {schedule_id} is invalid: {error}"
+                ))
+            })?;
+            schedule.id
+        };
+        #[cfg(not(feature = "daemon"))]
+        let payload_id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                SnapshotError::Agent(format!(
+                    "reactor snapshot schedule {schedule_id} has no string id"
+                ))
+            })?
+            .to_owned();
+        if payload_id != schedule_id {
+            return Err(SnapshotError::Agent(format!(
+                "reactor snapshot schedule key {schedule_id} does not match payload id {payload_id}"
+            )));
+        }
+        return Ok(());
+    }
+
+    if let Some(cursor_key) = key.strip_prefix("reactor:djehuty:cursor:") {
+        let Some((thread_id, schedule_id)) = cursor_key.split_once(':') else {
+            return Err(SnapshotError::Agent(format!(
+                "reactor snapshot cursor key {key} is malformed"
+            )));
+        };
+        if uuid::Uuid::parse_str(thread_id).is_err()
+            || schedule_id.is_empty()
+            || schedule_id.chars().any(char::is_control)
+        {
+            return Err(SnapshotError::Agent(format!(
+                "reactor snapshot cursor key {key} is malformed"
+            )));
+        }
+        let Some(message_id) = value.get("last_message_id").and_then(serde_json::Value::as_str)
+        else {
+            return Err(SnapshotError::Agent(format!(
+                "reactor snapshot cursor {key} has no last_message_id"
+            )));
+        };
+        uuid::Uuid::parse_str(message_id).map_err(|error| {
+            SnapshotError::Agent(format!(
+                "reactor snapshot cursor {key} has invalid message id: {error}"
+            ))
+        })?;
+        return Ok(());
+    }
+
+    Err(SnapshotError::Agent(format!(
+        "reactor snapshot metadata key {key} is outside the allow-list"
+    )))
 }
 
 /// Convert one portable relational row back into the exact local ledger
@@ -3674,6 +3965,230 @@ mod tests {
             bincode::deserialize(&bytes).expect("deserialize as PersonMemoryIndex");
         assert_eq!(idx.recall_with_person("alice", 10), vec![ep2, ep1]);
         assert_eq!(idx.recall_with_person_about("alice", topic, 10), vec![ep1]);
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn reactor_metadata_roundtrips_and_replaces_stale_namespaces() {
+        use crate::agent::reactor::{
+            ReactorAction, ReactorEvent, ReactorSchedule, ScheduleRule,
+        };
+
+        let source_root = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            data_dir: Some(source_root.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let mut schedule = ReactorSchedule::new(
+            "board-watch",
+            "Board watch",
+            ScheduleRule::Event {
+                source: "djehuty:thread:01a04e2c-29ff-7230-967d-2534f39af690".into(),
+            },
+            ReactorAction::DjehutyReply {
+                thread_id: "01a04e2c-29ff-7230-967d-2534f39af690".into(),
+                prompt_prefix: "read only".into(),
+                agent_id: Some("thoth".into()),
+                allowed_message_types: vec!["board/note@v1".into()],
+                max_prompt_chars: 12_000,
+                max_reply_chars: 4_000,
+                min_reply_interval_seconds: 30,
+            },
+            10,
+        )
+        .unwrap();
+        schedule.state.pending_events.push_back(ReactorEvent {
+            source: "djehuty:thread:01a04e2c-29ff-7230-967d-2534f39af690".into(),
+            id: "01a04e4c-a665-7ca0-b551-b07851328fdf".into(),
+            observed_at: 42,
+            payload: "{\"message_type\":\"board/note@v1\"}".into(),
+        });
+        schedule.state.processed_event_keys.push_back(
+            "djehuty:thread:01a04e2c-29ff-7230-967d-2534f39af690\0processed".into(),
+        );
+        schedule.state.lease_until = Some(77);
+        schedule.state.retry_at = Some(88);
+        schedule.state.attempt = 2;
+        let schedule_value = serde_json::to_value(&schedule).unwrap();
+        let schedule_bytes = serde_json::to_vec(&schedule_value).unwrap();
+        engine
+            .store()
+            .put_meta(
+                b"reactor:schedule:board-watch",
+                &schedule_bytes,
+            )
+            .unwrap();
+        let cursor_value = serde_json::json!({
+            "last_message_id": "01a04e49-77ef-7421-bd09-0250e72a97f6"
+        });
+        let cursor_bytes = serde_json::to_vec(&cursor_value).unwrap();
+        engine
+            .store()
+            .put_meta(
+                b"reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:board-watch",
+                &cursor_bytes,
+            )
+            .unwrap();
+
+        let captured = capture_reactor_metadata(&engine).unwrap();
+        assert_eq!(captured.len(), 2);
+        let extra = serde_json::json!({
+            "reactor": {
+                "version": REACTOR_SNAPSHOT_VERSION,
+                "metadata": captured,
+            }
+        });
+        assert!(
+            !serde_json::to_string(&extra).unwrap().contains("\\u0000"),
+            "portable reactor metadata must be accepted by PostgreSQL jsonb"
+        );
+
+        let restored_root = tempfile::tempdir().unwrap();
+        let restored = TieredStore::with_persistence(restored_root.path(), "symbols").unwrap();
+        restored
+            .put_meta(b"reactor:schedule:stale", br#"{"id":"stale"}"#)
+            .unwrap();
+        restored
+            .put_meta(
+                b"reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:stale",
+                br#"{"last_message_id":"01a04e49-77ef-7421-bd09-0250e72a97f6"}"#,
+            )
+            .unwrap();
+        restored.put_meta(b"unrelated", b"preserve").unwrap();
+
+        restore_reactor_metadata(&restored, Some(&extra)).unwrap();
+
+        let restored_schedule = restored
+            .get_meta(b"reactor:schedule:board-watch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored_schedule, schedule_bytes);
+        let restored_cursor = restored
+            .get_meta(
+                b"reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:board-watch",
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored_cursor, cursor_bytes);
+        assert!(
+            restored
+                .get_meta(b"reactor:schedule:stale")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            restored.get_meta(b"unrelated").unwrap().as_deref(),
+            Some(b"preserve".as_slice())
+        );
+    }
+
+    #[test]
+    fn reactor_metadata_restore_rejects_keys_outside_allow_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
+        let value_hex = encode_reactor_bytes(br#"{"shadow":"overwrite"}"#);
+        let extra = serde_json::json!({
+            "reactor": {
+                "version": REACTOR_SNAPSHOT_VERSION,
+                "metadata": [{
+                    "key": "agent:psyche",
+                    "value_hex": value_hex
+                }]
+            }
+        });
+        let error = restore_reactor_metadata(&store, Some(&extra)).unwrap_err();
+        assert!(error.to_string().contains("outside the allow-list"));
+    }
+
+    #[test]
+    fn reactor_metadata_restore_accepts_legacy_v1_envelope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
+        let key = "reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:legacy";
+        let extra = serde_json::json!({
+            "reactor": {
+                "version": 1,
+                "metadata": [{
+                    "key": key,
+                    "value": {
+                        "last_message_id": "01a04e49-77ef-7421-bd09-0250e72a97f6"
+                    }
+                }]
+            }
+        });
+
+        restore_reactor_metadata(&store, Some(&extra)).unwrap();
+
+        let restored = store.get_meta(key.as_bytes()).unwrap().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&restored).unwrap(),
+            serde_json::json!({
+                "last_message_id": "01a04e49-77ef-7421-bd09-0250e72a97f6"
+            })
+        );
+    }
+
+    #[test]
+    fn reactor_metadata_restore_rejects_malformed_hex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = TieredStore::with_persistence(tmp.path(), "symbols").unwrap();
+        let extra = serde_json::json!({
+            "reactor": {
+                "version": REACTOR_SNAPSHOT_VERSION,
+                "metadata": [{
+                    "key": "reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:bad",
+                    "value_hex": "0g"
+                }]
+            }
+        });
+
+        let error = restore_reactor_metadata(&store, Some(&extra)).unwrap_err();
+        assert!(error.to_string().contains("non-hex digit"));
+    }
+
+    #[test]
+    fn reactor_metadata_rejects_control_characters_in_keys() {
+        let value = serde_json::json!({
+            "last_message_id": "01a04e49-77ef-7421-bd09-0250e72a97f6"
+        });
+        let error = validate_reactor_metadata_entry(
+            "reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:bad\0id",
+            &value,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("control character"));
+    }
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn reactor_metadata_restore_rejects_semantically_invalid_schedule() {
+        use crate::agent::reactor::{ReactorAction, ReactorSchedule, ScheduleRule};
+
+        let schedule = ReactorSchedule::new(
+            "invalid-interval",
+            "Invalid interval",
+            ScheduleRule::Interval {
+                every_seconds: 1,
+                anchor: 0,
+            },
+            ReactorAction::LlmTurn {
+                prompt: "observe".into(),
+                agent_id: None,
+                allow_tools: false,
+                require_mutation: false,
+            },
+            0,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(schedule).unwrap();
+        value["rule"]["every_seconds"] = serde_json::json!(0);
+        let error = validate_reactor_metadata_entry(
+            "reactor:schedule:invalid-interval",
+            &value,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("interval must be at least one second"));
     }
 
     #[test]

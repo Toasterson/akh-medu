@@ -3884,7 +3884,7 @@ async fn start_acp_server(
     fallback_ws: &str,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> (Option<String>, Option<String>, Vec<tokio::task::JoinHandle<()>>) {
-    use akh_medu::acp::{serve_tcp_loop, serve_unix_loop, AkhAcpAgent};
+    use akh_medu::acp::{serve_tcp_loop, serve_unix_loop, AkhAcpAgent, SharedSecretAuth};
     use std::path::PathBuf;
 
     let ws = acp_cfg
@@ -3957,11 +3957,26 @@ async fn start_acp_server(
     }
 
     if let Some(addr) = acp_cfg.tcp_addr() {
+        // TCP is a cluster/network ingress and is never opened without a valid
+        // shared-secret source. The Unix socket remains local-only and does not
+        // need the network credential. File-backed auth reloads on initialize,
+        // which permits overlap rotation without restarting this singleton.
+        let auth = match SharedSecretAuth::from_env() {
+            Ok(auth) => auth,
+            Err(error) => {
+                tracing::error!(
+                    addr = %addr,
+                    %error,
+                    "ACP TCP disabled: shared-secret authentication is not configured"
+                );
+                return (socket_str, None, handles);
+            }
+        };
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
                 tracing::info!(addr = %addr, workspace = %ws, "ACP serving on TCP");
                 tcp_str = Some(addr);
-                let a = acp_agent.clone();
+                let a = acp_agent.clone().with_ingress_auth(auth);
                 let rx = shutdown_rx.clone();
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = serve_tcp_loop(a, listener, rx).await {

@@ -143,22 +143,15 @@ impl DrainHandle {
         })
     }
 
-    /// Join both drain threads and return every event they queued before
-    /// exiting. Errors are discarded because the child may have been killed,
-    /// causing read errors on the pipes.
-    ///
-    /// Joining before the final receive is important for fast children: the
-    /// process can be reaped before a drain thread has scheduled its final
-    /// output chunk. Dropping the receiver immediately after `join` loses that
-    /// output even though the reader completed successfully.
-    pub fn join(mut self) -> Vec<DrainEvent> {
+    /// Join both drain threads, retaining the receiver so callers can collect
+    /// events that raced with child exit.
+    pub fn join(&mut self) {
         if let Some(h) = self.stdout_thread.take() {
             let _ = h.join();
         }
         if let Some(h) = self.stderr_thread.take() {
             let _ = h.join();
         }
-        self.rx.try_iter().collect()
     }
 }
 
@@ -453,7 +446,7 @@ impl SupervisedExecution {
     fn wait_with_drain_bounded(
         mut self,
         tracker: &mut ProgressTracker,
-        drain: DrainHandle,
+        mut drain: DrainHandle,
         max_stdout_bytes: Option<usize>,
     ) -> SupervisorResult<(ExitStatus, DrainedOutput)> {
         let mut stdout_buf = Vec::new();
@@ -531,8 +524,10 @@ impl SupervisedExecution {
                 // Kill the process group
                 self.kill_process_group();
 
-                // Join drain threads to clean up
-                for event in drain.join() {
+                // Killing closes the pipes. Join the readers, then collect
+                // chunks they may have sent after the pre-kill drain above.
+                drain.join();
+                while let Ok(Some(event)) = drain.try_recv() {
                     match event {
                         DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
                         DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
@@ -554,19 +549,16 @@ impl SupervisedExecution {
             // Check if the process has exited
             match self.child.try_wait() {
                 Ok(Some(status)) => {
-                    // Process exited — drain any remaining output from the channel
+                    // Process exit can win the race against the reader threads.
+                    // Join first so every final pipe read reaches the channel,
+                    // then drain it to completion.
+                    drain.join();
                     while let Ok(Some(event)) = drain.try_recv() {
                         match event {
                             DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
                             DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
-                            _ => {}
-                        }
-                    }
-                    for event in drain.join() {
-                        match event {
-                            DrainEvent::Stdout(chunk) => push_stdout(&mut stdout_buf, &chunk),
-                            DrainEvent::Stderr(chunk) => stderr_buf.extend_from_slice(&chunk),
-                            _ => {}
+                            DrainEvent::StdoutEof => stdout_eof = true,
+                            DrainEvent::StderrEof => stderr_eof = true,
                         }
                     }
                     return Ok((status, DrainedOutput { stdout: stdout_buf, stderr: stderr_buf }));
@@ -575,7 +567,7 @@ impl SupervisedExecution {
                     // Still running — continue polling
                 }
                 Err(source) => {
-                    let _ = drain.join();
+                    drain.join();
                     return Err(SupervisorError::Wait { source });
                 }
             }
@@ -730,6 +722,31 @@ mod tests {
     }
 
     #[test]
+    fn short_lived_children_never_lose_their_final_capture() {
+        // Regression for WI-346: `try_wait` can observe exit before the drain
+        // threads forward their final pipe reads.
+        for attempt in 0..20 {
+            let mut command = Command::new("sh");
+            command
+                .arg("-c")
+                .arg("printf stdout; printf stderr >&2")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut execution = SupervisedExecution::spawn(command).unwrap();
+            let drain = execution.take_drain();
+            let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(5));
+
+            let (status, output) = execution
+                .wait_with_drain(&mut tracker, drain)
+                .unwrap_or_else(|error| panic!("attempt {attempt} failed: {error}"));
+
+            assert!(status.success(), "attempt {attempt}");
+            assert_eq!(output.stdout, b"stdout", "attempt {attempt}");
+            assert_eq!(output.stderr, b"stderr", "attempt {attempt}");
+        }
+    }
+
+    #[test]
     fn supervised_exec_kills_stuck_process() {
         let mut cmd = Command::new("sleep");
         cmd.arg("600")
@@ -842,29 +859,6 @@ mod tests {
             result.is_ok(),
             "slow-but-alive process must not be killed: {result:?}"
         );
-    }
-
-    /// A fast child may exit before its drain threads have delivered their
-    /// final pipe chunks to the supervisor. Joining those readers must not
-    /// discard the late events they queued while the join was in progress.
-    #[test]
-    fn fast_child_output_is_never_lost_during_drain_join() {
-        for _ in 0..64 {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c")
-                .arg("printf stdout; printf stderr >&2")
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            let mut exec = SupervisedExecution::spawn(cmd).unwrap();
-            let drain = exec.take_drain();
-            let mut tracker = ProgressTracker::with_timeout(Duration::from_secs(5));
-            let (status, output) = exec.wait_with_drain(&mut tracker, drain).unwrap();
-
-            assert!(status.success());
-            assert_eq!(output.stdout, b"stdout");
-            assert_eq!(output.stderr, b"stderr");
-        }
     }
 
     /// Regression test: a child that stays fully silent AND never exits

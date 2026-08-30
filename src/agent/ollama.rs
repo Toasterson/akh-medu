@@ -81,8 +81,12 @@ impl Default for OllamaConfig {
     }
 }
 
-fn default_base_url() -> String { "http://localhost:11434".into() }
-fn default_model() -> String { "gemma4:e4b".into() }
+fn default_base_url() -> String {
+    "http://localhost:11434".into()
+}
+fn default_model() -> String {
+    "gemma4:e4b".into()
+}
 /// Per-request timeout. `AKH_OLLAMA_TIMEOUT_SECS` overrides the 120s default so
 /// long reasoning / agentic-coding generations (which the model *does* answer,
 /// just slowly) aren't cut off mid-response.
@@ -93,7 +97,9 @@ fn default_timeout() -> u64 {
         .filter(|&n| n > 0)
         .unwrap_or(120)
 }
-fn default_keep_alive() -> String { "5m".into() }
+fn default_keep_alive() -> String {
+    "5m".into()
+}
 
 impl OllamaConfig {
     /// Resolve the API key, expanding an `env:VAR` reference at call time.
@@ -138,7 +144,10 @@ impl OllamaConfig {
     /// cover.
     pub fn validated_think_level(&self) -> Option<&'static str> {
         let raw = self.reasoning_effort.as_deref()?.trim();
-        match VALID_THINK_LEVELS.iter().find(|&&v| v.eq_ignore_ascii_case(raw)) {
+        match VALID_THINK_LEVELS
+            .iter()
+            .find(|&&v| v.eq_ignore_ascii_case(raw))
+        {
             Some(&level) => Some(level),
             None => {
                 tracing::warn!(
@@ -170,9 +179,14 @@ pub enum OllamaError {
     #[error("Ollama request failed (HTTP {status}) at {url}: {body}")]
     #[diagnostic(
         code(akh::ollama::request_failed),
-        help("Check Ollama server logs. Ensure the model is pulled: `ollama pull {model}`"),
+        help("Check Ollama server logs. Ensure the model is pulled: `ollama pull {model}`")
     )]
-    RequestFailed { url: String, status: u16, body: String, model: String },
+    RequestFailed {
+        url: String,
+        status: u16,
+        body: String,
+        model: String,
+    },
 
     #[error("Ollama returned unexpected response: {reason}")]
     #[diagnostic(
@@ -340,7 +354,9 @@ impl OllamaClient {
     fn chat_agent(&self) -> ureq::Agent {
         ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(20))
-            .timeout_read(std::time::Duration::from_secs(self.config.timeout_secs.max(30)))
+            .timeout_read(std::time::Duration::from_secs(
+                self.config.timeout_secs.max(30),
+            ))
             .build()
     }
 
@@ -421,7 +437,8 @@ impl OllamaClient {
     /// [`chat`]: Self::chat
     pub fn list_models(&self) -> OllamaResult<Vec<String>> {
         let url = format!("{}/api/tags", self.config.base_url.trim_end_matches('/'));
-        let mut req = ureq::get(&url).timeout(std::time::Duration::from_secs(self.config.timeout_secs));
+        let mut req =
+            ureq::get(&url).timeout(std::time::Duration::from_secs(self.config.timeout_secs));
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
@@ -438,9 +455,10 @@ impl OllamaClient {
             },
         })?;
 
-        let body: serde_json::Value = response.into_json().map_err(|e| OllamaError::ParseFailed {
-            reason: format!("JSON decode failed: {e}"),
-        })?;
+        let body: serde_json::Value =
+            response.into_json().map_err(|e| OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            })?;
 
         let names = body
             .get("models")
@@ -484,24 +502,23 @@ impl OllamaClient {
         if let Some(key) = self.config.resolved_api_key() {
             req = req.set("Authorization", &format!("Bearer {key}"));
         }
-        let response = req
-            .send_json(&body)
-            .map_err(|e| match e {
-                ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
-                    url: url.clone(),
-                    status,
-                    body: resp.into_string().unwrap_or_default(),
-                    model: self.config.model.clone(),
-                },
-                other => OllamaError::Unreachable {
-                    url: url.clone(),
-                    reason: other.to_string(),
-                },
-            })?;
-
-        let chat_resp: ChatResponse = response.into_json().map_err(|e| OllamaError::ParseFailed {
-            reason: format!("JSON decode failed: {e}"),
+        let response = req.send_json(&body).map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
         })?;
+
+        let chat_resp: ChatResponse =
+            response.into_json().map_err(|e| OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            })?;
 
         chat_resp
             .message
@@ -583,13 +600,12 @@ impl OllamaClient {
             },
         })?;
 
-        let chat_resp: ChatResponse =
-            response.into_json().map_err(|e| {
-                metrics.log(&self.config.model, "cancelled");
-                OllamaError::ParseFailed {
-                    reason: format!("JSON decode failed: {e}"),
-                }
-            })?;
+        let chat_resp: ChatResponse = response.into_json().map_err(|e| {
+            metrics.log(&self.config.model, "cancelled");
+            OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            }
+        })?;
 
         let msg = chat_resp.message.ok_or_else(|| {
             metrics.log(&self.config.model, "cancelled");
@@ -691,8 +707,8 @@ impl OllamaClient {
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> OllamaResult<AssistantTurn> {
         use std::io::BufRead;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         let request_start = std::time::Instant::now();
         // Metrics: track per-request counters (chunks, bytes, deltas) for diagnosing
@@ -787,9 +803,9 @@ impl OllamaClient {
         let heartbeat_alive = Arc::clone(&request_alive);
         let heartbeat_thread = std::thread::spawn(move || {
             while heartbeat_alive.load(Ordering::Relaxed) {
-                match heartbeat_stop_rx.recv_timeout(std::time::Duration::from_secs(
-                    HEARTBEAT_INTERVAL_SECS,
-                )) {
+                match heartbeat_stop_rx
+                    .recv_timeout(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS))
+                {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 }
@@ -822,92 +838,94 @@ impl OllamaClient {
             match line_result {
                 Ok(LineEvent::Line(line)) => {
                     let line = line.map_err(|e| {
-                // Capture request duration at the point of stream failure for
-                // diagnosing duration-bound connection resets (work item "Turns
-                // die quietly" defect 2, ask 4).
-                let duration = request_start.elapsed();
-                tracing::warn!(
-                    duration_secs = duration.as_secs(),
-                    error = %e,
-                    "streaming read failed mid-response"
-                );
-                // Signal heartbeat thread to stop before returning error.
-                request_alive.store(false, Ordering::Relaxed);
-                // Log metrics on cancellation path.
-                metrics.log(&self.config.model, "cancelled");
-                OllamaError::Unreachable {
-                    url: url.clone(),
-                    reason: format!("stream read error: {e}"),
-                }
-            })?;
-            let line = line.trim();
-            // Track chunk received (bytes).
-            metrics.note_chunk(line.len());
-            if line.is_empty() {
-                continue;
-            }
-            // Parse each NDJSON chunk leniently — a malformed line is skipped,
-            // not fatal, so one odd frame can't abort an otherwise-good stream.
-            let Ok(chunk) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if let Some(msg) = chunk.get("message") {
-                // Track whether this chunk produced any visible event so we can
-                // emit a Keepalive if it didn't (transport-liveness signal).
-                let mut emitted_something = false;
-                if let Some(delta) = msg.get("content").and_then(serde_json::Value::as_str)
-                    && !delta.is_empty()
-                {
-                    content.push_str(delta);
-                    on_event(StreamEvent::Content(delta.to_string()));
-                    metrics.note_content_delta();
-                    emitted_something = true;
-                }
-                if let Some(delta) = msg.get("thinking").and_then(serde_json::Value::as_str)
-                    && !delta.is_empty()
-                {
-                    on_event(StreamEvent::Thinking(delta.to_string()));
-                    metrics.note_thinking_delta();
-                    emitted_something = true;
-                }
-                if let Some(calls) = msg.get("tool_calls").and_then(serde_json::Value::as_array) {
-                    metrics.note_tool_call_chunk();
-                    for call in calls {
-                        if let Some(func) = call.get("function")
-                            && let Some(name) =
-                                func.get("name").and_then(serde_json::Value::as_str)
+                        // Capture request duration at the point of stream failure for
+                        // diagnosing duration-bound connection resets (work item "Turns
+                        // die quietly" defect 2, ask 4).
+                        let duration = request_start.elapsed();
+                        tracing::warn!(
+                            duration_secs = duration.as_secs(),
+                            error = %e,
+                            "streaming read failed mid-response"
+                        );
+                        // Signal heartbeat thread to stop before returning error.
+                        request_alive.store(false, Ordering::Relaxed);
+                        // Log metrics on cancellation path.
+                        metrics.log(&self.config.model, "cancelled");
+                        OllamaError::Unreachable {
+                            url: url.clone(),
+                            reason: format!("stream read error: {e}"),
+                        }
+                    })?;
+                    let line = line.trim();
+                    // Track chunk received (bytes).
+                    metrics.note_chunk(line.len());
+                    if line.is_empty() {
+                        continue;
+                    }
+                    // Parse each NDJSON chunk leniently — a malformed line is skipped,
+                    // not fatal, so one odd frame can't abort an otherwise-good stream.
+                    let Ok(chunk) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    if let Some(msg) = chunk.get("message") {
+                        // Track whether this chunk produced any visible event so we can
+                        // emit a Keepalive if it didn't (transport-liveness signal).
+                        let mut emitted_something = false;
+                        if let Some(delta) = msg.get("content").and_then(serde_json::Value::as_str)
+                            && !delta.is_empty()
                         {
-                            tool_calls.push(ToolCall {
-                                name: name.to_string(),
-                                arguments: func
-                                    .get("arguments")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null),
-                            });
+                            content.push_str(delta);
+                            on_event(StreamEvent::Content(delta.to_string()));
+                            metrics.note_content_delta();
+                            emitted_something = true;
+                        }
+                        if let Some(delta) = msg.get("thinking").and_then(serde_json::Value::as_str)
+                            && !delta.is_empty()
+                        {
+                            on_event(StreamEvent::Thinking(delta.to_string()));
+                            metrics.note_thinking_delta();
+                            emitted_something = true;
+                        }
+                        if let Some(calls) =
+                            msg.get("tool_calls").and_then(serde_json::Value::as_array)
+                        {
+                            metrics.note_tool_call_chunk();
+                            for call in calls {
+                                if let Some(func) = call.get("function")
+                                    && let Some(name) =
+                                        func.get("name").and_then(serde_json::Value::as_str)
+                                {
+                                    tool_calls.push(ToolCall {
+                                        name: name.to_string(),
+                                        arguments: func
+                                            .get("arguments")
+                                            .cloned()
+                                            .unwrap_or(serde_json::Value::Null),
+                                    });
+                                }
+                            }
+                        }
+                        // If we received a chunk but emitted nothing (e.g. accumulated
+                        // tool-call payloads), emit Keepalive so the idle watchdog knows
+                        // the stream is alive (ask 3: "reset on any chunk received").
+                        if !emitted_something {
+                            metrics.note_keepalive();
+                            on_event(StreamEvent::Keepalive);
                         }
                     }
-                }
-                // If we received a chunk but emitted nothing (e.g. accumulated
-                // tool-call payloads), emit Keepalive so the idle watchdog knows
-                // the stream is alive (ask 3: "reset on any chunk received").
-                if !emitted_something {
-                    metrics.note_keepalive();
-                    on_event(StreamEvent::Keepalive);
-                }
-            }
-            if chunk.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
-                // The final chunk carries the turn's token counts.
-                prompt_tokens = chunk
-                    .get("prompt_eval_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                completion_tokens = chunk
-                    .get("eval_count")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                metrics.set_tokens(prompt_tokens, completion_tokens);
-                break;
-            }
+                    if chunk.get("done").and_then(serde_json::Value::as_bool) == Some(true) {
+                        // The final chunk carries the turn's token counts.
+                        prompt_tokens = chunk
+                            .get("prompt_eval_count")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        completion_tokens = chunk
+                            .get("eval_count")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        metrics.set_tokens(prompt_tokens, completion_tokens);
+                        break;
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // No line received in the last 100ms — continue the loop to
@@ -988,13 +1006,64 @@ impl OllamaClient {
 mod tests {
     use super::*;
 
+    /// Consume the complete HTTP request before the mock peer responds. On
+    /// macOS, closing a socket with unread request-body bytes can turn a valid
+    /// response into `ECONNRESET` at the client.
+    fn drain_http_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read as _;
+
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        let header_end = loop {
+            let read = match stream.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("read mock Ollama request: {error}"),
+            };
+            assert!(read > 0, "mock Ollama request ended before its headers");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+            assert!(
+                request.len() <= 64 * 1024,
+                "mock Ollama request headers are too large"
+            );
+        };
+
+        let headers = std::str::from_utf8(&request[..header_end]).expect("ASCII HTTP headers");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then(|| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .expect("numeric Content-Length")
+                })
+            })
+            .expect("mock request includes Content-Length");
+        let mut remaining = content_length.saturating_sub(request.len() - header_end);
+        while remaining > 0 {
+            let limit = remaining.min(buffer.len());
+            let read = match stream.read(&mut buffer[..limit]) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("read mock Ollama request body: {error}"),
+            };
+            assert!(read > 0, "mock Ollama request body ended early");
+            remaining -= read;
+        }
+    }
+
     /// `chat_stream` parses Ollama's newline-delimited streaming response:
     /// content deltas concatenate into `AssistantTurn.content` and arrive as
     /// `Content` events in order, `thinking` deltas arrive as `Thinking` events
     /// (and are NOT folded into content), and `tool_calls` are collected.
     #[test]
     fn chat_stream_parses_ndjson_deltas_and_tool_calls() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         // NDJSON body: two content chunks, a thinking chunk, a tool call, done.
@@ -1021,10 +1090,10 @@ mod tests {
                     Err(error) => panic!("accept mock Ollama connection: {error}"),
                 }
             };
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf); // drain request (best-effort)
+            drain_http_request(&mut stream);
             let _ = stream.write_all(response.as_bytes());
             let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
             // Keep the peer alive briefly after flushing. Dropping immediately
             // can turn an otherwise complete response into a reset/EINVAL on
             // heavily parallel CI hosts before the client drains its buffer.
@@ -1079,7 +1148,7 @@ mod tests {
     /// 10s timer) must keep the idle watchdog alive through the silent phase.
     #[test]
     fn long_tool_call_generation_survives_via_heartbeat() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
         use std::time::Instant;
@@ -1114,8 +1183,7 @@ mod tests {
                     Err(error) => panic!("accept mock Ollama connection: {error}"),
                 }
             };
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            drain_http_request(&mut stream);
             // Write header
             let _ = stream.write_all(response.as_bytes());
             // Write first 43 chunks fast
@@ -1137,6 +1205,7 @@ mod tests {
             let _ = stream.write_all(done.as_bytes());
             let _ = stream.write_all(b"\r\n0\r\n\r\n");
             let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         });
 
         let client = OllamaClient::new(OllamaConfig {
@@ -1178,7 +1247,8 @@ mod tests {
             .filter_map(|(elapsed, ev)| {
                 if matches!(ev, StreamEvent::Keepalive)
                     && elapsed.as_secs_f64() > 1.0  // After thinking chunks
-                    && elapsed.as_secs_f64() < 12.0 // Before tool call arrives
+                    && elapsed.as_secs_f64() < 12.0
+                // Before tool call arrives
                 {
                     Some(elapsed.as_secs_f64())
                 } else {
@@ -1190,7 +1260,10 @@ mod tests {
             !keepalives_during_silence.is_empty(),
             "at least 1 heartbeat must arrive DURING the 12s silent window (1s-12s), \
              got {} total Keepalives but none in the silent window. Timings: {:?}",
-            events.iter().filter(|(_, ev)| matches!(ev, StreamEvent::Keepalive)).count(),
+            events
+                .iter()
+                .filter(|(_, ev)| matches!(ev, StreamEvent::Keepalive))
+                .count(),
             keepalives_during_silence
         );
     }

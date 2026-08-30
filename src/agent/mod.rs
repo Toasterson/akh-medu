@@ -46,7 +46,10 @@ pub mod delegation;
 pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+#[cfg(feature = "daemon")]
+pub mod board_reactor;
 pub mod decomposition;
+pub mod djehuty;
 pub mod drives;
 pub mod epistemic;
 pub mod error;
@@ -87,6 +90,8 @@ pub mod priority_reasoning;
 pub mod project;
 pub mod reflect;
 pub mod relation_enrichment;
+#[cfg(feature = "daemon")]
+pub mod reactor;
 pub mod resource;
 pub mod response_strategy;
 pub mod semantic_enrichment;
@@ -97,6 +102,8 @@ pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tasks;
 pub mod temporal_experience;
+#[cfg(feature = "daemon")]
+pub mod training_monitor;
 pub mod text_extract;
 pub mod tool;
 pub mod trajectory;
@@ -268,6 +275,11 @@ pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
 pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
 pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
+#[cfg(feature = "daemon")]
+pub use reactor::{
+    MisfirePolicy, ReactorAction, ReactorClaim, ReactorEvent, ReactorSchedule, ReactorState,
+    ReactorStore, RetryPolicy, ScheduleRule,
+};
 pub use watch::{
     Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
     WorldSnapshot,
@@ -283,3 +295,8 @@ pub use response_strategy::{
 };
 pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
 pub use openclaw::{OpenClawConfig, OpenClawError};
+pub use djehuty::{
+    DjehutyAgentId, DjehutyCheckpoint, DjehutyClient, DjehutyConfig, DjehutyError,
+    DjehutyMessageContent, DjehutyMessageId, DjehutyMessageView, DjehutyPage, DjehutyResult,
+    DjehutyRetention, DjehutyRetryPolicy, DjehutyThreadView, board_note,
+};

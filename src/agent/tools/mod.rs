@@ -47,6 +47,8 @@ pub mod mcp;
 #[cfg(feature = "daemon")]
 pub mod triage_dispatch_traps;
 pub mod trigger_manage;
+#[cfg(feature = "daemon")]
+pub mod reactor_manage;
 
 pub use code_gen::CodeGenTool;
 pub use code_ingest::CodeIngestTool;
@@ -84,6 +86,8 @@ pub use web_search::WebSearchTool;
 pub use agent_management::{AgentListTool, AgentMessageTool, AgentRetireTool, AgentSpawnTool};
 pub use tool_query::ToolQueryTool;
 pub use trigger_manage::TriggerManageTool;
+#[cfg(feature = "daemon")]
+pub use reactor_manage::ReactorManageTool;
 pub use audit_log::AuditLogTool;
 pub use entity_schema::{EntitySchemaTool, EntityTypesTool, EntityTypeFilterTool};
 pub use delegate::DelegateTool;

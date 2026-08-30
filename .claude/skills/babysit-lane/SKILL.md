@@ -8,6 +8,14 @@ description: One full babysit pass over the akh-medu lane in the Anima tracker �
 One complete pass: **observe → report → act**. Everything here is a single
 iteration; the user decides cadence (looping via /loop or cron is theirs to arm).
 
+When invoked by recurring automation, keep the pass change-only and bounded.
+Do not reload broad memory, full transcripts, full CI logs, or the whole parked
+pile. Start from the compact prior result when the caller provides one; otherwise
+take a project-scoped snapshot. Inspect at most the caller's item cap (default 3),
+chosen by new head/gate/verdict/session evidence and then priority. An unchanged
+head plus the same CI request/failure is not new evidence: name the existing
+follow-up WI and do not diagnose it again.
+
 ## Constants
 
 - akh-medu project: `019d9844-ce74-7993-a9f0-c953b8f04a4e`
@@ -34,6 +42,10 @@ recent server events:
 ```
 kubectl -n anima logs deploy/anima-server --since=2h | grep -aE 'result_handled|review_approved|review_rejected|ci_red|parked|solstice_dispatch"'
 ```
+
+Always scope `stranded_work_items` to the akh-medu project. In recurring mode,
+read only bounded item detail (`message_page_size`/`change_page_size`) for the
+selected WIs; fetch Solstice logs only for a new request id or changed failure.
 
 ## 2. Report (always, before acting)
 
@@ -79,13 +91,40 @@ instead). Force-push, then `resync_pr_state` + unpark: content-complete branches
 in the thread. Only *fix* what is rebase-mechanical — real defects get described,
 not patched, and go back to their implementer.
 
+### Canonical routing and proof of scheduling
+
+Lifecycle labels are not dispatch evidence. Never use `update_work_item` or
+`set_work_item_phase` to make an item look assigned, and never call a phase-only
+move "scheduled".
+
+- Draft work enters the queue through `promote_work_item` after its dependencies
+  are satisfied.
+- Parked work re-enters through `unpark_work_item`; put the verified branch state
+  and any missing deliverable in its atomic `dispatch_context`, not a later post.
+- After either action, call `get_scheduling_state` and `list_sessions`. Report a
+  scheduling decision only when a clock/lease or a new session exists. If no
+  scheduling row appears, leave the item visibly `ready`, report
+  `scheduler-unavailable`, and stop routing more work into that executor.
+- `working` means the canonical scheduler/runner path accepted the item. The
+  babysitter must not manufacture it. Likewise, do not jump a parked item
+  directly to `testing`; re-enter canonically, then use the real reviewed-head
+  transition and verify that a new CI dispatch was recorded.
+- The current ambient MCP has no direct create-session/manual-dispatch tool. If
+  continuous scheduling is disabled and promote/unpark records no decision, the
+  honest outcome is blocked throughput, not a phase workaround.
+
+Do not duplicate an existing live session. If the canonical action times out,
+verify scheduling state, sessions, and activity before retrying.
+
 ### Queueing draft/ready items to the akhs
 - Keep every live executor ≥2 items of runway. Pin via
   `update_work_item(executor=...)` (needs a no-op `status="open"` alongside).
-- Draft plan items: promote to `ready` only when their predecessor merged
+- Draft plan items: call `promote_work_item` only when their predecessor merged
   (dependency order comes from the plan family — `list_work_items(plan_id=...)`
   — and the WI descriptions' "Blocked by" sections). Never promote a draft whose
   contract/predecessor hasn't landed.
+- Ready items are runway, not stranded implementation. Do not rewrite them to
+  `working`; let the scheduler claim them and prove the claim as above.
 - Match item to lane: well-scoped code fixes → either akh; long grinds and
   design-heavy items → tecton; probes/benches/mechanical ports → imhotep.
 
@@ -134,10 +173,12 @@ Per item, in this order:
    - `rebase-conflict` → rebase flow above.
    - `gate-needs-human` → NEVER auto-unpark; surface to the user, one line each.
 5. **Before unparking, write the branch's real state into the thread.** Unpark
-   dispatches immediately, and if the machine gate is green with the AI gate
-   uncleared it dispatches a **review** — even into `working`, even on scaffolding.
+   can dispatch immediately when scheduling is active. If the machine gate is
+   green with the AI gate uncleared, it dispatches a **review** — even into
+   `working`, even on scaffolding.
    The note is what makes that reviewer adjudicate against the real acceptance
-   bar. Name the missing deliverable explicitly.
+   bar. Name the missing deliverable explicitly. Put this note in
+   `unpark_work_item.dispatch_context`, then verify the scheduling decision.
 
 Blocked sessions >30 min with no progress → `cancel_session` (frees the slot;
 corrective dispatch resumes the WI).
@@ -151,6 +192,9 @@ corrective dispatch resumes the WI).
   is complete. `cancel_session` does not stop it: the gate condition is unchanged,
   so a new review session appears in ~40s. Don't fight it; state the branch's gaps
   in the thread and let the reject cycle route it back to `working`.
+- A phase mutation succeeding does not mean anything was scheduled.
+  `get_scheduling_state` saying no clock exists plus `list_sessions` returning no
+  new session is a failed routing attempt; do not advance the label again.
 - **An ADR's `Status:` header is a claim about intent, not about the tree.** A
   2026-07-24 review declared ADR 049 dead and recommended retiring WI-180 on that
   basis; the Postgres store had landed five weeks earlier and the status line was
@@ -175,3 +219,13 @@ you triaged; say which ones you left and why (usually: ran out of pass, or
 
 List what is waiting on the user (operator-only items, `gate-needs-human`). If
 nothing needed action, say so in one line.
+
+Use precise verbs in the result: `promoted`, `unparked`, `scheduling decision
+recorded`, `session started`, and `CI dispatched` are distinct. Include the
+clock/session/request id that proves the latter three. In recurring mode, emit
+only material deltas and the selected WIs; do not repeat the lane inventory.
+
+When a missing capability is code rather than lane state, search active WIs
+before filing. Anima scheduler/lifecycle/runner fixes belong to Anima project
+`019d9ca9-ca71-7673-912c-09a8749821cb`; akh-medu tests, scripts, and repository
+automation belong to akh-medu project `019d9844-ce74-7993-a9f0-c953b8f04a4e`.

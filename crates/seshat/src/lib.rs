@@ -8,6 +8,7 @@
 //! to the `pa_*` tables), embedded via ONNX sentence transformers, and queried
 //! via MCP tools.
 
+pub mod auth;
 pub mod config;
 #[cfg(feature = "embedding")]
 pub mod embed_worker;

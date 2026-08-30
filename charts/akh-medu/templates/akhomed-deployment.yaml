@@ -103,6 +103,8 @@ spec:
               value: {{ .Values.akhomed.acp.tcpPort | quote }}
             - name: AKH_ACP_TCP_BIND
               value: {{ .Values.akhomed.acp.tcpBind | quote }}
+            - name: AKHOMED_SHARED_SECRET_FILE
+              value: {{ printf "%s/%s" (.Values.ingressAuth.mountPath | default "/var/run/secrets/akh-medu/ingress-auth") (.Values.ingressAuth.secretKey | default "tokens") | quote }}
             # OTLP service instance ID from the pod name.
             - name: OTEL_SERVICE_INSTANCE_ID
               valueFrom:
@@ -123,6 +125,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            - name: ingress-auth
+              mountPath: {{ .Values.ingressAuth.mountPath | default "/var/run/secrets/akh-medu/ingress-auth" }}
+              readOnly: true
             {{- if .Values.akhomed.models.enabled }}
             # akhomed reads models from $XDG_DATA_HOME/akh-medu/models.
             - name: models
@@ -172,6 +177,13 @@ spec:
           resources:
             {{- toYaml .Values.akhomed.resources | nindent 12 }}
       volumes:
+        - name: ingress-auth
+          secret:
+            secretName: {{ include "akh-medu.ingressAuth.secretName" . }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.ingressAuth.secretKey | default "tokens" }}
+                path: {{ .Values.ingressAuth.secretKey | default "tokens" }}
         - name: data
           {{- if .Values.akhomed.persistence.enabled }}
           persistentVolumeClaim:

@@ -450,6 +450,8 @@ impl Agent {
 
         // Trigger management.
         registry.register(Box::new(tools::TriggerManageTool));
+        #[cfg(feature = "daemon")]
+        registry.register(Box::new(tools::ReactorManageTool));
 
         // Runtime inference options (Phase 47: speculative decode toggle).
         registry.register(Box::new(tools::InferenceConfigTool));

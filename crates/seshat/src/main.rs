@@ -52,6 +52,13 @@ async fn main() -> miette::Result<()> {
     let config = SeshatConfig::from_file(&config_path)
         .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
 
+    // Authentication is mandatory for every HTTP route. Validate the source
+    // before opening the database or listener so a missing/empty Secret never
+    // leaves a briefly unauthenticated service during startup.
+    let ingress_auth = seshat::auth::SharedSecretAuth::from_env()
+        .map_err(seshat::SeshatError::Config)
+        .into_diagnostic()?;
+
     tracing::info!(bind = %config.server.bind, "starting Seshat's Archive");
 
     // Connect to PostgreSQL.
@@ -146,7 +153,11 @@ async fn main() -> miette::Result<()> {
 
     let app = axum::Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(scripts_router);
+        .merge(scripts_router)
+        .layer(axum::middleware::from_fn_with_state(
+            ingress_auth,
+            seshat::auth::require_bearer,
+        ));
 
     let bind_addr: std::net::SocketAddr = config
         .server
