@@ -1166,7 +1166,7 @@ fn main() -> Result<()> {
     // Phase 38i: OTLP tracing skeleton — installs OTLP exporter + sampler
     // when OTEL_EXPORTER_OTLP_ENDPOINT is set, else plain fmt(). The guard
     // flushes the batch span processor on drop; hold until process exit.
-    let _tracer_guard = akh_medu::observability::init_tracing("akh");
+    let _obs_guard = akh_medu::observability::init_observability("akh");
 
     let cli = Cli::parse();
 

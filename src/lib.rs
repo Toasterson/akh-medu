@@ -79,6 +79,12 @@ pub mod registry;
 /// `tracing-otel` feature inside the module so the lean `akh` CLI binary can
 /// still call `init_tracing` and get the plain-`fmt` fallback.
 pub mod observability;
+
+/// Phase 38j.1: typed metric-instrument registry for the akhomed daemon.
+/// Available only when the `tracing-otel` feature is enabled (the OTel
+/// `Meter` type is required).
+#[cfg(feature = "tracing-otel")]
+pub mod metrics;
 pub mod rule_macro;
 /// ADR 081: schema packs — the installable type system for Akh memory
 /// (stable triple identity lives in `graph::identity`).
