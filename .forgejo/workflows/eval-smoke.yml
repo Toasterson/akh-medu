@@ -2,19 +2,19 @@ name: eval-smoke
 #
 # Phase 42b: dataset-optional evaluation smoke test.
 #
-# Runs the LongMemEval 10-session raw subset on every PR and emits a delta vs
-# the main-branch baseline in the job log.  This
-# dataset-dependent evaluation is skipped cleanly when its inputs are not
-# provisioned in the shared CI lane.
+# Runs the LongMemEval 10-session raw subset on manual dispatch and emits a
+# delta vs the main-branch baseline in the job log. The shared PR lane does not
+# provision the dataset, and Forgejo/Solstice currently turns the otherwise
+# successful optional job into a blocking red context.
 #
 # The baseline is stored in `.forgejo/baselines/eval_smoke_baseline.json`.  When
 # it is missing, the job still runs and records the current metrics so the next
 # run can compute a delta.
 #
-# This workflow runs only on pull_request to avoid duplicating the lane with
-# the push event (see ci.yml for the rationale on avoiding duplicate jobs).
+# Keep this manual until the shared lane provisions the dataset or supports a
+# genuinely non-blocking job conclusion.
 on:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   eval-smoke:
