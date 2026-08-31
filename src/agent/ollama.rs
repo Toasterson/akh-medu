@@ -1062,6 +1062,9 @@ mod tests {
     /// `Content` events in order, `thinking` deltas arrive as `Thinking` events
     /// (and are NOT folded into content), and `tool_calls` are collected.
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): real socket transport is
+    // quarantined from CI; run it through the documented manual Ollama suite.
+    #[ignore = "WI-306: manual Ollama suite uses real loopback TCP"]
     fn chat_stream_parses_ndjson_deltas_and_tool_calls() {
         use std::io::Write;
         use std::net::TcpListener;
@@ -1147,6 +1150,9 @@ mod tests {
     /// tool_calls payload. The client-side heartbeat (emitting Keepalive on a
     /// 10s timer) must keep the idle watchdog alive through the silent phase.
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): real socket transport is
+    // quarantined from CI; run it through the documented manual Ollama suite.
+    #[ignore = "WI-306: manual Ollama suite uses real loopback TCP"]
     fn long_tool_call_generation_survives_via_heartbeat() {
         use std::io::Write;
         use std::net::TcpListener;
@@ -1384,6 +1390,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): even negative transport
+    // checks are kept in the manual suite so default CI never opens Ollama TCP.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn list_models_returns_error_when_unreachable() {
         let cfg = OllamaConfig {
             base_url: "http://127.0.0.1:19999".into(),
@@ -1397,6 +1406,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): even negative transport
+    // checks are kept in the manual suite so default CI never opens Ollama TCP.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn health_check_returns_false_when_unreachable() {
         let cfg = OllamaConfig {
             base_url: "http://127.0.0.1:19999".into(), // nothing listening here

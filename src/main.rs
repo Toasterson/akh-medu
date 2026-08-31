@@ -841,6 +841,11 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
     print_acp(&result)
 }
 
+#[cfg(not(feature = "acp"))]
+fn run_acp_command(_ws: &str, _op: &AcpOp) -> Result<()> {
+    miette::bail!("The `acp` subcommand requires building `akh` with --features acp.")
+}
+
 /// Dispatch `akh daemon <action>` over the ACP control-plane (`_akh/daemon/*`).
 /// Daemon ops span the whole daemon, so the target workspace is passed
 /// explicitly (the akh selected by `-w`).
@@ -862,6 +867,11 @@ fn run_daemon_acp(workspace: &str, action: DaemonAction) -> Result<()> {
     };
     let result = acp_call(method, params)?;
     print_acp(&result)
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_daemon_acp(_workspace: &str, _action: DaemonAction) -> Result<()> {
+    miette::bail!("The `daemon` subcommand requires building `akh` with --features acp.")
 }
 
 /// Dispatch `akh config <action>` over the ACP control-plane (`_akh/config/*`).
@@ -890,6 +900,11 @@ fn run_config_acp(action: ConfigAction) -> Result<()> {
     };
     let result = acp_call(method, params)?;
     print_acp(&result)
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_config_acp(_action: ConfigAction) -> Result<()> {
+    miette::bail!("The `config` subcommand requires building `akh` with --features acp.")
 }
 
 /// Guard a destructive CLI action behind explicit confirmation. `--yes`
@@ -976,6 +991,11 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
     print_acp(&result)
 }
 
+#[cfg(not(feature = "acp"))]
+fn run_workspace_acp(_current_ws: &str, _action: WorkspaceAction) -> Result<()> {
+    miette::bail!("The `workspace` subcommand requires building `akh` with --features acp.")
+}
+
 /// Dispatch `akh akh <action>` over the ACP control-plane (`_akh/akh/*`):
 /// snapshot the akh's state to Postgres, or wake a cold akh from it.
 #[cfg(feature = "acp")]
@@ -1009,12 +1029,22 @@ fn run_projection_acp(current_ws: &str, action: ProjectionAction) -> Result<()> 
     print_acp(&result)
 }
 
+#[cfg(not(feature = "acp"))]
+fn run_projection_acp(_current_ws: &str, _action: ProjectionAction) -> Result<()> {
+    miette::bail!("The `projection` subcommand requires building `akh` with --features acp.")
+}
+
 /// Dispatch `akh migrate` over the ACP control-plane (`_akh/migrate`): run the
 /// akhomed-store migrations against the daemon's Postgres backing store.
 #[cfg(feature = "acp")]
 fn run_migrate_acp() -> Result<()> {
     let result = acp_call("_akh/migrate", serde_json::json!({}))?;
     print_acp(&result)
+}
+
+#[cfg(not(feature = "acp"))]
+fn run_migrate_acp() -> Result<()> {
+    miette::bail!("The `migrate` subcommand requires building `akh` with --features acp.")
 }
 
 /// Dispatch `akh chat`: discover the running daemon and converse over ACP — the
@@ -1051,38 +1081,8 @@ fn run_chat_acp(ws_name: &str, headless: bool) -> Result<()> {
 }
 
 #[cfg(not(feature = "acp"))]
-fn run_acp_command(_ws: &str, _op: &AcpOp) -> Result<()> {
-    miette::bail!("The `acp` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
-fn run_daemon_acp(_workspace: &str, _action: DaemonAction) -> Result<()> {
-    miette::bail!("The `daemon` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
-fn run_config_acp(_action: ConfigAction) -> Result<()> {
-    miette::bail!("The `config` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
-fn run_workspace_acp(_current_ws: &str, _action: WorkspaceAction) -> Result<()> {
-    miette::bail!("The `workspace` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
 fn run_chat_acp(_ws_name: &str, _headless: bool) -> Result<()> {
     miette::bail!("The `chat` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
-fn run_projection_acp(_current_ws: &str, _action: ProjectionAction) -> Result<()> {
-    miette::bail!("The `projection` subcommand requires building `akh` with --features acp.")
-}
-
-#[cfg(not(feature = "acp"))]
-fn run_migrate_acp() -> Result<()> {
-    miette::bail!("The `migrate` subcommand requires building `akh` with --features acp.")
 }
 
 #[derive(Subcommand)]
@@ -1183,7 +1183,7 @@ fn main() -> Result<()> {
     // Phase 38i: OTLP tracing skeleton — installs OTLP exporter + sampler
     // when OTEL_EXPORTER_OTLP_ENDPOINT is set, else plain fmt(). The guard
     // flushes the batch span processor on drop; hold until process exit.
-    let _tracer_guard = akh_medu::observability::init_tracing("akh");
+    let _obs_guard = akh_medu::observability::init_observability("akh");
 
     let cli = Cli::parse();
 

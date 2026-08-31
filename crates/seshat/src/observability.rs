@@ -1,26 +1,30 @@
-//! Phase 38i — OTLP tracing skeleton (seshd copy).
+//! Phase 38i/38j.1 — OTLP observability bootstrap (tracing + metrics) for seshd.
 //!
 //! seshd is a separate crate with no dep on the root `akh-medu` crate, so it
-//! carries its own copy of `init_tracing`. Behaviour mirrors the root module;
-//! see `src/observability.rs` for the full design notes.
+//! carries its own copy of `init_observability`. Behaviour mirrors the root
+//! module; see `src/observability.rs` for full design notes.
+//!
+//! OTLP push only; no Prometheus exporter is installed.
 
 use std::env;
 use std::sync::Arc;
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Tracer shutdown guard. Drop flushes the batch span processor.
-pub struct TracerShutdown {
+/// Combined observability shutdown guard. Drop flushes, in order, the tracer
+/// provider then the meter provider.
+pub struct ObservabilityShutdown {
     #[cfg(feature = "tracing-otel")]
     inner: Option<InnerShutdown>,
 }
 
 #[cfg(feature = "tracing-otel")]
 struct InnerShutdown {
-    provider: Arc<opentelemetry_sdk::trace::TracerProvider>,
+    tracer: Arc<opentelemetry_sdk::trace::TracerProvider>,
+    meter: Arc<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
-impl TracerShutdown {
+impl ObservabilityShutdown {
     #[inline]
     pub fn empty() -> Self {
         Self {
@@ -30,18 +34,20 @@ impl TracerShutdown {
     }
 }
 
-impl Drop for TracerShutdown {
+impl Drop for ObservabilityShutdown {
     fn drop(&mut self) {
         #[cfg(feature = "tracing-otel")]
         if let Some(inner) = self.inner.take() {
-            let _ = inner.provider.shutdown();
+            let _ = inner.tracer.shutdown();
+            let _ = inner.meter.shutdown();
         }
     }
 }
 
-/// Initialise tracing. OTLP layer installed only when
-/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set; otherwise plain `fmt()`.
-pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
+/// Initialise tracing and, when configured, the OTLP metrics pipeline.
+/// OTLP layer installed only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set;
+/// otherwise plain `fmt()`.
+pub fn init_observability(service_name: &'static str) -> ObservabilityShutdown {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "seshat=info".parse().unwrap());
 
@@ -51,7 +57,7 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .init();
-        return TracerShutdown::empty();
+        return ObservabilityShutdown::empty();
     }
 
     #[cfg(feature = "tracing-otel")]
@@ -61,7 +67,7 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .init();
-            return TracerShutdown::empty();
+            return ObservabilityShutdown::empty();
         }
 
         match init_otel(service_name, endpoint.unwrap(), filter) {
@@ -74,10 +80,16 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
                             .unwrap_or_else(|_| "seshat=info".parse().unwrap()),
                     )
                     .init();
-                TracerShutdown::empty()
+                ObservabilityShutdown::empty()
             }
         }
     }
+}
+
+/// Backwards-compatible alias for the tracing-only era.
+#[deprecated(since = "0.1.1", note = "use init_observability instead")]
+pub fn init_tracing(service_name: &'static str) -> ObservabilityShutdown {
+    init_observability(service_name)
 }
 
 #[cfg(feature = "tracing-otel")]
@@ -85,15 +97,15 @@ fn init_otel(
     service_name: &'static str,
     endpoint: String,
     filter: EnvFilter,
-) -> Result<TracerShutdown, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ObservabilityShutdown, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::{KeyValue, trace::TracerProvider as _};
     use opentelemetry_sdk::{
         Resource,
         propagation::TraceContextPropagator,
         runtime::Tokio,
-        trace::{Sampler, TracerProvider},
+        trace::TracerProvider,
     };
-    use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
+    use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
 
     let mut resource_kv = vec![KeyValue::new(
         opentelemetry_semantic_conventions::resource::SERVICE_NAME,
@@ -115,7 +127,7 @@ fn init_otel(
     }
     let resource = Resource::new(resource_kv);
 
-    let exporter = SpanExporter::builder()
+    let span_exporter = SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
         .with_protocol(Protocol::Grpc)
@@ -124,21 +136,34 @@ fn init_otel(
     // seshd uses accept-parent sampling (research §8) — default ratio 0.1.
     let sampler = build_sampler();
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, Tokio)
+    let tracer_provider = TracerProvider::builder()
+        .with_batch_exporter(span_exporter, Tokio)
         .with_sampler(sampler)
+        .with_resource(resource.clone())
+        .build();
+
+    let metric_exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .with_protocol(Protocol::Grpc)
+        .build()?;
+
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metric_exporter, Tokio)
+        .with_interval(std::time::Duration::from_secs(60))
+        .build();
+
+    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader)
         .with_resource(resource)
         .build();
 
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // Get the tracer from the provider before wrapping in Arc.
-    let tracer = provider.tracer(service_name);
+    let tracer = tracer_provider.tracer(service_name);
 
-    // Set the global provider.
-    opentelemetry::global::set_tracer_provider(provider.clone());
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-    // Install the OpenTelemetry layer on top of the fmt layer.
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     tracing_subscriber::registry()
@@ -147,12 +172,13 @@ fn init_otel(
         .with(otel_layer)
         .init();
 
-    // Keep an Arc to the provider for the shutdown guard.
-    let provider_arc = Arc::new(provider);
+    let tracer_arc = Arc::new(tracer_provider);
+    let meter_arc = Arc::new(meter_provider);
 
-    Ok(TracerShutdown {
+    Ok(ObservabilityShutdown {
         inner: Some(InnerShutdown {
-            provider: provider_arc,
+            tracer: tracer_arc,
+            meter: meter_arc,
         }),
     })
 }
@@ -175,5 +201,46 @@ fn build_sampler() -> opentelemetry_sdk::trace::Sampler {
         "always_on" => Sampler::AlwaysOn,
         "always_off" => Sampler::AlwaysOff,
         _ => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio))),
+    }
+}
+
+#[cfg(all(test, feature = "tracing-otel"))]
+mod tests {
+    use super::*;
+    use opentelemetry::metrics::MeterProvider;
+
+    /// The offline path returns an empty guard.
+    #[test]
+    fn fallback_when_endpoint_unset() {
+        let prev = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        unsafe {
+            env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        }
+        let _guard = init_observability("seshd-test-fallback");
+        assert!(_guard.inner.is_none());
+        if let Some(v) = prev {
+            unsafe {
+                env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v);
+            }
+        }
+    }
+
+    /// Seshat instruments can be built against a ManualReader provider.
+    ///
+    /// Constructs the real §5.4 registry (`crate::metrics::SeshatMetrics`)
+    /// rather than ad-hoc instruments, so this test can never carry names
+    /// that diverge from the WI-34 catalog — later emission slices inherit
+    /// only contract names.
+    #[test]
+    fn metrics_registry_constructs_offline() {
+        use crate::metrics::SeshatMetrics;
+        use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
+
+        let reader = ManualReader::builder().build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("seshd-test");
+        let _registry = SeshatMetrics::new(meter);
+
+        drop(provider);
     }
 }

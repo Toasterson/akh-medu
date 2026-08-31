@@ -4129,7 +4129,7 @@ fn raise_nofile_limit() {
 
 #[tokio::main]
 async fn main() {
-    let _tracer_guard = akh_medu::observability::init_tracing("akhomed");
+    let _obs_guard = akh_medu::observability::init_observability("akhomed");
 
     #[cfg(unix)]
     raise_nofile_limit();
