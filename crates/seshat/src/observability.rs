@@ -226,22 +226,20 @@ mod tests {
     }
 
     /// Seshat instruments can be built against a ManualReader provider.
+    ///
+    /// Constructs the real §5.4 registry (`crate::metrics::SeshatMetrics`)
+    /// rather than ad-hoc instruments, so this test can never carry names
+    /// that diverge from the WI-34 catalog — later emission slices inherit
+    /// only contract names.
     #[test]
     fn metrics_registry_constructs_offline() {
+        use crate::metrics::SeshatMetrics;
         use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
 
         let reader = ManualReader::builder().build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
         let meter = provider.meter("seshd-test");
-
-        let _counter = meter.u64_counter("seshat_requests_total")
-            .with_description("Total archive requests")
-            .with_unit("request")
-            .build();
-        let _histogram = meter.f64_histogram("seshat_request_duration_seconds")
-            .with_description("Archive request latency")
-            .with_unit("s")
-            .build();
+        let _registry = SeshatMetrics::new(meter);
 
         drop(provider);
     }
