@@ -1,11 +1,11 @@
 name: eval-smoke
 #
-# Phase 42b: non-blocking evaluation smoke test.
+# Phase 42b: dataset-optional evaluation smoke test.
 #
 # Runs the LongMemEval 10-session raw subset on every PR and emits a delta vs
 # the main-branch baseline in the job log.  This
-# job is intentionally non-blocking (continue-on-error: true) because model and
-# pgvector provisioning remain environment-dependent in the shared CI lane.
+# dataset-dependent evaluation is skipped cleanly when its inputs are not
+# provisioned in the shared CI lane.
 #
 # The baseline is stored in `.forgejo/baselines/eval_smoke_baseline.json`.  When
 # it is missing, the job still runs and records the current metrics so the next
@@ -19,25 +19,18 @@ on:
 jobs:
   eval-smoke:
     runs-on: ubuntu-22.04
-    # Keep the job-level declaration for GitHub-compatible runners, and mark
-    # each step explicitly because Forgejo currently reports a failed job
-    # conclusion even when job-level continue-on-error is set.
-    continue-on-error: true
     steps:
       - name: Install dependencies
-        continue-on-error: true
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev unzip
 
       - name: Install Rust toolchain
-        continue-on-error: true
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo '. "$HOME/.cargo/env"' >> ~/.profile
 
       - name: Build hekad
-        continue-on-error: true
         run: |
           . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=1
@@ -49,19 +42,18 @@ jobs:
           cargo build -p heka --bin hekad
 
       - name: Run LongMemEval smoke (10 sessions, raw mode)
-        continue-on-error: true
         run: |
           . "$HOME/.cargo/env"
           mkdir -p eval_reports
           if [ ! -d eval_data/longmemeval ]; then
-            echo "LongMemEval dataset is unavailable; skipping this non-blocking smoke run."
+            echo "LongMemEval dataset is unavailable; skipping this optional smoke run."
           elif ! cargo run -p heka --bin hekad -- eval longmemeval --mode raw --sessions 10 --output eval_reports; then
-            echo "LongMemEval smoke did not produce a report; continuing because this workflow is non-blocking."
+            echo "LongMemEval smoke failed after its dataset was provisioned."
+            exit 1
           fi
 
       - name: Compute delta vs baseline
         id: delta
-        continue-on-error: true
         run: |
           set -eu
           REPORT="eval_reports/longmemeval_report.json"
@@ -128,6 +120,6 @@ jobs:
           echo "" >> "$DELTA_MD"
           echo "- This reports evidence-session retrieval, not answer accuracy." >> "$DELTA_MD"
           echo "- The acceptance metric follows LongMemEval session recall_all@5." >> "$DELTA_MD"
-          echo "- This job is non-blocking." >> "$DELTA_MD"
+          echo "- The smoke is skipped when its optional dataset is not provisioned." >> "$DELTA_MD"
 
           cat "$DELTA_MD"
