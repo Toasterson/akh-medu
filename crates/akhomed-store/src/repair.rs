@@ -1,9 +1,9 @@
-//! Transactional repair of legacy duplicate symbol labels.
+//! Transactional repair of legacy symbol registries and allocator state.
 //!
 //! The engine owns duplicate detection and normalization semantics. This leaf
 //! crate receives an already-validated loser→canonical plan and applies it to
 //! every relational symbol reference in one transaction, including primary-key
-//! collision handling and an audit row in the mutation WAL.
+//! collision handling, allocator reconciliation, and mutation-WAL audit rows.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::entity::{
-    agenda, episode, fact, goal, goal_dependency, goal_hierarchy, learned_method,
+    agenda, akh_state, episode, fact, goal, goal_dependency, goal_hierarchy, learned_method,
     learned_method_step, mutation_log, provenance, provenance_input, provenance_snapshot, symbol,
 };
 use crate::error::{StoreError, StoreResult};
@@ -56,6 +56,23 @@ pub struct SymbolRepairCounts {
     pub episodes_rewritten: usize,
     pub episodes_collapsed: usize,
     pub wal_records: usize,
+}
+
+/// Allocator reconciliation observed and applied under the repair transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolAllocatorRepair {
+    pub allocator_next_before: i64,
+    pub max_surviving_symbol_id: Option<i64>,
+    pub required_allocator_next: i64,
+    pub allocator_next_after: i64,
+    pub advanced: bool,
+}
+
+/// Complete result of the transactional symbol repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolRepairOutcome {
+    pub counts: SymbolRepairCounts,
+    pub allocator: SymbolAllocatorRepair,
 }
 
 fn mapping_from(merges: &[SymbolMerge]) -> StoreResult<HashMap<i64, i64>> {
@@ -294,19 +311,17 @@ macro_rules! insert_chunks {
     }};
 }
 
-/// Apply a validated duplicate-symbol plan atomically and append its audit WAL
-/// rows in the same transaction. The allocator state is deliberately untouched.
+/// Apply a validated duplicate-symbol plan atomically, reconcile the allocator
+/// against the maximum surviving relational symbol, and append audit WAL rows
+/// in the same transaction.
 pub async fn apply_symbol_repair(
     db: &DatabaseConnection,
     akh_id: Uuid,
     workspace_id: Uuid,
     merges: &[SymbolMerge],
     audit_rows: &[MutationRow],
-) -> StoreResult<SymbolRepairCounts> {
+) -> StoreResult<SymbolRepairOutcome> {
     let mapping = mapping_from(merges)?;
-    if mapping.is_empty() {
-        return Ok(SymbolRepairCounts::default());
-    }
 
     let txn = db.begin().await?;
     if txn.get_database_backend() == DatabaseBackend::Postgres {
@@ -322,6 +337,14 @@ pub async fn apply_symbol_repair(
         .filter(symbol::Column::AkhId.eq(akh_id))
         .all(&txn)
         .await?;
+    if let Some(row) = symbols.iter().find(|row| row.id <= 0) {
+        return Err(StoreError::Conflict {
+            message: format!(
+                "cannot repair symbol allocator for akh {akh_id}: invalid relational symbol ID {}",
+                row.id
+            ),
+        });
+    }
     let known_ids: HashSet<i64> = symbols.iter().map(|row| row.id).collect();
     for merge in merges {
         if !known_ids.contains(&merge.canonical_id) || !known_ids.contains(&merge.duplicate_id) {
@@ -332,6 +355,57 @@ pub async fn apply_symbol_repair(
                 ),
             });
         }
+    }
+
+    let max_surviving_symbol_id = symbols
+        .iter()
+        .filter(|row| !mapping.contains_key(&row.id))
+        .map(|row| row.id)
+        .max();
+    let required_allocator_next = match max_surviving_symbol_id {
+        Some(max_id) => max_id.checked_add(1).ok_or_else(|| StoreError::Conflict {
+            message: format!(
+                "cannot repair symbol allocator for akh {akh_id}: symbol ID space overflows after {max_id}"
+            ),
+        })?,
+        None => 1,
+    };
+    let state = akh_state::Entity::find_by_id(akh_id)
+        .one(&txn)
+        .await?
+        .ok_or_else(|| StoreError::Conflict {
+            message: format!(
+                "cannot repair symbol allocator for akh {akh_id}: akh_state is missing"
+            ),
+        })?;
+    let allocator_next_before = state.allocator_next;
+    let allocator_next_after = allocator_next_before.max(required_allocator_next);
+    let allocator = SymbolAllocatorRepair {
+        allocator_next_before,
+        max_surviving_symbol_id,
+        required_allocator_next,
+        allocator_next_after,
+        advanced: allocator_next_after > allocator_next_before,
+    };
+
+    let advance_allocator = |state: akh_state::Model| {
+        let mut active = state.into_active_model();
+        active.allocator_next = Set(allocator_next_after);
+        active.updated_at = Set(chrono::Utc::now());
+        active
+    };
+
+    if mapping.is_empty() {
+        if allocator.advanced {
+            akh_state::Entity::update(advance_allocator(state))
+                .exec(&txn)
+                .await?;
+        }
+        txn.commit().await?;
+        return Ok(SymbolRepairOutcome {
+            counts: SymbolRepairCounts::default(),
+            allocator,
+        });
     }
 
     let mut counts = SymbolRepairCounts::default();
@@ -642,8 +716,14 @@ pub async fn apply_symbol_repair(
     }
     counts.wal_records = audit_rows.len();
 
+    if allocator.advanced {
+        akh_state::Entity::update(advance_allocator(state))
+            .exec(&txn)
+            .await?;
+    }
+
     txn.commit().await?;
-    Ok(counts)
+    Ok(SymbolRepairOutcome { counts, allocator })
 }
 
 #[cfg(test)]

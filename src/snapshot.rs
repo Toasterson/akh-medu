@@ -1200,13 +1200,14 @@ pub struct PlannedSymbolMerge {
     pub duplicate_kind: String,
 }
 
-/// Dry-run/apply plan for WI-338 duplicate-label hydration repair.
+/// Dry-run/apply plan for WI-338/WI-359 symbol hydration repair.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SymbolRepairPlan {
     pub akh_id: Uuid,
     pub duplicate_groups: usize,
     pub extra_symbols: usize,
     pub merges: Vec<PlannedSymbolMerge>,
+    pub allocator: akhomed_store::repair::SymbolAllocatorRepair,
 }
 
 /// Result returned to the daemon control plane.
@@ -1218,28 +1219,46 @@ pub struct SymbolRepairReport {
     pub counts: akhomed_store::repair::SymbolRepairCounts,
 }
 
-/// Detect duplicate labels with exactly the normalization function used by
-/// wake's fail-closed validator. Lowest relational ID is always canonical.
+/// Detect duplicate labels and a stale relational allocator using the same
+/// fail-closed constraints as wake. Lowest relational ID is always canonical.
 pub async fn plan_duplicate_symbol_repair(
     db: &DatabaseConnection,
     akh_id: Uuid,
 ) -> SnapshotResult<SymbolRepairPlan> {
     let rows = akhomed_store::snapshots::load_symbols(db, akh_id).await?;
-    Ok(build_symbol_repair_plan(akh_id, rows))
+    let state = akhomed_store::snapshots::load_akh_state(db, akh_id)
+        .await?
+        .ok_or(SnapshotError::NotFound(akh_id))?;
+    build_symbol_repair_plan(akh_id, rows, state.allocator_next)
 }
 
 fn build_symbol_repair_plan(
     akh_id: Uuid,
     mut rows: Vec<symbol::Model>,
-) -> SymbolRepairPlan {
+    allocator_next: i64,
+) -> SnapshotResult<SymbolRepairPlan> {
+    for row in &rows {
+        let raw_id = u64::try_from(row.id).map_err(|_| {
+            SnapshotError::Agent(format!(
+                "repair: symbol {} uses invalid ID {}",
+                row.label, row.id
+            ))
+        })?;
+        if raw_id == 0 || is_reserved_symbol_id(raw_id) {
+            return Err(SnapshotError::Agent(format!(
+                "repair: symbol {} uses invalid/reserved ID {}",
+                row.label, row.id
+            )));
+        }
+    }
     rows.sort_by_key(|row| row.id);
     let mut groups: std::collections::BTreeMap<String, Vec<symbol::Model>> =
         std::collections::BTreeMap::new();
-    for row in rows {
+    for row in &rows {
         groups
             .entry(crate::registry::normalize_label_key(&row.label))
             .or_default()
-            .push(row);
+            .push(row.clone());
     }
 
     let duplicate_groups = groups.values().filter(|rows| rows.len() > 1).count();
@@ -1260,12 +1279,76 @@ fn build_symbol_repair_plan(
             });
         }
     }
-    SymbolRepairPlan {
+    let losing_ids: std::collections::HashSet<i64> =
+        merges.iter().map(|merge| merge.duplicate_id).collect();
+    let max_surviving_symbol_id = rows
+        .iter()
+        .filter(|row| !losing_ids.contains(&row.id))
+        .map(|row| row.id)
+        .max();
+    let allocator = plan_symbol_allocator_repair(allocator_next, max_surviving_symbol_id)?;
+    Ok(SymbolRepairPlan {
         akh_id,
         duplicate_groups,
         extra_symbols: merges.len(),
         merges,
+        allocator,
+    })
+}
+
+fn required_allocator_next(max_surviving_symbol_id: Option<u64>) -> SnapshotResult<u64> {
+    let required = max_surviving_symbol_id
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| SnapshotError::Agent("repair: symbol ID space is exhausted".into()))?;
+    if is_reserved_symbol_id(required) {
+        return Err(SnapshotError::Agent(
+            "repair: symbol ID space reaches a reserved protocol marker".into(),
+        ));
     }
+    Ok(required)
+}
+
+fn plan_symbol_allocator_repair(
+    allocator_next: i64,
+    max_surviving_symbol_id: Option<i64>,
+) -> SnapshotResult<akhomed_store::repair::SymbolAllocatorRepair> {
+    let max_surviving = max_surviving_symbol_id
+        .map(|id| {
+            u64::try_from(id).map_err(|_| {
+                SnapshotError::Agent(format!("repair: invalid surviving symbol ID {id}"))
+            })
+        })
+        .transpose()?;
+    let required = required_allocator_next(max_surviving)?;
+    let current = u64::try_from(allocator_next).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "repair: symbol allocator has invalid next ID {allocator_next}"
+        ))
+    })?;
+    let planned = current.max(required);
+    if is_reserved_symbol_id(planned) {
+        return Err(SnapshotError::Agent(format!(
+            "repair: symbol allocator has invalid/reserved next ID {planned}"
+        )));
+    }
+    let required_allocator_next = i64::try_from(required).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "repair: required allocator next ID {required} cannot be stored"
+        ))
+    })?;
+    let allocator_next_after = i64::try_from(planned).map_err(|_| {
+        SnapshotError::Agent(format!(
+            "repair: allocator next ID {planned} cannot be stored"
+        ))
+    })?;
+    Ok(akhomed_store::repair::SymbolAllocatorRepair {
+        allocator_next_before: allocator_next,
+        max_surviving_symbol_id,
+        required_allocator_next,
+        allocator_next_after,
+        advanced: allocator_next_after > allocator_next,
+    })
 }
 
 fn json_contains_symbol_id(value: &serde_json::Value, id: i64) -> bool {
@@ -1281,9 +1364,9 @@ fn json_contains_symbol_id(value: &serde_json::Value, id: i64) -> bool {
     }
 }
 
-/// Apply a duplicate-label plan transactionally. Every merge gets a
-/// `symbol_merge` WAL audit record containing stable TripleIdentity changes and
-/// the provenance records which referenced the losing ID.
+/// Apply a symbol repair plan transactionally. Every merge gets a `symbol_merge`
+/// WAL audit record containing stable TripleIdentity changes and the provenance
+/// records which referenced the losing ID; allocator-only plans remain valid.
 pub async fn repair_duplicate_symbols(
     db: &DatabaseConnection,
     akh_id: Uuid,
@@ -1293,13 +1376,31 @@ pub async fn repair_duplicate_symbols(
     use akhomed_store::entity::{fact, provenance, provenance_input, provenance_snapshot};
     use akhomed_store::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-    let plan = plan_duplicate_symbol_repair(db, akh_id).await?;
-    if dry_run || plan.merges.is_empty() {
+    let mut plan = plan_duplicate_symbol_repair(db, akh_id).await?;
+    if dry_run {
         return Ok(SymbolRepairReport {
             dry_run,
             applied: false,
             plan,
             counts: akhomed_store::repair::SymbolRepairCounts::default(),
+        });
+    }
+
+    if plan.merges.is_empty() {
+        let outcome = akhomed_store::repair::apply_symbol_repair(
+            db,
+            akh_id,
+            workspace_id,
+            &[],
+            &[],
+        )
+        .await?;
+        plan.allocator = outcome.allocator;
+        return Ok(SymbolRepairReport {
+            dry_run: false,
+            applied: outcome.allocator.advanced,
+            plan,
+            counts: outcome.counts,
         });
     }
 
@@ -1440,7 +1541,7 @@ pub async fn repair_duplicate_symbols(
             duplicate_id: merge.duplicate_id,
         })
         .collect();
-    let counts = akhomed_store::repair::apply_symbol_repair(
+    let outcome = akhomed_store::repair::apply_symbol_repair(
         db,
         akh_id,
         workspace_id,
@@ -1448,11 +1549,12 @@ pub async fn repair_duplicate_symbols(
         &audits,
     )
     .await?;
+    plan.allocator = outcome.allocator;
     Ok(SymbolRepairReport {
         dry_run: false,
         applied: true,
         plan,
-        counts,
+        counts: outcome.counts,
     })
 }
 
@@ -3529,7 +3631,9 @@ mod tests {
                 row(7, "OReilly"),
                 row(40, "distinct"),
             ],
-        );
+            41,
+        )
+        .unwrap();
         assert_eq!(plan.duplicate_groups, 1);
         assert_eq!(plan.extra_symbols, 2);
         assert_eq!(
@@ -3539,6 +3643,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(12, 7), (30, 7)]
         );
+        assert_eq!(plan.allocator.max_surviving_symbol_id, Some(40));
+        assert_eq!(plan.allocator.allocator_next_after, 41);
+        assert!(!plan.allocator.advanced);
+    }
+
+    #[test]
+    fn symbol_repair_plan_advances_stale_allocator_without_duplicate_merges() {
+        let akh_id = Uuid::nil();
+        let row = |id, label: &str| symbol::Model {
+            akh_id,
+            id,
+            kind: "Entity".into(),
+            glyph_codepoint: None,
+            label: label.into(),
+        };
+        let plan = build_symbol_repair_plan(
+            akh_id,
+            vec![row(7, "existing"), row(6_558, "restored max")],
+            2_826,
+        )
+        .unwrap();
+
+        assert_eq!(plan.duplicate_groups, 0);
+        assert!(plan.merges.is_empty());
+        assert_eq!(plan.allocator.max_surviving_symbol_id, Some(6_558));
+        assert_eq!(plan.allocator.required_allocator_next, 6_559);
+        assert_eq!(plan.allocator.allocator_next_before, 2_826);
+        assert_eq!(plan.allocator.allocator_next_after, 6_559);
+        assert!(plan.allocator.advanced);
+
+        let second = plan_symbol_allocator_repair(6_559, Some(6_558)).unwrap();
+        assert_eq!(second.allocator_next_after, 6_559);
+        assert!(!second.advanced);
+    }
+
+    #[test]
+    fn allocator_repair_rejects_exhaustion_and_reserved_markers() {
+        let overflow = required_allocator_next(Some(u64::MAX)).unwrap_err();
+        assert!(overflow.to_string().contains("exhausted"), "{overflow}");
+
+        let reserved = required_allocator_next(Some(u64::MAX - 2)).unwrap_err();
+        assert!(reserved.to_string().contains("reserved"), "{reserved}");
+
+        let unstoreable = plan_symbol_allocator_repair(1, Some(i64::MAX)).unwrap_err();
+        assert!(unstoreable.to_string().contains("cannot be stored"), "{unstoreable}");
     }
 
     #[test]
