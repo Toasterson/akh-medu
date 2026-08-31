@@ -19,20 +19,25 @@ on:
 jobs:
   eval-smoke:
     runs-on: ubuntu-22.04
-    # Non-blocking: failures here do not block merging.
+    # Keep the job-level declaration for GitHub-compatible runners, and mark
+    # each step explicitly because Forgejo currently reports a failed job
+    # conclusion even when job-level continue-on-error is set.
     continue-on-error: true
     steps:
       - name: Install dependencies
+        continue-on-error: true
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev unzip
 
       - name: Install Rust toolchain
+        continue-on-error: true
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           echo '. "$HOME/.cargo/env"' >> ~/.profile
 
       - name: Build hekad
+        continue-on-error: true
         run: |
           . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=1
@@ -44,6 +49,7 @@ jobs:
           cargo build -p heka --bin hekad
 
       - name: Run LongMemEval smoke (10 sessions, raw mode)
+        continue-on-error: true
         run: |
           . "$HOME/.cargo/env"
           mkdir -p eval_reports
@@ -51,6 +57,7 @@ jobs:
 
       - name: Compute delta vs baseline
         id: delta
+        continue-on-error: true
         run: |
           set -eu
           REPORT="eval_reports/longmemeval_report.json"
@@ -124,6 +131,7 @@ jobs:
       - name: Upload eval reports
         uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true
         with:
           name: eval-reports
           path: eval_reports/
