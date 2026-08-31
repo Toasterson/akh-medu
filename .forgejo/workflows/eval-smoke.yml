@@ -53,7 +53,9 @@ jobs:
         run: |
           . "$HOME/.cargo/env"
           mkdir -p eval_reports
-          if ! cargo run -p heka --bin hekad -- eval longmemeval --mode raw --sessions 10 --output eval_reports; then
+          if [ ! -d eval_data/longmemeval ]; then
+            echo "LongMemEval dataset is unavailable; skipping this non-blocking smoke run."
+          elif ! cargo run -p heka --bin hekad -- eval longmemeval --mode raw --sessions 10 --output eval_reports; then
             echo "LongMemEval smoke did not produce a report; continuing because this workflow is non-blocking."
           fi
 
