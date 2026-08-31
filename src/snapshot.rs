@@ -886,7 +886,8 @@ pub async fn wake(
             );
         }
     }
-    let tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    let mut tail = ops::load_mutation_tail(db, akh_id, state.watermark).await?;
+    rewrite_tail_after_symbol_merges(&mut tail, &symbol_metas)?;
     let tail_allocator_next =
         prepare_tail_restore(&tail, &mut symbol_metas, &mut provenance_records)?;
     let restored_allocator_next = base_allocator_next.max(tail_allocator_next);
@@ -1184,6 +1185,275 @@ fn validate_symbol_snapshot(metas: &[SymbolMeta], allocator_next: i64) -> Snapsh
         )));
     }
     Ok(allocator_next)
+}
+
+/// One losing legacy symbol and the deterministic canonical row it will merge
+/// into. Labels and kinds make dry-run output self-contained.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlannedSymbolMerge {
+    pub normalized_label: String,
+    pub canonical_id: i64,
+    pub canonical_label: String,
+    pub canonical_kind: String,
+    pub duplicate_id: i64,
+    pub duplicate_label: String,
+    pub duplicate_kind: String,
+}
+
+/// Dry-run/apply plan for WI-338 duplicate-label hydration repair.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolRepairPlan {
+    pub akh_id: Uuid,
+    pub duplicate_groups: usize,
+    pub extra_symbols: usize,
+    pub merges: Vec<PlannedSymbolMerge>,
+}
+
+/// Result returned to the daemon control plane.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolRepairReport {
+    pub dry_run: bool,
+    pub applied: bool,
+    pub plan: SymbolRepairPlan,
+    pub counts: akhomed_store::repair::SymbolRepairCounts,
+}
+
+/// Detect duplicate labels with exactly the normalization function used by
+/// wake's fail-closed validator. Lowest relational ID is always canonical.
+pub async fn plan_duplicate_symbol_repair(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+) -> SnapshotResult<SymbolRepairPlan> {
+    let rows = akhomed_store::snapshots::load_symbols(db, akh_id).await?;
+    Ok(build_symbol_repair_plan(akh_id, rows))
+}
+
+fn build_symbol_repair_plan(
+    akh_id: Uuid,
+    mut rows: Vec<symbol::Model>,
+) -> SymbolRepairPlan {
+    rows.sort_by_key(|row| row.id);
+    let mut groups: std::collections::BTreeMap<String, Vec<symbol::Model>> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        groups
+            .entry(crate::registry::normalize_label_key(&row.label))
+            .or_default()
+            .push(row);
+    }
+
+    let duplicate_groups = groups.values().filter(|rows| rows.len() > 1).count();
+    let mut merges = Vec::new();
+    for (normalized_label, rows) in groups {
+        let Some(canonical) = rows.first().filter(|_| rows.len() > 1) else {
+            continue;
+        };
+        for duplicate in &rows[1..] {
+            merges.push(PlannedSymbolMerge {
+                normalized_label: normalized_label.clone(),
+                canonical_id: canonical.id,
+                canonical_label: canonical.label.clone(),
+                canonical_kind: canonical.kind.clone(),
+                duplicate_id: duplicate.id,
+                duplicate_label: duplicate.label.clone(),
+                duplicate_kind: duplicate.kind.clone(),
+            });
+        }
+    }
+    SymbolRepairPlan {
+        akh_id,
+        duplicate_groups,
+        extra_symbols: merges.len(),
+        merges,
+    }
+}
+
+fn json_contains_symbol_id(value: &serde_json::Value, id: i64) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64() == Some(id),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_contains_symbol_id(value, id))
+        }
+        serde_json::Value::Object(object) => object
+            .values()
+            .any(|value| json_contains_symbol_id(value, id)),
+        _ => false,
+    }
+}
+
+/// Apply a duplicate-label plan transactionally. Every merge gets a
+/// `symbol_merge` WAL audit record containing stable TripleIdentity changes and
+/// the provenance records which referenced the losing ID.
+pub async fn repair_duplicate_symbols(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    workspace_id: Uuid,
+    dry_run: bool,
+) -> SnapshotResult<SymbolRepairReport> {
+    use akhomed_store::entity::{fact, provenance, provenance_input, provenance_snapshot};
+    use akhomed_store::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let plan = plan_duplicate_symbol_repair(db, akh_id).await?;
+    if dry_run || plan.merges.is_empty() {
+        return Ok(SymbolRepairReport {
+            dry_run,
+            applied: false,
+            plan,
+            counts: akhomed_store::repair::SymbolRepairCounts::default(),
+        });
+    }
+
+    let symbols = akhomed_store::snapshots::load_symbols(db, akh_id).await?;
+    let symbol_labels: std::collections::HashMap<i64, String> = symbols
+        .iter()
+        .map(|row| (row.id, row.label.clone()))
+        .collect();
+    let final_ids: std::collections::HashMap<i64, i64> = plan
+        .merges
+        .iter()
+        .map(|merge| (merge.duplicate_id, merge.canonical_id))
+        .collect();
+    let facts = fact::Entity::find()
+        // Match wake/apply semantics: the durable graph image is selected by
+        // workspace, regardless of which Akh originally asserted each fact.
+        .filter(fact::Column::WorkspaceId.eq(workspace_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+    let provenance_rows = provenance::Entity::find()
+        .filter(provenance::Column::AkhId.eq(akh_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+    let provenance_ids: Vec<i64> = provenance_rows.iter().map(|row| row.provenance_id).collect();
+    let provenance_inputs = if provenance_ids.is_empty() {
+        Vec::new()
+    } else {
+        provenance_input::Entity::find()
+            .filter(provenance_input::Column::ProvenanceId.is_in(provenance_ids))
+            .all(db)
+            .await
+            .map_err(akhomed_store::StoreError::from)?
+    };
+    let provenance_snapshots = provenance_snapshot::Entity::find()
+        .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
+        .all(db)
+        .await
+        .map_err(akhomed_store::StoreError::from)?;
+
+    let final_id = |id: i64| final_ids.get(&id).copied().unwrap_or(id);
+    let label = |id: i64| {
+        symbol_labels
+            .get(&id)
+            .map(String::as_str)
+            .unwrap_or("<missing-symbol>")
+    };
+    let mut audits = Vec::with_capacity(plan.merges.len());
+    for merge in &plan.merges {
+        let mut triple_changes = Vec::new();
+        let mut workspace_ids = std::collections::BTreeSet::new();
+        for row in &facts {
+            if ![row.subject, row.predicate, row.object].contains(&merge.duplicate_id) {
+                continue;
+            }
+            workspace_ids.insert(row.workspace_id);
+            let before = crate::graph::identity::TripleIdentity::compute(
+                label(row.subject),
+                label(row.predicate),
+                label(row.object),
+                row.compartment.as_deref(),
+            );
+            let after_ids = (
+                final_id(row.subject),
+                final_id(row.predicate),
+                final_id(row.object),
+            );
+            let after = crate::graph::identity::TripleIdentity::compute(
+                label(after_ids.0),
+                label(after_ids.1),
+                label(after_ids.2),
+                row.compartment.as_deref(),
+            );
+            triple_changes.push(serde_json::json!({
+                "before": [row.subject, row.predicate, row.object],
+                "after": [after_ids.0, after_ids.1, after_ids.2],
+                "before_identity": before.to_hex(),
+                "after_identity": after.to_hex(),
+                "compartment": row.compartment,
+            }));
+        }
+        if workspace_ids.is_empty() {
+            workspace_ids.insert(workspace_id);
+        }
+
+        let mut affected_provenance = std::collections::BTreeSet::new();
+        for row in &provenance_rows {
+            if row.subject == merge.duplicate_id
+                || json_contains_symbol_id(&row.derivation, merge.duplicate_id)
+            {
+                affected_provenance.insert(format!("legacy:{}", row.provenance_id));
+            }
+        }
+        for row in &provenance_inputs {
+            if row.input_symbol_id == merge.duplicate_id {
+                affected_provenance.insert(format!("legacy:{}", row.provenance_id));
+            }
+        }
+        for row in &provenance_snapshots {
+            if row.derived_symbol == merge.duplicate_id
+                || json_contains_symbol_id(&row.sources, merge.duplicate_id)
+                || json_contains_symbol_id(&row.derivation, merge.duplicate_id)
+            {
+                affected_provenance.insert(format!("snapshot:{}", row.provenance_id));
+            }
+        }
+
+        audits.push(akhomed_store::MutationRow {
+            kind: crate::mutation::MutationKind::SymbolMerge.as_str().to_owned(),
+            payload: serde_json::json!({
+                "v": 1,
+                "work_item": "WI-338",
+                "akh_id": akh_id,
+                "workspace_ids": workspace_ids,
+                "normalized_label": merge.normalized_label,
+                "canonical": {
+                    "id": merge.canonical_id,
+                    "label": merge.canonical_label,
+                    "kind": merge.canonical_kind,
+                },
+                "duplicate": {
+                    "id": merge.duplicate_id,
+                    "label": merge.duplicate_label,
+                    "kind": merge.duplicate_kind,
+                },
+                "triple_identity_changes": triple_changes,
+                "provenance_records": affected_provenance,
+            }),
+        });
+    }
+
+    let store_merges: Vec<_> = plan
+        .merges
+        .iter()
+        .map(|merge| akhomed_store::repair::SymbolMerge {
+            canonical_id: merge.canonical_id,
+            duplicate_id: merge.duplicate_id,
+        })
+        .collect();
+    let counts = akhomed_store::repair::apply_symbol_repair(
+        db,
+        akh_id,
+        workspace_id,
+        &store_merges,
+        &audits,
+    )
+    .await?;
+    Ok(SymbolRepairReport {
+        dry_run: false,
+        applied: true,
+        plan,
+        counts,
+    })
 }
 
 fn drive_kind_from(label: &str) -> Option<crate::agent::drives::DriveKind> {
@@ -2363,6 +2633,285 @@ fn merge_tail_symbols(
     Ok(())
 }
 
+fn remap_tail_number(
+    value: &mut serde_json::Value,
+    mapping: &std::collections::HashMap<u64, u64>,
+) -> bool {
+    let Some(id) = value.as_u64() else {
+        return false;
+    };
+    let Some(canonical) = mapping.get(&id).copied() else {
+        return false;
+    };
+    *value = serde_json::Value::from(canonical);
+    true
+}
+
+/// Rewrite replayable symbol references through any WI-338 merge audit in the
+/// same post-watermark tail. The audit is appended by the repair transaction,
+/// after the historical records it repairs, so collecting the complete map
+/// first makes the very first repaired wake safe before a new snapshot exists.
+fn rewrite_tail_symbol_value(
+    value: &mut serde_json::Value,
+    mapping: &std::collections::HashMap<u64, u64>,
+    canonical_symbols: &std::collections::HashMap<u64, SymbolMeta>,
+) -> SnapshotResult<bool> {
+    const SCALAR_FIELDS: &[&str] = &[
+        "symbol_id",
+        "episode_id",
+        "derived_id",
+        "derived_symbol",
+        "subject",
+        "predicate",
+        "object",
+        "from",
+        "goal",
+        "gap_entity",
+        "reactivated_goal",
+        "goal_id",
+        "parent",
+        "reformulated_from",
+        "replacement",
+        "primary",
+        "source_note",
+        "spawned_from",
+        "input_symbol_id",
+        "context",
+        "ancestor",
+        "from_context",
+        "to_context",
+        "specific",
+        "general",
+        "inverse",
+        "winner",
+        "loser",
+        "existing_object",
+        "incoming_object",
+        "existential_relation",
+        "bound_var",
+        "skolem",
+        "concrete_entity",
+        "function",
+        "source_goal",
+        "concept",
+        "tool",
+        "source",
+        "a",
+        "b",
+        "c",
+    ];
+    const ARRAY_FIELDS: &[&str] = &[
+        "sources",
+        "inputs",
+        "children",
+        "blocked_by",
+        "antecedents",
+        "supporting",
+        "learnings",
+        "tags",
+    ];
+
+    match value {
+        serde_json::Value::Array(values) => {
+            let mut changed = false;
+            for value in values {
+                changed |= rewrite_tail_symbol_value(value, mapping, canonical_symbols)?;
+            }
+            Ok(changed)
+        }
+        serde_json::Value::Object(object) => {
+            let mut changed = false;
+            for (key, child) in object {
+                if key == "symbols" {
+                    let serde_json::Value::Array(symbols) = child else {
+                        return Err(invalid_tail("symbol metadata envelope is not an array"));
+                    };
+                    let mut seen = std::collections::HashSet::with_capacity(symbols.len());
+                    let mut rewritten = Vec::with_capacity(symbols.len());
+                    for mut symbol in std::mem::take(symbols) {
+                        let id = symbol
+                            .get("id")
+                            .and_then(serde_json::Value::as_u64)
+                            .ok_or_else(|| invalid_tail("symbol metadata has no valid ID"))?;
+                        let final_id = mapping.get(&id).copied().unwrap_or(id);
+                        if let Some(canonical) = canonical_symbols.get(&final_id) {
+                            symbol = serde_json::to_value(canonical).map_err(|error| {
+                                invalid_tail(format!(
+                                    "could not encode canonical symbol {final_id}: {error}"
+                                ))
+                            })?;
+                            changed |= final_id != id;
+                        } else if final_id != id {
+                            return Err(invalid_tail(format!(
+                                "symbol merge maps {id} to missing canonical {final_id}"
+                            )));
+                        }
+                        if seen.insert(final_id) {
+                            rewritten.push(symbol);
+                        } else {
+                            changed = true;
+                        }
+                    }
+                    *symbols = rewritten;
+                } else if SCALAR_FIELDS.contains(&key.as_str()) {
+                    changed |= remap_tail_number(child, mapping);
+                    changed |= rewrite_tail_symbol_value(child, mapping, canonical_symbols)?;
+                } else if ARRAY_FIELDS.contains(&key.as_str()) {
+                    if let serde_json::Value::Array(values) = child {
+                        for value in values {
+                            changed |= remap_tail_number(value, mapping);
+                            changed |=
+                                rewrite_tail_symbol_value(value, mapping, canonical_symbols)?;
+                        }
+                    }
+                } else {
+                    changed |= rewrite_tail_symbol_value(child, mapping, canonical_symbols)?;
+                }
+            }
+            Ok(changed)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn collect_tail_canonical_symbols(
+    value: &serde_json::Value,
+    base_symbols: &std::collections::HashMap<u64, SymbolMeta>,
+    tail_symbols: &mut std::collections::HashMap<u64, SymbolMeta>,
+) -> SnapshotResult<()> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_tail_canonical_symbols(value, base_symbols, tail_symbols)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for (key, child) in object {
+                if key != "symbols" {
+                    collect_tail_canonical_symbols(child, base_symbols, tail_symbols)?;
+                    continue;
+                }
+                let serde_json::Value::Array(symbols) = child else {
+                    return Err(invalid_tail("symbol metadata envelope is not an array"));
+                };
+                for symbol in symbols {
+                    let Some(id) = symbol.get("id").and_then(serde_json::Value::as_u64) else {
+                        return Err(invalid_tail("symbol metadata has no valid ID"));
+                    };
+                    let Some(base) = base_symbols.get(&id) else {
+                        continue;
+                    };
+                    let meta: SymbolMeta =
+                        serde_json::from_value(symbol.clone()).map_err(|error| {
+                            invalid_tail(format!("could not decode canonical symbol {id}: {error}"))
+                        })?;
+                    if meta.kind != base.kind || meta.label != base.label {
+                        return Err(invalid_tail(format!(
+                            "canonical symbol {id} conflicts with repaired snapshot metadata"
+                        )));
+                    }
+                    if let Some(existing) = tail_symbols.get(&id) {
+                        if existing.kind != meta.kind
+                            || existing.label != meta.label
+                            || existing.created_at != meta.created_at
+                            || existing.source != meta.source
+                        {
+                            return Err(invalid_tail(format!(
+                                "canonical symbol {id} has conflicting replay metadata"
+                            )));
+                        }
+                    } else {
+                        tail_symbols.insert(id, meta);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn rewrite_tail_after_symbol_merges(
+    tail: &mut [akhomed_store::TailMutation],
+    base_symbols: &[SymbolMeta],
+) -> SnapshotResult<()> {
+    let mut mapping = std::collections::HashMap::new();
+    for mutation in tail.iter().filter(|row| row.kind == "symbol_merge") {
+        let parse_id = |side: &str| {
+            mutation
+                .payload
+                .get(side)
+                .and_then(|value| value.get("id"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|id| *id > 0 && !is_reserved_symbol_id(*id))
+                .ok_or_else(|| invalid_tail(format!("symbol merge has invalid {side} ID")))
+        };
+        let canonical = parse_id("canonical")?;
+        let duplicate = parse_id("duplicate")?;
+        if canonical >= duplicate {
+            return Err(invalid_tail(format!(
+                "symbol merge {duplicate} -> {canonical} is not canonical"
+            )));
+        }
+        if mapping.insert(duplicate, canonical).is_some() {
+            return Err(invalid_tail(format!(
+                "symbol merge repeats duplicate ID {duplicate}"
+            )));
+        }
+    }
+    if mapping.is_empty() {
+        return Ok(());
+    }
+    if let Some(chained) = mapping.values().find(|id| mapping.contains_key(id)) {
+        return Err(invalid_tail(format!(
+            "symbol merge contains chained canonical ID {chained}"
+        )));
+    }
+
+    let mut canonical_symbols: std::collections::HashMap<u64, SymbolMeta> = base_symbols
+        .iter()
+        .filter(|meta| mapping.values().any(|id| *id == meta.id.get()))
+        .map(|meta| (meta.id.get(), meta.clone()))
+        .collect();
+    for canonical in mapping.values() {
+        if !canonical_symbols.contains_key(canonical) {
+            return Err(invalid_tail(format!(
+                "symbol merge references missing canonical symbol {canonical}"
+            )));
+        }
+    }
+
+    // Relational symbol rows do not retain `created_at` or `source`. If the
+    // tail contains richer metadata for a canonical symbol, use one consistent
+    // copy for both that symbol and every loser rewritten to it. Otherwise an
+    // earlier loser envelope followed by a canonical envelope could restore
+    // the same ID with conflicting metadata on the first repaired wake.
+    let mut tail_canonical_symbols = std::collections::HashMap::new();
+    for mutation in tail.iter().filter(|row| {
+        matches!(
+            row.kind.as_str(),
+            "assert" | "retract" | "replace" | "retract_batch"
+        )
+    }) {
+        collect_tail_canonical_symbols(
+            &mutation.payload,
+            &canonical_symbols,
+            &mut tail_canonical_symbols,
+        )?;
+    }
+    canonical_symbols.extend(tail_canonical_symbols);
+
+    for mutation in tail {
+        if matches!(
+            mutation.kind.as_str(),
+            "assert" | "retract" | "replace" | "retract_batch"
+        ) {
+            rewrite_tail_symbol_value(&mut mutation.payload, &mapping, &canonical_symbols)?;
+        }
+    }
+    Ok(())
+}
+
 /// Merge every replay prerequisite into the cold-restore image before opening
 /// the engine. Facts are still replayed in WAL order afterwards so retract/TMS
 /// behavior stays unchanged.
@@ -2917,7 +3466,7 @@ fn apply_mutation_with_future(
         // just means "not counted in `replayed`" here (see the caller at
         // `wake`, ~line 690-696) — it is NOT treated as an error or an unknown
         // kind; wake proceeds normally with `turn` rows present.
-        "turn" => Ok(false),
+        "turn" | "symbol_merge" => Ok(false),
         _ => Ok(false),
     }
 }
@@ -2960,6 +3509,94 @@ mod tests {
         fn record(&self, mutation: MutationRecord) {
             self.0.lock().unwrap().push(mutation);
         }
+    }
+
+    #[test]
+    fn duplicate_symbol_repair_plan_uses_wake_normalization_and_lowest_id() {
+        let akh_id = Uuid::nil();
+        let row = |id, label: &str| symbol::Model {
+            akh_id,
+            id,
+            kind: "Entity".into(),
+            glyph_codepoint: None,
+            label: label.into(),
+        };
+        let plan = build_symbol_repair_plan(
+            akh_id,
+            vec![
+                row(30, "O’Reilly"),
+                row(12, "O'Reilly"),
+                row(7, "OReilly"),
+                row(40, "distinct"),
+            ],
+        );
+        assert_eq!(plan.duplicate_groups, 1);
+        assert_eq!(plan.extra_symbols, 2);
+        assert_eq!(
+            plan.merges
+                .iter()
+                .map(|merge| (merge.duplicate_id, merge.canonical_id))
+                .collect::<Vec<_>>(),
+            vec![(12, 7), (30, 7)]
+        );
+    }
+
+    #[test]
+    fn symbol_merge_audit_rewrites_earlier_replay_complete_tail() {
+        let canonical = replay_symbol(7, SymbolKind::Entity, "OReilly", 0);
+        let tail_canonical = replay_symbol(7, SymbolKind::Entity, "OReilly", 11);
+        let duplicate = replay_symbol(12, SymbolKind::Entity, "O’Reilly", 5);
+        let predicate = replay_symbol(20, SymbolKind::Relation, "relation", 0);
+        let object = replay_symbol(21, SymbolKind::Entity, "object", 0);
+        let mut tail = vec![
+            akhomed_store::TailMutation {
+                kind: "assert".into(),
+                payload: serde_json::json!({
+                    "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                    "subject": duplicate.id.get(),
+                    "predicate": predicate.id.get(),
+                    "object": object.id.get(),
+                    "confidence": 1.0,
+                    "timestamp": 5,
+                    "compartment": null,
+                    "provenance_id": null,
+                    "provenance": null,
+                    "symbols": [duplicate, predicate.clone(), object.clone()],
+                }),
+            },
+            akhomed_store::TailMutation {
+                kind: "assert".into(),
+                payload: serde_json::json!({
+                    "v": crate::mutation::ASSERT_MUTATION_VERSION,
+                    "subject": tail_canonical.id.get(),
+                    "predicate": predicate.id.get(),
+                    "object": object.id.get(),
+                    "confidence": 1.0,
+                    "timestamp": 11,
+                    "compartment": null,
+                    "provenance_id": null,
+                    "provenance": null,
+                    "symbols": [tail_canonical, predicate.clone(), object.clone()],
+                }),
+            },
+            akhomed_store::TailMutation {
+                kind: "symbol_merge".into(),
+                payload: serde_json::json!({
+                    "v": 1,
+                    "canonical": {"id": canonical.id.get()},
+                    "duplicate": {"id": 12},
+                }),
+            },
+        ];
+        let mut symbols = vec![canonical.clone(), predicate, object];
+
+        rewrite_tail_after_symbol_merges(&mut tail, &symbols).unwrap();
+        assert_eq!(tail[0].payload["subject"], canonical.id.get());
+        assert_eq!(tail[0].payload["symbols"][0]["id"], canonical.id.get());
+        assert_eq!(tail[0].payload["symbols"][0]["label"], canonical.label);
+        assert_eq!(tail[0].payload["symbols"][0]["created_at"], 11);
+        assert_eq!(tail[0].payload["symbols"][0], tail[1].payload["symbols"][0]);
+        prepare_tail_restore(&tail, &mut symbols, &mut Vec::new()).unwrap();
     }
 
     fn replay_symbol(id: u64, kind: SymbolKind, label: &str, created_at: u64) -> SymbolMeta {

@@ -1166,9 +1166,35 @@ impl ServerState {
     /// Wake a cold workspace from its Postgres snapshot (control-plane
     /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
     /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
-    async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        if self.pg_pool().is_none() {
+    async fn wake_workspace(
+        &self,
+        name: &str,
+        repair: bool,
+        dry_run: bool,
+    ) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        if dry_run && !repair {
+            return Err("dry_run requires repair=true".into());
+        }
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // Planning is read-only and intentionally does not acquire residency or
+        // quarantine local state. This makes `akh wake --repair --dry-run` a
+        // safe fleet-audit command, even when the target remains cold elsewhere.
+        if dry_run {
+            let report = akh_medu::snapshot::repair_duplicate_symbols(
+                &pool,
+                akh_id,
+                workspace_id,
+                true,
+            )
+            .await
+            .map_err(|error| format!("could not plan symbol repair for \"{name}\": {error}"))?;
+            return serde_json::to_value(report)
+                .map_err(|error| format!("could not encode symbol repair plan: {error}"));
         }
         // Single-flight: refuse a second concurrent wake of the same workspace
         // (otherwise both would open the same redb and one fails confusingly).
@@ -1194,13 +1220,37 @@ impl ServerState {
             ));
         }
 
-        let akh_id = akh_medu::wal::akh_id_for(name);
         // 38g split-brain guard: a cold akh may live on another host. Acquire its
         // Postgres advisory lock before touching state so two hosts can't wake the
         // same akh concurrently; refuse fast (non-zero CLI exit) if it's held.
         let residency_epoch = self
             .acquire_akh_lock_or_refuse(name, akh_id, "wake")
             .await?;
+
+        let repair_report = if repair {
+            let plan = akh_medu::snapshot::plan_duplicate_symbol_repair(&pool, akh_id)
+                .await
+                .map_err(|error| format!("could not plan symbol repair for \"{name}\": {error}"))?;
+            tracing::info!(
+                workspace = %name,
+                duplicate_groups = plan.duplicate_groups,
+                extra_symbols = plan.extra_symbols,
+                plan = %serde_json::to_string(&plan).unwrap_or_else(|_| "<unencodable>".into()),
+                "WI-338 symbol merge plan"
+            );
+            Some(
+                akh_medu::snapshot::repair_duplicate_symbols(
+                    &pool,
+                    akh_id,
+                    workspace_id,
+                    false,
+                )
+                .await
+                .map_err(|error| format!("symbol repair failed for \"{name}\": {error}"))?,
+            )
+        } else {
+            None
+        };
 
         let ws_paths = self.paths.workspace(name);
         let (triples, symbols) = self
@@ -1221,11 +1271,21 @@ impl ServerState {
         // wake just populated; this also wires the WAL + snapshot ticker).
         self.get_agent(name).await?;
 
+        // Publish a fresh snapshot immediately after an applied repair. This
+        // advances the snapshot watermark over the symbol_merge audit rows and
+        // leaves no interval where a later wake depends on replaying repair WAL.
+        let repaired = repair_report.as_ref().is_some_and(|report| report.applied);
+        if repaired {
+            self.snapshot_workspace(name).await?;
+        }
+
         tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
         Ok(serde_json::json!({
             "woke": name,
             "triples": triples,
             "symbols": symbols,
+            "repair": repair_report,
+            "repair_snapshotted": repaired,
         }))
     }
 
@@ -3657,7 +3717,15 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .get("workspace")
                         .and_then(serde_json::Value::as_str)
                         .ok_or_else(|| "missing required param: workspace".to_string())?;
-                    self.wake_workspace(ws).await
+                    let repair = params
+                        .get("repair")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let dry_run = params
+                        .get("dry_run")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    self.wake_workspace(ws, repair, dry_run).await
                 }
                 "akh/sleep" => {
                     let ws = params
