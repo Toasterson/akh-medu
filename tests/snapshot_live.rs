@@ -1153,3 +1153,116 @@ async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
     assert_eq!(predicate_id, predicate.id.get() as i64);
     assert_eq!(canonical_id, canonical.id.get() as i64);
 }
+
+/// WI-359 production regression: a previously committed duplicate repair can
+/// leave no merge work while the relational allocator still trails a surviving
+/// restored symbol. Repair must advance 2826/6558 to 6559 and make wake viable.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn stale_allocator_only_repair_restores_wake_and_is_idempotent() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    run_migrations(&db).await.unwrap();
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    ensure_akh(&db, akh_id, "wi-359-allocator-repair-live", None)
+        .await
+        .unwrap();
+
+    let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+    engine
+        .create_symbol(SymbolKind::Entity, "wi-359-existing")
+        .unwrap();
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .unwrap();
+
+    exec_batch(
+        &db,
+        &format!(
+            "INSERT INTO akhomed_symbols (akh_id,id,kind,glyph_codepoint,label)
+             VALUES ('{akh_id}', 6558, 'Entity', NULL, 'wi-359-restored-max');
+             UPDATE akhomed_akh_state SET allocator_next = 2826
+             WHERE akh_id = '{akh_id}';"
+        ),
+    )
+    .await;
+
+    let blocked_dir = tempfile::tempdir().unwrap();
+    let blocked = wake(blocked_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect_err("ordinary wake must fail closed on the stale allocator");
+    assert!(
+        blocked
+            .to_string()
+            .contains("allocator next ID 2826 collides with restored symbol 6558"),
+        "{blocked}"
+    );
+
+    let dry_run = repair_duplicate_symbols(&db, akh_id, workspace_id, true)
+        .await
+        .unwrap();
+    assert!(!dry_run.applied);
+    assert_eq!(dry_run.plan.duplicate_groups, 0);
+    assert_eq!(dry_run.plan.extra_symbols, 0);
+    assert_eq!(dry_run.plan.allocator.allocator_next_before, 2826);
+    assert_eq!(dry_run.plan.allocator.max_surviving_symbol_id, Some(6558));
+    assert_eq!(dry_run.plan.allocator.required_allocator_next, 6559);
+    assert_eq!(dry_run.plan.allocator.allocator_next_after, 6559);
+    assert!(dry_run.plan.allocator.advanced);
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"
+            ),
+        )
+        .await,
+        2826,
+        "dry-run must not change allocator state",
+    );
+
+    let repaired = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(repaired.applied);
+    assert_eq!(repaired.plan.extra_symbols, 0);
+    assert!(repaired.plan.allocator.advanced);
+    assert_eq!(repaired.plan.allocator.allocator_next_after, 6559);
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"
+            ),
+        )
+        .await,
+        6559,
+    );
+
+    let second = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(!second.applied);
+    assert_eq!(second.plan.extra_symbols, 0);
+    assert!(!second.plan.allocator.advanced);
+    assert_eq!(second.plan.allocator.allocator_next_before, 6559);
+    assert_eq!(second.plan.allocator.allocator_next_after, 6559);
+
+    let wake_dir = tempfile::tempdir().unwrap();
+    let woken = wake(wake_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect("allocator-only repair makes the legacy snapshot hydratable");
+    assert_eq!(
+        woken
+            .create_symbol(SymbolKind::Entity, "wi-359-first-new-symbol")
+            .unwrap()
+            .id
+            .get(),
+        6559,
+    );
+}
