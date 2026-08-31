@@ -2,8 +2,8 @@ name: eval-smoke
 #
 # Phase 42b: non-blocking evaluation smoke test.
 #
-# Runs the LongMemEval 10-session raw subset on every PR, captures the JSON
-# report as an artifact, and emits a delta vs the main-branch baseline.  This
+# Runs the LongMemEval 10-session raw subset on every PR and emits a delta vs
+# the main-branch baseline in the job log.  This
 # job is intentionally non-blocking (continue-on-error: true) because model and
 # pgvector provisioning remain environment-dependent in the shared CI lane.
 #
@@ -67,7 +67,7 @@ jobs:
           DELTA_MD="eval_reports/longmemeval_delta.md"
 
           if [ ! -f "$REPORT" ]; then
-            echo "Report not found at $REPORT" >&2
+            echo "Report not found at $REPORT"
             exit 0
           fi
 
@@ -129,11 +129,3 @@ jobs:
           echo "- This job is non-blocking." >> "$DELTA_MD"
 
           cat "$DELTA_MD"
-
-      - name: Upload eval reports
-        uses: actions/upload-artifact@v4
-        if: always()
-        continue-on-error: true
-        with:
-          name: eval-reports
-          path: eval_reports/
