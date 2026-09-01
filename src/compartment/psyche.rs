@@ -333,6 +333,11 @@ impl Psyche {
     /// (prefixed `blake3:`). Returns `true` when the hash actually changed —
     /// callers persist + re-advertise only on change, and clearing (`None`)
     /// after an avatar was set also counts as a change.
+    ///
+    /// NB: the write-path caller (the avatar-update RPC of ticket 12's slice)
+    /// has not landed yet — until it does, `avatar_hash` stays `None` and
+    /// `avatar_ref` advertises `None` for every akh. Kept intentionally so the
+    /// advertisement read path could ship against its final shape.
     pub fn set_avatar(&mut self, bytes: Option<&[u8]>) -> bool {
         let new_hash = bytes.map(|b| format!("blake3:{}", blake3::hash(b).to_hex()));
         if self.avatar_hash == new_hash {

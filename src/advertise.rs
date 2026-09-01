@@ -83,7 +83,9 @@ pub struct AkhAdvertisement {
     /// Whether the akh is enabled (disabled akhs are advertised but marked).
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Display nickname (mutable, operator-set, display-only).
+    /// Display nickname (display-only, may change freely). Until an
+    /// operator-set nickname surface exists, the daemon populates this from
+    /// the akh's persona name (psyche snapshot) as the stand-in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
     /// Avatar reference — the BLAKE3 hash of the avatar bytes
@@ -269,5 +271,67 @@ mod tests {
         assert!(!q.include_unowned);
         let q: AkhsQuery = serde_json::from_str("{\"include_unowned\": true}").unwrap();
         assert!(q.include_unowned);
+    }
+
+    // ── Golden-fixture conformance guard ─────────────────────────────────
+    //
+    // akh-medu has no proto tooling, so these vendored fixtures are the
+    // conformance oracle for the cross-repo wire contract: the Anima gateway
+    // pipes the envelope field-for-field, and other repos copy the fixtures.
+    // Deserialize each fixture into `AkhsEnvelope` and assert re-serialization
+    // is structurally equal to the fixture — any serde rename, field drift, or
+    // proto3-JSON omission change fails the build.
+
+    /// Round-trip one fixture: parse as wire JSON, deserialize into the typed
+    /// envelope, re-serialize, and require structural equality with the
+    /// original document.
+    fn assert_fixture_round_trip(fixture: &str) {
+        let expected: serde_json::Value =
+            serde_json::from_str(fixture).expect("fixture must be valid JSON");
+        let envelope: AkhsEnvelope =
+            serde_json::from_str(fixture).expect("fixture must conform to AkhsEnvelope");
+        let actual = serde_json::to_value(&envelope).expect("envelope re-serializes");
+        assert_eq!(
+            actual, expected,
+            "wire drift: AkhsEnvelope serde no longer matches the fixture oracle"
+        );
+    }
+
+    #[test]
+    fn fixture_guard_akhs_envelope_empty() {
+        assert_fixture_round_trip(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/akhs_envelope_empty.json"
+        )));
+    }
+
+    #[test]
+    fn fixture_guard_akhs_envelope_v1() {
+        assert_fixture_round_trip(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/akhs_envelope_v1.json"
+        )));
+    }
+
+    #[test]
+    fn fixture_v1_avatar_ref_is_valid_blake3_hex() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/akhs_envelope_v1.json"
+        ));
+        let envelope: AkhsEnvelope = serde_json::from_str(fixture).unwrap();
+        let avatar_ref = envelope
+            .akhs
+            .iter()
+            .find_map(|a| a.avatar_ref.as_deref())
+            .expect("v1 fixture must carry an avatar_ref entry");
+        let hex = avatar_ref
+            .strip_prefix("blake3:")
+            .expect("avatar_ref must be blake3:-prefixed");
+        assert_eq!(hex.len(), 64, "BLAKE3 hex digest is 64 chars: {avatar_ref}");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "avatar_ref must be lowercase hex: {avatar_ref}"
+        );
     }
 }

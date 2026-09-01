@@ -3312,7 +3312,7 @@ impl ServerState {
                 }
                 match wm.info(&name) {
                     Ok(cfg) => {
-                        let mut ad =
+                        let ad =
                             AkhAdvertisement::new(name.clone(), PowerState::Asleep, cfg.enabled);
                         akhs.push(ad);
                     }
@@ -3561,9 +3561,16 @@ impl akh_medu::acp::ServerControl for ServerState {
                 // the gateway pipes field-for-field (ADR-061: akhomed is the only
                 // inbound surface; the gateway never reads akh-pg).
                 "daemon/akhs" => {
-                    let query: akh_medu::advertise::AkhsQuery =
+                    // `params: null` (or omitted) means the default query —
+                    // owned/awake akhs only. Serde can't build a struct from
+                    // Null, so map it onto the default explicitly rather than
+                    // erroring on callers that pass no params at all.
+                    let query: akh_medu::advertise::AkhsQuery = if params.is_null() {
+                        Default::default()
+                    } else {
                         serde_json::from_value(params.clone())
-                            .map_err(|e| format!("invalid daemon/akhs params: {e}"))?;
+                            .map_err(|e| format!("invalid daemon/akhs params: {e}"))?
+                    };
                     let envelope = self.akhs_envelope(&query).await;
                     serde_json::to_value(envelope).map_err(|e| e.to_string())
                 }
@@ -5156,6 +5163,75 @@ mod control_plane_tests {
             res["akhs"].as_array().expect("akhs is an array").len(),
             0,
             "a daemon with no awake agents reports an empty set: {res}"
+        );
+
+        // Envelope shape is exactly {"v": 1, "akhs": [...]} — no extras.
+        let obj = res.as_object().expect("envelope is an object");
+        assert_eq!(obj.len(), 2, "envelope carries only v + akhs: {res}");
+        assert_eq!(res["v"], 1);
+
+        // `params: null` (JSON-RPC params omitted → Value::Null) is the
+        // default query, not an error.
+        let null_res = state
+            .dispatch("_akh/daemon/akhs", &serde_json::Value::Null)
+            .await
+            .expect("daemon/akhs with null params must default, not error");
+        assert_eq!(null_res, res, "null params == default query");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_akhs_include_unowned_enumerates_configured() {
+        use akh_medu::workspace::{WorkspaceConfig, WorkspaceManager};
+
+        let (_tmp, state) = temp_state();
+        let wm = WorkspaceManager::new(state.paths.clone());
+        wm.create(WorkspaceConfig::with_name("cold-one"))
+            .expect("create cold-one");
+        wm.create(WorkspaceConfig::with_name("cold-two"))
+            .expect("create cold-two");
+
+        // Default: owned/awake only — configured-but-cold akhs are hidden.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({}))
+            .await
+            .expect("daemon/akhs ok");
+        assert_eq!(res["akhs"].as_array().unwrap().len(), 0);
+
+        // include_unowned reveals the cold workspaces as POWER_STATE_ASLEEP.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        assert_eq!(akhs.len(), 2, "both cold workspaces advertised: {res}");
+        let names: Vec<&str> = akhs.iter().map(|a| a["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["cold-one", "cold-two"], "sorted by name");
+        for entry in akhs {
+            assert_eq!(entry["power_state"], "POWER_STATE_ASLEEP");
+            assert_eq!(entry["enabled"], true, "enabled defaults true");
+        }
+
+        // A malformed workspace config surfaces as POWER_STATE_ERRORED with
+        // the failure detail (ticket 10: fail-closed), never silently asleep.
+        let broken = state.paths.workspace_config_file("cold-two");
+        std::fs::write(&broken, "name = 7\nthis is not = = valid toml [[[\n")
+            .expect("write broken config");
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        let errored = akhs
+            .iter()
+            .find(|a| a["name"] == "cold-two")
+            .expect("broken workspace still advertised");
+        assert_eq!(errored["power_state"], "POWER_STATE_ERRORED");
+        assert!(
+            errored["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("workspace config load failed"),
+            "errored entry carries the load failure detail: {errored}"
         );
     }
 
