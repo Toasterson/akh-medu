@@ -3252,34 +3252,81 @@ impl ServerState {
         }
     }
 
-    /// The akhs this daemon currently owns + has awake, as JSON
-    /// `[{ name, awake, owned_here, model }]`.
+    /// Build the `_akh/daemon/akhs` envelope from real daemon state.
     ///
-    /// The live in-memory agent set IS this host's owned+awake set: `wake` loads
-    /// an akh's agent here and takes its Postgres advisory lock; `sleep`/
-    /// `relocate` evict the agent and release the lock (so `last_seen` +
-    /// `pg_try_advisory_lock` keep ownership single-writer, 38g). A dynamic akh
-    /// gateway mirrors exactly this set to advertise routing — it must reflect
-    /// what is *awake here*, not what is merely configured on disk. Side-effect
-    /// free: reads caches only, never lazily loads a workspace. The pinned model
-    /// comes from the cached `akh.toml` when known (`null` otherwise).
-    async fn owned_awake_akhs(&self) -> Vec<serde_json::Value> {
-        let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+    /// The live in-memory agent set IS this host's owned+awake set: `wake`
+    /// loads an akh's agent here and takes its Postgres advisory lock;
+    /// `sleep`/`relocate` evict the agent and release the lock (so
+    /// `last_seen` + `pg_try_advisory_lock` keep ownership single-writer,
+    /// 38g). Side-effect free: reads caches + on-disk configs only, never
+    /// lazily opens a workspace engine.
+    ///
+    /// * Owned/awake akhs → `POWER_STATE_AWAKE` (model from cached
+    ///   `akh.toml`, nickname + avatar_ref from the psyche snapshot).
+    /// * `include_unowned: true` additionally enumerates every configured
+    ///   workspace on disk that is not awake: config loads →
+    ///   `POWER_STATE_ASLEEP`; config/parse failure → `POWER_STATE_ERRORED`
+    ///   with the error text (ticket 10: fail-closed akhs are advertised as
+    ///   errored, never silently asleep).
+    /// * `enabled` comes from `WorkspaceConfig.enabled` for both.
+    async fn akhs_envelope(
+        &self,
+        query: &akh_medu::advertise::AkhsQuery,
+    ) -> akh_medu::advertise::AkhsEnvelope {
+        use akh_medu::advertise::{AkhAdvertisement, PowerState};
+
+        let awake_names: Vec<String> = self.agents.read().await.keys().cloned().collect();
         let configs = self.akh_configs.read().await;
-        let mut out: Vec<serde_json::Value> = names
-            .into_iter()
-            .map(|name| {
-                let model = configs.get(&name).and_then(|c| c.model.clone());
-                serde_json::json!({
-                    "name": name,
-                    "awake": true,
-                    "owned_here": true,
-                    "model": model,
-                })
-            })
-            .collect();
-        out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        out
+        let mut akhs: Vec<AkhAdvertisement> = Vec::new();
+
+        // Owned + awake set.
+        for name in &awake_names {
+            let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Awake, true);
+            ad.model = configs.get(name).and_then(|c| c.model.clone());
+            if let Some(psyche) = self
+                .psyche_snapshots
+                .read()
+                .await
+                .get(name)
+                .and_then(|s| s.read().ok().and_then(|g| g.clone()))
+            {
+                ad.nickname = Some(psyche.persona.name.clone());
+                ad.avatar_ref = psyche.avatar_ref().map(str::to_string);
+            }
+            // enabled flag from the on-disk workspace config (best-effort).
+            if let Ok(cfg) = WorkspaceManager::new(self.paths.clone()).info(name) {
+                ad.enabled = cfg.enabled;
+            }
+            akhs.push(ad);
+        }
+        drop(configs);
+
+        // Optionally reveal the unowned / cold-configured akhs.
+        if query.include_unowned {
+            let wm = WorkspaceManager::new(self.paths.clone());
+            let awake: std::collections::HashSet<&str> =
+                awake_names.iter().map(String::as_str).collect();
+            for name in wm.list() {
+                if awake.contains(name.as_str()) {
+                    continue; // already advertised as awake
+                }
+                match wm.info(&name) {
+                    Ok(cfg) => {
+                        let mut ad =
+                            AkhAdvertisement::new(name.clone(), PowerState::Asleep, cfg.enabled);
+                        akhs.push(ad);
+                    }
+                    Err(e) => {
+                        // Fail-closed: advertised as errored with detail.
+                        let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Errored, true);
+                        ad.error = Some(format!("workspace config load failed: {e}"));
+                        akhs.push(ad);
+                    }
+                }
+            }
+        }
+
+        akh_medu::advertise::AkhsEnvelope::new(akhs)
     }
 }
 
@@ -3508,12 +3555,18 @@ impl akh_medu::acp::ServerControl for ServerState {
                     let st = self.daemon_status_snapshot(ws).await;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
-                // The akhs this daemon currently owns + has awake — the live set
-                // an akh gateway mirrors to advertise routing (ADR-061: akhomed is
-                // the only inbound surface; the gateway never reads akh-pg).
-                "daemon/akhs" => Ok(serde_json::json!({
-                    "akhs": self.owned_awake_akhs().await,
-                })),
+                // The akhs this daemon advertises — owned/awake by default,
+                // plus cold/configured when `include_unowned` is set. Serves the
+                // proto3-JSON versioned envelope `{"v": 1, "akhs": [...]}` that
+                // the gateway pipes field-for-field (ADR-061: akhomed is the only
+                // inbound surface; the gateway never reads akh-pg).
+                "daemon/akhs" => {
+                    let query: akh_medu::advertise::AkhsQuery =
+                        serde_json::from_value(params.clone())
+                            .map_err(|e| format!("invalid daemon/akhs params: {e}"))?;
+                    let envelope = self.akhs_envelope(&query).await;
+                    serde_json::to_value(envelope).map_err(|e| e.to_string())
+                }
 
                 // ── config group (global AkhomedConfig) ──────────────────
                 "config/get" => {

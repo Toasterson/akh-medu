@@ -240,6 +240,7 @@ impl Default for Psyche {
             awakened: false,
             ocean: None,
             ennead_role: None,
+            avatar_hash: None,
         }
     }
 }
@@ -324,6 +325,26 @@ impl Psyche {
         }
         self.ennead_role = Some(role.to_string());
         None
+    }
+
+    /// Set the akh's avatar from raw image bytes (bytes-on-change, ticket 12).
+    ///
+    /// Computes the BLAKE3 hash of `bytes` and stores it in `avatar_hash`
+    /// (prefixed `blake3:`). Returns `true` when the hash actually changed —
+    /// callers persist + re-advertise only on change, and clearing (`None`)
+    /// after an avatar was set also counts as a change.
+    pub fn set_avatar(&mut self, bytes: Option<&[u8]>) -> bool {
+        let new_hash = bytes.map(|b| format!("blake3:{}", blake3::hash(b).to_hex()));
+        if self.avatar_hash == new_hash {
+            return false;
+        }
+        self.avatar_hash = new_hash;
+        true
+    }
+
+    /// The avatar reference advertised in the power-state contract.
+    pub fn avatar_ref(&self) -> Option<&str> {
+        self.avatar_hash.as_deref()
     }
 
     /// Returns the name of the highest-weighted archetype.
