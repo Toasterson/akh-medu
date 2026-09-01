@@ -280,6 +280,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
         AgentDef {
@@ -320,6 +321,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
         AgentDef {
@@ -365,6 +367,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
         AgentDef {
@@ -405,6 +408,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
         AgentDef {
@@ -446,6 +450,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
         AgentDef {
@@ -487,6 +492,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                 awakened: true,
                 ocean: None,
                 ennead_role: None,
+                avatar_hash: None,
             },
         },
     ]
