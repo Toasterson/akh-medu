@@ -221,11 +221,19 @@ pub fn train_step<B: AutodiffBackend>(
     let logits = model.forward(batch.input_ids.clone()); // [batch, seq, vocab]
     let masked_loss = masked_cross_entropy(logits, batch.targets.clone(), &mask_tensor);
 
+    // Read the loss BEFORE stepping: a single non-finite batch must not reach
+    // the optimizer, or the Adam moments are poisoned and every later step is
+    // NaN (observed: p350m step 880, healthy ~0.5 loss -> sudden NaN). The
+    // caller decides whether to skip or abort.
+    let loss_value: f32 = masked_loss.clone().into_scalar().elem();
+    if !loss_value.is_finite() {
+        return (model, loss_value);
+    }
+
     let grads = masked_loss.backward();
     let grads = GradientsParams::from_grads(grads, &model);
     let model = optim.step(lr, model, grads);
 
-    let loss_value: f32 = masked_loss.into_scalar().elem();
     (model, loss_value)
 }
 

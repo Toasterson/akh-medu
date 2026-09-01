@@ -380,6 +380,7 @@ fn main() {
 
     let run_start = Instant::now();
     let mut last_loss = f32::NAN;
+    let mut skipped_steps = 0usize;
 
     for step in start_step..total_steps {
         let batch_examples: Vec<RuleExample> = (0..args.batch_size)
@@ -401,14 +402,26 @@ fn main() {
         let (next_model, loss) = train_step(model, &mut optim, &batch, current_lr);
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         model = next_model;
-        last_loss = loss;
+
+        if !loss.is_finite() {
+            // train_step skipped the optimizer update for this batch; the
+            // model is untouched. A handful of poisoned batches in a 40k
+            // deterministic stream is survivable; a flood means something
+            // structural — abort so the run fails loudly.
+            skipped_steps += 1;
+            eprintln!(
+                "train_rule: non-finite loss at step {step} -- batch skipped ({skipped_steps} total)."
+            );
+            if skipped_steps > 50 {
+                eprintln!("train_rule: {skipped_steps} skipped batches -- aborting.");
+                break;
+            }
+        } else {
+            last_loss = loss;
+        }
 
         if step % 10 == 0 || step == total_steps - 1 {
             println!("step {step:6}: loss = {loss:.4} lr = {current_lr:.6} ({step_ms:.1} ms/step)");
-            if loss.is_nan() {
-                eprintln!("train_rule: NaN at step {step} -- aborting.");
-                break;
-            }
         }
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
