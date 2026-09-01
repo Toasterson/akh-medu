@@ -213,6 +213,26 @@ pub fn train_step<B: AutodiffBackend>(
     batch: &Batch<B>,
     lr: f64,
 ) -> (TinyTransformer<B>, f32) {
+    train_step_guarded(model, optim, batch, lr, f32::INFINITY)
+}
+
+/// [`train_step`] with a loss cap: when the batch loss is non-finite OR above
+/// `loss_cap`, the optimizer step is skipped and the model returned untouched.
+///
+/// Why the cap exists (p350m runs 1+2, 2026-09-01): on a task the model has
+/// already floored (~0.5 loss by step 600), warmup keeps raising the LR while
+/// Adam's second moment decays toward zero, so the effective step size grows
+/// until one harder batch spikes the loss (0.5 -> 7.4), a gradient overflows,
+/// and Norm-clipping turns the inf norm into NaN weights in a single update.
+/// Skipping spike batches breaks that chain before weight damage, which
+/// clipping alone demonstrably did not.
+pub fn train_step_guarded<B: AutodiffBackend>(
+    model: TinyTransformer<B>,
+    optim: &mut OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
+    batch: &Batch<B>,
+    lr: f64,
+    loss_cap: f32,
+) -> (TinyTransformer<B>, f32) {
     let device = batch.input_ids.device();
     let mask_flags: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
     let mask_tensor =
@@ -226,7 +246,7 @@ pub fn train_step<B: AutodiffBackend>(
     // NaN (observed: p350m step 880, healthy ~0.5 loss -> sudden NaN). The
     // caller decides whether to skip or abort.
     let loss_value: f32 = masked_loss.clone().into_scalar().elem();
-    if !loss_value.is_finite() {
+    if !loss_value.is_finite() || loss_value > loss_cap {
         return (model, loss_value);
     }
 

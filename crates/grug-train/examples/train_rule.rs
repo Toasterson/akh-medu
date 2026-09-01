@@ -38,7 +38,7 @@ use grug_train::generate::GenerateConfig;
 use grug_train::rule_train::{
     build_rule_batch, encode_rule_example, format_rule_prompt, generate_rule_outputs,
 };
-use grug_train::train::{init_training, to_eval_model, train_step};
+use grug_train::train::{init_training, to_eval_model, train_step_guarded};
 use grug_train::transformer::TinyTransformerConfig;
 use grug_train::{BpeTokenizer, checkpoint};
 
@@ -381,6 +381,7 @@ fn main() {
     let run_start = Instant::now();
     let mut last_loss = f32::NAN;
     let mut skipped_steps = 0usize;
+    let mut loss_ema = f32::NAN;
 
     for step in start_step..total_steps {
         let batch_examples: Vec<RuleExample> = (0..args.batch_size)
@@ -398,26 +399,36 @@ fn main() {
             args.lr_min_ratio,
         );
 
+        // Spike guard: once past the settling-in phase, refuse to step on a
+        // batch whose loss is far above the running EMA — that is the exact
+        // precursor of the run-1/run-2 blowup (converged ~0.5 loss, one spike
+        // to 7.4, inf grads, NaN weights through the norm-clip).
+        let loss_cap = if step > 100 && loss_ema.is_finite() {
+            (loss_ema * 4.0).max(loss_ema + 2.0)
+        } else {
+            f32::INFINITY
+        };
+
         let step_start = Instant::now();
-        let (next_model, loss) = train_step(model, &mut optim, &batch, current_lr);
+        let (next_model, loss) = train_step_guarded(model, &mut optim, &batch, current_lr, loss_cap);
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         model = next_model;
 
-        if !loss.is_finite() {
-            // train_step skipped the optimizer update for this batch; the
-            // model is untouched. A handful of poisoned batches in a 40k
-            // deterministic stream is survivable; a flood means something
-            // structural — abort so the run fails loudly.
+        if !loss.is_finite() || loss > loss_cap {
+            // Optimizer update was skipped; the model is untouched. A few
+            // dozen hard/poisoned batches per epoch are survivable; a flood
+            // means something structural — abort so the run fails loudly.
             skipped_steps += 1;
             eprintln!(
-                "train_rule: non-finite loss at step {step} -- batch skipped ({skipped_steps} total)."
+                "train_rule: loss {loss:.4} vs cap {loss_cap:.4} at step {step} -- batch skipped ({skipped_steps} total)."
             );
-            if skipped_steps > 50 {
+            if skipped_steps > 500 {
                 eprintln!("train_rule: {skipped_steps} skipped batches -- aborting.");
                 break;
             }
         } else {
             last_loss = loss;
+            loss_ema = if loss_ema.is_finite() { 0.98 * loss_ema + 0.02 * loss } else { loss };
         }
 
         if step % 10 == 0 || step == total_steps - 1 {
