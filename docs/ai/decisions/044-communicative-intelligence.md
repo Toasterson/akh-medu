@@ -1,7 +1,7 @@
 # ADR 044 — Communicative Intelligence
 
 > Date: 2026-03-26
-> Status: Proposed
+> Status: Accepted (shipped with Phase 34; agentic-loop exclusion superseded by ADR 099)
 > Phase: 34
 > Depends on: Phase 33 (verbalization tiers), Phase 23 (affective system/psyche)
 > Enhances: Phase 29c (psyche exposure), Phase 12b (grounded dialogue)

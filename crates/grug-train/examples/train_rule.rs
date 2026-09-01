@@ -105,6 +105,14 @@ struct Args {
     batch_size: usize,
     #[arg(long, default_value_t = 3e-4)]
     learning_rate: f64,
+    /// Linear warmup steps (0 = no warmup, i.e. constant/cosine from step 0).
+    #[arg(long, default_value_t = 0)]
+    warmup_steps: usize,
+    /// Cosine decay floor as a fraction of the peak LR (post-warmup). 1.0
+    /// disables decay entirely (LR stays at peak) — combined with
+    /// `--warmup-steps 0` this reproduces the old constant-LR behavior exactly.
+    #[arg(long, default_value_t = 0.1)]
+    lr_min_ratio: f64,
     #[arg(long, default_value_t = 3_000)]
     bpe_vocab_size: usize,
     #[arg(long, default_value_t = 256)]
@@ -145,6 +153,31 @@ fn parse_depths(s: &str, flag: &str) -> Vec<usize> {
                 .unwrap_or_else(|_| panic!("{flag}: not an integer: {t:?}"))
         })
         .collect()
+}
+
+/// Warmup + cosine-decay LR schedule (ADR: "~1e-4 + warmup + cosine" lesson
+/// from the 50M LR-instability run, see `training/README.md#lr-at-scale`).
+///
+/// `warmup_steps == 0 && lr_min_ratio == 1.0` reproduces the old constant-LR
+/// behavior exactly: outside warmup (vacuous when `warmup_steps == 0`) the
+/// decay floor equals the peak, so `peak_lr - min_lr == 0.0` exactly and the
+/// cosine term is multiplied away regardless of its value.
+fn lr_at_step(
+    step: usize,
+    total_steps: usize,
+    peak_lr: f64,
+    warmup_steps: usize,
+    lr_min_ratio: f64,
+) -> f64 {
+    if warmup_steps > 0 && step < warmup_steps {
+        // Linear 0 -> peak, using (step+1)/warmup_steps so the very first
+        // step isn't a wasted LR=0 step.
+        return peak_lr * (step + 1) as f64 / warmup_steps as f64;
+    }
+    let min_lr = peak_lr * lr_min_ratio;
+    let decay_steps = total_steps.saturating_sub(warmup_steps).max(1);
+    let progress = ((step - warmup_steps) as f64 / decay_steps as f64).min(1.0);
+    min_lr + 0.5 * (peak_lr - min_lr) * (1.0 + (std::f64::consts::PI * progress).cos())
 }
 
 fn model_config(name: &str, vocab: usize) -> TinyTransformerConfig {
@@ -336,10 +369,12 @@ fn main() {
     let ckpt_root = args.artifacts_dir.join("checkpoints");
     let total_steps = args.epochs * (args.train_examples / args.batch_size).max(1);
     println!(
-        "train_rule: {total_steps} steps ({} epochs), batch={}, lr={}, eval -> {}",
+        "train_rule: {total_steps} steps ({} epochs), batch={}, lr={} (warmup={}, lr_min_ratio={}), eval -> {}",
         args.epochs,
         args.batch_size,
         args.learning_rate,
+        args.warmup_steps,
+        args.lr_min_ratio,
         eval_log_path.display()
     );
 
@@ -354,14 +389,22 @@ fn main() {
             build_rule_batch::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device)
                 .expect("encoding should not fail on generator output");
 
+        let current_lr = lr_at_step(
+            step,
+            total_steps,
+            args.learning_rate,
+            args.warmup_steps,
+            args.lr_min_ratio,
+        );
+
         let step_start = Instant::now();
-        let (next_model, loss) = train_step(model, &mut optim, &batch, args.learning_rate);
+        let (next_model, loss) = train_step(model, &mut optim, &batch, current_lr);
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         model = next_model;
         last_loss = loss;
 
         if step % 10 == 0 || step == total_steps - 1 {
-            println!("step {step:6}: loss = {loss:.4} ({step_ms:.1} ms/step)");
+            println!("step {step:6}: loss = {loss:.4} lr = {current_lr:.6} ({step_ms:.1} ms/step)");
             if loss.is_nan() {
                 eprintln!("train_rule: NaN at step {step} -- aborting.");
                 break;

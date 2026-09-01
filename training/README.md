@@ -38,7 +38,7 @@ Model checkpoints and raw logs live in `runs/` (gitignored — they're GBs).
 
 ```bash
 git clone https://code.aopc.cloud/toasterson/akh-medu.git
-cd akh-medu && git checkout develop
+cd akh-medu && git checkout main
 bash training/scripts/setup-cuda.sh      # verifies toolchain + builds the CUDA binaries
 bash training/scripts/run-350m.sh        # detached, resumable; writes runs/ + training/results/
 bash training/scripts/status.sh p350m    # honest live status any time

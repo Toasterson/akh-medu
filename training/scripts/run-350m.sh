@@ -64,6 +64,7 @@ setsid nohup "$BIN" \
     --train-depths "$TRAIN_DEPTHS" --eval-depths "$EVAL_DEPTHS" \
     --train-examples "$TRAIN_EXAMPLES" --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" --learning-rate "$LR" \
+    --warmup-steps "${WARMUP_STEPS:-0}" --lr-min-ratio "${LR_MIN_RATIO:-0.1}" \
     --bpe-vocab-size "$BPE_VOCAB_SIZE" --holdout-examples "$HOLDOUT" \
     --max-seq-len "$MAX_SEQ_LEN" \
     --eval-every "$EVAL_EVERY" --ckpt-every "$CKPT_EVERY" \
