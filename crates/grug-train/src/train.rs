@@ -14,7 +14,7 @@
 //! the model is trained to *generate* the call, not to reproduce the prompt
 //! it was given.
 
-use burn::module::AutodiffModule;
+use burn::module::{AutodiffModule, Module, ModuleVisitor, Param};
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
@@ -213,26 +213,42 @@ pub fn train_step<B: AutodiffBackend>(
     batch: &Batch<B>,
     lr: f64,
 ) -> (TinyTransformer<B>, f32) {
-    train_step_guarded(model, optim, batch, lr, f32::INFINITY)
+    let (model, loss, _grad_norm) =
+        train_step_guarded(model, optim, batch, lr, f32::INFINITY, f32::INFINITY);
+    (model, loss)
 }
 
-/// [`train_step`] with a loss cap: when the batch loss is non-finite OR above
-/// `loss_cap`, the optimizer step is skipped and the model returned untouched.
+/// [`train_step`] with a loss cap and a grad-norm cap: when the batch loss is
+/// non-finite OR above `loss_cap`, OR the pre-clip global grad norm is
+/// non-finite OR above `grad_norm_cap`, the optimizer step is skipped and the
+/// model returned untouched. Returns `(model, loss, grad_norm)`; `grad_norm`
+/// is `f32::NAN` when the loss gate skipped before backward() ran (grad norm
+/// was never computed).
 ///
-/// Why the cap exists (p350m runs 1+2, 2026-09-01): on a task the model has
-/// already floored (~0.5 loss by step 600), warmup keeps raising the LR while
-/// Adam's second moment decays toward zero, so the effective step size grows
-/// until one harder batch spikes the loss (0.5 -> 7.4), a gradient overflows,
-/// and Norm-clipping turns the inf norm into NaN weights in a single update.
-/// Skipping spike batches breaks that chain before weight damage, which
-/// clipping alone demonstrably did not.
+/// Why the loss cap exists (p350m runs 1+2, 2026-09-01): on a task the model
+/// has already floored (~0.5 loss by step 600), warmup keeps raising the LR
+/// while Adam's second moment decays toward zero, so the effective step size
+/// grows until one harder batch spikes the loss (0.5 -> 7.4), a gradient
+/// overflows, and Norm-clipping turns the inf norm into NaN weights in a
+/// single update. Skipping spike batches breaks that chain before weight
+/// damage, which clipping alone demonstrably did not.
+///
+/// Why the grad-norm cap also exists: `init_training`'s `Norm(1.0)` clipping
+/// operates per parameter tensor, not globally, so it can still divide an
+/// individual tensor's inf norm into NaN weights even when the *loss* looks
+/// fine that step. The literature on loss spikes (and the run-1/run-2
+/// blowups) shows the pre-clip grad-norm spike foreshocks the loss spike by a
+/// few steps -- gating on the norm directly, before it ever reaches
+/// `optim.step`, is a strictly earlier and cheaper signal than waiting for
+/// loss to move.
 pub fn train_step_guarded<B: AutodiffBackend>(
     model: TinyTransformer<B>,
     optim: &mut OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
     batch: &Batch<B>,
     lr: f64,
     loss_cap: f32,
-) -> (TinyTransformer<B>, f32) {
+    grad_norm_cap: f32,
+) -> (TinyTransformer<B>, f32, f32) {
     let device = batch.input_ids.device();
     let mask_flags: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
     let mask_tensor =
@@ -247,14 +263,53 @@ pub fn train_step_guarded<B: AutodiffBackend>(
     // caller decides whether to skip or abort.
     let loss_value: f32 = masked_loss.clone().into_scalar().elem();
     if !loss_value.is_finite() || loss_value > loss_cap {
-        return (model, loss_value);
+        return (model, loss_value, f32::NAN);
     }
 
     let grads = masked_loss.backward();
     let grads = GradientsParams::from_grads(grads, &model);
+
+    // Pre-clip global L2 grad norm -- see the doc comment above for why this
+    // is gated separately from the loss.
+    let grad_norm = global_grad_norm(&grads, &model);
+    if !grad_norm.is_finite() || grad_norm > grad_norm_cap {
+        return (model, loss_value, grad_norm);
+    }
+
     let model = optim.step(lr, model, grads);
 
-    (model, loss_value)
+    (model, loss_value, grad_norm)
+}
+
+/// Global (whole-model) pre-clip L2 grad norm: `sqrt(sum of squares)` over
+/// every registered gradient tensor in `grads`, restricted to `model`'s
+/// parameters. Walks the model via [`ModuleVisitor`] (the same mechanism
+/// [`GradientsParams::from_grads`] uses internally) so it works for any
+/// module shape without hardcoding layer names.
+fn global_grad_norm<B: AutodiffBackend>(grads: &GradientsParams, model: &TinyTransformer<B>) -> f32 {
+    struct NormVisitor<'a, B: AutodiffBackend> {
+        grads: &'a GradientsParams,
+        sum_sq: f32,
+        _backend: std::marker::PhantomData<B>,
+    }
+
+    impl<B: AutodiffBackend> ModuleVisitor<B> for NormVisitor<'_, B> {
+        fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
+            let Some(grad) = self.grads.get::<B::InnerBackend, D>(param.id) else {
+                return;
+            };
+            let sq_sum: f32 = grad.powf_scalar(2.0).sum().into_scalar().elem();
+            self.sum_sq += sq_sum;
+        }
+    }
+
+    let mut visitor = NormVisitor::<B> {
+        grads,
+        sum_sq: 0.0,
+        _backend: std::marker::PhantomData,
+    };
+    model.visit(&mut visitor);
+    visitor.sum_sq.sqrt()
 }
 
 /// Cross-entropy over `logits` ([batch, seq, vocab]) vs `targets` ([batch,

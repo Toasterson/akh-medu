@@ -382,6 +382,7 @@ fn main() {
     let mut last_loss = f32::NAN;
     let mut skipped_steps = 0usize;
     let mut loss_ema = f32::NAN;
+    let mut grad_norm_ema = f32::NAN;
 
     for step in start_step..total_steps {
         let batch_examples: Vec<RuleExample> = (0..args.batch_size)
@@ -408,19 +409,30 @@ fn main() {
         } else {
             f32::INFINITY
         };
+        // Grad-norm gate: the literature (and the run-1/run-2 blowups) puts
+        // the pre-clip grad-norm spike a few steps *ahead* of the loss spike,
+        // so this is an earlier trip-wire than `loss_cap` alone, catching the
+        // per-tensor Norm(1.0) clip's inf/NaN failure mode directly.
+        let grad_cap = if step > 100 && grad_norm_ema.is_finite() {
+            (grad_norm_ema * 5.0).max(grad_norm_ema + 1.0)
+        } else {
+            f32::INFINITY
+        };
 
         let step_start = Instant::now();
-        let (next_model, loss) = train_step_guarded(model, &mut optim, &batch, current_lr, loss_cap);
+        let (next_model, loss, grad_norm) =
+            train_step_guarded(model, &mut optim, &batch, current_lr, loss_cap, grad_cap);
         let step_ms = step_start.elapsed().as_secs_f64() * 1000.0;
         model = next_model;
 
-        if !loss.is_finite() || loss > loss_cap {
+        let grad_skip = !grad_norm.is_finite() || grad_norm > grad_cap;
+        if !loss.is_finite() || loss > loss_cap || grad_skip {
             // Optimizer update was skipped; the model is untouched. A few
             // dozen hard/poisoned batches per epoch are survivable; a flood
             // means something structural — abort so the run fails loudly.
             skipped_steps += 1;
             eprintln!(
-                "train_rule: loss {loss:.4} vs cap {loss_cap:.4} at step {step} -- batch skipped ({skipped_steps} total)."
+                "train_rule: loss {loss:.4} vs cap {loss_cap:.4} gnorm = {grad_norm:.3} vs cap {grad_cap:.3} at step {step} -- batch skipped ({skipped_steps} total)."
             );
             if skipped_steps > 500 {
                 eprintln!("train_rule: {skipped_steps} skipped batches -- aborting.");
@@ -429,10 +441,17 @@ fn main() {
         } else {
             last_loss = loss;
             loss_ema = if loss_ema.is_finite() { 0.98 * loss_ema + 0.02 * loss } else { loss };
+            grad_norm_ema = if grad_norm_ema.is_finite() {
+                0.98 * grad_norm_ema + 0.02 * grad_norm
+            } else {
+                grad_norm
+            };
         }
 
         if step % 10 == 0 || step == total_steps - 1 {
-            println!("step {step:6}: loss = {loss:.4} lr = {current_lr:.6} ({step_ms:.1} ms/step)");
+            println!(
+                "step {step:6}: loss = {loss:.4} lr = {current_lr:.6} gnorm = {grad_norm:.3} ({step_ms:.1} ms/step)"
+            );
         }
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
