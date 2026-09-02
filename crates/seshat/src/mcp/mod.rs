@@ -252,10 +252,13 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        // WI-326: server span + bounded request/duration metrics.
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_search").entered();
+        // WI-326: server span + bounded request/duration metrics. Attach the
+        // span via `Instrument` rather than `.entered()` — `EnteredSpan` is not
+        // `Send`, and the rmcp `#[tool]` macro boxes each handler as a `Send`
+        // future, so holding an entered guard across `.await` would not compile.
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_search");
         let start = std::time::Instant::now();
-        let result = self.seshat_search_impl(params).await;
+        let result = tracing::Instrument::instrument(self.seshat_search_impl(params), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,
@@ -305,9 +308,9 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<WishParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_wish").entered();
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_wish");
         let start = std::time::Instant::now();
-        let result = self.seshat_wish_impl(params).await;
+        let result = tracing::Instrument::instrument(self.seshat_wish_impl(params), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,
@@ -379,9 +382,9 @@ impl SeshatMcpServer {
         description = "Get Seshat archive status: document count, chunk count, embedding progress, and cache statistics."
     )]
     async fn seshat_status(&self) -> Result<CallToolResult, McpError> {
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_status").entered();
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_status");
         let start = std::time::Instant::now();
-        let result = self.seshat_status_impl().await;
+        let result = tracing::Instrument::instrument(self.seshat_status_impl(), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,
@@ -427,9 +430,9 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<DocumentsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_documents").entered();
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_documents");
         let start = std::time::Instant::now();
-        let result = self.seshat_documents_impl(params).await;
+        let result = tracing::Instrument::instrument(self.seshat_documents_impl(params), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,
@@ -480,9 +483,9 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<IngestParams>,
     ) -> Result<CallToolResult, McpError> {
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_ingest").entered();
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_ingest");
         let start = std::time::Instant::now();
-        let result = self.seshat_ingest_impl(params).await;
+        let result = tracing::Instrument::instrument(self.seshat_ingest_impl(params), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,
@@ -533,9 +536,9 @@ impl SeshatMcpServer {
         description = "Force the embedding worker to process all pending chunks immediately. Returns the count of newly embedded chunks."
     )]
     async fn seshat_embed_now(&self) -> Result<CallToolResult, McpError> {
-        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_embed_now").entered();
+        let span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_embed_now");
         let start = std::time::Instant::now();
-        let result = self.seshat_embed_now_impl().await;
+        let result = tracing::Instrument::instrument(self.seshat_embed_now_impl(), span).await;
         #[cfg(feature = "tracing-otel")]
         emit_tool_metrics(
             &self.state.metrics,

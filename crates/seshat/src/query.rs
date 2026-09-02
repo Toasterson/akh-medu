@@ -46,6 +46,7 @@ pub async fn search_similar(
     query_embedding: &[f32],
     top_k: usize,
     min_similarity: f32,
+    #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
 ) -> SeshatResult<Vec<RetrievedChunk>> {
     search_similar_filtered(
         db,
@@ -53,6 +54,8 @@ pub async fn search_similar(
         top_k,
         min_similarity,
         &SearchFilters::default(),
+        #[cfg(feature = "tracing-otel")]
+        metrics,
     )
     .await
 }
@@ -66,10 +69,27 @@ pub async fn search_similar_filtered(
     top_k: usize,
     min_similarity: f32,
     filters: &SearchFilters,
+    #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
 ) -> SeshatResult<Vec<RetrievedChunk>> {
+    #[cfg(feature = "tracing-otel")]
+    let span = tracing::info_span!("seshat.pgvector_search", top_k, min_similarity);
+    #[cfg(feature = "tracing-otel")]
+    let start = std::time::Instant::now();
     let embedding_str = vec_to_pgvector(query_embedding);
     let statement = build_search_statement(&embedding_str, top_k, min_similarity, filters);
-    let results = RetrievedChunk::find_by_statement(statement).all(db).await?;
+    let query = RetrievedChunk::find_by_statement(statement);
+    let query_fut = query.all(db);
+    #[cfg(feature = "tracing-otel")]
+    let results = tracing::Instrument::instrument(query_fut, span).await;
+    #[cfg(not(feature = "tracing-otel"))]
+    let results = query_fut.await;
+
+    // Record latency before propagating a database error.
+    #[cfg(feature = "tracing-otel")]
+    if let Some(metrics) = metrics {
+        metrics.record_pgvector_search(start.elapsed().as_secs_f64());
+    }
+    let results = results?;
 
     Ok(results)
 }
@@ -226,7 +246,11 @@ mod tests {
             outcome: Some("Completed".to_string()),
         };
 
-        let hits = search_similar_filtered(&db, &[0.1, 0.2], 5, 0.3, &filters)
+        let hits = search_similar_filtered(
+            &db, &[0.1, 0.2], 5, 0.3, &filters,
+            #[cfg(feature = "tracing-otel")]
+            None,
+        )
             .await
             .expect("filtered transcript search should succeed");
 

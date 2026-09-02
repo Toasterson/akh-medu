@@ -29,6 +29,9 @@ pub async fn run_embed_worker(
     db: Arc<DatabaseConnection>,
     embedder: SharedEmbedder,
     config: EmbeddingConfig,
+    /// Optional metrics handle (`tracing-otel` builds only); `None` makes the
+    /// per-tick emission a no-op.
+    #[cfg(feature = "tracing-otel")] metrics: Option<std::sync::Arc<crate::metrics::SeshatMetrics>>,
 ) {
     let interval = Duration::from_secs(config.poll_interval_secs);
     let batch_size = config.batch_size;
@@ -41,7 +44,23 @@ pub async fn run_embed_worker(
     );
 
     loop {
-        match embed_pending_batch(&db, &embedder, batch_size, &model_name).await {
+        // One tick of the worker: spans the batch (including the blocking
+        // embed call, which re-enters this span's context across the
+        // `spawn_blocking` hop).
+        let tick_span = tracing::info_span!("seshat.embed_worker.tick");
+        let tick_result = {
+            let _tick = tick_span.entered();
+            embed_pending_batch(
+                &db,
+                &embedder,
+                batch_size,
+                &model_name,
+                #[cfg(feature = "tracing-otel")]
+                metrics.as_deref(),
+            )
+            .await
+        };
+        match tick_result {
             Ok(stats) => {
                 if stats.chunks_processed > 0 {
                     tracing::info!(
@@ -65,12 +84,23 @@ pub async fn run_embed_worker(
 }
 
 /// Process one batch of unembedded chunks.
+///
+/// WI-326: records `seshat_embed_batch_duration_seconds` / batch / chunks
+/// counters per invocation, and captures `tracing::Span::current()` before
+/// `spawn_blocking`, re-entering it inside the blocking closure so the
+/// ONNX-inference span context stays stitched to the caller (worker tick or
+/// `seshat_embed_now`) trace.
 pub async fn embed_pending_batch(
     db: &DatabaseConnection,
     embedder: &SharedEmbedder,
     batch_size: usize,
     model_name: &str,
+    /// Optional metrics handle (`tracing-otel` builds only).
+    #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
 ) -> SeshatResult<EmbedStats> {
+    #[cfg(feature = "tracing-otel")]
+    let batch_start = std::time::Instant::now();
+
     // Find unembedded chunks.
     let pending_chunks: Vec<pa_chunk::Model> = Chunk::find()
         .filter(ChunkCol::EmbeddedAt.is_null())
@@ -82,6 +112,11 @@ pub async fn embed_pending_batch(
         .collect();
 
     if pending_chunks.is_empty() {
+        // Empty tick still counts as a batch iteration (0 chunks processed).
+        #[cfg(feature = "tracing-otel")]
+        if let Some(m) = metrics {
+            m.record_embed_batch(batch_start.elapsed().as_secs_f64(), 0);
+        }
         return Ok(EmbedStats::default());
     }
 
@@ -91,9 +126,19 @@ pub async fn embed_pending_batch(
     let texts: Vec<&str> = pending_chunks.iter().map(|c| c.text.as_str()).collect();
 
     // Run embedding (blocking ONNX inference in a spawn_blocking task).
+    //
+    // WI-326 trace-stitching: capture the *current* span (the worker-tick or
+    // tool-call span) and re-enter it inside the blocking closure. A plain
+    // `spawn_blocking` runs on a separate blocking thread that is NOT running
+    // the async future's span context, so without the explicit capture +
+    // re-enter the ONNX call would be detached from the tick trace. The guard
+    // is a `EnteredRef`-style borrow (Send-safe here because the blocking
+    // closure never `.await`s).
     let embedder_clone = Arc::clone(embedder);
     let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
+    let blocking_span = tracing::Span::current();
     let embeddings = tokio::task::spawn_blocking(move || {
+        let _entered = blocking_span.entered();
         let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
         let mut guard = embedder_clone
             .lock()
@@ -137,10 +182,19 @@ pub async fn embed_pending_batch(
         chunk_active.update(db).await?;
     }
 
-    Ok(EmbedStats {
+    let stats = EmbedStats {
         chunks_processed: chunk_count,
         embeddings_created,
-    })
+    };
+
+    // WI-326: record the full-tick batch duration + chunks processed on the
+    // success leg.
+    #[cfg(feature = "tracing-otel")]
+    if let Some(m) = metrics {
+        m.record_embed_batch(batch_start.elapsed().as_secs_f64(), stats.chunks_processed as u64);
+    }
+
+    Ok(stats)
 }
 
 /// Count chunks waiting to be embedded.
