@@ -79,6 +79,14 @@ async fn main() -> miette::Result<()> {
 
     let db = Arc::new(db);
 
+    // WI-326: build the typed instrument registry once and share it. When
+    // OTLP export is unconfigured the meter is the SDK no-op, so emission is
+    // a cheap no-op rather than a permanently absent handle.
+    #[cfg(feature = "tracing-otel")]
+    let metrics = Arc::new(seshat::metrics::SeshatMetrics::new(
+        seshat::observability::global_meter("seshd"),
+    ));
+
     // Load embedding model (if feature enabled).
     #[cfg(feature = "embedding")]
     let embedder = {

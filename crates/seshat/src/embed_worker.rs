@@ -25,12 +25,13 @@ pub struct EmbedStats {
 
 /// Run the embed worker loop. This function runs forever, polling for
 /// unembedded chunks at the configured interval.
+///
+/// `metrics` (`tracing-otel` builds only) is the WI-326 emission handle;
+/// `None` makes the per-tick emission a no-op.
 pub async fn run_embed_worker(
     db: Arc<DatabaseConnection>,
     embedder: SharedEmbedder,
     config: EmbeddingConfig,
-    /// Optional metrics handle (`tracing-otel` builds only); `None` makes the
-    /// per-tick emission a no-op.
     #[cfg(feature = "tracing-otel")] metrics: Option<std::sync::Arc<crate::metrics::SeshatMetrics>>,
 ) {
     let interval = Duration::from_secs(config.poll_interval_secs);
@@ -90,12 +91,16 @@ pub async fn run_embed_worker(
 /// `spawn_blocking`, re-entering it inside the blocking closure so the
 /// ONNX-inference span context stays stitched to the caller (worker tick or
 /// `seshat_embed_now`) trace.
+/// WI-326 trace-stitching and `metrics` handling are described at the call
+/// site: the closure captures `tracing::Span::current()` before
+/// `spawn_blocking` and re-enters it inside the blocking work; `metrics`
+/// (`tracing-otel` builds only) receives one `record_embed_batch` per
+/// invocation, on both empty and populated ticks.
 pub async fn embed_pending_batch(
     db: &DatabaseConnection,
     embedder: &SharedEmbedder,
     batch_size: usize,
     model_name: &str,
-    /// Optional metrics handle (`tracing-otel` builds only).
     #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
 ) -> SeshatResult<EmbedStats> {
     #[cfg(feature = "tracing-otel")]
