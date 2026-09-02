@@ -13,6 +13,17 @@
 //! cargo run -p grug-train --example score_rule_jsonl -- \
 //!     --outputs /tmp/rule_eval_outputs.jsonl --n 64 --label base-qwen3-0.6b
 //! ```
+//!
+//! v2 addition — **lenient answer-only scoring**: alongside the strict
+//! `select/bind/fire/chain` replayer (which requires the *entire* trace to
+//! parse as valid DSL), also report `answer_lenient`: scan the raw output for
+//! the LAST occurrence of any token from the corpus's own closed answer
+//! vocabulary (`grug_data::GrugTruth::ALL`'s `surface()`s — `"yes"`/`"no"`/
+//! `"gap"`, whatever the format module defines, matched whole-word and
+//! case-insensitively) anywhere in the text, not just inside a well-formed
+//! `call answer | value X` line. This isolates "did the model land on the
+//! right yes/no/gap conclusion" from "did it also speak perfect trace DSL" —
+//! the axis v1 couldn't tell apart when both components were strict-zero.
 
 use std::collections::HashMap;
 use std::io::BufRead as _;
@@ -20,8 +31,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use grug_data::{
-    RuleCorpusConfig, RuleDataset, RuleEvalSummary, RuleExample, RuleWorldConfig, TraceArm,
-    score_rule_outputs,
+    GrugTruth, RuleCorpusConfig, RuleDataset, RuleEvalSummary, RuleExample, RuleWorldConfig,
+    TraceArm, score_rule_outputs,
 };
 
 #[derive(Parser, Debug)]
@@ -63,6 +74,39 @@ struct Args {
     /// "white-belt-v0", "checkpoint-0000400").
     #[arg(long, default_value = "")]
     label: String,
+}
+
+/// Scan `output` for the LAST whole-word, case-insensitive occurrence of any
+/// [`GrugTruth::ALL`] surface (`"yes"`/`"no"`/`"gap"` per the format module —
+/// not hardcoded here beyond that closed set) and return it, or `None` if the
+/// vocabulary never appears. "Whole-word" = tokens split on ASCII
+/// non-alphanumeric boundaries, so e.g. "cannot" doesn't spuriously match
+/// "no".
+fn lenient_answer(output: &str) -> Option<GrugTruth> {
+    let mut found = None;
+    for tok in output.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if tok.is_empty() {
+            continue;
+        }
+        let lower = tok.to_ascii_lowercase();
+        if let Some(t) = GrugTruth::ALL.iter().copied().find(|t| t.surface() == lower) {
+            found = Some(t);
+        }
+    }
+    found
+}
+
+/// Lenient answer-only accuracy over one axis: fraction of examples whose
+/// `lenient_answer` (over the whole raw output) matches `gold_answer`.
+fn lenient_axis_accuracy(examples: &[RuleExample], outputs: &[String]) -> (f64, usize) {
+    let n = examples.len().min(outputs.len());
+    if n == 0 {
+        return (0.0, 0);
+    }
+    let correct = (0..n)
+        .filter(|&i| lenient_answer(&outputs[i]) == Some(examples[i].gold_answer))
+        .count();
+    (correct as f64 / n as f64, n)
 }
 
 fn parse_depths(s: &str, flag: &str) -> Vec<usize> {
@@ -125,7 +169,7 @@ fn main() {
     );
 
     let mut missing = 0usize;
-    let mut score_axis = |axis: &str, examples: &[RuleExample]| -> RuleEvalSummary {
+    let mut score_axis = |axis: &str, examples: &[RuleExample]| -> (RuleEvalSummary, f64, usize) {
         let outputs: Vec<String> = (0..examples.len())
             .map(|i| {
                 let id = format!("{axis}_{i:03}");
@@ -138,7 +182,9 @@ fn main() {
                 }
             })
             .collect();
-        score_rule_outputs(examples, &outputs)
+        let summary = score_rule_outputs(examples, &outputs);
+        let (lenient_acc, lenient_n) = lenient_axis_accuracy(examples, &outputs);
+        (summary, lenient_acc, lenient_n)
     };
 
     println!(
@@ -147,11 +193,16 @@ fn main() {
         args.outputs.display()
     );
 
-    let in_summary = score_axis("in_dist", &in_dist);
-    print_summary_table("in-distribution", &in_summary);
+    let (in_summary, in_lenient, in_lenient_n) = score_axis("in_dist", &in_dist);
+    print_summary_table("in-distribution", &in_summary, in_lenient, in_lenient_n);
 
-    let len_summary = score_axis("len_gen", &len_gen);
-    print_summary_table("length-generalization", &len_summary);
+    let (len_summary, len_lenient, len_lenient_n) = score_axis("len_gen", &len_gen);
+    print_summary_table(
+        "length-generalization",
+        &len_summary,
+        len_lenient,
+        len_lenient_n,
+    );
 
     if missing > 0 {
         eprintln!(
@@ -165,8 +216,8 @@ fn main() {
             "outputs_file": args.outputs.display().to_string(),
             "n_per_axis": args.n,
             "missing_outputs": missing,
-            "in_distribution": summary_to_json(&in_summary),
-            "length_generalization": summary_to_json(&len_summary),
+            "in_distribution": summary_to_json(&in_summary, in_lenient, in_lenient_n),
+            "length_generalization": summary_to_json(&len_summary, len_lenient, len_lenient_n),
         });
         std::fs::write(out, serde_json::to_string_pretty(&summary_json).unwrap())
             .unwrap_or_else(|e| panic!("can't write --summary-out {}: {e}", out.display()));
@@ -174,11 +225,11 @@ fn main() {
     }
 }
 
-fn print_summary_table(label: &str, s: &RuleEvalSummary) {
+fn print_summary_table(label: &str, s: &RuleEvalSummary, lenient_acc: f64, lenient_n: usize) {
     let c = &s.components;
     println!(
-        "\n{label:<24}: n={} ans={:.3} exec={:.3} valid={:.3}",
-        s.n, s.answer_accuracy, s.executability_rate, s.trace_valid_rate
+        "\n{label:<24}: n={} ans={:.3} exec={:.3} valid={:.3} ans_lenient={:.3} (n={})",
+        s.n, s.answer_accuracy, s.executability_rate, s.trace_valid_rate, lenient_acc, lenient_n
     );
     println!(
         "  components           : select={:.3} bind={:.3} fire={:.3} chain={:.3} (fires={}, chain_expected={})",
@@ -195,7 +246,7 @@ fn print_summary_table(label: &str, s: &RuleEvalSummary) {
     }
 }
 
-fn summary_to_json(s: &RuleEvalSummary) -> serde_json::Value {
+fn summary_to_json(s: &RuleEvalSummary, lenient_acc: f64, lenient_n: usize) -> serde_json::Value {
     let per_depth: serde_json::Map<String, serde_json::Value> = s
         .per_depth
         .iter()
@@ -213,6 +264,8 @@ fn summary_to_json(s: &RuleEvalSummary) -> serde_json::Value {
     serde_json::json!({
         "n": s.n,
         "answer_accuracy": s.answer_accuracy,
+        "answer_lenient": lenient_acc,
+        "answer_lenient_n": lenient_n,
         "executability_rate": s.executability_rate,
         "trace_valid_rate": s.trace_valid_rate,
         "components": {
