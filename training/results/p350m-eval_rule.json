@@ -1,0 +1,63 @@
+{
+  "checkpoint_step": 28000,
+  "in_distribution": {
+    "answer_accuracy": 0.927734375,
+    "components": {
+      "bind_rate": 1.0,
+      "chain_expected_total": 261,
+      "chain_rate": 0.9348659003831418,
+      "fire_rate": 1.0,
+      "fire_total": 905,
+      "select_rate": 1.0
+    },
+    "executability_rate": 0.991970486111112,
+    "n": 512,
+    "per_depth": {
+      "2": {
+        "answer_accuracy": 1.0,
+        "executability_rate": 1.0,
+        "n": 152
+      },
+      "3": {
+        "answer_accuracy": 1.0,
+        "executability_rate": 1.0,
+        "n": 179
+      },
+      "4": {
+        "answer_accuracy": 0.7955801104972375,
+        "executability_rate": 0.9772866789441369,
+        "n": 181
+      }
+    },
+    "trace_valid_rate": 0.927734375
+  },
+  "length_generalization": {
+    "answer_accuracy": 0.494140625,
+    "components": {
+      "bind_rate": 1.0,
+      "chain_expected_total": 263,
+      "chain_rate": 0.0,
+      "fire_rate": 0.13459801264679314,
+      "fire_total": 1107,
+      "select_rate": 0.4245709123757904
+    },
+    "executability_rate": 0.327698722718254,
+    "n": 512,
+    "per_depth": {
+      "5": {
+        "answer_accuracy": 0.4448818897637795,
+        "executability_rate": 0.36878358955130613,
+        "n": 254
+      },
+      "6": {
+        "answer_accuracy": 0.5426356589147286,
+        "executability_rate": 0.2872508305647842,
+        "n": 258
+      }
+    },
+    "trace_valid_rate": 0.076171875
+  },
+  "logic": "rule",
+  "model": "p1a_350m",
+  "typed_slots": true
+}

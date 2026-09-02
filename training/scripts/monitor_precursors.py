@@ -97,7 +97,13 @@ if r_mean > b_mean * 3.0:
     crits.append(f"loss escaping {b_mean:.3f}->{r_mean:.3f}")
 if skips >= 3:
     warns.append(f"{skips} guard skips in tail window")
-if skips >= 10:
+# Skip pressure alone is the guards *working* (storms are expected on a
+# converged plateau, per AEoS); it is only CRITICAL when the loss/gnorm
+# health signals are ALSO degrading, or the burst is huge.
+skip_crit_floor = 30
+if skips >= 10 and (crits or any("drifting" in w or "variance" in w for w in warns)):
+    crits.append(f"skip pressure {skips} with degrading health signals")
+elif skips >= skip_crit_floor:
     crits.append(f"skip pressure {skips} in tail window")
 
 # Grad-norm precursor (optional -- backward compatible with logs that predate
@@ -117,14 +123,33 @@ if raw_gnorms:
     if g_recent_finite:
         g_recent_max = max(g_recent_finite)
 
-    if any_nonfinite_recent:
-        crits.append("non-finite gnorm in tail window")
+    nonfinite_recent = len(g_recent) - len(g_recent_finite)
+    if nonfinite_recent >= 3:
+        # A lone gated batch is the guard working; a cluster of non-finite
+        # norms in the freshest window means an active storm right now.
+        crits.append(f"{nonfinite_recent} non-finite gnorms in recent window")
+    elif any_nonfinite_recent:
+        warns.append("non-finite gnorm in recent window (gated batch)")
     elif g_median is not None and g_recent_max is not None and g_median > 1e-9:
         ratio = g_recent_max / g_median
         if ratio > 8.0:
             crits.append(f"gnorm blow-up x{ratio:.1f} vs tail median ({g_recent_max:.3f} vs {g_median:.3f})")
         elif ratio > 3.0:
             warns.append(f"gnorm x{ratio:.1f} vs tail median ({g_recent_max:.3f} vs {g_median:.3f})")
+
+# Storm-resolution check: if the freshest 3 losses are back at the baseline
+# level, any variance/escape anomaly in the window describes a storm the
+# guards already absorbed — report it, but don't page the operator at 3am.
+last5 = fl[-5:]
+healthy_floor = median(fl) if fl else 0.0
+storm_resolved = (
+    len(last5) == 5
+    and fl[-1] < max(healthy_floor * 2.0, healthy_floor + 0.1)
+    and median(last5) < max(healthy_floor * 2.0, healthy_floor + 0.1)
+)
+if storm_resolved and crits:
+    warns.extend(f"resolved-storm: {c}" for c in crits)
+    crits = []
 
 lr_rising = len(lrs) >= 2 and lrs[-1] > lrs[0]
 phase = "warmup(LR rising)" if lr_rising else "decay"
