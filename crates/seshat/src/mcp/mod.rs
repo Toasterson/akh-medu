@@ -21,10 +21,18 @@ use crate::embedder::SharedEmbedder;
 #[cfg(not(feature = "embedding"))]
 pub type SharedEmbedder = std::convert::Infallible;
 
+/// Metric registry handle, present only in `tracing-otel` builds.
+#[cfg(feature = "tracing-otel")]
+type MetricsHandle = std::sync::Arc<crate::metrics::SeshatMetrics>;
+
 /// Shared state for MCP tool handlers.
 pub struct SeshatMcpState {
     pub db: Arc<DatabaseConnection>,
     pub embedder: Option<SharedEmbedder>,
+    /// WI-326: emission sink for tool-call metrics. `None` when observability
+    /// is compiled out or not configured; call sites are no-ops in that case.
+    #[cfg(feature = "tracing-otel")]
+    pub metrics: Option<MetricsHandle>,
 }
 
 /// MCP server exposing Seshat's Archive tools.
@@ -161,6 +169,40 @@ pub struct IngestResult {
 
 // ── MCP Server implementation ───────────────────────────────────────────
 
+/// Map an `McpError` to a bounded `error_kind` label value. Only static
+/// strings from `labels::error_kind` are ever returned — no message text or
+/// request data becomes a label.
+#[cfg(feature = "tracing-otel")]
+fn classify_error(err: &McpError) -> &'static str {
+    use crate::metrics::labels::error_kind;
+    match err.code {
+        ErrorCode::INVALID_PARAMS | ErrorCode::INVALID_REQUEST => error_kind::VALIDATION,
+        ErrorCode::RESOURCE_NOT_FOUND => error_kind::NOT_FOUND,
+        ErrorCode::INTERNAL_ERROR => error_kind::INTERNAL,
+        _ => error_kind::INTERNAL,
+    }
+}
+
+/// Record the outcome of one tool call: span lifetime already closed by the
+/// caller; here we emit duration + request/error counters. No-op when the
+/// metrics handle is absent (non-OTLP builds).
+#[cfg(feature = "tracing-otel")]
+fn emit_tool_metrics(
+    metrics: &Option<MetricsHandle>,
+    tool: &'static str,
+    start: std::time::Instant,
+    result: &Result<CallToolResult, McpError>,
+) {
+    if let Some(m) = metrics {
+        use crate::metrics::labels::status;
+        let (status, error_kind) = match result {
+            Ok(_) => (status::OK, None),
+            Err(e) => (status::ERROR, Some(classify_error(e))),
+        };
+        m.record_tool_call(tool, status, start.elapsed().as_secs_f64(), error_kind);
+    }
+}
+
 #[tool_router]
 impl SeshatMcpServer {
     pub fn new(state: Arc<SeshatMcpState>) -> Self {
@@ -210,6 +252,24 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        // WI-326: server span + bounded request/duration metrics.
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_search").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_search_impl(params).await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::SEARCH,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_search_impl(
+        &self,
+        params: SearchParams,
+    ) -> Result<CallToolResult, McpError> {
         // Embed the query.
         let query_embedding = self.embed_query(params.query.clone()).await?;
 
@@ -225,6 +285,8 @@ impl SeshatMcpServer {
             params.top_k,
             params.min_similarity,
             &filters,
+            #[cfg(feature = "tracing-otel")]
+            self.state.metrics.as_deref(),
         )
         .await
         .map_err(|e| McpError::internal_error(format!("search: {e}"), None))?;
@@ -243,6 +305,20 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<WishParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_wish").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_wish_impl(params).await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::WISH,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_wish_impl(&self, params: WishParams) -> Result<CallToolResult, McpError> {
         // Check cache first (unless force_refresh).
         if !params.force_refresh {
             if let Some(cached) = self.check_cache(&params.query).await? {
@@ -253,9 +329,16 @@ impl SeshatMcpServer {
         // Embed query and search.
         let query_embedding = self.embed_query(params.query.clone()).await?;
 
-        let chunks = crate::query::search_similar(&self.state.db, &query_embedding, 10, 0.3)
-            .await
-            .map_err(|e| McpError::internal_error(format!("search: {e}"), None))?;
+        let chunks = crate::query::search_similar(
+            &self.state.db,
+            &query_embedding,
+            10,
+            0.3,
+            #[cfg(feature = "tracing-otel")]
+            self.state.metrics.as_deref(),
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("search: {e}"), None))?;
 
         if chunks.is_empty() {
             return Err(McpError::internal_error(
@@ -296,6 +379,20 @@ impl SeshatMcpServer {
         description = "Get Seshat archive status: document count, chunk count, embedding progress, and cache statistics."
     )]
     async fn seshat_status(&self) -> Result<CallToolResult, McpError> {
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_status").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_status_impl().await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::STATUS,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_status_impl(&self) -> Result<CallToolResult, McpError> {
         let total_documents = crate::query::count_documents(&self.state.db)
             .await
             .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
@@ -329,6 +426,23 @@ impl SeshatMcpServer {
     async fn seshat_documents(
         &self,
         Parameters(params): Parameters<DocumentsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_documents").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_documents_impl(params).await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::DOCUMENTS,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_documents_impl(
+        &self,
+        params: DocumentsParams,
     ) -> Result<CallToolResult, McpError> {
         use crate::entity::pa_document::Entity as Document;
         use sea_orm::{EntityTrait, QueryOrder, QuerySelect};
@@ -366,6 +480,23 @@ impl SeshatMcpServer {
         &self,
         Parameters(params): Parameters<IngestParams>,
     ) -> Result<CallToolResult, McpError> {
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_ingest").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_ingest_impl(params).await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::INGEST,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_ingest_impl(
+        &self,
+        params: IngestParams,
+    ) -> Result<CallToolResult, McpError> {
         let req = crate::ingest::IngestRequest {
             title: params.title,
             slug: params.slug,
@@ -402,6 +533,20 @@ impl SeshatMcpServer {
         description = "Force the embedding worker to process all pending chunks immediately. Returns the count of newly embedded chunks."
     )]
     async fn seshat_embed_now(&self) -> Result<CallToolResult, McpError> {
+        let _span = tracing::info_span!("seshat.mcp.tool", tool = "seshat_embed_now").entered();
+        let start = std::time::Instant::now();
+        let result = self.seshat_embed_now_impl().await;
+        #[cfg(feature = "tracing-otel")]
+        emit_tool_metrics(
+            &self.state.metrics,
+            crate::metrics::labels::tool::EMBED_NOW,
+            start,
+            &result,
+        );
+        result
+    }
+
+    async fn seshat_embed_now_impl(&self) -> Result<CallToolResult, McpError> {
         #[cfg(not(feature = "embedding"))]
         {
             Err(McpError::internal_error(
@@ -422,6 +567,8 @@ impl SeshatMcpServer {
                 embedder,
                 256, // larger batch for manual trigger
                 "all-MiniLM-L6-v2",
+                #[cfg(feature = "tracing-otel")]
+                self.state.metrics.as_deref(),
             )
             .await
             .map_err(|e| McpError::internal_error(format!("embed: {e}"), None))?;
