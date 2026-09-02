@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "akhs": [
+    {
+      "name": "maahes",
+      "power_state": "POWER_STATE_ERRORED",
+      "enabled": true,
+      "error": "workspace config load failed: toml parse error at line 3, column 5: invalid string"
+    },
+    {
+      "name": "ptah",
+      "model": "qwen3:8b",
+      "power_state": "POWER_STATE_AWAKE",
+      "enabled": true,
+      "nickname": "The Builder",
+      "avatar_ref": "blake3:36c5b666dc29b94f278b98b916b3d3d0b430a384d40e6bf4dcab8d6071c438fe"
+    },
+    {
+      "name": "sherlock",
+      "model": "llama3.1:70b",
+      "power_state": "POWER_STATE_ASLEEP",
+      "enabled": false
+    }
+  ]
+}

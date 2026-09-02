@@ -3252,34 +3252,81 @@ impl ServerState {
         }
     }
 
-    /// The akhs this daemon currently owns + has awake, as JSON
-    /// `[{ name, awake, owned_here, model }]`.
+    /// Build the `_akh/daemon/akhs` envelope from real daemon state.
     ///
-    /// The live in-memory agent set IS this host's owned+awake set: `wake` loads
-    /// an akh's agent here and takes its Postgres advisory lock; `sleep`/
-    /// `relocate` evict the agent and release the lock (so `last_seen` +
-    /// `pg_try_advisory_lock` keep ownership single-writer, 38g). A dynamic akh
-    /// gateway mirrors exactly this set to advertise routing — it must reflect
-    /// what is *awake here*, not what is merely configured on disk. Side-effect
-    /// free: reads caches only, never lazily loads a workspace. The pinned model
-    /// comes from the cached `akh.toml` when known (`null` otherwise).
-    async fn owned_awake_akhs(&self) -> Vec<serde_json::Value> {
-        let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+    /// The live in-memory agent set IS this host's owned+awake set: `wake`
+    /// loads an akh's agent here and takes its Postgres advisory lock;
+    /// `sleep`/`relocate` evict the agent and release the lock (so
+    /// `last_seen` + `pg_try_advisory_lock` keep ownership single-writer,
+    /// 38g). Side-effect free: reads caches + on-disk configs only, never
+    /// lazily opens a workspace engine.
+    ///
+    /// * Owned/awake akhs → `POWER_STATE_AWAKE` (model from cached
+    ///   `akh.toml`, nickname + avatar_ref from the psyche snapshot).
+    /// * `include_unowned: true` additionally enumerates every configured
+    ///   workspace on disk that is not awake: config loads →
+    ///   `POWER_STATE_ASLEEP`; config/parse failure → `POWER_STATE_ERRORED`
+    ///   with the error text (ticket 10: fail-closed akhs are advertised as
+    ///   errored, never silently asleep).
+    /// * `enabled` comes from `WorkspaceConfig.enabled` for both.
+    async fn akhs_envelope(
+        &self,
+        query: &akh_medu::advertise::AkhsQuery,
+    ) -> akh_medu::advertise::AkhsEnvelope {
+        use akh_medu::advertise::{AkhAdvertisement, PowerState};
+
+        let awake_names: Vec<String> = self.agents.read().await.keys().cloned().collect();
         let configs = self.akh_configs.read().await;
-        let mut out: Vec<serde_json::Value> = names
-            .into_iter()
-            .map(|name| {
-                let model = configs.get(&name).and_then(|c| c.model.clone());
-                serde_json::json!({
-                    "name": name,
-                    "awake": true,
-                    "owned_here": true,
-                    "model": model,
-                })
-            })
-            .collect();
-        out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        out
+        let mut akhs: Vec<AkhAdvertisement> = Vec::new();
+
+        // Owned + awake set.
+        for name in &awake_names {
+            let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Awake, true);
+            ad.model = configs.get(name).and_then(|c| c.model.clone());
+            if let Some(psyche) = self
+                .psyche_snapshots
+                .read()
+                .await
+                .get(name)
+                .and_then(|s| s.read().ok().and_then(|g| g.clone()))
+            {
+                ad.nickname = Some(psyche.persona.name.clone());
+                ad.avatar_ref = psyche.avatar_ref().map(str::to_string);
+            }
+            // enabled flag from the on-disk workspace config (best-effort).
+            if let Ok(cfg) = WorkspaceManager::new(self.paths.clone()).info(name) {
+                ad.enabled = cfg.enabled;
+            }
+            akhs.push(ad);
+        }
+        drop(configs);
+
+        // Optionally reveal the unowned / cold-configured akhs.
+        if query.include_unowned {
+            let wm = WorkspaceManager::new(self.paths.clone());
+            let awake: std::collections::HashSet<&str> =
+                awake_names.iter().map(String::as_str).collect();
+            for name in wm.list() {
+                if awake.contains(name.as_str()) {
+                    continue; // already advertised as awake
+                }
+                match wm.info(&name) {
+                    Ok(cfg) => {
+                        let ad =
+                            AkhAdvertisement::new(name.clone(), PowerState::Asleep, cfg.enabled);
+                        akhs.push(ad);
+                    }
+                    Err(e) => {
+                        // Fail-closed: advertised as errored with detail.
+                        let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Errored, true);
+                        ad.error = Some(format!("workspace config load failed: {e}"));
+                        akhs.push(ad);
+                    }
+                }
+            }
+        }
+
+        akh_medu::advertise::AkhsEnvelope::new(akhs)
     }
 }
 
@@ -3508,12 +3555,25 @@ impl akh_medu::acp::ServerControl for ServerState {
                     let st = self.daemon_status_snapshot(ws).await;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
-                // The akhs this daemon currently owns + has awake — the live set
-                // an akh gateway mirrors to advertise routing (ADR-061: akhomed is
-                // the only inbound surface; the gateway never reads akh-pg).
-                "daemon/akhs" => Ok(serde_json::json!({
-                    "akhs": self.owned_awake_akhs().await,
-                })),
+                // The akhs this daemon advertises — owned/awake by default,
+                // plus cold/configured when `include_unowned` is set. Serves the
+                // proto3-JSON versioned envelope `{"v": 1, "akhs": [...]}` that
+                // the gateway pipes field-for-field (ADR-061: akhomed is the only
+                // inbound surface; the gateway never reads akh-pg).
+                "daemon/akhs" => {
+                    // `params: null` (or omitted) means the default query —
+                    // owned/awake akhs only. Serde can't build a struct from
+                    // Null, so map it onto the default explicitly rather than
+                    // erroring on callers that pass no params at all.
+                    let query: akh_medu::advertise::AkhsQuery = if params.is_null() {
+                        Default::default()
+                    } else {
+                        serde_json::from_value(params.clone())
+                            .map_err(|e| format!("invalid daemon/akhs params: {e}"))?
+                    };
+                    let envelope = self.akhs_envelope(&query).await;
+                    serde_json::to_value(envelope).map_err(|e| e.to_string())
+                }
 
                 // ── config group (global AkhomedConfig) ──────────────────
                 "config/get" => {
@@ -5103,6 +5163,75 @@ mod control_plane_tests {
             res["akhs"].as_array().expect("akhs is an array").len(),
             0,
             "a daemon with no awake agents reports an empty set: {res}"
+        );
+
+        // Envelope shape is exactly {"v": 1, "akhs": [...]} — no extras.
+        let obj = res.as_object().expect("envelope is an object");
+        assert_eq!(obj.len(), 2, "envelope carries only v + akhs: {res}");
+        assert_eq!(res["v"], 1);
+
+        // `params: null` (JSON-RPC params omitted → Value::Null) is the
+        // default query, not an error.
+        let null_res = state
+            .dispatch("_akh/daemon/akhs", &serde_json::Value::Null)
+            .await
+            .expect("daemon/akhs with null params must default, not error");
+        assert_eq!(null_res, res, "null params == default query");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_akhs_include_unowned_enumerates_configured() {
+        use akh_medu::workspace::{WorkspaceConfig, WorkspaceManager};
+
+        let (_tmp, state) = temp_state();
+        let wm = WorkspaceManager::new(state.paths.clone());
+        wm.create(WorkspaceConfig::with_name("cold-one"))
+            .expect("create cold-one");
+        wm.create(WorkspaceConfig::with_name("cold-two"))
+            .expect("create cold-two");
+
+        // Default: owned/awake only — configured-but-cold akhs are hidden.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({}))
+            .await
+            .expect("daemon/akhs ok");
+        assert_eq!(res["akhs"].as_array().unwrap().len(), 0);
+
+        // include_unowned reveals the cold workspaces as POWER_STATE_ASLEEP.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        assert_eq!(akhs.len(), 2, "both cold workspaces advertised: {res}");
+        let names: Vec<&str> = akhs.iter().map(|a| a["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["cold-one", "cold-two"], "sorted by name");
+        for entry in akhs {
+            assert_eq!(entry["power_state"], "POWER_STATE_ASLEEP");
+            assert_eq!(entry["enabled"], true, "enabled defaults true");
+        }
+
+        // A malformed workspace config surfaces as POWER_STATE_ERRORED with
+        // the failure detail (ticket 10: fail-closed), never silently asleep.
+        let broken = state.paths.workspace_config_file("cold-two");
+        std::fs::write(&broken, "name = 7\nthis is not = = valid toml [[[\n")
+            .expect("write broken config");
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        let errored = akhs
+            .iter()
+            .find(|a| a["name"] == "cold-two")
+            .expect("broken workspace still advertised");
+        assert_eq!(errored["power_state"], "POWER_STATE_ERRORED");
+        assert!(
+            errored["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("workspace config load failed"),
+            "errored entry carries the load failure detail: {errored}"
         );
     }
 

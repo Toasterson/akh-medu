@@ -158,6 +158,10 @@ pub struct WorkspaceConfig {
     /// Shared partition names to mount.
     #[serde(default)]
     pub shared_partitions: Vec<String>,
+    /// Whether this akh is enabled. Disabled akhs are advertised but marked
+    /// as disabled in the power-state contract (Wave R3).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 fn default_dimension() -> usize {
@@ -185,6 +189,10 @@ fn default_seed_packs() -> Vec<String> {
     ]
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
 fn default_max_triples() -> u64 {
     DEFAULT_MAX_TRIPLES
 }
@@ -210,6 +218,7 @@ impl Default for WorkspaceConfig {
                 "architecture".into(),
             ],
             shared_partitions: Vec::new(),
+            enabled: default_enabled(),
         }
     }
 }

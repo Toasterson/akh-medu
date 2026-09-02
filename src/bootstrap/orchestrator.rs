@@ -1077,6 +1077,7 @@ mod tests {
             awakened: false,
             ocean: None,
             ennead_role: None,
+            avatar_hash: None,
         }
     }
 }
