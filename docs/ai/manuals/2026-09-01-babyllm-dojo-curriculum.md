@@ -233,7 +233,46 @@ four-field, always:
    permanently engine-side for in-akh deployment (ADR 099 pattern); possibly
    both, as a config.
 
+## 9. The High Grug arm and the shared-library architecture (added 2026-09-02)
+
+Requirement (Till): the kata — and all character training — must be
+expressible in High Grug, and the organs must compose like shared libraries.
+
+**Kata in High Grug.** The lineage record is already trace-shaped:
+`situation → why_this_move → move → observed_effect` maps one-to-one onto a
+High Grug internal monologue (read the pressure → name the kata and voice →
+choose the door → act → note the effect). Training pattern: **hidden HG
+trace, surface move in the person's language**. Consequences:
+- Kata are learned once, language-neutrally; en/de/fr (and anything else)
+  are surface realizations of the same trained move — the no-hardcoded-
+  language rule enforced by architecture, not by corpus mixing ratios.
+- Character decisions become inspectable: the HG trace states voice, kata,
+  and reason in a register the engine can parse back into the KG
+  (provenance for the shadow journal).
+- The corpus converter gains an HG arm: same records, assistant target =
+  HG trace + surface move (mirrors the P2 trace-arm discipline).
+
+**Shared-library composition.** Three realizations, in adoption order:
+1. **Adapters as `.so`** (now): one language-speaking trunk + small LoRA
+   adapters per organ (deduction, kata/character, tool syntax). The ADR 099
+   engine-side captain is the linker — symbolic selection of which adapter
+   loads per situation ("the LLM never picks the library"). First instance:
+   `white-belt-v0` on a borrowed Qwen3-0.6B trunk (`training/character/`).
+2. **HG as IPC** (with 1): organs, whether adapters or separate tiny
+   models, exchange High Grug — shared *spec*, not shared weights.
+3. **Crew-of-8 as expert mixture** (Brown belt+): adapter-per-voice with a
+   trained captain; reduces to (1) plus routing.
+
+**The ABI is the tokenizer.** The P4 plan's "definitive 8–32k tokenizer"
+must cover High Grug + surface languages; every organ links against it.
+Treat changes to it like syscall-interface changes: versioned, never casual.
+The own-trunk milestone is the P4 full-mixture run (FineWeb-Edu +
+FineWeb2-HQ deu_Latn + apertus-pretrain-swiss), unlocked by gate 5
+(`training/results/p350m-RESULT.md`); until then the borrowed trunk carries
+the adapters.
+
 ---
 
 *v0.1 — structure for discussion. Nothing here reproduces lineage-specific
-content; the tradition's material enters only if and as Till chooses.*
+content; the tradition's material enters only if and as Till chooses.
+§9 added 2026-09-02 after the P4 gate-5 result.*

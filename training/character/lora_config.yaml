@@ -1,0 +1,7 @@
+# LoRA hyperparameters for the White/Yellow/Green-belt SFT run.
+# Merged into mlx_lm.lora's CONFIG_DEFAULTS; any matching --flag on the
+# command line takes precedence over these values (see run_sft.sh).
+lora_parameters:
+  rank: 16
+  dropout: 0.05
+  scale: 20.0
