@@ -83,6 +83,13 @@ enum Commands {
         config_path: Option<PathBuf>,
     },
 
+    /// Run the MCP server (/health + /akh/{akh_id}/mcp) alongside the embed
+    /// worker. Ctrl-C drains the listener and stops the worker loop.
+    Serve {
+        /// Path to heka.toml (defaults to ~/.config/heka/heka.toml).
+        config_path: Option<PathBuf>,
+    },
+
     /// Explicitly repair verified drawers written by the rejected 000002
     /// sha256(title) backfill. No automatic timestamp inference is performed.
     RepairLegacyTitleHashes {
@@ -119,6 +126,7 @@ async fn main() -> miette::Result<()> {
         Commands::SetToken { name, config_path } => run_set_token(&name, config_path).await,
         Commands::Eval { command } => heka::eval::run(&command).await,
         Commands::Embed { config_path } => run_embed(config_path).await,
+        Commands::Serve { config_path } => run_serve(config_path).await,
         Commands::RepairLegacyTitleHashes {
             drawer_ids,
             config_path,
@@ -342,6 +350,134 @@ async fn run_embed(_config_path: Option<PathBuf>) -> miette::Result<()> {
         "the embed worker requires the `embedding` feature; rebuild hekad with default features"
     ))
 }
+
+/// Load ONNX model + embedder for `serve`. Without the `embedding` feature
+/// the server still runs — MCP tools and /health do not embed; the backlog
+/// then waits for a feature-enabled embed worker process.
+#[cfg(feature = "embedding")]
+fn load_shared_embedder(config: &HekaConfig) -> miette::Result<heka::embedder::SharedEmbedder> {
+    let model_dir = config.model_dir();
+    let model_name = &config.embedding.model;
+    let resolved = resolve_model_dir(&model_dir, model_name)
+        .wrap_err_with(|| format!("resolving embedding model '{model_name}'"))?;
+
+    tracing::info!(model = model_name, dir = %resolved.display(), "loading ONNX model");
+    let embedder = SentenceEmbedder::load(&resolved).wrap_err("loading ONNX embedding model")?;
+    Ok(heka::embedder::SharedEmbedder::new(embedder))
+}
+
+/// Run the HTTP MCP surface and the embed worker in the same process.
+///
+/// Ctrl-C (SIGINT) triggers one shutdown signal consumed by both halves:
+/// `heka::serve::serve` stops accepting connections and drains in-flight MCP
+/// sessions, and the embed worker loop exits after its current batch — no
+/// half-finished batch transaction is orphaned.
+async fn run_serve(config_path: Option<PathBuf>) -> miette::Result<()> {
+    let config_path = config_path.unwrap_or_else(default_config_path);
+    let config = HekaConfig::from_file(&config_path)
+        .wrap_err_with(|| format!("loading config from {}", config_path.display()))?;
+
+    let db = Arc::new(
+        connect_database(&config.database.url, config.database.max_connections)
+            .await
+            .into_diagnostic()
+            .wrap_err("connecting to PostgreSQL")?,
+    );
+
+    let bind_addr: std::net::SocketAddr = config
+        .server
+        .bind
+        .parse()
+        .into_diagnostic()
+        .wrap_err_with(|| format!("invalid server.bind address '{}'", config.server.bind))?;
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .into_diagnostic()
+        .wrap_err_with(|| format!("binding TCP listener on {bind_addr}"))?;
+
+    // One shutdown trigger shared by HTTP drain and the worker loop.
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received — draining HTTP and stopping the embed worker");
+    };
+    let (worker_stop_tx, worker_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = shutdown.then(|()| async move {
+        let _ = worker_stop_tx.send(());
+    });
+    tokio::pin!(shutdown);
+
+    // Embed worker alongside the server: drains when the stop signal fires.
+    // The worker polls every ~1s minimum between batches, so worst-case
+    // shutdown latency is one batch + one poll interval.
+    let (worker_done_tx, worker_done_rx) = tokio::sync::oneshot::channel::<()>();
+    #[cfg(feature = "embedding")]
+    {
+        let embedder = load_shared_embedder(&config)?;
+        let worker_db = Arc::clone(&db);
+        let poll_secs = config.embedding.poll_interval_secs.max(1);
+        let batch_size = config.embedding.batch_size;
+        let model_name = config.embedding.model.clone();
+        tokio::spawn(async move {
+            let interval = std::time::Duration::from_secs(poll_secs);
+            let mut stop = std::pin::pin!(worker_stop_rx);
+            tracing::info!(
+                batch_size,
+                poll_secs,
+                "heka embed worker started (serve mode)"
+            );
+            loop {
+                match heka::embed_worker::embed_pending_batch(
+                    &worker_db,
+                    &embedder,
+                    batch_size,
+                    &model_name,
+                )
+                .await
+                {
+                    Ok(stats) => {
+                        if stats.chunks_processed > 0 {
+                            tracing::info!(
+                                chunks = stats.chunks_processed,
+                                embeddings = stats.embeddings_created,
+                                "heka embed batch complete"
+                            );
+                        }
+                    }
+                    Err(error) => tracing::error!(%error, "heka embed worker error"),
+                }
+                if tokio::time::timeout(interval, &mut stop).await.is_ok() {
+                    break;
+                }
+            }
+            tracing::info!("heka embed worker drained");
+            let _ = worker_done_tx.send(());
+        });
+    }
+    #[cfg(not(feature = "embedding"))]
+    {
+        tracing::warn!(
+            "hekad built without the `embedding` feature — serve runs MCP + health only; \
+             start a feature-enabled embed worker separately to drain the backlog"
+        );
+        drop(worker_stop_rx);
+        tokio::spawn(async move {
+            let _ = worker_done_tx.send(());
+        });
+    }
+
+    tracing::info!(bind = %bind_addr, "hekad serve listening (/health + /akh/{{akh_id}}/mcp)");
+    let serve_result = heka::serve::serve(listener, Arc::clone(&db), shutdown).await;
+
+    // Listener is drained and closed; wait for the worker drain so process
+    // exit never abandons an open batch transaction.
+    let _ = worker_done_rx.await;
+    tracing::info!("hekad serve shutdown complete");
+
+    serve_result
+        .into_diagnostic()
+        .wrap_err("serving hekad MCP surface")
+}
+
 
 #[cfg(test)]
 mod tests {

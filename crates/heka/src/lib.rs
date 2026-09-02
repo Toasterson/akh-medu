@@ -35,6 +35,7 @@ pub mod eval;
 pub mod ingest;
 pub mod mcp;
 pub mod migration;
+pub mod serve;
 
 pub use config::HekaConfig;
 pub use error::{HekaError, HekaResult};
