@@ -109,6 +109,7 @@ pub mod tool;
 pub mod trajectory;
 pub mod tool_execution_tracker;
 pub mod tool_graph;
+pub mod turn_telemetry;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
