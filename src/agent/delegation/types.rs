@@ -124,7 +124,8 @@ impl Default for RemoteDelegationConfig {
 pub struct PeerDelegationConfig {
     /// Whether peer delegation is enabled.
     pub enabled: bool,
-    /// Explicit peer endpoint URLs (e.g. "http://research-akh.local:3001").
+    /// Explicit peer ACP addresses (`host:port` for a TCP peer, an absolute
+    /// socket path or `unix:<path>` for a same-host peer).
     pub endpoints: Vec<String>,
     /// Whether to attempt auto-discovery via mDNS (future feature).
     pub auto_discover: bool,
