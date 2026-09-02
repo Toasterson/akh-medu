@@ -45,12 +45,14 @@ pub async fn run_embed_worker(
     );
 
     loop {
-        // One tick of the worker: spans the batch (including the blocking
-        // embed call, which re-enters this span's context across the
-        // `spawn_blocking` hop).
+        // One tick of the worker: spans the whole batch, including the
+        // blocking embed call. Attach the tick span to the *future* via
+        // `Instrument::instrument` rather than holding `span.entered()`
+        // across the `.await` — `EnteredSpan` is `!Send`, and the future is
+        // spawned by `tokio::spawn` at the call site, so a held guard would
+        // make `run_embed_worker`'s future non-`Send` and fail to compile.
         let tick_span = tracing::info_span!("seshat.embed_worker.tick");
-        let tick_result = {
-            let _tick = tick_span.entered();
+        let tick_result = tracing::Instrument::instrument(
             embed_pending_batch(
                 &db,
                 &embedder,
@@ -58,9 +60,10 @@ pub async fn run_embed_worker(
                 &model_name,
                 #[cfg(feature = "tracing-otel")]
                 metrics.as_deref(),
-            )
-            .await
-        };
+            ),
+            tick_span,
+        )
+        .await;
         match tick_result {
             Ok(stats) => {
                 if stats.chunks_processed > 0 {
@@ -87,15 +90,14 @@ pub async fn run_embed_worker(
 /// Process one batch of unembedded chunks.
 ///
 /// WI-326: records `seshat_embed_batch_duration_seconds` / batch / chunks
-/// counters per invocation, and captures `tracing::Span::current()` before
-/// `spawn_blocking`, re-entering it inside the blocking closure so the
-/// ONNX-inference span context stays stitched to the caller (worker tick or
-/// `seshat_embed_now`) trace.
-/// WI-326 trace-stitching and `metrics` handling are described at the call
-/// site: the closure captures `tracing::Span::current()` before
-/// `spawn_blocking` and re-enters it inside the blocking work; `metrics`
-/// (`tracing-otel` builds only) receives one `record_embed_batch` per
-/// invocation, on both empty and populated ticks.
+/// counters per invocation via `record_embed_batch`, on both empty and
+/// populated ticks (`metrics` is `tracing-otel` builds only).
+///
+/// Trace-stitching: the caller (worker tick or `seshat_embed_now`) attaches
+/// its span to this future via `Instrument::instrument`; the closure below
+/// then captures `tracing::Span::current()` before `spawn_blocking` and
+/// explicitly re-enters it inside the blocking work so the ONNX-inference
+/// span context stays parented to the tick trace.
 pub async fn embed_pending_batch(
     db: &DatabaseConnection,
     embedder: &SharedEmbedder,
@@ -136,9 +138,11 @@ pub async fn embed_pending_batch(
     // tool-call span) and re-enter it inside the blocking closure. A plain
     // `spawn_blocking` runs on a separate blocking thread that is NOT running
     // the async future's span context, so without the explicit capture +
-    // re-enter the ONNX call would be detached from the tick trace. The guard
-    // is a `EnteredRef`-style borrow (Send-safe here because the blocking
-    // closure never `.await`s).
+    // re-enter the ONNX call would be detached from the tick trace.
+    // `blocking_span.entered()` consumes `Span` and returns an
+    // `EnteredSpan` (a `!Send` guard) — sound here only because the guard
+    // lives entirely inside the blocking closure and is dropped before it
+    // returns; the closure itself never `.await`s.
     let embedder_clone = Arc::clone(embedder);
     let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
     let blocking_span = tracing::Span::current();

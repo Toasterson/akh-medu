@@ -606,6 +606,12 @@ impl SeshatMcpServer {
             .map_err(|e| McpError::internal_error(format!("cache query: {e}"), None))?;
 
         if let Some(entry) = cached {
+            // WI-326: bounded cache-hit metric. Recorded before the access-
+            // stats update so a failure there never loses the hit signal.
+            #[cfg(feature = "tracing-otel")]
+            if let Some(m) = &self.state.metrics {
+                m.record_cache_lookup(crate::metrics::labels::result::HIT);
+            }
             // Update access stats.
             let mut active: crate::entity::pa_microtheory_cache::ActiveModel = entry.clone().into();
             active.access_count = Set(entry.access_count + 1);
@@ -623,8 +629,22 @@ impl SeshatMcpServer {
                 .map_err(|e| McpError::internal_error(format!("serialize: {e}"), None))?;
             Ok(Some(json))
         } else {
+            // WI-326: bounded cache-miss metric.
+            #[cfg(feature = "tracing-otel")]
+            if let Some(m) = &self.state.metrics {
+                m.record_cache_lookup(crate::metrics::labels::result::MISS);
+            }
             Ok(None)
         }
+    }
+
+    /// Test seam for WI-326: drive `check_cache` from the unit tests
+    /// (crate-private otherwise). Behaviour is identical; this simply widens
+    /// visibility to `pub(crate)` so unit tests can exercise the hit/miss
+    /// metric emission.
+    #[doc(hidden)]
+    pub(crate) async fn check_cache_for_test(&self, query: &str) -> Result<Option<String>, McpError> {
+        self.check_cache(query).await
     }
 }
 

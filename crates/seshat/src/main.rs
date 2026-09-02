@@ -118,8 +118,20 @@ async fn main() -> miette::Result<()> {
         let db_clone = Arc::clone(&db);
         let emb_clone = Arc::clone(emb);
         let embed_config = config.embedding.clone();
+        // WI-326: wire the shared metrics registry into the worker so every
+        // tick emits `record_embed_batch`. `None`-safe: the worker treats a
+        // missing handle as a no-op.
+        #[cfg(feature = "tracing-otel")]
+        let metrics_clone = Some(Arc::clone(&metrics));
         tokio::spawn(async move {
-            seshat::embed_worker::run_embed_worker(db_clone, emb_clone, embed_config).await;
+            seshat::embed_worker::run_embed_worker(
+                db_clone,
+                emb_clone,
+                embed_config,
+                #[cfg(feature = "tracing-otel")]
+                metrics_clone,
+            )
+            .await;
         });
         tracing::info!("embedding worker started");
     }
@@ -128,6 +140,9 @@ async fn main() -> miette::Result<()> {
     let state = Arc::new(SeshatMcpState {
         db: Arc::clone(&db),
         embedder,
+        // WI-326: same registry handle feeds the MCP tool-call metrics.
+        #[cfg(feature = "tracing-otel")]
+        metrics: Some(metrics),
     });
 
     let mcp_server = SeshatMcpServer::new(state);

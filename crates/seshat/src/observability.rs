@@ -86,6 +86,18 @@ pub fn init_observability(service_name: &'static str) -> ObservabilityShutdown {
     }
 }
 
+/// Return a meter from the process-global provider.
+///
+/// WI-326: seshd installs the meter provider globally in `init_otel`
+/// (`opentelemetry::global::set_meter_provider`); this accessor lets the
+/// binary and any consumer build the typed registry without threading the
+/// provider through every call site. Outside an OTLP-configured runtime the
+/// global provider is the SDK no-op, so instruments are cheap no-ops.
+#[cfg(feature = "tracing-otel")]
+pub fn global_meter(name: &'static str) -> opentelemetry::metrics::Meter {
+    opentelemetry::global::meter(name)
+}
+
 /// Backwards-compatible alias for the tracing-only era.
 #[deprecated(since = "0.1.1", note = "use init_observability instead")]
 pub fn init_tracing(service_name: &'static str) -> ObservabilityShutdown {
