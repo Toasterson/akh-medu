@@ -61,9 +61,17 @@ pub fn router(db: Arc<DatabaseConnection>) -> Router {
 }
 
 /// Bind `bind_addr` and serve [`router`] until `shutdown` resolves; in-flight
-/// MCP sessions are then drained by `axum::serve`'s graceful shutdown, and the
-/// rmcp session-manager cancellation token is tied to the same signal so SSE
-/// streams close promptly instead of lingering past the drain.
+/// MCP requests are then drained by `axum::serve`'s graceful shutdown
+/// (pending connections finish; the listener stops accepting new ones).
+///
+/// Note: the rmcp `LocalSessionManager`'s cancellation token is not tied to
+/// this signal, so a client that holds a long-lived SSE stream open without
+/// sending further requests can extend the drain until its HTTP connection
+/// closes. Heka's tool set is request/response-only (no notifications or
+/// server-initiated SSE pushes), so well-behaved clients open at most a
+/// short-lived SSE get per session and the drain completes promptly in
+/// practice; a hard drain timeout can be layered on later if real deployments
+/// show stuck sessions.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     db: Arc<DatabaseConnection>,

@@ -151,6 +151,16 @@ fn forbidden() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        Router,
+        body::Body,
+        extract::Extension,
+        http::Request,
+        middleware,
+        routing::get,
+    };
+    use sea_orm::EntityTrait;
+    use tower::ServiceExt;
 
     #[test]
     fn hash_token_matches_known_sha256_vector() {
@@ -172,30 +182,118 @@ mod tests {
         assert_ne!(plaintext, other);
     }
 
-    /// `resolve_akh` filters on both `Id.eq(akh_id)` and `TokenHash.eq(hash)`,
-    /// so a valid hash for a *different* akh matches zero rows. This is a
-    /// structural property of the query — verified by reading the function.
-    #[test]
-    fn resolve_akh_filters_on_both_id_and_token_hash() {
-        // The function body applies both filters:
-        //   .filter(heka_akhs::Column::Id.eq(akh_id))
-        //   .filter(heka_akhs::Column::TokenHash.eq(token_hash))
-        // A cross-tenant token (correct hash, wrong akh) cannot match.
-        // This is enforced structurally, not by post-hoc filtering.
+    /// Oneshot test app: a fixed route behind the real `require_akh_bearer`
+    /// middleware. A `DatabaseConnection::default()` is a disconnected handle,
+    /// so any request that reaches the DB-lookup branch yields 503 — exactly
+    /// the fail-closed behaviour we assert below. Pre-DB branches (401 for a
+    /// missing header, 403 for malformed/empty/padded tokens) never reach the
+    /// handle and are asserted exhaustively.
+    fn app(db: DatabaseConnection) -> Router {
+        let state = AkhAuthState::new(Arc::new(db));
+        Router::new()
+            .route(
+                "/akh/{akh_id}/mcp",
+                get(|Extension(tenant): Extension<HekaTenant>| async move {
+                    format!("ok:{}", tenant.akh_id)
+                }),
+            )
+            .layer(middleware::from_fn_with_state(state, require_akh_bearer))
     }
 
-    /// `require_akh_bearer` returns 401 only when the header is absent;
-    /// malformed / blank / padded / unknown tokens all return 403 because
-    /// no (id, hash) pair can match. The function's branching is:
-    ///   - no Authorization header → unauthorized()
-    ///   - non-UTF8 header → forbidden()
-    ///   - no "Bearer " prefix → forbidden()
-    ///   - empty or padded token → forbidden()
-    ///   - resolve_akh returns None → forbidden()
-    ///   - resolve_akh returns Err → 503
+    fn get_request(akh_id: Uuid, authorization: Option<&str>) -> Request<Body> {
+        let builder = Request::get(format!("/akh/{akh_id}/mcp"));
+        let builder = match authorization {
+            Some(value) => builder.header(header::AUTHORIZATION, value),
+            None => builder,
+        };
+        builder.body(Body::empty()).unwrap()
+    }
+
     #[test]
-    fn require_akh_bearer_branching_is_fail_closed() {
-        // The branching is exhaustive and fail-closed: every non-success
-        // path denies. The only success path is Ok(Some(akh)).
+    fn resolve_akh_filters_on_both_id_and_token_hash() {
+        // The SQL the lookup generates must pin BOTH the route akh id and the
+        // token hash in one equality pair — that is what makes a valid token
+        // for akh A unmatchable on akh B's route by construction. The
+        // cross-tenant integration test in `tests/mcp_integration.rs` proves
+        // the runtime behaviour against a live database; this pins the query
+        // shape itself so a well-meaning 'simplify the lookup' refactor
+        // cannot silently drop either filter.
+        let statement = heka_akhs::Entity::find()
+            .filter(heka_akhs::Column::Id.eq(Uuid::new_v4()))
+            .filter(heka_akhs::Column::TokenHash.eq("deadbeef".to_string()))
+            .build(sea_orm::DbBackend::Postgres);
+        let sql = statement.to_string();
+        assert!(
+            sql.contains("\"id\""),
+            "lookup must filter on the akh id: {sql}"
+        );
+        assert!(
+            sql.contains("\"token_hash\""),
+            "lookup must filter on the token hash: {sql}"
+        );
+        assert!(
+            sql.contains("AND"),
+            "lookup must require BOTH filters (a valid token for another akh must miss): {sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn require_akh_bearer_branching_is_fail_closed() {
+        let akh_id = Uuid::new_v4();
+        // Disconnected handle: only reached by a well-formed Bearer token,
+        // where the DB error must surface as 503 (fail-closed on outage).
+        let db = DatabaseConnection::default();
+
+        let missing = app(db.clone())
+            .oneshot(get_request(akh_id, None))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            missing.headers()[header::WWW_AUTHENTICATE],
+            "Bearer realm=\"heka\""
+        );
+
+        for (name, header_value) in [
+            ("non-Bearer scheme", "Basic dGVzdA=="),
+            ("empty token", "Bearer "),
+            ("left-padded token", "Bearer  abc"),
+            ("right-padded token", "Bearer abc "),
+            ("tab-padded token", "Bearer \tabc"),
+        ] {
+            let response = app(db.clone())
+                .oneshot(get_request(akh_id, Some(header_value)))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{name} must be forbidden"
+            );
+        }
+
+        // A non-UTF8 header value is also fail-closed (forbidden).
+        let response = app(db.clone())
+            .oneshot(
+                Request::get(format!("/akh/{akh_id}/mcp"))
+                    .header(header::AUTHORIZATION, HeaderValue::from_bytes(&[0xff, 0xfe]).unwrap())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // A well-formed but unknown token reaches the DB; with a disconnected
+        // handle the lookup errors and must surface as 503, never as a stray
+        // allow.
+        let response = app(db)
+            .oneshot(get_request(akh_id, Some(&format!(
+                "Bearer {}",
+                "a".repeat(64)
+            ))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

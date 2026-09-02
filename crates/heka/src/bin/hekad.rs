@@ -16,7 +16,6 @@
 //!   hekad repair-legacy-title-hashes --drawer-id <UUID>
 
 use std::path::PathBuf;
-#[cfg(feature = "embedding")]
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -395,16 +394,17 @@ async fn run_serve(config_path: Option<PathBuf>) -> miette::Result<()> {
         .into_diagnostic()
         .wrap_err_with(|| format!("binding TCP listener on {bind_addr}"))?;
 
-    // One shutdown trigger shared by HTTP drain and the worker loop.
-    let shutdown = async {
+    // One shutdown trigger shared by HTTP drain and the worker loop. The
+    // whole signal (including the worker-stop send) is built as a single
+    // owned `impl Future + Send + 'static`, so `axum::serve`'s
+    // `with_graceful_shutdown` bound is satisfied with no pin or extra
+    // future-combinator imports.
+    let (worker_stop_tx, worker_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown = async move {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("shutdown signal received — draining HTTP and stopping the embed worker");
-    };
-    let (worker_stop_tx, worker_stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let shutdown = shutdown.then(|()| async move {
         let _ = worker_stop_tx.send(());
-    });
-    tokio::pin!(shutdown);
+    };
 
     // Embed worker alongside the server: drains when the stop signal fires.
     // The worker polls every ~1s minimum between batches, so worst-case
