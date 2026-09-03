@@ -17,6 +17,10 @@ stack-graphs = "0.14"
 # Tree-sitter-graph: executes .tsg rulesets over concrete syntax trees to
 # construct the stack graph.
 tree-sitter-graph = "0.12"
+# The TSG executor: parses with a tree-sitter grammar and applies the ruleset
+# into a stack_graphs::StackGraph. Default features off — the bundled `cli`
+# and `lsp` features (tokio, clap, tower-lsp) are not needed by the library.
+tree-sitter-stack-graphs = { version = "0.10", default-features = false }
 # Parser runtime + Rust grammar (only Rust is wired up in WI-262; the
 # mechanism is polyglot and per-language rules land one at a time).
 tree-sitter = "0.24"
