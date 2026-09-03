@@ -2886,8 +2886,7 @@ impl ServerState {
         // calling). When the model is absent we log and leave the Ollama path —
         // run_agentic_turn falls back to it, then to the symbolic pipeline.
         #[cfg(feature = "candle-backend")]
-        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
-            let model_dir = self.paths.models_dir();
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {            let model_dir = self.paths.models_dir();
             match akh_medu::nlu::candle_backend::CandleBackend::try_load(&model_dir) {
                 Some(mut cb) => {
                     // Phase 47: share this akh's live inference options (Arc) with the backend and
@@ -2919,6 +2918,22 @@ impl ServerState {
                     );
                 }
             }
+        }
+        // WI-339 scope item 4: this akhomed was built WITHOUT `candle-backend`
+        // but the akh's config selects it. Refuse to start the akh rather than
+        // silently routing it to Ollama/symbolic — the same fail-loud invariant
+        // as the `remote-executor` refusal above, and the same "which model
+        // answered this stays answerable" reasoning as the OpenAI branch below.
+        #[cfg(not(feature = "candle-backend"))]
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            return Err(format!(
+                "workspace {name}: akh.toml selects backend = \"candle\" but this akhomed \
+                 was built without the `candle-backend` feature; rebuild with \
+                 `--features server-candle` (the Candle-enabled daemon profile — see \
+                 docs/ops/akhomed-feature-profiles.md), or host this akh on a \
+                 Candle-enabled akhomed. Refusing to fall back to Ollama/symbolic: that \
+                 would answer from a different model than the operator configured."
+            ));
         }
 
         // ADR 070 third peer: an OpenAI-compatible backing (vLLM/SGLang/OpenRouter/
