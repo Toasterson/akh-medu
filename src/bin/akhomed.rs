@@ -2886,7 +2886,8 @@ impl ServerState {
         // calling). When the model is absent we log and leave the Ollama path —
         // run_agentic_turn falls back to it, then to the symbolic pipeline.
         #[cfg(feature = "candle-backend")]
-        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {            let model_dir = self.paths.models_dir();
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            let model_dir = self.paths.models_dir();
             match akh_medu::nlu::candle_backend::CandleBackend::try_load(&model_dir) {
                 Some(mut cb) => {
                     // Phase 47: share this akh's live inference options (Arc) with the backend and
