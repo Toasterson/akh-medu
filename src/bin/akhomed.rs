@@ -2920,6 +2920,22 @@ impl ServerState {
                 }
             }
         }
+        // WI-339 scope item 4: this akhomed was built WITHOUT `candle-backend`
+        // but the akh's config selects it. Refuse to start the akh rather than
+        // silently routing it to Ollama/symbolic — the same fail-loud invariant
+        // as the `remote-executor` refusal above, and the same "which model
+        // answered this stays answerable" reasoning as the OpenAI branch below.
+        #[cfg(not(feature = "candle-backend"))]
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            return Err(format!(
+                "workspace {name}: akh.toml selects backend = \"candle\" but this akhomed \
+                 was built without the `candle-backend` feature; rebuild with \
+                 `--features server-candle` (the Candle-enabled daemon profile — see \
+                 docs/ops/akhomed-feature-profiles.md), or host this akh on a \
+                 Candle-enabled akhomed. Refusing to fall back to Ollama/symbolic: that \
+                 would answer from a different model than the operator configured."
+            ));
+        }
 
         // ADR 070 third peer: an OpenAI-compatible backing (vLLM/SGLang/OpenRouter/
         // DeepSeek/Hetzner inference). Unlike the Candle branch above, a failure

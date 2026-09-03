@@ -110,9 +110,11 @@ jobs:
           export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
           # akh: lean client (ACP transport only, no nlu-candle/onnxruntime).
           cargo build --release --no-default-features --features client --bin akh
-          # akhomed: daemon feature set; `server` keeps default nlu-candle but
-          # pulls no nlu-ml/ORT.
-          cargo build --release --features server --bin akhomed
+          # akhomed: daemon feature set. WI-339 removed candle from the
+          # default features, so the Candle-enabled daemon profile must be
+          # named explicitly: `server-candle` = server + candle-backend (the
+          # in-process GGUF path, still no nlu-ml/ORT).
+          cargo build --release --features server-candle --bin akhomed
           # seshd: synthesis only (drop `embedding`, which needs onnxruntime).
           cargo build --release -p seshat --bin seshd \
             --no-default-features --features synthesis

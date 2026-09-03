@@ -223,7 +223,18 @@ russh = { version = "0.62.1", default-features = false, features = ["ring", "rsa
 base64 = { version = "0.22.1", optional = true }
 
 [features]
-default = ["nlu-candle", "acp"]
+# WI-339: the default set is deliberately LEAN (no `nlu-candle`). Before this
+# item, `default = ["nlu-candle", "acp"]` dragged the vendored Candle stack,
+# tokenizers, and safetensors into every ordinary `cargo test`/`cargo build` —
+# including akhs whose inference runs entirely on Ollama/OpenAI-compatible
+# remote backends. Candle is now opt-in:
+#   * local inference / Candle token counter → `nlu-candle` (or the
+#     `server-candle` composite, defined below, for an akhomed daemon), and
+#   * a lean-built akhomed REFUSES to start an akh whose akh.toml selects
+#     `backend = "candle"` rather than silently re-routing it (see the
+#     `cfg(not(feature = "candle-backend"))` arm in src/bin/akhomed.rs).
+# Per-artifact profiles are documented in docs/ops/akhomed-feature-profiles.md.
+default = ["acp"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
@@ -247,6 +258,13 @@ nlu-full = ["nlu-ml", "nlu-llm"]
 delegation = ["daemon"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
+# WI-339: composite daemon profile for akhomed hosts that serve Candle-backed
+# akhs (in-process GGUF inference + the Candle token counter). This is THE
+# artifact profile for those hosts: release.yml and
+# docs/ops/akhomed-feature-profiles.md reference `server-candle`, and the lean
+# `server` build refuses to start a `backend = "candle"` akh (see the
+# `cfg(not(feature = "candle-backend"))` arm in src/bin/akhomed.rs).
+server-candle = ["server", "candle-backend"]
 # AMD GPU acceleration for the Candle backend (ADR 068). Opt-in: requires the
 # ROCm toolchain to build the HIP kernel (build.rs degrades gracefully if absent)
 # and an AMD GPU at runtime. Off by default — Candle runs CPU-only without it.
