@@ -1,0 +1,34 @@
+[package]
+name = "shend"
+version = "0.1.0"
+edition = "2024"
+description = "Shen — code-understanding resolution stage: stack-graph name binding, code:resolves-to, tiered provenance (ADR 057 + WI-262)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+# Library-only for now: the ADR 057 daemon (`shend` binary) hosts this crate as
+# its parse → resolve → project pipeline. WI-262 builds the resolution stage;
+# the MCP surface, codex.* store and codex_kg AGE projection land with the
+# daemon work.
+
+[dependencies]
+# Name binding via stack graphs (GitHub, MIT/Apache-2.0).
+stack-graphs = "0.14"
+# Tree-sitter-graph: executes .tsg rulesets over concrete syntax trees to
+# construct the stack graph.
+tree-sitter-graph = "0.12"
+# Parser runtime + Rust grammar (only Rust is wired up in WI-262; the
+# mechanism is polyglot and per-language rules land one at a time).
+tree-sitter = "0.24"
+tree-sitter-rust = "0.24"
+
+# Error handling
+thiserror = "2"
+
+# Serialization (ResolutionStore snapshots)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Hashing (file content identity)
+sha2 = "0.10"
