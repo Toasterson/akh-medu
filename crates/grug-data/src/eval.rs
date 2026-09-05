@@ -116,7 +116,11 @@ pub fn score_output(raw_output: &str, example: &Example) -> EvalOutcome {
 /// [`TargetFormat`] (Phase 51 P2). `TargetFormat::Json` is byte-identical to
 /// [`score_output`]; `TargetFormat::Grug` parses the flat pipe format via
 /// [`crate::format::parse_call`] and validates the resulting call the same way.
-pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format::TargetFormat) -> EvalOutcome {
+pub fn score_output_fmt(
+    raw_output: &str,
+    example: &Example,
+    fmt: crate::format::TargetFormat,
+) -> EvalOutcome {
     match fmt {
         crate::format::TargetFormat::Json => score_output(raw_output, example),
         crate::format::TargetFormat::Grug => {
@@ -129,9 +133,9 @@ pub fn score_output_fmt(raw_output: &str, example: &Example, fmt: crate::format:
             };
             let schema_result = validate_call(&call, example);
             let schema_ok = schema_result.as_ref().ok().cloned();
-            let arg_result = schema_ok
-                .as_ref()
-                .map(|c| check_arg_correctness(c, &example.expected_call, example.expected_schema()));
+            let arg_result = schema_ok.as_ref().map(|c| {
+                check_arg_correctness(c, &example.expected_call, example.expected_schema())
+            });
             EvalOutcome {
                 parsed_json: true,
                 schema: Some(schema_result),
@@ -238,10 +242,14 @@ fn validate_call(call: &ToolCall, example: &Example) -> Result<ToolCall, Vec<Sch
     }
     for (arg_name, arg_value) in &args_map {
         match schema.param(arg_name) {
-            None => violations.push(SchemaViolation::UnknownArg { param: arg_name.clone() }),
+            None => violations.push(SchemaViolation::UnknownArg {
+                param: arg_name.clone(),
+            }),
             Some(spec) => {
                 if !spec.ty.matches(arg_value) {
-                    violations.push(SchemaViolation::WrongType { param: arg_name.clone() });
+                    violations.push(SchemaViolation::WrongType {
+                        param: arg_name.clone(),
+                    });
                 }
             }
         }
@@ -362,16 +370,16 @@ fn check_arg_correctness(
 /// - Enum: exact string match against the declared variant.
 fn values_equal_normalized(a: &Value, b: &Value, ty: Option<&ParamType>) -> bool {
     match ty {
-        Some(ParamType::Integer) | Some(ParamType::Number) => {
-            match (a.as_f64(), b.as_f64()) {
-                (Some(x), Some(y)) => (x - y).abs() < 1e-6,
-                _ => a == b,
-            }
-        }
+        Some(ParamType::Integer) | Some(ParamType::Number) => match (a.as_f64(), b.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() < 1e-6,
+            _ => a == b,
+        },
         Some(ParamType::Boolean) => a == b,
-        Some(ParamType::String) | Some(ParamType::Enum(_)) => {
-            a.as_str().zip(b.as_str()).map(|(x, y)| x == y).unwrap_or(a == b)
-        }
+        Some(ParamType::String) | Some(ParamType::Enum(_)) => a
+            .as_str()
+            .zip(b.as_str())
+            .map(|(x, y)| x == y)
+            .unwrap_or(a == b),
         None => {
             // Untyped fallback (e.g. an unknown extra arg on both sides):
             // try numeric-tolerant compare first, else exact.
@@ -451,7 +459,10 @@ impl EvalReport {
     /// (Phase 51 P3b): outputs are grounded/repaired against the offered
     /// schemas before validation. Compare to [`EvalReport::from_outputs_fmt`]
     /// for the raw-vs-repaired lift.
-    pub fn from_outputs_repaired_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+    pub fn from_outputs_repaired_fmt(
+        pairs: &[(String, Example)],
+        fmt: crate::format::TargetFormat,
+    ) -> Self {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
             .map(|(raw, ex)| score_output_repaired_fmt(raw, ex, fmt))
@@ -465,7 +476,10 @@ impl EvalReport {
     /// ([`crate::ground::ground_values`]). Compare to
     /// [`EvalReport::from_outputs_repaired_fmt`] for the value-grounding lift on
     /// top of name-repair.
-    pub fn from_outputs_grounded_fmt(pairs: &[(String, Example)], fmt: crate::format::TargetFormat) -> Self {
+    pub fn from_outputs_grounded_fmt(
+        pairs: &[(String, Example)],
+        fmt: crate::format::TargetFormat,
+    ) -> Self {
         let outcomes: Vec<EvalOutcome> = pairs
             .iter()
             .map(|(raw, ex)| score_output_grounded_fmt(raw, ex, fmt))
@@ -479,7 +493,11 @@ impl EvalReport {
     /// [`EvalReport::from_outcomes`] because per-value accuracy needs the
     /// ground-truth values, which `EvalOutcome` alone does not carry.
     fn with_value_accuracy(mut self, hits: usize, total: usize) -> Self {
-        self.arg_value_accuracy = if total == 0 { 0.0 } else { hits as f64 / total as f64 };
+        self.arg_value_accuracy = if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        };
         self
     }
 
@@ -599,7 +617,13 @@ impl AbstentionReport {
             .count();
         let emitted_abstain = true_abstain + false_abstain;
 
-        let ratio = |num: usize, den: usize| if den == 0 { 0.0 } else { num as f64 / den as f64 };
+        let ratio = |num: usize, den: usize| {
+            if den == 0 {
+                0.0
+            } else {
+                num as f64 / den as f64
+            }
+        };
 
         Self {
             abstain_recall: ratio(true_abstain, n_abstain),
@@ -721,10 +745,7 @@ impl DiversityReport {
 /// the same diversity bucket.
 fn normalize_call_key(call: &ToolCall) -> String {
     let args = call.arguments_map();
-    let mut pairs: Vec<String> = args
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let mut pairs: Vec<String> = args.iter().map(|(k, v)| format!("{k}={v}")).collect();
     pairs.sort();
     format!("{}({})", call.name, pairs.join(","))
 }
@@ -747,7 +768,10 @@ mod value_accuracy_tests {
         Example {
             tools: vec![tool],
             user_request: "r".into(),
-            expected_call: ToolCall::new("book_table", serde_json::json!({"guest": "Ada", "party_size": 4})),
+            expected_call: ToolCall::new(
+                "book_table",
+                serde_json::json!({"guest": "Ada", "party_size": 4}),
+            ),
             mock_response: String::new(),
         }
     }
@@ -761,8 +785,15 @@ mod value_accuracy_tests {
         // guest right ("Ada"), party_size wrong (9 vs 4).
         let raw = "call book_table | guest Ada | party_size 9";
         let report = EvalReport::from_outputs_fmt(&[(raw.to_string(), ex)], TargetFormat::Grug);
-        assert_eq!(report.arg_correct_rate, 0.0, "one wrong value fails the whole call");
-        assert!((report.arg_value_accuracy - 0.5).abs() < 1e-9, "1 of 2 values correct = 0.5, got {}", report.arg_value_accuracy);
+        assert_eq!(
+            report.arg_correct_rate, 0.0,
+            "one wrong value fails the whole call"
+        );
+        assert!(
+            (report.arg_value_accuracy - 0.5).abs() < 1e-9,
+            "1 of 2 values correct = 0.5, got {}",
+            report.arg_value_accuracy
+        );
     }
 
     #[test]
@@ -778,11 +809,15 @@ mod value_accuracy_tests {
 #[cfg(test)]
 mod abstention_tests {
     use super::*;
-    use crate::format::{render_call, TargetFormat};
+    use crate::format::{TargetFormat, render_call};
     use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
 
     fn tool(name: &str) -> ToolSchema {
-        ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)])
+        ToolSchema::new(
+            name,
+            "d",
+            vec![ParamSpec::new("q", ParamType::String, true)],
+        )
     }
 
     /// A should-call example and a should-abstain example, scored together,
@@ -820,7 +855,13 @@ mod abstention_tests {
         // zero recall, full false-abstention, zero precision.
         let bad = vec![
             (render_call(&ToolCall::gap(), fmt), call_ex),
-            (render_call(&ToolCall::new("get_weather", serde_json::json!({"q": "y"})), fmt), abstain_ex),
+            (
+                render_call(
+                    &ToolCall::new("get_weather", serde_json::json!({"q": "y"})),
+                    fmt,
+                ),
+                abstain_ex,
+            ),
         ];
         let r = AbstentionReport::from_outputs_fmt(&bad, fmt);
         assert_eq!(r.abstain_recall, 0.0);

@@ -57,7 +57,11 @@ impl TargetFormat {
 pub fn render_tools(tools: &[ToolSchema], fmt: TargetFormat) -> String {
     match fmt {
         TargetFormat::Json => serde_json::to_string(tools).unwrap_or_default(),
-        TargetFormat::Grug => tools.iter().map(render_tool_grug).collect::<Vec<_>>().join("\n"),
+        TargetFormat::Grug => tools
+            .iter()
+            .map(render_tool_grug)
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -270,14 +274,17 @@ fn parse_call_grug(raw: &str, offered: &[ToolSchema]) -> Option<ToolCall> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
     use crate::Dataset;
+    use crate::schema::{Example, ParamSpec, ParamType, ToolCall, ToolSchema};
 
     fn tool(name: &str, params: &[(&str, ParamType)]) -> ToolSchema {
         ToolSchema::new(
             name,
             "d",
-            params.iter().map(|(n, t)| ParamSpec::new(*n, t.clone(), true)).collect(),
+            params
+                .iter()
+                .map(|(n, t)| ParamSpec::new(*n, t.clone(), true))
+                .collect(),
         )
     }
 
@@ -285,9 +292,15 @@ mod tests {
     fn grug_call_round_trips_through_parse() {
         let tools = vec![tool(
             "book_table",
-            &[("party_size", ParamType::Integer), ("time", ParamType::String)],
+            &[
+                ("party_size", ParamType::Integer),
+                ("time", ParamType::String),
+            ],
         )];
-        let call = ToolCall::new("book_table", serde_json::json!({"party_size": 4, "time": "20:00"}));
+        let call = ToolCall::new(
+            "book_table",
+            serde_json::json!({"party_size": 4, "time": "20:00"}),
+        );
         let rendered = render_call(&call, TargetFormat::Grug);
         assert_eq!(rendered, "call book_table | party_size 4 | time 20:00");
         let parsed = parse_call(&rendered, TargetFormat::Grug, &tools).unwrap();
@@ -302,7 +315,10 @@ mod tests {
         let call = ToolCall::new("note", serde_json::json!({"text": "hello there world"}));
         let rendered = render_call(&call, TargetFormat::Grug);
         let parsed = parse_call(&rendered, TargetFormat::Grug, &tools).unwrap();
-        assert_eq!(parsed.arguments["text"], serde_json::json!("hello there world"));
+        assert_eq!(
+            parsed.arguments["text"],
+            serde_json::json!("hello there world")
+        );
     }
 
     #[test]
@@ -312,7 +328,11 @@ mod tests {
             "d",
             vec![
                 ParamSpec::new("a", ParamType::String, true),
-                ParamSpec::new("b", ParamType::Enum(vec!["low".into(), "high".into()]), false),
+                ParamSpec::new(
+                    "b",
+                    ParamType::Enum(vec!["low".into(), "high".into()]),
+                    false,
+                ),
             ],
         )];
         let s = render_tools(&tools, TargetFormat::Grug);
@@ -324,12 +344,18 @@ mod tests {
         // The Json variant must reproduce Example::expected_call_as_json_string
         // exactly, so switching formats doesn't perturb the JSON baseline.
         let ex = Example {
-            tools: vec![tool("x", &[("b", ParamType::Integer), ("a", ParamType::String)])],
+            tools: vec![tool(
+                "x",
+                &[("b", ParamType::Integer), ("a", ParamType::String)],
+            )],
             user_request: "r".into(),
             expected_call: ToolCall::new("x", serde_json::json!({"a": "hi", "b": 3})),
             mock_response: String::new(),
         };
-        assert_eq!(render_call(&ex.expected_call, TargetFormat::Json), ex.expected_call_as_json_string());
+        assert_eq!(
+            render_call(&ex.expected_call, TargetFormat::Json),
+            ex.expected_call_as_json_string()
+        );
     }
 
     #[test]
@@ -385,10 +411,17 @@ mod tests {
             let rendered = render_call(&ex.expected_call, TargetFormat::Grug);
             let parsed = parse_call(&rendered, TargetFormat::Grug, &ex.tools)
                 .unwrap_or_else(|| panic!("failed to parse: {rendered}"));
-            assert_eq!(parsed.name, ex.expected_call.name, "name mismatch on {rendered}");
+            assert_eq!(
+                parsed.name, ex.expected_call.name,
+                "name mismatch on {rendered}"
+            );
             // Every expected arg is recovered with a type-correct value.
             for (k, v) in ex.expected_call.arguments_map() {
-                assert_eq!(parsed.arguments.get(&k), Some(&v), "arg {k} mismatch on {rendered}");
+                assert_eq!(
+                    parsed.arguments.get(&k),
+                    Some(&v),
+                    "arg {k} mismatch on {rendered}"
+                );
             }
             checked += 1;
         }

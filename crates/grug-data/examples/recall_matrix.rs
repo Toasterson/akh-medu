@@ -20,7 +20,9 @@
 //! cargo run -p grug-data --example recall_matrix --release
 //! ```
 
-use grug_data::retriever::{retrieval_recall_at_k, semantic_recall_at_k, Retriever, SemanticRetriever};
+use grug_data::retriever::{
+    Retriever, SemanticRetriever, retrieval_recall_at_k, semantic_recall_at_k,
+};
 use grug_data::{Dataset, DistractorConfig, SignalMode};
 
 fn main() {
@@ -37,9 +39,19 @@ fn main() {
     );
 
     let mut rows = Vec::new();
-    for (label, mode) in [("D0/name", SignalMode::Name), ("D1/desc", SignalMode::Description), ("D2/para", SignalMode::Paraphrase)] {
-        let dataset = Dataset::new_sized_signal(seed, n_tools, holdout_frac, DistractorConfig::easy_with_count(2), mode)
-            .expect("dataset splits cleanly");
+    for (label, mode) in [
+        ("D0/name", SignalMode::Name),
+        ("D1/desc", SignalMode::Description),
+        ("D2/para", SignalMode::Paraphrase),
+    ] {
+        let dataset = Dataset::new_sized_signal(
+            seed,
+            n_tools,
+            holdout_frac,
+            DistractorConfig::easy_with_count(2),
+            mode,
+        )
+        .expect("dataset splits cleanly");
         let registry = dataset.registry();
         let names: Vec<String> = registry.iter().map(|t| t.name.clone()).collect();
         let descriptions: Vec<String> = registry.iter().map(|t| t.description.clone()).collect();
@@ -49,7 +61,9 @@ fn main() {
         let hdc_name = SemanticRetriever::new_over(&names);
         let hdc_desc = SemanticRetriever::new_over(&descriptions);
 
-        let pairs = dataset.retrieval_recall_pairs(n_pairs).expect("recall pairs");
+        let pairs = dataset
+            .retrieval_recall_pairs(n_pairs)
+            .expect("recall pairs");
 
         let r_lex_name = retrieval_recall_at_k(&lex_name, &pairs, k);
         let r_lex_desc = retrieval_recall_at_k(&lex_desc, &pairs, k);
@@ -62,7 +76,10 @@ fn main() {
 
         // Show one glossed example per tier so the transformation is legible.
         if let Some((req, idx)) = pairs.first() {
-            println!("          e.g. tool={:<24} desc={:?}", registry[*idx].name, registry[*idx].description);
+            println!(
+                "          e.g. tool={:<24} desc={:?}",
+                registry[*idx].name, registry[*idx].description
+            );
             println!("               request={req:?}");
         }
 

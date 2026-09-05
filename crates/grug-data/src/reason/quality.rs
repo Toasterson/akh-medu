@@ -321,7 +321,9 @@ mod tests {
 
     fn example() -> ReasonExample {
         let ds = ReasonDataset::new(ReasonConfig::default()).expect("dataset");
-        ds.train_examples(1, TraceArm::Trace).expect("examples").remove(0)
+        ds.train_examples(1, TraceArm::Trace)
+            .expect("examples")
+            .remove(0)
     }
 
     /// The gold trace is the definition of clean: nothing repeated, nothing
@@ -443,7 +445,14 @@ mod tests {
     #[test]
     fn total_on_garbage() {
         let ex = example();
-        for junk in ["", "   ", "\n\n", "not a trace at all", "step | | |", "step x | y"] {
+        for junk in [
+            "",
+            "   ",
+            "\n\n",
+            "not a trace at all",
+            "step | | |",
+            "step x | y",
+        ] {
             let q = score_trace_quality(&ex, junk);
             assert!(q.redundancy_rate.is_finite(), "no NaN from {junk:?}");
             assert!(q.drift_rate.is_finite());
@@ -455,7 +464,8 @@ mod tests {
     #[test]
     fn summary_tolerates_length_mismatch() {
         let ex = example();
-        let s = summarize_trace_quality(&[ex.clone(), ex.clone()], &[ex.target.clone()]);
+        let s =
+            summarize_trace_quality(&[ex.clone(), ex.clone()], std::slice::from_ref(&ex.target));
         assert_eq!(s.examples, 1);
         assert!(s.mean_hop_coverage.is_finite());
     }

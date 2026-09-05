@@ -90,7 +90,9 @@ pub fn ground_values(
 
     // First pass: mark grounded numeric args and collect ungrounded ones.
     for (name, value) in &args {
-        let Some(spec) = schema.param(name) else { continue };
+        let Some(spec) = schema.param(name) else {
+            continue;
+        };
         if matches!(spec.ty, ParamType::Integer | ParamType::Number)
             && let Some(v) = value.as_f64()
         {
@@ -108,8 +110,12 @@ pub fn ground_values(
     ungrounded_numeric.sort();
     let mut new_args = args.clone();
     for name in &ungrounded_numeric {
-        let Some(v) = args.get(name).and_then(Value::as_f64) else { continue };
-        let Some(spec) = schema.param(name) else { continue };
+        let Some(v) = args.get(name).and_then(Value::as_f64) else {
+            continue;
+        };
+        let Some(spec) = schema.param(name) else {
+            continue;
+        };
         if available.is_empty() {
             break;
         }
@@ -117,7 +123,10 @@ pub fn ground_values(
             .iter()
             .enumerate()
             .min_by(|(_, a), (_, b)| {
-                (*a - v).abs().partial_cmp(&(*b - v).abs()).unwrap_or(std::cmp::Ordering::Equal)
+                (*a - v)
+                    .abs()
+                    .partial_cmp(&(*b - v).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .expect("available non-empty");
         let chosen = available.remove(best_i);
@@ -128,13 +137,18 @@ pub fn ground_values(
     // Enum grounding: snap to the declared variant present in the request when
     // the emitted value isn't already it and exactly one variant appears.
     for (name, value) in &args {
-        let Some(spec) = schema.param(name) else { continue };
+        let Some(spec) = schema.param(name) else {
+            continue;
+        };
         if let ParamType::Enum(variants) = &spec.ty {
             // Snap to the single declared variant present in the request whenever
             // the emitted value isn't already it — even if the emitted value is a
             // *different valid* variant (a wrong-but-valid enum is the common
             // error, and the request names the correct one).
-            let present: Vec<&String> = variants.iter().filter(|v| request_contains_word(request, v)).collect();
+            let present: Vec<&String> = variants
+                .iter()
+                .filter(|v| request_contains_word(request, v))
+                .collect();
             if present.len() == 1 && value.as_str() != Some(present[0].as_str()) {
                 new_args.insert(name.clone(), Value::String(present[0].clone()));
                 stats.enum_regrounded += 1;
@@ -155,19 +169,25 @@ pub fn ground_values(
     // verbatim (case-insensitive exact match), so they aren't reused. Claim the
     // first still-unclaimed matching window (a value can appear once per span).
     for (name, value) in &args {
-        let Some(spec) = schema.param(name) else { continue };
+        let Some(spec) = schema.param(name) else {
+            continue;
+        };
         if spec.ty != ParamType::String {
             continue;
         }
         let Some(s) = value.as_str() else { continue };
-        if let Some(i) = (0..windows.len()).find(|&i| !claimed[i] && windows[i].eq_ignore_ascii_case(s)) {
+        if let Some(i) =
+            (0..windows.len()).find(|&i| !claimed[i] && windows[i].eq_ignore_ascii_case(s))
+        {
             claimed[i] = true;
         }
     }
 
     // Second pass: snap ungrounded strings to the nearest unclaimed window.
     for (name, value) in &args {
-        let Some(spec) = schema.param(name) else { continue };
+        let Some(spec) = schema.param(name) else {
+            continue;
+        };
         if spec.ty != ParamType::String {
             continue;
         }
@@ -197,7 +217,10 @@ pub fn ground_values(
         }
     }
 
-    (ToolCall::new(call.name.clone(), Value::Object(new_args)), stats)
+    (
+        ToolCall::new(call.name.clone(), Value::Object(new_args)),
+        stats,
+    )
 }
 
 /// Byte ranges of each "word" in `text`: a maximal run of ASCII alphanumeric
@@ -243,7 +266,9 @@ fn span_windows<'a>(text: &'a str, words: &[(usize, usize)]) -> Vec<&'a str> {
 fn number_value(n: f64, ty: &ParamType) -> Value {
     match ty {
         ParamType::Integer => Value::from(n.round() as i64),
-        _ => serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::Null),
+        _ => serde_json::Number::from_f64(n)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -290,7 +315,8 @@ fn extract_numbers(text: &str) -> Vec<f64> {
 /// Whole-word (case-sensitive) containment of `word` in `text`, so an enum
 /// variant `read` doesn't match inside `ready`.
 fn request_contains_word(text: &str, word: &str) -> bool {
-    text.split(|c: char| !c.is_ascii_alphanumeric()).any(|tok| tok == word)
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok == word)
 }
 
 #[cfg(test)]
@@ -305,7 +331,11 @@ mod tests {
             vec![
                 ParamSpec::new("target_count", ParamType::Integer, true),
                 ParamSpec::new("query_score", ParamType::Number, true),
-                ParamSpec::new("mode_level", ParamType::Enum(vec!["low".into(), "high".into()]), true),
+                ParamSpec::new(
+                    "mode_level",
+                    ParamType::Enum(vec!["low".into(), "high".into()]),
+                    true,
+                ),
             ],
         )
     }
@@ -368,7 +398,11 @@ mod tests {
             vec![
                 ParamSpec::new("document", ParamType::String, true),
                 ParamSpec::new("place", ParamType::String, true),
-                ParamSpec::new("mode_level", ParamType::Enum(vec!["low".into(), "high".into()]), false),
+                ParamSpec::new(
+                    "mode_level",
+                    ParamType::Enum(vec!["low".into(), "high".into()]),
+                    false,
+                ),
             ],
         )
     }
@@ -386,7 +420,10 @@ mod tests {
         assert_eq!(stats.string_regrounded, 1);
         assert_eq!(grounded.arguments["place"], serde_json::json!("Zurich"));
         // The already-correct multi-word string is untouched.
-        assert_eq!(grounded.arguments["document"], serde_json::json!("the new proposal"));
+        assert_eq!(
+            grounded.arguments["document"],
+            serde_json::json!("the new proposal")
+        );
     }
 
     #[test]
@@ -400,7 +437,10 @@ mod tests {
         let (grounded, stats) = ground_values(&call, request, &offered);
         assert_eq!(stats.string_regrounded, 1);
         // Snapped to the exact request substring, apostrophe preserved.
-        assert_eq!(grounded.arguments["document"], serde_json::json!("grandma's recipe"));
+        assert_eq!(
+            grounded.arguments["document"],
+            serde_json::json!("grandma's recipe")
+        );
     }
 
     #[test]
@@ -415,7 +455,10 @@ mod tests {
         );
         let (grounded, stats) = ground_values(&call, request, &offered);
         assert_eq!(stats.string_regrounded, 0);
-        assert_eq!(grounded.arguments["document"], serde_json::json!("zzzzzzzzzz"));
+        assert_eq!(
+            grounded.arguments["document"],
+            serde_json::json!("zzzzzzzzzz")
+        );
     }
 
     #[test]

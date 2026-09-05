@@ -118,7 +118,12 @@ impl ToolCallGrammar {
         let tool_names = tools.iter().map(|t| t.name.clone().into_bytes()).collect();
         let params = tools
             .iter()
-            .map(|t| t.params.iter().map(|p| p.name.clone().into_bytes()).collect())
+            .map(|t| {
+                t.params
+                    .iter()
+                    .map(|p| p.name.clone().into_bytes())
+                    .collect()
+            })
             .collect();
         Self { tool_names, params }
     }
@@ -202,12 +207,17 @@ impl ToolCallGrammar {
                     let nc: Vec<(u16, u16)> = cands
                         .iter()
                         .copied()
-                        .filter(|(t, p)| self.params[*t as usize][*p as usize].get(*pos) == Some(&byte))
+                        .filter(|(t, p)| {
+                            self.params[*t as usize][*p as usize].get(*pos) == Some(&byte)
+                        })
                         .collect();
                     if nc.is_empty() {
                         None
                     } else {
-                        Some(Key { cands: nc, pos: *pos + 1 })
+                        Some(Key {
+                            cands: nc,
+                            pos: *pos + 1,
+                        })
                     }
                 }
             }
@@ -291,11 +301,7 @@ impl ToolCallGrammar {
                     let complete = cands
                         .iter()
                         .any(|&t| self.tool_names[t as usize].len() == *pos);
-                    if complete {
-                        Some(CloseOuter)
-                    } else {
-                        None
-                    }
+                    if complete { Some(CloseOuter) } else { None }
                 } else {
                     let nc: Vec<u16> = cands
                         .iter()
@@ -305,7 +311,10 @@ impl ToolCallGrammar {
                     if nc.is_empty() {
                         None
                     } else {
-                        Some(Name { cands: nc, pos: *pos + 1 })
+                        Some(Name {
+                            cands: nc,
+                            pos: *pos + 1,
+                        })
                     }
                 }
             }
@@ -343,8 +352,8 @@ impl ToolCallGrammar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{ParamSpec, ParamType, ToolCall, ToolSchema};
     use crate::Dataset;
+    use crate::schema::{ParamSpec, ParamType, ToolCall, ToolSchema};
 
     fn tool(name: &str, params: &[(&str, ParamType)]) -> ToolSchema {
         ToolSchema::new(
@@ -365,7 +374,13 @@ mod tests {
     #[test]
     fn accepts_a_hand_written_call() {
         let tools = vec![
-            tool("book_table", &[("party_size", ParamType::Integer), ("time", ParamType::String)]),
+            tool(
+                "book_table",
+                &[
+                    ("party_size", ParamType::Integer),
+                    ("time", ParamType::String),
+                ],
+            ),
             tool("get_weather", &[("city", ParamType::String)]),
         ];
         let g = ToolCallGrammar::new(&tools);
@@ -459,7 +474,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked > 100, "expected to check many examples, got {checked}");
+        assert!(
+            checked > 100,
+            "expected to check many examples, got {checked}"
+        );
     }
 
     /// A call naming a tool that was not offered must be rejected even if its
@@ -478,11 +496,11 @@ mod tests {
     #[test]
     fn grammar_agrees_with_expected_call_json_shape() {
         use crate::schema::Example;
-        let tools = vec![tool("x", &[("b", ParamType::Integer), ("a", ParamType::String)])];
-        let call = ToolCall::new(
+        let tools = vec![tool(
             "x",
-            serde_json::json!({"a": "hi", "b": 3}),
-        );
+            &[("b", ParamType::Integer), ("a", ParamType::String)],
+        )];
+        let call = ToolCall::new("x", serde_json::json!({"a": "hi", "b": 3}));
         let ex = Example {
             tools: tools.clone(),
             user_request: "irrelevant".to_string(),
@@ -491,6 +509,10 @@ mod tests {
         };
         let g = ToolCallGrammar::new(&tools);
         let s = ex.expected_call_as_json_string();
-        assert_eq!(g.advance(&g.start(), s.as_bytes()), Some(GrammarState::End), "target was: {s}");
+        assert_eq!(
+            g.advance(&g.start(), s.as_bytes()),
+            Some(GrammarState::End),
+            "target was: {s}"
+        );
     }
 }

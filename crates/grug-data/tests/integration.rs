@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use grug_data::eval::{score_output, ArgMismatch, DiversityReport, EvalReport, SchemaViolation};
+use grug_data::eval::{ArgMismatch, DiversityReport, EvalReport, SchemaViolation, score_output};
 use grug_data::{Dataset, DistractorConfig, EvalAxis, Example, Generator, ToolCatalog};
 
 #[test]
@@ -315,9 +315,11 @@ fn eval_schema_valid_but_wrong_argument_value_fails_at_arg_level() {
     assert!(!outcome.arg_correct());
     match &outcome.arg_correctness {
         Some(Err(mismatches)) => {
-            assert!(mismatches
-                .iter()
-                .any(|m| matches!(m, ArgMismatch::ValueDiffers { param } if param == "city")));
+            assert!(
+                mismatches
+                    .iter()
+                    .any(|m| matches!(m, ArgMismatch::ValueDiffers { param } if param == "city"))
+            );
         }
         other => panic!("expected arg mismatch, got {other:?}"),
     }
@@ -425,7 +427,10 @@ fn catalog_has_varied_param_shapes() {
     let many_params = tools.iter().filter(|t| t.params.len() >= 5).count();
     let one_param = tools.iter().filter(|t| t.params.len() == 1).count();
 
-    assert!(has_enum >= 5, "expected several tools with enum params, got {has_enum}");
+    assert!(
+        has_enum >= 5,
+        "expected several tools with enum params, got {has_enum}"
+    );
     assert!(
         has_optional >= 10,
         "expected several tools with optional params, got {has_optional}"
@@ -754,9 +759,12 @@ fn procedural_required_arg_values_are_copyable_from_user_request() {
             .expect("expected tool is always among offered tools");
         let args = ex.expected_call.arguments_map();
         for required in schema.required_params() {
-            let value = args
-                .get(&required.name)
-                .unwrap_or_else(|| panic!("required param {} missing from generated call", required.name));
+            let value = args.get(&required.name).unwrap_or_else(|| {
+                panic!(
+                    "required param {} missing from generated call",
+                    required.name
+                )
+            });
             let value_text = match value {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Bool(b) => b.to_string(),
@@ -890,7 +898,10 @@ fn procedural_phrasing_holdout_leak_proof_at_scale() {
         );
         checked += 1;
     }
-    assert!(checked > 400, "expected to check most of the 600 train tools, got {checked}");
+    assert!(
+        checked > 400,
+        "expected to check most of the 600 train tools, got {checked}"
+    );
 
     // Behavioral check: a large held-out-phrasing stream must never produce
     // a `user_request` seen verbatim in a large training stream.
@@ -1030,13 +1041,9 @@ fn hard_distractor_bundles_contain_same_family_or_similar_shape_tools() {
     // few genuinely similar siblings (shared name token or param-type
     // histogram), then confirm hard-mode's offered bundles actually surface
     // that similarity rather than looking uniformly random.
-    let dataset = Dataset::new_sized_with_distractors(
-        7,
-        800,
-        0.15,
-        DistractorConfig::hard_with_count(5),
-    )
-    .unwrap();
+    let dataset =
+        Dataset::new_sized_with_distractors(7, 800, 0.15, DistractorConfig::hard_with_count(5))
+            .unwrap();
     let examples = dataset.train_examples(200).unwrap();
 
     let mut bundles_with_a_similar_distractor = 0usize;
@@ -1104,7 +1111,11 @@ fn distractor_count_is_configurable_on_dataset() {
         .unwrap();
         let examples = dataset.train_examples(10).unwrap();
         for ex in &examples {
-            assert_eq!(ex.tools.len(), count + 1, "target + {count} distractors expected");
+            assert_eq!(
+                ex.tools.len(),
+                count + 1,
+                "target + {count} distractors expected"
+            );
         }
     }
 }
@@ -1115,7 +1126,10 @@ fn easy_distractor_mode_is_still_reachable_for_ab_comparison() {
         Dataset::new_sized_with_distractors(3, 500, 0.15, DistractorConfig::easy()).unwrap();
     let examples = dataset.train_examples(10).unwrap();
     for ex in &examples {
-        assert_eq!(ex.tools.len(), DistractorConfig::easy().distractor_count + 1);
+        assert_eq!(
+            ex.tools.len(),
+            DistractorConfig::easy().distractor_count + 1
+        );
     }
 }
 
@@ -1143,16 +1157,20 @@ fn hard_distractors_preserve_whole_tool_holdout_disjointness() {
     // config with a wider bundle, since hard-mode selection is a new code
     // path that must still only ever draw from the generator's own (train or
     // holdout) catalog.
-    let dataset = Dataset::new_sized_with_distractors(
-        13,
-        400,
-        0.2,
-        DistractorConfig::hard_with_count(6),
-    )
-    .unwrap();
+    let dataset =
+        Dataset::new_sized_with_distractors(13, 400, 0.2, DistractorConfig::hard_with_count(6))
+            .unwrap();
 
-    let holdout_names: HashSet<&str> = dataset.holdout_tools().iter().map(|t| t.name.as_str()).collect();
-    let train_names: HashSet<&str> = dataset.train_tools().iter().map(|t| t.name.as_str()).collect();
+    let holdout_names: HashSet<&str> = dataset
+        .holdout_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
+    let train_names: HashSet<&str> = dataset
+        .train_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     assert!(holdout_names.is_disjoint(&train_names));
 
     let train_examples = dataset.train_examples(300).unwrap();
@@ -1183,13 +1201,9 @@ fn hard_distractors_preserve_arg_copyability_and_target_presence() {
     // Every required arg must still appear verbatim in the rendered request
     // (arg-copyability), and the target tool must still be the one whose
     // call is expected, regardless of how many/which distractors surround it.
-    let dataset = Dataset::new_sized_with_distractors(
-        21,
-        400,
-        0.15,
-        DistractorConfig::hard_with_count(7),
-    )
-    .unwrap();
+    let dataset =
+        Dataset::new_sized_with_distractors(21, 400, 0.15, DistractorConfig::hard_with_count(7))
+            .unwrap();
     let examples = dataset.train_examples(200).unwrap();
 
     for ex in &examples {
@@ -1244,11 +1258,31 @@ fn stats_probe_param_shapes() {
     let catalog = ToolCatalog::built_in();
     let tools = catalog.tools();
     let total = tools.len();
-    let enums = tools.iter().filter(|t| t.params.iter().any(|p| matches!(p.ty, grug_data::ParamType::Enum(_)))).count();
-    let optionals = tools.iter().filter(|t| t.params.iter().any(|p| !p.required)).count();
+    let enums = tools
+        .iter()
+        .filter(|t| {
+            t.params
+                .iter()
+                .any(|p| matches!(p.ty, grug_data::ParamType::Enum(_)))
+        })
+        .count();
+    let optionals = tools
+        .iter()
+        .filter(|t| t.params.iter().any(|p| !p.required))
+        .count();
     let many = tools.iter().filter(|t| t.params.len() >= 5).count();
     let one = tools.iter().filter(|t| t.params.len() == 1).count();
-    let avg_train: f64 = tools.iter().map(|t| catalog.phrasings().get(&t.name).unwrap().train_count() as f64).sum::<f64>() / total as f64;
-    let avg_holdout: f64 = tools.iter().map(|t| catalog.phrasings().get(&t.name).unwrap().holdout_count() as f64).sum::<f64>() / total as f64;
-    eprintln!("total={total} enums={enums} optionals={optionals} many_params(>=5)={many} one_param={one} avg_train_templates={avg_train:.2} avg_holdout_templates={avg_holdout:.2}");
+    let avg_train: f64 = tools
+        .iter()
+        .map(|t| catalog.phrasings().get(&t.name).unwrap().train_count() as f64)
+        .sum::<f64>()
+        / total as f64;
+    let avg_holdout: f64 = tools
+        .iter()
+        .map(|t| catalog.phrasings().get(&t.name).unwrap().holdout_count() as f64)
+        .sum::<f64>()
+        / total as f64;
+    eprintln!(
+        "total={total} enums={enums} optionals={optionals} many_params(>=5)={many} one_param={one} avg_train_templates={avg_train:.2} avg_holdout_templates={avg_holdout:.2}"
+    );
 }

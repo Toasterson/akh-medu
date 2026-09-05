@@ -49,7 +49,9 @@ pub enum GrugError {
     )]
     DeserializeFailed { message: String },
 
-    #[error("tool `{tool}` has only {count} phrasing template(s); need at least 2 to split train/holdout")]
+    #[error(
+        "tool `{tool}` has only {count} phrasing template(s); need at least 2 to split train/holdout"
+    )]
     #[diagnostic(
         code(grug_data::insufficient_phrasings),
         help(

@@ -99,7 +99,11 @@ fn ground_tool<'a>(call: &ToolCall, offered: &'a [ToolSchema]) -> Option<&'a Too
             } else {
                 let matched = emitted
                     .iter()
-                    .filter(|e| t.params.iter().any(|p| normalized_similarity(e, &p.name) >= PARAM_MATCH_FLOOR))
+                    .filter(|e| {
+                        t.params
+                            .iter()
+                            .any(|p| normalized_similarity(e, &p.name) >= PARAM_MATCH_FLOOR)
+                    })
                     .count();
                 matched as f64 / emitted.len() as f64
             };
@@ -130,11 +134,15 @@ fn ground_param(arg_name: &str, tool: &ToolSchema, used: &[String]) -> Option<St
 /// `(value, changed)`. A string that parses as the target scalar is converted;
 /// anything already matching, or unconvertible, is returned unchanged.
 fn coerce_value(v: &Value, ty: Option<&ParamType>) -> (Value, bool) {
-    let Some(ty) = ty else { return (v.clone(), false) };
+    let Some(ty) = ty else {
+        return (v.clone(), false);
+    };
     if ty.matches(v) {
         return (v.clone(), false);
     }
-    let Some(s) = v.as_str() else { return (v.clone(), false) };
+    let Some(s) = v.as_str() else {
+        return (v.clone(), false);
+    };
     let s = s.trim();
     match ty {
         ParamType::Integer => s.parse::<i64>().ok().map(|n| (Value::from(n), true)),
@@ -162,7 +170,10 @@ mod tests {
         ToolSchema::new(
             name,
             "d",
-            params.iter().map(|(n, t)| ParamSpec::new(*n, t.clone(), true)).collect(),
+            params
+                .iter()
+                .map(|(n, t)| ParamSpec::new(*n, t.clone(), true))
+                .collect(),
         )
     }
 

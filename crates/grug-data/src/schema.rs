@@ -189,7 +189,9 @@ impl Example {
     /// offered `tools` (it always should be, by construction — except for an
     /// abstention example, whose gap target is deliberately *not* offered).
     pub fn expected_schema(&self) -> Option<&ToolSchema> {
-        self.tools.iter().find(|t| t.name == self.expected_call.name)
+        self.tools
+            .iter()
+            .find(|t| t.name == self.expected_call.name)
     }
 
     /// Is the ground truth for this example an **abstention** (no offered tool

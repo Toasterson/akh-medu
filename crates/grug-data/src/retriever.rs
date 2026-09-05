@@ -247,8 +247,9 @@ impl SemanticRetriever {
     pub fn top_k(&self, request: &str, k: usize) -> Vec<usize> {
         let hv = encode_text(request);
         let k = k.min(self.tool_hvs.len());
-        let mut scored: Vec<(u32, usize)> =
-            (0..self.tool_hvs.len()).map(|i| (self.similarity(i, &hv), i)).collect();
+        let mut scored: Vec<(u32, usize)> = (0..self.tool_hvs.len())
+            .map(|i| (self.similarity(i, &hv), i))
+            .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         scored.into_iter().take(k).map(|(_, i)| i).collect()
     }
@@ -470,7 +471,11 @@ mod tests {
     use crate::schema::{ParamSpec, ParamType, ToolSchema};
 
     fn tool(name: &str) -> ToolSchema {
-        ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)])
+        ToolSchema::new(
+            name,
+            "d",
+            vec![ParamSpec::new("q", ParamType::String, true)],
+        )
     }
 
     #[test]
@@ -509,8 +514,8 @@ mod tests {
     fn recall_at_k_is_high_on_real_registry() {
         // On the procedural registry, each request embeds its tool's verb+noun,
         // and the two-token match is (almost always) unique → recall@8 ≈ 1.0.
-        use rand::seq::SliceRandom;
         use rand::SeedableRng;
+        use rand::seq::SliceRandom;
         let catalog = build_catalog(42, 500);
         let registry = catalog.tools();
         let r = Retriever::new(registry);
@@ -518,25 +523,42 @@ mod tests {
 
         let mut pairs = Vec::new();
         for _ in 0..200 {
-            let idx = (0..registry.len()).collect::<Vec<_>>().choose(&mut rng).copied().unwrap();
+            let idx = (0..registry.len())
+                .collect::<Vec<_>>()
+                .choose(&mut rng)
+                .copied()
+                .unwrap();
             let bank = catalog.phrasings().get(&registry[idx].name).unwrap();
             // Build a trivial call so the phrasing renders (values don't affect
             // name-token retrieval).
             let mut args = serde_json::Map::new();
             for p in &registry[idx].params {
-                args.insert(p.name.clone(), crate::generator::fuzz_value(&mut rng, &p.ty));
+                args.insert(
+                    p.name.clone(),
+                    crate::generator::fuzz_value(&mut rng, &p.ty),
+                );
             }
-            let call = crate::schema::ToolCall::new(registry[idx].name.clone(), serde_json::Value::Object(args));
+            let call = crate::schema::ToolCall::new(
+                registry[idx].name.clone(),
+                serde_json::Value::Object(args),
+            );
             let req = bank.render_train(&mut rng, &call);
             pairs.push((req, idx));
         }
         let recall = retrieval_recall_at_k(&r, &pairs, 8);
-        assert!(recall > 0.9, "recall@8 should be high on the procedural registry, got {recall}");
+        assert!(
+            recall > 0.9,
+            "recall@8 should be high on the procedural registry, got {recall}"
+        );
     }
 
     /// Draw `n` `(request, target_idx)` pairs from the procedural registry —
     /// shared by the semantic-retriever tests below.
-    fn sample_pairs(seed: u64, n_tools: usize, n: usize) -> (Vec<ToolSchema>, Vec<(String, usize)>) {
+    fn sample_pairs(
+        seed: u64,
+        n_tools: usize,
+        n: usize,
+    ) -> (Vec<ToolSchema>, Vec<(String, usize)>) {
         use rand::Rng;
         use rand::SeedableRng;
         let catalog = build_catalog(42, n_tools);
@@ -548,9 +570,15 @@ mod tests {
             let bank = catalog.phrasings().get(&registry[idx].name).unwrap();
             let mut args = serde_json::Map::new();
             for p in &registry[idx].params {
-                args.insert(p.name.clone(), crate::generator::fuzz_value(&mut rng, &p.ty));
+                args.insert(
+                    p.name.clone(),
+                    crate::generator::fuzz_value(&mut rng, &p.ty),
+                );
             }
-            let call = crate::schema::ToolCall::new(registry[idx].name.clone(), serde_json::Value::Object(args));
+            let call = crate::schema::ToolCall::new(
+                registry[idx].name.clone(),
+                serde_json::Value::Object(args),
+            );
             let req = bank.render_train(&mut rng, &call);
             pairs.push((req, idx));
         }
@@ -565,7 +593,11 @@ mod tests {
         request
             .split_whitespace()
             .map(|w| {
-                let key: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+                let key: String = w
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric())
+                    .collect::<String>()
+                    .to_ascii_lowercase();
                 if toks.contains(&key) && w.chars().count() >= 2 {
                     let mut cs: Vec<char> = w.chars().collect();
                     let i = cs.len() / 2;
@@ -602,10 +634,16 @@ mod tests {
         ];
         let r = EmbedRetriever::new(tools);
         let query = vec![0.1, 0.99, 0.0]; // closest to tool 1
-        assert!(r.retrieved(&query, 1, 1), "nearest tool is retrieved at k=1");
+        assert!(
+            r.retrieved(&query, 1, 1),
+            "nearest tool is retrieved at k=1"
+        );
         assert!(!r.retrieved(&query, 0, 1), "a far tool is not top-1");
         // recall helper over a batch.
-        let pairs = vec![(vec![0.9, 0.1, 0.0], 0usize), (vec![0.0, 0.2, 0.98], 2usize)];
+        let pairs = vec![
+            (vec![0.9, 0.1, 0.0], 0usize),
+            (vec![0.0, 0.2, 0.98], 2usize),
+        ];
         assert_eq!(embed_recall_at_k(&r, &pairs, 1), 1.0);
     }
 

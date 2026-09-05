@@ -18,4 +18,21 @@ serde_json = "1"
 # Deterministic PRNG for the data generator (seeded, NOT an ML dependency)
 rand = { version = "0.8", features = ["std", "std_rng"] }
 
+# Reproducible text-vision bootstrap. The font8x8 bitmaps are compiled into
+# the generator, avoiding OS font/rasterizer drift; PNG is only the artifact
+# boundary, not a vision/ML dependency.
+font8x8 = { version = "0.3", features = ["unicode"] }
+# Deliberately separate OpenType outline/rasterization stack for the frozen
+# generator-independent OCR audit lane. Fonts are supplied explicitly and
+# content-hashed; no host font lookup or implicit fallback is allowed.
+ab_glyph = "0.2.32"
+png = "0.18"
+unicode-normalization = "0.1"
+regex = "1"
+
+# Content-addressed snapshots of the exact runtime tool contracts used to
+# generate a corpus or exam.  The hash is evidence that training and scoring
+# saw the same schemas, including nested MCP parameters.
+blake3 = "1"
+
 [dev-dependencies]

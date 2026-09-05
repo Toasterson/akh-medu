@@ -72,7 +72,10 @@ pub fn respond_to_gap(
         }
         for idx in retriever.top_k(request, width) {
             if !base.contains(&idx) && retriever.covers(request, idx) {
-                return GapResponse::Widen { width, tool_idx: idx };
+                return GapResponse::Widen {
+                    width,
+                    tool_idx: idx,
+                };
             }
         }
     }
@@ -120,7 +123,12 @@ impl GapRecoveryReport {
         from_k: usize,
         widen_schedule: &[usize],
     ) -> Self {
-        let max_width = widen_schedule.iter().copied().max().unwrap_or(from_k).max(from_k);
+        let max_width = widen_schedule
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(from_k)
+            .max(from_k);
 
         let mut retrieval_misses = 0;
         let mut widen_recovered = 0;
@@ -182,7 +190,12 @@ mod tests {
     use crate::schema::ToolCall;
 
     /// Build `(request, target_idx)` pairs from a catalog's own phrasings.
-    fn scoped_pairs(seed: u64, registry: &[crate::schema::ToolSchema], catalog: &crate::catalog::ToolCatalog, n: usize) -> Vec<(String, usize)> {
+    fn scoped_pairs(
+        seed: u64,
+        registry: &[crate::schema::ToolSchema],
+        catalog: &crate::catalog::ToolCatalog,
+        n: usize,
+    ) -> Vec<(String, usize)> {
         use rand::Rng;
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
@@ -192,7 +205,10 @@ mod tests {
             let bank = catalog.phrasings().get(&registry[idx].name).unwrap();
             let mut args = serde_json::Map::new();
             for p in &registry[idx].params {
-                args.insert(p.name.clone(), crate::generator::fuzz_value(&mut rng, &p.ty));
+                args.insert(
+                    p.name.clone(),
+                    crate::generator::fuzz_value(&mut rng, &p.ty),
+                );
             }
             let call = ToolCall::new(registry[idx].name.clone(), serde_json::Value::Object(args));
             pairs.push((bank.render_train(&mut rng, &call), idx));
@@ -227,7 +243,10 @@ mod tests {
                 let bank = catalog_b.phrasings().get(&btools[idx].name).unwrap();
                 let mut args = serde_json::Map::new();
                 for p in &btools[idx].params {
-                    args.insert(p.name.clone(), crate::generator::fuzz_value(&mut rng, &p.ty));
+                    args.insert(
+                        p.name.clone(),
+                        crate::generator::fuzz_value(&mut rng, &p.ty),
+                    );
                 }
                 let call = ToolCall::new(btools[idx].name.clone(), serde_json::Value::Object(args));
                 novelty.push(bank.render_train(&mut rng, &call));
@@ -270,7 +289,13 @@ mod tests {
     #[test]
     fn widen_recovers_a_covering_tool_outside_from_k() {
         use crate::schema::{ParamSpec, ParamType, ToolSchema};
-        let tool = |name: &str| ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)]);
+        let tool = |name: &str| {
+            ToolSchema::new(
+                name,
+                "d",
+                vec![ParamSpec::new("q", ParamType::String, true)],
+            )
+        };
         // Request names five tokens; four tools each match two of them (score 2),
         // ties broken by index. The target `alpha_beta` sits at index 3, so the
         // narrow top-3 offered set excludes it → a genuine retrieval miss.
@@ -289,8 +314,12 @@ mod tests {
         assert!(r.covers(request, 3), "target fully covers the request");
 
         match respond_to_gap(&r, request, 3, &[8]) {
-            GapResponse::Widen { tool_idx, .. } => assert_eq!(tool_idx, 3, "widen recovers the covering target"),
-            GapResponse::Synthesize => panic!("should have widened to recover the covering tool, not synthesized"),
+            GapResponse::Widen { tool_idx, .. } => {
+                assert_eq!(tool_idx, 3, "widen recovers the covering target")
+            }
+            GapResponse::Synthesize => {
+                panic!("should have widened to recover the covering tool, not synthesized")
+            }
         }
     }
 
@@ -299,12 +328,21 @@ mod tests {
     #[test]
     fn genuine_novelty_synthesizes_despite_partial_confusable() {
         use crate::schema::{ParamSpec, ParamType, ToolSchema};
-        let tool = |name: &str| ToolSchema::new(name, "d", vec![ParamSpec::new("q", ParamType::String, true)]);
+        let tool = |name: &str| {
+            ToolSchema::new(
+                name,
+                "d",
+                vec![ParamSpec::new("q", ParamType::String, true)],
+            )
+        };
         let registry = vec![tool("fetch_ledger"), tool("archive_widget")];
         let r = Retriever::new(&registry);
         // Novel request: shares only `fetch` with tool 0 (partial), covers nothing.
         let request = "fetch the zebra from the paddock";
         assert!(!r.covers(request, 0) && !r.covers(request, 1));
-        assert_eq!(respond_to_gap(&r, request, 1, &[2]), GapResponse::Synthesize);
+        assert_eq!(
+            respond_to_gap(&r, request, 1, &[2]),
+            GapResponse::Synthesize
+        );
     }
 }

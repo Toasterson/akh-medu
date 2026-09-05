@@ -253,7 +253,14 @@ impl RuleDataset {
                 let sort = random_sort(&mut rng);
                 let want_yes = rng.gen_bool(self.config.yes_frac.clamp(0.0, 1.0));
                 build_rule(
-                    &mut rng, &self.world, &self.config, sort, depth, want_yes, arm, typed,
+                    &mut rng,
+                    &self.world,
+                    &self.config,
+                    sort,
+                    depth,
+                    want_yes,
+                    arm,
+                    typed,
                 )
             })
             .collect()
@@ -1129,7 +1136,10 @@ mod tests {
             .iter()
             .filter(|e| train_prompts.contains(e.prompt.as_str()))
             .count();
-        assert!(overlap < 5, "train/eval streams overlap too much: {overlap}/100");
+        assert!(
+            overlap < 5,
+            "train/eval streams overlap too much: {overlap}/100"
+        );
 
         let ptrain = ds.propositional_examples(100, TraceArm::Trace, false);
         let peval = ds.propositional_examples_eval(100, TraceArm::Trace, false);
@@ -1138,7 +1148,10 @@ mod tests {
             .iter()
             .filter(|e| ptp.contains(e.prompt.as_str()))
             .count();
-        assert!(poverlap < 15, "prop train/eval overlap too high: {poverlap}/100");
+        assert!(
+            poverlap < 15,
+            "prop train/eval overlap too high: {poverlap}/100"
+        );
     }
 
     #[test]

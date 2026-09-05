@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 
 use grug_data::organ::GapRecoveryReport;
-use grug_data::retriever::{retrieval_recall_at_k, semantic_recall_at_k, SemanticRetriever};
+use grug_data::retriever::{SemanticRetriever, retrieval_recall_at_k, semantic_recall_at_k};
 use grug_data::{Dataset, DistractorConfig};
 
 /// Substitute one middle character in every request word equal to a `verb_noun`
@@ -33,7 +33,11 @@ fn corrupt_name_tokens(request: &str, name: &str) -> String {
     request
         .split_whitespace()
         .map(|w| {
-            let key: String = w.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+            let key: String = w
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase();
             if toks.contains(&key) && w.chars().count() >= 2 {
                 let mut cs: Vec<char> = w.chars().collect();
                 let i = cs.len() / 2;
@@ -50,8 +54,13 @@ fn corrupt_name_tokens(request: &str, name: &str) -> String {
 fn main() {
     let n_tools = 1000usize;
     let holdout_frac = 0.15;
-    let dataset = Dataset::new_sized_with_distractors(42, n_tools, holdout_frac, DistractorConfig::easy_with_count(2))
-        .expect("dataset splits cleanly");
+    let dataset = Dataset::new_sized_with_distractors(
+        42,
+        n_tools,
+        holdout_frac,
+        DistractorConfig::easy_with_count(2),
+    )
+    .expect("dataset splits cleanly");
     let registry = dataset.registry();
     println!(
         "gap_organ: registry={} out_of_registry(holdout)={}",
@@ -95,7 +104,10 @@ fn main() {
     let schedule = [8usize, 16, 64, registry.len()];
     let report = GapRecoveryReport::measure(&lexical, &pairs, &novelty, 3, &schedule);
 
-    println!("\n=== Lever 3: gap → organ widen/synthesize (from_k=3, widen→{}) ===", registry.len());
+    println!(
+        "\n=== Lever 3: gap → organ widen/synthesize (from_k=3, widen→{}) ===",
+        registry.len()
+    );
     println!(
         "  retrieval-miss gaps : {} of {} scoped  → widen recovered {} ({:.3})",
         report.retrieval_misses,

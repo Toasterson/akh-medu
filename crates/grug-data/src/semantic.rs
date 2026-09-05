@@ -154,7 +154,11 @@ pub(crate) const NOUN_GLOSS: &[(&str, &str, &str)] = &[
     ("region", "territory", "geographic division"),
     ("cluster_node", "worker machine", "compute instance"),
     ("token", "access key", "auth string"),
-    ("certificate", "digital identity proof", "signed key document"),
+    (
+        "certificate",
+        "digital identity proof",
+        "signed key document",
+    ),
     ("subscription", "recurring plan", "membership"),
     ("playlist", "track collection", "song lineup"),
     ("thread", "message chain", "discussion series"),
@@ -171,12 +175,18 @@ pub(crate) const NOUN_GLOSS: &[(&str, &str, &str)] = &[
 
 /// The primary/alt gloss for a verb, if known.
 fn verb_gloss(verb: &str, primary: bool) -> Option<&'static str> {
-    VERB_GLOSS.iter().find(|(w, ..)| *w == verb).map(|(_, p, a)| if primary { *p } else { *a })
+    VERB_GLOSS
+        .iter()
+        .find(|(w, ..)| *w == verb)
+        .map(|(_, p, a)| if primary { *p } else { *a })
 }
 
 /// The primary/alt gloss for a noun key, if known.
 fn noun_gloss(noun_key: &str, primary: bool) -> Option<&'static str> {
-    NOUN_GLOSS.iter().find(|(w, ..)| *w == noun_key).map(|(_, p, a)| if primary { *p } else { *a })
+    NOUN_GLOSS
+        .iter()
+        .find(|(w, ..)| *w == noun_key)
+        .map(|(_, p, a)| if primary { *p } else { *a })
 }
 
 /// Strip a trailing `_<digits>` disambiguation suffix from a procedural noun
@@ -259,21 +269,41 @@ mod tests {
     /// Ubiquitous function words that carry no discriminative retrieval signal
     /// — a surface retriever keying on "the" learns nothing, so glosses sharing
     /// only these are still surface-disjoint in the sense D2 needs.
-    const STOPWORDS: &[&str] = &["the", "a", "an", "to", "of", "for", "up", "off", "in", "out", "on", "into", "from", "with", "and"];
+    const STOPWORDS: &[&str] = &[
+        "the", "a", "an", "to", "of", "for", "up", "off", "in", "out", "on", "into", "from",
+        "with", "and",
+    ];
 
     fn content_tokens(s: &str) -> Vec<String> {
-        tokens(s).into_iter().filter(|t| !STOPWORDS.contains(&t.as_str())).collect()
+        tokens(s)
+            .into_iter()
+            .filter(|t| !STOPWORDS.contains(&t.as_str()))
+            .collect()
     }
 
     #[test]
     fn every_verb_and_noun_has_exactly_one_gloss_row() {
-        assert_eq!(VERB_GLOSS.len(), VERBS.len(), "VERB_GLOSS must cover every procedural verb");
-        assert_eq!(NOUN_GLOSS.len(), NOUNS.len(), "NOUN_GLOSS must cover every procedural noun");
+        assert_eq!(
+            VERB_GLOSS.len(),
+            VERBS.len(),
+            "VERB_GLOSS must cover every procedural verb"
+        );
+        assert_eq!(
+            NOUN_GLOSS.len(),
+            NOUNS.len(),
+            "NOUN_GLOSS must cover every procedural noun"
+        );
         for v in VERBS {
-            assert!(verb_gloss(v, true).is_some() && verb_gloss(v, false).is_some(), "verb {v} missing a gloss");
+            assert!(
+                verb_gloss(v, true).is_some() && verb_gloss(v, false).is_some(),
+                "verb {v} missing a gloss"
+            );
         }
         for n in NOUNS {
-            assert!(noun_gloss(n, true).is_some() && noun_gloss(n, false).is_some(), "noun {n} missing a gloss");
+            assert!(
+                noun_gloss(n, true).is_some() && noun_gloss(n, false).is_some(),
+                "noun {n} missing a gloss"
+            );
         }
     }
 
@@ -315,7 +345,10 @@ mod tests {
         for mode in [SignalMode::Description, SignalMode::Paraphrase] {
             let phrase = glossed_phrase("fetch_ledger", mode);
             for tok in tokens(&phrase) {
-                assert!(tok != "fetch" && tok != "ledger", "D{mode:?} phrase leaked a name token: {phrase:?}");
+                assert!(
+                    tok != "fetch" && tok != "ledger",
+                    "D{mode:?} phrase leaked a name token: {phrase:?}"
+                );
             }
         }
         // Description uses the primary gloss and is identical across D1/D2.
@@ -323,15 +356,27 @@ mod tests {
         let d2 = describe_tool("fetch_ledger", 2, SignalMode::Paraphrase);
         assert_eq!(d1, d2);
         assert_eq!(d1, "Retrieve the accounting records.");
-        assert_eq!(glossed_phrase("fetch_ledger", SignalMode::Paraphrase), "pull up the account book");
-        assert_eq!(glossed_phrase("fetch_ledger", SignalMode::Name), "fetch the ledger");
+        assert_eq!(
+            glossed_phrase("fetch_ledger", SignalMode::Paraphrase),
+            "pull up the account book"
+        );
+        assert_eq!(
+            glossed_phrase("fetch_ledger", SignalMode::Name),
+            "fetch the ledger"
+        );
     }
 
     #[test]
     fn numeric_suffix_noun_key_resolves() {
         // `ledger_37` (a disambiguated name) must still gloss via `ledger`.
-        assert_eq!(glossed_phrase("fetch_ledger_37", SignalMode::Description), "retrieve the accounting records");
+        assert_eq!(
+            glossed_phrase("fetch_ledger_37", SignalMode::Description),
+            "retrieve the accounting records"
+        );
         // Multi-word key `cluster_node` resolves as a whole.
-        assert_eq!(glossed_phrase("get_cluster_node", SignalMode::Description), "obtain the worker machine");
+        assert_eq!(
+            glossed_phrase("get_cluster_node", SignalMode::Description),
+            "obtain the worker machine"
+        );
     }
 }

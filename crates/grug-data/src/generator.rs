@@ -142,8 +142,17 @@ impl Generator {
     /// `Dataset::holdout_phrasing_examples` uses: same (train) tool catalog,
     /// but the *holdout* half of each tool's phrasing bank. Uses the default
     /// (hard) distractor config.
-    pub fn with_catalog_and_mode(seed: u64, catalog: ToolCatalog, phrasing_mode: PhrasingMode) -> Self {
-        Self::with_catalog_mode_and_distractors(seed, catalog, phrasing_mode, DistractorConfig::default())
+    pub fn with_catalog_and_mode(
+        seed: u64,
+        catalog: ToolCatalog,
+        phrasing_mode: PhrasingMode,
+    ) -> Self {
+        Self::with_catalog_mode_and_distractors(
+            seed,
+            catalog,
+            phrasing_mode,
+            DistractorConfig::default(),
+        )
     }
 
     /// Build a generator with full control over phrasing mode and distractor
@@ -577,7 +586,9 @@ fn hard_distractor_indices(
     n_distractors: usize,
 ) -> Vec<usize> {
     let chosen = &fingerprints[chosen_idx];
-    let mut candidates: Vec<usize> = (0..fingerprints.len()).filter(|&i| i != chosen_idx).collect();
+    let mut candidates: Vec<usize> = (0..fingerprints.len())
+        .filter(|&i| i != chosen_idx)
+        .collect();
     candidates.shuffle(rng);
 
     let cmp = |&a: &usize, &b: &usize| {
@@ -705,7 +716,11 @@ mod tests {
                 "d",
                 vec![
                     ParamSpec::new("target_id", ParamType::String, true),
-                    ParamSpec::new("priority", ParamType::Enum(vec!["low".into(), "high".into()]), false),
+                    ParamSpec::new(
+                        "priority",
+                        ParamType::Enum(vec!["low".into(), "high".into()]),
+                        false,
+                    ),
                 ],
             ),
             // Shares the "ticket" name token AND the exact param shape with
@@ -715,7 +730,11 @@ mod tests {
                 "d",
                 vec![
                     ParamSpec::new("target_id", ParamType::String, true),
-                    ParamSpec::new("priority", ParamType::Enum(vec!["low".into(), "high".into()]), false),
+                    ParamSpec::new(
+                        "priority",
+                        ParamType::Enum(vec!["low".into(), "high".into()]),
+                        false,
+                    ),
                 ],
             ),
             // Shares only the param shape (two params, string + enum) but no
@@ -725,7 +744,11 @@ mod tests {
                 "d",
                 vec![
                     ParamSpec::new("owner_name", ParamType::String, true),
-                    ParamSpec::new("mode_level", ParamType::Enum(vec!["a".into(), "b".into()]), false),
+                    ParamSpec::new(
+                        "mode_level",
+                        ParamType::Enum(vec!["a".into(), "b".into()]),
+                        false,
+                    ),
                 ],
             ),
             // Shares nothing: different name family, different param shape.
@@ -812,7 +835,12 @@ mod tests {
             DistractorConfig::easy_with_count(2),
             DistractorConfig::hard_with_count(0),
         ] {
-            for name in ["create_ticket", "update_ticket", "archive_widget", "get_weather"] {
+            for name in [
+                "create_ticket",
+                "update_ticket",
+                "archive_widget",
+                "get_weather",
+            ] {
                 let offered = offer_bundle(&mut rng, &tools, &fingerprints, name, &cfg);
                 assert!(
                     offered.iter().any(|t| t.name == name),
@@ -858,7 +886,11 @@ mod tests {
             assert!(ex.expected_call.is_gap());
             // Offered set is the same size as a normal easy-2 example (3 tools)
             // and contains none named the gap sentinel...
-            assert_eq!(ex.tools.len(), 3, "target + 2 distractors' worth, all distractors");
+            assert_eq!(
+                ex.tools.len(),
+                3,
+                "target + 2 distractors' worth, all distractors"
+            );
             assert!(!ex.tools.iter().any(|t| t.name == ToolCall::GAP_TOOL_NAME));
             // ...and, crucially, no offered tool's schema is *the* answer: the
             // request was phrased for a tool that is provably not in the bundle.
@@ -889,7 +921,10 @@ mod tests {
         for (a, b) in batch_a.iter().zip(batch_b.iter()) {
             let names_a: Vec<&str> = a.tools.iter().map(|t| t.name.as_str()).collect();
             let names_b: Vec<&str> = b.tools.iter().map(|t| t.name.as_str()).collect();
-            assert_eq!(names_a, names_b, "same seed must give byte-identical offered bundles");
+            assert_eq!(
+                names_a, names_b,
+                "same seed must give byte-identical offered bundles"
+            );
         }
     }
 

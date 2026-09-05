@@ -45,7 +45,7 @@ use rand::{Rng, SeedableRng};
 use crate::catalog::{ToolCatalog, param};
 use crate::phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
 use crate::schema::{ParamType, ToolSchema};
-use crate::semantic::{describe_tool, glossed_phrase, SignalMode};
+use crate::semantic::{SignalMode, describe_tool, glossed_phrase};
 
 /// Default number of NL phrasing templates generated per procedural tool.
 /// Within the plan's "6-10 templates" target; `9` splits cleanly under the
@@ -53,31 +53,140 @@ use crate::semantic::{describe_tool, glossed_phrase, SignalMode};
 pub const DEFAULT_TEMPLATES_PER_TOOL: usize = 9;
 
 pub(crate) const VERBS: &[&str] = &[
-    "get", "fetch", "list", "create", "update", "delete", "archive", "restore", "search",
-    "schedule", "cancel", "start", "stop", "pause", "resume", "sync", "export", "import",
-    "validate", "check", "reset", "rotate", "merge", "split", "clone", "publish", "unpublish",
-    "lock", "unlock", "tag", "untag", "assign", "unassign", "notify", "escalate", "resolve",
-    "close", "reopen", "approve", "reject", "queue", "dequeue", "compress", "decompress",
-    "encrypt", "decrypt", "index", "reindex", "compile", "deploy",
+    "get",
+    "fetch",
+    "list",
+    "create",
+    "update",
+    "delete",
+    "archive",
+    "restore",
+    "search",
+    "schedule",
+    "cancel",
+    "start",
+    "stop",
+    "pause",
+    "resume",
+    "sync",
+    "export",
+    "import",
+    "validate",
+    "check",
+    "reset",
+    "rotate",
+    "merge",
+    "split",
+    "clone",
+    "publish",
+    "unpublish",
+    "lock",
+    "unlock",
+    "tag",
+    "untag",
+    "assign",
+    "unassign",
+    "notify",
+    "escalate",
+    "resolve",
+    "close",
+    "reopen",
+    "approve",
+    "reject",
+    "queue",
+    "dequeue",
+    "compress",
+    "decompress",
+    "encrypt",
+    "decrypt",
+    "index",
+    "reindex",
+    "compile",
+    "deploy",
 ];
 
 pub(crate) const NOUNS: &[&str] = &[
-    "ledger", "beacon", "manifest", "cluster", "shard", "widget", "module", "profile",
-    "session", "invoice", "ticket", "snapshot", "pipeline", "endpoint", "artifact", "record",
-    "workspace", "channel", "queue", "policy", "template", "dataset", "credential", "webhook",
-    "schedule", "report", "dashboard", "device", "sensor", "package", "release", "backup",
-    "cache", "route", "zone", "region", "cluster_node", "token", "certificate", "subscription",
-    "playlist", "thread", "annotation", "bookmark", "label", "tag", "attachment", "form",
-    "survey", "campaign", "contact",
+    "ledger",
+    "beacon",
+    "manifest",
+    "cluster",
+    "shard",
+    "widget",
+    "module",
+    "profile",
+    "session",
+    "invoice",
+    "ticket",
+    "snapshot",
+    "pipeline",
+    "endpoint",
+    "artifact",
+    "record",
+    "workspace",
+    "channel",
+    "queue",
+    "policy",
+    "template",
+    "dataset",
+    "credential",
+    "webhook",
+    "schedule",
+    "report",
+    "dashboard",
+    "device",
+    "sensor",
+    "package",
+    "release",
+    "backup",
+    "cache",
+    "route",
+    "zone",
+    "region",
+    "cluster_node",
+    "token",
+    "certificate",
+    "subscription",
+    "playlist",
+    "thread",
+    "annotation",
+    "bookmark",
+    "label",
+    "tag",
+    "attachment",
+    "form",
+    "survey",
+    "campaign",
+    "contact",
 ];
 
 /// Bank of procedural param "role" names (paired with a type-appropriate
 /// suffix below) so param names read as plausible identifiers rather than
 /// `param_0`, `param_1`, ... .
 const PARAM_ROLES: &[&str] = &[
-    "target", "source", "owner", "requester", "primary", "secondary", "parent", "origin",
-    "destination", "region", "priority", "category", "status", "mode", "kind", "scope",
-    "filter", "query", "batch", "session", "customer", "account", "project", "team",
+    "target",
+    "source",
+    "owner",
+    "requester",
+    "primary",
+    "secondary",
+    "parent",
+    "origin",
+    "destination",
+    "region",
+    "priority",
+    "category",
+    "status",
+    "mode",
+    "kind",
+    "scope",
+    "filter",
+    "query",
+    "batch",
+    "session",
+    "customer",
+    "account",
+    "project",
+    "team",
 ];
 
 const ENUM_VARIANT_SETS: &[&[&str]] = &[
@@ -197,9 +306,7 @@ type Shape = fn(&str, &[String]) -> Vec<TemplatePart>;
 
 fn shape_imperative_lead(verb_phrase: &str, param_names: &[String]) -> Vec<TemplatePart> {
     // "Please <verb_phrase> for <p0>[, with <p1>][ and <p2>]..."
-    let mut parts = vec![TemplatePart::Literal(format!(
-        "Please {verb_phrase} for "
-    ))];
+    let mut parts = vec![TemplatePart::Literal(format!("Please {verb_phrase} for "))];
     append_param_list(&mut parts, param_names);
     parts.push(TemplatePart::Literal(".".to_string()));
     parts
@@ -207,9 +314,7 @@ fn shape_imperative_lead(verb_phrase: &str, param_names: &[String]) -> Vec<Templ
 
 fn shape_question_lead(verb_phrase: &str, param_names: &[String]) -> Vec<TemplatePart> {
     // "Can you <verb_phrase> for <p0>[ using <p1>]...?"
-    let mut parts = vec![TemplatePart::Literal(format!(
-        "Can you {verb_phrase} for "
-    ))];
+    let mut parts = vec![TemplatePart::Literal(format!("Can you {verb_phrase} for "))];
     append_param_list(&mut parts, param_names);
     parts.push(TemplatePart::Literal("?".to_string()));
     parts
@@ -255,7 +360,9 @@ fn shape_formal(verb_phrase: &str, param_names: &[String]) -> Vec<TemplatePart> 
 
 fn shape_urgent(verb_phrase: &str, param_names: &[String]) -> Vec<TemplatePart> {
     // "Urgent: <verb_phrase> now. <p0>[ / <p1>]..."
-    let mut parts = vec![TemplatePart::Literal(format!("Urgent: {verb_phrase} now. "))];
+    let mut parts = vec![TemplatePart::Literal(format!(
+        "Urgent: {verb_phrase} now. "
+    ))];
     append_param_list(&mut parts, param_names);
     parts.push(TemplatePart::Literal(".".to_string()));
     parts
@@ -331,7 +438,12 @@ fn append_param_list_from(parts: &mut Vec<TemplatePart>, param_names: &[String])
 /// guarantee holds for every required arg regardless of which template is
 /// drawn — this is the load-bearing invariant checked by the
 /// `arg_value_copyable_across_generated_examples` test.
-fn build_templates(tool: &ToolSchema, n_templates: usize, rotation: usize, mode: SignalMode) -> Vec<PhrasingTemplate> {
+fn build_templates(
+    tool: &ToolSchema,
+    n_templates: usize,
+    rotation: usize,
+    mode: SignalMode,
+) -> Vec<PhrasingTemplate> {
     let param_names: Vec<String> = tool.params.iter().map(|p| p.name.clone()).collect();
     let verb_phrase = glossed_phrase(&tool.name, mode);
 
@@ -358,7 +470,11 @@ pub fn build_catalog(seed: u64, n_tools: usize) -> ToolCatalog {
 /// Like [`build_catalog`], but with an explicit templates-per-tool count
 /// (exposed for tests that want to probe the minimum bank size, and for
 /// callers that want a denser/thinner phrasing bank than the default).
-pub fn build_catalog_with_templates(seed: u64, n_tools: usize, templates_per_tool: usize) -> ToolCatalog {
+pub fn build_catalog_with_templates(
+    seed: u64,
+    n_tools: usize,
+    templates_per_tool: usize,
+) -> ToolCatalog {
     build_catalog_signal(seed, n_tools, templates_per_tool, SignalMode::Name)
 }
 
@@ -465,12 +581,15 @@ mod tests {
             }
             let call = ToolCall::new(tool.name.clone(), serde_json::Value::Object(args));
 
-            for t in bank.train_templates().iter().chain(bank.holdout_templates()) {
+            for t in bank
+                .train_templates()
+                .iter()
+                .chain(bank.holdout_templates())
+            {
                 let rendered = t.render(&call);
                 for p in tool.required_params() {
-                    let value_text = crate::phrasing::value_as_text(
-                        call.arguments_map().get(&p.name).unwrap(),
-                    );
+                    let value_text =
+                        crate::phrasing::value_as_text(call.arguments_map().get(&p.name).unwrap());
                     assert!(
                         rendered.contains(&value_text),
                         "tool {} template {} did not embed required arg {}={} verbatim: {rendered:?}",

@@ -18,7 +18,7 @@
 //! All three streams use independent derived seeds so consuming one stream's
 //! random draws leaks no information about another's.
 
-use crate::catalog::{ToolCatalog, DEFAULT_HOLDOUT_COUNT};
+use crate::catalog::{DEFAULT_HOLDOUT_COUNT, ToolCatalog};
 use crate::error::GrugResult;
 use crate::eval::{DiversityReport, EvalReport};
 use crate::generator::{DistractorConfig, Generator, PhrasingMode};
@@ -98,7 +98,12 @@ impl Dataset {
     /// Build a dataset over a caller-supplied catalog and whole-tool holdout
     /// count, using the default (hard) distractor config.
     pub fn with_catalog(seed: u64, catalog: ToolCatalog, holdout_count: usize) -> GrugResult<Self> {
-        Self::with_catalog_and_distractors(seed, catalog, holdout_count, DistractorConfig::default())
+        Self::with_catalog_and_distractors(
+            seed,
+            catalog,
+            holdout_count,
+            DistractorConfig::default(),
+        )
     }
 
     /// Build a dataset over a caller-supplied catalog, whole-tool holdout
@@ -202,7 +207,12 @@ impl Dataset {
     ) -> GrugResult<Self> {
         let catalog = ToolCatalog::procedural_with_templates(seed, n_tools, templates_per_tool);
         let holdout_count = holdout_count_from_frac(n_tools, holdout_frac);
-        Self::with_catalog_and_distractors(seed, catalog, holdout_count, DistractorConfig::default())
+        Self::with_catalog_and_distractors(
+            seed,
+            catalog,
+            holdout_count,
+            DistractorConfig::default(),
+        )
     }
 
     /// Tool schemas available for training (never includes a whole-tool
@@ -252,7 +262,11 @@ impl Dataset {
     ///
     /// `abstain_frac == 0.0` reproduces [`Dataset::train_examples`] exactly (the
     /// call generator is advanced identically); `1.0` yields all-abstention.
-    pub fn train_examples_with_abstention(&self, n: usize, abstain_frac: f64) -> GrugResult<Vec<Example>> {
+    pub fn train_examples_with_abstention(
+        &self,
+        n: usize,
+        abstain_frac: f64,
+    ) -> GrugResult<Vec<Example>> {
         let frac = abstain_frac.clamp(0.0, 1.0);
         let mut call_gen = Generator::with_catalog_mode_and_distractors(
             self.seed,
@@ -319,8 +333,11 @@ impl Dataset {
         match self.signal_mode {
             crate::semantic::SignalMode::Name => crate::retriever::Retriever::new(self.registry()),
             crate::semantic::SignalMode::Description | crate::semantic::SignalMode::Paraphrase => {
-                let descriptions: Vec<&str> =
-                    self.registry().iter().map(|t| t.description.as_str()).collect();
+                let descriptions: Vec<&str> = self
+                    .registry()
+                    .iter()
+                    .map(|t| t.description.as_str())
+                    .collect();
                 crate::retriever::Retriever::new_over(&descriptions)
             }
         }
@@ -431,7 +448,10 @@ impl Dataset {
             .map(|_| {
                 generator.try_next_example().map(|base| {
                     let scoped = Self::scope_to_retrieval(base, &retriever, &registry, k);
-                    debug_assert!(scoped.is_abstention(), "out-of-registry request must label as gap");
+                    debug_assert!(
+                        scoped.is_abstention(),
+                        "out-of-registry request must label as gap"
+                    );
                     scoped
                 })
             })
@@ -448,7 +468,12 @@ impl Dataset {
     /// call when the retrieved offered set covers the request, and to gap both
     /// when retrieval missed an in-registry tool *and* when the request needs a
     /// capability the registry does not contain.
-    pub fn retrieval_train_mix(&self, k: usize, n: usize, novelty_frac: f64) -> GrugResult<Vec<Example>> {
+    pub fn retrieval_train_mix(
+        &self,
+        k: usize,
+        n: usize,
+        novelty_frac: f64,
+    ) -> GrugResult<Vec<Example>> {
         let frac = novelty_frac.clamp(0.0, 1.0);
         let retriever = self.registry_retriever();
         let registry = self.registry().to_vec();
@@ -629,7 +654,7 @@ impl Dataset {
 #[cfg(test)]
 mod retrieval_tests {
     use super::*;
-    use crate::retriever::{retrieval_recall_at_k, Retriever};
+    use crate::retriever::{Retriever, retrieval_recall_at_k};
 
     /// Retrieval-scoped training examples: offered set is ≤ k tools drawn from
     /// the registry, and the common case is a call whose target is offered.
@@ -655,7 +680,10 @@ mod retrieval_tests {
             }
         }
         // Retrieval is good on this data, so the vast majority are calls.
-        assert!(calls as f64 / examples.len() as f64 > 0.8, "expected mostly calls, got {calls}/200");
+        assert!(
+            calls as f64 / examples.len() as f64 > 0.8,
+            "expected mostly calls, got {calls}/200"
+        );
     }
 
     /// P3d-3: under D1 (description signal, name absent from requests) the
@@ -678,7 +706,10 @@ mod retrieval_tests {
         let retriever = dataset.registry_retriever();
         let pairs = dataset.retrieval_recall_pairs(150).unwrap();
         let recall = retrieval_recall_at_k(&retriever, &pairs, k);
-        assert!(recall > 0.9, "D1 description-keyed recall@{k} should be high, got {recall}");
+        assert!(
+            recall > 0.9,
+            "D1 description-keyed recall@{k} should be high, got {recall}"
+        );
 
         let examples = dataset.retrieval_train_examples(k, 200).unwrap();
         let calls = examples.iter().filter(|e| !e.is_abstention()).count();
@@ -710,7 +741,11 @@ mod retrieval_tests {
                 let leaked = req
                     .split(|c: char| !c.is_ascii_alphanumeric())
                     .any(|w| w == tok);
-                assert!(!leaked, "D1 phrasing leaked name token {tok:?}: {:?}", ex.user_request);
+                assert!(
+                    !leaked,
+                    "D1 phrasing leaked name token {tok:?}: {:?}",
+                    ex.user_request
+                );
             }
         }
     }
@@ -721,14 +756,21 @@ mod retrieval_tests {
     #[test]
     fn retrieval_abstention_always_gaps_and_never_offers_target() {
         let dataset = Dataset::new_sized(7, 400, 0.15).unwrap();
-        let out_of_reg: std::collections::HashSet<&str> =
-            dataset.holdout_tools().iter().map(|t| t.name.as_str()).collect();
+        let out_of_reg: std::collections::HashSet<&str> = dataset
+            .holdout_tools()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
         let examples = dataset.retrieval_abstention_examples(6, 100).unwrap();
         assert_eq!(examples.len(), 100);
         for ex in &examples {
             assert!(ex.is_abstention(), "out-of-registry request must gap");
             // None of the offered tools is an out-of-registry tool.
-            assert!(!ex.tools.iter().any(|t| out_of_reg.contains(t.name.as_str())));
+            assert!(
+                !ex.tools
+                    .iter()
+                    .any(|t| out_of_reg.contains(t.name.as_str()))
+            );
         }
     }
 
@@ -740,6 +782,9 @@ mod retrieval_tests {
         let retriever = Retriever::new(dataset.registry());
         let pairs = dataset.retrieval_recall_pairs(256).unwrap();
         let recall = retrieval_recall_at_k(&retriever, &pairs, 8);
-        assert!(recall > 0.9, "recall@8 over the registry should be high, got {recall}");
+        assert!(
+            recall > 0.9,
+            "recall@8 over the registry should be high, got {recall}"
+        );
     }
 }

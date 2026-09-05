@@ -100,28 +100,52 @@ fn get_weather() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("What's the weather like in {} right now?", get_str_or(c, "city", "my city"))
+            format!(
+                "What's the weather like in {} right now?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Can you check the weather for {}?", get_str_or(c, "city", "my city"))
+            format!(
+                "Can you check the weather for {}?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Tell me the current conditions in {}.", get_str_or(c, "city", "my city"))
+            format!(
+                "Tell me the current conditions in {}.",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Is it raining in {} at the moment?", get_str_or(c, "city", "my city"))
+            format!(
+                "Is it raining in {} at the moment?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("How hot is it in {} today?", get_str_or(c, "city", "my city"))
+            format!(
+                "How hot is it in {} today?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Give me a weather update for {}.", get_str_or(c, "city", "my city"))
+            format!(
+                "Give me a weather update for {}.",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(6, |c| {
-            format!("What should I wear outside in {}?", get_str_or(c, "city", "my city"))
+            format!(
+                "What should I wear outside in {}?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(7, |c| {
-            format!("Weather check for {}, please.", get_str_or(c, "city", "my city"))
+            format!(
+                "Weather check for {}, please.",
+                get_str_or(c, "city", "my city")
+            )
         }),
     ];
     (schema, templates)
@@ -145,10 +169,16 @@ fn get_forecast() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Will it rain in {} this week?", get_str_or(c, "city", "my city"))
+            format!(
+                "Will it rain in {} this week?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Give me the extended forecast for {}.", get_str_or(c, "city", "my city"))
+            format!(
+                "Give me the extended forecast for {}.",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!(
@@ -158,13 +188,19 @@ fn get_forecast() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Should I pack an umbrella for my trip to {}?", get_str_or(c, "city", "my city"))
+            format!(
+                "Should I pack an umbrella for my trip to {}?",
+                get_str_or(c, "city", "my city")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!("Forecast for {}, please.", get_str_or(c, "city", "my city"))
         }),
         PhrasingTemplate::new(6, |c| {
-            format!("What's the weather trend in {} looking like?", get_str_or(c, "city", "my city"))
+            format!(
+                "What's the weather trend in {} looking like?",
+                get_str_or(c, "city", "my city")
+            )
         }),
     ];
     (schema, templates)
@@ -247,11 +283,7 @@ fn book_hotel() -> ToolDef {
             param("city", ParamType::String, true),
             param("check_in", ParamType::String, true),
             param("nights", ParamType::Integer, true),
-            param(
-                "room_type",
-                enum_of(&["single", "double", "suite"]),
-                false,
-            ),
+            param("room_type", enum_of(&["single", "double", "suite"]), false),
             param("breakfast_included", ParamType::Boolean, false),
             param("max_price", ParamType::Number, false),
         ],
@@ -280,7 +312,10 @@ fn book_hotel() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Reserve accommodation in {}.", get_str_or(c, "city", "the city"))
+            format!(
+                "Reserve accommodation in {}.",
+                get_str_or(c, "city", "the city")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
             format!(
@@ -290,10 +325,17 @@ fn book_hotel() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Get me a hotel booking in {}, checking in {}.", get_str_or(c, "city", "the city"), get_str_or(c, "check_in", "tomorrow"))
+            format!(
+                "Get me a hotel booking in {}, checking in {}.",
+                get_str_or(c, "city", "the city"),
+                get_str_or(c, "check_in", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(6, |c| {
-            format!("Set up a hotel stay for {}.", get_str_or(c, "city", "the city"))
+            format!(
+                "Set up a hotel stay for {}.",
+                get_str_or(c, "city", "the city")
+            )
         }),
     ];
     (schema, templates)
@@ -315,22 +357,40 @@ fn search_restaurants() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Find restaurants near {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "Find restaurants near {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Where can I eat near {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "Where can I eat near {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Recommend a place to eat around {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "Recommend a place to eat around {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("I'm hungry, what's good near {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "I'm hungry, what's good near {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Search for dinner spots in {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "Search for dinner spots in {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Any restaurant recommendations for {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "Any restaurant recommendations for {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
     ];
     (schema, templates)
@@ -343,7 +403,11 @@ fn get_directions() -> ToolDef {
         vec![
             param("origin", ParamType::String, true),
             param("destination", ParamType::String, true),
-            param("mode", enum_of(&["driving", "walking", "transit", "cycling"]), false),
+            param(
+                "mode",
+                enum_of(&["driving", "walking", "transit", "cycling"]),
+                false,
+            ),
         ],
     );
     let templates: Vec<PhrasingTemplate> = vec![
@@ -362,7 +426,10 @@ fn get_directions() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("What's the route to {}?", get_str_or(c, "destination", "there"))
+            format!(
+                "What's the route to {}?",
+                get_str_or(c, "destination", "there")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!(
@@ -372,7 +439,10 @@ fn get_directions() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("What's the fastest way to {}?", get_str_or(c, "destination", "there"))
+            format!(
+                "What's the fastest way to {}?",
+                get_str_or(c, "destination", "there")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -393,22 +463,40 @@ fn check_flight_status() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Is flight {} on time?", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "Is flight {} on time?",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Check the status of flight {}.", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "Check the status of flight {}.",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Has flight {} been delayed?", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "Has flight {} been delayed?",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("What gate is flight {} departing from?", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "What gate is flight {} departing from?",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Any updates on flight {}?", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "Any updates on flight {}?",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Track flight {} for me.", get_str_or(c, "flight_number", "AA123"))
+            format!(
+                "Track flight {} for me.",
+                get_str_or(c, "flight_number", "AA123")
+            )
         }),
     ];
     (schema, templates)
@@ -442,7 +530,10 @@ fn book_train_ticket() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Get me on a train to {}.", get_str_or(c, "destination_station", "North Station"))
+            format!(
+                "Get me on a train to {}.",
+                get_str_or(c, "destination_station", "North Station")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!(
@@ -453,7 +544,10 @@ fn book_train_ticket() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Purchase a rail ticket to {}.", get_str_or(c, "destination_station", "North Station"))
+            format!(
+                "Purchase a rail ticket to {}.",
+                get_str_or(c, "destination_station", "North Station")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -473,7 +567,11 @@ fn rent_car() -> ToolDef {
         vec![
             param("location", ParamType::String, true),
             param("days", ParamType::Integer, true),
-            param("car_type", enum_of(&["economy", "suv", "luxury", "van"]), false),
+            param(
+                "car_type",
+                enum_of(&["economy", "suv", "luxury", "van"]),
+                false,
+            ),
         ],
     );
     let templates: Vec<PhrasingTemplate> = vec![
@@ -485,7 +583,10 @@ fn rent_car() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("I need a rental car in {}.", get_str_or(c, "location", "the city"))
+            format!(
+                "I need a rental car in {}.",
+                get_str_or(c, "location", "the city")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!(
@@ -495,10 +596,16 @@ fn rent_car() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Get me wheels in {}.", get_str_or(c, "location", "the city"))
+            format!(
+                "Get me wheels in {}.",
+                get_str_or(c, "location", "the city")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Reserve a rental vehicle in {}.", get_str_or(c, "location", "the city"))
+            format!(
+                "Reserve a rental vehicle in {}.",
+                get_str_or(c, "location", "the city")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -519,22 +626,40 @@ fn find_parking() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Where can I park near {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "Where can I park near {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Find parking near {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "Find parking near {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Is there a parking garage close to {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "Is there a parking garage close to {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("I need to park near {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "I need to park near {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Any parking spots available around {}?", get_str_or(c, "location", "downtown"))
+            format!(
+                "Any parking spots available around {}?",
+                get_str_or(c, "location", "downtown")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Locate parking options for {}.", get_str_or(c, "location", "downtown"))
+            format!(
+                "Locate parking options for {}.",
+                get_str_or(c, "location", "downtown")
+            )
         }),
     ];
     (schema, templates)
@@ -618,22 +743,40 @@ fn get_stock_price() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("What's the current price of {}?", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "What's the current price of {}?",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("How much is {} trading at?", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "How much is {} trading at?",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Check the stock price for {}.", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "Check the stock price for {}.",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("What's {} worth right now?", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "What's {} worth right now?",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Give me a quote for {}.", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "Give me a quote for {}.",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Look up {} on the market.", get_str_or(c, "ticker", "a stock"))
+            format!(
+                "Look up {} on the market.",
+                get_str_or(c, "ticker", "a stock")
+            )
         }),
     ];
     (schema, templates)
@@ -650,19 +793,31 @@ fn get_crypto_price() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("What's the price of {} right now?", get_str_or(c, "symbol", "BTC"))
+            format!(
+                "What's the price of {} right now?",
+                get_str_or(c, "symbol", "BTC")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
             format!("How much is {} worth?", get_str_or(c, "symbol", "BTC"))
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Check the {} exchange rate.", get_str_or(c, "symbol", "BTC"))
+            format!(
+                "Check the {} exchange rate.",
+                get_str_or(c, "symbol", "BTC")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Give me the current {} price.", get_str_or(c, "symbol", "BTC"))
+            format!(
+                "Give me the current {} price.",
+                get_str_or(c, "symbol", "BTC")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("What's {} trading at today?", get_str_or(c, "symbol", "BTC"))
+            format!(
+                "What's {} trading at today?",
+                get_str_or(c, "symbol", "BTC")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!("Look up {} crypto price.", get_str_or(c, "symbol", "BTC"))
@@ -711,7 +866,10 @@ fn calculate_loan_payment() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Estimate monthly installments for a {:.0} loan.", get_num_or(c, "principal", 10000.0))
+            format!(
+                "Estimate monthly installments for a {:.0} loan.",
+                get_num_or(c, "principal", 10000.0)
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -751,7 +909,11 @@ fn transfer_money() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Pay {} {:.2}.", get_str_or(c, "recipient", "my friend"), get_num_or(c, "amount", 50.0))
+            format!(
+                "Pay {} {:.2}.",
+                get_str_or(c, "recipient", "my friend"),
+                get_num_or(c, "amount", 50.0)
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!(
@@ -761,7 +923,11 @@ fn transfer_money() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Wire {} some money: {:.2}.", get_str_or(c, "recipient", "my friend"), get_num_or(c, "amount", 50.0))
+            format!(
+                "Wire {} some money: {:.2}.",
+                get_str_or(c, "recipient", "my friend"),
+                get_num_or(c, "amount", 50.0)
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -786,17 +952,28 @@ fn get_account_balance() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("What's my {} balance?", get_str_or(c, "account_type", "account"))
+            format!(
+                "What's my {} balance?",
+                get_str_or(c, "account_type", "account")
+            )
         }),
         PhrasingTemplate::new(1, |_c| "How much money do I have?".to_string()),
         PhrasingTemplate::new(2, |c| {
-            format!("Check my {} account balance.", get_str_or(c, "account_type", "account"))
+            format!(
+                "Check my {} account balance.",
+                get_str_or(c, "account_type", "account")
+            )
         }),
         PhrasingTemplate::new(3, |_c| "What's my current balance?".to_string()),
         PhrasingTemplate::new(4, |c| {
-            format!("Show me the balance on my {} account.", get_str_or(c, "account_type", "account"))
+            format!(
+                "Show me the balance on my {} account.",
+                get_str_or(c, "account_type", "account")
+            )
         }),
-        PhrasingTemplate::new(5, |_c| "How much do I have in the bank right now?".to_string()),
+        PhrasingTemplate::new(5, |_c| {
+            "How much do I have in the bank right now?".to_string()
+        }),
     ];
     (schema, templates)
 }
@@ -825,13 +1002,23 @@ fn calculate_tip() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("What's {:.0}% of {:.2}?", get_num_or(c, "tip_percent", 18.0), get_num_or(c, "bill_amount", 40.0))
+            format!(
+                "What's {:.0}% of {:.2}?",
+                get_num_or(c, "tip_percent", 18.0),
+                get_num_or(c, "bill_amount", 40.0)
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Work out the tip for a {:.2} check.", get_num_or(c, "bill_amount", 40.0))
+            format!(
+                "Work out the tip for a {:.2} check.",
+                get_num_or(c, "bill_amount", 40.0)
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("How much should I tip on {:.2}?", get_num_or(c, "bill_amount", 40.0))
+            format!(
+                "How much should I tip on {:.2}?",
+                get_num_or(c, "bill_amount", 40.0)
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!(
@@ -875,16 +1062,32 @@ fn create_calendar_event() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Add {} to my calendar on {}.", get_str_or(c, "title", "a meeting"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "Add {} to my calendar on {}.",
+                get_str_or(c, "title", "a meeting"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Put {} on the schedule for {}.", get_str_or(c, "title", "a meeting"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "Put {} on the schedule for {}.",
+                get_str_or(c, "title", "a meeting"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Block out time for {} on {}.", get_str_or(c, "title", "a meeting"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "Block out time for {} on {}.",
+                get_str_or(c, "title", "a meeting"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("I need an event named {} on {}.", get_str_or(c, "title", "a meeting"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "I need an event named {} on {}.",
+                get_str_or(c, "title", "a meeting"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
     ];
     (schema, templates)
@@ -901,19 +1104,31 @@ fn delete_calendar_event() -> ToolDef {
             format!("Cancel the {} event.", get_str_or(c, "title", "meeting"))
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Delete {} from my calendar.", get_str_or(c, "title", "meeting"))
+            format!(
+                "Delete {} from my calendar.",
+                get_str_or(c, "title", "meeting")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Remove the calendar entry for {}.", get_str_or(c, "title", "meeting"))
+            format!(
+                "Remove the calendar entry for {}.",
+                get_str_or(c, "title", "meeting")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("I need to cancel {}.", get_str_or(c, "title", "meeting"))
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Take {} off my schedule.", get_str_or(c, "title", "meeting"))
+            format!(
+                "Take {} off my schedule.",
+                get_str_or(c, "title", "meeting")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Clear {} from the calendar.", get_str_or(c, "title", "meeting"))
+            format!(
+                "Clear {} from the calendar.",
+                get_str_or(c, "title", "meeting")
+            )
         }),
     ];
     (schema, templates)
@@ -927,13 +1142,22 @@ fn list_calendar_events() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("What's on my calendar for {}?", get_str_or(c, "date", "today"))
+            format!(
+                "What's on my calendar for {}?",
+                get_str_or(c, "date", "today")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Show me my schedule for {}.", get_str_or(c, "date", "today"))
+            format!(
+                "Show me my schedule for {}.",
+                get_str_or(c, "date", "today")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("What do I have going on {}?", get_str_or(c, "date", "today"))
+            format!(
+                "What do I have going on {}?",
+                get_str_or(c, "date", "today")
+            )
         }),
         PhrasingTemplate::new(3, |_c| "List my upcoming events.".to_string()),
         PhrasingTemplate::new(4, |c| {
@@ -975,13 +1199,21 @@ fn set_reminder() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Ping me at {} to {}.", get_str_or(c, "remind_at", "later"), get_str_or(c, "text", "something"))
+            format!(
+                "Ping me at {} to {}.",
+                get_str_or(c, "remind_at", "later"),
+                get_str_or(c, "text", "something")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
             format!("I need a nudge to {}.", get_str_or(c, "text", "something"))
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Alert me about {} at {}.", get_str_or(c, "text", "something"), get_str_or(c, "remind_at", "later"))
+            format!(
+                "Alert me about {} at {}.",
+                get_str_or(c, "text", "something"),
+                get_str_or(c, "remind_at", "later")
+            )
         }),
     ];
     (schema, templates)
@@ -998,22 +1230,41 @@ fn set_timer() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Set a timer for {} minutes.", get_num_or(c, "duration_minutes", 10.0) as i64)
+            format!(
+                "Set a timer for {} minutes.",
+                get_num_or(c, "duration_minutes", 10.0) as i64
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Start a {}-minute countdown.", get_num_or(c, "duration_minutes", 10.0) as i64)
+            format!(
+                "Start a {}-minute countdown.",
+                get_num_or(c, "duration_minutes", 10.0) as i64
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Time {} minutes for me.", get_num_or(c, "duration_minutes", 10.0) as i64)
+            format!(
+                "Time {} minutes for me.",
+                get_num_or(c, "duration_minutes", 10.0) as i64
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Count down from {} minutes.", get_num_or(c, "duration_minutes", 10.0) as i64)
+            format!(
+                "Count down from {} minutes.",
+                get_num_or(c, "duration_minutes", 10.0) as i64
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("I need a {} minute timer for {}.", get_num_or(c, "duration_minutes", 10.0) as i64, get_str_or(c, "label", "cooking"))
+            format!(
+                "I need a {} minute timer for {}.",
+                get_num_or(c, "duration_minutes", 10.0) as i64,
+                get_str_or(c, "label", "cooking")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Timer, {} minutes, go.", get_num_or(c, "duration_minutes", 10.0) as i64)
+            format!(
+                "Timer, {} minutes, go.",
+                get_num_or(c, "duration_minutes", 10.0) as i64
+            )
         }),
     ];
     (schema, templates)
@@ -1083,7 +1334,11 @@ fn send_email() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Write to {} about {}.", get_str_or(c, "to", "someone"), get_str_or(c, "subject", "a quick note"))
+            format!(
+                "Write to {} about {}.",
+                get_str_or(c, "to", "someone"),
+                get_str_or(c, "subject", "a quick note")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("Draft an email to {}.", get_str_or(c, "to", "someone"))
@@ -1096,7 +1351,11 @@ fn send_email() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Let {} know about {} by email.", get_str_or(c, "to", "someone"), get_str_or(c, "subject", "a quick note"))
+            format!(
+                "Let {} know about {} by email.",
+                get_str_or(c, "to", "someone"),
+                get_str_or(c, "subject", "a quick note")
+            )
         }),
     ];
     (schema, templates)
@@ -1120,7 +1379,10 @@ fn send_sms() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Send a text to {}.", get_str_or(c, "phone_number", "555-0100"))
+            format!(
+                "Send a text to {}.",
+                get_str_or(c, "phone_number", "555-0100")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!(
@@ -1130,7 +1392,10 @@ fn send_sms() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("SMS {} with a quick note.", get_str_or(c, "phone_number", "555-0100"))
+            format!(
+                "SMS {} with a quick note.",
+                get_str_or(c, "phone_number", "555-0100")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
             format!(
@@ -1140,7 +1405,10 @@ fn send_sms() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Fire off a text to {}.", get_str_or(c, "phone_number", "555-0100"))
+            format!(
+                "Fire off a text to {}.",
+                get_str_or(c, "phone_number", "555-0100")
+            )
         }),
     ];
     (schema, templates)
@@ -1157,10 +1425,17 @@ fn send_slack_message() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Post {} in #{}.", get_str_or(c, "message", "an update"), get_str_or(c, "channel", "general"))
+            format!(
+                "Post {} in #{}.",
+                get_str_or(c, "message", "an update"),
+                get_str_or(c, "channel", "general")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Send a Slack message to #{}.", get_str_or(c, "channel", "general"))
+            format!(
+                "Send a Slack message to #{}.",
+                get_str_or(c, "channel", "general")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!(
@@ -1170,10 +1445,17 @@ fn send_slack_message() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Drop a note in #{} on Slack.", get_str_or(c, "channel", "general"))
+            format!(
+                "Drop a note in #{} on Slack.",
+                get_str_or(c, "channel", "general")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Let the #{} channel know: {}.", get_str_or(c, "channel", "general"), get_str_or(c, "message", "an update"))
+            format!(
+                "Let the #{} channel know: {}.",
+                get_str_or(c, "channel", "general"),
+                get_str_or(c, "message", "an update")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!("Ping #{} on Slack.", get_str_or(c, "channel", "general"))
@@ -1232,19 +1514,37 @@ fn schedule_meeting() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Set up a meeting with {}.", get_str_or(c, "participants", "the team"))
+            format!(
+                "Set up a meeting with {}.",
+                get_str_or(c, "participants", "the team")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Get {} together for a call on {}.", get_str_or(c, "participants", "the team"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "Get {} together for a call on {}.",
+                get_str_or(c, "participants", "the team"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Arrange a meeting with {} for {}.", get_str_or(c, "participants", "the team"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "Arrange a meeting with {} for {}.",
+                get_str_or(c, "participants", "the team"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Book time with {}.", get_str_or(c, "participants", "the team"))
+            format!(
+                "Book time with {}.",
+                get_str_or(c, "participants", "the team")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("I want to meet with {} on {}.", get_str_or(c, "participants", "the team"), get_str_or(c, "date", "tomorrow"))
+            format!(
+                "I want to meet with {} on {}.",
+                get_str_or(c, "participants", "the team"),
+                get_str_or(c, "date", "tomorrow")
+            )
         }),
     ];
     (schema, templates)
@@ -1268,7 +1568,10 @@ fn create_file() -> ToolDef {
             format!("Create a file at {}.", get_str_or(c, "path", "notes.txt"))
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Make a new file called {}.", get_str_or(c, "path", "notes.txt"))
+            format!(
+                "Make a new file called {}.",
+                get_str_or(c, "path", "notes.txt")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!("Write a file to {}.", get_str_or(c, "path", "notes.txt"))
@@ -1277,10 +1580,16 @@ fn create_file() -> ToolDef {
             format!("I need a new file: {}.", get_str_or(c, "path", "notes.txt"))
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Set up a file named {}.", get_str_or(c, "path", "notes.txt"))
+            format!(
+                "Set up a file named {}.",
+                get_str_or(c, "path", "notes.txt")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Generate a file at path {}.", get_str_or(c, "path", "notes.txt"))
+            format!(
+                "Generate a file at path {}.",
+                get_str_or(c, "path", "notes.txt")
+            )
         }),
     ];
     (schema, templates)
@@ -1306,7 +1615,10 @@ fn delete_file() -> ToolDef {
             format!("Trash the file at {}.", get_str_or(c, "path", "notes.txt"))
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("I don't need {} anymore, delete it.", get_str_or(c, "path", "notes.txt"))
+            format!(
+                "I don't need {} anymore, delete it.",
+                get_str_or(c, "path", "notes.txt")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!("Erase {} from disk.", get_str_or(c, "path", "notes.txt"))
@@ -1329,19 +1641,31 @@ fn search_files() -> ToolDef {
             format!("Find files matching {}.", get_str_or(c, "query", "report"))
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Search for {} in my files.", get_str_or(c, "query", "report"))
+            format!(
+                "Search for {} in my files.",
+                get_str_or(c, "query", "report")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Where's the file about {}?", get_str_or(c, "query", "report"))
+            format!(
+                "Where's the file about {}?",
+                get_str_or(c, "query", "report")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("Look for files named {}.", get_str_or(c, "query", "report"))
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Can you find anything matching {}?", get_str_or(c, "query", "report"))
+            format!(
+                "Can you find anything matching {}?",
+                get_str_or(c, "query", "report")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Search my documents for {}.", get_str_or(c, "query", "report"))
+            format!(
+                "Search my documents for {}.",
+                get_str_or(c, "query", "report")
+            )
         }),
     ];
     (schema, templates)
@@ -1361,19 +1685,34 @@ fn compress_files() -> ToolDef {
             format!("Zip up {}.", get_str_or(c, "directory", "the folder"))
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Compress {} into an archive.", get_str_or(c, "directory", "the folder"))
+            format!(
+                "Compress {} into an archive.",
+                get_str_or(c, "directory", "the folder")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Make a zip of {}.", get_str_or(c, "directory", "the folder"))
+            format!(
+                "Make a zip of {}.",
+                get_str_or(c, "directory", "the folder")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Archive the {} directory.", get_str_or(c, "directory", "the folder"))
+            format!(
+                "Archive the {} directory.",
+                get_str_or(c, "directory", "the folder")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Package up {} for me.", get_str_or(c, "directory", "the folder"))
+            format!(
+                "Package up {} for me.",
+                get_str_or(c, "directory", "the folder")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Bundle {} into a zip file.", get_str_or(c, "directory", "the folder"))
+            format!(
+                "Bundle {} into a zip file.",
+                get_str_or(c, "directory", "the folder")
+            )
         }),
     ];
     (schema, templates)
@@ -1433,7 +1772,10 @@ fn play_music() -> ToolDef {
             format!("Put on {}.", get_str_or(c, "query", "some music"))
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Can you play {} for me?", get_str_or(c, "query", "some music"))
+            format!(
+                "Can you play {} for me?",
+                get_str_or(c, "query", "some music")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("Start playing {}.", get_str_or(c, "query", "some music"))
@@ -1456,20 +1798,35 @@ fn set_volume() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Set the volume to {}%.", get_num_or(c, "level_percent", 50.0) as i64)
+            format!(
+                "Set the volume to {}%.",
+                get_num_or(c, "level_percent", 50.0) as i64
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Turn the volume up to {}.", get_num_or(c, "level_percent", 50.0) as i64)
+            format!(
+                "Turn the volume up to {}.",
+                get_num_or(c, "level_percent", 50.0) as i64
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Make it {}% volume.", get_num_or(c, "level_percent", 50.0) as i64)
+            format!(
+                "Make it {}% volume.",
+                get_num_or(c, "level_percent", 50.0) as i64
+            )
         }),
         PhrasingTemplate::new(3, |_c| "Turn the volume down.".to_string()),
         PhrasingTemplate::new(4, |c| {
-            format!("Adjust volume to {}.", get_num_or(c, "level_percent", 50.0) as i64)
+            format!(
+                "Adjust volume to {}.",
+                get_num_or(c, "level_percent", 50.0) as i64
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Set speaker level to {}%.", get_num_or(c, "level_percent", 50.0) as i64)
+            format!(
+                "Set speaker level to {}%.",
+                get_num_or(c, "level_percent", 50.0) as i64
+            )
         }),
     ];
     (schema, templates)
@@ -1483,22 +1840,34 @@ fn search_podcast() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Find a podcast about {}.", get_str_or(c, "query", "science"))
+            format!(
+                "Find a podcast about {}.",
+                get_str_or(c, "query", "science")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
             format!("Search podcasts for {}.", get_str_or(c, "query", "science"))
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Any good podcasts on {}?", get_str_or(c, "query", "science"))
+            format!(
+                "Any good podcasts on {}?",
+                get_str_or(c, "query", "science")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("Look up podcast: {}.", get_str_or(c, "query", "science"))
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("I want to listen to something about {}.", get_str_or(c, "query", "science"))
+            format!(
+                "I want to listen to something about {}.",
+                get_str_or(c, "query", "science")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Show me podcasts related to {}.", get_str_or(c, "query", "science"))
+            format!(
+                "Show me podcasts related to {}.",
+                get_str_or(c, "query", "science")
+            )
         }),
     ];
     (schema, templates)
@@ -1515,22 +1884,40 @@ fn download_video() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Download this video: {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "Download this video: {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Save the video at {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "Save the video at {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Grab a copy of {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "Grab a copy of {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Pull down the video from {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "Pull down the video from {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Fetch and save {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "Fetch and save {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("I want to keep this video: {}.", get_str_or(c, "url", "https://example.com/video"))
+            format!(
+                "I want to keep this video: {}.",
+                get_str_or(c, "url", "https://example.com/video")
+            )
         }),
     ];
     (schema, templates)
@@ -1551,20 +1938,35 @@ fn set_thermostat() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Set the thermostat to {:.0}.", get_num_or(c, "temperature", 21.0))
+            format!(
+                "Set the thermostat to {:.0}.",
+                get_num_or(c, "temperature", 21.0)
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Make it {:.0} degrees in here.", get_num_or(c, "temperature", 21.0))
+            format!(
+                "Make it {:.0} degrees in here.",
+                get_num_or(c, "temperature", 21.0)
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Turn the heat to {:.0}.", get_num_or(c, "temperature", 21.0))
+            format!(
+                "Turn the heat to {:.0}.",
+                get_num_or(c, "temperature", 21.0)
+            )
         }),
         PhrasingTemplate::new(3, |_c| "It's cold, warm it up.".to_string()),
         PhrasingTemplate::new(4, |c| {
-            format!("Adjust the temperature to {:.0} degrees.", get_num_or(c, "temperature", 21.0))
+            format!(
+                "Adjust the temperature to {:.0} degrees.",
+                get_num_or(c, "temperature", 21.0)
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Set home temp to {:.0}.", get_num_or(c, "temperature", 21.0))
+            format!(
+                "Set home temp to {:.0}.",
+                get_num_or(c, "temperature", 21.0)
+            )
         }),
     ];
     (schema, templates)
@@ -1581,26 +1983,61 @@ fn toggle_light() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            let action = if get_bool_or(c, "on", true) { "on" } else { "off" };
-            format!("Turn the {} lights {}.", get_str_or(c, "room", "living room"), action)
+            let action = if get_bool_or(c, "on", true) {
+                "on"
+            } else {
+                "off"
+            };
+            format!(
+                "Turn the {} lights {}.",
+                get_str_or(c, "room", "living room"),
+                action
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            let action = if get_bool_or(c, "on", true) { "on" } else { "off" };
-            format!("Switch the {} light {}.", get_str_or(c, "room", "living room"), action)
+            let action = if get_bool_or(c, "on", true) {
+                "on"
+            } else {
+                "off"
+            };
+            format!(
+                "Switch the {} light {}.",
+                get_str_or(c, "room", "living room"),
+                action
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!("Lights {}.", get_str_or(c, "room", "living room"))
         }),
         PhrasingTemplate::new(3, |c| {
-            let action = if get_bool_or(c, "on", true) { "" } else { "off " };
-            format!("Flip the {}light in the {}.", action, get_str_or(c, "room", "living room"))
+            let action = if get_bool_or(c, "on", true) {
+                ""
+            } else {
+                "off "
+            };
+            format!(
+                "Flip the {}light in the {}.",
+                action,
+                get_str_or(c, "room", "living room")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("It's dark in the {}, fix the lights.", get_str_or(c, "room", "living room"))
+            format!(
+                "It's dark in the {}, fix the lights.",
+                get_str_or(c, "room", "living room")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            let action = if get_bool_or(c, "on", true) { "on" } else { "off" };
-            format!("Please turn {} the {} light.", action, get_str_or(c, "room", "living room"))
+            let action = if get_bool_or(c, "on", true) {
+                "on"
+            } else {
+                "off"
+            };
+            format!(
+                "Please turn {} the {} light.",
+                action,
+                get_str_or(c, "room", "living room")
+            )
         }),
     ];
     (schema, templates)
@@ -1617,25 +2054,51 @@ fn lock_door() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            let action = if get_bool_or(c, "lock", true) { "Lock" } else { "Unlock" };
+            let action = if get_bool_or(c, "lock", true) {
+                "Lock"
+            } else {
+                "Unlock"
+            };
             format!("{} the {} door.", action, get_str_or(c, "door", "front"))
         }),
         PhrasingTemplate::new(1, |c| {
             format!("Is the {} door locked?", get_str_or(c, "door", "front"))
         }),
         PhrasingTemplate::new(2, |c| {
-            let action = if get_bool_or(c, "lock", true) { "secure" } else { "open up" };
-            format!("Please {} the {} door.", action, get_str_or(c, "door", "front"))
+            let action = if get_bool_or(c, "lock", true) {
+                "secure"
+            } else {
+                "open up"
+            };
+            format!(
+                "Please {} the {} door.",
+                action,
+                get_str_or(c, "door", "front")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Make sure the {} door is locked.", get_str_or(c, "door", "front"))
+            format!(
+                "Make sure the {} door is locked.",
+                get_str_or(c, "door", "front")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Let me in through the {} door.", get_str_or(c, "door", "front"))
+            format!(
+                "Let me in through the {} door.",
+                get_str_or(c, "door", "front")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            let action = if get_bool_or(c, "lock", true) { "lock" } else { "unlock" };
-            format!("Can you {} the {} door?", action, get_str_or(c, "door", "front"))
+            let action = if get_bool_or(c, "lock", true) {
+                "lock"
+            } else {
+                "unlock"
+            };
+            format!(
+                "Can you {} the {} door?",
+                action,
+                get_str_or(c, "door", "front")
+            )
         }),
     ];
     (schema, templates)
@@ -1656,11 +2119,17 @@ fn start_vacuum() -> ToolDef {
             format!("Clean the {} floor.", get_str_or(c, "room", "living room"))
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Send the vacuum to the {}.", get_str_or(c, "room", "living room"))
+            format!(
+                "Send the vacuum to the {}.",
+                get_str_or(c, "room", "living room")
+            )
         }),
         PhrasingTemplate::new(4, |_c| "Run a cleaning cycle.".to_string()),
         PhrasingTemplate::new(5, |c| {
-            format!("Tidy up the {} with the robot.", get_str_or(c, "room", "living room"))
+            format!(
+                "Tidy up the {} with the robot.",
+                get_str_or(c, "room", "living room")
+            )
         }),
     ];
     (schema, templates)
@@ -1674,20 +2143,40 @@ fn set_alarm_system() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            if get_bool_or(c, "armed", true) { "Arm the security system.".to_string() } else { "Disarm the alarm.".to_string() }
+            if get_bool_or(c, "armed", true) {
+                "Arm the security system.".to_string()
+            } else {
+                "Disarm the alarm.".to_string()
+            }
         }),
         PhrasingTemplate::new(1, |c| {
-            if get_bool_or(c, "armed", true) { "Set the alarm before we leave.".to_string() } else { "Turn off the house alarm.".to_string() }
+            if get_bool_or(c, "armed", true) {
+                "Set the alarm before we leave.".to_string()
+            } else {
+                "Turn off the house alarm.".to_string()
+            }
         }),
         PhrasingTemplate::new(2, |c| {
-            if get_bool_or(c, "armed", true) { "Lock everything down.".to_string() } else { "We're home, disarm it.".to_string() }
+            if get_bool_or(c, "armed", true) {
+                "Lock everything down.".to_string()
+            } else {
+                "We're home, disarm it.".to_string()
+            }
         }),
         PhrasingTemplate::new(3, |_c| "Is the security system armed?".to_string()),
         PhrasingTemplate::new(4, |c| {
-            if get_bool_or(c, "armed", true) { "Activate home security.".to_string() } else { "Deactivate the alarm system.".to_string() }
+            if get_bool_or(c, "armed", true) {
+                "Activate home security.".to_string()
+            } else {
+                "Deactivate the alarm system.".to_string()
+            }
         }),
         PhrasingTemplate::new(5, |c| {
-            if get_bool_or(c, "armed", true) { "Turn on the alarm, we're heading out.".to_string() } else { "Switch off the security system.".to_string() }
+            if get_bool_or(c, "armed", true) {
+                "Turn on the alarm, we're heading out.".to_string()
+            } else {
+                "Switch off the security system.".to_string()
+            }
         }),
     ];
     (schema, templates)
@@ -1707,14 +2196,15 @@ fn run_shell_command() -> ToolDef {
         ],
     );
     let templates: Vec<PhrasingTemplate> = vec![
-        PhrasingTemplate::new(0, |c| {
-            format!("Run `{}`.", get_str_or(c, "command", "ls"))
-        }),
+        PhrasingTemplate::new(0, |c| format!("Run `{}`.", get_str_or(c, "command", "ls"))),
         PhrasingTemplate::new(1, |c| {
             format!("Execute {} in the shell.", get_str_or(c, "command", "ls"))
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Can you run this command: {}", get_str_or(c, "command", "ls"))
+            format!(
+                "Can you run this command: {}",
+                get_str_or(c, "command", "ls")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!("Type {} at the terminal.", get_str_or(c, "command", "ls"))
@@ -1740,22 +2230,42 @@ fn create_git_branch() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Create a branch called {}.", get_str_or(c, "branch_name", "feature/new"))
+            format!(
+                "Create a branch called {}.",
+                get_str_or(c, "branch_name", "feature/new")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Make a new git branch: {}.", get_str_or(c, "branch_name", "feature/new"))
+            format!(
+                "Make a new git branch: {}.",
+                get_str_or(c, "branch_name", "feature/new")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Cut a branch named {} off {}.", get_str_or(c, "branch_name", "feature/new"), get_str_or(c, "base_branch", "main"))
+            format!(
+                "Cut a branch named {} off {}.",
+                get_str_or(c, "branch_name", "feature/new"),
+                get_str_or(c, "base_branch", "main")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("I need a new branch, {}.", get_str_or(c, "branch_name", "feature/new"))
+            format!(
+                "I need a new branch, {}.",
+                get_str_or(c, "branch_name", "feature/new")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Branch off {} into {}.", get_str_or(c, "base_branch", "main"), get_str_or(c, "branch_name", "feature/new"))
+            format!(
+                "Branch off {} into {}.",
+                get_str_or(c, "base_branch", "main"),
+                get_str_or(c, "branch_name", "feature/new")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Set up {} as a new branch.", get_str_or(c, "branch_name", "feature/new"))
+            format!(
+                "Set up {} as a new branch.",
+                get_str_or(c, "branch_name", "feature/new")
+            )
         }),
     ];
     (schema, templates)
@@ -1767,7 +2277,11 @@ fn deploy_service() -> ToolDef {
         "Deploy a service to an environment.",
         vec![
             param("service_name", ParamType::String, true),
-            param("environment", enum_of(&["dev", "staging", "production"]), true),
+            param(
+                "environment",
+                enum_of(&["dev", "staging", "production"]),
+                true,
+            ),
             param("version", ParamType::String, false),
             param("rollback_on_failure", ParamType::Boolean, false),
             param("replicas", ParamType::Integer, false),
@@ -1782,10 +2296,18 @@ fn deploy_service() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Ship {} to {}.", get_str_or(c, "service_name", "the api"), get_str_or(c, "environment", "staging"))
+            format!(
+                "Ship {} to {}.",
+                get_str_or(c, "service_name", "the api"),
+                get_str_or(c, "environment", "staging")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Push {} out to {}.", get_str_or(c, "service_name", "the api"), get_str_or(c, "environment", "staging"))
+            format!(
+                "Push {} out to {}.",
+                get_str_or(c, "service_name", "the api"),
+                get_str_or(c, "environment", "staging")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
             format!(
@@ -1796,10 +2318,18 @@ fn deploy_service() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Roll out {} on {}.", get_str_or(c, "service_name", "the api"), get_str_or(c, "environment", "staging"))
+            format!(
+                "Roll out {} on {}.",
+                get_str_or(c, "service_name", "the api"),
+                get_str_or(c, "environment", "staging")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Go ahead and deploy {} to the {} environment.", get_str_or(c, "service_name", "the api"), get_str_or(c, "environment", "staging"))
+            format!(
+                "Go ahead and deploy {} to the {} environment.",
+                get_str_or(c, "service_name", "the api"),
+                get_str_or(c, "environment", "staging")
+            )
         }),
     ];
     (schema, templates)
@@ -1816,19 +2346,28 @@ fn check_build_status() -> ToolDef {
             format!("Is build {} passing?", get_str_or(c, "build_id", "#123"))
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Check the status of build {}.", get_str_or(c, "build_id", "#123"))
+            format!(
+                "Check the status of build {}.",
+                get_str_or(c, "build_id", "#123")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
             format!("Did build {} succeed?", get_str_or(c, "build_id", "#123"))
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("What's happening with CI run {}?", get_str_or(c, "build_id", "#123"))
+            format!(
+                "What's happening with CI run {}?",
+                get_str_or(c, "build_id", "#123")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
             format!("Look up build {}.", get_str_or(c, "build_id", "#123"))
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Give me the status of {}.", get_str_or(c, "build_id", "#123"))
+            format!(
+                "Give me the status of {}.",
+                get_str_or(c, "build_id", "#123")
+            )
         }),
     ];
     (schema, templates)
@@ -1856,16 +2395,26 @@ fn create_ticket() -> ToolDef {
             format!("File an issue: {}.", get_str_or(c, "title", "the bug"))
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Create a ticket titled {}.", get_str_or(c, "title", "the bug"))
+            format!(
+                "Create a ticket titled {}.",
+                get_str_or(c, "title", "the bug")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Log a {} priority ticket for {}.", get_str_or(c, "priority", "medium"), get_str_or(c, "title", "the bug"))
+            format!(
+                "Log a {} priority ticket for {}.",
+                get_str_or(c, "priority", "medium"),
+                get_str_or(c, "title", "the bug")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
             format!("We need to track: {}.", get_str_or(c, "title", "the bug"))
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Report an issue about {}.", get_str_or(c, "title", "the bug"))
+            format!(
+                "Report an issue about {}.",
+                get_str_or(c, "title", "the bug")
+            )
         }),
     ];
     (schema, templates)
@@ -1886,7 +2435,10 @@ fn search_web() -> ToolDef {
     );
     let templates: Vec<PhrasingTemplate> = vec![
         PhrasingTemplate::new(0, |c| {
-            format!("Search the web for {}.", get_str_or(c, "query", "something"))
+            format!(
+                "Search the web for {}.",
+                get_str_or(c, "query", "something")
+            )
         }),
         PhrasingTemplate::new(1, |c| {
             format!("Google {}.", get_str_or(c, "query", "something"))
@@ -1895,13 +2447,22 @@ fn search_web() -> ToolDef {
             format!("Look up {} online.", get_str_or(c, "query", "something"))
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Find information about {}.", get_str_or(c, "query", "something"))
+            format!(
+                "Find information about {}.",
+                get_str_or(c, "query", "something")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Can you search for {}?", get_str_or(c, "query", "something"))
+            format!(
+                "Can you search for {}?",
+                get_str_or(c, "query", "something")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("What does the internet say about {}?", get_str_or(c, "query", "something"))
+            format!(
+                "What does the internet say about {}?",
+                get_str_or(c, "query", "something")
+            )
         }),
     ];
     (schema, templates)
@@ -1925,19 +2486,39 @@ fn translate_text() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("How do you say \"{}\" in {}?", get_str_or(c, "text", "hello"), get_str_or(c, "target_language", "French"))
+            format!(
+                "How do you say \"{}\" in {}?",
+                get_str_or(c, "text", "hello"),
+                get_str_or(c, "target_language", "French")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("Convert \"{}\" to {}.", get_str_or(c, "text", "hello"), get_str_or(c, "target_language", "French"))
+            format!(
+                "Convert \"{}\" to {}.",
+                get_str_or(c, "text", "hello"),
+                get_str_or(c, "target_language", "French")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("What's \"{}\" in {}?", get_str_or(c, "text", "hello"), get_str_or(c, "target_language", "French"))
+            format!(
+                "What's \"{}\" in {}?",
+                get_str_or(c, "text", "hello"),
+                get_str_or(c, "target_language", "French")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Please translate this to {}: \"{}\"", get_str_or(c, "target_language", "French"), get_str_or(c, "text", "hello"))
+            format!(
+                "Please translate this to {}: \"{}\"",
+                get_str_or(c, "target_language", "French"),
+                get_str_or(c, "text", "hello")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("I need \"{}\" in {}.", get_str_or(c, "text", "hello"), get_str_or(c, "target_language", "French"))
+            format!(
+                "I need \"{}\" in {}.",
+                get_str_or(c, "text", "hello"),
+                get_str_or(c, "target_language", "French")
+            )
         }),
     ];
     (schema, templates)
@@ -1960,13 +2541,22 @@ fn define_word() -> ToolDef {
             format!("Look up the word {}.", get_str_or(c, "word", "ephemeral"))
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("What's the definition of {}?", get_str_or(c, "word", "ephemeral"))
+            format!(
+                "What's the definition of {}?",
+                get_str_or(c, "word", "ephemeral")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("I don't know what {} means.", get_str_or(c, "word", "ephemeral"))
+            format!(
+                "I don't know what {} means.",
+                get_str_or(c, "word", "ephemeral")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Explain the word {} to me.", get_str_or(c, "word", "ephemeral"))
+            format!(
+                "Explain the word {} to me.",
+                get_str_or(c, "word", "ephemeral")
+            )
         }),
     ];
     (schema, templates)
@@ -2084,10 +2674,16 @@ fn search_recipes() -> ToolDef {
             format!("Search for {} recipes.", get_str_or(c, "query", "pasta"))
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("I want to cook {} tonight.", get_str_or(c, "query", "pasta"))
+            format!(
+                "I want to cook {} tonight.",
+                get_str_or(c, "query", "pasta")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Give me a recipe using {}.", get_str_or(c, "query", "pasta"))
+            format!(
+                "Give me a recipe using {}.",
+                get_str_or(c, "query", "pasta")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
             format!("How do I make {}?", get_str_or(c, "query", "pasta"))
@@ -2103,7 +2699,11 @@ fn book_ride() -> ToolDef {
         vec![
             param("pickup", ParamType::String, true),
             param("dropoff", ParamType::String, true),
-            param("ride_type", enum_of(&["standard", "premium", "shared"]), false),
+            param(
+                "ride_type",
+                enum_of(&["standard", "premium", "shared"]),
+                false,
+            ),
         ],
     );
     let templates: Vec<PhrasingTemplate> = vec![
@@ -2115,19 +2715,37 @@ fn book_ride() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Book a car from {} to {}.", get_str_or(c, "pickup", "home"), get_str_or(c, "dropoff", "the airport"))
+            format!(
+                "Book a car from {} to {}.",
+                get_str_or(c, "pickup", "home"),
+                get_str_or(c, "dropoff", "the airport")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("I need a lift from {} to {}.", get_str_or(c, "pickup", "home"), get_str_or(c, "dropoff", "the airport"))
+            format!(
+                "I need a lift from {} to {}.",
+                get_str_or(c, "pickup", "home"),
+                get_str_or(c, "dropoff", "the airport")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Call a ride to {}.", get_str_or(c, "dropoff", "the airport"))
+            format!(
+                "Call a ride to {}.",
+                get_str_or(c, "dropoff", "the airport")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Order a car pickup at {}, heading to {}.", get_str_or(c, "pickup", "home"), get_str_or(c, "dropoff", "the airport"))
+            format!(
+                "Order a car pickup at {}, heading to {}.",
+                get_str_or(c, "pickup", "home"),
+                get_str_or(c, "dropoff", "the airport")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Can you book me a rideshare to {}?", get_str_or(c, "dropoff", "the airport"))
+            format!(
+                "Can you book me a rideshare to {}?",
+                get_str_or(c, "dropoff", "the airport")
+            )
         }),
     ];
     (schema, templates)
@@ -2152,19 +2770,39 @@ fn order_food() -> ToolDef {
             )
         }),
         PhrasingTemplate::new(1, |c| {
-            format!("Get me {} delivered from {}.", get_str_or(c, "items", "a pizza"), get_str_or(c, "restaurant", "the usual place"))
+            format!(
+                "Get me {} delivered from {}.",
+                get_str_or(c, "items", "a pizza"),
+                get_str_or(c, "restaurant", "the usual place")
+            )
         }),
         PhrasingTemplate::new(2, |c| {
-            format!("I'm hungry, order {} from {}.", get_str_or(c, "items", "a pizza"), get_str_or(c, "restaurant", "the usual place"))
+            format!(
+                "I'm hungry, order {} from {}.",
+                get_str_or(c, "items", "a pizza"),
+                get_str_or(c, "restaurant", "the usual place")
+            )
         }),
         PhrasingTemplate::new(3, |c| {
-            format!("Place an order for {} at {}.", get_str_or(c, "items", "a pizza"), get_str_or(c, "restaurant", "the usual place"))
+            format!(
+                "Place an order for {} at {}.",
+                get_str_or(c, "items", "a pizza"),
+                get_str_or(c, "restaurant", "the usual place")
+            )
         }),
         PhrasingTemplate::new(4, |c| {
-            format!("Send over {} from {}.", get_str_or(c, "items", "a pizza"), get_str_or(c, "restaurant", "the usual place"))
+            format!(
+                "Send over {} from {}.",
+                get_str_or(c, "items", "a pizza"),
+                get_str_or(c, "restaurant", "the usual place")
+            )
         }),
         PhrasingTemplate::new(5, |c| {
-            format!("Can you order food, {} from {}?", get_str_or(c, "items", "a pizza"), get_str_or(c, "restaurant", "the usual place"))
+            format!(
+                "Can you order food, {} from {}?",
+                get_str_or(c, "items", "a pizza"),
+                get_str_or(c, "restaurant", "the usual place")
+            )
         }),
     ];
     (schema, templates)
