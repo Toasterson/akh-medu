@@ -1,0 +1,6 @@
+   Compiling grug-train v0.1.0 (/workspace/babyllm-runpod-src-20260904/crates/grug-train)
+    Finished `release` profile [optimized] target(s) in 49.69s
+     Running `target/release/examples/vision_compact_overfit --steps 2 --cases 1 --batch-size 1 --learning-rate 0.001 --min-learning-rate 0.00001 --checkpoint-every 1 --artifacts-dir /workspace/progress-checkpoint-smoke`
+step=1 loss=5.758366 lr=0.00100000 elapsed=11.7s
+checkpoint=/workspace/progress-checkpoint-smoke/progress/step-000001
+step=2 loss=3.598246 lr=0.00001000 elapsed=12.3s

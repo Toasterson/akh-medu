@@ -1,0 +1,23 @@
+   Compiling grug-train v0.1.0 (/workspace/babyllm-runpod-src-20260904/crates/grug-train)
+    Finished `release` profile [optimized] target(s) in 50.02s
+     Running `target/release/examples/vision_compact_overfit --steps 4000 --cases 128 --batch-size 32 --learning-rate 0.001 --artifacts-dir /workspace/vision-v1-checkpoint`
+step=1 loss=5.659536 elapsed=11.2s
+step=50 loss=0.246031 elapsed=42.3s
+step=100 loss=0.207659 elapsed=73.9s
+step=150 loss=0.184460 elapsed=105.5s
+step=200 loss=0.184899 elapsed=137.1s
+step=250 loss=0.165858 elapsed=168.8s
+step=300 loss=0.171418 elapsed=200.3s
+step=350 loss=0.127906 elapsed=231.9s
+step=400 loss=0.106168 elapsed=264.0s
+step=450 loss=0.099337 elapsed=295.5s
+step=500 loss=0.089100 elapsed=327.1s
+step=550 loss=0.059588 elapsed=358.6s
+step=600 loss=0.027359 elapsed=390.1s
+step=650 loss=0.034778 elapsed=421.9s
+step=700 loss=0.020190 elapsed=453.6s
+step=750 loss=0.034230 elapsed=485.2s
+step=800 loss=0.019800 elapsed=516.8s
+step=850 loss=0.033999 elapsed=548.6s
+step=900 loss=0.019643 elapsed=580.2s
+step=950 loss=0.033851 elapsed=611.7s

@@ -1,0 +1,41 @@
+{
+  "kind": "compact_conv_stem_plus_global_linear_glyph_classification",
+  "backend": "cuda",
+  "renderer": "font8x8-unicode-0.3/babyllm-raster-v1",
+  "canvas": [
+    48,
+    48
+  ],
+  "classes": 32,
+  "training_positions_per_class": 167,
+  "held_out_positions_per_class": 2,
+  "held_out_gate": 0.95,
+  "results": [
+    {
+      "glyph_pixels": 8,
+      "output_stride": 16,
+      "visual_tokens": 9,
+      "parameters": 17760,
+      "steps": 3000,
+      "elapsed_seconds": 69.630297112,
+      "initial_loss": 3.8702993,
+      "final_loss": 0.00029681064,
+      "training_position_accuracy": 1.0,
+      "held_out_position_accuracy": 1.0,
+      "gate_passed": true
+    },
+    {
+      "glyph_pixels": 16,
+      "output_stride": 16,
+      "visual_tokens": 9,
+      "parameters": 17760,
+      "steps": 3000,
+      "elapsed_seconds": 63.681543647,
+      "initial_loss": 3.6238236,
+      "final_loss": 0.00016690532,
+      "training_position_accuracy": 1.0,
+      "held_out_position_accuracy": 1.0,
+      "gate_passed": true
+    }
+  ]
+}

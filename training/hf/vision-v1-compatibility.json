@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "experimental_native_vision_checkpoint",
+  "architecture": "compact_shared_decoder_v1",
+  "checkpoint_format": "burn_0.21_named_mpk_full_precision",
+  "parameters": 3310340,
+  "tokenizer": {
+    "kind": "byte",
+    "vocab_size": 260,
+    "byte_ids": "0..=255",
+    "bos_id": 256,
+    "eos_id": 257,
+    "pad_id": 258,
+    "sep_id": 259,
+    "ocr_prompt": "transcribe image exactly"
+  },
+  "transformer": {
+    "d_model": 192,
+    "heads": 6,
+    "layers": 6,
+    "feed_forward": 768,
+    "max_sequence": 512
+  },
+  "vision": {
+    "input": "RGB u8 converted to NCHW float32 in [0,1]",
+    "training_geometry": {"width": 384, "height": 64},
+    "hidden_channels": 24,
+    "output_stride": 16,
+    "max_grid_rows": 4,
+    "max_grid_columns": 24,
+    "visual_tokens_at_training_geometry": 96,
+    "visual_fraction_of_context": 0.1875
+  },
+  "supported_claim": "clean-line training-sibling overfit gate only",
+  "unsupported_claims": [
+    "held-out OCR generalization",
+    "font generalization",
+    "corrupted-image OCR",
+    "multilingual OCR",
+    "layout understanding",
+    "production readiness"
+  ]
+}

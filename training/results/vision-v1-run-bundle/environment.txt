@@ -1,0 +1,26 @@
+captured_utc=2026-09-04T00:54:59Z
+Linux 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:43:11 UTC 2026 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.3 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.3 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+rustc 1.98.1 (48a229cea 2026-09-01)
+cargo 1.98.1 (797e8a9bc 2026-08-05)
+NVIDIA A40, 580.159.03, 49140 MiB
+Fri Sep  4 00:54:59 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.159.03             Driver Version: 580.159.03     CUDA Version: 13.0     |
+container_image=runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
+torch=2.9.1+cu128
+torch_cuda=12.8
+nvrtc=/usr/local/cuda/targets/x86_64-linux/lib/libnvrtc.so.12
+2b5576fe9ea269bd634995eaf276bea3cef75b9b5b3fb76c3c2b7b5bcc94c08a  /workspace/babyllm-runpod-src-20260904/Cargo.toml
+2c305c0f55c341a7ae43dab6f85d452d730c58682a281d8234606b80609bf4a7  /workspace/babyllm-runpod-src-20260904/Cargo.lock
+c4bfc44c44e3ab0f5620aa9d29ef0eb737a49b41317b2c54fa35b99f848efa15  /workspace/babyllm-runpod-src-20260904/crates/grug-data/Cargo.toml
+37db991533a4b74e80488d2689f3dbdde9839a07419f66376898ef5e09ca7018  /workspace/babyllm-runpod-src-20260904/crates/grug-train/Cargo.toml
+b429ebb0c6a89d77664391c62e40dd3c03421b6cb9915fa39b091fefbe26c6b2  /workspace/babyllm-runpod-src-20260904/crates/grug-data/src/vision_text.rs
+a3ed7029583501eb584f4abcfb8c0b6006ae029c2c1d4ed90b5ed220f938fe9e  /workspace/babyllm-runpod-src-20260904/crates/grug-train/src/transformer.rs
+f73e637c6185aa535f884bb0182f1cc2720c5bfbc17b65571bf3d2e792ac2be7  /workspace/babyllm-runpod-src-20260904/crates/grug-train/src/vision.rs
+36431471aee29913369f9e213b0782a6b6c8941ec489c30f662efffd209f6615  /workspace/babyllm-runpod-src-20260904/crates/grug-train/examples/vision_compact_overfit.rs

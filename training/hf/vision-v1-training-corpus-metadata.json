@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "compact_clean_line_training_corpus",
+  "generator_version": "babyllm-vision-text-v1",
+  "renderer_id": "font8x8-unicode-0.3/babyllm-raster-v1",
+  "domain": "training_sibling",
+  "seed": 51100,
+  "item_index_stride": 15,
+  "semantic_items": 128,
+  "rendered_cases": 128,
+  "variants_per_item": 1,
+  "difficulty": 1,
+  "languages": ["en"],
+  "script_scope": "latin",
+  "layouts": ["line"],
+  "corruptions": ["clean"],
+  "unique_transcripts": 128,
+  "manifest_sha256": "c1456f2701eaa012aa6d0ae6788e7e51989f6e00659e7c230a375b390c89527a",
+  "first_png_sha256": "ebcf380a5e5101295607eb1b987ff55a736a5e251508e02d1636ec70b7b9d4e5",
+  "identity_score": {
+    "exact_rate": 1.0,
+    "character_error_rate": 0.0,
+    "word_error_rate": 0.0,
+    "cross_semantic_collapse_rate": 0.0
+  },
+  "same_renderer_separation_audit": {
+    "admitted": true,
+    "exact_transcript_overlap": 0,
+    "exact_pixel_overlap": 0,
+    "max_transcript_ngram_jaccard": 0.37209302325581395,
+    "min_image_hash_hamming_distance": 19,
+    "report_sha256": "7589a8f92ddff189c321121ebafb8f0e7280bc4290c2ab8414a5ad0fab5b13e4"
+  },
+  "sentinel": false,
+  "exam": false,
+  "independent_audit": false
+}

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "public_training_sibling_demo",
+  "generator_version": "babyllm-vision-text-v1",
+  "renderer_id": "font8x8-unicode-0.3/babyllm-raster-v1",
+  "domain": "training_sibling",
+  "seed": 740059131,
+  "semantic_items": 30,
+  "variants_per_item": 5,
+  "rendered_cases": 150,
+  "difficulty": 2,
+  "languages": ["en", "de", "fr"],
+  "script_scope": "latin",
+  "layouts": ["line", "paragraph", "receipt", "terminal", "api_error"],
+  "corruptions": ["clean", "low_contrast", "salt_pepper", "box_blur", "occlusion"],
+  "sentinel": false,
+  "independent_audit": false,
+  "compact_clean_line_training_corpus": {
+    "seed": 51100,
+    "item_index_stride": 15,
+    "rendered_cases": 128,
+    "language": "en",
+    "layout": "line",
+    "corruption": "clean",
+    "manifest_sha256": "c1456f2701eaa012aa6d0ae6788e7e51989f6e00659e7c230a375b390c89527a"
+  },
+  "native_ocr_capability_gate": "v1_training_overfit_green_generalization_red"
+}

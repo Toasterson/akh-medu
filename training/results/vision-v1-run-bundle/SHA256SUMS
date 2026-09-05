@@ -1,0 +1,14 @@
+2c305c0f55c341a7ae43dab6f85d452d730c58682a281d8234606b80609bf4a7  ./Cargo.lock
+2b5576fe9ea269bd634995eaf276bea3cef75b9b5b3fb76c3c2b7b5bcc94c08a  ./Cargo.toml
+9043d76b18cb7aabe95f7427478d4319f2c05d1ad40a9910eda35d8ceed6c513  ./README.md
+f64d8a3ce8d23b9b721641230448ab6ffb225ecd589d8b8db034473d6b2cbc09  ./attempt-01-no-checkpoint.log
+7dc16bb42808f68a8dd6bece3a714085e7957112a7ae16fc4e7b0abcc751a3ff  ./attempt-02-context256-budget-stop.log
+b651330796a9a864d5bdf2db847ce41793c9c5482d92839484e0ea0556198b59  ./attempt-03-fixed-rate-plateau-stop.log
+216f0dbdaee36b3631cb9c9342def652a070717103163e2cb442be2aab710fb3  ./attempt-04-cosine-pass.log
+ea150d6b7a7b071aa82d60557ac0ea201388a1e9061b8a8ee13ed22c6611590c  ./environment.txt
+c4bfc44c44e3ab0f5620aa9d29ef0eb737a49b41317b2c54fa35b99f848efa15  ./grug-data-Cargo.toml
+37db991533a4b74e80488d2689f3dbdde9839a07419f66376898ef5e09ca7018  ./grug-train-Cargo.toml
+dd3ee8c36ddaae3d96e471bdff35eb69b4629c31bcad7363cdb133fcae73e8e5  ./local-offline-time.log
+9ac8cedca62ce28f828025e617be7d9fa49073dffff3e233e1cb25922b1b3368  ./periodic-checkpoint-smoke.json
+cbf8b35be8361508f9b388cc6b9f809ac4416fe4f6d5488d214ab7f6728efe7e  ./periodic-checkpoint-smoke.log
+36431471aee29913369f9e213b0782a6b6c8941ec489c30f662efffd209f6615  ./vision_compact_overfit-run.rs

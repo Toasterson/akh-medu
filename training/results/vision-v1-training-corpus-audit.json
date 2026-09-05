@@ -1,0 +1,19 @@
+{
+  "exam_cases": 128,
+  "training_cases": 128,
+  "exact_transcript_overlap": 0,
+  "exact_pixel_overlap": 0,
+  "evidence": {
+    "held_out_axes": [
+      "content_bank"
+    ],
+    "max_transcript_ngram_jaccard": 0.37209302325581395,
+    "min_image_hash_hamming_distance": 19
+  },
+  "policy": {
+    "max_transcript_ngram_jaccard": 0.8,
+    "min_image_hash_hamming_distance": 10,
+    "require_image_distance": true
+  },
+  "admitted": true
+}

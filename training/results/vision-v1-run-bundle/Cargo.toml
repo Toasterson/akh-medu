@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/grug-data", "crates/grug-train"]
+resolver = "3"

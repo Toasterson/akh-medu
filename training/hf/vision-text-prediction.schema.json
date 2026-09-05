@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://huggingface.co/datasets/OpenFlowLabs/babyllm-dojo-kata/raw/main/adaptive-exams/v1/schemas/vision-text-prediction.schema.json",
+  "title": "BabyLLM vision-text prediction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "text"],
+  "properties": {
+    "case_id": { "type": "string", "pattern": "^vtext-[0-9a-f]{16}$" },
+    "text": { "type": "string" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

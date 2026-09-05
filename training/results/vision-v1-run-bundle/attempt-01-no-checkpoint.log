@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 2.45s
+     Running `target/release/examples/vision_compact_overfit --steps 4000 --cases 128 --batch-size 32 --learning-rate 0.001`
+step=1 loss=5.659536 elapsed=11.1s
+step=50 loss=0.246031 elapsed=42.1s
+step=100 loss=0.207659 elapsed=73.6s
+step=150 loss=0.184460 elapsed=105.1s
+step=200 loss=0.184899 elapsed=136.7s
+step=250 loss=0.165858 elapsed=168.2s
+step=300 loss=0.171418 elapsed=199.6s
+step=350 loss=0.127906 elapsed=231.2s
+step=400 loss=0.106168 elapsed=262.7s
+step=450 loss=0.099337 elapsed=294.2s

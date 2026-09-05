@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "run_id": "babyllm-foundation-en-de-fr-v1",
+  "description": "Balanced 0.7M-document natural-language foundation for the compact Akh-Medu tool model; held-out records are selected by stable upstream-identity hash before decontamination.",
+  "selection_algorithm": "stream-shuffle-buffer+stable-id-hash-split-v1",
+  "shuffle_seed": 51004,
+  "minimum_free_bytes_after_run": 68719476736,
+  "sources": [
+    {
+      "name": "fineweb-edu-en",
+      "dataset": "HuggingFaceFW/fineweb-edu",
+      "config": "sample-10BT",
+      "split": "train",
+      "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+      "license": "ODC-By-1.0 + CommonCrawl Terms of Use",
+      "hub_license_tag": "license:odc-by",
+      "language": "en",
+      "text_field": "text",
+      "id_field": "id",
+      "language_field": "language",
+      "accepted_language_values": [
+        "en"
+      ],
+      "train_records": 350000,
+      "evaluation_records": 3500,
+      "evaluation_basis_points": 100,
+      "min_chars": 400,
+      "max_chars": 120000,
+      "shuffle_buffer": 10000,
+      "max_scan_records": 1200000,
+      "max_output_bytes": 6442450944,
+      "dataset_card": "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu",
+      "license_url": "https://opendatacommons.org/licenses/by/1-0/"
+    },
+    {
+      "name": "fineweb2-hq-de",
+      "dataset": "epfml/FineWeb2-HQ",
+      "config": "deu_Latn",
+      "split": "train",
+      "revision": "c0c06e94fd3a44ae9e802b2b0fc533817601eb5e",
+      "license": "ODC-By-1.0 + CommonCrawl Terms of Use",
+      "hub_license_tag": "license:odc-by",
+      "language": "de",
+      "text_field": "text",
+      "id_field": "id",
+      "language_field": "language",
+      "accepted_language_values": [
+        "deu"
+      ],
+      "train_records": 175000,
+      "evaluation_records": 1750,
+      "evaluation_basis_points": 100,
+      "min_chars": 400,
+      "max_chars": 120000,
+      "shuffle_buffer": 10000,
+      "max_scan_records": 700000,
+      "max_output_bytes": 3221225472,
+      "dataset_card": "https://huggingface.co/datasets/epfml/FineWeb2-HQ",
+      "license_url": "https://opendatacommons.org/licenses/by/1-0/"
+    },
+    {
+      "name": "fineweb2-hq-fr",
+      "dataset": "epfml/FineWeb2-HQ",
+      "config": "fra_Latn",
+      "split": "train",
+      "revision": "c0c06e94fd3a44ae9e802b2b0fc533817601eb5e",
+      "license": "ODC-By-1.0 + CommonCrawl Terms of Use",
+      "hub_license_tag": "license:odc-by",
+      "language": "fr",
+      "text_field": "text",
+      "id_field": "id",
+      "language_field": "language",
+      "accepted_language_values": [
+        "fra"
+      ],
+      "train_records": 175000,
+      "evaluation_records": 1750,
+      "evaluation_basis_points": 100,
+      "min_chars": 400,
+      "max_chars": 120000,
+      "shuffle_buffer": 10000,
+      "max_scan_records": 700000,
+      "max_output_bytes": 3221225472,
+      "dataset_card": "https://huggingface.co/datasets/epfml/FineWeb2-HQ",
+      "license_url": "https://opendatacommons.org/licenses/by/1-0/"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "compact_shared_decoder_local_offline_replay",
+  "backend": "cpu-ndarray",
+  "network_required": false,
+  "corpus_domain": "training_sibling",
+  "corpus_seed": 51100,
+  "index_stride": 15,
+  "checkpoint": "/private/tmp/babyllm-v1-final.P3Ateo/vision-v1-checkpoint-cosine",
+  "cases": 3,
+  "parameters": 3310340,
+  "max_visual_tokens": 96,
+  "visual_fraction_of_context": 0.1875,
+  "inference_seconds": 12.266284541,
+  "seconds_per_case": 4.088761513666666,
+  "exact_rate": 1.0,
+  "character_error_rate": 0.0,
+  "word_error_rate": 0.0,
+  "blank_rate": 0.0,
+  "unique_semantic_prediction_rate": 1.0,
+  "cross_semantic_collapse_rate": 0.0,
+  "failure_examples": []
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://huggingface.co/datasets/OpenFlowLabs/babyllm-dojo-kata/raw/main/adaptive-exams/v1/schemas/exam-plan.schema.json",
+  "title": "BabyLLM adaptive exam plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generator_version",
+    "run_id",
+    "checkpoint",
+    "tier",
+    "family",
+    "difficulty",
+    "seed",
+    "sample_count"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "generator_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "artifact_hash"],
+      "properties": {
+        "step": { "type": "integer", "minimum": 0 },
+        "artifact_hash": { "type": "string", "minLength": 1 }
+      }
+    },
+    "tier": {
+      "enum": ["sentinel", "rolling_probe", "frontier", "audit"]
+    },
+    "family": { "type": "string", "minLength": 1 },
+    "difficulty": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "seed": { "type": "integer", "minimum": 0 },
+    "sample_count": { "type": "integer", "minimum": 1 }
+  }
+}

@@ -1,0 +1,131 @@
+{
+  "overall": {
+    "cases": 128,
+    "predicted": 128,
+    "exact_rate": 1.0,
+    "exact_rate_interval_95": {
+      "lower": 0.9708630437264916,
+      "estimate": 1.0,
+      "upper": 1.0
+    },
+    "character_error_rate": 0.0,
+    "character_error_rate_interval_95": {
+      "lower": 0.0,
+      "estimate": 0.0,
+      "upper": 0.0
+    },
+    "word_error_rate": 0.0,
+    "word_error_rate_interval_95": {
+      "lower": 0.0,
+      "estimate": 0.0,
+      "upper": 0.0
+    },
+    "blank_rate": 0.0,
+    "blank_rate_interval_95": {
+      "lower": 0.0,
+      "estimate": 0.0,
+      "upper": 0.029136956273508416
+    },
+    "near_miss_rate": 0.0
+  },
+  "metamorphic_consistency": 0.0,
+  "metamorphic_groups": 0,
+  "unique_semantic_prediction_rate": 1.0,
+  "cross_semantic_collapse_rate": 0.0,
+  "suggested_pass_count": 128,
+  "suggested_precursor_count": 0,
+  "suggested_catastrophic_count": 0,
+  "per_language": {
+    "en": {
+      "cases": 128,
+      "predicted": 128,
+      "exact_rate": 1.0,
+      "exact_rate_interval_95": {
+        "lower": 0.9708630437264916,
+        "estimate": 1.0,
+        "upper": 1.0
+      },
+      "character_error_rate": 0.0,
+      "character_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "word_error_rate": 0.0,
+      "word_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "blank_rate": 0.0,
+      "blank_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.029136956273508416
+      },
+      "near_miss_rate": 0.0
+    }
+  },
+  "per_layout": {
+    "line": {
+      "cases": 128,
+      "predicted": 128,
+      "exact_rate": 1.0,
+      "exact_rate_interval_95": {
+        "lower": 0.9708630437264916,
+        "estimate": 1.0,
+        "upper": 1.0
+      },
+      "character_error_rate": 0.0,
+      "character_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "word_error_rate": 0.0,
+      "word_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "blank_rate": 0.0,
+      "blank_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.029136956273508416
+      },
+      "near_miss_rate": 0.0
+    }
+  },
+  "per_corruption": {
+    "clean": {
+      "cases": 128,
+      "predicted": 128,
+      "exact_rate": 1.0,
+      "exact_rate_interval_95": {
+        "lower": 0.9708630437264916,
+        "estimate": 1.0,
+        "upper": 1.0
+      },
+      "character_error_rate": 0.0,
+      "character_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "word_error_rate": 0.0,
+      "word_error_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.0
+      },
+      "blank_rate": 0.0,
+      "blank_rate_interval_95": {
+        "lower": 0.0,
+        "estimate": 0.0,
+        "upper": 0.029136956273508416
+      },
+      "near_miss_rate": 0.0
+    }
+  }
+}

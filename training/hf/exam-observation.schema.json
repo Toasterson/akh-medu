@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://huggingface.co/datasets/OpenFlowLabs/babyllm-dojo-kata/raw/main/adaptive-exams/v1/schemas/exam-observation.schema.json",
+  "title": "BabyLLM counted exam observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "checkpoint",
+    "tier",
+    "family",
+    "difficulty",
+    "sample_count",
+    "pass_count",
+    "precursor_count"
+  ],
+  "properties": {
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "artifact_hash"],
+      "properties": {
+        "step": { "type": "integer", "minimum": 0 },
+        "artifact_hash": { "type": "string", "minLength": 1 }
+      }
+    },
+    "tier": {
+      "enum": ["sentinel", "rolling_probe", "frontier", "audit"]
+    },
+    "family": { "type": "string", "minLength": 1 },
+    "difficulty": { "type": "integer", "minimum": 0, "maximum": 255 },
+    "sample_count": { "type": "integer", "minimum": 1 },
+    "pass_count": { "type": "integer", "minimum": 0 },
+    "precursor_count": { "type": "integer", "minimum": 0 },
+    "catastrophic_count": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Hard blank/invalid/non-finite outcomes; these can stop even while precursor steering is shadow-only."
+    }
+  }
+}
