@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("knowledge-sft-validate.log"),
         help="validate-only log file (relative paths are resolved under --base)",
     )
+    parser.add_argument(
+        "--curriculum-dir",
+        type=Path,
+        default=Path("local-curricula-20260904"),
+        help="curriculum directory containing sft/ (relative paths are resolved under --base)",
+    )
     args = parser.parse_args()
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("--poll-seconds must be >= 5 and --maximum-wait-hours positive")
@@ -158,9 +164,9 @@ def validate_foundation(foundation: Path) -> dict[str, Any]:
 
 
 def knowledge_command(
-    binary: Path, base: Path, foundation: Path, artifacts: Path
+    binary: Path, curriculum_dir: Path, foundation: Path, artifacts: Path
 ) -> list[str]:
-    curriculum = base / "local-curricula-20260904" / "sft"
+    curriculum = curriculum_dir / "sft"
     paths = {
         "contracts": curriculum / "contracts.json",
         "knowledge_train": curriculum / "knowledge.train.sft.jsonl",
@@ -276,7 +282,9 @@ def main() -> int:
                 "supervisor_pid": os.getpid(),
             },
         )
-        command = knowledge_command(binary, base, foundation, knowledge)
+        command = knowledge_command(
+            binary, resolve_under(base, args.curriculum_dir), foundation, knowledge
+        )
         run_logged(command + ["--validate-only"], resolve_under(base, args.validate_log))
 
         atomic_json(
