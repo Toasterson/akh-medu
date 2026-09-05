@@ -9,6 +9,7 @@
 > Supersedes: the in-process `CodeIngestTool` (`src/agent/tools/code_ingest.rs:33`)
 >             and Rust-only `syn` code ingestion (`src/agent/tools/code_predicates.rs`)
 > Reference ontology: GitLab Orbit schema (https://docs.gitlab.com/orbit/remote/schema/)
+> FOSS orientation: Graphify (https://github.com/safishamsi/graphify) — see refinement section, 2026-09-03
 > Anima ticket: TBD
 
 ## Context
@@ -251,6 +252,69 @@ throughout (falling back to today's behaviour until the relevant phase lands).
 7. **43g** (optional) — `sdlc:` ingestion (Forgejo MRs/issues, Solstice CI,
    security findings) under the same daemon, completing the Orbit-style SDLC
    graph.
+8. **43h** (added 2026-09-03) — `docs:` ingestion + rationale nodes: markdown
+   docs as `Doc` nodes, markdown/wiki links as `references` edges, structured
+   comments as `Rationale` nodes, and ADR/plan citations in code (Anima WI ID +
+   `docs/ai/` path) extracted as `code —references→ ADR` edges. See the
+   Graphify refinement section.
+
+## Refinement 2026-09-03 — orienting on Graphify (FOSS)
+
+[Graphify](https://github.com/safishamsi/graphify) (Apache-2.0/MIT
+dual-licensed, tree-sitter-based, ~37 grammars, local-first, MCP-exposed;
+covered by [heise](https://www.heise.de/ratgeber/Vom-Repo-zum-Wissensgraphen-Wie-Graphify-KI-Coding-Assistenten-Kontext-gibt-11436595.html))
+independently converges on this ADR's core bets: tree-sitter breadth over
+per-language servers, real graph traversal instead of embedding-RAG,
+an MCP query surface, and incremental AST-only re-extraction. That
+convergence is evidence the architecture is right. The following
+refinements are **adopted** from it:
+
+1. **Edge provenance (43b).** Every derived edge (`codex.reference`,
+   resolved imports/calls) carries a `derivation` column:
+   `extracted` (explicit in source) vs `inferred` (heuristically
+   resolved, e.g. a call bound through an import), plus optional
+   confidence. This types the "approximate edges first" caveat above
+   instead of leaving it implicit, and lets query answers show which
+   edges are certain. Surfaces in the MCP `explain` verb.
+
+2. **Rationale as first-class nodes (new 43h).** Structured comments
+   (`SAFETY:`, `NOTE:`, `WHY:`, `HACK:`, `TODO:`, doc comments) become
+   `Rationale` nodes edged to their enclosing `Definition`. Crucially,
+   this repo's own convention — code citing an Anima work-item ID *and*
+   a `docs/ai/plans|decisions/` path (CLAUDE.md rule) — is machine-
+   extractable: those citations become `code —references→ ADR` edges,
+   linking implementation to decision with zero new authoring effort.
+
+3. **Docs in the same graph (43h).** Markdown files (ADRs, plans,
+   runbooks) enter `codex.*` as `Doc` nodes under a `docs:` namespace;
+   markdown links and `[[wikilinks]]` become `references` edges. This
+   does **not** compete with Seshat (ADR 047): Seshat is the embedding
+   corpus for similarity recall; `codex_kg` holds the *structural*
+   doc↔code↔doc relationships that embeddings cannot represent —
+   Graphify's whole pitch, and the complement to RAG we were missing.
+
+4. **Query-surface parity (43d).** Alongside "definition of / callers
+   of / imports of / impact of changing", add `shortest_path(A, B)` and
+   `explain(node)` (all connections + derivation tags + `SourceRef`s)
+   as MCP verbs — cheap on AGE/Cypher, high agent value.
+
+5. **Architecture digest (43d, on-demand).** Community detection
+   (Leiden or label propagation) over `codex_kg` plus a generated
+   report — clusters, god nodes, suggested queries — as a `shend` job.
+   Gives an agent entering an unfamiliar repo a map before its first
+   query, the role Graphify's `GRAPH_REPORT.md` plays.
+
+6. **Reuse Graphify's `.scm` extraction queries (43c).** Its per-
+   language tree-sitter query files are Apache-2.0/MIT; port them as
+   starting points for our language-agnostic model instead of authoring
+   8+ grammars of extraction queries from scratch.
+
+**Considered and not adopted:** LLM-based semantic extraction of
+PDFs/images/video into the code graph (that is Seshat's remit and stays
+there); static HTML/GraphML exports (AGE already gives external Cypher
+access per ADR 049 — revisit only if a visualiser needs it); git-hook
+triggers (43e's watcher + Forgejo webhook subsume them for our
+deployment shape).
 
 ## References
 
@@ -262,6 +326,8 @@ throughout (falling back to today's behaviour until the relevant phase lands).
 - GitLab Orbit Local (separate-process code-graph precedent): https://docs.gitlab.com/orbit/local/
 - Apache AGE (graph-is-a-schema, `cypher()` read views): https://age.apache.org/
 - tree-sitter: https://tree-sitter.github.io/tree-sitter/
+- Graphify (FOSS orientation, Apache-2.0/MIT): https://github.com/safishamsi/graphify
+- heise Ratgeber on Graphify (2026): https://www.heise.de/ratgeber/Vom-Repo-zum-Wissensgraphen-Wie-Graphify-KI-Coding-Assistenten-Kontext-gibt-11436595.html
 - Retired: `src/agent/tools/code_ingest.rs`, `src/agent/tools/code_predicates.rs`
 
 ## Naming note

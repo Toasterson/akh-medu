@@ -5,6 +5,23 @@ LoRA fine-tuning pipeline that encodes each personality into model weights.
 
 ---
 
+## Hard Rules (persist across sessions)
+
+- **No psql, ever.** Never query the Anima Postgres directly (no `psql`, no
+  `kubectl exec ... -- psql`). All tracker access goes through the Anima MCP
+  server.
+- **Anima MCP bootstrap.** The MCP tools (`mcp__anima__*`) may be deferred.
+  If absent, self-bootstrap: mint a header with
+  `/Users/toasty/.local/bin/anima-pat get-auth-header` and POST JSON-RPC
+  `tools/call` to `https://anima.wegmueller.it/mcp` with
+  `Accept: application/json, text/event-stream`. This works from any harness
+  (opencode, claude, shell) — if one lacks access or tooling, check another's
+  config (e.g. `~/.claude.json` mcpServers) and copy the pattern.
+- **The runner token in `~/.config/anima-runner/gateway.env` is NOT an MCP
+  PAT** — it lacks `workitem.read`; don't use it for tracker calls.
+
+---
+
 ## The Six Ennead Agents
 
 | Agent  | Deity  | Primary    | Secondary | Domain                                |
