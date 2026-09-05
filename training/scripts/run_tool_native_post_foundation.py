@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         default=Path("post-foundation-supervisor.json"),
         help="supervisor status file (relative paths are resolved under --base)",
     )
+    parser.add_argument(
+        "--validate-log",
+        type=Path,
+        default=Path("knowledge-sft-validate.log"),
+        help="validate-only log file (relative paths are resolved under --base)",
+    )
     args = parser.parse_args()
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("--poll-seconds must be >= 5 and --maximum-wait-hours positive")
@@ -271,7 +277,7 @@ def main() -> int:
             },
         )
         command = knowledge_command(binary, base, foundation, knowledge)
-        run_logged(command + ["--validate-only"], base / "knowledge-sft-validate.log")
+        run_logged(command + ["--validate-only"], resolve_under(base, args.validate_log))
 
         atomic_json(
             status_path,
