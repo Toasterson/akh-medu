@@ -66,6 +66,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="resume only replay-safe work from an existing append-only loop directory",
     )
+    parser.add_argument(
+        "--knowledge-families",
+        type=str,
+        default=",".join(KNOWLEDGE_FAMILIES),
+        help="comma-separated knowledge workflow families for sentinels and frontier plans",
+    )
     args = parser.parse_args()
     positive = (
         args.poll_seconds,
@@ -82,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("poll must be >=5 and all budgets/sample counts must be positive")
     if (args.initial_bundle is None) != (args.initial_step is None):
         parser.error("--initial-bundle and --initial-step must be supplied together")
+    families = tuple(
+        family.strip() for family in args.knowledge_families.split(",") if family.strip()
+    )
+    if not families:
+        parser.error("--knowledge-families must list at least one family")
+    args.knowledge_families = families
     return args
 
 
@@ -201,6 +213,7 @@ def launch_configuration(
         "tool_sentinel_samples": args.tool_sentinel_samples,
         "max_sibling_records": args.max_sibling_records,
         "max_new_tokens": args.max_new_tokens,
+        "knowledge_families": list(args.knowledge_families),
         "promotion_enabled": False,
     }
 
@@ -264,7 +277,9 @@ def sentinel_inventory(
 
 
 def load_sentinel_inventory(
-    output: Path, inventory: dict[str, Any]
+    output: Path,
+    inventory: dict[str, Any],
+    families: tuple[str, ...] = KNOWLEDGE_FAMILIES,
 ) -> tuple[list[Path], Path]:
     knowledge = inventory.get("knowledge")
     tools = inventory.get("tools")
@@ -289,7 +304,7 @@ def load_sentinel_inventory(
         return path
 
     knowledge_paths = [verified(entry) for entry in knowledge]
-    if len(knowledge_paths) != len(KNOWLEDGE_FAMILIES):
+    if len(knowledge_paths) != len(families):
         raise RuntimeError("sentinel inventory does not cover every knowledge family")
     return knowledge_paths, verified(tools)
 
@@ -472,6 +487,7 @@ def prepare_sentinels(
     contracts: Path,
     controller: dict[str, Any],
     output: Path,
+    knowledge_families: tuple[str, ...] = KNOWLEDGE_FAMILIES,
 ) -> tuple[list[Path], Path]:
     sentinels = output / "sentinels"
     if sentinels.exists():
@@ -482,7 +498,7 @@ def prepare_sentinels(
     base_seed = int(controller["base_seed"])
     run_id = f"{controller['run_id']}-immutable-sentinel-v1"
     planner = str(controller["generator_version"])
-    for index, family in enumerate(KNOWLEDGE_FAMILIES):
+    for index, family in enumerate(knowledge_families):
         plan = {
             "schema_version": int(controller["schema_version"]),
             "generator_version": planner,
@@ -1030,7 +1046,11 @@ def main() -> int:
 
         launch_path = output / "launch-config.json"
         if launch_path.exists():
-            if load_json(launch_path) != launch:
+            stored_launch = load_json(launch_path)
+            # Loop directories created before --knowledge-families existed have
+            # no such key; they were always built from the hardcoded default.
+            stored_launch.setdefault("knowledge_families", list(KNOWLEDGE_FAMILIES))
+            if stored_launch != launch:
                 raise RuntimeError(
                     "resume launch arguments or executable hashes differ from the original loop"
                 )
@@ -1066,22 +1086,34 @@ def main() -> int:
         loop_config_path = output / "loop-config.json"
         if loop_config_path.exists():
             stored_loop_config = load_json(loop_config_path)
+            # Loop directories created before --knowledge-families existed have
+            # no such key; they were always built from the hardcoded default.
+            stored_loop_config.setdefault(
+                "knowledge_families", list(KNOWLEDGE_FAMILIES)
+            )
             knowledge_sentinels, tool_sentinel = load_sentinel_inventory(
-                output, stored_loop_config.get("sentinels", {})
+                output,
+                stored_loop_config.get("sentinels", {}),
+                args.knowledge_families,
             )
         else:
             sentinels_path = output / "sentinels"
             if sentinels_path.exists():
                 knowledge_sentinels = [
                     sentinels_path / f"{safe_stem(family)}.json"
-                    for family in KNOWLEDGE_FAMILIES
+                    for family in args.knowledge_families
                 ]
                 tool_sentinel = sentinels_path / "all-tools.json"
                 for path in [*knowledge_sentinels, tool_sentinel]:
                     path.resolve(strict=True)
             else:
                 knowledge_sentinels, tool_sentinel = prepare_sentinels(
-                    args, binaries, contracts, step["controller"], output
+                    args,
+                    binaries,
+                    contracts,
+                    step["controller"],
+                    output,
+                    args.knowledge_families,
                 )
             stored_loop_config = {
                 "schema_version": 1,
@@ -1096,6 +1128,7 @@ def main() -> int:
                 "tool_sentinel_samples": args.tool_sentinel_samples,
                 "max_sibling_records": args.max_sibling_records,
                 "maximum_steering_share_ppm": MAX_STEERING_SHARE_PPM,
+                "knowledge_families": list(args.knowledge_families),
                 "sentinels": sentinel_inventory(
                     output, knowledge_sentinels, tool_sentinel
                 ),
@@ -1115,6 +1148,7 @@ def main() -> int:
             "tool_sentinel_samples": args.tool_sentinel_samples,
             "max_sibling_records": args.max_sibling_records,
             "maximum_steering_share_ppm": MAX_STEERING_SHARE_PPM,
+            "knowledge_families": list(args.knowledge_families),
             "promotion_enabled": False,
         }
         if any(stored_loop_config.get(key) != value for key, value in expected_loop_fields.items()):

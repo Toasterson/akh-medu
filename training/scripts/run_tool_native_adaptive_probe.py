@@ -41,10 +41,50 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controller-binary", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--maximum-wait-hours", type=float, default=15.0)
+    parser.add_argument(
+        "--bundle",
+        type=Path,
+        default=Path("knowledge-model-small-v1"),
+        help="knowledge SFT bundle directory (relative paths are resolved under --base)",
+    )
+    parser.add_argument(
+        "--probe-dir",
+        type=Path,
+        default=Path("adaptive-probe-sft-epoch-1-v1"),
+        help="adaptive probe output directory (relative paths are resolved under --base)",
+    )
+    parser.add_argument(
+        "--post-foundation-json",
+        type=Path,
+        default=Path("post-foundation-supervisor.json"),
+        help="upstream post-foundation status file (relative paths are resolved under --base)",
+    )
+    parser.add_argument(
+        "--status-json",
+        type=Path,
+        default=Path("adaptive-probe-supervisor.json"),
+        help="supervisor status file (relative paths are resolved under --base)",
+    )
+    parser.add_argument(
+        "--knowledge-families",
+        type=str,
+        default=",".join(KNOWLEDGE_FAMILIES),
+        help="comma-separated knowledge workflow families to probe",
+    )
     args = parser.parse_args()
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("--poll-seconds must be >= 5 and --maximum-wait-hours positive")
+    families = tuple(
+        family.strip() for family in args.knowledge_families.split(",") if family.strip()
+    )
+    if not families:
+        parser.error("--knowledge-families must list at least one family")
+    args.knowledge_families = families
     return args
+
+
+def resolve_under(base: Path, value: Path) -> Path:
+    return value if value.is_absolute() else base / value
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -97,8 +137,9 @@ def run_stdout_new(command: list[str], output: Path, error_log: Path) -> None:
         )
 
 
-def wait_for_candidate(base: Path, poll_seconds: int, maximum_hours: float) -> dict[str, Any]:
-    upstream_status = base / "post-foundation-supervisor.json"
+def wait_for_candidate(
+    upstream_status: Path, poll_seconds: int, maximum_hours: float
+) -> dict[str, Any]:
     deadline = time.monotonic() + maximum_hours * 3600.0
     while time.monotonic() < deadline:
         if upstream_status.exists():
@@ -119,17 +160,24 @@ def binary(path: Path) -> str:
     return str(resolved)
 
 
-def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
+def run_probe(
+    args: argparse.Namespace,
+    base: Path,
+    status_path: Path,
+    bundle: Path,
+    probe: Path,
+    post_foundation_json: Path,
+    knowledge_families: tuple[str, ...],
+) -> None:
     workflow = binary(args.knowledge_workflow_binary)
     generate_tools = binary(args.tool_exam_generator_binary)
     eval_knowledge = binary(args.knowledge_eval_binary)
     eval_tools = binary(args.tool_eval_binary)
     controller = binary(args.controller_binary)
     upstream = wait_for_candidate(
-        base, args.poll_seconds, args.maximum_wait_hours
+        post_foundation_json, args.poll_seconds, args.maximum_wait_hours
     )
 
-    bundle = base / "knowledge-model-small-v1"
     candidate_path = bundle / "candidate-model.json"
     candidate = load_json(candidate_path)
     checkpoint_step = int(candidate["checkpoint_step"])
@@ -143,7 +191,6 @@ def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
         raise RuntimeError("candidate identity changed or was activated before its probe")
 
     contracts = bundle / "contracts.json"
-    probe = base / "adaptive-probe-sft-epoch-1-v1"
     probe.mkdir()
     (probe / "knowledge").mkdir()
     (probe / "tools").mkdir()
@@ -159,7 +206,7 @@ def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
 
     observations: list[dict[str, Any]] = []
     evidence_paths: list[str] = []
-    for index, family in enumerate(KNOWLEDGE_FAMILIES):
+    for index, family in enumerate(knowledge_families):
         stem = family.replace(".", "-")
         exam = probe / "knowledge" / f"{stem}.exam.json"
         evidence = probe / "knowledge" / f"{stem}.evidence.json"
@@ -284,7 +331,7 @@ def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
         handle.flush()
         os.fsync(handle.fileno())
 
-    capabilities = ",".join(f"{family}:0:5:1" for family in KNOWLEDGE_FAMILIES)
+    capabilities = ",".join(f"{family}:0:5:1" for family in knowledge_families)
     initial_controller = probe / "controller.initial.json"
     run_stdout_new(
         [
@@ -341,7 +388,7 @@ def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
             "stage": "ready_for_curriculum_decision",
             "checkpoint_step": checkpoint_step,
             "checkpoint_model_hash": checkpoint_hash,
-            "knowledge_families": len(KNOWLEDGE_FAMILIES),
+            "knowledge_families": len(knowledge_families),
             "tool_families": len(tool_result.get("observations", [])),
             "observations": len(observations),
             "warnings": warnings,
@@ -354,9 +401,11 @@ def run_probe(args: argparse.Namespace, base: Path, status_path: Path) -> None:
 def main() -> int:
     args = parse_args()
     base = args.base.resolve(strict=True)
-    status_path = base / "adaptive-probe-supervisor.json"
+    status_path = resolve_under(base, args.status_json)
     lock_path = base / ".adaptive-probe-supervisor.lock"
-    probe = base / "adaptive-probe-sft-epoch-1-v1"
+    bundle = resolve_under(base, args.bundle)
+    probe = resolve_under(base, args.probe_dir)
+    post_foundation_json = resolve_under(base, args.post_foundation_json)
     if probe.exists():
         raise RuntimeError(f"refusing existing adaptive probe directory {probe}")
     with lock_path.open("a+", encoding="utf-8") as lock:
@@ -369,7 +418,15 @@ def main() -> int:
             {"schema_version": 1, "stage": "waiting_for_first_sft_epoch"},
         )
         try:
-            run_probe(args, base, status_path)
+            run_probe(
+                args,
+                base,
+                status_path,
+                bundle,
+                probe,
+                post_foundation_json,
+                args.knowledge_families,
+            )
         except Exception as error:
             atomic_json(
                 status_path,

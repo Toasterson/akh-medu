@@ -31,10 +31,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train-binary", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--maximum-wait-hours", type=float, default=12.0)
+    parser.add_argument(
+        "--knowledge-dir",
+        type=Path,
+        default=Path("knowledge-model-small-v1"),
+        help="knowledge SFT bundle directory (relative paths are resolved under --base)",
+    )
+    parser.add_argument(
+        "--status-json",
+        type=Path,
+        default=Path("post-foundation-supervisor.json"),
+        help="supervisor status file (relative paths are resolved under --base)",
+    )
     args = parser.parse_args()
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("--poll-seconds must be >= 5 and --maximum-wait-hours positive")
     return args
+
+
+def resolve_under(base: Path, value: Path) -> Path:
+    return value if value.is_absolute() else base / value
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -199,8 +215,8 @@ def main() -> int:
     base = args.base.resolve(strict=True)
     binary = args.train_binary.resolve(strict=True)
     foundation = base / "foundation-model-small-v1"
-    knowledge = base / "knowledge-model-small-v1"
-    status_path = base / "post-foundation-supervisor.json"
+    knowledge = resolve_under(base, args.knowledge_dir)
+    status_path = resolve_under(base, args.status_json)
     lock_path = base / ".post-foundation-supervisor.lock"
     if knowledge.exists():
         raise RuntimeError(f"refusing existing knowledge artifact directory {knowledge}")
@@ -305,7 +321,7 @@ if __name__ == "__main__":
         try:
             failure_args = parse_args()
             atomic_json(
-                failure_args.base / "post-foundation-supervisor.json",
+                resolve_under(failure_args.base, failure_args.status_json),
                 {
                     "schema_version": 1,
                     "stage": "failed",
