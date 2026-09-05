@@ -108,8 +108,14 @@ def read_last_step(path: Path) -> int | None:
             line = handle.readline().strip()
     if not line:
         return None
-    value = json.loads(line)
-    return int(value["step"])
+    try:
+        value = json.loads(line)
+        return int(value["step"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        # The trainer appends concurrently; a torn final line means "still
+        # writing", not corruption. Validation after exit re-reads a quiescent
+        # file and still fails closed on a genuine mismatch.
+        return None
 
 
 def run_logged(command: list[str], log_path: Path) -> None:
