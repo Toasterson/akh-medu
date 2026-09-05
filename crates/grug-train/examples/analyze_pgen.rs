@@ -27,15 +27,15 @@ use grug_train::eval::FrozenTwoAxisHoldout;
 use grug_train::tokenizer::Vocab;
 use grug_train::train::{encode_example, init_training_ptr, to_eval_model_ptr};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer, PointerTransformerConfig};
+use grug_train::{BpeTokenizer, PointerTransformerConfig, checkpoint};
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "analyze_pgen")]
@@ -84,6 +84,7 @@ fn pgen_stats<B: Backend, V: Vocab>(
         let p_gen = parts.p_gen.reshape([len]);
         // Positions predicting a target token: i in [target_start-1, len-1).
         let start = enc.target_start - 1;
+        #[allow(clippy::single_range_in_vec_init)]
         let vals: Vec<f32> = p_gen
             .slice([start..len - 1])
             .into_data()
@@ -98,7 +99,11 @@ fn pgen_stats<B: Backend, V: Vocab>(
         }
     }
     let mean = if n > 0 { sum / n as f64 } else { f64::NAN };
-    let frac_high = if n > 0 { high as f64 / n as f64 } else { f64::NAN };
+    let frac_high = if n > 0 {
+        high as f64 / n as f64
+    } else {
+        f64::NAN
+    };
     (mean, frac_high, n)
 }
 
@@ -119,23 +124,30 @@ fn main() {
 
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
 
-    let tokenizer = BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
-    let model_config = PointerTransformerConfig::new(TinyTransformerConfig::p1a(tokenizer.vocab_size()));
+    let tokenizer =
+        BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
+    let model_config =
+        PointerTransformerConfig::new(TinyTransformerConfig::p1a(tokenizer.vocab_size()));
     let (model, optim) = init_training_ptr::<ActiveBackend>(&model_config, &device);
     let (model, _optim, step) =
-        checkpoint::load_checkpoint_ptr(&args.resume, model, optim, &device).expect("checkpoint loads");
+        checkpoint::load_checkpoint_ptr(&args.resume, model, optim, &device)
+            .expect("checkpoint loads");
     let model = to_eval_model_ptr(&model);
     println!("analyze_pgen: loaded checkpoint at step {step}");
 
     let holdout = FrozenTwoAxisHoldout::new(&dataset, args.samples).expect("holdout draws");
 
-    let (b_mean, b_high, b_n) = pgen_stats(&model, &tokenizer, holdout.phrasing_examples(), &device);
-    let (a_mean, a_high, a_n) = pgen_stats(&model, &tokenizer, holdout.whole_tool_examples(), &device);
+    let (b_mean, b_high, b_n) =
+        pgen_stats(&model, &tokenizer, holdout.phrasing_examples(), &device);
+    let (a_mean, a_high, a_n) =
+        pgen_stats(&model, &tokenizer, holdout.whole_tool_examples(), &device);
 
     println!("\n=== p_gen at target positions (1.0 = always generate, 0.0 = always copy) ===");
     println!(

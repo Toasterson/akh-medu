@@ -59,13 +59,13 @@ impl<B: Backend> Mlp<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{GrugError, GrugResult};
     use crate::CpuAutodiffBackend;
+    use crate::error::{GrugError, GrugResult};
     use burn::module::AutodiffModule;
     use burn::nn::loss::{MseLoss, Reduction};
     use burn::optim::{GradientsParams, Optimizer, SgdConfig};
-    use burn::tensor::backend::AutodiffBackend;
     use burn::tensor::TensorData;
+    use burn::tensor::backend::AutodiffBackend;
 
     /// R1 gate, part 1: a forward pass through the MLP on the ndarray
     /// backend produces the expected output shape, and does not panic.
@@ -156,7 +156,11 @@ mod tests {
         let steps = 50;
 
         let initial_loss: f32 = MseLoss::new()
-            .forward(model.forward(input.clone()), target.clone(), Reduction::Mean)
+            .forward(
+                model.forward(input.clone()),
+                target.clone(),
+                Reduction::Mean,
+            )
             .into_scalar();
 
         for _ in 0..steps {
@@ -176,8 +180,7 @@ mod tests {
                 start_loss: initial_loss as f64,
                 end_loss: final_loss as f64,
                 steps,
-            }
-            .into());
+            });
         }
 
         // Also sanity-check `valid()` (the AutodiffModule -> inference-mode

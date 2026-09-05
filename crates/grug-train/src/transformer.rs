@@ -3,8 +3,8 @@
 //! This is the real Spike-0 model (Phase 51 plan, P0): token embedding +
 //! sinusoidal positional encoding + N causal decoder blocks (self-attention
 //! + MLP, each with a residual + pre-`LayerNorm`) + an LM head back to
-//! vocab size. Kept deliberately tiny (see [`TinyTransformerConfig::spike`])
-//! so a handful of training steps run in seconds on CPU.
+//!   vocab size. Kept deliberately tiny (see [`TinyTransformerConfig::spike`])
+//!   so a handful of training steps run in seconds on CPU.
 //!
 //! # The `Attention` seam (plan decision 8)
 //!
@@ -29,7 +29,9 @@
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::attention::generate_autoregressive_mask;
-use burn::nn::{Embedding, EmbeddingConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig};
+use burn::nn::{
+    Embedding, EmbeddingConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
+};
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, Int, Tensor};
@@ -67,7 +69,7 @@ pub struct CausalSelfAttentionConfig {
 impl CausalSelfAttentionConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> CausalSelfAttention<B> {
         assert!(
-            self.d_model % self.n_heads == 0,
+            self.d_model.is_multiple_of(self.n_heads),
             "d_model ({}) must be divisible by n_heads ({})",
             self.d_model,
             self.n_heads
@@ -94,6 +96,15 @@ pub struct CausalSelfAttention<B: Backend> {
     out_proj: Linear<B>,
     n_heads: usize,
     d_head: usize,
+}
+
+/// Per-layer projected keys and values retained during autoregressive
+/// decoding. This is runtime state only: it is not a module parameter and
+/// therefore does not change checkpoint compatibility.
+#[derive(Debug)]
+pub struct CausalSelfAttentionCache<B: Backend> {
+    key: Tensor<B, 4>,
+    value: Tensor<B, 4>,
 }
 
 impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
@@ -131,6 +142,85 @@ impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
             .reshape([batch_size, seq_len, d_model]);
 
         self.out_proj.forward(merged)
+    }
+}
+
+impl<B: Backend> CausalSelfAttention<B> {
+    /// Attention for a prompt prefill or one incremental token. Prefill
+    /// supplies the ordinary causal mask and no cache; an incremental call
+    /// supplies one query token plus all prior projected keys and values.
+    fn forward_cached(
+        &self,
+        input: Tensor<B, 3>,
+        causal_mask: Option<Tensor<B, 3, Bool>>,
+        cache: Option<CausalSelfAttentionCache<B>>,
+    ) -> (Tensor<B, 3>, CausalSelfAttentionCache<B>) {
+        let [batch_size, query_len, d_model] = input.dims();
+        let n_heads = self.n_heads;
+        let d_head = self.d_head;
+
+        let q = self.query.forward(input.clone());
+        let new_key = self.key.forward(input.clone());
+        let new_value = self.value.forward(input);
+        let split_heads = |tensor: Tensor<B, 3>| -> Tensor<B, 4> {
+            tensor
+                .reshape([batch_size, query_len, n_heads, d_head])
+                .swap_dims(1, 2)
+        };
+        let q = split_heads(q);
+        let new_key = split_heads(new_key);
+        let new_value = split_heads(new_value);
+
+        let (key, value) = match cache {
+            Some(cache) => {
+                let [cached_batch, cached_heads, _, cached_width] = cache.key.dims();
+                assert_eq!(cached_batch, batch_size, "attention cache batch changed");
+                assert_eq!(cached_heads, n_heads, "attention cache head count changed");
+                assert_eq!(cached_width, d_head, "attention cache head width changed");
+                assert_eq!(
+                    cache.value.dims(),
+                    cache.key.dims(),
+                    "attention key/value cache shapes differ"
+                );
+                assert_eq!(
+                    query_len, 1,
+                    "incremental attention accepts exactly one new token"
+                );
+                (
+                    Tensor::cat(vec![cache.key, new_key], 2),
+                    Tensor::cat(vec![cache.value, new_value], 2),
+                )
+            }
+            None => (new_key, new_value),
+        };
+        let total_len = key.dims()[2];
+        let scale = (d_head as f64).sqrt();
+        let scores = q.matmul(key.clone().swap_dims(2, 3)) / scale;
+        let scores = match causal_mask {
+            Some(mask) => {
+                assert_eq!(
+                    mask.dims(),
+                    [batch_size, query_len, total_len],
+                    "cached attention mask shape differs from query/key lengths"
+                );
+                scores.mask_fill(mask.unsqueeze_dim::<4>(1), f32::NEG_INFINITY)
+            }
+            None => {
+                assert_eq!(
+                    query_len, 1,
+                    "multi-token cached attention requires a causal mask"
+                );
+                scores
+            }
+        };
+        let attended = softmax(scores, 3).matmul(value.clone());
+        let merged = attended
+            .swap_dims(1, 2)
+            .reshape([batch_size, query_len, d_model]);
+        (
+            self.out_proj.forward(merged),
+            CausalSelfAttentionCache { key, value },
+        )
     }
 }
 
@@ -180,6 +270,11 @@ pub struct DecoderBlock<B: Backend> {
     feed_forward: FeedForward<B>,
 }
 
+#[derive(Debug)]
+pub struct DecoderBlockCache<B: Backend> {
+    attention: CausalSelfAttentionCache<B>,
+}
+
 #[derive(Config, Debug)]
 pub struct DecoderBlockConfig {
     pub d_model: usize,
@@ -200,10 +295,28 @@ impl DecoderBlockConfig {
 
 impl<B: Backend> DecoderBlock<B> {
     pub fn forward(&self, input: Tensor<B, 3>, causal_mask: Tensor<B, 3, Bool>) -> Tensor<B, 3> {
-        let attended = self.attention.forward(self.ln1.forward(input.clone()), causal_mask);
+        let attended = self
+            .attention
+            .forward(self.ln1.forward(input.clone()), causal_mask);
         let input = input + attended;
         let fed_forward = self.feed_forward.forward(self.ln2.forward(input.clone()));
         input + fed_forward
+    }
+
+    fn forward_cached(
+        &self,
+        input: Tensor<B, 3>,
+        causal_mask: Option<Tensor<B, 3, Bool>>,
+        cache: Option<DecoderBlockCache<B>>,
+    ) -> (Tensor<B, 3>, DecoderBlockCache<B>) {
+        let (attended, attention) = self.attention.forward_cached(
+            self.ln1.forward(input.clone()),
+            causal_mask,
+            cache.map(|cache| cache.attention),
+        );
+        let input = input + attended;
+        let fed_forward = self.feed_forward.forward(self.ln2.forward(input.clone()));
+        (input + fed_forward, DecoderBlockCache { attention })
     }
 }
 
@@ -280,6 +393,20 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 1024, 16, 24, 4864, 1024)
     }
 
+    /// Fast iteration model for Akh tool-use and knowledge-workflow curricula.
+    /// At a 3k BPE vocabulary this is roughly 30M parameters, while the 2048
+    /// context fits captured tool schemas plus several action/result rounds.
+    pub fn akh_tool_small(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 512, 8, 8, 2048, 2048)
+    }
+
+    /// Full BabyLLM tool-capable rung: the existing ~350M capacity with a
+    /// 4096-token context so textbook excerpts, exact nested tool schemas, and
+    /// multi-round memory traces fit without discarding supervision.
+    pub fn akh_tool_350m(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 1024, 16, 24, 4864, 4096)
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))
@@ -314,6 +441,16 @@ pub struct TinyTransformer<B: Backend> {
     max_seq_len: usize,
 }
 
+/// Runtime-only decoder state. `next_position` is the absolute learned
+/// position assigned to the next token; callers must pre-compact the prompt
+/// so the full completion fits instead of silently rebasing cached states.
+#[derive(Debug)]
+pub struct TinyTransformerCache<B: Backend> {
+    layers: Vec<DecoderBlockCache<B>>,
+    next_position: usize,
+    batch_size: usize,
+}
+
 impl<B: Backend> TinyTransformer<B> {
     /// Forward pass: `input_ids` is `[batch_size, seq_len]` token ids,
     /// output is `[batch_size, seq_len, vocab_size]` logits.
@@ -323,6 +460,205 @@ impl<B: Backend> TinyTransformer<B> {
     /// only has that many rows.
     pub fn forward(&self, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         self.vocab_logits(self.hidden(input_ids))
+    }
+
+    /// Encode a complete prompt once and retain each layer's projected keys
+    /// and values for incremental generation.
+    pub(crate) fn prefill_cached(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, TinyTransformerCache<B>) {
+        let [batch_size, seq_len] = input_ids.dims();
+        assert!(seq_len > 0, "cached prefill requires at least one token");
+        assert!(
+            seq_len <= self.max_seq_len,
+            "sequence length {seq_len} exceeds configured max_seq_len {}",
+            self.max_seq_len
+        );
+        let device = input_ids.device();
+        let tokens = self.token_embedding.forward(input_ids);
+        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
+            .unsqueeze::<2>()
+            .repeat_dim(0, batch_size);
+        let mut hidden = tokens + self.position_embedding.forward(positions);
+        let causal_mask = generate_autoregressive_mask::<B>(batch_size, seq_len, &device);
+        let mut layers = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            let (next, cache) = block.forward_cached(hidden, Some(causal_mask.clone()), None);
+            hidden = next;
+            layers.push(cache);
+        }
+        let logits = self.vocab_logits(self.ln_final.forward(hidden));
+        (
+            logits,
+            TinyTransformerCache {
+                layers,
+                next_position: seq_len,
+                batch_size,
+            },
+        )
+    }
+
+    /// Encode a continuous prefix and the complete textual prompt once, then
+    /// retain every layer's projected keys and values for incremental decode.
+    ///
+    /// This is the cached counterpart to [`Self::forward_with_prefix_embeddings`].
+    /// Prefix positions occupy `0..prefix_len`; textual positions follow them,
+    /// preserving the exact learned-position ABI used by the uncached path.
+    pub(crate) fn prefill_cached_with_prefix_embeddings(
+        &self,
+        prefix: Tensor<B, 3>,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> (Tensor<B, 3>, TinyTransformerCache<B>) {
+        let [prefix_batch, prefix_len, prefix_width] = prefix.dims();
+        let [text_batch, text_len] = input_ids.dims();
+        assert!(
+            prefix_len > 0 || text_len > 0,
+            "cached prefix prefill requires at least one position"
+        );
+        assert_eq!(
+            prefix_batch, text_batch,
+            "prefix batch {prefix_batch} differs from text batch {text_batch}"
+        );
+        let tokens = self.token_embedding.forward(input_ids);
+        let token_width = tokens.dims()[2];
+        assert_eq!(
+            prefix_width, token_width,
+            "prefix width {prefix_width} differs from model width {token_width}"
+        );
+        let seq_len = prefix_len + text_len;
+        assert!(
+            seq_len <= self.max_seq_len,
+            "combined prefix+text sequence length {seq_len} exceeds configured max_seq_len {}",
+            self.max_seq_len
+        );
+        let device = prefix.device();
+        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
+            .unsqueeze::<2>()
+            .repeat_dim(0, text_batch);
+        let mut hidden =
+            Tensor::cat(vec![prefix, tokens], 1) + self.position_embedding.forward(positions);
+        let causal_mask = generate_autoregressive_mask::<B>(text_batch, seq_len, &device);
+        let mut layers = Vec::with_capacity(self.blocks.len());
+        for block in &self.blocks {
+            let (next, cache) = block.forward_cached(hidden, Some(causal_mask.clone()), None);
+            hidden = next;
+            layers.push(cache);
+        }
+        let logits = self.vocab_logits(self.ln_final.forward(hidden));
+        (
+            logits,
+            TinyTransformerCache {
+                layers,
+                next_position: seq_len,
+                batch_size: text_batch,
+            },
+        )
+    }
+
+    /// Decode exactly one token using a cache returned by
+    /// [`Self::prefill_cached`] or an earlier incremental call.
+    pub(crate) fn decode_cached(
+        &self,
+        input_ids: Tensor<B, 2, Int>,
+        cache: TinyTransformerCache<B>,
+    ) -> (Tensor<B, 3>, TinyTransformerCache<B>) {
+        let [batch_size, seq_len] = input_ids.dims();
+        assert_eq!(seq_len, 1, "cached decode accepts exactly one token");
+        assert_eq!(
+            batch_size, cache.batch_size,
+            "cached decode batch differs from prefill batch"
+        );
+        assert_eq!(
+            cache.layers.len(),
+            self.blocks.len(),
+            "decoder cache layer count differs from model"
+        );
+        assert!(
+            cache.next_position < self.max_seq_len,
+            "cached decode position {} exceeds configured max_seq_len {}",
+            cache.next_position,
+            self.max_seq_len
+        );
+        let device = input_ids.device();
+        let tokens = self.token_embedding.forward(input_ids);
+        let positions = Tensor::<B, 1, Int>::arange(
+            cache.next_position as i64..cache.next_position as i64 + 1,
+            &device,
+        )
+        .unsqueeze::<2>()
+        .repeat_dim(0, batch_size);
+        let mut hidden = tokens + self.position_embedding.forward(positions);
+        let mut layers = Vec::with_capacity(self.blocks.len());
+        for (block, prior) in self.blocks.iter().zip(cache.layers) {
+            let (next, updated) = block.forward_cached(hidden, None, Some(prior));
+            hidden = next;
+            layers.push(updated);
+        }
+        let logits = self.vocab_logits(self.ln_final.forward(hidden));
+        (
+            logits,
+            TinyTransformerCache {
+                layers,
+                next_position: cache.next_position + 1,
+                batch_size,
+            },
+        )
+    }
+
+    /// Forward with continuous prefix embeddings before the textual token
+    /// embeddings. This is the modality seam used by the native vision stem:
+    /// image patches and text share this decoder stack rather than routing
+    /// through an external OCR model.
+    ///
+    /// The prefix is `[batch, prefix_len, d_model]`; `input_ids` remains
+    /// `[batch, text_len]`. Output covers the combined sequence in prefix/text
+    /// order. Existing text-only methods are intentionally untouched so old
+    /// checkpoints and tests retain their exact path.
+    pub fn forward_with_prefix_embeddings(
+        &self,
+        prefix: Tensor<B, 3>,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        self.vocab_logits(self.hidden_with_prefix_embeddings(prefix, input_ids))
+    }
+
+    /// Hidden-state counterpart to [`Self::forward_with_prefix_embeddings`].
+    pub fn hidden_with_prefix_embeddings(
+        &self,
+        prefix: Tensor<B, 3>,
+        input_ids: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
+        let [prefix_batch, prefix_len, prefix_width] = prefix.dims();
+        let [text_batch, text_len] = input_ids.dims();
+        assert_eq!(
+            prefix_batch, text_batch,
+            "prefix batch {prefix_batch} differs from text batch {text_batch}"
+        );
+        let tokens = self.token_embedding.forward(input_ids);
+        let token_width = tokens.dims()[2];
+        assert_eq!(
+            prefix_width, token_width,
+            "prefix width {prefix_width} differs from model width {token_width}"
+        );
+        let seq_len = prefix_len + text_len;
+        assert!(
+            seq_len <= self.max_seq_len,
+            "combined prefix+text sequence length {seq_len} exceeds configured max_seq_len {}",
+            self.max_seq_len
+        );
+        let device = prefix.device();
+        let tokens = Tensor::cat(vec![prefix, tokens], 1);
+        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
+            .unsqueeze::<2>()
+            .repeat_dim(0, text_batch);
+        let positions = self.position_embedding.forward(positions);
+        let mut hidden = tokens + positions;
+        let causal_mask = generate_autoregressive_mask::<B>(text_batch, seq_len, &device);
+        for block in &self.blocks {
+            hidden = block.forward(hidden, causal_mask.clone());
+        }
+        self.ln_final.forward(hidden)
     }
 
     /// The final hidden states `[batch_size, seq_len, d_model]` (post the
@@ -461,6 +797,8 @@ impl<B: Backend> TinyTransformer<B> {
 mod tests {
     use super::*;
     use crate::CpuBackend;
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    use crate::{GpuBackend, gpu_device};
     use burn::tensor::TensorData;
 
     fn tiny_config() -> TinyTransformerConfig {
@@ -476,7 +814,9 @@ mod tests {
 
         let batch_size = 3;
         let seq_len = 10;
-        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| i % 260).collect();
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64)
+            .map(|i| i % 260)
+            .collect();
         let input = Tensor::<CpuBackend, 2, Int>::from_data(
             TensorData::new(ids, [batch_size, seq_len]),
             &device,
@@ -490,9 +830,77 @@ mod tests {
     fn forward_pass_single_token() {
         let device = Default::default();
         let model = tiny_config().init::<CpuBackend>(&device);
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(vec![42i64], [1, 1]), &device);
+        let input =
+            Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(vec![42i64], [1, 1]), &device);
         let output = model.forward(input);
         assert_eq!(output.dims(), [1, 1, 260]);
+    }
+
+    #[test]
+    fn cached_prefill_and_decode_match_full_forward_logits() {
+        let device = Default::default();
+        let model = tiny_config().init::<CpuBackend>(&device);
+        let ids = vec![3i64, 5, 7, 11, 13];
+        let full_input = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(ids.clone(), [1, ids.len()]),
+            &device,
+        );
+        let full = model.forward(full_input);
+
+        let prefix = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(ids[..3].to_vec(), [1, 3]),
+            &device,
+        );
+        let (prefill, mut cache) = model.prefill_cached(prefix);
+        assert_close(
+            &tensor_to_vec(prefill),
+            &tensor_to_vec(full.clone().slice([0..1, 0..3, 0..260])),
+            1e-4,
+            "cached prefill",
+        );
+
+        for (position, token) in ids.into_iter().enumerate().skip(3) {
+            let input = Tensor::<CpuBackend, 2, Int>::from_data(
+                TensorData::new(vec![token], [1, 1]),
+                &device,
+            );
+            let (step, next_cache) = model.decode_cached(input, cache);
+            cache = next_cache;
+            assert_close(
+                &tensor_to_vec(step),
+                &tensor_to_vec(full.clone().slice([0..1, position..position + 1, 0..260])),
+                1e-4,
+                "cached decode",
+            );
+        }
+        assert_eq!(cache.next_position, 5);
+    }
+
+    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[test]
+    fn cached_decode_matches_full_forward_on_the_gpu_backend() {
+        let device = gpu_device();
+        let model = tiny_config().init::<GpuBackend>(&device);
+        let ids = vec![17i64, 19, 23, 29];
+        let full = model.forward(Tensor::<GpuBackend, 2, Int>::from_data(
+            TensorData::new(ids.clone(), [1, ids.len()]),
+            &device,
+        ));
+        let (_, cache) = model.prefill_cached(Tensor::<GpuBackend, 2, Int>::from_data(
+            TensorData::new(ids[..3].to_vec(), [1, 3]),
+            &device,
+        ));
+        let (step, _) = model.decode_cached(
+            Tensor::<GpuBackend, 2, Int>::from_data(TensorData::new(vec![ids[3]], [1, 1]), &device),
+            cache,
+        );
+        let cached = step.into_data().to_vec::<f32>().unwrap();
+        let expected = full
+            .slice([0..1, 3..4, 0..260])
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_close(&cached, &expected, 1e-3, "GPU cached decode");
     }
 
     #[test]
@@ -501,7 +909,8 @@ mod tests {
         let device = Default::default();
         let model = tiny_config().init::<CpuBackend>(&device);
         let ids: Vec<i64> = (0..100i64).map(|i| i % 260).collect();
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, 100]), &device);
+        let input =
+            Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, 100]), &device);
         let _ = model.forward(input);
     }
 
@@ -514,7 +923,10 @@ mod tests {
         // range rather than pinning an exact number that would break on
         // every hyperparameter tweak.
         assert!(n > 100_000, "spike model suspiciously small: {n} params");
-        assert!(n < 20_000_000, "spike model larger than the P0 target: {n} params");
+        assert!(
+            n < 20_000_000,
+            "spike model larger than the P0 target: {n} params"
+        );
     }
 
     /// GWT probe hook (§7.1): `hidden_layers` returns exactly `n_layers + 1`
@@ -527,8 +939,13 @@ mod tests {
 
         let batch_size = 2;
         let seq_len = 6;
-        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| i % 260).collect();
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [batch_size, seq_len]), &device);
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64)
+            .map(|i| i % 260)
+            .collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(ids, [batch_size, seq_len]),
+            &device,
+        );
 
         let layers = model.hidden_layers(input);
         assert_eq!(layers.len(), config.n_layers + 1);
@@ -564,8 +981,13 @@ mod tests {
 
         let batch_size = 2;
         let seq_len = 5;
-        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| (i * 7) % 260).collect();
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids.clone(), [batch_size, seq_len]), &device);
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64)
+            .map(|i| (i * 7) % 260)
+            .collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(ids.clone(), [batch_size, seq_len]),
+            &device,
+        );
 
         let forward_out = model.forward(input.clone());
         let layers = model.hidden_layers(input);
@@ -593,8 +1015,13 @@ mod tests {
 
         let batch_size = 2;
         let seq_len = 7;
-        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64).map(|i| (i * 3 + 1) % 260).collect();
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids.clone(), [batch_size, seq_len]), &device);
+        let ids: Vec<i64> = (0..(batch_size * seq_len) as i64)
+            .map(|i| (i * 3 + 1) % 260)
+            .collect();
+        let input = Tensor::<CpuBackend, 2, Int>::from_data(
+            TensorData::new(ids.clone(), [batch_size, seq_len]),
+            &device,
+        );
 
         let expected = tensor_to_vec(model.hidden(input.clone()));
         let layers = model.hidden_layers(input);
@@ -620,7 +1047,24 @@ mod tests {
         // the Phase 51 plan.
         let model = TinyTransformerConfig::p1a(2500).init::<CpuBackend>(&device);
         let n = model.num_params();
-        assert!(n > 5_000_000, "P1a model below the 5-30M target range: {n} params");
-        assert!(n < 30_000_000, "P1a model above the 5-30M target range: {n} params");
+        assert!(
+            n > 5_000_000,
+            "P1a model below the 5-30M target range: {n} params"
+        );
+        assert!(
+            n < 30_000_000,
+            "P1a model above the 5-30M target range: {n} params"
+        );
+    }
+
+    #[test]
+    fn akh_tool_small_stays_in_compact_weight_class() {
+        let device = Default::default();
+        let model = TinyTransformerConfig::akh_tool_small(3_000).init::<crate::CpuBackend>(&device);
+        let parameters = model.num_params();
+        assert!(
+            (25_000_000..=45_000_000).contains(&parameters),
+            "unexpected compact tool model size: {parameters}"
+        );
     }
 }

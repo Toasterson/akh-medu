@@ -53,7 +53,9 @@ pub enum GrugError {
 
     /// The tiny sanity-check training loop did not reduce the loss on its
     /// fixed target within the configured number of steps.
-    #[error("training loop did not reduce loss: start={start_loss:.6}, end={end_loss:.6} over {steps} steps")]
+    #[error(
+        "training loop did not reduce loss: start={start_loss:.6}, end={end_loss:.6} over {steps} steps"
+    )]
     #[diagnostic(
         code(grug_train::loss_did_not_decrease),
         help(

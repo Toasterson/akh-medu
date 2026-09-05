@@ -26,16 +26,16 @@ use std::time::Instant;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig, TargetFormat};
-use grug_train::eval::{run_two_axis_eval_fmt, FrozenTwoAxisHoldout};
+use grug_train::eval::{FrozenTwoAxisHoldout, run_two_axis_eval_fmt};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{build_batch_fmt, init_training, to_eval_model, train_step};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "train_format_ab")]
@@ -94,7 +94,9 @@ fn main() {
 
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
@@ -107,8 +109,17 @@ fn main() {
     );
 
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
-    let tokenizer = load_or_train_tokenizer(&dataset, &tokenizer_path, args.train_examples, args.bpe_vocab_size, fmt);
-    println!("train_format_ab: BPE tokenizer vocab_size={}", tokenizer.vocab_size());
+    let tokenizer = load_or_train_tokenizer(
+        &dataset,
+        &tokenizer_path,
+        args.train_examples,
+        args.bpe_vocab_size,
+        fmt,
+    );
+    println!(
+        "train_format_ab: BPE tokenizer vocab_size={}",
+        tokenizer.vocab_size()
+    );
 
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
@@ -118,35 +129,55 @@ fn main() {
         let sample = dataset.train_examples(256).unwrap_or_default();
         let mut lens: Vec<usize> = sample
             .iter()
-            .filter_map(|ex| grug_train::train::encode_example_fmt(&tokenizer, ex, fmt).ok().map(|e| e.ids.len()))
+            .filter_map(|ex| {
+                grug_train::train::encode_example_fmt(&tokenizer, ex, fmt)
+                    .ok()
+                    .map(|e| e.ids.len())
+            })
             .collect();
         lens.sort_unstable();
         let max = lens.last().copied().unwrap_or(0);
         let median = lens.get(lens.len() / 2).copied().unwrap_or(0);
         let over = lens.iter().filter(|&&l| l > max_seq_len).count();
-        println!("train_format_ab: SEQ-LEN (n={}) median={median} max={max} ctx={max_seq_len} over_ctx={over}", lens.len());
+        println!(
+            "train_format_ab: SEQ-LEN (n={}) median={median} max={max} ctx={max_seq_len} over_ctx={over}",
+            lens.len()
+        );
     }
 
     let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);
-    println!("train_format_ab: base TinyTransformer ~{} params", burn::module::Module::num_params(&model));
+    println!(
+        "train_format_ab: base TinyTransformer ~{} params",
+        burn::module::Module::num_params(&model)
+    );
 
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
-        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device).expect("checkpoint loads");
+        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device)
+            .expect("checkpoint loads");
         model = m;
         optim = o;
         start_step = step + 1;
         println!("train_format_ab: resumed at step {start_step}");
     }
 
-    let train_examples = dataset.train_examples(args.train_examples).expect("train examples");
-    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws");
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+    let train_examples = dataset
+        .train_examples(args.train_examples)
+        .expect("train examples");
+    let holdout =
+        FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws");
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
     let eval_log_path = args.artifacts_dir.join("eval_axes.jsonl");
     let ckpt_root = args.artifacts_dir.join("checkpoints");
     let total_steps = args.epochs * (args.train_examples / args.batch_size).max(1);
-    println!("train_format_ab: {total_steps} steps ({} epochs), batch={}, lr={}", args.epochs, args.batch_size, args.learning_rate);
+    println!(
+        "train_format_ab: {total_steps} steps ({} epochs), batch={}, lr={}",
+        args.epochs, args.batch_size, args.learning_rate
+    );
 
     let run_start = Instant::now();
     let mut last_loss = f32::NAN;
@@ -155,8 +186,14 @@ fn main() {
         let batch_examples: Vec<_> = (0..args.batch_size)
             .map(|i| train_examples[(step * args.batch_size + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch_fmt::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device, fmt)
-            .expect("encoding should not fail");
+        let batch = build_batch_fmt::<ActiveBackend, _>(
+            &tokenizer,
+            &batch_examples,
+            max_seq_len,
+            &device,
+            fmt,
+        )
+        .expect("encoding should not fail");
 
         let step_start = Instant::now();
         let (next_model, loss) = train_step(model, &mut optim, &batch, args.learning_rate);
@@ -174,12 +211,18 @@ fn main() {
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
             let eval_model = to_eval_model(&model);
-            let (b, a) = run_two_axis_eval_fmt(&eval_model, &tokenizer, &holdout, gen_config, &device, fmt);
+            let (b, a) =
+                run_two_axis_eval_fmt(&eval_model, &tokenizer, &holdout, gen_config, &device, fmt);
             log_axis_rows(&eval_log_path, step, args.format.as_str(), &b, &a);
             println!(
                 "  eval@{step}  axis_b: valid={:.3} schema={:.3} arg={:.3} | axis_a: valid={:.3} schema={:.3} arg={:.3} div={:.3}",
-                b.eval.valid_json_rate, b.eval.schema_adherence_rate, b.eval.arg_correct_rate,
-                a.eval.valid_json_rate, a.eval.schema_adherence_rate, a.eval.arg_correct_rate, a.diversity.distinct_call_ratio,
+                b.eval.valid_json_rate,
+                b.eval.schema_adherence_rate,
+                b.eval.arg_correct_rate,
+                a.eval.valid_json_rate,
+                a.eval.schema_adherence_rate,
+                a.eval.arg_correct_rate,
+                a.diversity.distinct_call_ratio,
             );
         }
 
@@ -207,7 +250,7 @@ fn load_or_train_tokenizer(
         return BpeTokenizer::load(path).expect("existing tokenizer.json loads");
     }
     let corpus_examples = dataset
-        .train_examples(train_examples.min(60_000).max(200))
+        .train_examples(train_examples.clamp(200, 60_000))
         .expect("train examples for tokenizer corpus");
     let corpus: Vec<String> = corpus_examples
         .iter()
@@ -223,7 +266,13 @@ fn load_or_train_tokenizer(
     tokenizer
 }
 
-fn log_axis_rows(path: &Path, step: usize, fmt_label: &str, b: &grug_data::AxisReport, a: &grug_data::AxisReport) {
+fn log_axis_rows(
+    path: &Path,
+    step: usize,
+    fmt_label: &str,
+    b: &grug_data::AxisReport,
+    a: &grug_data::AxisReport,
+) {
     use std::io::Write as _;
     let row = |axis: &str, r: &grug_data::AxisReport| {
         serde_json::json!({
@@ -237,7 +286,11 @@ fn log_axis_rows(path: &Path, step: usize, fmt_label: &str, b: &grug_data::AxisR
         })
         .to_string()
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", row("held_out_phrasing", b));
         let _ = writeln!(f, "{}", row("whole_tool_holdout", a));
     }

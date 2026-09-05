@@ -38,7 +38,9 @@ use serde::Serialize;
 use grug_data::constrain::ToolCallGrammar;
 
 use crate::error::{GrugError, GrugResult};
-use crate::generate::{generate, generate_constrained, generate_ptr, generate_ptr_constrained, GenerateConfig};
+use crate::generate::{
+    GenerateConfig, generate, generate_constrained, generate_ptr, generate_ptr_constrained,
+};
 use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
 use crate::train::format_prompt;
@@ -162,14 +164,23 @@ pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
             .iter()
             .map(|ex| {
                 let prompt = crate::train::format_prompt_fmt(ex, fmt);
-                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+                (
+                    generate(model, tokenizer, &prompt, gen_config, device),
+                    ex.clone(),
+                )
             })
             .collect();
         Dataset::score_axis_fmt(which, &outputs, fmt)
     };
     (
-        axis(holdout.phrasing_examples(), grug_data::EvalAxis::HeldOutPhrasing),
-        axis(holdout.whole_tool_examples(), grug_data::EvalAxis::WholeToolHoldout),
+        axis(
+            holdout.phrasing_examples(),
+            grug_data::EvalAxis::HeldOutPhrasing,
+        ),
+        axis(
+            holdout.whole_tool_examples(),
+            grug_data::EvalAxis::WholeToolHoldout,
+        ),
     )
 }
 
@@ -193,7 +204,10 @@ pub fn run_two_axis_eval_raw_and_repaired_fmt<B: Backend, V: Vocab>(
             .iter()
             .map(|ex| {
                 let prompt = crate::train::format_prompt_fmt(ex, fmt);
-                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+                (
+                    generate(model, tokenizer, &prompt, gen_config, device),
+                    ex.clone(),
+                )
             })
             .collect()
     };
@@ -229,7 +243,9 @@ fn generate_outputs_constrained<B: Backend, V: Vocab>(
         .map(|example| {
             let prompt = format_prompt(example);
             let grammar = ToolCallGrammar::new(&example.tools);
-            let raw = generate_constrained(model, tokenizer, &prompt, &grammar, pieces, gen_config, device);
+            let raw = generate_constrained(
+                model, tokenizer, &prompt, &grammar, pieces, gen_config, device,
+            );
             (raw, example.clone())
         })
         .collect()
@@ -249,9 +265,22 @@ pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
     gen_config: GenerateConfig,
     device: &B::Device,
 ) -> (grug_data::AxisReport, grug_data::AxisReport) {
-    let phrasing_outputs = generate_outputs_constrained(model, tokenizer, pieces, &holdout.phrasing, gen_config, device);
-    let whole_tool_outputs =
-        generate_outputs_constrained(model, tokenizer, pieces, &holdout.whole_tool, gen_config, device);
+    let phrasing_outputs = generate_outputs_constrained(
+        model,
+        tokenizer,
+        pieces,
+        &holdout.phrasing,
+        gen_config,
+        device,
+    );
+    let whole_tool_outputs = generate_outputs_constrained(
+        model,
+        tokenizer,
+        pieces,
+        &holdout.whole_tool,
+        gen_config,
+        device,
+    );
 
     (
         Dataset::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_outputs),
@@ -274,7 +303,12 @@ pub fn run_two_axis_eval_ptr<B: Backend, V: Vocab>(
     let axis = |examples: &[Example], which: EvalAxis| {
         let outputs: Vec<(String, Example)> = examples
             .iter()
-            .map(|ex| (generate_ptr(model, tokenizer, &format_prompt(ex), gen_config, device), ex.clone()))
+            .map(|ex| {
+                (
+                    generate_ptr(model, tokenizer, &format_prompt(ex), gen_config, device),
+                    ex.clone(),
+                )
+            })
             .collect();
         Dataset::score_axis(which, &outputs)
     };
@@ -367,7 +401,8 @@ pub fn run_abstention_eval_fmt<B: Backend, V: Vocab>(
     device: &B::Device,
     fmt: grug_data::TargetFormat,
 ) -> grug_data::AbstentionReport {
-    let mut pairs: Vec<(String, Example)> = Vec::with_capacity(holdout.call.len() + holdout.abstain.len());
+    let mut pairs: Vec<(String, Example)> =
+        Vec::with_capacity(holdout.call.len() + holdout.abstain.len());
     for ex in holdout.call.iter().chain(holdout.abstain.iter()) {
         let prompt = crate::train::format_prompt_fmt(ex, fmt);
         let raw = generate(model, tokenizer, &prompt, gen_config, device);
@@ -468,7 +503,10 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
             .iter()
             .map(|ex| {
                 let prompt = crate::train::format_prompt_fmt(ex, fmt);
-                (generate(model, tokenizer, &prompt, gen_config, device), ex.clone())
+                (
+                    generate(model, tokenizer, &prompt, gen_config, device),
+                    ex.clone(),
+                )
             })
             .collect()
     };
@@ -477,8 +515,11 @@ pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
 
     // Registry-wide call reliability: only the scoped examples whose label is a
     // concrete call (retrieval covered the request).
-    let call_pairs: Vec<(String, Example)> =
-        scoped.iter().filter(|(_, ex)| !ex.is_abstention()).cloned().collect();
+    let call_pairs: Vec<(String, Example)> = scoped
+        .iter()
+        .filter(|(_, ex)| !ex.is_abstention())
+        .cloned()
+        .collect();
     let call = grug_data::EvalReport::from_outputs_fmt(&call_pairs, fmt);
     // Full-stack (M1→propose→M2): repair each proposal against the retrieved
     // offered set before scoring.
@@ -510,12 +551,12 @@ fn append_row<R: Serialize>(row: &R, path: &Path) -> GrugResult<()> {
         message: e.to_string(),
     })?;
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| GrugError::EvalLogWriteFailed {
-                message: format!("creating parent dir {}: {e}", parent.display()),
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| GrugError::EvalLogWriteFailed {
+            message: format!("creating parent dir {}: {e}", parent.display()),
+        })?;
     }
 
     let mut file = OpenOptions::new()
@@ -631,8 +672,10 @@ pub fn run_two_axis_eval<B: Backend, V: Vocab>(
     gen_config: GenerateConfig,
     device: &B::Device,
 ) -> (grug_data::AxisReport, grug_data::AxisReport) {
-    let phrasing_outputs = generate_outputs(model, tokenizer, &holdout.phrasing, gen_config, device);
-    let whole_tool_outputs = generate_outputs(model, tokenizer, &holdout.whole_tool, gen_config, device);
+    let phrasing_outputs =
+        generate_outputs(model, tokenizer, &holdout.phrasing, gen_config, device);
+    let whole_tool_outputs =
+        generate_outputs(model, tokenizer, &holdout.whole_tool, gen_config, device);
 
     (
         Dataset::score_axis(EvalAxis::HeldOutPhrasing, &phrasing_outputs),
@@ -658,7 +701,8 @@ pub fn run_two_axis_eval_and_log<B: Backend, V: Vocab>(
     step: usize,
     log_path: impl AsRef<Path>,
 ) -> GrugResult<(AxisEvalLogRow, AxisEvalLogRow)> {
-    let (phrasing_report, whole_tool_report) = run_two_axis_eval(model, tokenizer, holdout, gen_config, device);
+    let (phrasing_report, whole_tool_report) =
+        run_two_axis_eval(model, tokenizer, holdout, gen_config, device);
 
     let phrasing_row = AxisEvalLogRow::from_axis_report(step, &phrasing_report);
     let whole_tool_row = AxisEvalLogRow::from_axis_report(step, &whole_tool_report);
@@ -673,9 +717,9 @@ pub fn run_two_axis_eval_and_log<B: Backend, V: Vocab>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CpuBackend;
     use crate::tokenizer::ByteTokenizer;
     use crate::transformer::TinyTransformerConfig;
-    use crate::CpuBackend;
 
     #[test]
     fn eval_harness_runs_end_to_end_and_produces_well_formed_report() {
@@ -683,7 +727,8 @@ mod tests {
         let dataset = Dataset::new(7).unwrap();
         let holdout = FrozenHoldout::new(&dataset, 3).unwrap();
 
-        let model_config = TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
         let model = model_config.init::<CpuBackend>(&device);
         let tokenizer = ByteTokenizer::new();
 
@@ -692,7 +737,8 @@ mod tests {
             max_seq_len: 64,
         };
 
-        let (eval_report, diversity_report) = run_eval(&model, &tokenizer, &holdout, gen_config, &device);
+        let (eval_report, diversity_report) =
+            run_eval(&model, &tokenizer, &holdout, gen_config, &device);
 
         assert_eq!(eval_report.n, 3);
         assert!((0.0..=1.0).contains(&eval_report.valid_json_rate));
@@ -709,7 +755,8 @@ mod tests {
         let dataset = Dataset::new(11).unwrap();
         let holdout = FrozenHoldout::new(&dataset, 2).unwrap();
 
-        let model_config = TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
         let model = model_config.init::<CpuBackend>(&device);
         let tokenizer = ByteTokenizer::new();
         let gen_config = GenerateConfig {
@@ -724,7 +771,10 @@ mod tests {
         // stray dir from a killed run is plausible).
         let _ = std::fs::remove_file(&log_path);
 
-        let row = run_eval_and_log(&model, &tokenizer, &holdout, gen_config, &device, 0, &log_path).unwrap();
+        let row = run_eval_and_log(
+            &model, &tokenizer, &holdout, gen_config, &device, 0, &log_path,
+        )
+        .unwrap();
         assert_eq!(row.step, 0);
         assert_eq!(row.n, 2);
 
@@ -746,7 +796,8 @@ mod tests {
         let dataset = Dataset::new(13).unwrap();
         let holdout = FrozenTwoAxisHoldout::new(&dataset, 3).unwrap();
 
-        let model_config = TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
         let model = model_config.init::<CpuBackend>(&device);
         let tokenizer = ByteTokenizer::new();
 
@@ -779,7 +830,8 @@ mod tests {
         let dataset = Dataset::new(17).unwrap();
         let holdout = FrozenTwoAxisHoldout::new(&dataset, 2).unwrap();
 
-        let model_config = TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
         let model = model_config.init::<CpuBackend>(&device);
         let tokenizer = ByteTokenizer::new();
         let gen_config = GenerateConfig {
@@ -787,12 +839,17 @@ mod tests {
             max_seq_len: 64,
         };
 
-        let dir = std::env::temp_dir().join(format!("grug_train_two_axis_eval_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "grug_train_two_axis_eval_test_{}",
+            std::process::id()
+        ));
         let log_path = dir.join("eval_axes.jsonl");
         let _ = std::fs::remove_file(&log_path);
 
-        let (phrasing_row, whole_tool_row) =
-            run_two_axis_eval_and_log(&model, &tokenizer, &holdout, gen_config, &device, 5, &log_path).unwrap();
+        let (phrasing_row, whole_tool_row) = run_two_axis_eval_and_log(
+            &model, &tokenizer, &holdout, gen_config, &device, 5, &log_path,
+        )
+        .unwrap();
         assert_eq!(phrasing_row.step, 5);
         assert_eq!(phrasing_row.axis, "held_out_phrasing");
         assert_eq!(whole_tool_row.step, 5);

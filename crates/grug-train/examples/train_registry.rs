@@ -36,16 +36,16 @@ use std::time::Instant;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig, SignalMode, TargetFormat};
-use grug_train::eval::{run_retrieval_eval_fmt, FrozenRetrievalHoldout};
+use grug_train::eval::{FrozenRetrievalHoldout, run_retrieval_eval_fmt};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{build_batch_fmt, init_training, to_eval_model, train_step};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "train_registry")]
@@ -120,7 +120,9 @@ fn main() {
     // replaced by the retriever's top-K, so the effective offered size is K.
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode),
+        Some(n) => {
+            Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
@@ -146,18 +148,26 @@ fn main() {
     );
 
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
-    let tokenizer = load_or_train_tokenizer(&train_examples, &tokenizer_path, args.bpe_vocab_size, fmt);
-    println!("train_registry: BPE tokenizer vocab_size={}", tokenizer.vocab_size());
+    let tokenizer =
+        load_or_train_tokenizer(&train_examples, &tokenizer_path, args.bpe_vocab_size, fmt);
+    println!(
+        "train_registry: BPE tokenizer vocab_size={}",
+        tokenizer.vocab_size()
+    );
 
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
 
     let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);
-    println!("train_registry: base TinyTransformer ~{} params", burn::module::Module::num_params(&model));
+    println!(
+        "train_registry: base TinyTransformer ~{} params",
+        burn::module::Module::num_params(&model)
+    );
 
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
-        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device).expect("checkpoint loads");
+        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device)
+            .expect("checkpoint loads");
         model = m;
         optim = o;
         start_step = step + 1;
@@ -177,12 +187,18 @@ fn main() {
         args.retrieval_k,
         holdout.recall_at_k(),
     );
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
     let eval_log_path = args.artifacts_dir.join("eval_registry.jsonl");
     let ckpt_root = args.artifacts_dir.join("checkpoints");
     let total_steps = args.epochs * (args.train_examples / args.batch_size).max(1);
-    println!("train_registry: {total_steps} steps ({} epochs), batch={}, lr={}", args.epochs, args.batch_size, args.learning_rate);
+    println!(
+        "train_registry: {total_steps} steps ({} epochs), batch={}, lr={}",
+        args.epochs, args.batch_size, args.learning_rate
+    );
 
     let run_start = Instant::now();
     let mut last_loss = f32::NAN;
@@ -191,8 +207,14 @@ fn main() {
         let batch_examples: Vec<_> = (0..args.batch_size)
             .map(|i| train_examples[(step * args.batch_size + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch_fmt::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device, fmt)
-            .expect("encoding should not fail");
+        let batch = build_batch_fmt::<ActiveBackend, _>(
+            &tokenizer,
+            &batch_examples,
+            max_seq_len,
+            &device,
+            fmt,
+        )
+        .expect("encoding should not fail");
 
         let step_start = Instant::now();
         let (next_model, loss) = train_step(model, &mut optim, &batch, args.learning_rate);
@@ -210,13 +232,27 @@ fn main() {
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
             let eval_model = to_eval_model(&model);
-            let r = run_retrieval_eval_fmt(&eval_model, &tokenizer, &holdout, gen_config, &device, fmt);
-            log_registry_row(&eval_log_path, step, args.format.as_str(), args.retrieval_k, &r);
+            let r =
+                run_retrieval_eval_fmt(&eval_model, &tokenizer, &holdout, gen_config, &device, fmt);
+            log_registry_row(
+                &eval_log_path,
+                step,
+                args.format.as_str(),
+                args.retrieval_k,
+                &r,
+            );
             println!(
                 "  eval@{step}  recall@{}={:.3} | registry_call: schema={:.3} arg={:.3} → repaired arg={:.3} (n={}) | GAP: recall={:.3} false_abstain={:.3} precision={:.3} (n_abstain={})",
-                args.retrieval_k, r.recall_at_k,
-                r.call.schema_adherence_rate, r.call.arg_correct_rate, r.call_repaired.arg_correct_rate, r.n_call,
-                r.abstention.abstain_recall, r.abstention.false_abstention_rate, r.abstention.abstain_precision, r.n_abstain,
+                args.retrieval_k,
+                r.recall_at_k,
+                r.call.schema_adherence_rate,
+                r.call.arg_correct_rate,
+                r.call_repaired.arg_correct_rate,
+                r.n_call,
+                r.abstention.abstain_recall,
+                r.abstention.false_abstention_rate,
+                r.abstention.abstain_precision,
+                r.n_abstain,
             );
         }
 
@@ -257,7 +293,13 @@ fn load_or_train_tokenizer(
     tokenizer
 }
 
-fn log_registry_row(path: &Path, step: usize, fmt_label: &str, k: usize, r: &grug_train::RetrievalEval) {
+fn log_registry_row(
+    path: &Path,
+    step: usize,
+    fmt_label: &str,
+    k: usize,
+    r: &grug_train::RetrievalEval,
+) {
     use std::io::Write as _;
     let row = serde_json::json!({
         "step": step,
@@ -279,7 +321,11 @@ fn log_registry_row(path: &Path, step: usize, fmt_label: &str, k: usize, r: &gru
         "n_abstain": r.n_abstain,
     })
     .to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{row}");
     }
 }

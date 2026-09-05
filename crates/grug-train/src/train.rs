@@ -17,12 +17,12 @@
 use burn::module::{AutodiffModule, Module, ModuleVisitor, Param};
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::ElementConversion;
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Int, Tensor, TensorData};
 
-use grug_data::schema::Example;
 use grug_data::TargetFormat;
+use grug_data::schema::Example;
 
 use crate::pointer::{PointerTransformer, PointerTransformerConfig};
 use crate::tokenizer::Vocab;
@@ -60,7 +60,10 @@ pub struct Encoded {
 }
 
 /// Tokenize `example` into the `BOS <prompt> SEP <target> EOS` framing.
-pub fn encode_example<V: Vocab>(tokenizer: &V, example: &Example) -> crate::error::GrugResult<Encoded> {
+pub fn encode_example<V: Vocab>(
+    tokenizer: &V,
+    example: &Example,
+) -> crate::error::GrugResult<Encoded> {
     encode_example_fmt(tokenizer, example, TargetFormat::Json)
 }
 
@@ -109,7 +112,7 @@ impl Default for TrainConfig {
 /// input_ids[:, i+1]`. `loss_mask` is `true` where that position's target is
 /// a real target-half token (i.e. should count toward the loss) and `false`
 /// for prompt tokens and padding.
-pub struct Batch<B: AutodiffBackend> {
+pub struct Batch<B: Backend> {
     pub input_ids: Tensor<B, 2, Int>,
     pub targets: Tensor<B, 2, Int>,
     pub loss_mask: Vec<bool>,
@@ -126,7 +129,7 @@ pub struct Batch<B: AutodiffBackend> {
 
 /// Build a training batch from a slice of examples, truncating/padding every
 /// sequence to the batch's own max length (capped at `max_seq_len`).
-pub fn build_batch<B: AutodiffBackend, V: Vocab>(
+pub fn build_batch<B: Backend, V: Vocab>(
     tokenizer: &V,
     examples: &[Example],
     max_seq_len: usize,
@@ -136,7 +139,7 @@ pub fn build_batch<B: AutodiffBackend, V: Vocab>(
 }
 
 /// [`build_batch`] under an explicit [`TargetFormat`] (Phase 51 P2).
-pub fn build_batch_fmt<B: AutodiffBackend, V: Vocab>(
+pub fn build_batch_fmt<B: Backend, V: Vocab>(
     tokenizer: &V,
     examples: &[Example],
     max_seq_len: usize,
@@ -149,7 +152,12 @@ pub fn build_batch_fmt<B: AutodiffBackend, V: Vocab>(
         .map(|ex| encode_example_fmt(tokenizer, ex, fmt))
         .collect::<crate::error::GrugResult<Vec<_>>>()?;
 
-    let longest = encoded.iter().map(|e| e.ids.len()).max().unwrap_or(1).min(max_seq_len);
+    let longest = encoded
+        .iter()
+        .map(|e| e.ids.len())
+        .max()
+        .unwrap_or(1)
+        .min(max_seq_len);
     let batch_size = encoded.len();
     // Full sequences are `longest`; input/target pairs are `longest - 1`.
     let seq_len = longest.saturating_sub(1).max(1);
@@ -170,7 +178,8 @@ pub fn build_batch_fmt<B: AutodiffBackend, V: Vocab>(
         // token) is the copy source: a target token is "copyable" iff it also
         // appears here. Built once per example.
         let prompt_end = enc.target_start.min(longest);
-        let prompt_set: std::collections::HashSet<u32> = ids[0..prompt_end].iter().copied().collect();
+        let prompt_set: std::collections::HashSet<u32> =
+            ids[0..prompt_end].iter().copied().collect();
 
         for i in 0..seq_len {
             input_flat.push(ids[i] as i64);
@@ -185,14 +194,10 @@ pub fn build_batch_fmt<B: AutodiffBackend, V: Vocab>(
         }
     }
 
-    let input_ids = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(input_flat, [batch_size, seq_len]),
-        device,
-    );
-    let targets = Tensor::<B, 2, Int>::from_data(
-        TensorData::new(target_flat, [batch_size, seq_len]),
-        device,
-    );
+    let input_ids =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [batch_size, seq_len]), device);
+    let targets =
+        Tensor::<B, 2, Int>::from_data(TensorData::new(target_flat, [batch_size, seq_len]), device);
 
     Ok(Batch {
         input_ids,
@@ -216,6 +221,28 @@ pub fn train_step<B: AutodiffBackend>(
     let (model, loss, _grad_norm) =
         train_step_guarded(model, optim, batch, lr, f32::INFINITY, f32::INFINITY);
     (model, loss)
+}
+
+/// Forward-only masked loss through the ordinary text path. Keeping this
+/// generic over [`Backend`] lets expensive evaluations run without retaining
+/// an autodiff graph.
+pub fn text_batch_loss<B: Backend>(model: &TinyTransformer<B>, batch: &Batch<B>) -> f32 {
+    let device = batch.input_ids.device();
+    let mask_flags: Vec<i64> = batch
+        .loss_mask
+        .iter()
+        .map(|&enabled| i64::from(enabled))
+        .collect();
+    let mask = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]),
+        &device,
+    );
+    let loss = masked_cross_entropy(
+        model.forward(batch.input_ids.clone()),
+        batch.targets.clone(),
+        &mask,
+    );
+    loss.into_scalar().elem()
 }
 
 /// [`train_step`] with a loss cap and a grad-norm cap: when the batch loss is
@@ -250,9 +277,15 @@ pub fn train_step_guarded<B: AutodiffBackend>(
     grad_norm_cap: f32,
 ) -> (TinyTransformer<B>, f32, f32) {
     let device = batch.input_ids.device();
-    let mask_flags: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
-    let mask_tensor =
-        Tensor::<B, 1, Int>::from_data(TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]), &device);
+    let mask_flags: Vec<i64> = batch
+        .loss_mask
+        .iter()
+        .map(|&m| if m { 1 } else { 0 })
+        .collect();
+    let mask_tensor = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]),
+        &device,
+    );
 
     let logits = model.forward(batch.input_ids.clone()); // [batch, seq, vocab]
     let masked_loss = masked_cross_entropy(logits, batch.targets.clone(), &mask_tensor);
@@ -286,7 +319,10 @@ pub fn train_step_guarded<B: AutodiffBackend>(
 /// parameters. Walks the model via [`ModuleVisitor`] (the same mechanism
 /// [`GradientsParams::from_grads`] uses internally) so it works for any
 /// module shape without hardcoding layer names.
-fn global_grad_norm<B: AutodiffBackend>(grads: &GradientsParams, model: &TinyTransformer<B>) -> f32 {
+pub(crate) fn global_grad_norm<B: AutodiffBackend, M: Module<B>>(
+    grads: &GradientsParams,
+    model: &M,
+) -> f32 {
     struct NormVisitor<'a, B: AutodiffBackend> {
         grads: &'a GradientsParams,
         sum_sq: f32,
@@ -321,7 +357,7 @@ fn global_grad_norm<B: AutodiffBackend>(grads: &GradientsParams, model: &TinyTra
 /// option masks by *target token value*, not by *sequence position* -- we
 /// need to mask out prompt positions regardless of what byte value happens
 /// to sit there.
-fn masked_cross_entropy<B: AutodiffBackend>(
+pub(crate) fn masked_cross_entropy<B: Backend>(
     logits: Tensor<B, 3>,
     targets: Tensor<B, 2, Int>,
     mask: &Tensor<B, 1, Int>,
@@ -354,7 +390,10 @@ fn masked_cross_entropy<B: AutodiffBackend>(
 pub fn init_training<B: AutodiffBackend>(
     model_config: &TinyTransformerConfig,
     device: &B::Device,
-) -> (TinyTransformer<B>, OptimizerAdaptor<Adam, TinyTransformer<B>, B>) {
+) -> (
+    TinyTransformer<B>,
+    OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
+) {
     let model = model_config.init::<B>(device);
     // Gradient-norm clipping: without it the harder/longer hard-distractor task
     // hits a large-gradient batch and diverges to NaN around step ~100 (the
@@ -369,7 +408,9 @@ pub fn init_training<B: AutodiffBackend>(
 /// Project a training-mode model to its inference-mode (`valid()`)
 /// projection, for generation/eval. Thin wrapper so callers don't need to
 /// import `AutodiffModule` themselves.
-pub fn to_eval_model<B: AutodiffBackend>(model: &TinyTransformer<B>) -> TinyTransformer<B::InnerBackend> {
+pub fn to_eval_model<B: AutodiffBackend>(
+    model: &TinyTransformer<B>,
+) -> TinyTransformer<B::InnerBackend> {
     model.valid()
 }
 
@@ -382,7 +423,10 @@ pub fn to_eval_model<B: AutodiffBackend>(model: &TinyTransformer<B>) -> TinyTran
 pub fn init_training_ptr<B: AutodiffBackend>(
     config: &PointerTransformerConfig,
     device: &B::Device,
-) -> (PointerTransformer<B>, OptimizerAdaptor<Adam, PointerTransformer<B>, B>) {
+) -> (
+    PointerTransformer<B>,
+    OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
+) {
     let model = config.init::<B>(device);
     let optim = AdamConfig::new()
         .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
@@ -401,9 +445,15 @@ pub fn train_step_ptr<B: AutodiffBackend>(
     lr: f64,
 ) -> (PointerTransformer<B>, f32) {
     let device = batch.input_ids.device();
-    let mask_flags: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
-    let mask_tensor =
-        Tensor::<B, 1, Int>::from_data(TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]), &device);
+    let mask_flags: Vec<i64> = batch
+        .loss_mask
+        .iter()
+        .map(|&m| if m { 1 } else { 0 })
+        .collect();
+    let mask_tensor = Tensor::<B, 1, Int>::from_data(
+        TensorData::new(mask_flags, [batch.batch_size * batch.seq_len]),
+        &device,
+    );
 
     let log_probs = model.log_probs(batch.input_ids.clone()); // [batch, seq, vocab]
     let masked_loss = masked_nll(log_probs, batch.targets.clone(), &mask_tensor);
@@ -475,7 +525,11 @@ pub fn train_step_ptr_supervised<B: AutodiffBackend>(
     let device = batch.input_ids.device();
     let n = batch.batch_size * batch.seq_len;
 
-    let mask_int: Vec<i64> = batch.loss_mask.iter().map(|&m| if m { 1 } else { 0 }).collect();
+    let mask_int: Vec<i64> = batch
+        .loss_mask
+        .iter()
+        .map(|&m| if m { 1 } else { 0 })
+        .collect();
     let mask_int_t = Tensor::<B, 1, Int>::from_data(TensorData::new(mask_int, [n]), &device);
 
     let parts = model.forward_parts(batch.input_ids.clone());
@@ -483,9 +537,17 @@ pub fn train_step_ptr_supervised<B: AutodiffBackend>(
 
     // Auxiliary BCE on p_gen. Target = P(generate): 1 where the token is NOT
     // copyable, 0 (copy) where it is. Averaged over loss-mask positions only.
-    let loss_flags: Vec<f32> = batch.loss_mask.iter().map(|&m| if m { 1.0 } else { 0.0 }).collect();
+    let loss_flags: Vec<f32> = batch
+        .loss_mask
+        .iter()
+        .map(|&m| if m { 1.0 } else { 0.0 })
+        .collect();
     let loss_mask_f = Tensor::<B, 1>::from_data(TensorData::new(loss_flags, [n]), &device);
-    let gen_target: Vec<f32> = batch.copy_mask.iter().map(|&c| if c { 0.0 } else { 1.0 }).collect();
+    let gen_target: Vec<f32> = batch
+        .copy_mask
+        .iter()
+        .map(|&c| if c { 0.0 } else { 1.0 })
+        .collect();
     let gen_target_t = Tensor::<B, 1>::from_data(TensorData::new(gen_target, [n]), &device);
 
     let eps = 1e-6;
@@ -509,8 +571,8 @@ pub fn train_step_ptr_supervised<B: AutodiffBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenizer::ByteTokenizer;
     use crate::CpuAutodiffBackend;
+    use crate::tokenizer::ByteTokenizer;
     use grug_data::Dataset;
 
     fn tiny_model_config() -> TinyTransformerConfig {
@@ -548,7 +610,10 @@ mod tests {
         for step in 0..8 {
             let (next, loss) = train_step_ptr(model, &mut optim, &batch, 3e-3);
             model = next;
-            assert!(loss.is_finite(), "loss went non-finite at step {step}: {loss}");
+            assert!(
+                loss.is_finite(),
+                "loss went non-finite at step {step}: {loss}"
+            );
             if step == 0 {
                 first = loss;
             }
@@ -635,7 +700,8 @@ mod tests {
 
         let model_config = TinyTransformerConfig::new(tok.vocab_size(), 16, 2, 1, 32, 128);
         let (mut model, mut optim) = init_training::<CpuAutodiffBackend>(&model_config, &device);
-        let batch = build_batch::<CpuAutodiffBackend, _>(&tok, &train_examples[..4], 128, &device).unwrap();
+        let batch =
+            build_batch::<CpuAutodiffBackend, _>(&tok, &train_examples[..4], 128, &device).unwrap();
 
         let lr = 1e-2;
         let mut losses = Vec::new();

@@ -26,8 +26,11 @@ fn n_tools_wiring_builds_a_procedural_dataset() {
 
     // Whole-tool holdout tools must be disjoint from train tools (the axis-A
     // guarantee the eval gate depends on).
-    let train_names: std::collections::HashSet<&str> =
-        dataset.train_tools().iter().map(|t| t.name.as_str()).collect();
+    let train_names: std::collections::HashSet<&str> = dataset
+        .train_tools()
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
     for holdout_tool in dataset.holdout_tools() {
         assert!(
             !train_names.contains(holdout_tool.name.as_str()),
@@ -47,7 +50,11 @@ fn n_tools_wiring_builds_a_procedural_dataset() {
         .iter()
         .flat_map(|ex| vec![format_prompt(ex), ex.expected_call_as_json_string()])
         .collect();
-    assert_eq!(corpus.len(), 120, "one prompt + one target JSON per example");
+    assert_eq!(
+        corpus.len(),
+        120,
+        "one prompt + one target JSON per example"
+    );
     assert!(
         corpus.iter().all(|s| !s.is_empty()),
         "no empty corpus strings"
@@ -58,10 +65,12 @@ fn n_tools_wiring_builds_a_procedural_dataset() {
     // identifier surface the BPE tokenizer needs subword coverage for, not
     // just leftover 56-tool-catalog names.
     let procedural_name_appears = examples.iter().any(|ex| {
-        format_prompt(ex).contains(&ex.expected_call.name)
-            || ex.expected_call.name.contains('_')
+        format_prompt(ex).contains(&ex.expected_call.name) || ex.expected_call.name.contains('_')
     });
-    assert!(procedural_name_appears, "expected verb_noun-shaped tool names in the corpus");
+    assert!(
+        procedural_name_appears,
+        "expected verb_noun-shaped tool names in the corpus"
+    );
 }
 
 #[test]

@@ -21,16 +21,16 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig, TargetFormat};
-use grug_train::eval::{run_two_axis_eval_raw_and_repaired_fmt, FrozenTwoAxisHoldout};
+use grug_train::eval::{FrozenTwoAxisHoldout, run_two_axis_eval_raw_and_repaired_fmt};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "eval_repair")]
@@ -73,12 +73,15 @@ fn main() {
 
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
 
-    let tokenizer = BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
+    let tokenizer =
+        BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
 
@@ -88,11 +91,16 @@ fn main() {
     let model = to_eval_model(&model);
     println!("eval_repair: FORMAT={fmt:?} checkpoint step {step}");
 
-    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws");
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+    let holdout =
+        FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws");
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
-    let ((raw_b, raw_a), (rep_b, rep_a)) =
-        run_two_axis_eval_raw_and_repaired_fmt(&model, &tokenizer, &holdout, gen_config, &device, fmt);
+    let ((raw_b, raw_a), (rep_b, rep_a)) = run_two_axis_eval_raw_and_repaired_fmt(
+        &model, &tokenizer, &holdout, gen_config, &device, fmt,
+    );
 
     let line = |tag: &str, r: &grug_data::AxisReport| {
         println!(

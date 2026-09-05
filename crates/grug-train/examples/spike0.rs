@@ -19,10 +19,10 @@
 use std::time::Instant;
 
 use grug_data::Dataset;
-use grug_train::eval::{default_log_path, run_eval_and_log, FrozenHoldout};
+use grug_train::eval::{FrozenHoldout, default_log_path, run_eval_and_log};
 use grug_train::generate::GenerateConfig;
 use grug_train::tokenizer::ByteTokenizer;
-use grug_train::train::{build_batch, init_training, train_step, TrainConfig};
+use grug_train::train::{TrainConfig, build_batch, init_training, train_step};
 use grug_train::transformer::TinyTransformerConfig;
 
 // Phase 51 P0 gate (R3): the training backend is a pure type-alias swap.
@@ -31,10 +31,10 @@ use grug_train::transformer::TinyTransformerConfig;
 // (gfx1100) -- no other line in this file changes. See
 // `docs/ai/decisions/087-grug-brain-baby-llm-training.md` and
 // `GpuAutodiffBackend` / `CpuAutodiffBackend` in `src/lib.rs`.
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 const TRAIN_EXAMPLES: usize = 128;
 const HOLDOUT_EXAMPLES: usize = 16;
@@ -47,7 +47,9 @@ fn main() {
     #[cfg(feature = "gpu")]
     let device = {
         let d = burn::backend::rocm::RocmDevice::default();
-        println!("Spike-0: GPU feature enabled -- training on Burn ROCm/HIP (CubeCL) backend, device: {d:?}");
+        println!(
+            "Spike-0: GPU feature enabled -- training on Burn ROCm/HIP (CubeCL) backend, device: {d:?}"
+        );
         d
     };
     #[cfg(not(feature = "gpu"))]
@@ -62,7 +64,8 @@ fn main() {
     let train_examples = dataset
         .train_examples(TRAIN_EXAMPLES)
         .expect("generator produces train examples");
-    let holdout = FrozenHoldout::new(&dataset, HOLDOUT_EXAMPLES).expect("generator produces holdout examples");
+    let holdout = FrozenHoldout::new(&dataset, HOLDOUT_EXAMPLES)
+        .expect("generator produces holdout examples");
 
     let model_config = TinyTransformerConfig::spike(grug_train::tokenizer::VOCAB_SIZE);
     let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);

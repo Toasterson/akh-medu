@@ -144,7 +144,11 @@ impl<B: Backend> PointerTransformer<B> {
 
         // log(P + eps): P_final sums to 1 over vocab; eps guards log(0).
         let log_probs = p_final.add_scalar(1e-9).log();
-        PointerParts { log_probs, p_gen, p_copy }
+        PointerParts {
+            log_probs,
+            p_gen,
+            p_copy,
+        }
     }
 
     /// The mixed next-token distribution as **log-probabilities**
@@ -191,7 +195,8 @@ mod tests {
         let model = tiny_config().init::<CpuBackend>(&device);
         let seq = 8;
         let ids: Vec<i64> = (0..seq as i64).map(|i| (i * 3) % 37).collect();
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, seq]), &device);
+        let input =
+            Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, seq]), &device);
 
         let probs = model.log_probs(input).exp(); // [1, seq, 37]
         let sums = probs.sum_dim(2).reshape([seq]); // [seq]
@@ -213,12 +218,16 @@ mod tests {
         let seq = 6;
         let present_token = 21i64;
         let ids: Vec<i64> = vec![present_token; seq];
-        let input = Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, seq]), &device);
+        let input =
+            Tensor::<CpuBackend, 2, Int>::from_data(TensorData::new(ids, [1, seq]), &device);
 
         let probs = model.log_probs(input).exp();
         // Probability assigned to `present_token` at the last position.
         let last = probs.slice([0..1, seq - 1..seq, 0..37]).reshape([37]);
         let p: Vec<f32> = last.into_data().to_vec().unwrap();
-        assert!(p[present_token as usize] > 0.0, "present token got zero probability");
+        assert!(
+            p[present_token as usize] > 0.0,
+            "present token got zero probability"
+        );
     }
 }

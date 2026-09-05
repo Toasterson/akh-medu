@@ -51,12 +51,12 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::{RuleCorpusConfig, RuleDataset, RuleExample, RuleWorldConfig, TraceArm};
+use grug_train::BpeTokenizer;
 use grug_train::checkpoint;
 use grug_train::rule_train::{encode_rule_example, format_rule_prompt};
 use grug_train::tokenizer::Vocab;
 use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::{TinyTransformer, TinyTransformerConfig};
-use grug_train::BpeTokenizer;
 
 #[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
@@ -116,7 +116,9 @@ fn model_config(name: &str, vocab: usize) -> TinyTransformerConfig {
         "p1a_50m" => TinyTransformerConfig::p1a_50m(vocab),
         "p1a_100m" => TinyTransformerConfig::p1a_100m(vocab),
         "p1a_350m" => TinyTransformerConfig::p1a_350m(vocab),
-        other => panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}"),
+        other => {
+            panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}")
+        }
     }
 }
 
@@ -157,11 +159,17 @@ fn build_probe_input<B: Backend, V: Vocab>(
     let encoded: Vec<_> = examples
         .iter()
         .map(|ex| {
-            encode_rule_example(tokenizer, ex).expect("encoding should not fail on generator output")
+            encode_rule_example(tokenizer, ex)
+                .expect("encoding should not fail on generator output")
         })
         .collect();
 
-    let longest = encoded.iter().map(|e| e.ids.len()).max().unwrap_or(1).min(max_seq_len);
+    let longest = encoded
+        .iter()
+        .map(|e| e.ids.len())
+        .max()
+        .unwrap_or(1)
+        .min(max_seq_len);
     let batch_size = encoded.len();
     let seq_len = longest.saturating_sub(1).max(1);
 
@@ -172,9 +180,7 @@ fn build_probe_input<B: Backend, V: Vocab>(
         while ids.len() < longest {
             ids.push(pad_id);
         }
-        for i in 0..seq_len {
-            input_flat.push(ids[i] as i64);
-        }
+        input_flat.extend(ids.iter().take(seq_len).map(|&id| id as i64));
     }
 
     let input_ids =
@@ -299,7 +305,9 @@ fn notes_for(s: &BatchStats) -> String {
     if s.max_abs_logit > 1.0e4 {
         notes.push("EXTREME (>1e4)".to_string());
     } else if s.max_abs_logit > FP32_EXP_OVERFLOW_THRESHOLD {
-        notes.push(format!("> fp32 exp-overflow ({FP32_EXP_OVERFLOW_THRESHOLD:.0})"));
+        notes.push(format!(
+            "> fp32 exp-overflow ({FP32_EXP_OVERFLOW_THRESHOLD:.0})"
+        ));
     }
     if notes.is_empty() {
         "ok".to_string()
@@ -355,7 +363,9 @@ fn main() {
 
     // --- 2. train the BPE in-process, identically to
     // train_rule.rs::load_or_train_tokenizer / forensic_batches.rs. ---
-    println!("probe_logits: training BPE tokenizer (vocab_size={BPE_VOCAB_SIZE}) from the corpus...");
+    println!(
+        "probe_logits: training BPE tokenizer (vocab_size={BPE_VOCAB_SIZE}) from the corpus..."
+    );
     let corpus: Vec<String> = train_examples
         .iter()
         .take(60_000)
@@ -431,8 +441,13 @@ fn main() {
 
     // --- 5. compact comparison table. ---
     println!();
-    println!("=== probe_logits: output-logit divergence probe (Wortsman 2309.14322 / z-loss hypothesis) ===");
-    println!("checkpoint: {} (loaded step {loaded_step})", args.resume.display());
+    println!(
+        "=== probe_logits: output-logit divergence probe (Wortsman 2309.14322 / z-loss hypothesis) ==="
+    );
+    println!(
+        "checkpoint: {} (loaded step {loaded_step})",
+        args.resume.display()
+    );
     println!();
     println!(
         "{:>6} | {:<8} | {:>16} | {:>18} | {:<28}",

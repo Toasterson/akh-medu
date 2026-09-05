@@ -37,8 +37,8 @@
 use std::path::Path;
 
 use tokenizers::decoders::byte_level::ByteLevel as ByteLevelDecoder;
-use tokenizers::models::bpe::{BpeTrainerBuilder, BPE};
 use tokenizers::models::TrainerWrapper;
+use tokenizers::models::bpe::{BPE, BpeTrainerBuilder};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel as ByteLevelPreTokenizer;
 use tokenizers::{AddedToken, Tokenizer};
 
@@ -93,8 +93,7 @@ impl BpeTokenizer {
         let bpe = BPE::default();
         let mut tokenizer = Tokenizer::new(bpe);
         tokenizer.with_pre_tokenizer(Some(ByteLevelPreTokenizer::new(
-            /* add_prefix_space */ false,
-            /* trim_offsets */ true,
+            /* add_prefix_space */ false, /* trim_offsets */ true,
             /* use_regex */ true,
         )));
         tokenizer.with_decoder(Some(ByteLevelDecoder::new(true, true, true)));
@@ -153,13 +152,13 @@ impl BpeTokenizer {
     /// directories as needed).
     pub fn save(&self, path: impl AsRef<Path>) -> GrugResult<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| GrugError::TokenizerSaveFailed {
-                    path: path.display().to_string(),
-                    message: format!("creating parent dir: {e}"),
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| GrugError::TokenizerSaveFailed {
+                path: path.display().to_string(),
+                message: format!("creating parent dir: {e}"),
+            })?;
         }
         self.inner
             .save(path, /* pretty */ false)
@@ -214,12 +213,12 @@ impl BpeTokenizer {
     /// Encode `text` with no special tokens added -- the counterpart to
     /// [`crate::tokenizer::ByteTokenizer::encode`].
     pub fn encode(&self, text: &str) -> GrugResult<Vec<u32>> {
-        let encoding = self
-            .inner
-            .encode(text, false)
-            .map_err(|e| GrugError::TokenizerEncodeFailed {
-                message: e.to_string(),
-            })?;
+        let encoding =
+            self.inner
+                .encode(text, false)
+                .map_err(|e| GrugError::TokenizerEncodeFailed {
+                    message: e.to_string(),
+                })?;
         Ok(encoding.get_ids().to_vec())
     }
 
@@ -347,8 +346,16 @@ mod tests {
         let tok = BpeTokenizer::train(sample_corpus(), 512).unwrap();
         // At least the byte-level base alphabet (256) + 4 specials; capped
         // at (approximately) the requested ceiling.
-        assert!(tok.vocab_size() >= 260, "vocab suspiciously small: {}", tok.vocab_size());
-        assert!(tok.vocab_size() <= 512 + 16, "vocab exceeded requested ceiling: {}", tok.vocab_size());
+        assert!(
+            tok.vocab_size() >= 260,
+            "vocab suspiciously small: {}",
+            tok.vocab_size()
+        );
+        assert!(
+            tok.vocab_size() <= 512 + 16,
+            "vocab exceeded requested ceiling: {}",
+            tok.vocab_size()
+        );
     }
 
     #[test]
@@ -397,7 +404,11 @@ mod tests {
         let mut specials = vec![tok.bos_id(), tok.eos_id(), tok.pad_id(), tok.sep_id()];
         specials.sort_unstable();
         specials.dedup();
-        assert_eq!(specials.len(), 4, "special tokens must be pairwise distinct");
+        assert_eq!(
+            specials.len(),
+            4,
+            "special tokens must be pairwise distinct"
+        );
 
         let decoded = tok.decode(&ids).unwrap();
         assert_eq!(decoded, "hi thereok");
@@ -471,7 +482,10 @@ mod tests {
         let tok = BpeTokenizer::train(sample_corpus(), 512).unwrap();
         let pieces = Vocab::token_pieces(&tok);
         for id in [tok.bos_id(), tok.eos_id(), tok.pad_id(), tok.sep_id()] {
-            assert!(pieces[id as usize].is_none(), "special token {id} should have no byte piece");
+            assert!(
+                pieces[id as usize].is_none(),
+                "special token {id} should have no byte piece"
+            );
         }
     }
 }

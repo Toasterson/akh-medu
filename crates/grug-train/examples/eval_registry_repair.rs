@@ -22,16 +22,16 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig, SignalMode, TargetFormat};
-use grug_train::eval::{run_retrieval_eval_fmt, FrozenRetrievalHoldout};
+use grug_train::eval::{FrozenRetrievalHoldout, run_retrieval_eval_fmt};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "eval_registry_repair")]
@@ -82,12 +82,15 @@ fn main() {
         .expect("--signal-mode must be name|d0|description|d1|paraphrase|d2");
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode),
+        Some(n) => {
+            Dataset::new_sized_signal(args.seed, n, args.holdout_frac, distractors, signal_mode)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
 
-    let tokenizer = BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
+    let tokenizer =
+        BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer loads");
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
 
@@ -95,8 +98,11 @@ fn main() {
     let (model, _optim, step) =
         checkpoint::load_checkpoint(&args.resume, model, optim, &device).expect("checkpoint loads");
     let model = to_eval_model(&model);
-    println!("eval_registry_repair: FORMAT={fmt:?} SIGNAL={signal_mode:?} checkpoint step {step} | registry={} out_of_registry={}",
-        dataset.registry().len(), dataset.holdout_tools().len());
+    println!(
+        "eval_registry_repair: FORMAT={fmt:?} SIGNAL={signal_mode:?} checkpoint step {step} | registry={} out_of_registry={}",
+        dataset.registry().len(),
+        dataset.holdout_tools().len()
+    );
 
     let holdout = FrozenRetrievalHoldout::new(
         &dataset,
@@ -106,12 +112,18 @@ fn main() {
         args.holdout_examples,
     )
     .expect("retrieval holdout draws");
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
     let r = run_retrieval_eval_fmt(&model, &tokenizer, &holdout, gen_config, &device, fmt);
 
     println!("\n=== Phase 51 P3a full-stack — M1 retrieve → propose → M2 repair → M3 gap ===");
-    println!("M1  retrieval recall@{}     : {:.3}  (target present in offered set)", args.retrieval_k, r.recall_at_k);
+    println!(
+        "M1  retrieval recall@{}     : {:.3}  (target present in offered set)",
+        args.retrieval_k, r.recall_at_k
+    );
     println!("    registry call (n={})", r.n_call);
     println!(
         "      raw (neural)          : schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
@@ -119,11 +131,15 @@ fn main() {
     );
     println!(
         "M2  repaired (name-grounded): schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
-        r.call_repaired.schema_adherence_rate, r.call_repaired.arg_correct_rate, r.call_repaired.arg_value_accuracy
+        r.call_repaired.schema_adherence_rate,
+        r.call_repaired.arg_correct_rate,
+        r.call_repaired.arg_value_accuracy
     );
     println!(
         "P3a grounded (value-grounded): schema={:.3} arg(whole-call)={:.3} arg(per-value)={:.3}",
-        r.call_grounded.schema_adherence_rate, r.call_grounded.arg_correct_rate, r.call_grounded.arg_value_accuracy
+        r.call_grounded.schema_adherence_rate,
+        r.call_grounded.arg_correct_rate,
+        r.call_grounded.arg_value_accuracy
     );
     println!(
         "    Δ (raw→grounded)          : whole-call {:+.3}   per-value {:+.3}",
@@ -132,7 +148,10 @@ fn main() {
     );
     println!(
         "M3  abstention (n_abstain={})  : recall={:.3} false_abstain={:.3} precision={:.3}",
-        r.n_abstain, r.abstention.abstain_recall, r.abstention.false_abstention_rate, r.abstention.abstain_precision,
+        r.n_abstain,
+        r.abstention.abstain_recall,
+        r.abstention.false_abstention_rate,
+        r.abstention.abstain_precision,
     );
 
     let summary = serde_json::json!({

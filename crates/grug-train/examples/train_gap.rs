@@ -15,7 +15,7 @@
 //!   - **abstain_recall** should climb high (the model learns to emit gap), and
 //!   - **false_abstention_rate** should stay low (it does not start wrongly
 //!     abstaining on requests a tool *does* cover),
-//! while axis-B call arg-correct holds (no regression from the mixed corpus).
+//!     while axis-B call arg-correct holds (no regression from the mixed corpus).
 //!
 //! Sparse checkpointing by default (`--ckpt-every 2000`) — the P2 run filled
 //! the disk writing every 500 across many runs; do not repeat that.
@@ -33,16 +33,18 @@ use std::time::Instant;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig, TargetFormat};
-use grug_train::eval::{run_abstention_eval_fmt, run_two_axis_eval_fmt, FrozenAbstentionHoldout, FrozenTwoAxisHoldout};
+use grug_train::eval::{
+    FrozenAbstentionHoldout, FrozenTwoAxisHoldout, run_abstention_eval_fmt, run_two_axis_eval_fmt,
+};
 use grug_train::generate::GenerateConfig;
 use grug_train::train::{build_batch_fmt, init_training, to_eval_model, train_step};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "train_gap")]
@@ -104,7 +106,9 @@ fn main() {
 
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
     .expect("dataset splits cleanly");
@@ -129,33 +133,49 @@ fn main() {
     );
 
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
-    let tokenizer = load_or_train_tokenizer(&train_examples, &tokenizer_path, args.bpe_vocab_size, fmt);
-    println!("train_gap: BPE tokenizer vocab_size={}", tokenizer.vocab_size());
+    let tokenizer =
+        load_or_train_tokenizer(&train_examples, &tokenizer_path, args.bpe_vocab_size, fmt);
+    println!(
+        "train_gap: BPE tokenizer vocab_size={}",
+        tokenizer.vocab_size()
+    );
 
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
 
     let (mut model, mut optim) = init_training::<ActiveBackend>(&model_config, &device);
-    println!("train_gap: base TinyTransformer ~{} params", burn::module::Module::num_params(&model));
+    println!(
+        "train_gap: base TinyTransformer ~{} params",
+        burn::module::Module::num_params(&model)
+    );
 
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
-        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device).expect("checkpoint loads");
+        let (m, o, step) = checkpoint::load_checkpoint(resume_dir, model, optim, &device)
+            .expect("checkpoint loads");
         model = m;
         optim = o;
         start_step = step + 1;
         println!("train_gap: resumed at step {start_step}");
     }
 
-    let call_holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("call holdout draws");
+    let call_holdout =
+        FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("call holdout draws");
     let abstention_holdout =
-        FrozenAbstentionHoldout::new(&dataset, args.holdout_examples, args.holdout_examples).expect("abstention holdout draws");
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+        FrozenAbstentionHoldout::new(&dataset, args.holdout_examples, args.holdout_examples)
+            .expect("abstention holdout draws");
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
     let eval_log_path = args.artifacts_dir.join("eval_gap.jsonl");
     let ckpt_root = args.artifacts_dir.join("checkpoints");
     let total_steps = args.epochs * (args.train_examples / args.batch_size).max(1);
-    println!("train_gap: {total_steps} steps ({} epochs), batch={}, lr={}", args.epochs, args.batch_size, args.learning_rate);
+    println!(
+        "train_gap: {total_steps} steps ({} epochs), batch={}, lr={}",
+        args.epochs, args.batch_size, args.learning_rate
+    );
 
     let run_start = Instant::now();
     let mut last_loss = f32::NAN;
@@ -164,8 +184,14 @@ fn main() {
         let batch_examples: Vec<_> = (0..args.batch_size)
             .map(|i| train_examples[(step * args.batch_size + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch_fmt::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device, fmt)
-            .expect("encoding should not fail");
+        let batch = build_batch_fmt::<ActiveBackend, _>(
+            &tokenizer,
+            &batch_examples,
+            max_seq_len,
+            &device,
+            fmt,
+        )
+        .expect("encoding should not fail");
 
         let step_start = Instant::now();
         let (next_model, loss) = train_step(model, &mut optim, &batch, args.learning_rate);
@@ -183,13 +209,32 @@ fn main() {
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
             let eval_model = to_eval_model(&model);
-            let (b, a) = run_two_axis_eval_fmt(&eval_model, &tokenizer, &call_holdout, gen_config, &device, fmt);
-            let gap = run_abstention_eval_fmt(&eval_model, &tokenizer, &abstention_holdout, gen_config, &device, fmt);
+            let (b, a) = run_two_axis_eval_fmt(
+                &eval_model,
+                &tokenizer,
+                &call_holdout,
+                gen_config,
+                &device,
+                fmt,
+            );
+            let gap = run_abstention_eval_fmt(
+                &eval_model,
+                &tokenizer,
+                &abstention_holdout,
+                gen_config,
+                &device,
+                fmt,
+            );
             log_gap_row(&eval_log_path, step, args.format.as_str(), &b, &a, &gap);
             println!(
                 "  eval@{step}  call_axisB: schema={:.3} arg={:.3} | GAP: recall={:.3} false_abstain={:.3} precision={:.3} (n_call={} n_abstain={})",
-                b.eval.schema_adherence_rate, b.eval.arg_correct_rate,
-                gap.abstain_recall, gap.false_abstention_rate, gap.abstain_precision, gap.n_call, gap.n_abstain,
+                b.eval.schema_adherence_rate,
+                b.eval.arg_correct_rate,
+                gap.abstain_recall,
+                gap.false_abstention_rate,
+                gap.abstain_precision,
+                gap.n_call,
+                gap.n_abstain,
             );
             let _ = a; // axis-A whole-tool holdout stays flat (zero-shot ~0.03); logged, not printed.
         }
@@ -261,7 +306,11 @@ fn log_gap_row(
         "n_abstain": gap.n_abstain,
     })
     .to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{row}");
     }
 }

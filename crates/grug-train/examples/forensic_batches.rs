@@ -12,8 +12,8 @@
 //! ```
 
 use grug_data::{GrugTruth, RuleCorpusConfig, RuleDataset, RuleExample, RuleWorldConfig, TraceArm};
-use grug_train::rule_train::{encode_rule_example, format_rule_prompt};
 use grug_train::BpeTokenizer;
+use grug_train::rule_train::{encode_rule_example, format_rule_prompt};
 
 /// Same MAX_SEQ_LEN as `training/configs/350m.env` (`MAX_SEQ_LEN=1024`), the
 /// context window `build_rule_batch` truncates to at train time.
@@ -43,8 +43,11 @@ fn main() {
     let typed_slots = true;
     let train_examples: usize = 40_000;
 
-    println!("forensic_batches: generating {train_examples} rule examples (seed=42, depths={train_depths:?}, arm=trace, typed_slots=true)...");
-    let stream: Vec<RuleExample> = dataset.rule_examples(train_examples, &train_depths, arm, typed_slots);
+    println!(
+        "forensic_batches: generating {train_examples} rule examples (seed=42, depths={train_depths:?}, arm=trace, typed_slots=true)..."
+    );
+    let stream: Vec<RuleExample> =
+        dataset.rule_examples(train_examples, &train_depths, arm, typed_slots);
     assert_eq!(stream.len(), train_examples);
 
     // --- 2. train the BPE in-process, EXACTLY as train_rule.rs's
@@ -64,31 +67,25 @@ fn main() {
 
     // --- 3. encode every example, recording forensic stats. ---
     struct Stat {
-        idx: usize,
         total_tokens: usize,
         target_start: usize,
         target_tokens: usize,
         depth: usize,
         yes: bool,
-        prompt_chars: usize,
-        target_chars: usize,
     }
 
     let mut stats: Vec<Stat> = Vec::with_capacity(stream.len());
-    for (idx, ex) in stream.iter().enumerate() {
+    for ex in &stream {
         let enc = encode_rule_example(&tokenizer, ex).expect("encoding should not fail");
         let total_tokens = enc.ids.len();
         let target_start = enc.target_start;
         let target_tokens = total_tokens.saturating_sub(target_start);
         stats.push(Stat {
-            idx,
             total_tokens,
             target_start,
             target_tokens,
             depth: ex.depth,
             yes: ex.gold_answer == GrugTruth::Yes,
-            prompt_chars: ex.prompt.chars().count(),
-            target_chars: ex.target.chars().count(),
         });
     }
 
@@ -147,7 +144,9 @@ fn main() {
     // fixed stride so it's reproducible without pulling in `rand`).
     let control: Vec<&Stat> = {
         let stride = stats.len() / 200;
-        (0..200).map(|i| &stats[(i * stride) % stats.len()]).collect()
+        (0..200)
+            .map(|i| &stats[(i * stride) % stats.len()])
+            .collect()
     };
 
     // --- 5. reporting helpers. ---
@@ -196,12 +195,21 @@ fn main() {
 
     println!();
     println!("=== Forensic report: Phase 51 P4 350M loss/gradient storm ===");
-    println!("MAX_SEQ_LEN (train cap) = {MAX_SEQ_LEN}, batch_size = {BATCH_SIZE}, stream_len = {}", stats.len());
+    println!(
+        "MAX_SEQ_LEN (train cap) = {MAX_SEQ_LEN}, batch_size = {BATCH_SIZE}, stream_len = {}",
+        stats.len()
+    );
     println!();
 
     let all_refs: Vec<&Stat> = stats.iter().collect();
     println!("--- (a) Full 40000-example stream ---");
-    summarize("FULL STREAM", &all_refs, is_over_ctx, is_empty_mask, is_target_cut);
+    summarize(
+        "FULL STREAM",
+        &all_refs,
+        is_over_ctx,
+        is_empty_mask,
+        is_target_cut,
+    );
     println!();
 
     println!("--- (b) Trigger ranges (epoch-periodic non-finite-gradient windows) ---");
@@ -211,7 +219,13 @@ fn main() {
     println!();
 
     println!("--- (c) Random control sample (n=200, stride-sampled) ---");
-    summarize("CONTROL (n=200)", &control, is_over_ctx, is_empty_mask, is_target_cut);
+    summarize(
+        "CONTROL (n=200)",
+        &control,
+        is_over_ctx,
+        is_empty_mask,
+        is_target_cut,
+    );
     println!();
 
     // --- 6. compact comparison table (trigger ranges vs global). ---
@@ -251,11 +265,26 @@ fn main() {
     println!();
 
     // --- 7. verdict line. ---
-    let global_over = pct(all_refs.iter().filter(|s| is_over_ctx(s)).count(), all_refs.len());
-    let trigger_total: Vec<&Stat> = window_stats.iter().flat_map(|(_, v)| v.iter().copied()).collect();
-    let trigger_over = pct(trigger_total.iter().filter(|s| is_over_ctx(s)).count(), trigger_total.len().max(1));
-    let trigger_cut = pct(trigger_total.iter().filter(|s| is_target_cut(s)).count(), trigger_total.len().max(1));
-    let trigger_empty = pct(trigger_total.iter().filter(|s| is_empty_mask(s)).count(), trigger_total.len().max(1));
+    let global_over = pct(
+        all_refs.iter().filter(|s| is_over_ctx(s)).count(),
+        all_refs.len(),
+    );
+    let trigger_total: Vec<&Stat> = window_stats
+        .iter()
+        .flat_map(|(_, v)| v.iter().copied())
+        .collect();
+    let trigger_over = pct(
+        trigger_total.iter().filter(|s| is_over_ctx(s)).count(),
+        trigger_total.len().max(1),
+    );
+    let trigger_cut = pct(
+        trigger_total.iter().filter(|s| is_target_cut(s)).count(),
+        trigger_total.len().max(1),
+    );
+    let trigger_empty = pct(
+        trigger_total.iter().filter(|s| is_empty_mask(s)).count(),
+        trigger_total.len().max(1),
+    );
     println!(
         "VERDICT-INPUTS: global_over_ctx%={global_over:.2} trigger_over_ctx%={trigger_over:.2} trigger_target_cut%={trigger_cut:.2} trigger_empty_mask%={trigger_empty:.2} (n_trigger_examples={})",
         trigger_total.len()

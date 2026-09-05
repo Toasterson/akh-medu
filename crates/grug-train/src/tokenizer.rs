@@ -214,7 +214,11 @@ mod tests {
         let mut specials = vec![BOS, EOS, PAD, SEP];
         specials.sort_unstable();
         specials.dedup();
-        assert_eq!(specials.len(), 4, "special tokens must be pairwise distinct");
+        assert_eq!(
+            specials.len(),
+            4,
+            "special tokens must be pairwise distinct"
+        );
         for s in specials {
             assert!(s >= 256, "special token {s} must be outside the byte range");
         }

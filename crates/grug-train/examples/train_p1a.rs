@@ -29,11 +29,11 @@ use std::time::Instant;
 
 use clap::Parser;
 use grug_data::Dataset;
-use grug_train::eval::{run_two_axis_eval_and_log, FrozenTwoAxisHoldout};
+use grug_train::eval::{FrozenTwoAxisHoldout, run_two_axis_eval_and_log};
 use grug_train::generate::GenerateConfig;
-use grug_train::train::{build_batch, init_training, train_step, TrainConfig};
+use grug_train::train::{TrainConfig, build_batch, init_training, train_step};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
 // Phase 51 P0 gate (R3) / P1a: the training backend is a pure type-alias
 // swap -- default (no `gpu` feature) trains on CPU (`burn-ndarray`);
@@ -41,10 +41,10 @@ use grug_train::{checkpoint, BpeTokenizer};
 // box's 7900 XTX (gfx1100). No other line in this file changes. Source
 // `scripts/train-env.sh` first so `hipconfig` (shimmed) and `ROCM_PATH`/
 // `HIP_PATH` are on PATH/set before building or running with `--features gpu`.
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 /// Phase 51 P1a: scale-up training run for the Grug-Brain BabyLLM tool-calling
 /// spike. See `docs/ai/plans/2026-07-05-phase51-grug-brain-baby-llm.md`.
@@ -147,7 +147,9 @@ fn main() {
     #[cfg(feature = "gpu")]
     let device = {
         let d = burn::backend::rocm::RocmDevice::default();
-        println!("train_p1a: GPU feature enabled -- training on Burn ROCm/HIP (CubeCL) backend, device: {d:?}");
+        println!(
+            "train_p1a: GPU feature enabled -- training on Burn ROCm/HIP (CubeCL) backend, device: {d:?}"
+        );
         d
     };
     #[cfg(not(feature = "gpu"))]
@@ -183,11 +185,20 @@ fn main() {
     // crash before the first checkpoint, doesn't waste time retraining an
     // identical BPE vocabulary). ---
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
-    let tokenizer = load_or_train_tokenizer(&dataset, &tokenizer_path, args.train_examples, args.bpe_vocab_size);
+    let tokenizer = load_or_train_tokenizer(
+        &dataset,
+        &tokenizer_path,
+        args.train_examples,
+        args.bpe_vocab_size,
+    );
     println!(
         "train_p1a: BPE tokenizer ready, vocab_size={} ({})",
         tokenizer.vocab_size(),
-        if tokenizer_path.exists() { "loaded" } else { "freshly trained" }
+        if tokenizer_path.exists() {
+            "loaded"
+        } else {
+            "freshly trained"
+        }
     );
 
     let model_config = if args.large_model {
@@ -207,12 +218,22 @@ fn main() {
         let sample = dataset.train_examples(256).unwrap_or_default();
         let mut lens: Vec<usize> = sample
             .iter()
-            .filter_map(|ex| grug_train::train::encode_example(&tokenizer, ex).ok().map(|e| e.ids.len()))
+            .filter_map(|ex| {
+                grug_train::train::encode_example(&tokenizer, ex)
+                    .ok()
+                    .map(|e| e.ids.len())
+            })
             .collect();
         lens.sort_unstable();
         let max = lens.last().copied().unwrap_or(0);
-        let p95 = lens.get(lens.len().saturating_mul(95) / 100).copied().unwrap_or(0);
-        let over = lens.iter().filter(|&&l| l > model_config.max_seq_len).count();
+        let p95 = lens
+            .get(lens.len().saturating_mul(95) / 100)
+            .copied()
+            .unwrap_or(0);
+        let over = lens
+            .iter()
+            .filter(|&&l| l > model_config.max_seq_len)
+            .count();
         println!(
             "train_p1a: PROMPT-LEN check (n={}) max={max} p95={p95} ctx={} over_ctx={over}",
             lens.len(),
@@ -234,9 +255,13 @@ fn main() {
 
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
-        println!("train_p1a: resuming from checkpoint {}", resume_dir.display());
+        println!(
+            "train_p1a: resuming from checkpoint {}",
+            resume_dir.display()
+        );
         let (loaded_model, loaded_optim, step) =
-            checkpoint::load_checkpoint(resume_dir, model, optim, &device).expect("checkpoint should load");
+            checkpoint::load_checkpoint(resume_dir, model, optim, &device)
+                .expect("checkpoint should load");
         model = loaded_model;
         optim = loaded_optim;
         start_step = step + 1;
@@ -255,7 +280,8 @@ fn main() {
         "train_p1a: drawing {} frozen holdout examples per axis...",
         args.holdout_examples
     );
-    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("generator produces holdout examples");
+    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples)
+        .expect("generator produces holdout examples");
 
     let gen_config = GenerateConfig {
         max_new_tokens: args.eval_max_new_tokens,
@@ -284,8 +310,13 @@ fn main() {
         let batch_examples: Vec<_> = (0..args.batch_size)
             .map(|i| train_examples[(step * args.batch_size + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch::<ActiveBackend, _>(&tokenizer, &batch_examples, model_config.max_seq_len, &device)
-            .expect("BPE tokenizer encoding should not fail on generator output");
+        let batch = build_batch::<ActiveBackend, _>(
+            &tokenizer,
+            &batch_examples,
+            model_config.max_seq_len,
+            &device,
+        )
+        .expect("BPE tokenizer encoding should not fail on generator output");
 
         let step_start = Instant::now();
         let (next_model, loss) = train_step(model, &mut optim, &batch, train_cfg.learning_rate);
@@ -332,7 +363,8 @@ fn main() {
 
         if (step > 0 && step % args.ckpt_every == 0) || step == total_steps - 1 {
             let ckpt_dir = ckpt_root.join(format!("step_{step:08}"));
-            checkpoint::save_checkpoint(&ckpt_dir, step, &model, &optim).expect("checkpoint save should succeed");
+            checkpoint::save_checkpoint(&ckpt_dir, step, &model, &optim)
+                .expect("checkpoint save should succeed");
             println!("  checkpoint saved -> {}", ckpt_dir.display());
         }
     }
@@ -375,7 +407,12 @@ fn build_dataset(
 /// Load a previously-trained tokenizer from `path`, or train a fresh one over
 /// `dataset`'s train stream (prompts + target JSON, `train_examples`-sized)
 /// and save it to `path`.
-fn load_or_train_tokenizer(dataset: &Dataset, path: &Path, train_examples: usize, vocab_size: usize) -> BpeTokenizer {
+fn load_or_train_tokenizer(
+    dataset: &Dataset,
+    path: &Path,
+    train_examples: usize,
+    vocab_size: usize,
+) -> BpeTokenizer {
     if path.exists() {
         return BpeTokenizer::load(path).expect("existing tokenizer.json should load");
     }
@@ -387,7 +424,7 @@ fn load_or_train_tokenizer(dataset: &Dataset, path: &Path, train_examples: usize
     // an 8000 target, which fragments arg values and hurts copy-correctness).
     // Use (almost) the full training corpus; BPE training over it is still fast.
     let corpus_examples = dataset
-        .train_examples(train_examples.min(60_000).max(200))
+        .train_examples(train_examples.clamp(200, 60_000))
         .expect("generator produces train examples for tokenizer training corpus");
     let corpus: Vec<String> = corpus_examples
         .iter()
@@ -399,7 +436,8 @@ fn load_or_train_tokenizer(dataset: &Dataset, path: &Path, train_examples: usize
         })
         .collect();
 
-    let tokenizer = BpeTokenizer::train(corpus, vocab_size).expect("BPE training should succeed on a real corpus");
+    let tokenizer = BpeTokenizer::train(corpus, vocab_size)
+        .expect("BPE training should succeed on a real corpus");
     tokenizer.save(path).expect("tokenizer save should succeed");
     tokenizer
 }
@@ -412,7 +450,11 @@ fn append_train_log_row(path: &Path, step: usize, loss: f32, step_ms: f64) {
         let _ = std::fs::create_dir_all(parent);
     }
     let line = serde_json::json!({ "step": step, "loss": loss, "step_ms": step_ms }).to_string();
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(file, "{line}");
     }
 }

@@ -30,17 +30,17 @@ use std::time::Instant;
 
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig};
-use grug_train::eval::{run_two_axis_eval, run_two_axis_eval_constrained, FrozenTwoAxisHoldout};
+use grug_train::eval::{FrozenTwoAxisHoldout, run_two_axis_eval, run_two_axis_eval_constrained};
 use grug_train::generate::GenerateConfig;
 use grug_train::tokenizer::Vocab;
 use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "eval_constrained")]
@@ -100,7 +100,9 @@ fn build_dataset(args: &Args) -> grug_data::GrugResult<Dataset> {
         DistractorConfig::easy_with_count(args.distractor_count)
     };
     match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
 }
@@ -126,12 +128,19 @@ fn main() {
         dataset.train_tools().len(),
         dataset.holdout_tools().len(),
         args.distractor_count,
-        if args.hard_distractors { "hard" } else { "easy" },
+        if args.hard_distractors {
+            "hard"
+        } else {
+            "easy"
+        },
     );
 
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
     let tokenizer = BpeTokenizer::load(&tokenizer_path).expect("tokenizer.json should load");
-    println!("eval_constrained: tokenizer vocab_size={}", tokenizer.vocab_size());
+    println!(
+        "eval_constrained: tokenizer vocab_size={}",
+        tokenizer.vocab_size()
+    );
 
     let model_config = if args.large_model {
         TinyTransformerConfig::p1a_large(tokenizer.vocab_size())
@@ -140,14 +149,15 @@ fn main() {
     };
 
     let (model, optim) = init_training::<ActiveBackend>(&model_config, &device);
-    let (model, _optim, step) =
-        checkpoint::load_checkpoint(&args.resume, model, optim, &device).expect("checkpoint should load");
+    let (model, _optim, step) = checkpoint::load_checkpoint(&args.resume, model, optim, &device)
+        .expect("checkpoint should load");
     println!("eval_constrained: loaded checkpoint at step {step}");
 
     let eval_model = to_eval_model(&model);
     let pieces = Vocab::token_pieces(&tokenizer);
 
-    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws cleanly");
+    let holdout =
+        FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws cleanly");
     let gen_config = GenerateConfig {
         max_new_tokens: args.eval_max_new_tokens,
         max_seq_len: model_config.max_seq_len,
@@ -155,14 +165,27 @@ fn main() {
 
     // --- Baseline (unconstrained) — should reproduce the training-run eval. ---
     let t0 = Instant::now();
-    let (base_b, base_a) = run_two_axis_eval(&eval_model, &tokenizer, &holdout, gen_config, &device);
-    println!("eval_constrained: baseline eval in {:.1}s", t0.elapsed().as_secs_f64());
+    let (base_b, base_a) =
+        run_two_axis_eval(&eval_model, &tokenizer, &holdout, gen_config, &device);
+    println!(
+        "eval_constrained: baseline eval in {:.1}s",
+        t0.elapsed().as_secs_f64()
+    );
 
     // --- Treatment (schema-constrained). ---
     let t1 = Instant::now();
-    let (con_b, con_a) =
-        run_two_axis_eval_constrained(&eval_model, &tokenizer, &pieces, &holdout, gen_config, &device);
-    println!("eval_constrained: constrained eval in {:.1}s", t1.elapsed().as_secs_f64());
+    let (con_b, con_a) = run_two_axis_eval_constrained(
+        &eval_model,
+        &tokenizer,
+        &pieces,
+        &holdout,
+        gen_config,
+        &device,
+    );
+    println!(
+        "eval_constrained: constrained eval in {:.1}s",
+        t1.elapsed().as_secs_f64()
+    );
 
     let line = |tag: &str, r: &grug_data::AxisReport| {
         format!(
@@ -199,7 +222,10 @@ fn main() {
     let out_path = args.artifacts_dir.join("eval_constrained.json");
     match std::fs::write(&out_path, serde_json::to_string_pretty(&summary).unwrap()) {
         Ok(()) => println!("\neval_constrained: wrote {}", out_path.display()),
-        Err(e) => eprintln!("eval_constrained: could not write {}: {e}", out_path.display()),
+        Err(e) => eprintln!(
+            "eval_constrained: could not write {}: {e}",
+            out_path.display()
+        ),
     }
 }
 

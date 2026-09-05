@@ -89,7 +89,11 @@ fn lenient_answer(output: &str) -> Option<GrugTruth> {
             continue;
         }
         let lower = tok.to_ascii_lowercase();
-        if let Some(t) = GrugTruth::ALL.iter().copied().find(|t| t.surface() == lower) {
+        if let Some(t) = GrugTruth::ALL
+            .iter()
+            .copied()
+            .find(|t| t.surface() == lower)
+        {
             found = Some(t);
         }
     }
@@ -152,14 +156,18 @@ fn main() {
         if line.is_empty() {
             continue;
         }
-        let v: serde_json::Value =
-            serde_json::from_str(line).unwrap_or_else(|e| panic!("invalid JSON line {line:?}: {e}"));
+        let v: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("invalid JSON line {line:?}: {e}"));
         let id = v
             .get("id")
             .and_then(|x| x.as_str())
             .unwrap_or_else(|| panic!("row missing string \"id\": {line:?}"))
             .to_string();
-        let output = v.get("output").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let output = v
+            .get("output")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         by_id.insert(id, output);
     }
     println!(

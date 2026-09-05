@@ -27,7 +27,7 @@ use std::time::Instant;
 use clap::Parser;
 use grug_data::{Dataset, DistractorConfig};
 use grug_train::eval::{
-    run_two_axis_eval_ptr, run_two_axis_eval_ptr_constrained, FrozenTwoAxisHoldout,
+    FrozenTwoAxisHoldout, run_two_axis_eval_ptr, run_two_axis_eval_ptr_constrained,
 };
 use grug_train::generate::GenerateConfig;
 use grug_train::tokenizer::Vocab;
@@ -35,12 +35,12 @@ use grug_train::train::{
     build_batch, init_training_ptr, to_eval_model_ptr, train_step_ptr, train_step_ptr_supervised,
 };
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer, PointerTransformerConfig};
+use grug_train::{BpeTokenizer, PointerTransformerConfig, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "train_p1a_ptr")]
@@ -86,7 +86,9 @@ struct Args {
 fn build_dataset(args: &Args) -> grug_data::GrugResult<Dataset> {
     let distractors = DistractorConfig::easy_with_count(args.distractor_count);
     match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors),
+        Some(n) => {
+            Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, distractors)
+        }
         None => Dataset::new(args.seed),
     }
 }
@@ -116,8 +118,16 @@ fn main() {
     );
 
     let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
-    let tokenizer = load_or_train_tokenizer(&dataset, &tokenizer_path, args.train_examples, args.bpe_vocab_size);
-    println!("train_p1a_ptr: BPE tokenizer vocab_size={}", tokenizer.vocab_size());
+    let tokenizer = load_or_train_tokenizer(
+        &dataset,
+        &tokenizer_path,
+        args.train_examples,
+        args.bpe_vocab_size,
+    );
+    println!(
+        "train_p1a_ptr: BPE tokenizer vocab_size={}",
+        tokenizer.vocab_size()
+    );
 
     let base_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = base_config.max_seq_len;
@@ -129,19 +139,29 @@ fn main() {
         let sample = dataset.train_examples(256).unwrap_or_default();
         let mut lens: Vec<usize> = sample
             .iter()
-            .filter_map(|ex| grug_train::train::encode_example(&tokenizer, ex).ok().map(|e| e.ids.len()))
+            .filter_map(|ex| {
+                grug_train::train::encode_example(&tokenizer, ex)
+                    .ok()
+                    .map(|e| e.ids.len())
+            })
             .collect();
         lens.sort_unstable();
         let max = lens.last().copied().unwrap_or(0);
         let over = lens.iter().filter(|&&l| l > max_seq_len).count();
-        println!("train_p1a_ptr: PROMPT-LEN check (n={}) max={max} ctx={max_seq_len} over_ctx={over}", lens.len());
+        println!(
+            "train_p1a_ptr: PROMPT-LEN check (n={}) max={max} ctx={max_seq_len} over_ctx={over}",
+            lens.len()
+        );
     }
 
     let (mut model, mut optim) = init_training_ptr::<ActiveBackend>(&model_config, &device);
     let param_count = burn::module::Module::num_params(&model);
     println!("train_p1a_ptr: PointerTransformer(~{param_count} params over 13M trunk + copy head)");
     if args.copy_supervision > 0.0 {
-        println!("train_p1a_ptr: COPY-SUPERVISION ON (Step B2), lambda={}", args.copy_supervision);
+        println!(
+            "train_p1a_ptr: COPY-SUPERVISION ON (Step B2), lambda={}",
+            args.copy_supervision
+        );
     } else {
         println!("train_p1a_ptr: copy-supervision OFF (plain marginal-likelihood, Step B)");
     }
@@ -149,16 +169,19 @@ fn main() {
     let mut start_step = 0usize;
     if let Some(resume_dir) = &args.resume {
         println!("train_p1a_ptr: resuming from {}", resume_dir.display());
-        let (m, o, step) =
-            checkpoint::load_checkpoint_ptr(resume_dir, model, optim, &device).expect("checkpoint should load");
+        let (m, o, step) = checkpoint::load_checkpoint_ptr(resume_dir, model, optim, &device)
+            .expect("checkpoint should load");
         model = m;
         optim = o;
         start_step = step + 1;
         println!("train_p1a_ptr: resumed at step {start_step}");
     }
 
-    let train_examples = dataset.train_examples(args.train_examples).expect("generator produces train examples");
-    let holdout = FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws cleanly");
+    let train_examples = dataset
+        .train_examples(args.train_examples)
+        .expect("generator produces train examples");
+    let holdout =
+        FrozenTwoAxisHoldout::new(&dataset, args.holdout_examples).expect("holdout draws cleanly");
     let pieces = Vocab::token_pieces(&tokenizer);
 
     let gen_config = GenerateConfig {
@@ -182,12 +205,19 @@ fn main() {
         let batch_examples: Vec<_> = (0..args.batch_size)
             .map(|i| train_examples[(step * args.batch_size + i) % train_examples.len()].clone())
             .collect();
-        let batch = build_batch::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device)
-            .expect("BPE encoding should not fail");
+        let batch =
+            build_batch::<ActiveBackend, _>(&tokenizer, &batch_examples, max_seq_len, &device)
+                .expect("BPE encoding should not fail");
 
         let step_start = Instant::now();
         let (next_model, loss) = if args.copy_supervision > 0.0 {
-            train_step_ptr_supervised(model, &mut optim, &batch, args.learning_rate, args.copy_supervision)
+            train_step_ptr_supervised(
+                model,
+                &mut optim,
+                &batch,
+                args.learning_rate,
+                args.copy_supervision,
+            )
         } else {
             train_step_ptr(model, &mut optim, &batch, args.learning_rate)
         };
@@ -199,25 +229,32 @@ fn main() {
             println!("step {step:6}: loss = {loss:.4} ({step_ms:.1} ms/step)");
             append_train_log_row(&train_log_path, step, loss, step_ms);
             if loss.is_nan() {
-                eprintln!("train_p1a_ptr: LOSS IS NaN at step {step} — aborting (see grad-clip / lr).");
+                eprintln!(
+                    "train_p1a_ptr: LOSS IS NaN at step {step} — aborting (see grad-clip / lr)."
+                );
                 break;
             }
         }
 
         if step % args.eval_every == 0 || step == total_steps - 1 {
             let eval_model = to_eval_model_ptr(&model);
-            let (b, a) = run_two_axis_eval_ptr(&eval_model, &tokenizer, &holdout, gen_config, &device);
+            let (b, a) =
+                run_two_axis_eval_ptr(&eval_model, &tokenizer, &holdout, gen_config, &device);
             log_axis_rows(&eval_log_path, step, "plain", &b, &a);
             println!(
                 "  eval@{step} PLAIN  axis_b: schema={:.3} arg={:.3} | axis_a: schema={:.3} arg={:.3} div={:.3}",
-                b.eval.schema_adherence_rate, b.eval.arg_correct_rate,
-                a.eval.schema_adherence_rate, a.eval.arg_correct_rate, a.diversity.distinct_call_ratio,
+                b.eval.schema_adherence_rate,
+                b.eval.arg_correct_rate,
+                a.eval.schema_adherence_rate,
+                a.eval.arg_correct_rate,
+                a.diversity.distinct_call_ratio,
             );
         }
 
         if (step > 0 && step % args.ckpt_every == 0) || step == total_steps - 1 {
             let ckpt_dir = ckpt_root.join(format!("step_{step:08}"));
-            checkpoint::save_checkpoint_ptr(&ckpt_dir, step, &model, &optim).expect("checkpoint save should succeed");
+            checkpoint::save_checkpoint_ptr(&ckpt_dir, step, &model, &optim)
+                .expect("checkpoint save should succeed");
             println!("  checkpoint -> {}", ckpt_dir.display());
         }
     }
@@ -225,12 +262,22 @@ fn main() {
     // Final: constrained (copy + Step-A grammar) two-axis pass.
     {
         let eval_model = to_eval_model_ptr(&model);
-        let (b, a) = run_two_axis_eval_ptr_constrained(&eval_model, &tokenizer, &pieces, &holdout, gen_config, &device);
+        let (b, a) = run_two_axis_eval_ptr_constrained(
+            &eval_model,
+            &tokenizer,
+            &pieces,
+            &holdout,
+            gen_config,
+            &device,
+        );
         log_axis_rows(&eval_log_path, total_steps, "constrained", &b, &a);
         println!(
             "  FINAL CONSTRAINED  axis_b: schema={:.3} arg={:.3} | axis_a: schema={:.3} arg={:.3} div={:.3}",
-            b.eval.schema_adherence_rate, b.eval.arg_correct_rate,
-            a.eval.schema_adherence_rate, a.eval.arg_correct_rate, a.diversity.distinct_call_ratio,
+            b.eval.schema_adherence_rate,
+            b.eval.arg_correct_rate,
+            a.eval.schema_adherence_rate,
+            a.eval.arg_correct_rate,
+            a.diversity.distinct_call_ratio,
         );
     }
 
@@ -241,23 +288,39 @@ fn main() {
     );
 }
 
-fn load_or_train_tokenizer(dataset: &Dataset, path: &Path, train_examples: usize, vocab_size: usize) -> BpeTokenizer {
+fn load_or_train_tokenizer(
+    dataset: &Dataset,
+    path: &Path,
+    train_examples: usize,
+    vocab_size: usize,
+) -> BpeTokenizer {
     if path.exists() {
         return BpeTokenizer::load(path).expect("existing tokenizer.json should load");
     }
     let corpus_examples = dataset
-        .train_examples(train_examples.min(60_000).max(200))
+        .train_examples(train_examples.clamp(200, 60_000))
         .expect("generator produces train examples for tokenizer corpus");
     let corpus: Vec<String> = corpus_examples
         .iter()
-        .flat_map(|ex| vec![grug_train::train::format_prompt(ex), ex.expected_call_as_json_string()])
+        .flat_map(|ex| {
+            vec![
+                grug_train::train::format_prompt(ex),
+                ex.expected_call_as_json_string(),
+            ]
+        })
         .collect();
     let tokenizer = BpeTokenizer::train(corpus, vocab_size).expect("BPE training should succeed");
     tokenizer.save(path).expect("tokenizer save should succeed");
     tokenizer
 }
 
-fn log_axis_rows(path: &Path, step: usize, mode: &str, b: &grug_data::AxisReport, a: &grug_data::AxisReport) {
+fn log_axis_rows(
+    path: &Path,
+    step: usize,
+    mode: &str,
+    b: &grug_data::AxisReport,
+    a: &grug_data::AxisReport,
+) {
     use std::io::Write as _;
     let row = |axis: &str, r: &grug_data::AxisReport| {
         serde_json::json!({
@@ -271,7 +334,11 @@ fn log_axis_rows(path: &Path, step: usize, mode: &str, b: &grug_data::AxisReport
         })
         .to_string()
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", row("held_out_phrasing", b));
         let _ = writeln!(f, "{}", row("whole_tool_holdout", a));
     }
@@ -280,7 +347,11 @@ fn log_axis_rows(path: &Path, step: usize, mode: &str, b: &grug_data::AxisReport
 fn append_train_log_row(path: &Path, step: usize, loss: f32, step_ms: f64) {
     use std::io::Write as _;
     let line = serde_json::json!({ "step": step, "loss": loss, "step_ms": step_ms }).to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }

@@ -20,15 +20,15 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use grug_data::{ArgMismatch, Dataset, DistractorConfig, ParsedOutput, TargetFormat};
-use grug_train::generate::{generate, GenerateConfig};
+use grug_train::generate::{GenerateConfig, generate};
 use grug_train::train::{format_prompt_fmt, init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{checkpoint, BpeTokenizer};
+use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(feature = "gpu")]
-use grug_train::GpuAutodiffBackend as ActiveBackend;
 #[cfg(not(feature = "gpu"))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "gpu")]
+use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
 #[command(name = "inspect_registry")]
@@ -82,35 +82,67 @@ fn main() {
     let fmt = TargetFormat::parse_label(&args.format).expect("--format json|grug");
 
     #[cfg(feature = "gpu")]
-    let device = { let d = burn::backend::rocm::RocmDevice::default(); println!("inspect: GPU {d:?}"); d };
+    let device = {
+        let d = burn::backend::rocm::RocmDevice::default();
+        println!("inspect: GPU {d:?}");
+        d
+    };
     #[cfg(not(feature = "gpu"))]
-    let device = { println!("inspect: CPU"); Default::default() };
+    let device = {
+        println!("inspect: CPU");
+        Default::default()
+    };
 
     let dataset = match args.n_tools {
-        Some(n) => Dataset::new_sized_with_distractors(args.seed, n, args.holdout_frac, DistractorConfig::easy_with_count(2)),
+        Some(n) => Dataset::new_sized_with_distractors(
+            args.seed,
+            n,
+            args.holdout_frac,
+            DistractorConfig::easy_with_count(2),
+        ),
         None => Dataset::new(args.seed),
     }
     .expect("dataset");
 
-    let tokenizer = BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer");
+    let tokenizer =
+        BpeTokenizer::load(args.artifacts_dir.join("tokenizer.json")).expect("tokenizer");
     let model_config = TinyTransformerConfig::p1a(tokenizer.vocab_size());
     let max_seq_len = model_config.max_seq_len;
     let (model, optim) = init_training::<ActiveBackend>(&model_config, &device);
-    let (model, _optim, step) = checkpoint::load_checkpoint(&args.resume, model, optim, &device).expect("checkpoint");
+    let (model, _optim, step) =
+        checkpoint::load_checkpoint(&args.resume, model, optim, &device).expect("checkpoint");
     let model = to_eval_model(&model);
-    println!("inspect: step {step}, scoring {} call examples with the real eval scorer\n", args.n);
+    println!(
+        "inspect: step {step}, scoring {} call examples with the real eval scorer\n",
+        args.n
+    );
 
-    let examples = dataset.retrieval_holdout_examples(args.retrieval_k, args.n).expect("holdout");
-    let gen_config = GenerateConfig { max_new_tokens: args.eval_max_new_tokens, max_seq_len };
+    let examples = dataset
+        .retrieval_holdout_examples(args.retrieval_k, args.n)
+        .expect("holdout");
+    let gen_config = GenerateConfig {
+        max_new_tokens: args.eval_max_new_tokens,
+        max_seq_len,
+    };
 
     // Buckets (mutually exclusive, sum to n_call):
-    let (mut n_call, mut arg_correct, mut schema_invalid, mut gap_on_call) = (0usize, 0usize, 0usize, 0usize);
-    // Residual = schema-valid but arg-wrong:
-    let (mut residual, mut case_value_only, mut case_presence_only, mut case_mixed, mut case_wrong_tool) =
-        (0usize, 0usize, 0usize, 0usize, 0usize);
-    // Per-param mismatch tallies + suspicious sub-cases:
-    let (mut value_diff_params, mut presence_diff_params, mut numeric_close_diffs, mut empty_val_diffs) =
+    let (mut n_call, mut arg_correct, mut schema_invalid, mut gap_on_call) =
         (0usize, 0usize, 0usize, 0usize);
+    // Residual = schema-valid but arg-wrong:
+    let (
+        mut residual,
+        mut case_value_only,
+        mut case_presence_only,
+        mut case_mixed,
+        mut case_wrong_tool,
+    ) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    // Per-param mismatch tallies + suspicious sub-cases:
+    let (
+        mut value_diff_params,
+        mut presence_diff_params,
+        mut numeric_close_diffs,
+        mut empty_val_diffs,
+    ) = (0usize, 0usize, 0usize, 0usize);
     // Value-grounding design inputs: is the CORRECT value in the request (the
     // premise a grounding pass depends on)? Is the WRONG value in the request
     // (misalignment) or not (hallucination)? And are the errors a pure
@@ -126,14 +158,23 @@ fn main() {
             continue;
         }
         n_call += 1;
-        let raw = generate(&model, &tokenizer, &format_prompt_fmt(ex, fmt), gen_config, &device);
+        let raw = generate(
+            &model,
+            &tokenizer,
+            &format_prompt_fmt(ex, fmt),
+            gen_config,
+            &device,
+        );
         let outcome = grug_data::eval::score_output_fmt(&raw, ex, fmt);
         if outcome.arg_correct() {
             arg_correct += 1;
             continue;
         }
         // Not arg-correct. Distinguish gap-on-call / schema-invalid / residual.
-        if matches!(grug_data::parse_output(&raw, fmt, &ex.tools), ParsedOutput::Abstain) {
+        if matches!(
+            grug_data::parse_output(&raw, fmt, &ex.tools),
+            ParsedOutput::Abstain
+        ) {
             gap_on_call += 1;
             continue;
         }
@@ -168,24 +209,25 @@ fn main() {
                         // Numeric-close: both parse as f64 within 1e-6 → the
                         // scorer's tolerance *should* have matched these; if this
                         // fires, it is a scorer/type bug worth fixing.
-                        if let (Some(wf), Some(gf)) = (w.and_then(|v| v.as_f64()), g.and_then(|v| v.as_f64())) {
-                            if (wf - gf).abs() < 1e-6 {
-                                numeric_close_diffs += 1;
-                            }
+                        if let (Some(wf), Some(gf)) =
+                            (w.and_then(|v| v.as_f64()), g.and_then(|v| v.as_f64()))
+                            && (wf - gf).abs() < 1e-6
+                        {
+                            numeric_close_diffs += 1;
                         }
                         if w.is_some_and(is_empty_val) || g.is_some_and(is_empty_val) {
                             empty_val_diffs += 1;
                         }
                         // Value-grounding design inputs.
-                        if let Some(wv) = w {
-                            if req.contains(&val_text(wv)) {
-                                want_in_req += 1;
-                            }
+                        if let Some(wv) = w
+                            && req.contains(&val_text(wv))
+                        {
+                            want_in_req += 1;
                         }
-                        if let Some(gv) = g {
-                            if req.contains(&val_text(gv)) {
-                                got_in_req += 1;
-                            }
+                        if let Some(gv) = g
+                            && req.contains(&val_text(gv))
+                        {
+                            got_in_req += 1;
                         }
                         if let Some(ty) = schema.and_then(|s| s.param(param)).map(|p| &p.ty) {
                             *err_by_type.entry(type_tag(ty)).or_insert(0) += 1;
@@ -194,7 +236,9 @@ fn main() {
                     ArgMismatch::PresenceDiffers { param } => {
                         has_pres = true;
                         presence_diff_params += 1;
-                        if want.get(param).is_some_and(is_empty_val) || got.get(param).is_some_and(is_empty_val) {
+                        if want.get(param).is_some_and(is_empty_val)
+                            || got.get(param).is_some_and(is_empty_val)
+                        {
                             empty_val_diffs += 1;
                         }
                     }
@@ -236,10 +280,18 @@ fn main() {
                     v.iter()
                         .map(|m| match m {
                             ArgMismatch::ValueDiffers { param } => {
-                                format!("{param}: want={:?} got={:?}", want.get(param), got.get(param))
+                                format!(
+                                    "{param}: want={:?} got={:?}",
+                                    want.get(param),
+                                    got.get(param)
+                                )
                             }
                             ArgMismatch::PresenceDiffers { param } => {
-                                format!("{param}: PRESENCE want={:?} got={:?}", want.get(param), got.get(param))
+                                format!(
+                                    "{param}: PRESENCE want={:?} got={:?}",
+                                    want.get(param),
+                                    got.get(param)
+                                )
                             }
                         })
                         .collect()
@@ -253,21 +305,43 @@ fn main() {
         }
     }
 
-    let pct = |x: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * x as f64 / d as f64 };
+    let pct = |x: usize, d: usize| {
+        if d == 0 {
+            0.0
+        } else {
+            100.0 * x as f64 / d as f64
+        }
+    };
     println!("\n=== outcome buckets (n_call={n_call}) ===");
-    println!("  arg-correct    : {arg_correct} ({:.1}%)", pct(arg_correct, n_call));
-    println!("  schema-invalid : {schema_invalid} ({:.1}%)", pct(schema_invalid, n_call));
-    println!("  gap-on-call    : {gap_on_call} ({:.1}%)  [model wrongly abstained]", pct(gap_on_call, n_call));
-    println!("  residual (schema-valid, arg-wrong): {residual} ({:.1}%)", pct(residual, n_call));
+    println!(
+        "  arg-correct    : {arg_correct} ({:.1}%)",
+        pct(arg_correct, n_call)
+    );
+    println!(
+        "  schema-invalid : {schema_invalid} ({:.1}%)",
+        pct(schema_invalid, n_call)
+    );
+    println!(
+        "  gap-on-call    : {gap_on_call} ({:.1}%)  [model wrongly abstained]",
+        pct(gap_on_call, n_call)
+    );
+    println!(
+        "  residual (schema-valid, arg-wrong): {residual} ({:.1}%)",
+        pct(residual, n_call)
+    );
     println!("\n=== residual case breakdown ({residual}) ===");
     println!("  wrong-tool (ValueDiffers on 'name'): {case_wrong_tool}");
     println!("  value-only                         : {case_value_only}");
     println!("  presence-only                      : {case_presence_only}");
     println!("  mixed (value + presence)           : {case_mixed}");
     println!("\n=== per-param mismatch tallies ===");
-    println!("  ValueDiffers params   : {value_diff_params}  (numeric-close [scorer-bug flag]: {numeric_close_diffs})");
+    println!(
+        "  ValueDiffers params   : {value_diff_params}  (numeric-close [scorer-bug flag]: {numeric_close_diffs})"
+    );
     println!("  PresenceDiffers params: {presence_diff_params}");
-    println!("  mismatches involving an EMPTY-string value [generator artifact]: {empty_val_diffs}");
+    println!(
+        "  mismatches involving an EMPTY-string value [generator artifact]: {empty_val_diffs}"
+    );
     println!("\n=== value-grounding design inputs (over {value_diff_params} ValueDiffers) ===");
     println!(
         "  CORRECT value appears in request : {want_in_req}/{value_diff_params} ({:.1}%)  [grounding premise: can we re-extract it?]",

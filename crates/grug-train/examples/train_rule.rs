@@ -188,7 +188,9 @@ fn model_config(name: &str, vocab: usize) -> TinyTransformerConfig {
         "p1a_50m" => TinyTransformerConfig::p1a_50m(vocab),
         "p1a_100m" => TinyTransformerConfig::p1a_100m(vocab),
         "p1a_350m" => TinyTransformerConfig::p1a_350m(vocab),
-        other => panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}"),
+        other => {
+            panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}")
+        }
     }
 }
 
@@ -440,7 +442,11 @@ fn main() {
             }
         } else {
             last_loss = loss;
-            loss_ema = if loss_ema.is_finite() { 0.98 * loss_ema + 0.02 * loss } else { loss };
+            loss_ema = if loss_ema.is_finite() {
+                0.98 * loss_ema + 0.02 * loss
+            } else {
+                loss
+            };
             grad_norm_ema = if grad_norm_ema.is_finite() {
                 0.98 * grad_norm_ema + 0.02 * grad_norm
             } else {

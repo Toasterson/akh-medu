@@ -53,9 +53,26 @@ pub fn generate<B: Backend, V: Vocab>(
     config: GenerateConfig,
     device: &B::Device,
 ) -> String {
-    let mut ids: Vec<u32> = Vec::new();
+    let prompt_ids = tokenizer.encode(prompt).unwrap_or_default();
+    generate_from_prompt_ids(model, tokenizer, &prompt_ids, config, device)
+}
+
+/// Greedily generate from an already-tokenized prompt body.
+///
+/// This is the lower-level seam used by knowledge-workflow inference, where a
+/// long prompt is compacted by retaining both its tool-policy head and latest
+/// conversation tail before generation. Callers provide neither BOS nor SEP;
+/// this function adds the same framing as [`generate`].
+pub fn generate_from_prompt_ids<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    prompt_ids: &[u32],
+    config: GenerateConfig,
+    device: &B::Device,
+) -> String {
+    let mut ids = Vec::with_capacity(prompt_ids.len() + config.max_new_tokens + 2);
     ids.push(tokenizer.bos_id());
-    ids.extend(tokenizer.encode(prompt).unwrap_or_default());
+    ids.extend_from_slice(prompt_ids);
     ids.push(tokenizer.sep_id());
 
     let mut generated: Vec<u32> = Vec::new();
@@ -69,7 +86,8 @@ pub fn generate<B: Backend, V: Vocab>(
 
         let seq_len = window.len();
         let input_flat: Vec<i64> = window.iter().map(|&t| t as i64).collect();
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
+        let input =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
 
         let logits = model.forward(input); // [1, seq_len, vocab]
         let vocab_size = logits.dims()[2];
@@ -91,7 +109,74 @@ pub fn generate<B: Backend, V: Vocab>(
         // can fail on a truncated multi-byte codepoint -- lossily decode the
         // byte-range tokens directly rather than surfacing an error from a
         // generation call, per this function's documented contract.
-        let bytes: Vec<u8> = generated.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect();
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&t| t < 256)
+            .map(|t| t as u8)
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
+}
+
+/// Greedy generation with a per-layer key/value cache.
+///
+/// When the framed prompt plus the requested completion fits in the declared
+/// context, this performs one full prompt prefill and then one-token decoder
+/// steps. If a generic caller has not reserved completion room, it falls back
+/// to [`generate_from_prompt_ids`], whose left-truncation semantics remain the
+/// compatibility path. Knowledge-runtime callers compact before entering this
+/// function, so normal Akh serving and checkpoint exams use the cached path.
+pub fn generate_from_prompt_ids_cached<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    prompt_ids: &[u32],
+    config: GenerateConfig,
+    device: &B::Device,
+) -> String {
+    let mut framed = Vec::with_capacity(prompt_ids.len() + 2);
+    framed.push(tokenizer.bos_id());
+    framed.extend_from_slice(prompt_ids);
+    framed.push(tokenizer.sep_id());
+    if framed.len().saturating_add(config.max_new_tokens) > config.max_seq_len {
+        return generate_from_prompt_ids(model, tokenizer, prompt_ids, config, device);
+    }
+
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(
+            framed.iter().map(|token| i64::from(*token)).collect(),
+            [1, framed.len()],
+        ),
+        device,
+    );
+    let (mut logits, mut cache) = model.prefill_cached(input);
+    let mut generated = Vec::with_capacity(config.max_new_tokens);
+    for index in 0..config.max_new_tokens {
+        let [_, seq_len, vocab_size] = logits.dims();
+        let last_logits = logits
+            .clone()
+            .slice([0..1, seq_len - 1..seq_len, 0..vocab_size])
+            .reshape([vocab_size]);
+        let next_id = argmax(last_logits);
+        if next_id == tokenizer.eos_id() {
+            break;
+        }
+        generated.push(next_id);
+        if index + 1 < config.max_new_tokens {
+            let input = Tensor::<B, 2, Int>::from_data(
+                TensorData::new(vec![i64::from(next_id)], [1, 1]),
+                device,
+            );
+            (logits, cache) = model.decode_cached(input, cache);
+        }
+    }
+    tokenizer.decode(&generated).unwrap_or_else(|_| {
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&token| token < 256)
+            .map(|token| token as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     })
 }
@@ -143,7 +228,8 @@ pub fn generate_constrained<B: Backend, V: Vocab>(
 
         let seq_len = window.len();
         let input_flat: Vec<i64> = window.iter().map(|&t| t as i64).collect();
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
+        let input =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
 
         let logits = model.forward(input); // [1, seq_len, vocab]
         let vocab_size = logits.dims()[2];
@@ -158,11 +244,12 @@ pub fn generate_constrained<B: Backend, V: Vocab>(
         let mut mask = vec![f32::NEG_INFINITY; vocab_size];
         let mut any_allowed = false;
         for (id, piece) in pieces.iter().enumerate().take(vocab_size) {
-            if let Some(bytes) = piece {
-                if !bytes.is_empty() && grammar.advance(&frontier, bytes).is_some() {
-                    mask[id] = 0.0;
-                    any_allowed = true;
-                }
+            if let Some(bytes) = piece
+                && !bytes.is_empty()
+                && grammar.advance(&frontier, bytes).is_some()
+            {
+                mask[id] = 0.0;
+                any_allowed = true;
             }
         }
         // Offer EOS only when a complete call has been formed.
@@ -201,7 +288,12 @@ pub fn generate_constrained<B: Backend, V: Vocab>(
     }
 
     tokenizer.decode(&generated).unwrap_or_else(|_| {
-        let bytes: Vec<u8> = generated.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect();
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&t| t < 256)
+            .map(|t| t as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     })
 }
@@ -235,7 +327,8 @@ pub fn generate_ptr<B: Backend, V: Vocab>(
 
         let seq_len = window.len();
         let input_flat: Vec<i64> = window.iter().map(|&t| t as i64).collect();
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
+        let input =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
 
         let log_probs = model.log_probs(input); // [1, seq_len, vocab]
         let vocab_size = log_probs.dims()[2];
@@ -252,7 +345,12 @@ pub fn generate_ptr<B: Backend, V: Vocab>(
     }
 
     tokenizer.decode(&generated).unwrap_or_else(|_| {
-        let bytes: Vec<u8> = generated.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect();
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&t| t < 256)
+            .map(|t| t as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     })
 }
@@ -289,7 +387,8 @@ pub fn generate_ptr_constrained<B: Backend, V: Vocab>(
 
         let seq_len = window.len();
         let input_flat: Vec<i64> = window.iter().map(|&t| t as i64).collect();
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
+        let input =
+            Tensor::<B, 2, Int>::from_data(TensorData::new(input_flat, [1, seq_len]), device);
 
         let log_probs = model.log_probs(input); // [1, seq_len, vocab]
         let vocab_size = log_probs.dims()[2];
@@ -300,11 +399,12 @@ pub fn generate_ptr_constrained<B: Backend, V: Vocab>(
         let mut mask = vec![f32::NEG_INFINITY; vocab_size];
         let mut any_allowed = false;
         for (id, piece) in pieces.iter().enumerate().take(vocab_size) {
-            if let Some(bytes) = piece {
-                if !bytes.is_empty() && grammar.advance(&frontier, bytes).is_some() {
-                    mask[id] = 0.0;
-                    any_allowed = true;
-                }
+            if let Some(bytes) = piece
+                && !bytes.is_empty()
+                && grammar.advance(&frontier, bytes).is_some()
+            {
+                mask[id] = 0.0;
+                any_allowed = true;
             }
         }
         let eos_ok = grammar.accepts_eos(&frontier);
@@ -335,7 +435,12 @@ pub fn generate_ptr_constrained<B: Backend, V: Vocab>(
     }
 
     tokenizer.decode(&generated).unwrap_or_else(|_| {
-        let bytes: Vec<u8> = generated.iter().copied().filter(|&t| t < 256).map(|t| t as u8).collect();
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&t| t < 256)
+            .map(|t| t as u8)
+            .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     })
 }
@@ -359,14 +464,15 @@ fn argmax<B: Backend>(logits: Tensor<B, 1>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CpuBackend;
     use crate::tokenizer::ByteTokenizer;
     use crate::transformer::TinyTransformerConfig;
-    use crate::CpuBackend;
 
     #[test]
     fn generate_stops_at_max_new_tokens_on_untrained_model() {
         let device = Default::default();
-        let model_config = TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
         let model = model_config.init::<CpuBackend>(&device);
         let tok = ByteTokenizer::new();
 
@@ -384,6 +490,24 @@ mod tests {
         assert!(
             out.chars().count() <= 5 * 3,
             "expected at most 5 generated tokens' worth of (possibly replacement-char-inflated) output, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cached_generation_matches_the_compatibility_path() {
+        let device = Default::default();
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model = model_config.init::<CpuBackend>(&device);
+        let tokenizer = ByteTokenizer::new();
+        let prompt_ids = tokenizer.encode("cache parity");
+        let config = GenerateConfig {
+            max_new_tokens: 8,
+            max_seq_len: 64,
+        };
+        assert_eq!(
+            generate_from_prompt_ids(&model, &tokenizer, &prompt_ids, config, &device),
+            generate_from_prompt_ids_cached(&model, &tokenizer, &prompt_ids, config, &device)
         );
     }
 }

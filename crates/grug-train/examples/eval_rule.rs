@@ -98,7 +98,9 @@ fn model_config(name: &str, vocab: usize) -> TinyTransformerConfig {
         "p1a_50m" => TinyTransformerConfig::p1a_50m(vocab),
         "p1a_100m" => TinyTransformerConfig::p1a_100m(vocab),
         "p1a_350m" => TinyTransformerConfig::p1a_350m(vocab),
-        other => panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}"),
+        other => {
+            panic!("--model must be spike|p1a|p1a_large|p1a_50m|p1a_100m|p1a_350m, got {other:?}")
+        }
     }
 }
 
