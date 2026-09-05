@@ -394,10 +394,13 @@ impl TinyTransformerConfig {
     }
 
     /// Fast iteration model for Akh tool-use and knowledge-workflow curricula.
-    /// At a 3k BPE vocabulary this is roughly 30M parameters, while the 2048
-    /// context fits captured tool schemas plus several action/result rounds.
+    /// At a 3k BPE vocabulary this is roughly 30M parameters. The 4096 context
+    /// matches the measured v2 knowledge-workflow envelope (longest episode
+    /// ~3.4k tokens): at 2048 the long note-revision families were compacted
+    /// during training, which corrupted their supervision and produced 100%
+    /// catastrophic sentinel failures (adaptive-loop-v2, 2026-09-05).
     pub fn akh_tool_small(vocab_size: usize) -> Self {
-        Self::new(vocab_size, 512, 8, 8, 2048, 2048)
+        Self::new(vocab_size, 512, 8, 8, 2048, 4096)
     }
 
     /// Full BabyLLM tool-capable rung: the existing ~350M capacity with a
