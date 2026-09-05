@@ -16,8 +16,8 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
-use crate::vsa::encode::{encode_label, encode_token};
 use crate::vsa::HyperVec;
+use crate::vsa::encode::{encode_label, encode_token};
 
 use super::expand::ExpansionResult;
 
@@ -836,14 +836,11 @@ impl PrerequisiteAnalyzer {
 
         // Sort: tier ASC, zone ASC (Known < Proximal < Beyond), similarity DESC.
         curriculum.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then(a.zone.cmp(&b.zone))
-                .then(
-                    b.similarity_to_known
-                        .partial_cmp(&a.similarity_to_known)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
+            a.tier.cmp(&b.tier).then(a.zone.cmp(&b.zone)).then(
+                b.similarity_to_known
+                    .partial_cmp(&a.similarity_to_known)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         curriculum
@@ -973,9 +970,14 @@ fn find_cycle_edge(
         if visited.contains(&start) {
             continue;
         }
-        if let Some(edge_idx) =
-            dfs_find_cycle(start, adj, edges, &mut visited, &mut in_stack, &mut stack_edges)
-        {
+        if let Some(edge_idx) = dfs_find_cycle(
+            start,
+            adj,
+            edges,
+            &mut visited,
+            &mut in_stack,
+            &mut stack_edges,
+        ) {
             return Some(edge_idx);
         }
     }
@@ -1462,19 +1464,18 @@ mod tests {
         let similarity = 0.5; // between 0.3 and 0.7
         let triple_count = 2; // below known_min_triples
 
-        let zone =
-            if triple_count >= config.known_min_triples
-                && similarity >= config.known_similarity_threshold
-            {
-                ZpdZone::Known
-            } else if prereq_coverage >= config.proximal_min_prereq_coverage
-                && similarity >= config.proximal_similarity_low
-                && similarity < config.proximal_similarity_high
-            {
-                ZpdZone::Proximal
-            } else {
-                ZpdZone::Beyond
-            };
+        let zone = if triple_count >= config.known_min_triples
+            && similarity >= config.known_similarity_threshold
+        {
+            ZpdZone::Known
+        } else if prereq_coverage >= config.proximal_min_prereq_coverage
+            && similarity >= config.proximal_similarity_low
+            && similarity < config.proximal_similarity_high
+        {
+            ZpdZone::Proximal
+        } else {
+            ZpdZone::Beyond
+        };
         assert_eq!(zone, ZpdZone::Proximal);
     }
 
@@ -1486,19 +1487,18 @@ mod tests {
         let similarity = 0.1; // below 0.3
         let triple_count = 1;
 
-        let zone =
-            if triple_count >= config.known_min_triples
-                && similarity >= config.known_similarity_threshold
-            {
-                ZpdZone::Known
-            } else if prereq_coverage >= config.proximal_min_prereq_coverage
-                && similarity >= config.proximal_similarity_low
-                && similarity < config.proximal_similarity_high
-            {
-                ZpdZone::Proximal
-            } else {
-                ZpdZone::Beyond
-            };
+        let zone = if triple_count >= config.known_min_triples
+            && similarity >= config.known_similarity_threshold
+        {
+            ZpdZone::Known
+        } else if prereq_coverage >= config.proximal_min_prereq_coverage
+            && similarity >= config.proximal_similarity_low
+            && similarity < config.proximal_similarity_high
+        {
+            ZpdZone::Proximal
+        } else {
+            ZpdZone::Beyond
+        };
         assert_eq!(zone, ZpdZone::Beyond);
     }
 
@@ -1536,14 +1536,11 @@ mod tests {
         ];
 
         entries.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then(a.zone.cmp(&b.zone))
-                .then(
-                    b.similarity_to_known
-                        .partial_cmp(&a.similarity_to_known)
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
+            a.tier.cmp(&b.tier).then(a.zone.cmp(&b.zone)).then(
+                b.similarity_to_known
+                    .partial_cmp(&a.similarity_to_known)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         // Tier 0 Known first, then tier 0 Beyond, then tier 1 Proximal

@@ -87,9 +87,9 @@ impl<M: ContextManager> ContextManager for SafetyEnforced<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::manager::{HeuristicTokenCounter, PassThroughManager};
     use super::super::types::{AssembledContext, ContextSection, DroppedSpan};
+    use super::*;
     use crate::engine::{Engine, EngineConfig};
     use crate::provenance::{DerivationKind, ProvenanceRecord};
     use crate::symbol::{SymbolId, SymbolKind};
@@ -149,9 +149,13 @@ mod tests {
     #[test]
     fn rejects_dropping_a_pinned_span() {
         let (engine, _tmp) = test_engine();
-        let pinned = engine.create_symbol(SymbolKind::Entity, "pinned").unwrap().id;
+        let pinned = engine
+            .create_symbol(SymbolKind::Entity, "pinned")
+            .unwrap()
+            .id;
         let goal = engine.create_symbol(SymbolKind::Entity, "g").unwrap().id;
-        let mut rec = ProvenanceRecord::new(pinned, DerivationKind::AgentDecision { goal, cycle: 1 });
+        let mut rec =
+            ProvenanceRecord::new(pinned, DerivationKind::AgentDecision { goal, cycle: 1 });
         engine.store_provenance(&mut rec).unwrap();
 
         let mgr = SafetyEnforced::new(DroppingManager {
@@ -169,7 +173,10 @@ mod tests {
     fn allows_dropping_a_volatile_span() {
         let (engine, _tmp) = test_engine();
         // No provenance ⇒ Volatile ⇒ free to drop.
-        let plain = engine.create_symbol(SymbolKind::Entity, "plain").unwrap().id;
+        let plain = engine
+            .create_symbol(SymbolKind::Entity, "plain")
+            .unwrap()
+            .id;
         let mgr = SafetyEnforced::new(DroppingManager {
             anchor: Some(plain),
         });

@@ -111,7 +111,9 @@ impl Tool for OpenClawDiscoverTool {
         let config: serde_json::Value = match serde_json::from_str(&config_text) {
             Ok(v) => v,
             Err(e) => {
-                return Ok(ToolOutput::err(format!("openclaw.json is not valid JSON: {e}")));
+                return Ok(ToolOutput::err(format!(
+                    "openclaw.json is not valid JSON: {e}"
+                )));
             }
         };
 
@@ -301,7 +303,10 @@ mod tests {
         write(&ws.join("IDENTITY.md"), "# Tecton");
         write(&ws.join("memory/2026-05-08.md"), "a day");
         write(&ws.join("memory/credentials.md"), "SECRET token");
-        write(&ws.join("skills/cluster-inspect/SKILL.md"), "---\nname: x\n---\nbody");
+        write(
+            &ws.join("skills/cluster-inspect/SKILL.md"),
+            "---\nname: x\n---\nbody",
+        );
         write(&home.join("memory/tecton.sqlite"), "sqlitebytes");
         tmp
     }

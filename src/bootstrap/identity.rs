@@ -544,8 +544,19 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             EntityType::Deity,
             CultureOrigin::Egyptian,
             "Egyptian goddess of wisdom, writing, and knowledge. Divine librarian and scribe, keeper of records and measurer of time.",
-            &["knowledge-management", "documentation", "writing", "measurement"],
-            &["meticulous", "organized", "analytical", "thorough", "curious"],
+            &[
+                "knowledge-management",
+                "documentation",
+                "writing",
+                "measurement",
+            ],
+            &[
+                "meticulous",
+                "organized",
+                "analytical",
+                "thorough",
+                "curious",
+            ],
             &["sage", "guardian"],
         )),
         "hathor" => Some((
@@ -553,7 +564,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Egyptian,
             "Egyptian goddess of love, beauty, music, dance, and joy. The great mirror of the gods — she reflects truth and nurtures growth.",
             &["review", "feedback", "reflection", "harmony"],
-            &["empathetic", "perceptive", "harmonious", "nurturing", "creative"],
+            &[
+                "empathetic",
+                "perceptive",
+                "harmonious",
+                "nurturing",
+                "creative",
+            ],
             &["lover", "sage"],
         )),
         "horus" => Some((
@@ -569,7 +586,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Egyptian,
             "Egyptian ram-headed god of creation and the source of the Nile. Shapes living beings on his potter's wheel, master of form.",
             &["design", "refactoring", "crafting", "formation"],
-            &["creative", "patient", "transformative", "meticulous", "methodical"],
+            &[
+                "creative",
+                "patient",
+                "transformative",
+                "meticulous",
+                "methodical",
+            ],
             &["creator", "magician"],
         )),
         "set" | "seth" => Some((
@@ -577,7 +600,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Egyptian,
             "Egyptian god of chaos, storms, and the desert. Necessary force of disruption — destroyer of the old to make way for the new.",
             &["cleanup", "removal", "simplification", "transformation"],
-            &["relentless", "decisive", "unconventional", "transformative", "bold"],
+            &[
+                "relentless",
+                "decisive",
+                "unconventional",
+                "transformative",
+                "bold",
+            ],
             &["destroyer", "shadow"],
         )),
         "athena" => Some((
@@ -609,7 +638,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Norse,
             "Norse Allfather, god of wisdom, war, and death. Sacrificed his eye for knowledge at Mimir's well.",
             &["wisdom", "war", "knowledge"],
-            &["wise", "contemplative", "brave", "transformative", "curious"],
+            &[
+                "wise",
+                "contemplative",
+                "brave",
+                "transformative",
+                "curious",
+            ],
             &["sage", "magician"],
         )),
         "thor" => Some((
@@ -625,7 +660,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Fictional,
             "Wizard from Tolkien's Middle-earth. Guide, mentor, and protector who inspires others to find their courage.",
             &["guidance", "wisdom", "magic"],
-            &["wise", "brave", "contemplative", "protective", "transformative"],
+            &[
+                "wise",
+                "brave",
+                "contemplative",
+                "protective",
+                "transformative",
+            ],
             &["sage", "magician"],
         )),
         "sherlock" | "sherlock holmes" => Some((
@@ -633,7 +674,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Fictional,
             "Consulting detective from Arthur Conan Doyle's stories. Master of deduction, observation, and logical reasoning.",
             &["deduction", "observation", "reasoning"],
-            &["analytical", "precise", "curious", "unconventional", "logical"],
+            &[
+                "analytical",
+                "precise",
+                "curious",
+                "unconventional",
+                "logical",
+            ],
             &["sage", "explorer"],
         )),
         "spock" => Some((
@@ -641,7 +688,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Fictional,
             "Vulcan science officer from Star Trek. Embodies logic, scientific inquiry, and emotional discipline.",
             &["logic", "science", "discipline"],
-            &["logical", "analytical", "precise", "contemplative", "methodical"],
+            &[
+                "logical",
+                "analytical",
+                "precise",
+                "contemplative",
+                "methodical",
+            ],
             &["sage", "ruler"],
         )),
         "turing" | "alan turing" => Some((
@@ -649,7 +702,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Latin,
             "Father of theoretical computer science and artificial intelligence. Broke the Enigma code and formalized computation.",
             &["computation", "cryptography", "ai"],
-            &["analytical", "innovative", "curious", "rigorous", "unconventional"],
+            &[
+                "analytical",
+                "innovative",
+                "curious",
+                "rigorous",
+                "unconventional",
+            ],
             &["sage", "creator"],
         )),
         "einstein" | "albert einstein" => Some((
@@ -657,7 +716,13 @@ pub fn resolve_from_static_tables(name: &str) -> Option<CharacterKnowledge> {
             CultureOrigin::Latin,
             "Theoretical physicist who developed the theory of relativity. Revolutionized understanding of space, time, and energy.",
             &["physics", "mathematics", "cosmology"],
-            &["curious", "creative", "contemplative", "innovative", "unconventional"],
+            &[
+                "curious",
+                "creative",
+                "contemplative",
+                "innovative",
+                "unconventional",
+            ],
             &["explorer", "creator"],
         )),
         "curie" | "marie curie" => Some((
@@ -1601,7 +1666,9 @@ mod tests {
             first.vsa_score = 1.0;
         }
         candidates.sort_by(|a, b| {
-            b.vsa_score.partial_cmp(&a.vsa_score).unwrap_or(std::cmp::Ordering::Equal)
+            b.vsa_score
+                .partial_cmp(&a.vsa_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Apply the FictionalCharacter selection rule.

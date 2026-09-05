@@ -50,7 +50,9 @@ fn lines_with_seq(engine: &Engine, agent_id: &str) -> Vec<(SymbolId, u64, String
         .triples_from(a)
         .into_iter()
         .filter(|t| t.predicate == p)
-        .filter_map(|t| parse_line(&engine.resolve_label(t.object)).map(|(s, txt)| (t.object, s, txt)))
+        .filter_map(|t| {
+            parse_line(&engine.resolve_label(t.object)).map(|(s, txt)| (t.object, s, txt))
+        })
         .collect()
 }
 
@@ -84,8 +86,14 @@ pub fn append(engine: &Engine, agent_id: &str, text: &str) -> AkhResult<usize> {
         let _ = engine.remove_triple(a, p, oldest);
     }
 
-    let next_seq = existing.iter().map(|(_, seq, _)| *seq).max().map(|m| m + 1).unwrap_or(0);
-    let line = engine.resolve_or_create_entity(&format!("core_mem:{agent_id}:{next_seq}:{text}"))?;
+    let next_seq = existing
+        .iter()
+        .map(|(_, seq, _)| *seq)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let line =
+        engine.resolve_or_create_entity(&format!("core_mem:{agent_id}:{next_seq}:{text}"))?;
     engine.add_triple(&Triple::new(a, p, line))?;
     Ok(existing.len() + 1)
 }
@@ -133,15 +141,29 @@ mod tests {
 
         append(&e, "alice", "user's name is Toni").unwrap();
         append(&e, "alice", "prefers concise answers").unwrap();
-        assert_eq!(read(&e, "alice"), vec!["user's name is Toni", "prefers concise answers"]);
+        assert_eq!(
+            read(&e, "alice"),
+            vec!["user's name is Toni", "prefers concise answers"]
+        );
 
         // Idempotent.
         append(&e, "alice", "user's name is Toni").unwrap();
         assert_eq!(read(&e, "alice").len(), 2);
 
         // Replace preserves order.
-        assert!(replace(&e, "alice", "prefers concise answers", "prefers detailed answers").unwrap());
-        assert_eq!(read(&e, "alice"), vec!["user's name is Toni", "prefers detailed answers"]);
+        assert!(
+            replace(
+                &e,
+                "alice",
+                "prefers concise answers",
+                "prefers detailed answers"
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            read(&e, "alice"),
+            vec!["user's name is Toni", "prefers detailed answers"]
+        );
 
         // Replace of a missing line is a no-op false.
         assert!(!replace(&e, "alice", "nope", "x").unwrap());

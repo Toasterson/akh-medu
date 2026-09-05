@@ -3,7 +3,7 @@
 //! Converts raw RFC 5322 bytes into a structured `ParsedEmail` with
 //! extracted headers, body text, and threading metadata.
 
-use mail_parser::{MimeHeaders, MessageParser};
+use mail_parser::{MessageParser, MimeHeaders};
 
 use super::connector::RawEmail;
 use super::error::{EmailError, EmailResult};
@@ -52,18 +52,13 @@ pub struct ParsedEmail {
 impl ParsedEmail {
     /// A short summary suitable for display: "Subject (from sender)".
     pub fn summary(&self) -> String {
-        let from_display = self
-            .from_display
-            .as_deref()
-            .unwrap_or(self.from.as_str());
+        let from_display = self.from_display.as_deref().unwrap_or(self.from.as_str());
         format!("{} (from {})", self.subject, from_display)
     }
 
     /// The body text, preferring plain text over HTML.
     pub fn best_body(&self) -> Option<&str> {
-        self.body_text
-            .as_deref()
-            .or(self.body_html.as_deref())
+        self.body_text.as_deref().or(self.body_html.as_deref())
     }
 }
 
@@ -107,10 +102,7 @@ pub fn parse_raw(raw: &RawEmail) -> EmailResult<ParsedEmail> {
         .unwrap_or_default();
 
     // Subject
-    let subject = message
-        .subject()
-        .unwrap_or("[no subject]")
-        .to_string();
+    let subject = message.subject().unwrap_or("[no subject]").to_string();
 
     // Date
     let date = message.date().map(|dt| dt.to_timestamp() as u64);
@@ -131,9 +123,7 @@ pub fn parse_raw(raw: &RawEmail) -> EmailResult<ParsedEmail> {
     let has_attachments = message.attachment_count() > 0;
 
     // List-Id — header_raw returns Option<&str>
-    let list_id = message
-        .header_raw("List-Id")
-        .map(|s| s.trim().to_string());
+    let list_id = message.header_raw("List-Id").map(|s| s.trim().to_string());
 
     // Content-Type
     let content_type = message
@@ -191,10 +181,7 @@ fn extract_sender(message: &mail_parser::Message<'_>) -> (String, Option<String>
     if let Some(from_addr) = message.from() {
         // Address enum can be List or Group.
         if let Some(first) = from_addr.first() {
-            let email = first
-                .address()
-                .unwrap_or("unknown@unknown")
-                .to_string();
+            let email = first.address().unwrap_or("unknown@unknown").to_string();
             let display = first.name().map(|n| n.to_string());
             (email, display)
         } else {
@@ -225,9 +212,7 @@ fn extract_first_text_or_id(hv: &mail_parser::HeaderValue<'_>) -> Option<String>
 fn extract_text_list(hv: &mail_parser::HeaderValue<'_>) -> Vec<String> {
     match hv {
         mail_parser::HeaderValue::Text(s) => vec![s.to_string()],
-        mail_parser::HeaderValue::TextList(list) => {
-            list.iter().map(|s| s.to_string()).collect()
-        }
+        mail_parser::HeaderValue::TextList(list) => list.iter().map(|s| s.to_string()).collect(),
         _ => Vec::new(),
     }
 }

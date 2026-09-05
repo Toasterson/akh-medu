@@ -255,14 +255,16 @@ impl DurableStore {
             let end_bound = increment_prefix(prefix);
             let stale_keys = {
                 let iter = match &end_bound {
-                    Some(end) => table
-                        .range::<&[u8]>(prefix..end.as_slice())
+                    Some(end) => table.range::<&[u8]>(prefix..end.as_slice()).map_err(|e| {
+                        StoreError::Redb {
+                            message: format!("range scan failed: {e}"),
+                        }
+                    })?,
+                    None => table
+                        .range::<&[u8]>(prefix..)
                         .map_err(|e| StoreError::Redb {
                             message: format!("range scan failed: {e}"),
                         })?,
-                    None => table.range::<&[u8]>(prefix..).map_err(|e| StoreError::Redb {
-                        message: format!("range scan failed: {e}"),
-                    })?,
                 };
                 let mut keys = Vec::new();
                 for entry in iter {

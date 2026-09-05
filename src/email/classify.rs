@@ -219,7 +219,9 @@ impl TokenProbabilityTable {
         scored.sort_by(|a, b| {
             let dev_a = (a.0 - 0.5).abs();
             let dev_b = (b.0 - 0.5).abs();
-            dev_b.partial_cmp(&dev_a).unwrap_or(std::cmp::Ordering::Equal)
+            dev_b
+                .partial_cmp(&dev_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         scored.truncate(ROBINSON_TOP_N);
 
@@ -369,10 +371,9 @@ impl SpamClassifier {
                 body
             };
             if !preview.trim().is_empty() {
-                let body_filler =
-                    encode_label(ops, preview).map_err(|e| EmailError::Parse {
-                        message: format!("VSA encode_label failed for body: {e}"),
-                    })?;
+                let body_filler = encode_label(ops, preview).map_err(|e| EmailError::Parse {
+                    message: format!("VSA encode_label failed for body: {e}"),
+                })?;
                 let body_bound = ops
                     .bind(&self.role_vectors.body, &body_filler)
                     .map_err(|e| EmailError::Parse {
@@ -383,7 +384,11 @@ impl SpamClassifier {
         }
 
         // 4. Has attachments
-        let attach_token = if email.has_attachments { "true" } else { "false" };
+        let attach_token = if email.has_attachments {
+            "true"
+        } else {
+            "false"
+        };
         let attach_filler = encode_token(ops, attach_token);
         let attach_bound = ops
             .bind(&self.role_vectors.has_attachments, &attach_filler)
@@ -433,15 +438,15 @@ impl SpamClassifier {
     /// Classify an email through the full pipeline.
     ///
     /// Returns a [`ClassificationResult`] with the decision, scores, and reasoning.
-    pub fn classify(
-        &self,
-        ops: &VsaOps,
-        email: &ParsedEmail,
-    ) -> EmailResult<ClassificationResult> {
+    pub fn classify(&self, ops: &VsaOps, email: &ParsedEmail) -> EmailResult<ClassificationResult> {
         // 1. Deterministic rule overrides
         let domain = extract_domain(&email.from);
 
-        if self.whitelist.iter().any(|w| domain.eq_ignore_ascii_case(w)) {
+        if self
+            .whitelist
+            .iter()
+            .any(|w| domain.eq_ignore_ascii_case(w))
+        {
             return Ok(ClassificationResult {
                 decision: SpamDecision::Ham,
                 vsa_spam_similarity: 0.0,
@@ -453,7 +458,11 @@ impl SpamClassifier {
             });
         }
 
-        if self.blacklist.iter().any(|b| domain.eq_ignore_ascii_case(b)) {
+        if self
+            .blacklist
+            .iter()
+            .any(|b| domain.eq_ignore_ascii_case(b))
+        {
             return Ok(ClassificationResult {
                 decision: SpamDecision::Spam,
                 vsa_spam_similarity: 0.0,
@@ -539,12 +548,7 @@ impl SpamClassifier {
     /// existing prototype. The existing prototype encodes the accumulated history
     /// of all prior examples; majority vote naturally gives diminishing weight
     /// to each new example as more data accumulates.
-    pub fn train(
-        &mut self,
-        ops: &VsaOps,
-        email: &ParsedEmail,
-        is_spam: bool,
-    ) -> EmailResult<()> {
+    pub fn train(&mut self, ops: &VsaOps, email: &ParsedEmail, is_spam: bool) -> EmailResult<()> {
         let email_vec = self.encode_email(ops, email)?;
 
         if is_spam {
@@ -580,14 +584,22 @@ impl SpamClassifier {
 
     /// Add a domain to the operator whitelist (emails from this domain → Ham).
     pub fn whitelist_domain(&mut self, domain: String) {
-        if !self.whitelist.iter().any(|w| w.eq_ignore_ascii_case(&domain)) {
+        if !self
+            .whitelist
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(&domain))
+        {
             self.whitelist.push(domain);
         }
     }
 
     /// Add a domain to the operator blacklist (emails from this domain → Spam).
     pub fn blacklist_domain(&mut self, domain: String) {
-        if !self.blacklist.iter().any(|b| b.eq_ignore_ascii_case(&domain)) {
+        if !self
+            .blacklist
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(&domain))
+        {
             self.blacklist.push(domain);
         }
     }
@@ -595,16 +607,14 @@ impl SpamClassifier {
     /// Remove a domain from the whitelist. Returns `true` if it was present.
     pub fn remove_whitelist(&mut self, domain: &str) -> bool {
         let before = self.whitelist.len();
-        self.whitelist
-            .retain(|w| !w.eq_ignore_ascii_case(domain));
+        self.whitelist.retain(|w| !w.eq_ignore_ascii_case(domain));
         self.whitelist.len() < before
     }
 
     /// Remove a domain from the blacklist. Returns `true` if it was present.
     pub fn remove_blacklist(&mut self, domain: &str) -> bool {
         let before = self.blacklist.len();
-        self.blacklist
-            .retain(|b| !b.eq_ignore_ascii_case(domain));
+        self.blacklist.retain(|b| !b.eq_ignore_ascii_case(domain));
         self.blacklist.len() < before
     }
 
@@ -862,10 +872,7 @@ mod tests {
         assert!(sim < 0.6, "role vectors should be dissimilar: sim={sim}");
 
         let sim2 = ops.similarity(&rv.subject, &rv.body).unwrap();
-        assert!(
-            sim2 < 0.6,
-            "role vectors should be dissimilar: sim={sim2}"
-        );
+        assert!(sim2 < 0.6, "role vectors should be dissimilar: sim={sim2}");
     }
 
     // ── Encoding ───────────────────────────────────────────────────────
@@ -1045,7 +1052,10 @@ mod tests {
     fn token_table_robinson_neutral_when_empty() {
         let table = TokenProbabilityTable::new();
         let score = table.robinson_chi_square(&["hello".to_string()]);
-        assert!((score - 0.5).abs() < 0.01, "empty table should be neutral: {score}");
+        assert!(
+            (score - 0.5).abs() < 0.01,
+            "empty table should be neutral: {score}"
+        );
     }
 
     #[test]
@@ -1069,7 +1079,10 @@ mod tests {
         table.train(&ham_tokens, false);
 
         // Spam-like query should score high
-        let spam_query: Vec<String> = vec!["free", "money"].into_iter().map(String::from).collect();
+        let spam_query: Vec<String> = vec!["free", "money"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let spam_score = table.robinson_chi_square(&spam_query);
 
         // Ham-like query should score low

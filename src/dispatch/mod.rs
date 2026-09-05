@@ -63,10 +63,7 @@ pub enum DispatchError {
              Check the inner errors for details, or simplify the query."
         )
     )]
-    AllFailed {
-        problem_kind: String,
-        tried: usize,
-    },
+    AllFailed { problem_kind: String, tried: usize },
 
     #[error(transparent)]
     #[diagnostic(transparent)]
@@ -110,9 +107,7 @@ pub enum Problem {
     },
 
     /// E-graph simplification / verification.
-    EGraphSimplify {
-        expression: String,
-    },
+    EGraphSimplify { expression: String },
 
     /// Transitive closure query: is `subject` transitively related to `object`
     /// via `predicate`? (e.g., is Dog transitively is-a Animal?)
@@ -123,10 +118,7 @@ pub enum Problem {
     },
 
     /// Type hierarchy query: is `instance` a (transitive) instance of `type_`?
-    TypeCheck {
-        instance: SymbolId,
-        type_: SymbolId,
-    },
+    TypeCheck { instance: SymbolId, type_: SymbolId },
 
     /// Predicate subsumption: does `specific` predicate specialize `general`?
     PredicateSubsumption {
@@ -352,7 +344,11 @@ impl ReasonerRegistry {
         }
 
         // Sort by score (lower is better)
-        bids.sort_by(|a, b| a.1.score().partial_cmp(&b.1.score()).unwrap_or(std::cmp::Ordering::Equal));
+        bids.sort_by(|a, b| {
+            a.1.score()
+                .partial_cmp(&b.1.score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let all_bids: Vec<(String, Bid)> = bids
             .iter()
@@ -431,7 +427,9 @@ impl Reasoner for SpreadingActivationReasoner {
             });
         };
 
-        let result = engine.infer(query).map_err(|e| DispatchError::Engine(Box::new(e)))?;
+        let result = engine
+            .infer(query)
+            .map_err(|e| DispatchError::Engine(Box::new(e)))?;
         Ok(ReasonerOutput::Inference(result))
     }
 }
@@ -485,9 +483,8 @@ impl Reasoner for BackwardChainingReasoner {
             vsa_verify: true,
         };
 
-        let chains =
-            crate::infer::backward::infer_backward(engine, *goal, &config)
-                .map_err(DispatchError::Infer)?;
+        let chains = crate::infer::backward::infer_backward(engine, *goal, &config)
+            .map_err(DispatchError::Infer)?;
 
         // Convert backward chains into InferenceResult format
         let mut activations: Vec<(SymbolId, f32)> = Vec::new();
@@ -594,9 +591,7 @@ impl Reasoner for EGraphReasoner {
 
     fn can_handle(&self, problem: &Problem) -> Option<Bid> {
         match problem {
-            Problem::EGraphSimplify { .. } => {
-                Some(Bid::new(Duration::from_micros(200), 0.9))
-            }
+            Problem::EGraphSimplify { .. } => Some(Bid::new(Duration::from_micros(200), 0.9)),
             _ => None,
         }
     }
@@ -615,13 +610,12 @@ impl Reasoner for EGraphReasoner {
 
         use egg::{AstSize, Extractor, Runner};
 
-        let expr: egg::RecExpr<crate::reason::AkhLang> = expression
-            .parse()
-            .map_err(|e: egg::RecExprParseError<_>| DispatchError::Infer(
-                InferError::Reason(crate::error::ReasonError::ParseError {
+        let expr: egg::RecExpr<crate::reason::AkhLang> =
+            expression.parse().map_err(|e: egg::RecExprParseError<_>| {
+                DispatchError::Infer(InferError::Reason(crate::error::ReasonError::ParseError {
                     message: e.to_string(),
-                }),
-            ))?;
+                }))
+            })?;
 
         let rules = crate::reason::builtin_rules();
         let runner = Runner::default().with_expr(&expr).run(&rules);
@@ -742,7 +736,8 @@ impl Reasoner for TransitiveClosureReasoner {
             }
             Problem::TypeCheck { instance, type_ } => {
                 // Use is-a predicate for type checking
-                let is_a = engine.resolve_or_create_relation("is-a")
+                let is_a = engine
+                    .resolve_or_create_relation("is-a")
                     .map_err(|e| DispatchError::Engine(Box::new(e)))?;
 
                 let kg = engine.knowledge_graph();
@@ -783,11 +778,7 @@ pub struct TypeHierarchyReasoner;
 
 impl TypeHierarchyReasoner {
     /// Collect all transitive ancestors of `start` via `predicate`.
-    fn ancestors(
-        kg: &KnowledgeGraph,
-        start: SymbolId,
-        predicate: SymbolId,
-    ) -> Vec<SymbolId> {
+    fn ancestors(kg: &KnowledgeGraph, start: SymbolId, predicate: SymbolId) -> Vec<SymbolId> {
         let mut result = Vec::new();
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
@@ -836,12 +827,11 @@ impl Reasoner for TypeHierarchyReasoner {
             });
         };
 
-        let is_a = engine.resolve_or_create_relation("is-a")
-            .map_err(|e| DispatchError::Infer(InferError::Graph(
-                crate::error::GraphError::Analytics {
-                    message: format!("failed to resolve is-a: {e}"),
-                },
-            )))?;
+        let is_a = engine.resolve_or_create_relation("is-a").map_err(|e| {
+            DispatchError::Infer(InferError::Graph(crate::error::GraphError::Analytics {
+                message: format!("failed to resolve is-a: {e}"),
+            }))
+        })?;
 
         let kg = engine.knowledge_graph();
         let ancestors = Self::ancestors(kg, *instance, is_a);
@@ -884,9 +874,7 @@ impl Reasoner for PredicateHierarchyReasoner {
 
     fn can_handle(&self, problem: &Problem) -> Option<Bid> {
         match problem {
-            Problem::PredicateSubsumption { .. } => {
-                Some(Bid::new(Duration::from_micros(40), 0.95))
-            }
+            Problem::PredicateSubsumption { .. } => Some(Bid::new(Duration::from_micros(40), 0.95)),
             _ => None,
         }
     }
@@ -903,7 +891,8 @@ impl Reasoner for PredicateHierarchyReasoner {
             });
         };
 
-        let rel_generalizes = engine.resolve_or_create_relation("rel:generalizes")
+        let rel_generalizes = engine
+            .resolve_or_create_relation("rel:generalizes")
             .map_err(|e| DispatchError::Engine(Box::new(e)))?;
 
         let kg = engine.knowledge_graph();
@@ -976,7 +965,10 @@ mod tests {
             expression: "(not (not x))".to_string(),
         };
         let result = reg.dispatch(&problem, &engine);
-        assert!(matches!(result, Err(DispatchError::NoReasonerAvailable { .. })));
+        assert!(matches!(
+            result,
+            Err(DispatchError::NoReasonerAvailable { .. })
+        ));
     }
 
     // --- Bid scoring ---
@@ -1005,7 +997,9 @@ mod tests {
         let (output, trace) = reg.dispatch(&problem, &engine).unwrap();
         assert_eq!(trace.reasoner_name, "egraph");
         match output {
-            ReasonerOutput::Simplified { simplified, cost, .. } => {
+            ReasonerOutput::Simplified {
+                simplified, cost, ..
+            } => {
                 assert_eq!(simplified, "x");
                 assert_eq!(cost, 1);
             }
@@ -1042,7 +1036,9 @@ mod tests {
 
         let reg = ReasonerRegistry::with_builtins(Duration::from_secs(5));
         let problem = Problem::ForwardInference(
-            InferenceQuery::default().with_seeds(vec![sun]).with_max_depth(1),
+            InferenceQuery::default()
+                .with_seeds(vec![sun])
+                .with_max_depth(1),
         );
         let (output, trace) = reg.dispatch(&problem, &engine).unwrap();
         assert_eq!(trace.reasoner_name, "spreading-activation");
@@ -1050,7 +1046,10 @@ mod tests {
         match output {
             ReasonerOutput::Inference(result) => {
                 let syms: Vec<SymbolId> = result.activations.iter().map(|(s, _)| *s).collect();
-                assert!(syms.contains(&star), "Should find Star via spreading activation");
+                assert!(
+                    syms.contains(&star),
+                    "Should find Star via spreading activation"
+                );
             }
             other => panic!("expected Inference, got {other:?}"),
         }
@@ -1067,7 +1066,9 @@ mod tests {
         let is_a = sym(&engine, SymbolKind::Relation, "is-a");
 
         engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
-        engine.add_triple(&Triple::new(mammal, is_a, animal)).unwrap();
+        engine
+            .add_triple(&Triple::new(mammal, is_a, animal))
+            .unwrap();
 
         let reg = ReasonerRegistry::with_builtins(Duration::from_secs(5));
         let problem = Problem::TransitiveClosure {
@@ -1183,7 +1184,9 @@ mod tests {
         // Create a custom reasoner that always fails
         struct FailReasoner;
         impl Reasoner for FailReasoner {
-            fn name(&self) -> &str { "always-fail" }
+            fn name(&self) -> &str {
+                "always-fail"
+            }
             fn can_handle(&self, problem: &Problem) -> Option<Bid> {
                 match problem {
                     Problem::EGraphSimplify { .. } => {
@@ -1192,7 +1195,12 @@ mod tests {
                     _ => None,
                 }
             }
-            fn solve(&self, _: &Problem, _: &Engine, _: Duration) -> DispatchResult<ReasonerOutput> {
+            fn solve(
+                &self,
+                _: &Problem,
+                _: &Engine,
+                _: Duration,
+            ) -> DispatchResult<ReasonerOutput> {
                 Err(DispatchError::AllFailed {
                     problem_kind: "test".to_string(),
                     tried: 1,
@@ -1268,7 +1276,13 @@ mod tests {
 
         // TypeCheck should have bids from both type-hierarchy and transitive-closure
         let bid_names: Vec<&str> = trace.bids.iter().map(|(n, _)| n.as_str()).collect();
-        assert!(bid_names.contains(&"type-hierarchy"), "type-hierarchy should bid");
-        assert!(bid_names.contains(&"transitive-closure"), "transitive-closure should bid");
+        assert!(
+            bid_names.contains(&"type-hierarchy"),
+            "type-hierarchy should bid"
+        );
+        assert!(
+            bid_names.contains(&"transitive-closure"),
+            "transitive-closure should bid"
+        );
     }
 }

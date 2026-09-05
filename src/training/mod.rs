@@ -23,7 +23,7 @@ pub use data_collector::{
     CollectorConfig, CollectorError, CollectorResult, TrainingDataCollector, TrainingPair,
     TrainingPairKind,
 };
-pub use lora::{AgentId, LoraAdapterMeta, LoraConfig, LoraError, LoraRegistry, LoadedAdapter};
+pub use lora::{AgentId, LoadedAdapter, LoraAdapterMeta, LoraConfig, LoraError, LoraRegistry};
 pub use qa_generator::{AgentPersonaProfile, QaCategory, QaGenerator, QaPair};
 pub use trainer::{BridgeTrainingSession, TrainerConfig, TrainingResult};
 pub use verbalizer::TripleVerbalizer;

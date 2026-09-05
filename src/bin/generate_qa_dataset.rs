@@ -339,11 +339,7 @@ fn ennead_agents() -> Vec<AgentDef> {
                         "perceptive".into(),
                         "holistic".into(),
                     ],
-                    tone: vec![
-                        "warm".into(),
-                        "compassionate".into(),
-                        "encouraging".into(),
-                    ],
+                    tone: vec!["warm".into(), "compassionate".into(), "encouraging".into()],
                 },
                 shadow: Shadow {
                     veto_patterns: vec![],
@@ -669,9 +665,8 @@ impl TeacherClient {
 
             match result {
                 Ok(resp) => {
-                    let val: serde_json::Value = resp
-                        .into_json()
-                        .map_err(|e| GenError::ParseFailed {
+                    let val: serde_json::Value =
+                        resp.into_json().map_err(|e| GenError::ParseFailed {
                             reason: format!("JSON decode: {e}"),
                             raw: String::new(),
                         })?;
@@ -703,13 +698,17 @@ impl TeacherClient {
                     });
                 }
                 Err(_) => {
-                    last_error = Some(GenError::ApiTimeout { secs: self.timeout.as_secs() });
+                    last_error = Some(GenError::ApiTimeout {
+                        secs: self.timeout.as_secs(),
+                    });
                     continue;
                 }
             }
         }
 
-        Err(last_error.unwrap_or(GenError::ApiTimeout { secs: self.timeout.as_secs() }))
+        Err(last_error.unwrap_or(GenError::ApiTimeout {
+            secs: self.timeout.as_secs(),
+        }))
     }
 }
 
@@ -766,7 +765,10 @@ fn grounding_score(answer: &str, batch: &[LabeledTriple]) -> f32 {
         return 0.5; // No context to check against — neutral score.
     }
 
-    let matched = entities.iter().filter(|e| lower.contains(e.as_str())).count();
+    let matched = entities
+        .iter()
+        .filter(|e| lower.contains(e.as_str()))
+        .count();
     (matched as f32 / entities.len() as f32).min(1.0)
 }
 
@@ -837,18 +839,24 @@ fn generate_for_agent(
         let user_msg = build_user_message(batch);
 
         if dry_run {
-            eprintln!("  [DRY RUN] agent={} batch={bi} prompt len={}", agent.id, user_msg.len());
+            eprintln!(
+                "  [DRY RUN] agent={} batch={bi} prompt len={}",
+                agent.id,
+                user_msg.len()
+            );
             // Generate stub pairs in dry-run mode.
             let stubs: Vec<QaPair> = (0..pairs_per_call)
-                .map(|i| build_qa_pair(
-                    agent,
-                    checkpoint,
-                    &RawQaPair {
-                        q: format!("[dry-run] question {i}"),
-                        a: format!("[dry-run] answer {i}"),
-                    },
-                    batch,
-                ))
+                .map(|i| {
+                    build_qa_pair(
+                        agent,
+                        checkpoint,
+                        &RawQaPair {
+                            q: format!("[dry-run] question {i}"),
+                            a: format!("[dry-run] answer {i}"),
+                        },
+                        batch,
+                    )
+                })
                 .collect();
             generated += stubs.len();
             checkpoint.increment(agent.id, stubs.len());
@@ -858,33 +866,34 @@ fn generate_for_agent(
         }
 
         match client.call(&system_prompt, &user_msg) {
-            Ok(raw) => {
-                match parse_qa_pairs(&raw) {
-                    Ok(pairs) if !pairs.is_empty() => {
-                        let qa_pairs: Vec<QaPair> = pairs
-                            .into_iter()
-                            .map(|p| build_qa_pair(agent, checkpoint, &p, batch))
-                            .collect();
-                        let n = qa_pairs.len();
-                        writer.append(&qa_pairs)?;
-                        checkpoint.increment(agent.id, n);
-                        checkpoint.save(checkpoint_path)?;
-                        generated += n;
+            Ok(raw) => match parse_qa_pairs(&raw) {
+                Ok(pairs) if !pairs.is_empty() => {
+                    let qa_pairs: Vec<QaPair> = pairs
+                        .into_iter()
+                        .map(|p| build_qa_pair(agent, checkpoint, &p, batch))
+                        .collect();
+                    let n = qa_pairs.len();
+                    writer.append(&qa_pairs)?;
+                    checkpoint.increment(agent.id, n);
+                    checkpoint.save(checkpoint_path)?;
+                    generated += n;
 
-                        let current = checkpoint.count(agent.id);
-                        eprintln!(
-                            "  [{}] {}/{} pairs (batch {bi}, +{n})",
-                            agent.id, current, target_pairs
-                        );
-                    }
-                    Ok(_) => {
-                        eprintln!("  [{}] WARNING: model returned 0 pairs, skipping batch", agent.id);
-                    }
-                    Err(e) => {
-                        eprintln!("  [{}] WARNING: parse error on batch {bi}: {e}", agent.id);
-                    }
+                    let current = checkpoint.count(agent.id);
+                    eprintln!(
+                        "  [{}] {}/{} pairs (batch {bi}, +{n})",
+                        agent.id, current, target_pairs
+                    );
                 }
-            }
+                Ok(_) => {
+                    eprintln!(
+                        "  [{}] WARNING: model returned 0 pairs, skipping batch",
+                        agent.id
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  [{}] WARNING: parse error on batch {bi}: {e}", agent.id);
+                }
+            },
             Err(e) => {
                 eprintln!("  [{}] ERROR on batch {bi}: {e} — continuing", agent.id);
                 // Brief pause before continuing to next batch.
@@ -898,7 +907,10 @@ fn generate_for_agent(
         }
         // Stop if we've cycled through all batches more than 10x without progress.
         if cycle > batches.len() * 10 + 100 {
-            eprintln!("  [{}] WARNING: exceeded max batch cycles, stopping early", agent.id);
+            eprintln!(
+                "  [{}] WARNING: exceeded max batch cycles, stopping early",
+                agent.id
+            );
             break;
         }
     }
@@ -957,7 +969,11 @@ fn seed_triples() -> Vec<LabeledTriple> {
         ("akh-medu", "written-in", "rust"),
         ("akh-medu", "edition", "2024"),
         // VSA
-        ("vector-symbolic-architecture", "is-a", "hyperdimensional-computing"),
+        (
+            "vector-symbolic-architecture",
+            "is-a",
+            "hyperdimensional-computing",
+        ),
         ("vector-symbolic-architecture", "dimension", "10000"),
         ("vector-symbolic-architecture", "encoding", "bipolar"),
         // KG layers

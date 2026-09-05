@@ -122,7 +122,6 @@ impl ElizaRouter {
                 weight: 0.70,
                 category: PatternCategory::Creative,
             },
-
             // ── KG-grounded (factual queries) ───────────────────────────────
             Pattern {
                 keywords: vec!["what", "what's", "whats"],
@@ -208,8 +207,8 @@ impl ElizaRouter {
                         let mut start = 0;
                         while let Some(pos) = lower[start..].find(kw) {
                             let abs = start + pos;
-                            let before_ok = abs == 0
-                                || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
+                            let before_ok =
+                                abs == 0 || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
                             let after_ok = abs + kw.len() >= lower.len()
                                 || !lower.as_bytes()[abs + kw.len()].is_ascii_alphanumeric();
                             if before_ok && after_ok {
@@ -368,7 +367,8 @@ mod tests {
 
     #[test]
     fn confidence_is_bounded() {
-        let r = engine().classify("What is who define describe tell explain list show when where how");
+        let r =
+            engine().classify("What is who define describe tell explain list show when where how");
         if let ElizaRouting::KgGrounded { confidence, .. } = r {
             assert!(confidence <= 1.0, "confidence must not exceed 1.0");
             assert!(confidence >= 0.0, "confidence must not be negative");

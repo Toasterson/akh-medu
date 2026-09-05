@@ -53,7 +53,9 @@ use russh::client;
 use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use thiserror::Error;
 
-use crate::backend::{Backend, Confinement, ExecError, ExecLocus, ExecOutcome, ExecRequest, ExecResult, Posture};
+use crate::backend::{
+    Backend, Confinement, ExecError, ExecLocus, ExecOutcome, ExecRequest, ExecResult, Posture,
+};
 use crate::fs::{Filesystem, FsError, FsResult};
 
 // ---------------------------------------------------------------------------
@@ -167,10 +169,7 @@ pub enum RemoteError {
              status command (e.g. `pgrep`) before assuming the work stopped."
         )
     )]
-    ExecTimeout {
-        command: String,
-        timeout: Duration,
-    },
+    ExecTimeout { command: String, timeout: Duration },
 
     /// Any other russh transport-level failure (connection reset, channel
     /// open rejected, protocol error, …).
@@ -328,7 +327,10 @@ impl ClientHandler {
 impl client::Handler for ClientHandler {
     type Error = RemoteError;
 
-    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
         // Returning `Err` (rather than `Ok(false)`) on a mismatch lets our
         // rich `HostKeyRejected` diagnostic reach the caller — russh
         // propagates a handler error verbatim as the connect error, whereas
@@ -419,17 +421,22 @@ impl RemoteBackend {
         })
     }
 
-    async fn connect_tcp(config: &RemoteBackendConfig) -> Result<client::Handle<ClientHandler>, RemoteError> {
+    async fn connect_tcp(
+        config: &RemoteBackendConfig,
+    ) -> Result<client::Handle<ClientHandler>, RemoteError> {
         let ssh_config = Arc::new(client::Config::default());
         let handler = ClientHandler::new(config);
         let addr = (config.host.as_str(), config.port);
-        let mut handle = tokio::time::timeout(config.connect_timeout, client::connect(ssh_config, addr, handler))
-            .await
-            .map_err(|_elapsed| RemoteError::ConnectTimeout {
-                host: config.host.clone(),
-                port: config.port,
-                timeout: config.connect_timeout,
-            })??;
+        let mut handle = tokio::time::timeout(
+            config.connect_timeout,
+            client::connect(ssh_config, addr, handler),
+        )
+        .await
+        .map_err(|_elapsed| RemoteError::ConnectTimeout {
+            host: config.host.clone(),
+            port: config.port,
+            timeout: config.connect_timeout,
+        })??;
         Self::authenticate(&mut handle, config).await?;
         Ok(handle)
     }
@@ -468,7 +475,9 @@ impl RemoteBackend {
         config: &RemoteBackendConfig,
     ) -> Result<(), RemoteError> {
         let key = load_private_key(&config.private_key_path)?;
-        let result = handle.authenticate_publickey(config.user.clone(), key).await?;
+        let result = handle
+            .authenticate_publickey(config.user.clone(), key)
+            .await?;
         if result.success() {
             Ok(())
         } else {
@@ -484,7 +493,11 @@ impl RemoteBackend {
     /// payload) over a fresh channel, blocking the calling thread until it
     /// exits or `timeout` elapses.
     fn run_shell(&self, command: String, timeout: Duration) -> Result<ExecOutcome, RemoteError> {
-        self.runtime.block_on(Self::run_shell_async(Arc::clone(&self.handle), command, timeout))
+        self.runtime.block_on(Self::run_shell_async(
+            Arc::clone(&self.handle),
+            command,
+            timeout,
+        ))
     }
 
     async fn run_shell_async(
@@ -595,7 +608,10 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyWithHashAlg, RemoteError> {
     })?;
     // `hash_alg` is ignored for non-RSA keys (see `PrivateKeyWithHashAlg::new`
     // doc); Sha256 is the modern default when the key *is* RSA.
-    Ok(PrivateKeyWithHashAlg::new(Arc::new(key), Some(HashAlg::Sha256)))
+    Ok(PrivateKeyWithHashAlg::new(
+        Arc::new(key),
+        Some(HashAlg::Sha256),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -704,7 +720,9 @@ impl Filesystem for RemoteBackend {
         if !outcome.success {
             return Err(FsError::Io {
                 path: path.display().to_string(),
-                source: std::io::Error::other(String::from_utf8_lossy(&outcome.stderr).into_owned()),
+                source: std::io::Error::other(
+                    String::from_utf8_lossy(&outcome.stderr).into_owned(),
+                ),
             });
         }
         Ok(String::from_utf8_lossy(&outcome.stdout).into_owned())
@@ -769,7 +787,9 @@ impl Filesystem for RemoteBackend {
         if !outcome.success {
             return Err(FsError::Io {
                 path: path.display().to_string(),
-                source: std::io::Error::other(String::from_utf8_lossy(&outcome.stderr).into_owned()),
+                source: std::io::Error::other(
+                    String::from_utf8_lossy(&outcome.stderr).into_owned(),
+                ),
             });
         }
         Ok(())
@@ -782,15 +802,14 @@ impl Filesystem for RemoteBackend {
         // matters since exec1 is illumos). Note: `test`/`[` takes no `--`
         // end-of-options marker (POSIX), so the quoted path stands alone;
         // `ls`, which does accept `--`, gets it for leading-dash safety.
-        let command = format!(
-            "test -d {p} && ls -1a -- {p}",
-            p = shell_quote_path(path)
-        );
+        let command = format!("test -d {p} && ls -1a -- {p}", p = shell_quote_path(path));
         let outcome = self.run_file_op(path, command)?;
         if !outcome.success {
             return Err(FsError::Io {
                 path: path.display().to_string(),
-                source: std::io::Error::other(String::from_utf8_lossy(&outcome.stderr).into_owned()),
+                source: std::io::Error::other(
+                    String::from_utf8_lossy(&outcome.stderr).into_owned(),
+                ),
             });
         }
         let entries = String::from_utf8_lossy(&outcome.stdout)
@@ -822,7 +841,9 @@ impl Filesystem for RemoteBackend {
         if !outcome.success {
             return Err(FsError::Io {
                 path: path.display().to_string(),
-                source: std::io::Error::other(String::from_utf8_lossy(&outcome.stderr).into_owned()),
+                source: std::io::Error::other(
+                    String::from_utf8_lossy(&outcome.stderr).into_owned(),
+                ),
             });
         }
         String::from_utf8_lossy(&outcome.stdout)
@@ -897,8 +918,8 @@ impl Backend for RemoteBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use russh::server;
     use russh::keys::ssh_key::LineEnding;
+    use russh::server;
     use std::time::Duration as StdDuration;
 
     // Ephemeral ed25519 test keypairs generated once for this fixture only
@@ -1068,9 +1089,12 @@ QFBgc=\n\
         let backend = connected_backend(test_runtime());
         let out = backend
             .exec(
-                ExecRequest::shell("pwd && printf '%s' \"$AKH_REMOTE_TEST\"", StdDuration::from_secs(10))
-                    .with_cwd("/tmp")
-                    .with_env("AKH_REMOTE_TEST", "forty-two"),
+                ExecRequest::shell(
+                    "pwd && printf '%s' \"$AKH_REMOTE_TEST\"",
+                    StdDuration::from_secs(10),
+                )
+                .with_cwd("/tmp")
+                .with_env("AKH_REMOTE_TEST", "forty-two"),
             )
             .unwrap();
         assert!(out.success);
@@ -1085,16 +1109,24 @@ QFBgc=\n\
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("roundtrip.txt");
 
-        backend.write(&file, "through the wire\nwith a newline").unwrap();
+        backend
+            .write(&file, "through the wire\nwith a newline")
+            .unwrap();
         let read = backend.read_to_string(&file).unwrap();
         assert_eq!(read, "through the wire\nwith a newline");
 
         assert!(backend.exists(&file));
         assert!(!backend.is_symlink(&file));
-        assert_eq!(backend.file_size(&file).unwrap(), "through the wire\nwith a newline".len() as u64);
+        assert_eq!(
+            backend.file_size(&file).unwrap(),
+            "through the wire\nwith a newline".len() as u64
+        );
 
         let names = backend.read_dir(dir.path()).unwrap();
-        assert!(names.iter().any(|p| p == &file), "read_dir missing the file: {names:?}");
+        assert!(
+            names.iter().any(|p| p == &file),
+            "read_dir missing the file: {names:?}"
+        );
     }
 
     /// Regression test for the Phase 50 W3 finding: a multi-KB payload (a
@@ -1119,7 +1151,10 @@ QFBgc=\n\
                 "line {i}: 'single' \"double\" $VAR ${{BRACED}} `backtick` \\ backslash\n"
             ));
         }
-        assert!(payload.len() > 4000, "test payload should exceed the sizes that reproduced the bug");
+        assert!(
+            payload.len() > 4000,
+            "test payload should exceed the sizes that reproduced the bug"
+        );
 
         backend.write(&file, &payload).unwrap();
         let read = backend.read_to_string(&file).unwrap();
@@ -1135,12 +1170,20 @@ QFBgc=\n\
             let encoded = base64::engine::general_purpose::STANDARD.encode(&raw);
             let wrapped = wrap_base64_mime(&encoded);
             // No line exceeds the wrap width.
-            assert!(wrapped.lines().all(|l| l.len() <= 76), "line too long for len={len}");
+            assert!(
+                wrapped.lines().all(|l| l.len() <= 76),
+                "line too long for len={len}"
+            );
             // Stripping the newlines back out recovers the original base64
             // (the wrap is purely cosmetic — content-preserving).
             let unwrapped: String = wrapped.chars().filter(|c| *c != '\n').collect();
-            assert_eq!(unwrapped, encoded, "wrap lost/reordered content for len={len}");
-            let decoded = base64::engine::general_purpose::STANDARD.decode(unwrapped).unwrap();
+            assert_eq!(
+                unwrapped, encoded,
+                "wrap lost/reordered content for len={len}"
+            );
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(unwrapped)
+                .unwrap();
             assert_eq!(decoded, raw, "round trip mismatch for len={len}");
         }
     }
@@ -1184,7 +1227,9 @@ QFBgc=\n\
         });
         let key_dir = tempfile::tempdir().unwrap();
         let key_path = key_dir.path().join("id_ed25519");
-        client_key.write_openssh_file(&key_path, LineEnding::LF).unwrap();
+        client_key
+            .write_openssh_file(&key_path, LineEnding::LF)
+            .unwrap();
         std::mem::forget(key_dir);
 
         // No `with_roots` call: write_roots stays empty.
@@ -1207,8 +1252,10 @@ QFBgc=\n\
         // The server only accepts CLIENT_PRIVATE_KEY's public half; connect
         // with a *different* freshly-parsed identity (the server key reused
         // as a client key) to exercise the auth-rejection path end to end.
-        let wrong_client_key = PrivateKey::from_openssh(SERVER_PRIVATE_KEY).expect("parse server key again");
-        let real_client_key = PrivateKey::from_openssh(CLIENT_PRIVATE_KEY).expect("parse client key");
+        let wrong_client_key =
+            PrivateKey::from_openssh(SERVER_PRIVATE_KEY).expect("parse server key again");
+        let real_client_key =
+            PrivateKey::from_openssh(CLIENT_PRIVATE_KEY).expect("parse client key");
         let real_client_public = real_client_key.public_key().clone();
 
         let (client_stream, server_stream) = tokio::io::duplex(1 << 16);
@@ -1229,7 +1276,9 @@ QFBgc=\n\
 
         let key_dir = tempfile::tempdir().unwrap();
         let key_path = key_dir.path().join("id_ed25519");
-        wrong_client_key.write_openssh_file(&key_path, LineEnding::LF).unwrap();
+        wrong_client_key
+            .write_openssh_file(&key_path, LineEnding::LF)
+            .unwrap();
         std::mem::forget(key_dir);
 
         let config = RemoteBackendConfig::new("loopback", "akh-exec", &key_path)
@@ -1263,7 +1312,10 @@ QFBgc=\n\
         assert_eq!(locus.host.as_deref(), Some("loopback"));
         assert_eq!(locus.os_user.as_deref(), Some("akh-exec"));
         assert!(
-            locus.correlation_id.as_deref().is_some_and(|id| id.starts_with("remote-")),
+            locus
+                .correlation_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("remote-")),
             "expected a remote-<hash> correlation id, got {:?}",
             locus.correlation_id
         );
@@ -1299,7 +1351,9 @@ QFBgc=\n\
 
         let key_dir = tempfile::tempdir().unwrap();
         let key_path = key_dir.path().join("id_ed25519");
-        client_key.write_openssh_file(&key_path, LineEnding::LF).unwrap();
+        client_key
+            .write_openssh_file(&key_path, LineEnding::LF)
+            .unwrap();
         std::mem::forget(key_dir);
 
         let config = RemoteBackendConfig::new("loopback", "akh-exec", &key_path)

@@ -1314,7 +1314,10 @@ mod tests {
         let coalition = planner
             .form_coalition(&agents, vec!["goal_a".into()], 0.1)
             .unwrap();
-        assert!(coalition.stable, "coalition with high alignment should be stable");
+        assert!(
+            coalition.stable,
+            "coalition with high alignment should be stable"
+        );
     }
 
     #[test]

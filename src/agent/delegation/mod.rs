@@ -180,8 +180,7 @@ impl DelegationManager {
     #[cfg(feature = "daemon")]
     pub fn new(config: DelegationConfig) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let cost_guard =
-            CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
+        let cost_guard = CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
         let peer_registry = peer::PeerRegistry::new(&config.peers);
         Self {
             config,
@@ -198,8 +197,7 @@ impl DelegationManager {
     /// Create a manager without async channels (for non-daemon builds).
     #[cfg(not(feature = "daemon"))]
     pub fn new(config: DelegationConfig) -> Self {
-        let cost_guard =
-            CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
+        let cost_guard = CostGuard::new(config.daily_cost_budget_cents, config.per_task_max_cents);
         let peer_registry = peer::PeerRegistry::new(&config.peers);
         Self {
             config,
@@ -223,12 +221,7 @@ impl DelegationManager {
         if !self.config.enabled {
             return Err(DelegationError::Disabled);
         }
-        let pending = self.active.len()
-            + self
-                .pending_tasks
-                .lock()
-                .map(|q| q.len())
-                .unwrap_or(0);
+        let pending = self.active.len() + self.pending_tasks.lock().map(|q| q.len()).unwrap_or(0);
         if pending >= self.config.max_concurrent {
             return Err(DelegationError::AtCapacity {
                 max: self.config.max_concurrent,
@@ -318,10 +311,7 @@ impl DelegationManager {
 
     /// Number of tasks queued but not yet dispatched.
     pub fn pending_count(&self) -> usize {
-        self.pending_tasks
-            .lock()
-            .map(|q| q.len())
-            .unwrap_or(0)
+        self.pending_tasks.lock().map(|q| q.len()).unwrap_or(0)
     }
 
     /// Whether we can accept another delegation (below max_concurrent).
@@ -459,8 +449,7 @@ impl DelegationManager {
             });
         }
 
-        let hint = target_hint
-            .or(task.target_hint.as_deref());
+        let hint = target_hint.or(task.target_hint.as_deref());
         let target = self.select_target(&task.required_capabilities, hint)?;
 
         let model = match &target {
@@ -581,8 +570,7 @@ impl DelegationManager {
                 let id_clone = id;
                 let target_clone = target;
                 tokio::spawn(async move {
-                    let result =
-                        peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
+                    let result = peer::delegate_to_peer(&endpoint, &task_clone, id_clone).await;
                     let outcome = match result {
                         Ok(mut outcome) => {
                             outcome.target = Some(target_clone);

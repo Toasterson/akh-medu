@@ -153,8 +153,14 @@ pub fn detect_manipulation_markers(text: &str) -> Vec<String> {
 
     // Urgency patterns.
     let urgency = [
-        "immediately", "urgent", "act now", "right away", "deadline",
-        "time is running out", "don't delay", "asap",
+        "immediately",
+        "urgent",
+        "act now",
+        "right away",
+        "deadline",
+        "time is running out",
+        "don't delay",
+        "asap",
     ];
     for pat in &urgency {
         if lower.contains(pat) {
@@ -164,8 +170,11 @@ pub fn detect_manipulation_markers(text: &str) -> Vec<String> {
 
     // Flattery patterns.
     let flattery = [
-        "you're the only", "specially selected", "exclusive offer",
-        "chosen few", "uniquely qualified",
+        "you're the only",
+        "specially selected",
+        "exclusive offer",
+        "chosen few",
+        "uniquely qualified",
     ];
     for pat in &flattery {
         if lower.contains(pat) {
@@ -175,8 +184,12 @@ pub fn detect_manipulation_markers(text: &str) -> Vec<String> {
 
     // Threat patterns.
     let threats = [
-        "or else", "consequences", "you must", "no choice",
-        "forced to", "will be held responsible",
+        "or else",
+        "consequences",
+        "you must",
+        "no choice",
+        "forced to",
+        "will be held responsible",
     ];
     for pat in &threats {
         if lower.contains(pat) {
@@ -186,8 +199,11 @@ pub fn detect_manipulation_markers(text: &str) -> Vec<String> {
 
     // Authority abuse.
     let authority = [
-        "trust me", "everyone knows", "it's obvious",
-        "no one disagrees", "experts agree",
+        "trust me",
+        "everyone knows",
+        "it's obvious",
+        "no one disagrees",
+        "experts agree",
     ];
     for pat in &authority {
         if lower.contains(pat) {

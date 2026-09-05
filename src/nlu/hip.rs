@@ -160,11 +160,13 @@ impl RocmBlas {
         let kernel_path = concat!(env!("OUT_DIR"), "/libakh_hip_kernels.so");
         let kernels = unsafe { Library::new(kernel_path) }.ok();
         if kernels.is_none() {
-            tracing::warn!(path = kernel_path, "HIP dequant kernel not found — quantized GPU path unavailable");
+            tracing::warn!(
+                path = kernel_path,
+                "HIP dequant kernel not found — quantized GPU path unavailable"
+            );
         }
         // Create the persistent rocBLAS handle once.
-        let rb_create =
-            Self::sym::<RocblasCreateHandle>(&rocblas, b"rocblas_create_handle\0")?;
+        let rb_create = Self::sym::<RocblasCreateHandle>(&rocblas, b"rocblas_create_handle\0")?;
         let mut handle: *mut c_void = std::ptr::null_mut();
         // SAFETY: out-param sized for one pointer; rc checked below.
         let rc = unsafe { rb_create(&mut handle) };
@@ -173,7 +175,12 @@ impl RocmBlas {
                 reason: format!("rocblas_create_handle failed (status={rc})"),
             });
         }
-        Ok(Self { hip, rocblas, kernels, handle })
+        Ok(Self {
+            hip,
+            rocblas,
+            kernels,
+            handle,
+        })
     }
 
     /// True if the quantized GPU path (dequant kernel) is available.
@@ -193,13 +200,23 @@ impl RocmBlas {
         in_dim: usize,
         group: usize,
     ) -> NluResult<()> {
-        let lib = self.kernels.as_ref().ok_or_else(|| NluError::ModelLoadFailed {
-            reason: "HIP dequant kernel not built (no rocm toolchain at build time)".into(),
-        })?;
+        let lib = self
+            .kernels
+            .as_ref()
+            .ok_or_else(|| NluError::ModelLoadFailed {
+                reason: "HIP dequant kernel not built (no rocm toolchain at build time)".into(),
+            })?;
         let f = Self::sym::<AkhDequantQ4>(lib, b"akh_dequant_q4\0")?;
         // SAFETY: device pointers valid & sized for rows*in_dim; group divides in_dim.
         let rc = unsafe {
-            f(q, scales, out, rows as c_int, in_dim as c_int, group as c_int)
+            f(
+                q,
+                scales,
+                out,
+                rows as c_int,
+                in_dim as c_int,
+                group as c_int,
+            )
         };
         if rc != 0 {
             return Err(NluError::ModelLoadFailed {
@@ -213,9 +230,12 @@ impl RocmBlas {
     /// length `n`. Lets the MLP keep its hidden state resident on the GPU instead of bringing
     /// gate/up back to the host to multiply.
     fn silu_mul(&self, g: *const f32, u: *const f32, out: *mut f32, n: usize) -> NluResult<()> {
-        let lib = self.kernels.as_ref().ok_or_else(|| NluError::ModelLoadFailed {
-            reason: "HIP silu_mul kernel not built (no rocm toolchain at build time)".into(),
-        })?;
+        let lib = self
+            .kernels
+            .as_ref()
+            .ok_or_else(|| NluError::ModelLoadFailed {
+                reason: "HIP silu_mul kernel not built (no rocm toolchain at build time)".into(),
+            })?;
         let f = Self::sym::<AkhSiluMul>(lib, b"akh_silu_mul\0")?;
         // SAFETY: g/u/out are device pointers each holding `n` floats.
         let rc = unsafe { f(g, u, out, n as i64) };
@@ -301,7 +321,9 @@ impl RocmBlas {
                 HIP_MEMCPY_DEVICE_TO_HOST,
             ) != 0
             {
-                return Err(NluError::ModelLoadFailed { reason: "hipMemcpy D2H failed".into() });
+                return Err(NluError::ModelLoadFailed {
+                    reason: "hipMemcpy D2H failed".into(),
+                });
             }
         }
         PCIE_D2H.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -318,9 +340,12 @@ impl RocmBlas {
         rows: usize,
         in_dim: usize,
     ) -> NluResult<()> {
-        let lib = self.kernels.as_ref().ok_or_else(|| NluError::ModelLoadFailed {
-            reason: "HIP Q4_K kernel not built (no rocm toolchain at build time)".into(),
-        })?;
+        let lib = self
+            .kernels
+            .as_ref()
+            .ok_or_else(|| NluError::ModelLoadFailed {
+                reason: "HIP Q4_K kernel not built (no rocm toolchain at build time)".into(),
+            })?;
         let f = Self::sym::<AkhDequantQ4K>(lib, b"akh_dequant_q4k\0")?;
         // SAFETY: `blocks` holds rows*(in_dim/256) Q4_K blocks; `out` holds rows*in_dim floats.
         let rc = unsafe { f(blocks, out, rows as c_int, in_dim as c_int) };
@@ -336,10 +361,7 @@ impl RocmBlas {
         // SAFETY: name is a NUL-terminated C symbol that exists in the loaded ROCm library;
         // the caller binds it to the matching C ABI signature.
         unsafe { lib.get(name) }.map_err(|e| NluError::ModelLoadFailed {
-            reason: format!(
-                "ROCm symbol {} missing: {e}",
-                String::from_utf8_lossy(name)
-            ),
+            reason: format!("ROCm symbol {} missing: {e}", String::from_utf8_lossy(name)),
         })
     }
 
@@ -387,12 +409,22 @@ impl RocmBlas {
             };
 
             if let Err(e) = check(
-                hip_memcpy(da, a.as_ptr() as *const c_void, bytes_a, HIP_MEMCPY_HOST_TO_DEVICE),
+                hip_memcpy(
+                    da,
+                    a.as_ptr() as *const c_void,
+                    bytes_a,
+                    HIP_MEMCPY_HOST_TO_DEVICE,
+                ),
                 "memcpy H2D A",
             )
             .and_then(|_| {
                 check(
-                    hip_memcpy(db, b.as_ptr() as *const c_void, bytes_b, HIP_MEMCPY_HOST_TO_DEVICE),
+                    hip_memcpy(
+                        db,
+                        b.as_ptr() as *const c_void,
+                        bytes_b,
+                        HIP_MEMCPY_HOST_TO_DEVICE,
+                    ),
                     "memcpy H2D B",
                 )
             }) {
@@ -503,7 +535,12 @@ impl RocmBlas {
                     reason: "hipMalloc (resident weight) failed".into(),
                 });
             }
-            if hip_memcpy(ptr, data.as_ptr() as *const c_void, bytes, HIP_MEMCPY_HOST_TO_DEVICE) != 0
+            if hip_memcpy(
+                ptr,
+                data.as_ptr() as *const c_void,
+                bytes,
+                HIP_MEMCPY_HOST_TO_DEVICE,
+            ) != 0
             {
                 let hip_free = Self::sym::<HipFree>(&self.hip, b"hipFree\0")?;
                 hip_free(ptr);
@@ -530,16 +567,29 @@ impl RocmBlas {
         unsafe {
             let mut ptr: *mut c_void = std::ptr::null_mut();
             if hip_malloc(&mut ptr, bytes) != 0 {
-                return Err(NluError::ModelLoadFailed { reason: "hipMalloc (u8) failed".into() });
+                return Err(NluError::ModelLoadFailed {
+                    reason: "hipMalloc (u8) failed".into(),
+                });
             }
-            if hip_memcpy(ptr, data.as_ptr() as *const c_void, bytes, HIP_MEMCPY_HOST_TO_DEVICE) != 0
+            if hip_memcpy(
+                ptr,
+                data.as_ptr() as *const c_void,
+                bytes,
+                HIP_MEMCPY_HOST_TO_DEVICE,
+            ) != 0
             {
                 let hip_free = Self::sym::<HipFree>(&self.hip, b"hipFree\0")?;
                 hip_free(ptr);
-                return Err(NluError::ModelLoadFailed { reason: "hipMemcpy H2D (u8) failed".into() });
+                return Err(NluError::ModelLoadFailed {
+                    reason: "hipMemcpy H2D (u8) failed".into(),
+                });
             }
             PCIE_H2D.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(DeviceBuffer { ptr, bytes, blas: Arc::clone(self) })
+            Ok(DeviceBuffer {
+                ptr,
+                bytes,
+                blas: Arc::clone(self),
+            })
         }
     }
 
@@ -551,9 +601,15 @@ impl RocmBlas {
         unsafe {
             let mut ptr: *mut c_void = std::ptr::null_mut();
             if hip_malloc(&mut ptr, bytes) != 0 {
-                return Err(NluError::ModelLoadFailed { reason: "hipMalloc (scratch) failed".into() });
+                return Err(NluError::ModelLoadFailed {
+                    reason: "hipMalloc (scratch) failed".into(),
+                });
             }
-            Ok(DeviceBuffer { ptr, bytes, blas: Arc::clone(self) })
+            Ok(DeviceBuffer {
+                ptr,
+                bytes,
+                blas: Arc::clone(self),
+            })
         }
     }
 
@@ -602,7 +658,13 @@ impl RocmBlas {
                     reason: "hipMalloc (activation) failed".into(),
                 });
             }
-            if hip_memcpy(da, a.as_ptr() as *const c_void, bytes_a, HIP_MEMCPY_HOST_TO_DEVICE) != 0 {
+            if hip_memcpy(
+                da,
+                a.as_ptr() as *const c_void,
+                bytes_a,
+                HIP_MEMCPY_HOST_TO_DEVICE,
+            ) != 0
+            {
                 hip_free(da);
                 hip_free(dc);
                 return Err(NluError::ModelLoadFailed {
@@ -668,17 +730,24 @@ pub struct ResidentLinear {
 impl ResidentLinear {
     /// Upload `weight` (Candle tensor shaped `[out, in]`) to the GPU as `Wᵀ[in,out]`.
     pub fn from_weight(blas: &Arc<RocmBlas>, weight: &Tensor) -> NluResult<Self> {
-        let (out_dim, in_dim) = weight
-            .dims2()
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("weight not 2-D: {e}") })?;
+        let (out_dim, in_dim) = weight.dims2().map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("weight not 2-D: {e}"),
+        })?;
         let wt = weight
             .t()
             .and_then(|t| t.contiguous())
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("weight transpose: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("weight transpose: {e}"),
+            })?;
         let wt = Arc::new(blas.alloc_upload(&wt)?);
-        Ok(Self { blas: Arc::clone(blas), wt, in_dim, out_dim })
+        Ok(Self {
+            blas: Arc::clone(blas),
+            wt,
+            in_dim,
+            out_dim,
+        })
     }
 
     /// `y = x · Wᵀ`, with the GEMM on the GPU. `x` is `[.., in]` (any leading dims); the result
@@ -698,8 +767,12 @@ impl ResidentLinear {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("activation: {e}") })?;
-        let y = self.blas.sgemm_resident(&x2, m, self.in_dim, self.out_dim, &self.wt)?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("activation: {e}"),
+            })?;
+        let y = self
+            .blas
+            .sgemm_resident(&x2, m, self.in_dim, self.out_dim, &self.wt)?;
         let mut out_dims = dims;
         *out_dims.last_mut().unwrap() = self.out_dim;
         Tensor::from_vec(y, out_dims, x.device()).map_err(|e| NluError::ModelLoadFailed {
@@ -762,7 +835,9 @@ impl GpuLinear {
         }
         let w = qt
             .dequantize(device)
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("dequantize: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("dequantize: {e}"),
+            })?;
         Self::from_weight(blas, &w, quant)
     }
 
@@ -881,7 +956,10 @@ impl GpuMlp {
         let in_dim = *dims.last().expect("xs rank >= 1");
         if in_dim != self.gate.in_dim() {
             return Err(NluError::ModelLoadFailed {
-                reason: format!("GpuMlp: xs last dim {in_dim} != gate in {}", self.gate.in_dim()),
+                reason: format!(
+                    "GpuMlp: xs last dim {in_dim} != gate in {}",
+                    self.gate.in_dim()
+                ),
             });
         }
         let m: usize = dims[..dims.len() - 1].iter().product();
@@ -896,7 +974,9 @@ impl GpuMlp {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("activation: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("activation: {e}"),
+            })?;
         let x_dev = blas.alloc_upload(&x)?;
 
         let g_dev = self.gate.forward_dev(x_dev.ptr as *const f32, m)?; // [m, ffn]
@@ -922,9 +1002,11 @@ impl GpuMlp {
     fn forward_unfused(&self, xs: &Tensor) -> NluResult<Tensor> {
         let g = self.gate.forward(xs)?;
         let u = self.up.forward(xs)?;
-        let act = candle_nn::ops::silu(&g)
-            .and_then(|s| s * u)
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("swiglu act: {e}") })?;
+        let act = candle_nn::ops::silu(&g).and_then(|s| s * u).map_err(|e| {
+            NluError::ModelLoadFailed {
+                reason: format!("swiglu act: {e}"),
+            }
+        })?;
         self.down.forward(&act)
     }
 }
@@ -999,9 +1081,9 @@ impl ResidentQuantLinear {
                 reason: "quantized GPU path requires the HIP dequant kernel (not built)".into(),
             });
         }
-        let (out_dim, in_dim) = weight
-            .dims2()
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("weight not 2-D: {e}") })?;
+        let (out_dim, in_dim) = weight.dims2().map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("weight not 2-D: {e}"),
+        })?;
         let group = Self::GROUP;
         if in_dim % group != 0 || in_dim % 2 != 0 {
             return Err(NluError::ModelLoadFailed {
@@ -1013,11 +1095,20 @@ impl ResidentQuantLinear {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("weight read: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("weight read: {e}"),
+            })?;
         let (packed, scales) = quantize_q4(&w, out_dim, in_dim, group);
         let qweight = Arc::new(blas.alloc_upload_u8(&packed)?);
         let scales = Arc::new(blas.alloc_upload(&scales)?);
-        Ok(Self { blas: Arc::clone(blas), qweight, scales, in_dim, out_dim, group })
+        Ok(Self {
+            blas: Arc::clone(blas),
+            qweight,
+            scales,
+            in_dim,
+            out_dim,
+            group,
+        })
     }
 
     /// `y = x · Wᵀ` with the quantized weight resident on the GPU.
@@ -1036,7 +1127,9 @@ impl ResidentQuantLinear {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("activation: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("activation: {e}"),
+            })?;
 
         let groups_per_row = self.in_dim / self.group;
         // Chunk output columns so the dequant scratch stays bounded.
@@ -1065,7 +1158,9 @@ impl ResidentQuantLinear {
             )?;
             // scratch now holds Wᵀ_chunk[in, co]; y_chunk[m,co] = x[m,in]·scratch[in,co].
             // sgemm_resident asserts b length == in*co, so size the scratch view via a temp.
-            let y_chunk = self.blas.sgemm_resident_ptr(&x2, m, self.in_dim, co, scratch.ptr)?;
+            let y_chunk = self
+                .blas
+                .sgemm_resident_ptr(&x2, m, self.in_dim, co, scratch.ptr)?;
             for r in 0..m {
                 out[r * self.out_dim + o0..r * self.out_dim + o0 + co]
                     .copy_from_slice(&y_chunk[r * co..r * co + co]);
@@ -1102,14 +1197,27 @@ impl ResidentQuantLinear {
                     (self.scales.ptr as *const f32).add(o0 * groups_per_row),
                 )
             };
-            self.blas
-                .dequant_q4(q_ptr, sc_ptr, scratch.ptr as *mut f32, co, self.in_dim, self.group)?;
+            self.blas.dequant_q4(
+                q_ptr,
+                sc_ptr,
+                scratch.ptr as *mut f32,
+                co,
+                self.in_dim,
+                self.group,
+            )?;
             // Write this chunk's [m, co] block into columns [o0, o0+co) of the [m, out_dim]
             // output: base = c + o0, row stride ldc = out_dim.
             // SAFETY: c holds m*out_dim floats; the block written stays within it.
             let c_chunk = unsafe { (c.ptr as *mut f32).add(o0) };
-            self.blas
-                .sgemm_into(x_ptr, m, self.in_dim, co, scratch.ptr as *const f32, c_chunk, self.out_dim)?;
+            self.blas.sgemm_into(
+                x_ptr,
+                m,
+                self.in_dim,
+                co,
+                scratch.ptr as *const f32,
+                c_chunk,
+                self.out_dim,
+            )?;
             o0 += co;
         }
         drop(scratch);
@@ -1167,9 +1275,9 @@ impl ResidentQ4KLinear {
                 reason: format!("Q4_K in_dim {in_dim} not a multiple of {QK_K}"),
             });
         }
-        let data = qt
-            .data()
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("Q4_K raw data: {e}") })?;
+        let data = qt.data().map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("Q4_K raw data: {e}"),
+        })?;
         let expect = out_dim * (in_dim / QK_K) * Q4K_BLOCK_BYTES;
         if data.len() != expect {
             return Err(NluError::ModelLoadFailed {
@@ -1177,7 +1285,12 @@ impl ResidentQ4KLinear {
             });
         }
         let blocks = Arc::new(blas.alloc_upload_u8(&data)?);
-        Ok(Self { blas: Arc::clone(blas), blocks, in_dim, out_dim })
+        Ok(Self {
+            blas: Arc::clone(blas),
+            blocks,
+            in_dim,
+            out_dim,
+        })
     }
 
     /// Per-output-chunk dequant budget (reuse the symmetric path's scratch cap).
@@ -1209,7 +1322,9 @@ impl ResidentQ4KLinear {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("activation: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("activation: {e}"),
+            })?;
 
         let chunk = self.chunk();
         let mut out = vec![0f32; m * self.out_dim];
@@ -1219,8 +1334,11 @@ impl ResidentQ4KLinear {
             let co = chunk.min(self.out_dim - o0);
             // SAFETY: o0 < out_dim.
             let q_ptr = unsafe { self.row_blocks_ptr(o0) };
-            self.blas.dequant_q4k(q_ptr, scratch.ptr as *mut f32, co, self.in_dim)?;
-            let y_chunk = self.blas.sgemm_resident_ptr(&x2, m, self.in_dim, co, scratch.ptr)?;
+            self.blas
+                .dequant_q4k(q_ptr, scratch.ptr as *mut f32, co, self.in_dim)?;
+            let y_chunk = self
+                .blas
+                .sgemm_resident_ptr(&x2, m, self.in_dim, co, scratch.ptr)?;
             for r in 0..m {
                 out[r * self.out_dim + o0..r * self.out_dim + o0 + co]
                     .copy_from_slice(&y_chunk[r * co..r * co + co]);
@@ -1246,7 +1364,8 @@ impl ResidentQ4KLinear {
             let co = chunk.min(self.out_dim - o0);
             // SAFETY: o0 < out_dim.
             let q_ptr = unsafe { self.row_blocks_ptr(o0) };
-            self.blas.dequant_q4k(q_ptr, scratch.ptr as *mut f32, co, self.in_dim)?;
+            self.blas
+                .dequant_q4k(q_ptr, scratch.ptr as *mut f32, co, self.in_dim)?;
             // SAFETY: c holds m*out_dim floats; the [m,co] block at column o0 stays within it.
             let c_chunk = unsafe { (c.ptr as *mut f32).add(o0) };
             self.blas.sgemm_into(
@@ -1324,7 +1443,10 @@ impl GpuAttnProj {
         let in_dim = *dims.last().expect("x rank >= 1");
         if in_dim != self.wq.in_dim() {
             return Err(NluError::ModelLoadFailed {
-                reason: format!("GpuAttnProj: x last dim {in_dim} != wq in {}", self.wq.in_dim()),
+                reason: format!(
+                    "GpuAttnProj: x last dim {in_dim} != wq in {}",
+                    self.wq.in_dim()
+                ),
             });
         }
         let m: usize = dims[..dims.len() - 1].iter().product();
@@ -1335,7 +1457,9 @@ impl GpuAttnProj {
             .and_then(|t| t.to_dtype(candle_core::DType::F32))
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| NluError::ModelLoadFailed { reason: format!("activation: {e}") })?;
+            .map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("activation: {e}"),
+            })?;
         let x_dev = blas.alloc_upload(&x_host)?;
 
         let one = |proj: &GpuLinear| -> NluResult<Tensor> {
@@ -1344,8 +1468,9 @@ impl GpuAttnProj {
             let y = blas.download_f32(y_dev.ptr, m * out)?;
             let mut out_dims = dims.clone();
             *out_dims.last_mut().unwrap() = out;
-            Tensor::from_vec(y, out_dims, x.device())
-                .map_err(|e| NluError::ModelLoadFailed { reason: format!("rebuild q/k/v: {e}") })
+            Tensor::from_vec(y, out_dims, x.device()).map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("rebuild q/k/v: {e}"),
+            })
         };
         Ok((one(&self.wq)?, one(&self.wk)?, one(&self.wv)?))
     }
@@ -1411,9 +1536,10 @@ impl CustomOp2 for RocmMatmul {
 /// the caller → CPU fallback) when ROCm is unavailable.
 pub fn gpu_matmul(a: &Tensor, b: &Tensor) -> NluResult<Tensor> {
     let op = RocmMatmul::new()?;
-    a.apply_op2_no_bwd(b, &op).map_err(|e| NluError::ModelLoadFailed {
-        reason: format!("gpu_matmul: {e}"),
-    })
+    a.apply_op2_no_bwd(b, &op)
+        .map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("gpu_matmul: {e}"),
+        })
 }
 
 #[cfg(test)]
@@ -1444,7 +1570,13 @@ mod tests {
         )
         .unwrap();
 
-        let cpu = a.matmul(&b).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let cpu = a
+            .matmul(&b)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         let gpu = gpu_matmul(&a, &b)
             .expect("gpu matmul")
             .flatten_all()
@@ -1471,13 +1603,17 @@ mod tests {
         let out_dim = 3;
         // W[out,in], x[2, in] → y[2, out] = x · Wᵀ
         let w = Tensor::from_vec(
-            (0..(out_dim * in_dim)).map(|v| (v as f32) * 0.1 - 0.5).collect::<Vec<_>>(),
+            (0..(out_dim * in_dim))
+                .map(|v| (v as f32) * 0.1 - 0.5)
+                .collect::<Vec<_>>(),
             (out_dim, in_dim),
             &dev,
         )
         .unwrap();
         let x = Tensor::from_vec(
-            (0..(2 * in_dim)).map(|v| (v as f32) * 0.2).collect::<Vec<_>>(),
+            (0..(2 * in_dim))
+                .map(|v| (v as f32) * 0.2)
+                .collect::<Vec<_>>(),
             (2, in_dim),
             &dev,
         )
@@ -1493,7 +1629,13 @@ mod tests {
 
         let blas = Arc::new(RocmBlas::load().unwrap());
         let lin = ResidentLinear::from_weight(&blas, &w).unwrap();
-        let gpu = lin.forward(&x).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let gpu = lin
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
 
         assert_eq!(cpu.len(), gpu.len());
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
@@ -1532,15 +1674,29 @@ mod tests {
         }
         let w = Tensor::from_vec(wv, (out_dim, in_dim), &dev).unwrap();
         let x = Tensor::from_vec(
-            (0..(2 * in_dim)).map(|v| ((v % 5) as f32) - 2.0).collect::<Vec<_>>(),
+            (0..(2 * in_dim))
+                .map(|v| ((v % 5) as f32) - 2.0)
+                .collect::<Vec<_>>(),
             (2, in_dim),
             &dev,
         )
         .unwrap();
 
-        let cpu = x.matmul(&w.t().unwrap()).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let cpu = x
+            .matmul(&w.t().unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         let lin = ResidentQuantLinear::from_weight(&blas, &w).unwrap();
-        let gpu = lin.forward(&x).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let gpu = lin
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
 
         assert_eq!(cpu.len(), gpu.len());
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
@@ -1570,7 +1726,9 @@ mod tests {
         let m = 2;
         let mk = |rows: usize, cols: usize, off: f32| {
             Tensor::from_vec(
-                (0..(rows * cols)).map(|v| (v as f32) * 0.05 - off).collect::<Vec<_>>(),
+                (0..(rows * cols))
+                    .map(|v| (v as f32) * 0.05 - off)
+                    .collect::<Vec<_>>(),
                 (rows, cols),
                 &dev,
             )
@@ -1595,10 +1753,19 @@ mod tests {
 
         // f32 fused GPU path.
         let mlp = GpuMlp::from_weights(&blas, &gate_w, &up_w, &down_w, false).unwrap();
-        let gpu = mlp.forward(&x).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let gpu = mlp
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         assert_eq!(cpu.len(), gpu.len());
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
-            assert!((c - g).abs() < 1e-3, "f32 fused mismatch at {i}: cpu={c} gpu={g}");
+            assert!(
+                (c - g).abs() < 1e-3,
+                "f32 fused mismatch at {i}: cpu={c} gpu={g}"
+            );
         }
     }
 
@@ -1631,21 +1798,41 @@ mod tests {
         // candle's CPU dequant of the same blocks → the reference weight.
         let w_dq = qt.dequantize(&dev).unwrap();
         let x = Tensor::from_vec(
-            (0..(m * in_dim)).map(|v| ((v % 11) as f32 - 5.0) * 0.1).collect::<Vec<_>>(),
+            (0..(m * in_dim))
+                .map(|v| ((v % 11) as f32 - 5.0) * 0.1)
+                .collect::<Vec<_>>(),
             (m, in_dim),
             &dev,
         )
         .unwrap();
-        let cpu = x.matmul(&w_dq.t().unwrap()).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let cpu = x
+            .matmul(&w_dq.t().unwrap())
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
 
-        assert!(ResidentQ4KLinear::supports(&qt), "Q4_K tensor should be supported");
+        assert!(
+            ResidentQ4KLinear::supports(&qt),
+            "Q4_K tensor should be supported"
+        );
         let lin = ResidentQ4KLinear::from_qtensor(&blas, &qt).unwrap();
-        let gpu = lin.forward(&x).unwrap().flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let gpu = lin
+            .forward(&x)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
 
         assert_eq!(cpu.len(), gpu.len());
         for (i, (c, g)) in cpu.iter().zip(gpu.iter()).enumerate() {
             // Same dequant formula on both sides; only matmul accumulation order differs.
-            assert!((c - g).abs() < 1e-3, "Q4_K native mismatch at {i}: cpu={c} gpu={g}");
+            assert!(
+                (c - g).abs() < 1e-3,
+                "Q4_K native mismatch at {i}: cpu={c} gpu={g}"
+            );
         }
     }
 }

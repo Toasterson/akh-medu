@@ -2,7 +2,8 @@
 //!
 //! Uses `ureq` for synchronous HTTP requests. Enforces a timeout and
 //! maximum response size to prevent the agent from hanging or consuming
-//! excessive memory.
+//! excessive memory. Successful output repeats the fetched URL so a later
+//! provenance gate can bind quoted content to the actual source result.
 
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
@@ -14,6 +15,16 @@ use std::collections::HashSet;
 
 /// Maximum response body size (256 KB).
 const MAX_RESPONSE_SIZE: u64 = 256 * 1024;
+
+fn format_success_response(
+    url: &str,
+    status: u16,
+    content_type: &str,
+    body_len: usize,
+    body: &str,
+) -> String {
+    format!("HTTP {status} ({content_type}), {body_len} bytes:\nSource: {url}\n{body}")
+}
 
 /// Fetch content from a URL via HTTP GET.
 pub struct HttpFetchTool;
@@ -77,12 +88,12 @@ impl Tool for HttpFetchTool {
                             body.clone()
                         };
 
-                        Ok(ToolOutput::ok(format!(
-                            "HTTP {} ({}), {} bytes:\n{}",
+                        Ok(ToolOutput::ok(format_success_response(
+                            url,
                             status,
-                            content_type,
+                            &content_type,
                             body.len(),
-                            truncated,
+                            &truncated,
                         )))
                     }
                     Err(e) => Ok(ToolOutput::err(format!(
@@ -126,5 +137,23 @@ impl Tool for HttpFetchTool {
             },
             source: ToolSource::Native,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successful_response_names_the_retrieved_source() {
+        let output = format_success_response(
+            "https://example.invalid/manual",
+            200,
+            "text/plain",
+            12,
+            "chapter text",
+        );
+        assert!(output.contains("Source: https://example.invalid/manual"));
+        assert!(output.ends_with("chapter text"));
     }
 }

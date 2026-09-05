@@ -64,9 +64,10 @@ pub fn install_pack(engine: &Engine, pack: &CompiledSchemaPack) -> SchemaResult<
     // --- Idempotency: already installed? ---
     let mt_existing = engine.resolve_symbol(&mt_label).ok();
     if let Some(mt) = mt_existing
-        && engine.triples_from(mt).iter().any(|t| {
-            engine.resolve_label(t.predicate) == INSTALLED_PREDICATE
-        })
+        && engine
+            .triples_from(mt)
+            .iter()
+            .any(|t| engine.resolve_label(t.predicate) == INSTALLED_PREDICATE)
     {
         return Ok(InstallReport {
             microtheory: mt,
@@ -84,14 +85,11 @@ pub fn install_pack(engine: &Engine, pack: &CompiledSchemaPack) -> SchemaResult<
             let Ok(existing) = engine.resolve_symbol(type_name) else {
                 continue;
             };
-            let redefined = engine
-                .triples_from(existing)
-                .into_iter()
-                .find(|t| {
-                    t.object == type_marker
-                        && engine.resolve_label(t.predicate) == PRED_IS_A
-                        && t.compartment_id.as_deref() != Some(mt_label.as_str())
-                });
+            let redefined = engine.triples_from(existing).into_iter().find(|t| {
+                t.object == type_marker
+                    && engine.resolve_label(t.predicate) == PRED_IS_A
+                    && t.compartment_id.as_deref() != Some(mt_label.as_str())
+            });
             if let Some(prior) = redefined {
                 return Err(SchemaError::TypeRedefinition {
                     type_name: type_name.clone(),
@@ -303,7 +301,9 @@ mod tests {
         let pack = compile(SRC).unwrap();
         install_pack(&engine, &pack).unwrap();
 
-        let akh_schema = engine.resolve_or_create_entity("mt:akh/test-effective").unwrap();
+        let akh_schema = engine
+            .resolve_or_create_entity("mt:akh/test-effective")
+            .unwrap();
         activate_pack(&engine, akh_schema, &pack).unwrap();
 
         let specializes = engine.resolve_symbol("ctx:specializes").unwrap();

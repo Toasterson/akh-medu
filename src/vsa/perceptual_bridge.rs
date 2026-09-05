@@ -20,9 +20,9 @@
 //! pass (grounding percept vectors against known KG concept vectors) can be
 //! added in Phase 27 once the training infrastructure lands.
 
-use super::{Dimension, Encoding, HyperVec};
 use super::item_memory::{ItemMemory, SearchResult};
 use super::neural_bridge::LinearProjection;
+use super::{Dimension, Encoding, HyperVec};
 use crate::perception::PerceptionError;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -194,7 +194,10 @@ mod tests {
         let all_low = vec![-10.0f32; 64];
         let hv_high = bridge.project(&all_high).unwrap();
         let hv_low = bridge.project(&all_low).unwrap();
-        assert_ne!(hv_high, hv_low, "opposite extremes should map to different HyperVecs");
+        assert_ne!(
+            hv_high, hv_low,
+            "opposite extremes should map to different HyperVecs"
+        );
     }
 
     #[test]
@@ -203,7 +206,10 @@ mod tests {
         let features = vec![0.3f32; 32];
         let hv1 = bridge.project(&features).unwrap();
         let hv2 = bridge.project(&features).unwrap();
-        assert_eq!(hv1, hv2, "identical inputs must produce identical HyperVecs");
+        assert_eq!(
+            hv1, hv2,
+            "identical inputs must produce identical HyperVecs"
+        );
     }
 
     #[test]

@@ -179,9 +179,8 @@ pub fn build_threads(emails: &[ParsedEmail]) -> ThreadTree {
     // Collect date info first to avoid borrow conflict.
     let dates: Vec<u64> = nodes.iter().map(|n| n.date()).collect();
     for node in &mut nodes {
-        node.children.sort_by_key(|&child_idx| {
-            dates.get(child_idx).copied().unwrap_or(0)
-        });
+        node.children
+            .sort_by_key(|&child_idx| dates.get(child_idx).copied().unwrap_or(0));
     }
 
     // Sort roots by date of earliest message.
@@ -381,13 +380,7 @@ mod tests {
     fn thread_id_for_lookup() {
         let emails = vec![
             make_email("<a@ex>", "Root", None, &[], Some(100)),
-            make_email(
-                "<b@ex>",
-                "Reply",
-                Some("<a@ex>"),
-                &["<a@ex>"],
-                Some(200),
-            ),
+            make_email("<b@ex>", "Reply", Some("<a@ex>"), &["<a@ex>"], Some(200)),
         ];
 
         let tree = build_threads(&emails);
@@ -401,20 +394,8 @@ mod tests {
     fn thread_messages_collects_all() {
         let emails = vec![
             make_email("<a@ex>", "Root", None, &[], Some(100)),
-            make_email(
-                "<b@ex>",
-                "Reply 1",
-                Some("<a@ex>"),
-                &["<a@ex>"],
-                Some(200),
-            ),
-            make_email(
-                "<c@ex>",
-                "Reply 2",
-                Some("<a@ex>"),
-                &["<a@ex>"],
-                Some(300),
-            ),
+            make_email("<b@ex>", "Reply 1", Some("<a@ex>"), &["<a@ex>"], Some(200)),
+            make_email("<c@ex>", "Reply 2", Some("<a@ex>"), &["<a@ex>"], Some(300)),
         ];
 
         let tree = build_threads(&emails);

@@ -116,7 +116,9 @@ impl DiscoveryFailure {
 // ── Proxy tools (daemon build only — needs the HTTP MCP client) ──────────────
 
 #[cfg(feature = "daemon")]
-pub use proxy::{build_tools_from_discovered, discover_session_tools, discover_session_tools_strict};
+pub use proxy::{
+    build_tools_from_discovered, discover_session_tools, discover_session_tools_strict,
+};
 
 #[cfg(feature = "daemon")]
 mod proxy {
@@ -161,6 +163,11 @@ mod proxy {
         ty: String,
         required: bool,
         description: String,
+        /// Exact property schema advertised by the remote MCP server. Keeping
+        /// this intact is required for arrays/objects (`seshat_ingest.tags`,
+        /// metadata, future typed tools); flattening to a type string teaches
+        /// the model and repair layer a contract the upstream does not have.
+        schema: Value,
     }
 
     /// A single remote MCP tool exposed to the akh as a first-class tool.
@@ -216,6 +223,7 @@ mod proxy {
                         ty: pschema["type"].as_str().unwrap_or("string").to_string(),
                         required: required.contains(pname),
                         description: pschema["description"].as_str().unwrap_or("").to_string(),
+                        schema: pschema.clone(),
                     });
                 }
             }
@@ -231,28 +239,16 @@ mod proxy {
             })
         }
 
-        /// Coerce the flat string `ToolInput` into a JSON argument object typed
-        /// per the remote tool's schema (so `usize`/`f32`/`bool` params
-        /// round-trip instead of arriving as strings the server rejects).
+        /// Build the remote JSON argument object without flattening structured
+        /// values. Native arrays/objects pass through byte-for-value; legacy
+        /// string-valued backends still get bounded scalar/JSON coercion.
         fn build_args(&self, input: &ToolInput) -> Value {
             let mut args = Map::new();
             for p in &self.params {
-                let Some(raw) = input.get(&p.name) else { continue };
-                let value = match p.ty.as_str() {
-                    "integer" => raw
-                        .parse::<i64>()
-                        .map(Value::from)
-                        .unwrap_or_else(|_| Value::from(raw)),
-                    "number" => raw
-                        .parse::<f64>()
-                        .map(Value::from)
-                        .unwrap_or_else(|_| Value::from(raw)),
-                    "boolean" => raw
-                        .parse::<bool>()
-                        .map(Value::from)
-                        .unwrap_or_else(|_| Value::from(raw)),
-                    _ => Value::from(raw),
+                let Some(raw) = input.get_value(&p.name) else {
+                    continue;
                 };
+                let value = coerce_schema_value(raw, &p.ty);
                 args.insert(p.name.clone(), value);
             }
             Value::Object(args)
@@ -278,11 +274,13 @@ mod proxy {
 
         fn execute(&self, _engine: &Engine, input: ToolInput) -> AgentResult<ToolOutput> {
             let args = self.build_args(&input);
-            let client = UpstreamMcpClient::from_endpoint(self.url.clone(), self.auth_header.clone());
+            let client =
+                UpstreamMcpClient::from_endpoint(self.url.clone(), self.auth_header.clone());
             match client.call_tool_text(&self.remote_name, args) {
-                Ok(text) if text.is_empty() => {
-                    Ok(ToolOutput::ok(format!("{} returned no content.", self.remote_name)))
-                }
+                Ok(text) if text.is_empty() => Ok(ToolOutput::ok(format!(
+                    "{} returned no content.",
+                    self.remote_name
+                ))),
                 Ok(text) => Ok(ToolOutput::ok(text)),
                 Err(e) => Ok(ToolOutput::err(format!(
                     "upstream MCP tool \"{}\" failed: {e}",
@@ -298,12 +296,12 @@ mod proxy {
                 parameters: self
                     .params
                     .iter()
-                    .map(|p| {
-                        if p.required {
-                            ToolParamSchema::required(&p.name, &p.description)
-                        } else {
-                            ToolParamSchema::optional(&p.name, &p.description)
-                        }
+                    .map(|p| ToolParamSchema {
+                        name: p.name.clone(),
+                        description: p.description.clone(),
+                        required: p.required,
+                        param_type: p.ty.clone(),
+                        schema: Some(p.schema.clone()),
                     })
                     .collect(),
                 danger: DangerInfo {
@@ -312,8 +310,39 @@ mod proxy {
                     description: "Calls a client-provided MCP server over the network.".into(),
                     shadow_triggers: vec!["mcp".into(), "remote".into(), "external".into()],
                 },
-                source: ToolSource::Mcp { server: self.server.clone() },
+                source: ToolSource::Mcp {
+                    server: self.server.clone(),
+                },
             }
+        }
+    }
+
+    fn coerce_schema_value(raw: &Value, ty: &str) -> Value {
+        let Value::String(text) = raw else {
+            return raw.clone();
+        };
+        match ty {
+            "integer" => text
+                .parse::<i64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| raw.clone()),
+            "number" => text
+                .parse::<f64>()
+                .map(Value::from)
+                .unwrap_or_else(|_| raw.clone()),
+            "boolean" => text
+                .parse::<bool>()
+                .map(Value::from)
+                .unwrap_or_else(|_| raw.clone()),
+            "array" => serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(Value::is_array)
+                .unwrap_or_else(|| raw.clone()),
+            "object" => serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(Value::is_object)
+                .unwrap_or_else(|| raw.clone()),
+            _ => raw.clone(),
         }
     }
 
@@ -460,7 +489,11 @@ mod proxy {
     fn discover_with_retries(
         cfgs: &[SessionMcpServerCfg],
         retries: usize,
-    ) -> (Vec<DiscoveredServerTools>, Vec<(String, String, String)>, usize) {
+    ) -> (
+        Vec<DiscoveredServerTools>,
+        Vec<(String, String, String)>,
+        usize,
+    ) {
         let attempted = cfgs.len();
         if cfgs.is_empty() {
             return (Vec::new(), Vec::new(), 0);
@@ -535,13 +568,15 @@ mod proxy {
                     .collect();
                 handles
                     .into_iter()
-                    .map(|h| h.join().unwrap_or_else(|_| {
-                        Err((
-                            "<unknown>".to_string(),
-                            "<unknown>".to_string(),
-                            "discovery thread panicked".to_string(),
-                        ))
-                    }))
+                    .map(|h| {
+                        h.join().unwrap_or_else(|_| {
+                            Err((
+                                "<unknown>".to_string(),
+                                "<unknown>".to_string(),
+                                "discovery thread panicked".to_string(),
+                            ))
+                        })
+                    })
                     .collect()
             });
 
@@ -621,7 +656,8 @@ mod proxy {
         #[test]
         fn from_descriptor_rejects_nameless() {
             assert!(
-                McpProxyTool::from_descriptor("s", "http://x", None, &serde_json::json!({})).is_none()
+                McpProxyTool::from_descriptor("s", "http://x", None, &serde_json::json!({}))
+                    .is_none()
             );
         }
 
@@ -645,6 +681,53 @@ mod proxy {
                 .expect("proxy");
             let args = t.build_args(&ToolInput::new().with_param("query", "q"));
             assert!(args.get("top_k").is_none());
+        }
+
+        #[test]
+        fn structured_schema_and_values_survive_proxy_boundary() {
+            let descriptor = serde_json::json!({
+                "name": "seshat_ingest",
+                "description": "Ingest a textbook",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "tags": {"type": "array", "items": {"type": "string"}},
+                        "metadata": {
+                            "type": "object",
+                            "properties": {"language": {"type": "string"}}
+                        }
+                    },
+                    "required": ["title", "tags", "metadata"]
+                }
+            });
+            let tool = McpProxyTool::from_descriptor("seshat", "http://x", None, &descriptor)
+                .expect("proxy");
+            let input = ToolInput::new()
+                .with_param("title", "Systems")
+                .with_value("tags", serde_json::json!(["textbook", "rust"]))
+                .with_value("metadata", serde_json::json!({"language": "en"}));
+            let args = tool.build_args(&input);
+            assert_eq!(args["tags"], serde_json::json!(["textbook", "rust"]));
+            assert_eq!(args["metadata"], serde_json::json!({"language": "en"}));
+
+            let manifest = tool.manifest();
+            let tags = manifest
+                .parameters
+                .iter()
+                .find(|p| p.name == "tags")
+                .unwrap();
+            assert_eq!(tags.param_type, "array");
+            assert_eq!(tags.schema.as_ref().unwrap()["items"]["type"], "string");
+            let metadata = manifest
+                .parameters
+                .iter()
+                .find(|p| p.name == "metadata")
+                .unwrap();
+            assert_eq!(
+                metadata.schema.as_ref().unwrap()["properties"]["language"]["type"],
+                "string"
+            );
         }
 
         /// `discover_session_tools_strict` must fail the session when a pushed
@@ -682,10 +765,12 @@ mod proxy {
             // The strict variant streams an `error[acp]` per failing server
             // so the upstream status is visible in the thread — verify at
             // least one error message landed in the sink.
-            let has_error = sink.messages().iter().any(|m| matches!(
-                m,
-                crate::message::AkhMessage::Error { code, .. } if code == "acp"
-            ));
+            let has_error = sink.messages().iter().any(|m| {
+                matches!(
+                    m,
+                    crate::message::AkhMessage::Error { code, .. } if code == "acp"
+                )
+            });
             assert!(
                 has_error,
                 "strict discovery should stream an error[acp] message for the failing server"
@@ -726,10 +811,12 @@ mod proxy {
                 "legacy discovery should return an empty Vec when the server is unreachable"
             );
             // The legacy path emits a `system` (skip) message, not an error.
-            let has_system = sink.messages().iter().any(|m| matches!(
-                m,
-                crate::message::AkhMessage::System { text } if text.contains("skipped")
-            ));
+            let has_system = sink.messages().iter().any(|m| {
+                matches!(
+                    m,
+                    crate::message::AkhMessage::System { text } if text.contains("skipped")
+                )
+            });
             assert!(
                 has_system,
                 "legacy discovery should emit a 'skipped' system message for the failing server"
@@ -746,7 +833,8 @@ mod tests {
     #[test]
     fn parse_http_server_lifts_authorization_header() {
         let mut http = McpServerHttp::new("seshat", "http://seshat.local:4200");
-        http.headers.push(HttpHeader::new("Authorization", "Bearer tok"));
+        http.headers
+            .push(HttpHeader::new("Authorization", "Bearer tok"));
         http.headers.push(HttpHeader::new("X-Other", "ignored"));
         let (cfgs, unsupported) = parse_mcp_servers(&[McpServer::Http(http)]);
         assert_eq!(unsupported, 0);

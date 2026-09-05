@@ -133,14 +133,10 @@ pub fn polar_to_cartesian(data: &mut [f32]) {
 ///
 /// These are derived for a standard normal distribution (the rotated KV values
 /// approximate a normal distribution after FWHT). 8 reconstruction levels.
-const LLOYD_MAX_BOUNDARIES: [f32; 7] = [
-    -1.748, -1.050, -0.500, 0.000, 0.500, 1.050, 1.748,
-];
+const LLOYD_MAX_BOUNDARIES: [f32; 7] = [-1.748, -1.050, -0.500, 0.000, 0.500, 1.050, 1.748];
 
 /// Pre-computed optimal reconstruction levels for 3-bit Lloyd-Max.
-const LLOYD_MAX_LEVELS: [f32; 8] = [
-    -2.152, -1.344, -0.756, -0.245, 0.245, 0.756, 1.344, 2.152,
-];
+const LLOYD_MAX_LEVELS: [f32; 8] = [-2.152, -1.344, -0.756, -0.245, 0.245, 0.756, 1.344, 2.152];
 
 /// Quantize a single f32 value to a 3-bit index (0..7).
 pub fn quantize_scalar(value: f32) -> u8 {
@@ -352,7 +348,10 @@ mod tests {
         fwht_normalized(&mut data);
         fwht_normalized(&mut data);
         for (a, b) in data.iter().zip(original.iter()) {
-            assert!((a - b).abs() < 1e-5, "FWHT should be self-inverse: {a} != {b}");
+            assert!(
+                (a - b).abs() < 1e-5,
+                "FWHT should be self-inverse: {a} != {b}"
+            );
         }
     }
 
@@ -367,10 +366,7 @@ mod tests {
         // Inverse should recover original.
         inverse_randomized_hadamard(&mut data, seed);
         for (a, b) in data.iter().zip(original.iter()) {
-            assert!(
-                (a - b).abs() < 1e-4,
-                "roundtrip failed: {a} != {b}"
-            );
+            assert!((a - b).abs() < 1e-4, "roundtrip failed: {a} != {b}");
         }
     }
 
@@ -384,10 +380,7 @@ mod tests {
         assert!(data[2] > 0.0);
         polar_to_cartesian(&mut data);
         for (a, b) in data.iter().zip(original.iter()) {
-            assert!(
-                (a - b).abs() < 1e-5,
-                "polar roundtrip: {a} != {b}"
-            );
+            assert!((a - b).abs() < 1e-5, "polar roundtrip: {a} != {b}");
         }
     }
 
@@ -428,9 +421,7 @@ mod tests {
     #[test]
     fn full_pipeline_roundtrip_preserves_direction() {
         // Full compress/decompress should roughly preserve the vector direction.
-        let original: Vec<f32> = (0..64)
-            .map(|i| ((i as f32) * 0.7).sin() * 2.0)
-            .collect();
+        let original: Vec<f32> = (0..64).map(|i| ((i as f32) * 0.7).sin() * 2.0).collect();
         let seed = 123;
         let std_dev = empirical_std(&original);
 
@@ -438,7 +429,11 @@ mod tests {
         let recovered = decompress(&qvec, seed, std_dev);
 
         // Compute cosine similarity between original and recovered.
-        let dot: f32 = original.iter().zip(recovered.iter()).map(|(a, b)| a * b).sum();
+        let dot: f32 = original
+            .iter()
+            .zip(recovered.iter())
+            .map(|(a, b)| a * b)
+            .sum();
         let norm_a: f32 = original.iter().map(|a| a * a).sum::<f32>().sqrt();
         let norm_b: f32 = recovered.iter().map(|b| b * b).sum::<f32>().sqrt();
         let cosine = if norm_a > 0.0 && norm_b > 0.0 {

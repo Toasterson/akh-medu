@@ -506,10 +506,9 @@ impl TriageEngine {
                 body
             };
             if !preview.trim().is_empty() {
-                let body_filler =
-                    encode_label(ops, preview).map_err(|e| EmailError::Parse {
-                        message: format!("VSA encode_label failed for body: {e}"),
-                    })?;
+                let body_filler = encode_label(ops, preview).map_err(|e| EmailError::Parse {
+                    message: format!("VSA encode_label failed for body: {e}"),
+                })?;
                 let body_bound = ops
                     .bind(&self.role_vectors.body, &body_filler)
                     .map_err(|e| EmailError::Parse {
@@ -534,7 +533,11 @@ impl TriageEngine {
         features.push(thread_bound);
 
         // 6. Attachments
-        let attach_token = if email.has_attachments { "true" } else { "false" };
+        let attach_token = if email.has_attachments {
+            "true"
+        } else {
+            "false"
+        };
         let attach_filler = encode_token(ops, attach_token);
         let attach_bound = ops
             .bind(&self.role_vectors.has_attachments, &attach_filler)
@@ -711,7 +714,11 @@ impl TriageEngine {
     /// Thread score (0.0–1.0): reply indicator, thread depth, has references.
     fn score_thread(email: &ParsedEmail) -> f32 {
         // 40% user_replied: has in_reply_to (ongoing conversation)
-        let user_replied = if email.in_reply_to.is_some() { 1.0 } else { 0.0 };
+        let user_replied = if email.in_reply_to.is_some() {
+            1.0
+        } else {
+            0.0
+        };
 
         // 40% thread depth: min(references.len(), 10) / 10
         let depth = (email.references.len().min(10) as f32) / 10.0;
@@ -738,11 +745,7 @@ impl TriageEngine {
     }
 
     /// Compute VSA similarity to important/low-priority prototypes.
-    fn compute_vsa_similarity(
-        &self,
-        ops: &VsaOps,
-        email: &ParsedEmail,
-    ) -> EmailResult<(f32, f32)> {
+    fn compute_vsa_similarity(&self, ops: &VsaOps, email: &ParsedEmail) -> EmailResult<(f32, f32)> {
         match (&self.important_prototype, &self.low_priority_prototype) {
             (Some(imp_proto), Some(low_proto)) => {
                 let email_vec = self.encode_email(ops, email)?;
@@ -823,14 +826,8 @@ pub fn sync_sender_to_kg(
         Ok(())
     };
 
-    add_triple(
-        predicates.reply_rate,
-        &format!("{:.3}", sender.reply_rate),
-    )?;
-    add_triple(
-        predicates.message_count,
-        &sender.message_count.to_string(),
-    )?;
+    add_triple(predicates.reply_rate, &format!("{:.3}", sender.reply_rate))?;
+    add_triple(predicates.message_count, &sender.message_count.to_string())?;
     add_triple(
         predicates.avg_reply_time,
         &format!("{:.0}", sender.avg_reply_time_secs),
@@ -1035,10 +1032,7 @@ mod tests {
         assert!(sim < 0.6, "role vectors should be dissimilar: sim={sim}");
 
         let sim2 = ops.similarity(&rv.subject, &rv.body).unwrap();
-        assert!(
-            sim2 < 0.6,
-            "role vectors should be dissimilar: sim={sim2}"
-        );
+        assert!(sim2 < 0.6, "role vectors should be dissimilar: sim={sim2}");
     }
 
     // ── Encoding ───────────────────────────────────────────────────────

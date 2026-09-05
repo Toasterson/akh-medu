@@ -15,12 +15,12 @@
 
 use candle_core as candle;
 
-use candle_transformers::utils::repeat_kv;
 use candle::{
-    quantized::{gguf_file, QMatMul, QTensor},
     D, DType, Device, IndexOp, Result, Tensor,
+    quantized::{QMatMul, QTensor, gguf_file},
 };
 use candle_nn::{Embedding, Module};
+use candle_transformers::utils::repeat_kv;
 use std::collections::HashMap;
 
 // --- HIP-device op routing (Phase 45f / ADR 073) ----------------------------
@@ -170,7 +170,11 @@ impl LayerWeights {
                 let gpu = |t: std::result::Result<Tensor, crate::nlu::error::NluError>| {
                     t.map_err(|e| candle_core::Error::Msg(format!("gpu attn proj: {e}")))
                 };
-                (gpu(g.wq.forward(x))?, gpu(g.wk.forward(x))?, gpu(g.wv.forward(x))?)
+                (
+                    gpu(g.wq.forward(x))?,
+                    gpu(g.wk.forward(x))?,
+                    gpu(g.wv.forward(x))?,
+                )
             }
             None => (
                 self.attention_wq.forward(x)?,
@@ -240,10 +244,10 @@ impl LayerWeights {
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, n_embd])?;
         #[cfg(feature = "rocm")]
         let y = match &self.gpu_attn {
-            Some(g) => g
-                .wo
-                .forward(&y)
-                .map_err(|e| candle_core::Error::Msg(format!("gpu attn wo: {e}")))?,
+            Some(g) => {
+                g.wo.forward(&y)
+                    .map_err(|e| candle_core::Error::Msg(format!("gpu attn wo: {e}")))?
+            }
             None => self.attention_wo.forward(&y)?,
         };
         #[cfg(not(feature = "rocm"))]

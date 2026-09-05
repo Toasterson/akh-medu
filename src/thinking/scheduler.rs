@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::symbol::SymbolId;
 
+use super::ThinkingPredicates;
 use super::error::{ThinkingError, ThinkingResult};
 use super::state::ThoughtState;
-use super::ThinkingPredicates;
 
 // ---------------------------------------------------------------------------
 // Primitive vocabulary
@@ -156,11 +156,8 @@ pub struct WeightedScheduler {
 impl WeightedScheduler {
     /// Build from a weight table. Zero-weight entries are dropped.
     pub fn new(weights: &[(PrimitiveKind, f32)]) -> ThinkingResult<Self> {
-        let entries: Vec<(PrimitiveKind, f32)> = weights
-            .iter()
-            .copied()
-            .filter(|(_, w)| *w > 0.0)
-            .collect();
+        let entries: Vec<(PrimitiveKind, f32)> =
+            weights.iter().copied().filter(|(_, w)| *w > 0.0).collect();
         if entries.is_empty() {
             return Err(ThinkingError::BadWeights {
                 reason: "no strictly positive weights".into(),
@@ -420,7 +417,10 @@ mod tests {
         for _ in 0..90 {
             *counts.entry(s.next(&st).unwrap()).or_default() += 1;
         }
-        let mcts = counts.get(&PrimitiveKind::MctsRollout).copied().unwrap_or(0);
+        let mcts = counts
+            .get(&PrimitiveKind::MctsRollout)
+            .copied()
+            .unwrap_or(0);
         for (kind, n) in &counts {
             if *kind != PrimitiveKind::MctsRollout {
                 assert!(

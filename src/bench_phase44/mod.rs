@@ -123,7 +123,10 @@ pub fn default_scenarios() -> Vec<Scenario> {
         Scenario {
             name: "early_fact_tight_budget",
             history: {
-                let mut h = vec![(Speaker::Operator, "remember: the launch code is alpha-seven")];
+                let mut h = vec![(
+                    Speaker::Operator,
+                    "remember: the launch code is alpha-seven",
+                )];
                 h.extend(filler.clone());
                 h
             },
@@ -199,7 +202,10 @@ fn assemble_cell<M: ContextManager>(
     match mgr.assemble(&ep, &scenario.budget, &counter) {
         Ok(a) => {
             let present = a.messages.iter().any(|m| {
-                m["content"].as_str().map(|c| c.contains(scenario.salient)).unwrap_or(false)
+                m["content"]
+                    .as_str()
+                    .map(|c| c.contains(scenario.salient))
+                    .unwrap_or(false)
             });
             Cell {
                 scenario: scenario.name.to_string(),
@@ -230,8 +236,16 @@ pub fn run() -> BenchResult {
 pub fn run_scenarios(scenarios: &[Scenario]) -> BenchResult {
     let mut cells = Vec::new();
     for s in scenarios {
-        cells.push(assemble_cell("compacting", s, &SafetyEnforced::new(CompactingManager)));
-        cells.push(assemble_cell("passive", s, &SafetyEnforced::new(PassiveManager::default())));
+        cells.push(assemble_cell(
+            "compacting",
+            s,
+            &SafetyEnforced::new(CompactingManager),
+        ));
+        cells.push(assemble_cell(
+            "passive",
+            s,
+            &SafetyEnforced::new(PassiveManager::default()),
+        ));
         cells.push(assemble_cell(
             "virtual",
             s,
@@ -477,14 +491,22 @@ mod tests {
         assert_eq!(result.aggregates.len(), 3);
         // The safety guard must never trip for any strategy (ADR 065 D6).
         for a in &result.aggregates {
-            assert_eq!(a.safety_violations, 0, "{} tripped the safety guard", a.strategy);
+            assert_eq!(
+                a.safety_violations, 0,
+                "{} tripped the safety guard",
+                a.strategy
+            );
         }
     }
 
     #[test]
     fn grounding_is_retained_by_every_strategy() {
         let result = run();
-        for c in result.cells.iter().filter(|c| c.scenario == "grounding_in_kg") {
+        for c in result
+            .cells
+            .iter()
+            .filter(|c| c.scenario == "grounding_in_kg")
+        {
             assert!(c.salient_present, "{} dropped KG grounding", c.strategy);
         }
     }
@@ -500,8 +522,14 @@ mod tests {
                 .unwrap()
         };
         // Virtual keeps the fact via core memory; passive (tail-only) cannot.
-        assert!(cell("virtual").salient_present, "virtual should keep the core-memory fact");
-        assert!(!cell("passive").salient_present, "passive can't pin the early fact");
+        assert!(
+            cell("virtual").salient_present,
+            "virtual should keep the core-memory fact"
+        );
+        assert!(
+            !cell("passive").salient_present,
+            "passive can't pin the early fact"
+        );
     }
 
     #[test]
@@ -532,7 +560,10 @@ mod tests {
             assert!(!d.section_deltas.is_empty(), "section deltas present");
             // The cross-check field is always populated (false today — no
             // strategy evicts pinned spans).
-            assert!(!d.b_would_evict_pinned_that_a_kept, "no strategy evicts pinned spans");
+            assert!(
+                !d.b_would_evict_pinned_that_a_kept,
+                "no strategy evicts pinned spans"
+            );
         }
         // At least one diff exists per scenario (3 scenarios × 3 pairs = 9).
         assert_eq!(diffs.len(), 9);

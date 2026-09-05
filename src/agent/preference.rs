@@ -13,9 +13,9 @@ use thiserror::Error;
 use crate::engine::Engine;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::goal::Goal;
 use super::memory::WorkingMemory;
@@ -44,7 +44,9 @@ pub enum PreferenceError {
     #[error("serendipity search failed: {message}")]
     #[diagnostic(
         code(akh::agent::preference::serendipity_failed),
-        help("The near-miss HNSW search could not find candidates in the [0.3, 0.6] similarity window.")
+        help(
+            "The near-miss HNSW search could not find candidates in the [0.3, 0.6] similarity window."
+        )
     )]
     SerendipityFailed { message: String },
 
@@ -597,7 +599,11 @@ impl PreferenceManager {
         // Merge serendipity sources, take top 3.
         let mut all_serendipity = serendipity_matches;
         all_serendipity.extend(kg_serendipity);
-        all_serendipity.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+        all_serendipity.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         all_serendipity.truncate(3);
 
         // Record provenance for suggestions.
@@ -643,16 +649,12 @@ impl PreferenceManager {
             return encode_token(ops, "pref:empty-context");
         }
         let refs: Vec<&HyperVec> = vecs.iter().collect();
-        ops.bundle(&refs).unwrap_or_else(|_| encode_token(ops, "pref:empty-context"))
+        ops.bundle(&refs)
+            .unwrap_or_else(|_| encode_token(ops, "pref:empty-context"))
     }
 
     /// Direct HNSW search for relevant entities.
-    fn search_direct(
-        &self,
-        engine: &Engine,
-        context_vec: &HyperVec,
-        k: usize,
-    ) -> Vec<Suggestion> {
+    fn search_direct(&self, engine: &Engine, context_vec: &HyperVec, k: usize) -> Vec<Suggestion> {
         let results = match engine.item_memory().search(context_vec, k) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -677,11 +679,7 @@ impl PreferenceManager {
     }
 
     /// Serendipity search: HNSW with k=50, filter to similarity [0.3, 0.6].
-    fn search_serendipity(
-        &self,
-        engine: &Engine,
-        context_vec: &HyperVec,
-    ) -> Vec<Suggestion> {
+    fn search_serendipity(&self, engine: &Engine, context_vec: &HyperVec) -> Vec<Suggestion> {
         let results = match engine.item_memory().search(context_vec, 50) {
             Ok(r) => r,
             Err(_) => return Vec::new(),
@@ -758,10 +756,7 @@ impl PreferenceManager {
                         label,
                         relevance,
                         serendipitous: true,
-                        reasoning: format!(
-                            "KG discovery at depth {} from context",
-                            depth + 1
-                        ),
+                        reasoning: format!("KG discovery at depth {} from context", depth + 1),
                         proactivity_level: ProactivityLevel::Offer,
                     });
                 }
@@ -812,11 +807,7 @@ impl PreferenceManager {
     // ─── Query ───────────────────────────────────────────────────────
 
     /// Compute similarity between the interest prototype and an entity.
-    pub fn interest_similarity(
-        &self,
-        entity: SymbolId,
-        engine: &Engine,
-    ) -> f32 {
+    pub fn interest_similarity(&self, entity: SymbolId, engine: &Engine) -> f32 {
         let proto = match &self.profile.interest_prototype {
             Some(p) => p,
             None => return 0.0,
@@ -830,11 +821,7 @@ impl PreferenceManager {
     }
 
     /// Return top-k interests by similarity to the prototype.
-    pub fn top_interests(
-        &self,
-        engine: &Engine,
-        k: usize,
-    ) -> Vec<(String, f32)> {
+    pub fn top_interests(&self, engine: &Engine, k: usize) -> Vec<(String, f32)> {
         let proto = match &self.profile.interest_prototype {
             Some(p) => p,
             None => return Vec::new(),
@@ -881,9 +868,7 @@ impl PreferenceManager {
         // Use a synthetic symbol for the provenance record.
         let level_sym = engine
             .resolve_or_create_relation("pref:assistance-event")
-            .unwrap_or_else(|_| {
-                SymbolId::new(1).unwrap()
-            });
+            .unwrap_or_else(|_| SymbolId::new(1).unwrap());
 
         let mut record = ProvenanceRecord::new(
             level_sym,
@@ -970,7 +955,10 @@ mod tests {
             response_time_secs: 30,
         };
         let s = sig.strength();
-        assert!(s > 0.7 && s <= 1.0, "replied strength should be ~0.9, got {s}");
+        assert!(
+            s > 0.7 && s <= 1.0,
+            "replied strength should be ~0.9, got {s}"
+        );
     }
 
     #[test]
@@ -1037,10 +1025,7 @@ mod tests {
     fn temporal_decay_recent() {
         // 1 hour old → barely decays with λ=0.01
         let decayed = PreferenceManager::apply_temporal_decay(1.0, 3600, 0.01);
-        assert!(
-            decayed > 0.99,
-            "1 hour should barely decay: got {decayed}"
-        );
+        assert!(decayed > 0.99, "1 hour should barely decay: got {decayed}");
     }
 
     #[test]
@@ -1048,10 +1033,7 @@ mod tests {
         // 90 days old → should be significantly decayed
         let age_secs = 90 * 86400;
         let decayed = PreferenceManager::apply_temporal_decay(1.0, age_secs, 0.01);
-        assert!(
-            decayed < 0.5,
-            "90 days should heavily decay: got {decayed}"
-        );
+        assert!(decayed < 0.5, "90 days should heavily decay: got {decayed}");
     }
 
     #[test]
@@ -1074,10 +1056,7 @@ mod tests {
             restored.profile.interaction_count,
             mgr.profile.interaction_count
         );
-        assert_eq!(
-            restored.profile.decay_rate,
-            mgr.profile.decay_rate
-        );
+        assert_eq!(restored.profile.decay_rate, mgr.profile.decay_rate);
         assert_eq!(
             restored.profile.proactivity_level,
             mgr.profile.proactivity_level
@@ -1101,10 +1080,7 @@ mod tests {
         mgr.record_suggestion_outcome(false);
         mgr.record_suggestion_outcome(false);
         let rate = mgr.suggestion_acceptance_rate();
-        assert!(
-            (rate - 0.6).abs() < 0.01,
-            "3/5 should be 0.6, got {rate}"
-        );
+        assert!((rate - 0.6).abs() < 0.01, "3/5 should be 0.6, got {rate}");
     }
 
     #[test]
@@ -1178,10 +1154,7 @@ mod tests {
         for i in 0..vecs.len() {
             for j in (i + 1)..vecs.len() {
                 let sim = ops.similarity(vecs[i], vecs[j]).unwrap_or(0.0);
-                assert!(
-                    sim < 0.7,
-                    "role vectors {i} and {j} too similar: {sim}"
-                );
+                assert!(sim < 0.7, "role vectors {i} and {j} too similar: {sim}");
             }
         }
     }

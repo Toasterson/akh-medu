@@ -19,9 +19,9 @@ use crate::vsa::encode::encode_label;
 use crate::vsa::ops::VsaOps;
 use crate::vsa::{Dimension, Encoding, HyperVec};
 
-use super::bandit::{FeatureVec, LinUcbBandit, D};
-use super::cache::SemanticCache;
 use super::NluParseResult;
+use super::bandit::{D, FeatureVec, LinUcbBandit};
+use super::cache::SemanticCache;
 
 /// Identifies a routable NLU backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -171,22 +171,44 @@ impl NakhRouter {
         const SEEDS: &[(&str, &[&str], Option<BackendId>)] = &[
             (
                 "greeting",
-                &["hello", "good morning", "hi there", "goodbye", "farewell", "greetings"],
+                &[
+                    "hello",
+                    "good morning",
+                    "hi there",
+                    "goodbye",
+                    "farewell",
+                    "greetings",
+                ],
                 Some(BackendId::RuleParser),
             ),
             (
                 "fact_assertion",
-                &["dogs are mammals", "water is wet", "the sky is blue", "cats are felines"],
+                &[
+                    "dogs are mammals",
+                    "water is wet",
+                    "the sky is blue",
+                    "cats are felines",
+                ],
                 Some(BackendId::RuleParser),
             ),
             (
                 "entity_query",
-                &["who is Alan Turing", "what is a neuron", "tell me about rust", "describe the concept"],
+                &[
+                    "who is Alan Turing",
+                    "what is a neuron",
+                    "tell me about rust",
+                    "describe the concept",
+                ],
                 Some(BackendId::OnnxNer),
             ),
             (
                 "relationship_query",
-                &["how are X and Y related", "what connects A to B", "find path between nodes", "what is the link"],
+                &[
+                    "how are X and Y related",
+                    "what connects A to B",
+                    "find path between nodes",
+                    "what is the link",
+                ],
                 Some(BackendId::VsaDirect),
             ),
             (
@@ -446,7 +468,10 @@ mod tests {
 
         // Cache should now hold this result
         let cached = router.find_cached(input);
-        assert!(cached.is_some(), "cache should hold the result after report_reward");
+        assert!(
+            cached.is_some(),
+            "cache should hold the result after report_reward"
+        );
     }
 
     #[test]
@@ -487,6 +512,9 @@ mod tests {
         assert!(router.find_cached(input).is_some());
 
         router.invalidate_cache();
-        assert!(router.find_cached(input).is_none(), "cache should be empty after invalidation");
+        assert!(
+            router.find_cached(input).is_none(),
+            "cache should be empty after invalidation"
+        );
     }
 }

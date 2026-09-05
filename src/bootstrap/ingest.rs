@@ -14,13 +14,13 @@ use crate::bootstrap::expand::normalize_label;
 use crate::bootstrap::prerequisite::PrereqAnalysisResult;
 use crate::bootstrap::resources::{DiscoveredResource, ResourceDiscoveryResult};
 use crate::engine::Engine;
+use crate::graph::Triple;
 use crate::library::catalog::LibraryCatalog;
 use crate::library::error::LibraryError;
 use crate::library::ingest::{IngestConfig, ingest_document, ingest_url};
 use crate::library::model::{ContentFormat, DocumentSource};
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
-use crate::graph::Triple;
 use crate::vsa::grounding::{GroundingConfig, ground_symbol};
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -309,10 +309,11 @@ impl CurriculumIngestor {
         // ── Sort curriculum: tier ASC, similarity_to_known DESC ────
         let mut sorted_curriculum: Vec<_> = prereq_result.curriculum.iter().collect();
         sorted_curriculum.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then_with(|| b.similarity_to_known.partial_cmp(&a.similarity_to_known)
-                    .unwrap_or(std::cmp::Ordering::Equal))
+            a.tier.cmp(&b.tier).then_with(|| {
+                b.similarity_to_known
+                    .partial_cmp(&a.similarity_to_known)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         // ── Open library catalog ───────────────────────────────────
@@ -398,18 +399,20 @@ impl CurriculumIngestor {
                     }
 
                     // Record provenance for this ingestion.
-                    if outcome.triples_added > 0 && let Some(prov_id) = self.record_provenance(
-                        engine,
-                        &ProvenanceInfo {
-                            concept: entry.concept,
-                            concept_label: &entry.label,
-                            resource_title: &resource.title,
-                            triples_added: outcome.triples_added,
-                            extraction_methods: &outcome.extraction_methods,
-                            tier: entry.tier,
-                            cross_validated: false,
-                        },
-                    ) {
+                    if outcome.triples_added > 0
+                        && let Some(prov_id) = self.record_provenance(
+                            engine,
+                            &ProvenanceInfo {
+                                concept: entry.concept,
+                                concept_label: &entry.label,
+                                resource_title: &resource.title,
+                                triples_added: outcome.triples_added,
+                                extraction_methods: &outcome.extraction_methods,
+                                tier: entry.tier,
+                                cross_validated: false,
+                            },
+                        )
+                    {
                         result.provenance_ids.push(prov_id);
                     }
 
@@ -549,20 +552,21 @@ impl CurriculumIngestor {
                 ..Default::default()
             };
 
-            match ingest_url(engine, catalog, &resource.url, url_config, None, self.config.url_timeout_secs) {
+            match ingest_url(
+                engine,
+                catalog,
+                &resource.url,
+                url_config,
+                None,
+                self.config.url_timeout_secs,
+            ) {
                 Ok(ingest_result) => {
                     outcome.triples_added += ingest_result.triple_count;
                     outcome.concepts_extracted += ingest_result.concept_count;
                     outcome.url_succeeded = true;
                     outcome.extraction_methods.push("url_fulltext".to_string());
 
-                    self.store_ingestion_metadata(
-                        engine,
-                        concept,
-                        &resource.title,
-                        "url",
-                        tier,
-                    );
+                    self.store_ingestion_metadata(engine, concept, &resource.title, "url", tier);
                 }
                 Err(e) => {
                     // URL ingestion is best-effort — log and continue.
@@ -608,9 +612,7 @@ impl CurriculumIngestor {
         }
 
         // ingest:extraction_method → method entity
-        if let Ok(method_entity) =
-            engine.resolve_or_create_entity(&format!("method:{method}"))
-        {
+        if let Ok(method_entity) = engine.resolve_or_create_entity(&format!("method:{method}")) {
             let triple = Triple {
                 subject: concept,
                 predicate: self.predicates.extraction_method,
@@ -624,9 +626,7 @@ impl CurriculumIngestor {
         }
 
         // ingest:curriculum_tier → tier entity
-        if let Ok(tier_entity) =
-            engine.resolve_or_create_entity(&format!("tier:{tier}"))
-        {
+        if let Ok(tier_entity) = engine.resolve_or_create_entity(&format!("tier:{tier}")) {
             let triple = Triple {
                 subject: concept,
                 predicate: self.predicates.curriculum_tier,
@@ -667,9 +667,7 @@ impl CurriculumIngestor {
                 .unwrap_or_default()
                 .as_secs();
 
-            if let Ok(xval_entity) =
-                engine.resolve_or_create_entity("status:cross_validated")
-            {
+            if let Ok(xval_entity) = engine.resolve_or_create_entity("status:cross_validated") {
                 let boosted = (0.9 + self.config.cross_validation_boost).min(1.0);
                 let triple = Triple {
                     subject: concept,
@@ -813,8 +811,8 @@ fn build_resource_index<'a>(
 mod tests {
     use super::*;
     use crate::bootstrap::prerequisite::{CurriculumEntry, ZpdZone};
-    use crate::bootstrap::resources::ResourceApi;
     use crate::bootstrap::purpose::DreyfusLevel;
+    use crate::bootstrap::resources::ResourceApi;
 
     #[test]
     fn config_defaults() {
@@ -901,7 +899,12 @@ mod tests {
         assert!(!tracker.is_saturated(b));
     }
 
-    fn make_resource(title: &str, concepts: &[&str], quality: f32, open_access: bool) -> DiscoveredResource {
+    fn make_resource(
+        title: &str,
+        concepts: &[&str],
+        quality: f32,
+        open_access: bool,
+    ) -> DiscoveredResource {
         DiscoveredResource {
             title: title.to_string(),
             url: if open_access {
@@ -974,10 +977,11 @@ mod tests {
 
         let mut sorted: Vec<_> = entries.iter().collect();
         sorted.sort_by(|a, b| {
-            a.tier
-                .cmp(&b.tier)
-                .then_with(|| b.similarity_to_known.partial_cmp(&a.similarity_to_known)
-                    .unwrap_or(std::cmp::Ordering::Equal))
+            a.tier.cmp(&b.tier).then_with(|| {
+                b.similarity_to_known
+                    .partial_cmp(&a.similarity_to_known)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         // Tier 0 first, then tier 1.

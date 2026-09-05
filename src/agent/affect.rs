@@ -129,8 +129,8 @@ impl Appraisal {
     /// Convert this appraisal to an affective state delta.
     pub fn to_affect_delta(&self) -> AffectiveState {
         let valence = self.valence * self.relevance;
-        let arousal = (self.novelty * 0.5 + self.relevance * 0.3 + (1.0 - self.coping) * 0.2)
-            .clamp(0.0, 1.0);
+        let arousal =
+            (self.novelty * 0.5 + self.relevance * 0.3 + (1.0 - self.coping) * 0.2).clamp(0.0, 1.0);
         let dominance = self.coping;
         AffectiveState::new(valence, arousal, dominance)
     }
@@ -256,7 +256,8 @@ impl SomaticMarkerRegistry {
         marker.observation_count += 1;
         let alpha = 1.0 / (1.0 + marker.observation_count as f32 * 0.2);
         marker.valence += alpha * (outcome_valence - marker.valence);
-        marker.confidence = (marker.observation_count as f32 / (marker.observation_count as f32 + 5.0)).min(0.95);
+        marker.confidence =
+            (marker.observation_count as f32 / (marker.observation_count as f32 + 5.0)).min(0.95);
     }
 
     /// Get the decision bias for a concept.
@@ -273,7 +274,11 @@ impl SomaticMarkerRegistry {
     /// Top-k most positive markers (approach signals).
     pub fn most_positive(&self, k: usize) -> Vec<&SomaticMarker> {
         let mut sorted: Vec<_> = self.markers.values().collect();
-        sorted.sort_by(|a, b| b.valence.partial_cmp(&a.valence).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.valence
+                .partial_cmp(&a.valence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sorted.truncate(k);
         sorted
     }
@@ -281,7 +286,11 @@ impl SomaticMarkerRegistry {
     /// Top-k most negative markers (avoidance signals).
     pub fn most_negative(&self, k: usize) -> Vec<&SomaticMarker> {
         let mut sorted: Vec<_> = self.markers.values().collect();
-        sorted.sort_by(|a, b| a.valence.partial_cmp(&b.valence).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.valence
+                .partial_cmp(&b.valence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         sorted.truncate(k);
         sorted
     }
@@ -397,8 +406,8 @@ impl AffectiveSystem {
 
     /// Persist to durable store.
     pub fn persist(&self, engine: &crate::engine::Engine) -> Result<(), String> {
-        let bytes = bincode::serialize(self)
-            .map_err(|e| format!("serialize affective system: {e}"))?;
+        let bytes =
+            bincode::serialize(self).map_err(|e| format!("serialize affective system: {e}"))?;
         engine
             .store()
             .put_meta(b"agent:affective_system", &bytes)
@@ -506,7 +515,11 @@ mod tests {
                 timestamp: now(),
             });
         }
-        assert!(mood.baseline.valence > 0.0, "mood should be positive: {}", mood.baseline.valence);
+        assert!(
+            mood.baseline.valence > 0.0,
+            "mood should be positive: {}",
+            mood.baseline.valence
+        );
     }
 
     #[test]
@@ -527,7 +540,10 @@ mod tests {
 
     #[test]
     fn mood_window_bounded() {
-        let mut mood = MoodState { window_size: 5, ..Default::default() };
+        let mut mood = MoodState {
+            window_size: 5,
+            ..Default::default()
+        };
         for i in 0..20 {
             mood.process_appraisal(Appraisal {
                 trigger: AppraisalTrigger::Novelty { entity: sym(i + 1) },
@@ -554,7 +570,11 @@ mod tests {
         }
 
         let marker = registry.get(concept).unwrap();
-        assert!(marker.valence > 0.3, "should learn positive: {}", marker.valence);
+        assert!(
+            marker.valence > 0.3,
+            "should learn positive: {}",
+            marker.valence
+        );
         assert!(marker.confidence > 0.3, "should gain confidence");
     }
 

@@ -81,11 +81,7 @@ pub trait ServerControl: Send + Sync {
     /// `method` is the full wire method (e.g. `"_akh/workspace/list"`);
     /// `params` is its JSON-RPC params object. Implementors should match on the
     /// `_akh/`-stripped tail and return a structured JSON result.
-    fn dispatch<'a>(
-        &'a self,
-        method: &'a str,
-        params: &'a serde_json::Value,
-    ) -> ControlFuture<'a>;
+    fn dispatch<'a>(&'a self, method: &'a str, params: &'a serde_json::Value) -> ControlFuture<'a>;
 
     /// Resolve a workspace's runtime handles by name, lazily loading it.
     ///
@@ -97,9 +93,9 @@ pub trait ServerControl: Send + Sync {
     /// Default: unsupported — in-process embeds/tests without a multi-workspace
     /// backend keep their single held engine/agent instead.
     fn resolve<'a>(&'a self, _workspace: &'a str) -> ResolveFuture<'a> {
-        Box::pin(async move {
-            Err("workspace resolution not supported by this backend".to_string())
-        })
+        Box::pin(
+            async move { Err("workspace resolution not supported by this backend".to_string()) },
+        )
     }
 
     /// Resolve only the engine for a workspace — never constructs a full
@@ -109,13 +105,10 @@ pub trait ServerControl: Send + Sync {
     ///
     /// Default: unsupported — in-process embeds/tests without a
     /// multi-workspace backend keep their single held engine instead.
-    fn resolve_engine_only<'a>(
-        &'a self,
-        _workspace: &'a str,
-    ) -> ResolveEngineFuture<'a> {
-        Box::pin(async move {
-            Err("engine-only resolution not supported by this backend".to_string())
-        })
+    fn resolve_engine_only<'a>(&'a self, _workspace: &'a str) -> ResolveEngineFuture<'a> {
+        Box::pin(
+            async move { Err("engine-only resolution not supported by this backend".to_string()) },
+        )
     }
 }
 

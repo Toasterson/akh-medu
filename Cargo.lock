@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "addr2line"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,6 +223,7 @@ dependencies = [
  "futures",
  "futures-util",
  "grug-data",
+ "grug-train",
  "harness-core",
  "hnsw_rs",
  "hound",
@@ -4570,6 +4587,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "font8x8"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5367,17 +5390,24 @@ dependencies = [
 name = "grug-data"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
+ "blake3",
+ "font8x8",
  "miette 7.6.0",
+ "png",
  "rand 0.8.5",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "unicode-normalization",
 ]
 
 [[package]]
 name = "grug-train"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "burn",
  "clap",
  "grug-data",
@@ -5385,6 +5415,7 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokenizers",
 ]
@@ -7929,6 +7960,15 @@ dependencies = [
  "proc-macro2-diagnostics",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser",
 ]
 
 [[package]]

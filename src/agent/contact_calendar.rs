@@ -76,11 +76,7 @@ impl ContactCalendar {
         event_symbol: SymbolId,
         contact_symbol: SymbolId,
     ) -> ContactResult<()> {
-        engine.add_triple(&Triple::new(
-            event_symbol,
-            preds.organizer,
-            contact_symbol,
-        ))?;
+        engine.add_triple(&Triple::new(event_symbol, preds.organizer, contact_symbol))?;
         Ok(())
     }
 
@@ -309,8 +305,7 @@ mod tests {
         )
         .unwrap();
 
-        let shared =
-            ContactCalendar::shared_events(&cal, &engine, &preds, alice_sym, bob_sym);
+        let shared = ContactCalendar::shared_events(&cal, &engine, &preds, alice_sym, bob_sym);
         assert_eq!(shared.len(), 1);
     }
 
@@ -382,8 +377,7 @@ mod tests {
         let ev = cal
             .add_event(&engine, "10am", 36000, 39600, None, None, None, None)
             .unwrap();
-        ContactCalendar::add_attendee(&engine, &preds, ev, alice_sym, ev.get(), &alice_id)
-            .unwrap();
+        ContactCalendar::add_attendee(&engine, &preds, ev, alice_sym, ev.get(), &alice_id).unwrap();
 
         let heatmap = ContactCalendar::availability_heatmap(&cal, &engine, &preds, alice_sym);
         assert_eq!(heatmap[10], 1);

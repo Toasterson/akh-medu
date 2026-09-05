@@ -101,7 +101,10 @@ pub fn is_scaffolding(subject_label: &str, predicate_label: &str, object_label: 
 /// Returns immediately (metrics with `scaffolding_removed = 0`) when:
 /// - The KG is empty, or
 /// - The scaffolding fraction is below `config.scaffolding_fraction_threshold`.
-pub fn run_kg_compaction(engine: &Engine, config: &CompactionConfig) -> AgentResult<CompactionMetrics> {
+pub fn run_kg_compaction(
+    engine: &Engine,
+    config: &CompactionConfig,
+) -> AgentResult<CompactionMetrics> {
     let all_triples = engine.all_triples();
     let total_before = all_triples.len();
 
@@ -222,7 +225,11 @@ mod tests {
 
     #[test]
     fn memory_type_predicate_is_scaffolding() {
-        assert!(is_scaffolding("concept:foo", "agent:memory_type", "semantic"));
+        assert!(is_scaffolding(
+            "concept:foo",
+            "agent:memory_type",
+            "semantic"
+        ));
     }
 
     #[test]
@@ -238,7 +245,11 @@ mod tests {
     fn domain_triple_is_not_scaffolding() {
         assert!(!is_scaffolding("dog", "is-a", "animal"));
         assert!(!is_scaffolding("Paris", "capital-of", "France"));
-        assert!(!is_scaffolding("concept:foo", "agent:learned", "concept:bar"));
+        assert!(!is_scaffolding(
+            "concept:foo",
+            "agent:learned",
+            "concept:bar"
+        ));
     }
 
     #[test]

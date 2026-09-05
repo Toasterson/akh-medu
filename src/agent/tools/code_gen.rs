@@ -95,8 +95,9 @@ impl Tool for CodeGenTool {
                 },
                 ToolParam {
                     name: "format".into(),
-                    description: "Whether to run rustfmt on output: 'true' or 'false' (default: false)."
-                        .into(),
+                    description:
+                        "Whether to run rustfmt on output: 'true' or 'false' (default: false)."
+                            .into(),
                     required: false,
                 },
                 ToolParam {
@@ -153,17 +154,18 @@ impl Tool for CodeGenTool {
         let effective_scope = scope.unwrap_or_else(|| detect_scope(engine, &preds, target_id));
 
         // Build AbsTree from KG facts
-        let abs_tree = build_abstree_from_kg(engine, &preds, target_id, &target_label, effective_scope);
+        let abs_tree =
+            build_abstree_from_kg(engine, &preds, target_id, &target_label, effective_scope);
 
         // Linearize through RustCodeGrammar
         let grammar = RustCodeGrammar;
         let ctx = LinContext::default();
-        let code = grammar.linearize(&abs_tree, &ctx).map_err(|e| {
-            AgentError::ToolExecution {
+        let code = grammar
+            .linearize(&abs_tree, &ctx)
+            .map_err(|e| AgentError::ToolExecution {
                 tool_name: "code_gen".into(),
                 message: format!("Linearization failed: {e}"),
-            }
-        })?;
+            })?;
 
         // Optionally format with rustfmt
         let final_code = if run_format {
@@ -211,9 +213,10 @@ impl Tool for CodeGenTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "code_gen".into(),
-            description: "Generates Rust code from KG structure or templates — read-only KG access, \
+            description:
+                "Generates Rust code from KG structure or templates — read-only KG access, \
                           optional filesystem for rustfmt."
-                .into(),
+                    .into(),
             parameters: vec![
                 ToolParamSchema::required(
                     "target",
@@ -369,8 +372,12 @@ fn detect_scope(engine: &Engine, preds: &CodePredicates, target: SymbolId) -> Co
     let triples_from = engine.triples_from(target);
     let has_methods = triples_from.iter().any(|t| t.predicate == preds.has_method);
     let has_fields = triples_from.iter().any(|t| t.predicate == preds.has_field);
-    let has_variants = triples_from.iter().any(|t| t.predicate == preds.has_variant);
-    let has_submods = triples_from.iter().any(|t| t.predicate == preds.contains_mod);
+    let has_variants = triples_from
+        .iter()
+        .any(|t| t.predicate == preds.has_variant);
+    let has_submods = triples_from
+        .iter()
+        .any(|t| t.predicate == preds.contains_mod);
 
     if has_variants {
         CodeScope::Enum
@@ -628,7 +635,11 @@ fn gather_module_children(
 }
 
 /// Collect all source symbols referenced by code:* triples from the target.
-fn collect_source_symbols(engine: &Engine, preds: &CodePredicates, target: SymbolId) -> Vec<SymbolId> {
+fn collect_source_symbols(
+    engine: &Engine,
+    preds: &CodePredicates,
+    target: SymbolId,
+) -> Vec<SymbolId> {
     let mut symbols = HashSet::new();
     let triples = engine.triples_from(target);
 
@@ -676,11 +687,7 @@ fn format_with_rustfmt(code: &str) -> Option<String> {
         .spawn()
         .ok()?;
 
-    child
-        .stdin
-        .as_mut()?
-        .write_all(code.as_bytes())
-        .ok()?;
+    child.stdin.as_mut()?.write_all(code.as_bytes()).ok()?;
 
     let output = child.wait_with_output().ok()?;
     if output.status.success() {
@@ -715,16 +722,16 @@ pub enum RefinementKind {
     /// Syntax error in generated code (likely grammar bug).
     SyntaxError,
     /// Missing trait implementation.
-    MissingTraitImpl { trait_name: String, type_name: String },
+    MissingTraitImpl {
+        trait_name: String,
+        type_name: String,
+    },
     /// Generic error that needs manual intervention.
     Other,
 }
 
 /// Analyze compiler error output and suggest refinement actions.
-pub fn analyze_compiler_errors(
-    error_output: &str,
-    target: SymbolId,
-) -> Vec<RefinementAction> {
+pub fn analyze_compiler_errors(error_output: &str, target: SymbolId) -> Vec<RefinementAction> {
     let mut actions = Vec::new();
 
     for line in error_output.lines() {
@@ -740,9 +747,7 @@ pub fn analyze_compiler_errors(
                     expected: expected.to_string(),
                     found: found.to_string(),
                 },
-                description: format!(
-                    "Type mismatch: expected `{expected}`, found `{found}`"
-                ),
+                description: format!("Type mismatch: expected `{expected}`, found `{found}`"),
                 affected_symbols: vec![target],
             });
         }
@@ -771,9 +776,7 @@ pub fn analyze_compiler_errors(
                     trait_name: trait_name.to_string(),
                     type_name: type_name.to_string(),
                 },
-                description: format!(
-                    "Missing impl: `{trait_name}` for `{type_name}`"
-                ),
+                description: format!("Missing impl: `{trait_name}` for `{type_name}`"),
                 affected_symbols: vec![target],
             });
         }
@@ -816,13 +819,23 @@ mod tests {
         let mod_id = engine.resolve_or_create_entity("utils").unwrap();
         let param_id = engine.resolve_or_create_entity("name: &str").unwrap();
         let ret_id = engine.resolve_or_create_entity("String").unwrap();
-        let doc_id = engine.resolve_or_create_entity("Greets a person by name.").unwrap();
+        let doc_id = engine
+            .resolve_or_create_entity("Greets a person by name.")
+            .unwrap();
 
         use crate::graph::Triple;
-        engine.add_triple(&Triple::new(mod_id, preds.defines_fn, fn_id).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(fn_id, preds.has_param, param_id).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(fn_id, preds.returns_type, ret_id).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(fn_id, preds.has_doc, doc_id).with_confidence(0.9)).unwrap();
+        engine
+            .add_triple(&Triple::new(mod_id, preds.defines_fn, fn_id).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(fn_id, preds.has_param, param_id).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(fn_id, preds.returns_type, ret_id).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(fn_id, preds.has_doc, doc_id).with_confidence(0.9))
+            .unwrap();
 
         (engine, fn_id)
     }
@@ -844,11 +857,21 @@ mod tests {
         let derive2 = engine.resolve_or_create_entity("Clone").unwrap();
 
         use crate::graph::Triple;
-        engine.add_triple(&Triple::new(mod_id, preds.defines_struct, struct_id).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(struct_id, preds.has_field, field1).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(struct_id, preds.has_field, field2).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(struct_id, preds.derives_trait, derive1).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(struct_id, preds.derives_trait, derive2).with_confidence(0.9)).unwrap();
+        engine
+            .add_triple(&Triple::new(mod_id, preds.defines_struct, struct_id).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(struct_id, preds.has_field, field1).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(struct_id, preds.has_field, field2).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(struct_id, preds.derives_trait, derive1).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(struct_id, preds.derives_trait, derive2).with_confidence(0.9))
+            .unwrap();
 
         (engine, struct_id)
     }
@@ -1010,10 +1033,18 @@ mod tests {
 
         let output = tool.execute(&engine, input).unwrap();
         assert!(output.success, "template failed: {}", output.result);
-        assert!(output.result.contains("#[derive(Debug, thiserror::Error, miette::Diagnostic)]"));
+        assert!(
+            output
+                .result
+                .contains("#[derive(Debug, thiserror::Error, miette::Diagnostic)]")
+        );
         assert!(output.result.contains("pub enum MyError {"));
         assert!(output.result.contains("#[error(\"item not found\")]"));
-        assert!(output.result.contains("#[diagnostic(code(my::not_found), help(\"check the ID\"))]"));
+        assert!(
+            output
+                .result
+                .contains("#[diagnostic(code(my::not_found), help(\"check the ID\"))]")
+        );
         assert!(output.result.contains("pub type MyResult<T>"));
     }
 
@@ -1029,7 +1060,10 @@ mod tests {
         let input = ToolInput::new()
             .with_param("target", "Config")
             .with_param("template", "builder")
-            .with_param("template_params", "type_name=Config;fields=name: String, value: u64");
+            .with_param(
+                "template_params",
+                "type_name=Config;fields=name: String, value: u64",
+            );
 
         let output = tool.execute(&engine, input).unwrap();
         assert!(output.success, "template failed: {}", output.result);
@@ -1077,7 +1111,8 @@ mod tests {
 
     #[test]
     fn parse_template_params_semicolons() {
-        let params = parse_template_params("name=MyError;variants=A(x), B(y);result_alias=MyResult");
+        let params =
+            parse_template_params("name=MyError;variants=A(x), B(y);result_alias=MyResult");
         assert_eq!(params.get("name").unwrap(), "MyError");
         assert_eq!(params.get("variants").unwrap(), "A(x), B(y)");
         assert_eq!(params.get("result_alias").unwrap(), "MyResult");

@@ -403,7 +403,9 @@ fn parse_date(field: &str, s: &str) -> TaskResult<u64> {
         value: s.to_string(),
     };
     let parts: Vec<&str> = s.trim().split('-').collect();
-    let [y, m, d] = parts[..] else { return Err(bad()) };
+    let [y, m, d] = parts[..] else {
+        return Err(bad());
+    };
     let y: i64 = y.parse().map_err(|_| bad())?;
     let m: u32 = m.parse().map_err(|_| bad())?;
     let d: u32 = d.parse().map_err(|_| bad())?;
@@ -434,7 +436,13 @@ static TASK_SEQ: AtomicU64 = AtomicU64::new(0);
 fn slugify(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let collapsed: String = cleaned
         .split('-')
@@ -480,7 +488,9 @@ pub fn create_task(
 
     let seq = TASK_SEQ.fetch_add(1, Ordering::Relaxed);
     let label = format!("task:{}:{}-{seq}", slugify(&new.title), now_secs());
-    let symbol_id = engine.create_symbol(crate::symbol::SymbolKind::Entity, &label)?.id;
+    let symbol_id = engine
+        .create_symbol(crate::symbol::SymbolKind::Entity, &label)?
+        .id;
 
     let marker = engine.resolve_or_create_entity(TASK_MARKER_LABEL)?;
     let mut triples = vec![Triple::new(symbol_id, preds.task_type, marker)];
@@ -526,13 +536,13 @@ pub fn create_task(
         let future_tag = engine.resolve_or_create_entity("tag:future")?;
         triples.push(Triple::new(symbol_id, agent_preds.has_tag, future_tag));
     }
-    let excerpt = if new.title.len() > 80 { &new.title[..80] } else { &new.title };
+    let excerpt = if new.title.len() > 80 {
+        &new.title[..80]
+    } else {
+        &new.title
+    };
     let summary_sym = engine.resolve_or_create_entity(&format!("summary:{excerpt}"))?;
-    triples.push(Triple::new(
-        symbol_id,
-        agent_preds.has_summary,
-        summary_sym,
-    ));
+    triples.push(Triple::new(symbol_id, agent_preds.has_summary, summary_sym));
 
     let mut prov = ProvenanceRecord::new(
         symbol_id,
@@ -603,10 +613,20 @@ pub fn update_task(
         if title.trim().is_empty() {
             return Err(TaskError::EmptyTitle);
         }
-        replace_single(engine, symbol_id, preds.has_title, &format!("literal:{title}"))?;
+        replace_single(
+            engine,
+            symbol_id,
+            preds.has_title,
+            &format!("literal:{title}"),
+        )?;
     }
     if let Some(due) = update.due {
-        replace_single(engine, symbol_id, preds.has_due, &format!("date:{}", format_date(due)))?;
+        replace_single(
+            engine,
+            symbol_id,
+            preds.has_due,
+            &format!("date:{}", format_date(due)),
+        )?;
     }
     if let Some(scheduled) = update.scheduled {
         replace_single(
@@ -735,7 +755,11 @@ pub fn complete_task(
         .id;
 
     let summary_text = format!("Completed: {}", current.title);
-    let excerpt = if summary_text.len() > 80 { &summary_text[..80] } else { &summary_text };
+    let excerpt = if summary_text.len() > 80 {
+        &summary_text[..80]
+    } else {
+        &summary_text
+    };
     let summary_sym = engine.resolve_or_create_entity(&format!("summary:{excerpt}"))?;
     let mut episode_triples = vec![Triple::new(
         episode_id,
@@ -744,11 +768,7 @@ pub fn complete_task(
     )];
 
     let complete_tag = engine.resolve_or_create_entity("tag:task_complete")?;
-    episode_triples.push(Triple::new(
-        episode_id,
-        agent_preds.has_tag,
-        complete_tag,
-    ));
+    episode_triples.push(Triple::new(episode_id, agent_preds.has_tag, complete_tag));
 
     let mem_type_sym = engine.resolve_or_create_entity("episodic_memory")?;
     episode_triples.push(Triple::new(
@@ -802,7 +822,11 @@ pub fn complete_task(
                     source_note: current.source_note,
                 },
             )?;
-            engine.add_triple(&Triple::new(spawned.symbol_id, preds.spawned_from, symbol_id))?;
+            engine.add_triple(&Triple::new(
+                spawned.symbol_id,
+                preds.spawned_from,
+                symbol_id,
+            ))?;
             Some(reconstruct_task(engine, preds, spawned.symbol_id)?.unwrap_or(spawned))
         }
         None => None,
@@ -871,7 +895,11 @@ pub fn list_tasks(
         .filter_map(|t| reconstruct_task(engine, preds, t.subject).ok().flatten())
         .filter(|task| filter.matches(&task.lifecycle))
         .collect();
-    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.symbol_id.get().cmp(&a.symbol_id.get())));
+    tasks.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then(b.symbol_id.get().cmp(&a.symbol_id.get()))
+    });
     Ok(tasks)
 }
 
@@ -1020,7 +1048,10 @@ mod tests {
         }
         assert_eq!(format_date(0), "1970-01-01");
         assert_eq!(parse_date("due", "1970-01-01").unwrap(), 0);
-        assert_eq!(format_date(parse_date("due", "2026-07-15").unwrap()), "2026-07-15");
+        assert_eq!(
+            format_date(parse_date("due", "2026-07-15").unwrap()),
+            "2026-07-15"
+        );
     }
 
     #[test]
@@ -1119,7 +1150,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(updated2.due.map(format_date), Some("2026-09-01".to_string()));
+        assert_eq!(
+            updated2.due.map(format_date),
+            Some("2026-09-01".to_string())
+        );
         let due_triples: Vec<_> = engine
             .triples_from(task.symbol_id)
             .into_iter()
@@ -1151,16 +1185,26 @@ mod tests {
 
         let outcome = complete_task(&engine, &tp, &ap, task.symbol_id).unwrap();
         assert!(matches!(outcome.task.lifecycle, TaskLifecycle::Done { .. }));
-        assert!(outcome.next_occurrence.is_none(), "non-recurring task spawns nothing");
+        assert!(
+            outcome.next_occurrence.is_none(),
+            "non-recurring task spawns nothing"
+        );
 
         // The completion episode exists, is tagged, and is recallable.
         let recent = crate::agent::memory::recall_recent_episodes(&engine, &ap, 10).unwrap();
         assert!(recent.iter().any(|e| e.symbol_id == outcome.episode_id));
-        assert!(engine.resolve_label(outcome.episode_id).starts_with("episode:task-complete:"));
+        assert!(
+            engine
+                .resolve_label(outcome.episode_id)
+                .starts_with("episode:task-complete:")
+        );
 
         // Completing again is an error, not a corrupt double-completion.
         let err = complete_task(&engine, &tp, &ap, task.symbol_id).unwrap_err();
-        assert!(matches!(err, TaskError::AlreadyTerminal { state: "done", .. }));
+        assert!(matches!(
+            err,
+            TaskError::AlreadyTerminal { state: "done", .. }
+        ));
     }
 
     #[test]
@@ -1187,10 +1231,15 @@ mod tests {
         .unwrap();
 
         let outcome = complete_task(&engine, &tp, &ap, task.symbol_id).unwrap();
-        let next = outcome.next_occurrence.expect("recurring task must spawn a next occurrence");
+        let next = outcome
+            .next_occurrence
+            .expect("recurring task must spawn a next occurrence");
         assert_ne!(next.symbol_id, task.symbol_id);
         assert_eq!(next.title, "Weekly sync");
-        assert!(next.due.unwrap() > due, "next occurrence's due date must advance");
+        assert!(
+            next.due.unwrap() > due,
+            "next occurrence's due date must advance"
+        );
         assert_eq!(next.spawned_from, Some(task.symbol_id));
 
         // Exactly one next occurrence exists in the store.
@@ -1224,7 +1273,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(cancelled.lifecycle, TaskLifecycle::Cancelled { .. }));
+        assert!(matches!(
+            cancelled.lifecycle,
+            TaskLifecycle::Cancelled { .. }
+        ));
 
         let open = list_tasks(&engine, &tp, TaskListFilter::Open).unwrap();
         assert!(open.is_empty());

@@ -102,12 +102,11 @@ impl WorkingMemory {
     pub fn push_priority(&mut self, mut entry: WorkingMemoryEntry) -> AgentResult<u64> {
         // Make room if needed by evicting the lowest-relevance entry.
         if self.entries.len() >= self.capacity {
-            if let Some((idx, _)) = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| a.relevance.partial_cmp(&b.relevance).unwrap_or(std::cmp::Ordering::Equal))
-            {
+            if let Some((idx, _)) = self.entries.iter().enumerate().min_by(|(_, a), (_, b)| {
+                a.relevance
+                    .partial_cmp(&b.relevance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }) {
                 let evicted = self.entries.remove(idx);
                 tracing::debug!(
                     evicted_id = evicted.id,
@@ -590,11 +589,7 @@ fn persist_episode(
     triples.extend([
         Triple::new(episode_id, predicates.has_tag, tag_sym),
         Triple::new(episode_id, predicates.memory_type, mem_type_sym),
-        Triple::new(
-            episode_id,
-            predicates.has_affective_valence,
-            valence_sym,
-        ),
+        Triple::new(episode_id, predicates.has_affective_valence, valence_sym),
     ]);
     engine.add_triples_with_provenance(&mut triples, &mut prov)?;
 
@@ -732,11 +727,7 @@ pub fn index_cycle_episode(
         format!("summary:{summary_text}")
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let mut triples = vec![Triple::new(
-        episode_id,
-        predicates.has_summary,
-        summary_sym,
-    )];
+    let mut triples = vec![Triple::new(episode_id, predicates.has_summary, summary_sym)];
 
     // Tag: marks this as a direct cycle episode (as opposed to a consolidated one).
     let cycle_tag = engine.resolve_or_create_entity("tag:cycle_episode")?;
@@ -745,11 +736,7 @@ pub fn index_cycle_episode(
     // Tag: progress outcome for targeted queries.
     let progress_tag_label = format!("tag:progress_{progress}");
     let progress_tag = engine.resolve_or_create_entity(&progress_tag_label)?;
-    triples.push(Triple::new(
-        episode_id,
-        predicates.has_tag,
-        progress_tag,
-    ));
+    triples.push(Triple::new(episode_id, predicates.has_tag, progress_tag));
 
     // Link to the goal so symbol-based recall can find this episode.
     if let Some(gid) = goal_id {
@@ -767,11 +754,7 @@ pub fn index_cycle_episode(
     // from_cycle: link to a cycle-number entity for temporal ordering queries.
     let cycle_entity_label = format!("cycle:{cycle_count}");
     let cycle_sym = engine.resolve_or_create_entity(&cycle_entity_label)?;
-    triples.push(Triple::new(
-        episode_id,
-        predicates.from_cycle,
-        cycle_sym,
-    ));
+    triples.push(Triple::new(episode_id, predicates.from_cycle, cycle_sym));
 
     // Provenance — record at full confidence since this is a direct agent action.
     let reason = format!(
@@ -1230,13 +1213,19 @@ mod tests {
         let mut wm = WorkingMemory::new(3);
 
         // Fill to capacity with entries of varying relevance.
-        let id1 = wm.push(make_entry(WorkingMemoryKind::Observation, "low", 1)).unwrap();
+        let id1 = wm
+            .push(make_entry(WorkingMemoryKind::Observation, "low", 1))
+            .unwrap();
         wm.update_relevance(id1, 0.3);
 
-        let id2 = wm.push(make_entry(WorkingMemoryKind::Observation, "medium", 1)).unwrap();
+        let id2 = wm
+            .push(make_entry(WorkingMemoryKind::Observation, "medium", 1))
+            .unwrap();
         wm.update_relevance(id2, 0.6);
 
-        let id3 = wm.push(make_entry(WorkingMemoryKind::Observation, "high", 1)).unwrap();
+        let id3 = wm
+            .push(make_entry(WorkingMemoryKind::Observation, "high", 1))
+            .unwrap();
         wm.update_relevance(id3, 0.9);
 
         assert_eq!(wm.len(), 3);
@@ -1249,8 +1238,14 @@ mod tests {
 
         // Still at capacity, but the low-relevance entry was evicted.
         assert_eq!(wm.len(), 3);
-        assert!(wm.get(id1).is_none(), "low-relevance entry should be evicted");
-        assert!(wm.get(id2).is_some(), "medium-relevance entry should remain");
+        assert!(
+            wm.get(id1).is_none(),
+            "low-relevance entry should be evicted"
+        );
+        assert!(
+            wm.get(id2).is_some(),
+            "medium-relevance entry should remain"
+        );
         assert!(wm.get(id3).is_some(), "high-relevance entry should remain");
         assert!(wm.get(id4).is_some(), "priority entry should be added");
     }
@@ -1258,7 +1253,8 @@ mod tests {
     #[test]
     fn push_priority_succeeds_when_not_full() {
         let mut wm = WorkingMemory::new(5);
-        wm.push(make_entry(WorkingMemoryKind::Observation, "existing", 1)).unwrap();
+        wm.push(make_entry(WorkingMemoryKind::Observation, "existing", 1))
+            .unwrap();
 
         let mut priority_entry = make_entry(WorkingMemoryKind::Observation, "priority", 2);
         priority_entry.relevance = 0.95;
@@ -1559,9 +1555,7 @@ mod tests {
         let mut wm = WorkingMemory::new(20);
 
         // ToolResult entry with a real symbol — eligible for consolidation.
-        let sym = engine
-            .resolve_or_create_entity("some:concept")
-            .unwrap();
+        let sym = engine.resolve_or_create_entity("some:concept").unwrap();
         wm.push(WorkingMemoryEntry {
             id: 0,
             content: "Tool result (kg_query):\nfound concept".into(),
@@ -1595,7 +1589,10 @@ mod tests {
         assert!(
             summary_entities.is_empty(),
             "summary:* entities must not be created (got: {:?})",
-            summary_entities.iter().map(|m| &m.label).collect::<Vec<_>>()
+            summary_entities
+                .iter()
+                .map(|m| &m.label)
+                .collect::<Vec<_>>()
         );
 
         // Episode entity label should embed the content excerpt.
@@ -1623,11 +1620,18 @@ mod tests {
         let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
         let predicates = test_predicates(&engine);
 
-        let goal_sym = engine
-            .resolve_or_create_entity("goal:learn_rust")
-            .unwrap();
+        let goal_sym = engine.resolve_or_create_entity("goal:learn_rust").unwrap();
 
-        index_cycle_episode(&engine, &predicates, 1, "learn rust", Some(goal_sym), "nlu_parse", "advanced").unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            1,
+            "learn rust",
+            Some(goal_sym),
+            "nlu_parse",
+            "advanced",
+        )
+        .unwrap();
 
         let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
         assert_eq!(episodes.len(), 1);
@@ -1648,9 +1652,36 @@ mod tests {
         let engine = crate::engine::Engine::new(crate::engine::EngineConfig::default()).unwrap();
         let predicates = test_predicates(&engine);
 
-        index_cycle_episode(&engine, &predicates, 1, "goal A", None, "tool_a", "advanced").unwrap();
-        index_cycle_episode(&engine, &predicates, 2, "goal B", None, "tool_b", "completed").unwrap();
-        index_cycle_episode(&engine, &predicates, 3, "goal C", None, "tool_c", "no_change").unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            1,
+            "goal A",
+            None,
+            "tool_a",
+            "advanced",
+        )
+        .unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            2,
+            "goal B",
+            None,
+            "tool_b",
+            "completed",
+        )
+        .unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            3,
+            "goal C",
+            None,
+            "tool_c",
+            "no_change",
+        )
+        .unwrap();
 
         let episodes = recall_recent_episodes(&engine, &predicates, 2).unwrap();
         assert_eq!(episodes.len(), 2);
@@ -1669,7 +1700,16 @@ mod tests {
         let predicates = test_predicates(&engine);
 
         let goal_sym = engine.resolve_or_create_entity("goal:my_goal").unwrap();
-        index_cycle_episode(&engine, &predicates, 5, "my goal", Some(goal_sym), "search", "advanced").unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            5,
+            "my goal",
+            Some(goal_sym),
+            "search",
+            "advanced",
+        )
+        .unwrap();
 
         let episodes = recall_episodes(&engine, &[goal_sym], &predicates, 5, None).unwrap();
         assert_eq!(episodes.len(), 1);
@@ -1682,8 +1722,26 @@ mod tests {
         let predicates = test_predicates(&engine);
 
         // Indexing the same cycle twice should not error (resolve_or_create_entity is idempotent).
-        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
-        index_cycle_episode(&engine, &predicates, 7, "goal X", None, "tool_x", "advanced").unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            7,
+            "goal X",
+            None,
+            "tool_x",
+            "advanced",
+        )
+        .unwrap();
+        index_cycle_episode(
+            &engine,
+            &predicates,
+            7,
+            "goal X",
+            None,
+            "tool_x",
+            "advanced",
+        )
+        .unwrap();
 
         // Still exactly one episode (triples are deduplicated).
         let episodes = recall_recent_episodes(&engine, &predicates, 10).unwrap();
@@ -1729,12 +1787,20 @@ mod tests {
             .unwrap();
         let mem_type_sym = engine.resolve_or_create_entity("episodic_memory").unwrap();
         engine
-            .add_triple(&Triple::new(episode_id, predicates.memory_type, mem_type_sym))
+            .add_triple(&Triple::new(
+                episode_id,
+                predicates.memory_type,
+                mem_type_sym,
+            ))
             .unwrap();
         let summary_label = format!("summary:{excerpt}");
         let summary_sym = engine.resolve_or_create_entity(&summary_label).unwrap();
         engine
-            .add_triple(&Triple::new(episode_id, predicates.has_summary, summary_sym))
+            .add_triple(&Triple::new(
+                episode_id,
+                predicates.has_summary,
+                summary_sym,
+            ))
             .unwrap();
         episode_id
     }

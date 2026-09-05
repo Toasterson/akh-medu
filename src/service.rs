@@ -146,10 +146,7 @@ pub fn generate_plist(config: &LaunchdConfig) -> String {
         xml_escape(&config.program.to_string_lossy())
     ));
     for arg in &config.program_args {
-        args_xml.push_str(&format!(
-            "        <string>{}</string>\n",
-            xml_escape(arg)
-        ));
+        args_xml.push_str(&format!("        <string>{}</string>\n", xml_escape(arg)));
     }
 
     let mut env_xml = String::new();
@@ -273,10 +270,7 @@ fn find_akhomed() -> ServiceResult<PathBuf> {
 
     // 2. Search PATH via `which`.
     if cfg!(target_os = "macos") {
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("akhomed")
-            .output()
-        {
+        if let Ok(output) = std::process::Command::new("which").arg("akhomed").output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -633,10 +627,12 @@ mod tests {
         if let Ok(config) = default_config(None) {
             assert_eq!(config.label, "dev.akh-medu.akhomed");
             assert!(config.plist_path.to_string_lossy().contains("LaunchAgents"));
-            assert!(config
-                .plist_path
-                .to_string_lossy()
-                .contains("dev.akh-medu.akhomed.plist"));
+            assert!(
+                config
+                    .plist_path
+                    .to_string_lossy()
+                    .contains("dev.akh-medu.akhomed.plist")
+            );
             assert!(config.log_dir.to_string_lossy().contains("Logs/akh-medu"));
             assert!(config.keep_alive);
             assert_eq!(config.nice, 10);

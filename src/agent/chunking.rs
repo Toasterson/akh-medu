@@ -40,7 +40,9 @@ pub enum ChunkingError {
     #[error("trace extraction failed for goal \"{goal_description}\": {reason}")]
     #[diagnostic(
         code(akh::agent::chunking::trace_extraction_failed),
-        help("ensure the goal was executed with at least 2 OODA cycles before attempting compilation")
+        help(
+            "ensure the goal was executed with at least 2 OODA cycles before attempting compilation"
+        )
     )]
     TraceExtractionFailed {
         goal_description: String,
@@ -314,7 +316,9 @@ pub fn extract_trace(goal_id: SymbolId, wm: &WorkingMemory) -> ChunkingResult<Ve
                 .find("reasoning=\"")
                 .and_then(|start| {
                     let begin = start + 11;
-                    rest[begin..].find('"').map(|end| rest[begin..begin + end].to_string())
+                    rest[begin..]
+                        .find('"')
+                        .map(|end| rest[begin..begin + end].to_string())
                 })
                 .unwrap_or_default();
 
@@ -487,7 +491,12 @@ pub fn to_decomposition_method(learned: &LearnedMethod) -> DecompositionMethod {
         .iter()
         .enumerate()
         .map(|(i, step)| SubtaskTemplate {
-            description_template: format!("Step {}: {} with {}", i + 1, step.tool, step.arg_pattern),
+            description_template: format!(
+                "Step {}: {} with {}",
+                i + 1,
+                step.tool,
+                step.arg_pattern
+            ),
             priority_offset: -(i as i8 * 5),
             criteria_template: step.expected_outcome.clone(),
         })
@@ -499,11 +508,7 @@ pub fn to_decomposition_method(learned: &LearnedMethod) -> DecompositionMethod {
         .collect();
 
     // Build keyword hints from tool names and the precondition pattern.
-    let mut keyword_hints: Vec<String> = learned
-        .steps
-        .iter()
-        .map(|s| s.tool.clone())
-        .collect();
+    let mut keyword_hints: Vec<String> = learned.steps.iter().map(|s| s.tool.clone()).collect();
     // Add a few words from the precondition pattern.
     for word in learned.precondition_pattern.split_whitespace().take(3) {
         let w = word.to_lowercase();
@@ -694,9 +699,8 @@ mod tests {
     fn make_wm_with_decisions(goal_id: u64, tools: &[&str]) -> WorkingMemory {
         let mut wm = WorkingMemory::new(100);
         for (i, tool) in tools.iter().enumerate() {
-            let content = format!(
-                "Decide: tool={tool}, goal=\"{goal_id}\", reasoning=\"step {i}\""
-            );
+            let content =
+                format!("Decide: tool={tool}, goal=\"{goal_id}\", reasoning=\"step {i}\"");
             let _ = wm.push(WorkingMemoryEntry {
                 id: 0,
                 content,
@@ -749,8 +753,16 @@ mod tests {
         .unwrap();
 
         let trace = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "find concepts".into(), cycle: 1 },
-            TraceStep { tool: "reason".into(), input_summary: "analyze".into(), cycle: 2 },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "find concepts".into(),
+                cycle: 1,
+            },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "analyze".into(),
+                cycle: 2,
+            },
         ];
 
         let steps = generalize_trace(&trace, &engine).unwrap();
@@ -784,8 +796,16 @@ mod tests {
 
         let goal = make_goal(1, "explore knowledge graph");
         let steps = vec![
-            GeneralizedStep { tool: "kg_query".into(), arg_pattern: "find {Entity}".into(), expected_outcome: "kg_query_result".into() },
-            GeneralizedStep { tool: "reason".into(), arg_pattern: "analyze results".into(), expected_outcome: "reason_result".into() },
+            GeneralizedStep {
+                tool: "kg_query".into(),
+                arg_pattern: "find {Entity}".into(),
+                expected_outcome: "kg_query_result".into(),
+            },
+            GeneralizedStep {
+                tool: "reason".into(),
+                arg_pattern: "analyze results".into(),
+                expected_outcome: "reason_result".into(),
+            },
         ];
 
         let method = compile_method(&goal, steps, &engine, 10);
@@ -948,12 +968,28 @@ mod tests {
     #[test]
     fn traces_similar_same_sequence() {
         let a = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "a".into(), cycle: 1 },
-            TraceStep { tool: "reason".into(), input_summary: "b".into(), cycle: 2 },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "a".into(),
+                cycle: 1,
+            },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "b".into(),
+                cycle: 2,
+            },
         ];
         let b = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "x".into(), cycle: 3 },
-            TraceStep { tool: "reason".into(), input_summary: "y".into(), cycle: 4 },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "x".into(),
+                cycle: 3,
+            },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "y".into(),
+                cycle: 4,
+            },
         ];
         assert!(traces_similar(&a, &b));
     }
@@ -961,24 +997,50 @@ mod tests {
     #[test]
     fn traces_similar_different_sequence() {
         let a = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "a".into(), cycle: 1 },
-            TraceStep { tool: "reason".into(), input_summary: "b".into(), cycle: 2 },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "a".into(),
+                cycle: 1,
+            },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "b".into(),
+                cycle: 2,
+            },
         ];
         let b = vec![
-            TraceStep { tool: "reason".into(), input_summary: "x".into(), cycle: 3 },
-            TraceStep { tool: "kg_query".into(), input_summary: "y".into(), cycle: 4 },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "x".into(),
+                cycle: 3,
+            },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "y".into(),
+                cycle: 4,
+            },
         ];
         assert!(!traces_similar(&a, &b));
     }
 
     #[test]
     fn traces_similar_different_length() {
-        let a = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "a".into(), cycle: 1 },
-        ];
+        let a = vec![TraceStep {
+            tool: "kg_query".into(),
+            input_summary: "a".into(),
+            cycle: 1,
+        }];
         let b = vec![
-            TraceStep { tool: "kg_query".into(), input_summary: "x".into(), cycle: 3 },
-            TraceStep { tool: "reason".into(), input_summary: "y".into(), cycle: 4 },
+            TraceStep {
+                tool: "kg_query".into(),
+                input_summary: "x".into(),
+                cycle: 3,
+            },
+            TraceStep {
+                tool: "reason".into(),
+                input_summary: "y".into(),
+                cycle: 4,
+            },
         ];
         assert!(!traces_similar(&a, &b));
     }
@@ -1138,7 +1200,9 @@ mod tests {
             for (i, tool) in ["kg_query", "reason", "kg_mutate"].iter().enumerate() {
                 let _ = wm.push(WorkingMemoryEntry {
                     id: 0,
-                    content: format!("Decide: tool={tool}, goal=\"{goal_id}\", reasoning=\"step {i}\""),
+                    content: format!(
+                        "Decide: tool={tool}, goal=\"{goal_id}\", reasoning=\"step {i}\""
+                    ),
                     symbols: vec![],
                     kind: WorkingMemoryKind::Decision,
                     timestamp: 0,

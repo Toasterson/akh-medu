@@ -161,10 +161,7 @@ impl LibraryLearner {
                     message: format!("failed to create category value: {e}"),
                 })?;
             let occ_val = engine
-                .create_symbol(
-                    SymbolKind::Entity,
-                    format!("val:{}", abs.occurrences),
-                )
+                .create_symbol(SymbolKind::Entity, format!("val:{}", abs.occurrences))
                 .map_err(|e| AgentError::ToolExecution {
                     tool_name: "library_learn".into(),
                     message: format!("failed to create occurrence value: {e}"),
@@ -178,10 +175,12 @@ impl LibraryLearner {
 
             for mut triple in triples {
                 triple.compartment_id = Some(compartment.to_string());
-                engine.add_triple(&triple).map_err(|e| AgentError::ToolExecution {
-                    tool_name: "library_learn".into(),
-                    message: format!("failed to add template triple: {e}"),
-                })?;
+                engine
+                    .add_triple(&triple)
+                    .map_err(|e| AgentError::ToolExecution {
+                        tool_name: "library_learn".into(),
+                        message: format!("failed to add template triple: {e}"),
+                    })?;
             }
 
             // Encode as VSA vector for similarity retrieval
@@ -264,12 +263,27 @@ fn reconstruct_ast(
         return None;
     }
 
-    let param_count = triples.iter().filter(|t| t.predicate == preds.has_param).count();
-    let field_count = triples.iter().filter(|t| t.predicate == preds.has_field).count();
-    let variant_count = triples.iter().filter(|t| t.predicate == preds.has_variant).count();
-    let method_count = triples.iter().filter(|t| t.predicate == preds.has_method).count();
+    let param_count = triples
+        .iter()
+        .filter(|t| t.predicate == preds.has_param)
+        .count();
+    let field_count = triples
+        .iter()
+        .filter(|t| t.predicate == preds.has_field)
+        .count();
+    let variant_count = triples
+        .iter()
+        .filter(|t| t.predicate == preds.has_variant)
+        .count();
+    let method_count = triples
+        .iter()
+        .filter(|t| t.predicate == preds.has_method)
+        .count();
     let has_return = triples.iter().any(|t| t.predicate == preds.returns_type);
-    let derive_count = triples.iter().filter(|t| t.predicate == preds.derives_trait).count();
+    let derive_count = triples
+        .iter()
+        .filter(|t| t.predicate == preds.derives_trait)
+        .count();
     let defines_fn = triples.iter().any(|t| t.predicate == preds.defines_fn);
     let defines_struct = triples.iter().any(|t| t.predicate == preds.defines_struct);
     let defines_enum = triples.iter().any(|t| t.predicate == preds.defines_enum);
@@ -298,9 +312,7 @@ fn reconstruct_ast(
             })
         } else {
             // Module-like container
-            Some(SimplifiedAst::Block {
-                children: vec![],
-            })
+            Some(SimplifiedAst::Block { children: vec![] })
         }
     } else if defines_struct || field_count > 0 {
         Some(SimplifiedAst::Struct {
@@ -380,7 +392,7 @@ fn ensure_patterns_microtheory(engine: &Engine) -> AgentResult<SymbolId> {
 mod tests {
     use super::*;
     use crate::engine::EngineConfig;
-    use crate::reason::anti_unify::{GeneralizedAst, AstSlot, AntiUnifyVar};
+    use crate::reason::anti_unify::{AntiUnifyVar, AstSlot, GeneralizedAst};
     use crate::vsa::Dimension;
 
     /// Create an engine with a temp data dir so provenance is available.
@@ -538,16 +550,29 @@ mod tests {
         };
 
         let template = CodeTemplate::from_abstraction(&abs);
-        assert!(template.is_some(), "should create template from function abstraction");
+        assert!(
+            template.is_some(),
+            "should create template from function abstraction"
+        );
 
         let t = template.unwrap();
-        assert!(t.name.starts_with("learned:"), "name should start with 'learned:': {}", t.name);
+        assert!(
+            t.name.starts_with("learned:"),
+            "name should start with 'learned:': {}",
+            t.name
+        );
         assert_eq!(t.category, "learned-function");
 
         // Instantiate with default params
         let code = t.instantiate(&std::collections::HashMap::new()).unwrap();
-        assert!(code.contains("fn "), "should generate function scaffold: {code}");
-        assert!(code.contains("Learned pattern:"), "should include pattern comment: {code}");
+        assert!(
+            code.contains("fn "),
+            "should generate function scaffold: {code}"
+        );
+        assert!(
+            code.contains("Learned pattern:"),
+            "should include pattern comment: {code}"
+        );
     }
 
     #[test]

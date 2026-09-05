@@ -27,12 +27,13 @@ impl Tool for MemoryRecallTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "memory_recall".into(),
-            description: "Recall episodic memories matching query terms (fuzzy -- terms need not be \
+            description:
+                "Recall episodic memories matching query terms (fuzzy -- terms need not be \
                           exact symbol names; 'cluster' matches `cluster-topology`). Returns \
                           each episode's stored FACTS and tags inline, so you can answer \
                           directly without further kg_query drill-down. Recency fallback if \
                           nothing matches."
-                .into(),
+                    .into(),
             parameters: vec![
                 ToolParam {
                     name: "query_symbols".into(),
@@ -155,8 +156,8 @@ impl Tool for MemoryRecallTool {
                 // 4. Relevance score = how many query terms appear anywhere in the
                 //    episode's text (summary + facts + tags). Surfaces the on-topic
                 //    episode even when the recency pool is large.
-                let blob = format!("{} {} {}", ep.summary, facts.join(" "), tags.join(" "))
-                    .to_lowercase();
+                let blob =
+                    format!("{} {} {}", ep.summary, facts.join(" "), tags.join(" ")).to_lowercase();
                 let score = terms.iter().filter(|t| blob.contains(t.as_str())).count();
                 Rendered {
                     symbol_id: ep.symbol_id,
@@ -205,12 +206,13 @@ impl Tool for MemoryRecallTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "memory_recall".into(),
-            description: "Recall episodic memories matching query terms (fuzzy -- terms need not be \
+            description:
+                "Recall episodic memories matching query terms (fuzzy -- terms need not be \
                           exact symbol names; 'cluster' matches `cluster-topology`). Returns \
                           each episode's stored FACTS and tags inline, so you can answer \
                           directly without further kg_query drill-down. Recency fallback if \
                           nothing matches."
-                .into(),
+                    .into(),
             parameters: vec![
                 ToolParamSchema::required(
                     "query_symbols",

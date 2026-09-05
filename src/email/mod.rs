@@ -20,12 +20,12 @@ pub use connector::{
     MockConnector, RawEmail,
 };
 pub use error::{EmailError, EmailResult};
+pub use extract::{
+    ActionItemGoalSpec, ExtractedItem, ExtractedItemKind, ExtractionPredicates, ExtractionResult,
+    ExtractionScope, SourceField,
+};
 pub use parser::{ParsedEmail, extract_domain, parse_raw};
 pub use threading::{ThreadNode, ThreadTree, build_threads};
-pub use extract::{
-    ActionItemGoalSpec, ExtractionPredicates, ExtractionResult, ExtractionScope, ExtractedItem,
-    ExtractedItemKind, SourceField,
-};
 pub use triage::{EmailRoute, SenderStats, TriageEngine, TriagePredicates, TriageResult};
 
 use std::collections::VecDeque;
@@ -242,10 +242,7 @@ impl EmailChannel {
                             match parse_raw(raw) {
                                 Ok(parsed) => handle.push_email(&parsed),
                                 Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to parse email uid={}: {e}",
-                                        raw.uid
-                                    );
+                                    tracing::warn!("Failed to parse email uid={}: {e}", raw.uid);
                                 }
                             }
                         }
@@ -313,10 +310,7 @@ impl std::fmt::Debug for EmailChannel {
         f.debug_struct("EmailChannel")
             .field("id", &self.id)
             .field("connected", &self.connected.load(Ordering::Relaxed))
-            .field(
-                "pending_inbound",
-                &self.inbound.lock().unwrap().len(),
-            )
+            .field("pending_inbound", &self.inbound.lock().unwrap().len())
             .field("config_host", &self.config.host)
             .finish()
     }

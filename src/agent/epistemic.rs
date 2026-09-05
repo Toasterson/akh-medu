@@ -293,28 +293,29 @@ impl EpistemicStateManager {
 
     /// Register an agent for epistemic tracking.
     pub fn register_agent(&mut self, agent_id: SymbolId) {
-        self.profiles.entry(agent_id.get()).or_insert_with(|| {
-            EpistemicProfile {
+        self.profiles
+            .entry(agent_id.get())
+            .or_insert_with(|| EpistemicProfile {
                 agent_id,
                 known: Vec::new(),
                 believed: Vec::new(),
                 ignorance: Vec::new(),
                 updated_at: 0,
-            }
-        });
+            });
     }
 
     /// Assert that an agent knows a proposition.
     pub fn assert_knows(&mut self, agent: SymbolId, prop: PropositionRef) {
-        let profile = self.profiles.entry(agent.get()).or_insert_with(|| {
-            EpistemicProfile {
+        let profile = self
+            .profiles
+            .entry(agent.get())
+            .or_insert_with(|| EpistemicProfile {
                 agent_id: agent,
                 known: Vec::new(),
                 believed: Vec::new(),
                 ignorance: Vec::new(),
                 updated_at: 0,
-            }
-        });
+            });
         if !profile.known.contains(&prop) {
             profile.known.push(prop.clone());
         }
@@ -325,15 +326,16 @@ impl EpistemicStateManager {
 
     /// Assert that an agent believes a proposition (lower confidence than Knows).
     pub fn assert_believes(&mut self, agent: SymbolId, prop: PropositionRef) {
-        let profile = self.profiles.entry(agent.get()).or_insert_with(|| {
-            EpistemicProfile {
+        let profile = self
+            .profiles
+            .entry(agent.get())
+            .or_insert_with(|| EpistemicProfile {
                 agent_id: agent,
                 known: Vec::new(),
                 believed: Vec::new(),
                 ignorance: Vec::new(),
                 updated_at: 0,
-            }
-        });
+            });
         if !profile.believed.contains(&prop) && !profile.known.contains(&prop) {
             profile.believed.push(prop.clone());
         }
@@ -343,15 +345,16 @@ impl EpistemicStateManager {
 
     /// Mark that an agent is ignorant about a proposition.
     pub fn mark_ignorant(&mut self, agent: SymbolId, prop: PropositionRef) {
-        let profile = self.profiles.entry(agent.get()).or_insert_with(|| {
-            EpistemicProfile {
+        let profile = self
+            .profiles
+            .entry(agent.get())
+            .or_insert_with(|| EpistemicProfile {
                 agent_id: agent,
                 known: Vec::new(),
                 believed: Vec::new(),
                 ignorance: Vec::new(),
                 updated_at: 0,
-            }
-        });
+            });
         if !profile.ignorance.contains(&prop) {
             profile.ignorance.push(prop);
         }
@@ -380,11 +383,7 @@ impl EpistemicStateManager {
     }
 
     /// Compute common knowledge between two agents.
-    pub fn common_knowledge(
-        &self,
-        agent_a: SymbolId,
-        agent_b: SymbolId,
-    ) -> Vec<PropositionRef> {
+    pub fn common_knowledge(&self, agent_a: SymbolId, agent_b: SymbolId) -> Vec<PropositionRef> {
         let a_known = self.profiles.get(&agent_a.get()).map(|p| &p.known);
         let b_known = self.profiles.get(&agent_b.get()).map(|p| &p.known);
 
@@ -413,8 +412,16 @@ impl EpistemicStateManager {
             .cloned()
             .unwrap_or_default();
 
-        let our_advantages: Vec<_> = a_known.iter().filter(|p| !b_known.contains(p)).cloned().collect();
-        let their_advantages: Vec<_> = b_known.iter().filter(|p| !a_known.contains(p)).cloned().collect();
+        let our_advantages: Vec<_> = a_known
+            .iter()
+            .filter(|p| !b_known.contains(p))
+            .cloned()
+            .collect();
+        let their_advantages: Vec<_> = b_known
+            .iter()
+            .filter(|p| !a_known.contains(p))
+            .cloned()
+            .collect();
 
         let assessment = if our_advantages.len() > their_advantages.len() + 2 {
             StrategicAssessment::InformationSuperior
@@ -593,11 +600,7 @@ impl ToMEngine {
     }
 
     /// Build a theory-of-mind model of a target agent.
-    pub fn build_model(
-        &self,
-        target: SymbolId,
-        epistemic_mgr: &EpistemicStateManager,
-    ) -> ToMModel {
+    pub fn build_model(&self, target: SymbolId, epistemic_mgr: &EpistemicStateManager) -> ToMModel {
         let profile = epistemic_mgr.get_profile(target);
 
         let (their_knowledge, their_beliefs) = match profile {
@@ -697,7 +700,10 @@ mod tests {
     #[test]
     fn modality_confidence_ordering() {
         assert!(EpistemicModality::Knows.confidence() > EpistemicModality::Believes.confidence());
-        assert!(EpistemicModality::Believes.confidence() > EpistemicModality::ConsidersPossible.confidence());
+        assert!(
+            EpistemicModality::Believes.confidence()
+                > EpistemicModality::ConsidersPossible.confidence()
+        );
         assert_eq!(EpistemicModality::IgnorantAbout.confidence(), 0.0);
     }
 
@@ -820,7 +826,10 @@ mod tests {
         };
 
         mgr.apply_event(&event);
-        assert_eq!(mgr.query_modality(recipient, &prop), EpistemicModality::Knows);
+        assert_eq!(
+            mgr.query_modality(recipient, &prop),
+            EpistemicModality::Knows
+        );
         assert_eq!(
             mgr.query_modality(eavesdropper, &prop),
             EpistemicModality::IgnorantAbout
@@ -882,7 +891,10 @@ mod tests {
             source_reliability: 0.8,
         };
         mgr.apply_event(&event);
-        assert_eq!(mgr.query_modality(agent, &prop), EpistemicModality::Believes);
+        assert_eq!(
+            mgr.query_modality(agent, &prop),
+            EpistemicModality::Believes
+        );
     }
 
     // ── 19c: Theory of Mind ───────────────────────────────────────
@@ -933,7 +945,10 @@ mod tests {
 
     #[test]
     fn strategic_assessment_labels() {
-        assert_eq!(StrategicAssessment::InformationSuperior.as_label(), "information superior");
+        assert_eq!(
+            StrategicAssessment::InformationSuperior.as_label(),
+            "information superior"
+        );
         assert_eq!(StrategicAssessment::Unknown.as_label(), "unknown");
     }
 }

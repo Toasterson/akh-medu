@@ -27,7 +27,9 @@ pub enum ConstraintCheckError {
     #[error("constraint pipeline failed: {reason}")]
     #[diagnostic(
         code(akh::constraint::pipeline_failure),
-        help("The constraint checking pipeline encountered an internal error. The message was not emitted.")
+        help(
+            "The constraint checking pipeline encountered an internal error. The message was not emitted."
+        )
     )]
     PipelineFailure { reason: String },
 }
@@ -437,10 +439,7 @@ impl ConstraintChecker {
     /// Run a simplified check for non-grounded (legacy) messages.
     ///
     /// Only rate limiting applies — we have no structured claims to check.
-    pub fn check_ungrounded(
-        &mut self,
-        channel_id: &str,
-    ) -> CheckOutcome {
+    pub fn check_ungrounded(&mut self, channel_id: &str) -> CheckOutcome {
         let mut violations = Vec::new();
 
         if let Some(violation) = self.check_rate(channel_id) {
@@ -469,7 +468,8 @@ impl ConstraintChecker {
 
         for gt in &response.supporting_triples {
             // Reconstruct a Triple from the grounded triple's IDs.
-            let (Some(subj), Some(pred), Some(obj)) = (gt.subject_id, gt.predicate_id, gt.object_id)
+            let (Some(subj), Some(pred), Some(obj)) =
+                (gt.subject_id, gt.predicate_id, gt.object_id)
             else {
                 continue;
             };
@@ -485,12 +485,20 @@ impl ConstraintChecker {
             };
 
             let contradictions = crate::graph::contradiction::check_contradictions(
-                engine, &triple, &func_preds, &disjointness, None, None,
+                engine,
+                &triple,
+                &func_preds,
+                &disjointness,
+                None,
+                None,
             );
 
             for c in contradictions {
                 violations.push(ConstraintViolation::Contradiction {
-                    claim_label: format!("{} {} {}", gt.subject_label, gt.predicate_label, gt.object_label),
+                    claim_label: format!(
+                        "{} {} {}",
+                        gt.subject_label, gt.predicate_label, gt.object_label
+                    ),
                     contradicts: c.existing.subject,
                     description: format!("{:?}", c.kind),
                 });
@@ -511,13 +519,19 @@ impl ConstraintChecker {
 
             if conf < threshold {
                 violations.push(ConstraintViolation::BelowConfidence {
-                    claim_label: format!("{} {} {}", gt.subject_label, gt.predicate_label, gt.object_label),
+                    claim_label: format!(
+                        "{} {} {}",
+                        gt.subject_label, gt.predicate_label, gt.object_label
+                    ),
                     confidence: conf,
                     threshold,
                 });
             } else if conf < self.config.low_confidence_warning {
                 warnings.push(ConstraintWarning::LowConfidence {
-                    claim_label: format!("{} {} {}", gt.subject_label, gt.predicate_label, gt.object_label),
+                    claim_label: format!(
+                        "{} {} {}",
+                        gt.subject_label, gt.predicate_label, gt.object_label
+                    ),
                     confidence: conf,
                 });
             }
@@ -577,14 +591,18 @@ impl ConstraintChecker {
             // Check each entity in the triple for provenance.
             let ids = [gt.subject_id, gt.predicate_id, gt.object_id];
             let has_provenance = ids.iter().filter_map(|id| *id).any(|id| {
-                engine.provenance_of(id)
+                engine
+                    .provenance_of(id)
                     .map(|records| !records.is_empty())
                     .unwrap_or(false)
             });
 
             if !has_provenance && gt.derivation_tag.is_none() {
                 warnings.push(ConstraintWarning::Ungrounded {
-                    claim_label: format!("{} {} {}", gt.subject_label, gt.predicate_label, gt.object_label),
+                    claim_label: format!(
+                        "{} {} {}",
+                        gt.subject_label, gt.predicate_label, gt.object_label
+                    ),
                 });
             }
         }
@@ -689,30 +707,75 @@ mod tests {
 
     #[test]
     fn sensitivity_level_parsing() {
-        assert_eq!(SensitivityLevel::from_label("public"), Some(SensitivityLevel::Public));
-        assert_eq!(SensitivityLevel::from_label("Private"), Some(SensitivityLevel::Private));
-        assert_eq!(SensitivityLevel::from_label("HIGH"), Some(SensitivityLevel::High));
-        assert_eq!(SensitivityLevel::from_label("medium"), Some(SensitivityLevel::Medium));
-        assert_eq!(SensitivityLevel::from_label("confidential"), Some(SensitivityLevel::Private));
+        assert_eq!(
+            SensitivityLevel::from_label("public"),
+            Some(SensitivityLevel::Public)
+        );
+        assert_eq!(
+            SensitivityLevel::from_label("Private"),
+            Some(SensitivityLevel::Private)
+        );
+        assert_eq!(
+            SensitivityLevel::from_label("HIGH"),
+            Some(SensitivityLevel::High)
+        );
+        assert_eq!(
+            SensitivityLevel::from_label("medium"),
+            Some(SensitivityLevel::Medium)
+        );
+        assert_eq!(
+            SensitivityLevel::from_label("confidential"),
+            Some(SensitivityLevel::Private)
+        );
         assert_eq!(SensitivityLevel::from_label("xyz"), None);
     }
 
     #[test]
     fn sensitivity_required_channel() {
-        assert_eq!(SensitivityLevel::Public.required_channel_kind(), ChannelKind::Public);
-        assert_eq!(SensitivityLevel::Low.required_channel_kind(), ChannelKind::Social);
-        assert_eq!(SensitivityLevel::Medium.required_channel_kind(), ChannelKind::Trusted);
-        assert_eq!(SensitivityLevel::High.required_channel_kind(), ChannelKind::Operator);
-        assert_eq!(SensitivityLevel::Private.required_channel_kind(), ChannelKind::Operator);
+        assert_eq!(
+            SensitivityLevel::Public.required_channel_kind(),
+            ChannelKind::Public
+        );
+        assert_eq!(
+            SensitivityLevel::Low.required_channel_kind(),
+            ChannelKind::Social
+        );
+        assert_eq!(
+            SensitivityLevel::Medium.required_channel_kind(),
+            ChannelKind::Trusted
+        );
+        assert_eq!(
+            SensitivityLevel::High.required_channel_kind(),
+            ChannelKind::Operator
+        );
+        assert_eq!(
+            SensitivityLevel::Private.required_channel_kind(),
+            ChannelKind::Operator
+        );
     }
 
     #[test]
     fn channel_kind_trust_ordering() {
-        assert!(channel_kind_permits(ChannelKind::Operator, ChannelKind::Public));
-        assert!(channel_kind_permits(ChannelKind::Operator, ChannelKind::Operator));
-        assert!(channel_kind_permits(ChannelKind::Trusted, ChannelKind::Social));
-        assert!(!channel_kind_permits(ChannelKind::Social, ChannelKind::Trusted));
-        assert!(!channel_kind_permits(ChannelKind::Public, ChannelKind::Operator));
+        assert!(channel_kind_permits(
+            ChannelKind::Operator,
+            ChannelKind::Public
+        ));
+        assert!(channel_kind_permits(
+            ChannelKind::Operator,
+            ChannelKind::Operator
+        ));
+        assert!(channel_kind_permits(
+            ChannelKind::Trusted,
+            ChannelKind::Social
+        ));
+        assert!(!channel_kind_permits(
+            ChannelKind::Social,
+            ChannelKind::Trusted
+        ));
+        assert!(!channel_kind_permits(
+            ChannelKind::Public,
+            ChannelKind::Operator
+        ));
     }
 
     #[test]
@@ -726,7 +789,10 @@ mod tests {
             }],
             warnings: Vec::new(),
         };
-        assert_eq!(emission_decision(ChannelKind::Operator, &outcome), EmissionDecision::Emit);
+        assert_eq!(
+            emission_decision(ChannelKind::Operator, &outcome),
+            EmissionDecision::Emit
+        );
     }
 
     #[test]
@@ -740,16 +806,31 @@ mod tests {
             }],
             warnings: Vec::new(),
         };
-        assert_eq!(emission_decision(ChannelKind::Social, &outcome), EmissionDecision::Suppress);
+        assert_eq!(
+            emission_decision(ChannelKind::Social, &outcome),
+            EmissionDecision::Suppress
+        );
     }
 
     #[test]
     fn emission_decision_clean_always_emits() {
         let outcome = CheckOutcome::clean();
-        assert_eq!(emission_decision(ChannelKind::Public, &outcome), EmissionDecision::Emit);
-        assert_eq!(emission_decision(ChannelKind::Social, &outcome), EmissionDecision::Emit);
-        assert_eq!(emission_decision(ChannelKind::Trusted, &outcome), EmissionDecision::Emit);
-        assert_eq!(emission_decision(ChannelKind::Operator, &outcome), EmissionDecision::Emit);
+        assert_eq!(
+            emission_decision(ChannelKind::Public, &outcome),
+            EmissionDecision::Emit
+        );
+        assert_eq!(
+            emission_decision(ChannelKind::Social, &outcome),
+            EmissionDecision::Emit
+        );
+        assert_eq!(
+            emission_decision(ChannelKind::Trusted, &outcome),
+            EmissionDecision::Emit
+        );
+        assert_eq!(
+            emission_decision(ChannelKind::Operator, &outcome),
+            EmissionDecision::Emit
+        );
     }
 
     #[test]

@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use crate::agent::error::AgentResult;
 use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolParam, ToolSignature};
 use crate::agent::tool_graph::ToolGraphRegistrar;
-use crate::agent::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource};
+use crate::agent::tool_manifest::{
+    Capability, DangerInfo, DangerLevel, ToolManifest, ToolParamSchema, ToolSource,
+};
 use crate::engine::Engine;
 
 /// Introspect this akh's tools.
@@ -76,7 +78,10 @@ impl Tool for ToolQueryTool {
 
         let mut out = format!("{} tool(s) callable now:\n", live_sorted.len());
         for t in &live_sorted {
-            out.push_str(&format!("  {} [{}] — {}\n", t.name, t.origin, t.description));
+            out.push_str(&format!(
+                "  {} [{}] — {}\n",
+                t.name, t.origin, t.description
+            ));
         }
 
         // KG-only extras: labels are `tool:{name}`; compare on the bare name so a

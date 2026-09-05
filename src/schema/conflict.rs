@@ -349,7 +349,10 @@ mod tests {
             (bel_open.belief - bel_closed.belief).abs() < 1e-6,
             "equal-reliability sources must not silently favor one candidate: {bel_open:?} vs {bel_closed:?}"
         );
-        assert!(bel_open.belief > 0.0, "an asserted candidate still carries some belief");
+        assert!(
+            bel_open.belief > 0.0,
+            "an asserted candidate still carries some belief"
+        );
     }
 
     #[test]
@@ -393,6 +396,9 @@ mod tests {
         // Neither is driven all the way to zero — the flaky source's
         // assertion still exists in the KG and still carries *some* mass;
         // this is attenuation, not erasure.
-        assert!(bel_closed.plausibility > 0.0, "the losing candidate is not silently erased");
+        assert!(
+            bel_closed.plausibility > 0.0,
+            "the losing candidate is not silently erased"
+        );
     }
 }

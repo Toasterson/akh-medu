@@ -144,12 +144,18 @@ impl std::fmt::Display for TemporalProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Stable => write!(f, "Stable"),
-            Self::Decaying { half_life_secs } => write!(f, "Decaying(half_life={}s)", half_life_secs),
+            Self::Decaying { half_life_secs } => {
+                write!(f, "Decaying(half_life={}s)", half_life_secs)
+            }
             Self::Ephemeral { ttl_secs } => write!(f, "Ephemeral(ttl={}s)", ttl_secs),
             Self::Periodic {
                 period_secs,
                 phase_secs,
-            } => write!(f, "Periodic(period={}s, phase={}s)", period_secs, phase_secs),
+            } => write!(
+                f,
+                "Periodic(period={}s, phase={}s)",
+                period_secs, phase_secs
+            ),
         }
     }
 }
@@ -259,10 +265,8 @@ impl TemporalRegistry {
         }
         // located-at → Ephemeral (24 hours)
         if let Ok(id) = engine.lookup_symbol("located-at") {
-            reg.profiles.insert(
-                id,
-                TemporalProfile::Ephemeral { ttl_secs: 86400 },
-            );
+            reg.profiles
+                .insert(id, TemporalProfile::Ephemeral { ttl_secs: 86400 });
         }
 
         Ok(reg)
@@ -468,11 +472,7 @@ mod tests {
         reg.set_profile(rel, TemporalProfile::Ephemeral { ttl_secs: 100 })
             .unwrap();
 
-        let mut triple = Triple::new(
-            SymbolId::new(1).unwrap(),
-            rel,
-            SymbolId::new(3).unwrap(),
-        );
+        let mut triple = Triple::new(SymbolId::new(1).unwrap(), rel, SymbolId::new(3).unwrap());
         triple.timestamp = 1000;
 
         assert!(!reg.is_expired(&triple, 1050, 0.01));

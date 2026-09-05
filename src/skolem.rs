@@ -163,9 +163,12 @@ impl SkolemRegistry {
         skolem_id: SymbolId,
         concrete_entity: SymbolId,
     ) -> SkolemResult<&SkolemSymbol> {
-        let skolem = self.skolems.get_mut(&skolem_id).ok_or(SkolemError::NotFound {
-            id: skolem_id.get(),
-        })?;
+        let skolem = self
+            .skolems
+            .get_mut(&skolem_id)
+            .ok_or(SkolemError::NotFound {
+                id: skolem_id.get(),
+            })?;
 
         if let Some(existing) = skolem.grounded_to {
             return Err(SkolemError::AlreadyGrounded {
@@ -180,9 +183,12 @@ impl SkolemRegistry {
 
     /// Unground a Skolem (remove its concrete resolution).
     pub fn unground(&mut self, skolem_id: SymbolId) -> SkolemResult<()> {
-        let skolem = self.skolems.get_mut(&skolem_id).ok_or(SkolemError::NotFound {
-            id: skolem_id.get(),
-        })?;
+        let skolem = self
+            .skolems
+            .get_mut(&skolem_id)
+            .ok_or(SkolemError::NotFound {
+                id: skolem_id.get(),
+            })?;
         skolem.grounded_to = None;
         Ok(())
     }
@@ -208,11 +214,7 @@ impl SkolemRegistry {
     /// concrete triple satisfies the Skolem's existential.
     ///
     /// Returns the concrete entity if found, or None.
-    pub fn check_grounding(
-        &self,
-        engine: &Engine,
-        skolem_id: SymbolId,
-    ) -> Option<SymbolId> {
+    pub fn check_grounding(&self, engine: &Engine, skolem_id: SymbolId) -> Option<SymbolId> {
         let skolem = self.skolems.get(&skolem_id)?;
         if skolem.is_grounded() {
             return skolem.grounded_to;
@@ -270,10 +272,7 @@ impl SkolemRegistry {
 
     /// List all ungrounded Skolems.
     pub fn ungrounded(&self) -> Vec<&SkolemSymbol> {
-        self.skolems
-            .values()
-            .filter(|s| !s.is_grounded())
-            .collect()
+        self.skolems.values().filter(|s| !s.is_grounded()).collect()
     }
 
     /// Number of registered Skolems.
@@ -393,10 +392,7 @@ mod tests {
         registry.unground(skolem_id).unwrap();
         registry.ground(skolem_id, car2.id).unwrap();
 
-        assert_eq!(
-            registry.get(skolem_id).unwrap().grounded_to,
-            Some(car2.id)
-        );
+        assert_eq!(registry.get(skolem_id).unwrap().grounded_to, Some(car2.id));
     }
 
     #[test]
@@ -458,9 +454,7 @@ mod tests {
         let found = registry.find_for_existential(owns.id, alice.id).unwrap();
         assert_eq!(found.id, skolem.id);
 
-        assert!(registry
-            .find_for_existential(alice.id, owns.id)
-            .is_none());
+        assert!(registry.find_for_existential(alice.id, owns.id).is_none());
     }
 
     #[test]

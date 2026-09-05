@@ -299,10 +299,7 @@ impl TrainingDataCollector {
 
         let nlu = counters.get("nlu")?.map(|v| v.value()).unwrap_or(0) as usize;
         let nlg = counters.get("nlg")?.map(|v| v.value()).unwrap_or(0) as usize;
-        let elicitation = counters
-            .get("elic")?
-            .map(|v| v.value())
-            .unwrap_or(0) as usize;
+        let elicitation = counters.get("elic")?.map(|v| v.value()).unwrap_or(0) as usize;
 
         Ok(TrainingCounts {
             nlu,
@@ -407,8 +404,7 @@ mod tests {
     fn temp_collector() -> TrainingDataCollector {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("training.redb");
-        let collector =
-            TrainingDataCollector::open(&path, CollectorConfig::default()).unwrap();
+        let collector = TrainingDataCollector::open(&path, CollectorConfig::default()).unwrap();
         // Leak the dir so it doesn't get cleaned up while we use the DB.
         std::mem::forget(dir);
         collector
@@ -471,9 +467,7 @@ mod tests {
     #[test]
     fn pairs_of_kind_filters() {
         let mut collector = temp_collector();
-        collector
-            .record_nlu("hello", "{}", 1, 0.8)
-            .unwrap();
+        collector.record_nlu("hello", "{}", 1, 0.8).unwrap();
         collector
             .record_nlg("triple", "text", "narrative", 0.9)
             .unwrap();

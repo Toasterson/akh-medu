@@ -149,7 +149,10 @@ impl Template {
         }
 
         stored_text.push_str(&text[last_end..]);
-        Ok(Self { stored_text, fact_queries })
+        Ok(Self {
+            stored_text,
+            fact_queries,
+        })
     }
 
     /// Render the template: substitute captures and pre-resolved facts.
@@ -393,7 +396,11 @@ fn query_vsa(entity: &str, k: usize, engine: &Engine) -> Option<Vec<String>> {
         .filter(|label| !is_metadata_label(label))
         .collect();
 
-    if labels.is_empty() { None } else { Some(labels) }
+    if labels.is_empty() {
+        None
+    } else {
+        Some(labels)
+    }
 }
 
 fn query_competence(entity: &str, engine: &Engine) -> Option<Vec<String>> {
@@ -530,7 +537,11 @@ fn parse_fact_spec(inner: &str) -> ElizaResult<FactQuery> {
         }
     };
 
-    Ok(FactQuery { fact_index, kind, entity })
+    Ok(FactQuery {
+        fact_index,
+        kind,
+        entity,
+    })
 }
 
 /// Parse `{N}` as a capture reference or anything else as a literal.
@@ -666,20 +677,29 @@ mod tests {
 
     #[test]
     fn triple_to_nl_known_predicates() {
-        assert_eq!(triple_to_nl("Rust", "is-a", "language"), "Rust is a language");
+        assert_eq!(
+            triple_to_nl("Rust", "is-a", "language"),
+            "Rust is a language"
+        );
         assert_eq!(triple_to_nl("X", "part-of", "Y"), "X is part of Y");
         assert_eq!(triple_to_nl("A", "member-of", "B"), "A is a member of B");
     }
 
     #[test]
     fn triple_to_nl_unknown_predicate() {
-        assert_eq!(triple_to_nl("Ennead", "worships", "Ra"), "Ennead worships Ra");
+        assert_eq!(
+            triple_to_nl("Ennead", "worships", "Ra"),
+            "Ennead worships Ra"
+        );
     }
 
     #[test]
     fn format_facts_triple_joins_semicolons() {
         let facts = vec!["A is B".into(), "C is D".into()];
-        assert_eq!(format_facts(&facts, &FactQueryKind::Triple), "A is B; C is D");
+        assert_eq!(
+            format_facts(&facts, &FactQueryKind::Triple),
+            "A is B; C is D"
+        );
     }
 
     #[test]

@@ -280,7 +280,8 @@ impl<'e> ToolGraphRegistrar<'e> {
     // ── helpers ─────────────────────────────────────────────────────────────
 
     fn triple(&self, subject: SymbolId, predicate: SymbolId, object: SymbolId) -> AkhResult<()> {
-        self.engine.add_triple(&Triple::new(subject, predicate, object))
+        self.engine
+            .add_triple(&Triple::new(subject, predicate, object))
     }
 }
 
@@ -362,7 +363,8 @@ mod tests {
         let engine = make_engine();
         let reg = ToolGraphRegistrar::init(&engine).unwrap();
         let manifest = dummy_manifest("search");
-        reg.register_tool(&manifest, "akhomed", &["agent:tecton"]).unwrap();
+        reg.register_tool(&manifest, "akhomed", &["agent:tecton"])
+            .unwrap();
 
         // tool:search should now exist
         let subject = engine.lookup_symbol("tool:search").unwrap();
@@ -428,8 +430,10 @@ mod tests {
     fn list_all_tools_returns_registered() {
         let engine = make_engine();
         let reg = ToolGraphRegistrar::init(&engine).unwrap();
-        reg.register_tool(&dummy_manifest("alpha"), "akhomed", &[]).unwrap();
-        reg.register_tool(&dummy_manifest("beta"), "akhomed", &[]).unwrap();
+        reg.register_tool(&dummy_manifest("alpha"), "akhomed", &[])
+            .unwrap();
+        reg.register_tool(&dummy_manifest("beta"), "akhomed", &[])
+            .unwrap();
         let all = reg.list_all_tools();
         assert!(all.contains(&"tool:alpha".to_string()));
         assert!(all.contains(&"tool:beta".to_string()));
@@ -452,8 +456,8 @@ mod tests {
 
     #[test]
     fn reconcile_prunes_stale_akhomed_tools_keeps_remote() {
-        use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
         use crate::agent::AgentResult;
+        use crate::agent::tool::{Tool, ToolInput, ToolOutput, ToolSignature};
 
         struct T(&'static str);
         impl Tool for T {

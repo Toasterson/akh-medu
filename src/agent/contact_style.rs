@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::contact::{ContactError, ContactResult};
 
@@ -125,9 +125,20 @@ pub fn score_formality(text: &str) -> f32 {
 
     // Formal markers (positive).
     let formal_markers = [
-        "dear ", "sincerely", "regards", "respectfully", "please",
-        "thank you", "would you", "could you", "i would appreciate",
-        "kindly", "hereby", "furthermore", "therefore", "accordingly",
+        "dear ",
+        "sincerely",
+        "regards",
+        "respectfully",
+        "please",
+        "thank you",
+        "would you",
+        "could you",
+        "i would appreciate",
+        "kindly",
+        "hereby",
+        "furthermore",
+        "therefore",
+        "accordingly",
     ];
     for marker in &formal_markers {
         if lower.contains(marker) {
@@ -138,8 +149,8 @@ pub fn score_formality(text: &str) -> f32 {
 
     // Casual markers (negative).
     let casual_markers = [
-        "hey", "lol", "haha", "gonna", "wanna", "gotta", "btw",
-        "omg", "nah", "yeah", "yep", "nope", "sup", "yo ",
+        "hey", "lol", "haha", "gonna", "wanna", "gotta", "btw", "omg", "nah", "yeah", "yep",
+        "nope", "sup", "yo ",
     ];
     for marker in &casual_markers {
         if lower.contains(marker) {
@@ -343,7 +354,11 @@ impl StyleManager {
 
     /// Find contacts with similar communication style (by VSA prototype similarity).
     pub fn similar_style(&self, contact_id: &str, k: usize) -> Vec<(String, f64)> {
-        let target = match self.styles.get(contact_id).and_then(|s| s.style_prototype.as_ref()) {
+        let target = match self
+            .styles
+            .get(contact_id)
+            .and_then(|s| s.style_prototype.as_ref())
+        {
             Some(v) => v,
             None => return Vec::new(),
         };
@@ -499,7 +514,8 @@ mod tests {
 
     #[test]
     fn formality_heuristic() {
-        let formal = score_formality("Dear Professor, I would appreciate your feedback on my thesis.");
+        let formal =
+            score_formality("Dear Professor, I would appreciate your feedback on my thesis.");
         let casual = score_formality("hey lol what's up gonna grab coffee?");
         assert!(formal > casual);
     }

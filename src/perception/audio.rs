@@ -133,7 +133,11 @@ impl TwiddleTables {
             cos_table.push(angle.cos());
             sin_table.push(-angle.sin()); // negative: e^{-j 2π k n / N}
         }
-        Self { cos_table, sin_table, n }
+        Self {
+            cos_table,
+            sin_table,
+            n,
+        }
     }
 
     /// Compute positive-frequency DFT magnitudes for a real-valued frame.
@@ -242,11 +246,8 @@ fn audio_affect(mel_frames: &[Vec<f32>], n_mels: usize) -> PerceptualAffect {
     let n_frames = mel_frames.len() as f32;
 
     // Overall log energy level → arousal.
-    let total_energy: f32 = mel_frames
-        .iter()
-        .flat_map(|f| f.iter())
-        .sum::<f32>()
-        / (n_frames * n_mels as f32);
+    let total_energy: f32 =
+        mel_frames.iter().flat_map(|f| f.iter()).sum::<f32>() / (n_frames * n_mels as f32);
 
     let arousal = sigmoid(total_energy * 0.5).clamp(0.0, 1.0);
 
@@ -310,10 +311,7 @@ mod tests {
             .collect();
         let (features, _) = extract_audio_features(&samples, 16000, &cfg).unwrap();
         for &v in &features {
-            assert!(
-                v >= 0.0 && v <= 1.0,
-                "feature out of range [0,1]: {v}"
-            );
+            assert!(v >= 0.0 && v <= 1.0, "feature out of range [0,1]: {v}");
         }
     }
 

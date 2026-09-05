@@ -121,7 +121,9 @@ pub enum ElizaError {
 
 impl From<crate::error::VsaError> for ElizaError {
     fn from(e: crate::error::VsaError) -> Self {
-        ElizaError::Vsa { message: e.to_string() }
+        ElizaError::Vsa {
+            message: e.to_string(),
+        }
     }
 }
 

@@ -41,7 +41,10 @@ use crate::symbol::SymbolId;
 /// [`TaskError::BadInput`] diagnostic — this is the "grammar-constrained,
 /// schema-validated" reliability mechanism the ADR calls for, not a free-form
 /// string the tool has to guess at.
-fn parse_args<T: serde::de::DeserializeOwned>(input: &ToolInput, tool_name: &str) -> AgentResult<T> {
+fn parse_args<T: serde::de::DeserializeOwned>(
+    input: &ToolInput,
+    tool_name: &str,
+) -> AgentResult<T> {
     let value = serde_json::Value::Object(input.params.clone());
     serde_json::from_value(value).map_err(|e| {
         AgentError::Task(TaskError::BadInput {
@@ -57,7 +60,9 @@ fn parse_task_id(s: &str) -> TaskResult<SymbolId> {
         .ok()
         .and_then(SymbolId::new)
         .ok_or_else(|| TaskError::BadInput {
-            message: format!("invalid task id: \"{s}\" (expected the numeric id from `create`/`list`)"),
+            message: format!(
+                "invalid task id: \"{s}\" (expected the numeric id from `create`/`list`)"
+            ),
         })
 }
 
@@ -263,8 +268,16 @@ fn build_update(args: &UpdateArgs) -> TaskResult<TaskUpdate> {
         .as_deref()
         .map(super::super::pim::Recurrence::parse)
         .transpose()?;
-    let priority = args.priority.as_deref().map(TaskPriority::parse).transpose()?;
-    let status = args.status.as_deref().map(UpdateStatus::parse).transpose()?;
+    let priority = args
+        .priority
+        .as_deref()
+        .map(TaskPriority::parse)
+        .transpose()?;
+    let status = args
+        .status
+        .as_deref()
+        .map(UpdateStatus::parse)
+        .transpose()?;
     Ok(TaskUpdate {
         title: args.title.clone(),
         due,
@@ -329,7 +342,8 @@ impl Tool for StructuredTaskUpdateTool {
                 },
                 ToolParam {
                     name: "status".into(),
-                    description: "\"open\" or \"cancelled\" (not \"done\" — use `complete`).".into(),
+                    description: "\"open\" or \"cancelled\" (not \"done\" — use `complete`)."
+                        .into(),
                     required: false,
                 },
             ],
@@ -425,7 +439,10 @@ impl Tool for StructuredTaskCompleteTool {
         );
         if let Some(next) = &outcome.next_occurrence {
             symbols.push(next.symbol_id);
-            msg.push_str(&format!("\nSpawned next occurrence {}: {next}", next.symbol_id.get()));
+            msg.push_str(&format!(
+                "\nSpawned next occurrence {}: {next}",
+                next.symbol_id.get()
+            ));
         }
         Ok(ToolOutput::ok_with_symbols(msg, symbols))
     }
@@ -590,7 +607,10 @@ mod tests {
         let open = list.execute(&engine, ToolInput::new()).unwrap();
         assert!(!open.result.contains("Buy groceries") || open.result.contains("🔁"));
         let done = list
-            .execute(&engine, ToolInput::new().with_value("filter", json!("done")))
+            .execute(
+                &engine,
+                ToolInput::new().with_value("filter", json!("done")),
+            )
             .unwrap();
         assert_eq!(done.symbols_involved.len(), 1);
     }
@@ -618,11 +638,17 @@ mod tests {
                     .with_value("due", json!("not-a-date")),
             )
             .unwrap_err();
-        assert!(matches!(err, AgentError::Task(TaskError::InvalidDate { .. })));
+        assert!(matches!(
+            err,
+            AgentError::Task(TaskError::InvalidDate { .. })
+        ));
 
         // No task was created — the store has nothing.
         let tasks = tasks::list_tasks(&engine, &tp, TaskListFilter::All).unwrap();
-        assert!(tasks.is_empty(), "invalid input must not leave a corrupt task behind");
+        assert!(
+            tasks.is_empty(),
+            "invalid input must not leave a corrupt task behind"
+        );
     }
 
     #[test]

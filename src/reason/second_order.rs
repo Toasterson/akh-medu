@@ -36,7 +36,9 @@ pub enum SecondOrderError {
     )]
     RuleNotFound { name: String },
 
-    #[error("no qualifying predicates found for rule '{rule_name}' (constraint: {constraint_label})")]
+    #[error(
+        "no qualifying predicates found for rule '{rule_name}' (constraint: {constraint_label})"
+    )]
     #[diagnostic(
         code(akh::second_order::no_qualifying),
         help(
@@ -162,16 +164,32 @@ impl SecondOrderPredicates {
     pub fn resolve(engine: &Engine) -> AkhResult<Self> {
         let is_a = engine
             .create_symbol(SymbolKind::Relation, "is-a")
-            .or_else(|_| engine.lookup_symbol("is-a").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "is-a")))?;
+            .or_else(|_| {
+                engine
+                    .lookup_symbol("is-a")
+                    .map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "is-a"))
+            })?;
         let transitive = engine
             .create_symbol(SymbolKind::Entity, "TransitiveRelation")
-            .or_else(|_| engine.lookup_symbol("TransitiveRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "TransitiveRelation")))?;
+            .or_else(|_| {
+                engine.lookup_symbol("TransitiveRelation").map(|id| {
+                    crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "TransitiveRelation")
+                })
+            })?;
         let symmetric = engine
             .create_symbol(SymbolKind::Entity, "SymmetricRelation")
-            .or_else(|_| engine.lookup_symbol("SymmetricRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "SymmetricRelation")))?;
+            .or_else(|_| {
+                engine.lookup_symbol("SymmetricRelation").map(|id| {
+                    crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "SymmetricRelation")
+                })
+            })?;
         let reflexive = engine
             .create_symbol(SymbolKind::Entity, "ReflexiveRelation")
-            .or_else(|_| engine.lookup_symbol("ReflexiveRelation").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "ReflexiveRelation")))?;
+            .or_else(|_| {
+                engine.lookup_symbol("ReflexiveRelation").map(|id| {
+                    crate::symbol::SymbolMeta::new(id, SymbolKind::Entity, "ReflexiveRelation")
+                })
+            })?;
 
         Ok(Self {
             is_a: is_a.id,
@@ -280,10 +298,7 @@ pub fn qualifying_predicates(
 
 /// Apply the transitivity rule: for each qualifying predicate R,
 /// find all (a,b) and (b,c) where R(a,b) and R(b,c), infer R(a,c).
-pub fn apply_transitivity(
-    engine: &Engine,
-    relation: SymbolId,
-) -> Vec<Triple> {
+pub fn apply_transitivity(engine: &Engine, relation: SymbolId) -> Vec<Triple> {
     let kg = engine.knowledge_graph();
     // triples_for_predicate returns Vec<(subject, object)>
     let pairs = kg.triples_for_predicate(relation);
@@ -371,7 +386,9 @@ pub fn apply_reflexivity(
     let existing_pairs = kg.triples_for_predicate(relation);
     let mut inferred = Vec::new();
     for entity in domain_entities {
-        let already_exists = existing_pairs.iter().any(|&(s, o)| s == entity && o == entity);
+        let already_exists = existing_pairs
+            .iter()
+            .any(|&(s, o)| s == entity && o == entity);
         if !already_exists {
             inferred.push(Triple::new(entity, relation, entity));
         }
@@ -382,10 +399,7 @@ pub fn apply_reflexivity(
 
 /// Apply the symmetry rule: for each qualifying predicate R,
 /// find all R(a,b) and infer R(b,a) if not already present.
-pub fn apply_symmetry(
-    engine: &Engine,
-    relation: SymbolId,
-) -> Vec<Triple> {
+pub fn apply_symmetry(engine: &Engine, relation: SymbolId) -> Vec<Triple> {
     let kg = engine.knowledge_graph();
     // triples_for_predicate returns Vec<(subject, object)>
     let pairs = kg.triples_for_predicate(relation);
@@ -452,7 +466,10 @@ mod tests {
 
     #[test]
     fn relation_property_display_and_parse() {
-        assert_eq!(RelationProperty::Transitive.to_string(), "TransitiveRelation");
+        assert_eq!(
+            RelationProperty::Transitive.to_string(),
+            "TransitiveRelation"
+        );
         assert_eq!(
             RelationProperty::from_label("TransitiveRelation"),
             Some(RelationProperty::Transitive)
@@ -476,9 +493,7 @@ mod tests {
     #[test]
     fn qualifying_predicates_finds_transitive() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let trans_rel = engine
             .create_symbol(SymbolKind::Entity, "TransitiveRelation")
             .unwrap();
@@ -587,9 +602,7 @@ mod tests {
     #[test]
     fn instantiate_all_generates_inferences() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let trans_rel = engine
             .create_symbol(SymbolKind::Entity, "TransitiveRelation")
             .unwrap();
@@ -644,15 +657,9 @@ mod tests {
         use crate::graph::arity::ConstraintRegistry;
 
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
-        let equal = engine
-            .create_symbol(SymbolKind::Relation, "equal")
-            .unwrap();
-        let number_type = engine
-            .create_symbol(SymbolKind::Entity, "Number")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let equal = engine.create_symbol(SymbolKind::Relation, "equal").unwrap();
+        let number_type = engine.create_symbol(SymbolKind::Entity, "Number").unwrap();
         let n1 = engine.create_symbol(SymbolKind::Entity, "1").unwrap();
         let n2 = engine.create_symbol(SymbolKind::Entity, "2").unwrap();
 
@@ -678,9 +685,7 @@ mod tests {
     #[test]
     fn apply_reflexivity_no_domain_is_noop() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let equal = engine
-            .create_symbol(SymbolKind::Relation, "equal")
-            .unwrap();
+        let equal = engine.create_symbol(SymbolKind::Relation, "equal").unwrap();
 
         // No constraint registry → no-op
         let inferred = apply_reflexivity(&engine, equal.id, None);

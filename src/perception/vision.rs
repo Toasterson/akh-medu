@@ -215,7 +215,10 @@ mod tests {
         let cfg = PerceptionConfig::default();
         // 10 bytes is not 8×8×3 = 192
         let result = extract_image_features(&vec![0u8; 10], 8, 8, &cfg);
-        assert!(matches!(result, Err(PerceptionError::FeatureExtraction { .. })));
+        assert!(matches!(
+            result,
+            Err(PerceptionError::FeatureExtraction { .. })
+        ));
     }
 
     #[test]

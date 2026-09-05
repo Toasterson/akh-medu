@@ -61,7 +61,13 @@ impl ParseRanker {
     }
 
     /// Record a successful parse as an exemplar.
-    pub fn record_success(&mut self, input: &str, tree: &AbsTree, source_tier: u8, confidence: f32) {
+    pub fn record_success(
+        &mut self,
+        input: &str,
+        tree: &AbsTree,
+        source_tier: u8,
+        confidence: f32,
+    ) {
         let normalized = normalize_input(input);
 
         // Don't store duplicates

@@ -207,7 +207,9 @@ pub fn capture_snapshot_at_fence(
     let engine = agent.engine();
 
     // Flush durable state to local redb (registry, allocator counter, KG snapshot).
-    agent.persist().map_err(|e| SnapshotError::Agent(e.to_string()))?;
+    agent
+        .persist()
+        .map_err(|e| SnapshotError::Agent(e.to_string()))?;
 
     let allocator_next = i64::try_from(engine.symbol_allocator_next()).map_err(|_| {
         SnapshotError::Agent(format!(
@@ -247,7 +249,7 @@ pub fn capture_snapshot_at_fence(
                         "fact provenance ID {} exceeds the relational snapshot range",
                         t.provenance_id.unwrap_or_default()
                     ))
-            })?;
+                })?;
             Ok(fact::Model {
                 workspace_id,
                 subject: relational_symbol_id("fact subject", t.subject)?,
@@ -380,9 +382,8 @@ pub fn capture_snapshot_at_fence(
                 akh_id,
                 parent_id: goal_id,
                 child_id: relational_symbol_id("goal child", *child)?,
-                position: i32::try_from(position).map_err(|_| {
-                    SnapshotError::Agent("goal child position exceeds i32".into())
-                })?,
+                position: i32::try_from(position)
+                    .map_err(|_| SnapshotError::Agent("goal child position exceeds i32".into()))?,
             });
         }
         let blockers = unique_symbol_ids(&g.blocked_by);
@@ -856,8 +857,7 @@ pub async fn wake(
         .is_some_and(|version| version >= PROVENANCE_SNAPSHOT_VERSION);
 
     let mut symbol_metas = symbol_rows_to_metas(&symbol_rows)?;
-    let base_allocator_next =
-        validate_symbol_snapshot(&symbol_metas, state.allocator_next)?;
+    let base_allocator_next = validate_symbol_snapshot(&symbol_metas, state.allocator_next)?;
 
     // Validate the base image before admitting any post-snapshot symbol or
     // provenance record.  Otherwise a dangling base fact can be
@@ -905,11 +905,7 @@ pub async fn wake(
         })?;
 
         write_registry(&store, &symbol_metas)?;
-        put_bincode_required(
-            &store,
-            b"sym_allocator_next",
-            &restored_allocator_next,
-        )?;
+        put_bincode_required(&store, b"sym_allocator_next", &restored_allocator_next)?;
         put_bincode(&store, b"agent:cycle_count", &(state.cycle_count as u64));
 
         if let Some(d) = build_drive_system(&drive_rows) {
@@ -1567,15 +1563,12 @@ fn restore_reactor_metadata(
                 SnapshotError::Agent("wake: reactor snapshot has no metadata array".into())
             })?;
             match version {
-                Some(REACTOR_SNAPSHOT_VERSION) => {
-                    serde_json::from_value::<Vec<PortableReactorMetadata>>(metadata).map_err(
-                        |error| {
-                            SnapshotError::Agent(format!(
-                                "wake: decode reactor metadata: {error}"
-                            ))
-                        },
-                    )?
-                }
+                Some(REACTOR_SNAPSHOT_VERSION) => serde_json::from_value::<
+                    Vec<PortableReactorMetadata>,
+                >(metadata)
+                .map_err(|error| {
+                    SnapshotError::Agent(format!("wake: decode reactor metadata: {error}"))
+                })?,
                 Some(1) => serde_json::from_value::<Vec<LegacyPortableReactorMetadata>>(metadata)
                     .map_err(|error| {
                         SnapshotError::Agent(format!(
@@ -1685,18 +1678,17 @@ fn replace_reactor_namespace(
         .iter()
         .map(|(key, value)| (key.as_slice(), value.as_slice()))
         .collect::<Vec<_>>();
-    store.replace_meta_prefix(prefix, &borrowed).map_err(|error| {
-        SnapshotError::Agent(format!(
-            "wake: replace reactor metadata {}: {error}",
-            String::from_utf8_lossy(prefix)
-        ))
-    })
+    store
+        .replace_meta_prefix(prefix, &borrowed)
+        .map_err(|error| {
+            SnapshotError::Agent(format!(
+                "wake: replace reactor metadata {}: {error}",
+                String::from_utf8_lossy(prefix)
+            ))
+        })
 }
 
-fn validate_reactor_metadata_entry(
-    key: &str,
-    value: &serde_json::Value,
-) -> SnapshotResult<()> {
+fn validate_reactor_metadata_entry(key: &str, value: &serde_json::Value) -> SnapshotResult<()> {
     if key.chars().any(char::is_control) {
         return Err(SnapshotError::Agent(
             "reactor snapshot metadata key contains a control character".into(),
@@ -1710,14 +1702,13 @@ fn validate_reactor_metadata_entry(
         }
         #[cfg(feature = "daemon")]
         let payload_id = {
-            let schedule = serde_json::from_value::<crate::agent::reactor::ReactorSchedule>(
-                value.clone(),
-            )
-            .map_err(|error| {
-                SnapshotError::Agent(format!(
-                    "reactor snapshot schedule {schedule_id} is invalid: {error}"
-                ))
-            })?;
+            let schedule =
+                serde_json::from_value::<crate::agent::reactor::ReactorSchedule>(value.clone())
+                    .map_err(|error| {
+                        SnapshotError::Agent(format!(
+                            "reactor snapshot schedule {schedule_id} is invalid: {error}"
+                        ))
+                    })?;
             schedule.validate().map_err(|error| {
                 SnapshotError::Agent(format!(
                     "reactor snapshot schedule {schedule_id} is invalid: {error}"
@@ -1757,7 +1748,9 @@ fn validate_reactor_metadata_entry(
                 "reactor snapshot cursor key {key} is malformed"
             )));
         }
-        let Some(message_id) = value.get("last_message_id").and_then(serde_json::Value::as_str)
+        let Some(message_id) = value
+            .get("last_message_id")
+            .and_then(serde_json::Value::as_str)
         else {
             return Err(SnapshotError::Agent(format!(
                 "reactor snapshot cursor {key} has no last_message_id"
@@ -1965,8 +1958,7 @@ fn validate_rule_application_payload(
     record: &crate::provenance::ProvenanceRecord,
     conclusion: (SymbolId, SymbolId, SymbolId),
 ) -> SnapshotResult<()> {
-    let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = &record.kind
-    else {
+    let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = &record.kind else {
         return Ok(());
     };
     let Some(first) = antecedents.first() else {
@@ -1976,9 +1968,9 @@ fn validate_rule_application_payload(
         return Ok(());
     }
 
-    let is_v2 = antecedents.get(1).is_some_and(|marker| {
-        marker.get() == crate::provenance::RULE_APPLICATION_V2_SENTINEL
-    });
+    let is_v2 = antecedents
+        .get(1)
+        .is_some_and(|marker| marker.get() == crate::provenance::RULE_APPLICATION_V2_SENTINEL);
     if !is_v2 {
         if (antecedents.len() - 1) % 3 != 0 {
             return Err(invalid_tail(
@@ -2212,7 +2204,11 @@ fn parse_replay_complete_retract_batch(
 
 fn parse_replay_complete_assert(
     payload: &serde_json::Value,
-) -> SnapshotResult<(Triple, Vec<SymbolMeta>, Option<crate::provenance::ProvenanceRecord>)> {
+) -> SnapshotResult<(
+    Triple,
+    Vec<SymbolMeta>,
+    Option<crate::provenance::ProvenanceRecord>,
+)> {
     let envelope: ReplayCompleteAssert = serde_json::from_value(payload.clone())
         .map_err(|error| invalid_tail(format!("assert-v2 decode failed: {error}")))?;
     if envelope.v != crate::mutation::ASSERT_MUTATION_VERSION {
@@ -2228,8 +2224,7 @@ fn parse_replay_complete_assert(
         )));
     }
     if let Some(compartment_id) = envelope.compartment.as_deref() {
-        validate_compartment_id(compartment_id)
-            .map_err(|error| invalid_tail(error.to_string()))?;
+        validate_compartment_id(compartment_id).map_err(|error| invalid_tail(error.to_string()))?;
     }
     let subject = SymbolId::new(envelope.subject)
         .filter(|id| !is_reserved_symbol_id(id.get()))
@@ -2244,9 +2239,8 @@ fn parse_replay_complete_assert(
     match (envelope.provenance_id, envelope.provenance.as_ref()) {
         (None, None) => {}
         (Some(raw_id), Some(record)) => {
-            let id = crate::provenance::ProvenanceId::new(raw_id).ok_or_else(|| {
-                invalid_tail("assert provenance ID must be non-zero")
-            })?;
+            let id = crate::provenance::ProvenanceId::new(raw_id)
+                .ok_or_else(|| invalid_tail("assert provenance ID must be non-zero"))?;
             if record.id != Some(id) {
                 return Err(invalid_tail(format!(
                     "assert provenance ID {raw_id} does not match record {:?}",
@@ -2375,7 +2369,10 @@ fn prepare_tail_restore(
     let mut labels = std::collections::HashMap::with_capacity(symbols.len());
     for (position, meta) in symbols.iter().enumerate() {
         symbol_positions.insert(meta.id.get(), position);
-        labels.insert(crate::registry::normalize_label_key(&meta.label), meta.id.get());
+        labels.insert(
+            crate::registry::normalize_label_key(&meta.label),
+            meta.id.get(),
+        );
     }
     let mut provenance_by_id = std::collections::HashMap::with_capacity(provenance.len());
     for (position, record) in provenance.iter().enumerate() {
@@ -2477,9 +2474,9 @@ fn prepare_tail_restore(
     }
 
     let max_id = symbols.iter().map(|meta| meta.id.get()).max().unwrap_or(0);
-    let next = max_id.checked_add(1).ok_or_else(|| {
-        invalid_tail("post-snapshot symbol ID space is exhausted")
-    })?;
+    let next = max_id
+        .checked_add(1)
+        .ok_or_else(|| invalid_tail("post-snapshot symbol ID space is exhausted"))?;
     if is_reserved_symbol_id(next) {
         return Err(invalid_tail(
             "post-snapshot symbol allocator would enter the reserved sentinel",
@@ -2489,8 +2486,7 @@ fn prepare_tail_restore(
 }
 
 fn validate_fact_symbols(facts: &[fact::Model], symbols: &[SymbolMeta]) -> SnapshotResult<()> {
-    let ids: std::collections::HashSet<u64> =
-        symbols.iter().map(|meta| meta.id.get()).collect();
+    let ids: std::collections::HashSet<u64> = symbols.iter().map(|meta| meta.id.get()).collect();
     for fact in facts {
         if !fact.confidence.is_finite() || !(0.0..=1.0).contains(&fact.confidence) {
             return Err(SnapshotError::Agent(format!(
@@ -2511,9 +2507,7 @@ fn validate_fact_symbols(facts: &[fact::Model], symbols: &[SymbolMeta]) -> Snaps
                 .and_then(SymbolId::new)
                 .filter(|id| !is_reserved_symbol_id(id.get()))
                 .ok_or_else(|| {
-                    SnapshotError::Agent(format!(
-                        "wake: fact {field} has invalid symbol ID {raw}"
-                    ))
+                    SnapshotError::Agent(format!("wake: fact {field} has invalid symbol ID {raw}"))
                 })?;
             if !ids.contains(&id.get()) {
                 return Err(SnapshotError::Agent(format!(
@@ -2530,8 +2524,7 @@ fn validate_provenance_symbols(
     records: &[crate::provenance::ProvenanceRecord],
     symbols: &[SymbolMeta],
 ) -> SnapshotResult<()> {
-    let ids: std::collections::HashSet<SymbolId> =
-        symbols.iter().map(|meta| meta.id).collect();
+    let ids: std::collections::HashSet<SymbolId> = symbols.iter().map(|meta| meta.id).collect();
     let mut provenance_ids = std::collections::HashSet::with_capacity(records.len());
     for record in records {
         let provenance_id = record
@@ -2578,9 +2571,7 @@ fn fact_to_triple(row: &fact::Model) -> SnapshotResult<Triple> {
             .and_then(SymbolId::new)
             .filter(|id| !is_reserved_symbol_id(id.get()))
             .ok_or_else(|| {
-                SnapshotError::Agent(format!(
-                    "wake: fact {field} has invalid symbol ID {raw}"
-                ))
+                SnapshotError::Agent(format!("wake: fact {field} has invalid symbol ID {raw}"))
             })
     };
     let s = convert("subject", row.subject)?;
@@ -2841,8 +2832,9 @@ fn apply_mutation_with_future(
                 if actual.is_some()
                     && let Some(raw_id) = triple.provenance_id
                 {
-                    let id = crate::provenance::ProvenanceId::new(raw_id)
-                        .ok_or_else(|| invalid_tail("retract batch provenance ID must be non-zero"))?;
+                    let id = crate::provenance::ProvenanceId::new(raw_id).ok_or_else(|| {
+                        invalid_tail("retract batch provenance ID must be non-zero")
+                    })?;
                     engine.get_provenance(id).map_err(|error| {
                         invalid_tail(format!(
                             "retract batch references unavailable provenance ID {raw_id}: {error}"
@@ -2853,11 +2845,7 @@ fn apply_mutation_with_future(
                     && actual != *triple
                 {
                     if later_assertion_matches_snapshot_edge(&actual, index, future_touches) {
-                        snapshot_overlap.insert((
-                            triple.subject,
-                            triple.predicate,
-                            triple.object,
-                        ));
+                        snapshot_overlap.insert((triple.subject, triple.predicate, triple.object));
                     } else {
                         return Err(invalid_tail(format!(
                             "retract batch edge ({}, {}, {}) metadata does not match replay state",
@@ -2869,11 +2857,7 @@ fn apply_mutation_with_future(
                 }
             }
             for triple in &retracts {
-                if snapshot_overlap.contains(&(
-                    triple.subject,
-                    triple.predicate,
-                    triple.object,
-                )) {
+                if snapshot_overlap.contains(&(triple.subject, triple.predicate, triple.object)) {
                     continue;
                 }
                 engine
@@ -3233,7 +3217,10 @@ mod tests {
         assert_eq!(sys.strength(DriveKind::Efficiency), 0.9);
         assert_eq!(sys.thresholds[DriveKind::Curiosity as usize], 0.6);
         assert_eq!(sys.thresholds[DriveKind::Efficiency as usize], 0.4);
-        assert!(build_drive_system(&[]).is_none(), "no rows → None (default fallback)");
+        assert!(
+            build_drive_system(&[]).is_none(),
+            "no rows → None (default fallback)"
+        );
     }
 
     #[test]
@@ -3296,9 +3283,18 @@ mod tests {
     #[test]
     fn consolidation_phase_parses_debug_form() {
         use crate::agent::sleep::ConsolidationPhase;
-        assert_eq!(parse_consolidation_phase("DreamState"), ConsolidationPhase::DreamState);
-        assert_eq!(parse_consolidation_phase("Consolidation"), ConsolidationPhase::Consolidation);
-        assert_eq!(parse_consolidation_phase("garbage"), ConsolidationPhase::Wake);
+        assert_eq!(
+            parse_consolidation_phase("DreamState"),
+            ConsolidationPhase::DreamState
+        );
+        assert_eq!(
+            parse_consolidation_phase("Consolidation"),
+            ConsolidationPhase::Consolidation
+        );
+        assert_eq!(
+            parse_consolidation_phase("garbage"),
+            ConsolidationPhase::Wake
+        );
     }
 
     #[test]
@@ -3312,7 +3308,9 @@ mod tests {
         let ep2 = SymbolId::new(12).unwrap();
         let topic = SymbolId::new(20).unwrap();
         let portable = crate::agent::contact_memory::PortablePersonMemory {
-            episodes_by_contact: [("alice".to_string(), vec![ep2, ep1])].into_iter().collect(),
+            episodes_by_contact: [("alice".to_string(), vec![ep2, ep1])]
+                .into_iter()
+                .collect(),
             topic_index: vec![(("alice".to_string(), topic), vec![ep1])],
             max_per_contact: 100,
         };
@@ -3333,9 +3331,7 @@ mod tests {
     #[cfg(feature = "daemon")]
     #[test]
     fn reactor_metadata_roundtrips_and_replaces_stale_namespaces() {
-        use crate::agent::reactor::{
-            ReactorAction, ReactorEvent, ReactorSchedule, ScheduleRule,
-        };
+        use crate::agent::reactor::{ReactorAction, ReactorEvent, ReactorSchedule, ScheduleRule};
 
         let source_root = tempfile::tempdir().unwrap();
         let engine = Engine::new(EngineConfig {
@@ -3367,9 +3363,10 @@ mod tests {
             observed_at: 42,
             payload: "{\"message_type\":\"board/note@v1\"}".into(),
         });
-        schedule.state.processed_event_keys.push_back(
-            "djehuty:thread:01a04e2c-29ff-7230-967d-2534f39af690\0processed".into(),
-        );
+        schedule
+            .state
+            .processed_event_keys
+            .push_back("djehuty:thread:01a04e2c-29ff-7230-967d-2534f39af690\0processed".into());
         schedule.state.lease_until = Some(77);
         schedule.state.retry_at = Some(88);
         schedule.state.attempt = 2;
@@ -3377,10 +3374,7 @@ mod tests {
         let schedule_bytes = serde_json::to_vec(&schedule_value).unwrap();
         engine
             .store()
-            .put_meta(
-                b"reactor:schedule:board-watch",
-                &schedule_bytes,
-            )
+            .put_meta(b"reactor:schedule:board-watch", &schedule_bytes)
             .unwrap();
         let cursor_value = serde_json::json!({
             "last_message_id": "01a04e49-77ef-7421-bd09-0250e72a97f6"
@@ -3428,9 +3422,7 @@ mod tests {
             .unwrap();
         assert_eq!(restored_schedule, schedule_bytes);
         let restored_cursor = restored
-            .get_meta(
-                b"reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:board-watch",
-            )
+            .get_meta(b"reactor:djehuty:cursor:01a04e2c-29ff-7230-967d-2534f39af690:board-watch")
             .unwrap()
             .unwrap();
         assert_eq!(restored_cursor, cursor_bytes);
@@ -3546,12 +3538,13 @@ mod tests {
         .unwrap();
         let mut value = serde_json::to_value(schedule).unwrap();
         value["rule"]["every_seconds"] = serde_json::json!(0);
-        let error = validate_reactor_metadata_entry(
-            "reactor:schedule:invalid-interval",
-            &value,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("interval must be at least one second"));
+        let error = validate_reactor_metadata_entry("reactor:schedule:invalid-interval", &value)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("interval must be at least one second")
+        );
     }
 
     #[test]
@@ -3854,15 +3847,30 @@ triples_file = "triples.json"
         let restored_source = engine.get_symbol_meta(source.id).unwrap();
         assert_eq!(restored_source.created_at, 104);
         assert_eq!(restored_source.source, source.source);
-        assert_eq!(engine.get_provenance(ProvenanceId::new(41).unwrap()).unwrap().depth, 2);
+        assert_eq!(
+            engine
+                .get_provenance(ProvenanceId::new(41).unwrap())
+                .unwrap()
+                .depth,
+            2
+        );
         let edge = engine.triples_from(subject.id).pop().unwrap();
         assert_eq!(edge.confidence, 0.55);
         assert_eq!(edge.timestamp, 20);
         assert_eq!(edge.compartment_id, None);
-        assert_eq!(edge.provenance_id, None, "the later untracked assertion is authoritative");
+        assert_eq!(
+            edge.provenance_id, None,
+            "the later untracked assertion is authoritative"
+        );
 
-        let fresh = engine.create_symbol(SymbolKind::Entity, "AfterTail").unwrap();
-        assert_eq!(fresh.id.get(), 704, "symbol allocation must advance beyond the WAL tail");
+        let fresh = engine
+            .create_symbol(SymbolKind::Entity, "AfterTail")
+            .unwrap();
+        assert_eq!(
+            fresh.id.get(),
+            704,
+            "symbol allocation must advance beyond the WAL tail"
+        );
         let mut next_record = ProvenanceRecord::new(fresh.id, DerivationKind::Reasoned);
         assert_eq!(engine.store_provenance(&mut next_record).unwrap().get(), 42);
     }
@@ -3901,12 +3909,7 @@ triples_file = "triples.json"
             }),
         };
         assert!(
-            prepare_tail_restore(
-                &[missing_kind_symbol],
-                &mut Vec::new(),
-                &mut Vec::new()
-            )
-            .is_err(),
+            prepare_tail_restore(&[missing_kind_symbol], &mut Vec::new(), &mut Vec::new()).is_err(),
             "a provenance-kind symbol without metadata must fail closed"
         );
 
@@ -3926,12 +3929,8 @@ triples_file = "triples.json"
             }),
         };
         assert!(
-            prepare_tail_restore(
-                &[malformed_compartment],
-                &mut Vec::new(),
-                &mut Vec::new()
-            )
-            .is_err(),
+            prepare_tail_restore(&[malformed_compartment], &mut Vec::new(), &mut Vec::new())
+                .is_err(),
             "a malformed V2 compartment must return an error"
         );
 
@@ -4032,13 +4031,8 @@ triples_file = "triples.json"
         };
         let mut symbols = vec![predicate.clone(), object];
         assert!(
-            validate_base_restore_image(
-                std::slice::from_ref(&base_fact),
-                &[],
-                &symbols,
-                true,
-            )
-            .is_err(),
+            validate_base_restore_image(std::slice::from_ref(&base_fact), &[], &symbols, true,)
+                .is_err(),
             "tail metadata must not make an unknown base symbol valid"
         );
 
@@ -4077,8 +4071,7 @@ triples_file = "triples.json"
             DerivationKind::RuleInference {
                 rule_name: "mismatched".into(),
                 antecedents: vec![
-                    SymbolId::new(crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL)
-                        .unwrap(),
+                    SymbolId::new(crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL).unwrap(),
                     SymbolId::new(crate::provenance::RULE_APPLICATION_V2_SENTINEL).unwrap(),
                     subject.id,
                     predicate.id,
@@ -4267,9 +4260,10 @@ triples_file = "triples.json"
             Uuid::from_u128(2),
             crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
         ));
-        assert!(live
-            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         live.remove_triple(premise_subject, predicate, premise_object)
             .unwrap();
@@ -4344,9 +4338,10 @@ triples_file = "triples.json"
             Uuid::from_u128(31),
             crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
         ));
-        assert!(live
-            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
         live.add_triple(
             &Triple::new(subject, predicate, object)
                 .with_confidence(0.84)
@@ -4372,18 +4367,17 @@ triples_file = "triples.json"
             retained[0].payload["v"],
             crate::mutation::RETRACT_BATCH_MUTATION_VERSION
         );
-        assert_eq!(retained[0].payload["provenance"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            retained[0].payload["provenance"].as_array().unwrap().len(),
+            1
+        );
 
         let tail = vec![akhomed_store::TailMutation {
             kind: retained[0].kind.as_str().into(),
             payload: retained[0].payload.clone(),
         }];
-        let allocator_next = prepare_tail_restore(
-            &tail,
-            &mut restored_symbols,
-            &mut restored_provenance,
-        )
-        .unwrap();
+        let allocator_next =
+            prepare_tail_restore(&tail, &mut restored_symbols, &mut restored_provenance).unwrap();
         assert_eq!(restored_symbols.len(), 4);
         assert_eq!(restored_provenance.len(), 1);
 
@@ -4398,9 +4392,7 @@ triples_file = "triples.json"
             ..Default::default()
         })
         .unwrap();
-        replay
-            .replace_all_provenance(&restored_provenance)
-            .unwrap();
+        replay.replace_all_provenance(&restored_provenance).unwrap();
         assert!(apply_mutation(&replay, &tail[0]).unwrap());
         assert!(replay.all_triples().is_empty());
         assert_eq!(
@@ -4458,9 +4450,10 @@ triples_file = "triples.json"
             Uuid::from_u128(4),
             crate::wal::WalConfig::new(std::time::Duration::from_secs(1), 64, 1 << 20),
         ));
-        assert!(live
-            .set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            live.set_mutation_sink(Arc::clone(&wal) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
         live.add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.2))
             .unwrap();
         let mut new_record = crate::provenance::ProvenanceRecord::new(
@@ -4488,12 +4481,8 @@ triples_file = "triples.json"
                 payload: record.payload,
             })
             .collect::<Vec<_>>();
-        let allocator_next = prepare_tail_restore(
-            &tail,
-            &mut restored_symbols,
-            &mut restored_provenance,
-        )
-        .unwrap();
+        let allocator_next =
+            prepare_tail_restore(&tail, &mut restored_symbols, &mut restored_provenance).unwrap();
 
         let dir = tempfile::tempdir().unwrap();
         {
@@ -4507,9 +4496,7 @@ triples_file = "triples.json"
             ..Default::default()
         })
         .unwrap();
-        replay
-            .replace_all_provenance(&restored_provenance)
-            .unwrap();
+        replay.replace_all_provenance(&restored_provenance).unwrap();
         replay.restore_triples(&captured_triples).unwrap();
         for mutation in &tail {
             assert!(apply_mutation(&replay, mutation).unwrap());
@@ -4517,9 +4504,7 @@ triples_file = "triples.json"
 
         let by_key = |engine: &Engine| {
             let mut triples = engine.all_triples();
-            triples.sort_by_key(|triple| {
-                (triple.subject, triple.predicate, triple.object)
-            });
+            triples.sort_by_key(|triple| (triple.subject, triple.predicate, triple.object));
             triples
         };
         assert_eq!(by_key(&live), by_key(&replay));
@@ -4697,11 +4682,7 @@ triples_file = "triples.json"
             ("replace", replacement),
         ] {
             let rejected = restored_replay();
-            let guarded_tail = vec![
-                tail[0].clone(),
-                first_same_edge_touch,
-                tail[2].clone(),
-            ];
+            let guarded_tail = vec![tail[0].clone(), first_same_edge_touch, tail[2].clone()];
             assert!(
                 apply_mutation_tail(&rejected, &guarded_tail).is_err(),
                 "first same-edge {name} must fail closed"
@@ -4893,8 +4874,8 @@ triples_file = "triples.json"
             .unwrap(),
         );
         let agent = Agent::new(engine, crate::agent::AgentConfig::default()).unwrap();
-        let data = capture_snapshot_at_watermark(&agent, Uuid::new_v4(), Uuid::new_v4(), 37)
-            .unwrap();
+        let data =
+            capture_snapshot_at_watermark(&agent, Uuid::new_v4(), Uuid::new_v4(), 37).unwrap();
         assert_eq!(data.watermark, 37);
         assert!(capture_snapshot_at_watermark(&agent, Uuid::nil(), Uuid::nil(), -1).is_err());
     }

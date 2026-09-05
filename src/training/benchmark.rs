@@ -91,19 +91,16 @@ impl Default for BenchmarkConfig {
 
 fn default_stop_words() -> HashSet<String> {
     [
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "not", "no", "nor", "so",
-        "yet", "both", "either", "neither", "and", "but", "or", "as", "at",
-        "by", "for", "in", "of", "on", "to", "up", "with", "about", "above",
-        "after", "again", "against", "all", "am", "any", "because", "before",
-        "between", "during", "each", "few", "from", "further", "here", "how",
-        "i", "if", "into", "it", "its", "itself", "just", "more", "most",
-        "my", "myself", "now", "only", "other", "our", "out", "own",
-        "same", "she", "he", "her", "him", "his", "than", "that", "their",
-        "them", "then", "there", "these", "they", "this", "those", "through",
-        "too", "under", "until", "us", "very", "was", "we", "what", "when",
-        "where", "which", "while", "who", "whom", "why", "you", "your",
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "not", "no", "nor", "so", "yet", "both", "either", "neither", "and", "but", "or", "as",
+        "at", "by", "for", "in", "of", "on", "to", "up", "with", "about", "above", "after",
+        "again", "against", "all", "am", "any", "because", "before", "between", "during", "each",
+        "few", "from", "further", "here", "how", "i", "if", "into", "it", "its", "itself", "just",
+        "more", "most", "my", "myself", "now", "only", "other", "our", "out", "own", "same", "she",
+        "he", "her", "him", "his", "than", "that", "their", "them", "then", "there", "these",
+        "they", "this", "those", "through", "too", "under", "until", "us", "very", "was", "we",
+        "what", "when", "where", "which", "while", "who", "whom", "why", "you", "your",
     ]
     .iter()
     .map(|&s| s.to_string())
@@ -359,11 +356,9 @@ mod tests {
         }];
 
         let result = b
-            .evaluate(
-                AgentId::Tecton,
-                &pairs,
-                |_| Ok("I am knowledge builder focused on structure precision".into()),
-            )
+            .evaluate(AgentId::Tecton, &pairs, |_| {
+                Ok("I am knowledge builder focused on structure precision".into())
+            })
             .unwrap();
 
         assert_eq!(result.pairs_evaluated, 1);
@@ -410,7 +405,10 @@ mod tests {
     fn load_eval_set_missing_file_returns_err() {
         let b = bench();
         let result = b.load_eval_set(AgentId::Set, Path::new("/nonexistent/eval.jsonl"));
-        assert!(matches!(result, Err(BenchmarkError::EvalSetNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(BenchmarkError::EvalSetNotFound { .. })
+        ));
     }
 
     #[test]

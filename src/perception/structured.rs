@@ -110,13 +110,7 @@ pub fn default_concept_mappings() -> Vec<ConceptMappingRule> {
     ]
 }
 
-fn rule(
-    prefix: &str,
-    min: f64,
-    max: f64,
-    label: &str,
-    valence: f32,
-) -> ConceptMappingRule {
+fn rule(prefix: &str, min: f64, max: f64, label: &str, valence: f32) -> ConceptMappingRule {
     ConceptMappingRule {
         name_prefix: prefix.to_string(),
         value_min: min,

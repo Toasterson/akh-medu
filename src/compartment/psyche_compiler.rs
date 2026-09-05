@@ -17,7 +17,7 @@
 use miette::Diagnostic;
 use thiserror::Error;
 
-use super::eliza::{DefaultResponses, Decomposition, ElizaRule, ElizaScript, ScriptMeta};
+use super::eliza::{Decomposition, DefaultResponses, ElizaRule, ElizaScript, ScriptMeta};
 use super::psyche::{ArchetypeWeights, OceanProfile, Psyche};
 
 // ── Errors ────────────────────────────────────────────────────────────────
@@ -151,7 +151,6 @@ fn effective_ocean(psyche: &Psyche) -> OceanProfile {
     psyche.effective_ocean()
 }
 
-
 // ── Priority helpers ──────────────────────────────────────────────────────
 
 /// Scale archetype weight → rule priority (base + up-to-10 bonus).
@@ -161,7 +160,11 @@ fn weight_to_priority(weight: f32, base: u32) -> u32 {
 
 // ── Default-response builder ──────────────────────────────────────────────
 
-fn build_defaults(psyche: &Psyche, ocean: &OceanProfile, depth: ReflectionDepth) -> DefaultResponses {
+fn build_defaults(
+    psyche: &Psyche,
+    ocean: &OceanProfile,
+    depth: ReflectionDepth,
+) -> DefaultResponses {
     let name = &psyche.persona.name;
 
     let greetings = if ocean.agreeableness > 0.6 {
@@ -252,8 +255,10 @@ fn sage_rules(weight: f32, depth: ReflectionDepth, openness: f32) -> Vec<ElizaRu
         ],
         ReflectionDepth::Deep => vec![
             "What underlying assumptions shape your view of $3?".to_string(),
-            "If you could see $3 from a completely different angle, what might you find?".to_string(),
-            "What do you already know that might be obscuring a deeper understanding of $3?".to_string(),
+            "If you could see $3 from a completely different angle, what might you find?"
+                .to_string(),
+            "What do you already know that might be obscuring a deeper understanding of $3?"
+                .to_string(),
             "What would it mean for everything you believe if $3 were otherwise?".to_string(),
         ],
     };
@@ -642,7 +647,8 @@ fn explorer_rules(weight: f32, depth: ReflectionDepth, extraversion: f32) -> Vec
             priority: priority.saturating_sub(1),
             tags: tag.clone(),
             decompositions: vec![Decomposition {
-                pattern: "(.*)(new|novel|discover|explore|try|experiment|possible|imagine)(.*)".to_string(),
+                pattern: "(.*)(new|novel|discover|explore|try|experiment|possible|imagine)(.*)"
+                    .to_string(),
                 reassemblies: explore_reassemblies,
             }],
         },
@@ -712,7 +718,8 @@ fn shadow_examination_rules(depth: ReflectionDepth) -> Vec<ElizaRule> {
             priority: 12,
             tags: tag,
             decompositions: vec![Decomposition {
-                pattern: "(.*)(dark|shadow|hidden|afraid|ashamed|shame|judge|critic)(.*)".to_string(),
+                pattern: "(.*)(dark|shadow|hidden|afraid|ashamed|shame|judge|critic)(.*)"
+                    .to_string(),
                 reassemblies: shadow_reassemblies,
             }],
         },
@@ -726,9 +733,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::compartment::psyche::{
-        ArchetypeWeights, Psyche, Shadow, ShadowPattern,
-    };
+    use crate::compartment::psyche::{ArchetypeWeights, Psyche, Shadow, ShadowPattern};
 
     fn sage_heavy_psyche() -> Psyche {
         Psyche {
@@ -805,12 +810,19 @@ mod tests {
 
         let has_knowledge_theme = all_texts.iter().any(|t| {
             let lower = t.to_lowercase();
-            lower.contains("understand") || lower.contains("know") || lower.contains("belief")
-                || lower.contains("true") || lower.contains("evidence")
-                || lower.contains("assumptions") || lower.contains("think")
+            lower.contains("understand")
+                || lower.contains("know")
+                || lower.contains("belief")
+                || lower.contains("true")
+                || lower.contains("evidence")
+                || lower.contains("assumptions")
+                || lower.contains("think")
                 || lower.contains("mean")
         });
-        assert!(has_knowledge_theme, "sage rules should contain knowledge-seeking language");
+        assert!(
+            has_knowledge_theme,
+            "sage rules should contain knowledge-seeking language"
+        );
     }
 
     #[test]
@@ -830,8 +842,10 @@ mod tests {
 
         // High healer + agreeableness should produce empathetic phrasing.
         assert!(
-            healer_texts.contains("hear") || healer_texts.contains("matters")
-                || healer_texts.contains("glad") || healer_texts.contains("support"),
+            healer_texts.contains("hear")
+                || healer_texts.contains("matters")
+                || healer_texts.contains("glad")
+                || healer_texts.contains("support"),
             "agreeable agent should include empathetic/validating language; got: {healer_texts}"
         );
     }
@@ -865,7 +879,10 @@ mod tests {
             .iter()
             .any(|r| r.tags.contains(&"shadow".to_string()));
 
-        assert!(!has_shadow_rules, "inactive shadow should produce no shadow rules");
+        assert!(
+            !has_shadow_rules,
+            "inactive shadow should produce no shadow rules"
+        );
     }
 
     #[test]
@@ -959,7 +976,10 @@ mod tests {
         };
         let ocean = a.derive_ocean();
         // Sage-heavy → high openness.
-        assert!(ocean.openness > 0.6, "sage-heavy profile should have openness > 0.6");
+        assert!(
+            ocean.openness > 0.6,
+            "sage-heavy profile should have openness > 0.6"
+        );
         // Guardian-ish → decent conscientiousness.
         assert!(ocean.conscientiousness > 0.5);
     }

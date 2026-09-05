@@ -52,6 +52,21 @@ impl NoteId {
         Self(format!("note-{}", &hash.to_hex()[..32]))
     }
 
+    /// Parse a persisted/caller-supplied note id.
+    ///
+    /// The strict shape check is also a path-safety boundary for the durable
+    /// note store: a note id is used as a file-name component and must never
+    /// carry separators, traversal segments, or an alternate namespace.
+    pub fn parse(value: impl Into<String>) -> Result<Self, LibraryError> {
+        let value = value.into();
+        let suffix = value.strip_prefix("note-");
+        if suffix.is_some_and(|s| s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())) {
+            Ok(Self(value))
+        } else {
+            Err(LibraryError::InvalidNoteId { value })
+        }
+    }
+
     /// Borrow the id as a plain string slice (e.g. for use as a map key or
     /// KG symbol label suffix).
     pub fn as_str(&self) -> &str {
@@ -102,7 +117,10 @@ pub fn extract_wikilinks(text: &str) -> Vec<Wikilink> {
     WIKILINK_RE
         .captures_iter(text)
         .map(|caps| Wikilink {
-            target: caps.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default(),
+            target: caps
+                .get(1)
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default(),
             alias: caps.get(2).map(|m| m.as_str().trim().to_string()),
         })
         .collect()
@@ -211,7 +229,10 @@ static DATETIME_RE: LazyLock<Regex> =
 pub(crate) fn parse_value(raw: &str) -> FrontmatterValue {
     let trimmed = raw.trim();
 
-    if let Some(inner) = trimmed.strip_prefix("[[").and_then(|s| s.strip_suffix("]]")) {
+    if let Some(inner) = trimmed
+        .strip_prefix("[[")
+        .and_then(|s| s.strip_suffix("]]"))
+    {
         let mut parts = inner.splitn(2, '|');
         let target = parts.next().unwrap_or_default().trim().to_string();
         let alias = parts.next().map(|s| s.trim().to_string());
@@ -293,6 +314,15 @@ impl Frontmatter {
     /// Look up a field by key.
     pub fn get(&self, key: &str) -> Option<&FrontmatterValue> {
         self.0.get(key)
+    }
+
+    /// Clone the frontmatter without one field. Used by bounded resident and
+    /// catalog views to keep archival-only values (such as source excerpts)
+    /// out of always-on context while preserving them in the durable note.
+    pub fn without(&self, key: &str) -> Self {
+        let mut projected = self.clone();
+        projected.0.remove(key);
+        projected
     }
 
     /// Iterate fields in key order (stable, for deterministic rendering).
@@ -474,6 +504,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn note_id_parse_is_strict_and_path_safe() {
+        let id = NoteId::new();
+        assert_eq!(NoteId::parse(id.to_string()).unwrap(), id);
+        assert!(NoteId::parse("../../notes").is_err());
+        assert!(NoteId::parse("note-not-hexadecimal-not-hexadecimal").is_err());
+    }
+
     // -- frontmatter parse round-trip --------------------------------------
 
     #[test]
@@ -548,7 +586,10 @@ plain_link: [[Bare Target]]
     #[test]
     fn frontmatter_parse_rejects_missing_separator() {
         let err = Frontmatter::parse("not-a-kv-line").unwrap_err();
-        assert!(matches!(err, LibraryError::FrontmatterParse { line: 1, .. }));
+        assert!(matches!(
+            err,
+            LibraryError::FrontmatterParse { line: 1, .. }
+        ));
     }
 
     #[test]
@@ -560,9 +601,18 @@ plain_link: [[Bare Target]]
     #[test]
     fn value_type_matches_schema_value_types() {
         use crate::schema::source::ValueType;
-        assert_eq!(FrontmatterValue::Text("x".into()).value_type(), ValueType::Text);
-        assert_eq!(FrontmatterValue::Number(1.0).value_type(), ValueType::Number);
-        assert_eq!(FrontmatterValue::Checkbox(true).value_type(), ValueType::Checkbox);
+        assert_eq!(
+            FrontmatterValue::Text("x".into()).value_type(),
+            ValueType::Text
+        );
+        assert_eq!(
+            FrontmatterValue::Number(1.0).value_type(),
+            ValueType::Number
+        );
+        assert_eq!(
+            FrontmatterValue::Checkbox(true).value_type(),
+            ValueType::Checkbox
+        );
         assert_eq!(
             FrontmatterValue::Date("2026-01-01".into()).value_type(),
             ValueType::Date
@@ -571,10 +621,7 @@ plain_link: [[Bare Target]]
             FrontmatterValue::Datetime("2026-01-01T00:00:00".into()).value_type(),
             ValueType::Datetime
         );
-        assert_eq!(
-            FrontmatterValue::List(vec![]).value_type(),
-            ValueType::List
-        );
+        assert_eq!(FrontmatterValue::List(vec![]).value_type(), ValueType::List);
         assert_eq!(
             FrontmatterValue::Link(Wikilink {
                 target: "x".into(),

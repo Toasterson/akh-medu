@@ -105,7 +105,11 @@ pub fn build_kg_context(
 
     if let Some(cached) = cache.get(&cache_key) {
         tracing::debug!(keywords = ?keywords, "KG context cache hit");
-        return if cached.is_empty() { None } else { Some(cached.to_string()) };
+        return if cached.is_empty() {
+            None
+        } else {
+            Some(cached.to_string())
+        };
     }
 
     let t0 = std::time::Instant::now();
@@ -196,16 +200,14 @@ pub fn extract_keywords(input: &str) -> Vec<String> {
 /// Returns `true` if `word` is a common English stop word.
 fn is_stop_word(word: &str) -> bool {
     static STOP_WORDS: &[&str] = &[
-        "the", "and", "for", "are", "but", "not", "you", "all", "can",
-        "had", "her", "was", "one", "our", "out", "day", "get", "has",
-        "him", "his", "how", "its", "may", "now", "old", "see", "two",
-        "way", "who", "did", "let", "put", "say", "she", "too", "use",
-        "what", "when", "with", "this", "that", "from", "your", "they",
-        "been", "have", "more", "will", "also", "about", "which", "there",
-        "their", "would", "other", "after", "first", "these", "could",
-        "into", "then", "than", "some", "just", "over", "such", "tell",
-        "ask", "give", "show", "list", "find", "know", "does", "make",
-        "take", "look", "come", "think", "help", "need", "want", "like",
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
+        "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "now", "old", "see",
+        "two", "way", "who", "did", "let", "put", "say", "she", "too", "use", "what", "when",
+        "with", "this", "that", "from", "your", "they", "been", "have", "more", "will", "also",
+        "about", "which", "there", "their", "would", "other", "after", "first", "these", "could",
+        "into", "then", "than", "some", "just", "over", "such", "tell", "ask", "give", "show",
+        "list", "find", "know", "does", "make", "take", "look", "come", "think", "help", "need",
+        "want", "like",
     ];
     let lower = word.to_lowercase();
     STOP_WORDS.contains(&lower.as_str())
@@ -216,7 +218,10 @@ fn is_stop_word(word: &str) -> bool {
 /// Returns up to [`MAX_TRIPLES`] `((subject, predicate, object), "s p o")` pairs,
 /// deduplicated. The key lets callers do session-level delta filtering (44d);
 /// [`build_kg_context`] just formats the texts.
-fn collect_relevant_triples(engine: &Engine, keywords: &[String]) -> Vec<((u64, u64, u64), String)> {
+fn collect_relevant_triples(
+    engine: &Engine,
+    keywords: &[String],
+) -> Vec<((u64, u64, u64), String)> {
     let mut triples: Vec<((u64, u64, u64), String)> = Vec::new();
     let mut seen: HashSet<(u64, u64, u64)> = HashSet::new();
 
@@ -374,7 +379,11 @@ mod tests {
     #[test]
     fn format_context_block_respects_char_limit() {
         let long_triple = "a".repeat(MAX_CONTEXT_CHARS / 2);
-        let triples = vec![long_triple.clone(), long_triple.clone(), long_triple.clone()];
+        let triples = vec![
+            long_triple.clone(),
+            long_triple.clone(),
+            long_triple.clone(),
+        ];
         let block = format_context_block(&triples);
         assert!(block.len() <= MAX_CONTEXT_CHARS + 10);
     }
@@ -399,7 +408,10 @@ mod tests {
             cache.insert(format!("key_{i}"), format!("val_{i}"));
         }
         cache.insert("overflow".to_string(), "new".to_string());
-        assert!(cache.get("key_0").is_none(), "oldest entry should be evicted");
+        assert!(
+            cache.get("key_0").is_none(),
+            "oldest entry should be evicted"
+        );
         assert_eq!(cache.get("overflow"), Some("new"));
         assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
     }
@@ -434,9 +446,15 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         // First turn: the fact is delivered.
         let first = build_kg_context_delta(&engine, "tell me about rustlang", &mut seen);
-        assert!(first.as_deref().unwrap_or("").contains("memory-safe"), "first turn delivers the fact");
+        assert!(
+            first.as_deref().unwrap_or("").contains("memory-safe"),
+            "first turn delivers the fact"
+        );
         // Second turn, same topic: already shown ⇒ nothing new.
         let second = build_kg_context_delta(&engine, "tell me about rustlang", &mut seen);
-        assert!(second.is_none(), "already-shown fact is not re-sent: {second:?}");
+        assert!(
+            second.is_none(),
+            "already-shown fact is not re-sent: {second:?}"
+        );
     }
 }

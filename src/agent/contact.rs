@@ -28,14 +28,18 @@ pub enum ContactError {
     #[error("contact not found: \"{contact_id}\"")]
     #[diagnostic(
         code(akh::agent::contact::not_found),
-        help("Create a contact first with `contact_manager.create_contact()`, or use `resolve_or_create()` for auto-creation.")
+        help(
+            "Create a contact first with `contact_manager.create_contact()`, or use `resolve_or_create()` for auto-creation."
+        )
     )]
     NotFound { contact_id: String },
 
     #[error("duplicate alias: \"{alias}\" already belongs to contact \"{existing_contact}\"")]
     #[diagnostic(
         code(akh::agent::contact::duplicate_alias),
-        help("Merge the two contacts with `contact_manager.merge()` if they are the same person, or use a different alias.")
+        help(
+            "Merge the two contacts with `contact_manager.merge()` if they are the same person, or use a different alias."
+        )
     )]
     DuplicateAlias {
         alias: String,
@@ -113,7 +117,8 @@ impl ContactPredicates {
             has_phone: engine.resolve_or_create_relation("contact:has-phone")?,
             has_note: engine.resolve_or_create_relation("contact:has-note")?,
             merged_from: engine.resolve_or_create_relation("contact:merged-from")?,
-            linked_interlocutor: engine.resolve_or_create_relation("contact:linked-interlocutor")?,
+            linked_interlocutor: engine
+                .resolve_or_create_relation("contact:linked-interlocutor")?,
             linked_sender: engine.resolve_or_create_relation("contact:linked-sender")?,
             created_at: engine.resolve_or_create_relation("contact:created-at")?,
             participated_in: engine.resolve_or_create_relation("contact:participated-in")?,
@@ -333,7 +338,8 @@ impl ContactManager {
             let normalized = alias.to_lowercase();
             let alias_sym = engine.resolve_or_create_entity(&format!("alias:{normalized}"))?;
             engine.add_triple(&Triple::new(symbol_id, preds.has_alias, alias_sym))?;
-            self.alias_index.insert(normalized.clone(), contact_id.clone());
+            self.alias_index
+                .insert(normalized.clone(), contact_id.clone());
             normalized_aliases.push(normalized);
         }
 
@@ -401,12 +407,7 @@ impl ContactManager {
     /// from the discarded contact are moved to the kept contact. The
     /// discarded contact is removed and a `contact:merged-from` provenance
     /// link is stored.
-    pub fn merge(
-        &mut self,
-        engine: &Engine,
-        keep_id: &str,
-        discard_id: &str,
-    ) -> ContactResult<()> {
+    pub fn merge(&mut self, engine: &Engine, keep_id: &str, discard_id: &str) -> ContactResult<()> {
         if keep_id == discard_id {
             return Err(ContactError::SelfMerge {
                 contact_id: keep_id.to_string(),
@@ -446,7 +447,11 @@ impl ContactManager {
             if !keep.interlocutor_ids.contains(&iid) {
                 keep.interlocutor_ids.push(iid.clone());
                 let iid_sym = engine.resolve_or_create_entity(&format!("interlocutor:{iid}"))?;
-                engine.add_triple(&Triple::new(keep.symbol_id, preds.linked_interlocutor, iid_sym))?;
+                engine.add_triple(&Triple::new(
+                    keep.symbol_id,
+                    preds.linked_interlocutor,
+                    iid_sym,
+                ))?;
             }
         }
 
@@ -513,9 +518,18 @@ impl ContactManager {
                 contact_id: contact_id.to_string(),
             })?;
 
-        if !contact.interlocutor_ids.iter().any(|id| id == interlocutor_id) {
-            let iid_sym = engine.resolve_or_create_entity(&format!("interlocutor:{interlocutor_id}"))?;
-            engine.add_triple(&Triple::new(contact.symbol_id, preds.linked_interlocutor, iid_sym))?;
+        if !contact
+            .interlocutor_ids
+            .iter()
+            .any(|id| id == interlocutor_id)
+        {
+            let iid_sym =
+                engine.resolve_or_create_entity(&format!("interlocutor:{interlocutor_id}"))?;
+            engine.add_triple(&Triple::new(
+                contact.symbol_id,
+                preds.linked_interlocutor,
+                iid_sym,
+            ))?;
             contact.interlocutor_ids.push(interlocutor_id.to_string());
         }
 
@@ -540,7 +554,11 @@ impl ContactManager {
         let normalized = sender_address.to_lowercase();
         if !contact.sender_addresses.iter().any(|a| a == &normalized) {
             let addr_sym = engine.resolve_or_create_entity(&format!("sender:{normalized}"))?;
-            engine.add_triple(&Triple::new(contact.symbol_id, preds.linked_sender, addr_sym))?;
+            engine.add_triple(&Triple::new(
+                contact.symbol_id,
+                preds.linked_sender,
+                addr_sym,
+            ))?;
             contact.sender_addresses.push(normalized);
         }
 
@@ -596,13 +614,13 @@ impl ContactManager {
 
     /// Private helper: safely access predicates, returning an error if not initialized.
     fn preds_or_err(&self) -> ContactResult<&ContactPredicates> {
-        self.predicates.as_ref().ok_or_else(|| ContactError::Engine(
-            Box::new(crate::error::AkhError::Store(
+        self.predicates.as_ref().ok_or_else(|| {
+            ContactError::Engine(Box::new(crate::error::AkhError::Store(
                 crate::error::StoreError::Serialization {
                     message: "ContactManager predicates not initialized".to_string(),
                 },
-            )),
-        ))
+            )))
+        })
     }
 }
 
@@ -779,8 +797,16 @@ mod tests {
             .unwrap();
 
         let contact = mgr.get(&cid).unwrap();
-        assert!(contact.interlocutor_ids.contains(&"interlocutor-123".to_string()));
-        assert!(contact.sender_addresses.contains(&"alice@personal.net".to_string()));
+        assert!(
+            contact
+                .interlocutor_ids
+                .contains(&"interlocutor-123".to_string())
+        );
+        assert!(
+            contact
+                .sender_addresses
+                .contains(&"alice@personal.net".to_string())
+        );
 
         // Idempotent — linking again should not duplicate.
         mgr.link_interlocutor(&engine, &cid, "interlocutor-123")

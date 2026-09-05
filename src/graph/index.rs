@@ -242,12 +242,7 @@ impl KnowledgeGraph {
     /// Removes the edge between subject and object with the matching predicate.
     /// Returns true if a matching edge was found and removed, false otherwise.
     /// Does NOT remove nodes (they may be referenced by other edges).
-    pub fn remove_triple(
-        &self,
-        subject: SymbolId,
-        predicate: SymbolId,
-        object: SymbolId,
-    ) -> bool {
+    pub fn remove_triple(&self, subject: SymbolId, predicate: SymbolId, object: SymbolId) -> bool {
         let subj_idx = match self.node_index.get(&subject) {
             Some(idx) => *idx.value(),
             None => return false,
@@ -935,7 +930,10 @@ mod tests {
         first.compartment_id = Some("audit".into());
         kg.insert_triple(&first).unwrap();
 
-        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([41])).len(), 1);
+        assert_eq!(
+            kg.triples_with_provenance_ids(&HashSet::from([41])).len(),
+            1
+        );
         assert!(kg.triples_at_or_above_confidence(0.5).is_empty());
         assert!(kg.triples_without_provenance().is_empty());
 
@@ -947,7 +945,10 @@ mod tests {
             kg.triples_with_provenance_ids(&HashSet::from([41]))
                 .is_empty()
         );
-        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([42])).len(), 1);
+        assert_eq!(
+            kg.triples_with_provenance_ids(&HashSet::from([42])).len(),
+            1
+        );
         assert_eq!(kg.triples_at_or_above_confidence(0.8).len(), 1);
 
         let untracked = Triple::new(a, relation, b).with_confidence(0.2);
@@ -969,7 +970,10 @@ mod tests {
             .with_provenance(43);
         restored.compartment_id = Some("restored".into());
         assert_eq!(kg.bulk_load(&[restored]).unwrap(), 1);
-        assert_eq!(kg.triples_with_provenance_ids(&HashSet::from([43])).len(), 1);
+        assert_eq!(
+            kg.triples_with_provenance_ids(&HashSet::from([43])).len(),
+            1
+        );
         assert!(kg.triples_at_or_above_confidence(0.1).is_empty());
         assert!(kg.update_triple_confidence(a, relation, c, 0.75, 0.0, 1.0));
         assert_eq!(kg.triples_at_or_above_confidence(0.7).len(), 1);

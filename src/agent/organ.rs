@@ -49,8 +49,8 @@
 //! repaired retry.
 
 use grug_data::{
-    ground_values, normalized_similarity_ci, repair_call, ParamSpec, ParamType, Retriever,
-    ToolCall, ToolSchema,
+    ParamSpec, ParamType, Retriever, ToolCall, ToolSchema, ground_values, normalized_similarity_ci,
+    repair_call,
 };
 use serde_json::Value;
 
@@ -88,7 +88,12 @@ const REPAIR_NAME_FLOOR: f64 = 0.5;
 ///
 /// Selection is deterministic (ties break by catalog order, which the caller
 /// sorts by name) in both paths.
-pub fn retrieve_scoped(tools: &[Value], request: &str, k: usize, engine: Option<&Engine>) -> Vec<Value> {
+pub fn retrieve_scoped(
+    tools: &[Value],
+    request: &str,
+    k: usize,
+    engine: Option<&Engine>,
+) -> Vec<Value> {
     if tools.len() <= k {
         return tools.to_vec();
     }
@@ -103,21 +108,33 @@ pub fn retrieve_scoped(tools: &[Value], request: &str, k: usize, engine: Option<
 /// VSA-scored path behind [`retrieve_scoped`]. Returns `None` (never partial
 /// results) the moment any encoding or similarity call fails, so the caller
 /// falls back to the lexical path wholesale.
-fn retrieve_scoped_vsa(tools: &[Value], request: &str, k: usize, engine: &Engine) -> Option<Vec<Value>> {
+fn retrieve_scoped_vsa(
+    tools: &[Value],
+    request: &str,
+    k: usize,
+    engine: &Engine,
+) -> Option<Vec<Value>> {
     let ops = engine.ops();
     let item_memory = engine.item_memory();
     let request_vec = encode_text_as_vector(request, engine, ops, item_memory).ok()?;
 
     let mut scored: Vec<(usize, f32)> = Vec::with_capacity(tools.len());
     for (i, tool) in tools.iter().enumerate() {
-        let tool_vec = encode_text_as_vector(&retrieval_text(tool), engine, ops, item_memory).ok()?;
+        let tool_vec =
+            encode_text_as_vector(&retrieval_text(tool), engine, ops, item_memory).ok()?;
         let sim = ops.similarity(&request_vec, &tool_vec).ok()?;
         scored.push((i, sim));
     }
     // Stable sort: ties keep their catalog order, matching the lexical path's
     // tie-break contract.
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Some(scored.into_iter().take(k).map(|(i, _)| tools[i].clone()).collect())
+    Some(
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(i, _)| tools[i].clone())
+            .collect(),
+    )
 }
 
 /// Lexical fallback behind [`retrieve_scoped`]: token overlap via
@@ -142,7 +159,13 @@ fn retrieval_text(tool: &Value) -> String {
     let desc = f["description"].as_str().unwrap_or_default();
     let opened: String = name
         .chars()
-        .map(|c| if c == '_' || c == '.' || c == '-' { ' ' } else { c })
+        .map(|c| {
+            if c == '_' || c == '.' || c == '-' {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     format!("{opened} {desc}")
 }
@@ -165,7 +188,11 @@ pub struct RepairedCall {
 /// - no offered entry parses into a schema,
 /// - the best grounding's name similarity falls below [`REPAIR_NAME_FLOOR`]
 ///   (a hallucinated name, not a near-miss).
-pub fn repair_unknown_call(name: &str, arguments: &Value, offered: &[Value]) -> Option<RepairedCall> {
+pub fn repair_unknown_call(
+    name: &str,
+    arguments: &Value,
+    offered: &[Value],
+) -> Option<RepairedCall> {
     if std::env::var("AKH_AGENT_TOOL_REPAIR").is_ok_and(|v| v == "0") {
         return None;
     }
@@ -219,7 +246,11 @@ pub fn repair_unknown_call(name: &str, arguments: &Value, offered: &[Value]) -> 
 ///
 /// Returns `None` when `name` isn't in `full_catalog` at all, or when repair
 /// changed nothing — a no-op repair is not worth a retry.
-pub fn repair_known_call_args(name: &str, arguments: &Value, full_catalog: &[Value]) -> Option<RepairedCall> {
+pub fn repair_known_call_args(
+    name: &str,
+    arguments: &Value,
+    full_catalog: &[Value],
+) -> Option<RepairedCall> {
     let entry = full_catalog
         .iter()
         .find(|t| t["function"]["name"].as_str() == Some(name))?;
@@ -281,7 +312,12 @@ pub fn repair_known_call_args(name: &str, arguments: &Value, full_catalog: &[Val
 ///
 /// Returns `None` when the flag is unset, `name` isn't in `offered`, or
 /// nothing changed.
-pub fn ground_call_values(name: &str, arguments: &Value, request: &str, offered: &[Value]) -> Option<RepairedCall> {
+pub fn ground_call_values(
+    name: &str,
+    arguments: &Value,
+    request: &str,
+    offered: &[Value],
+) -> Option<RepairedCall> {
     if !std::env::var("AKH_AGENT_VALUE_GROUND").is_ok_and(|v| v == "1") {
         return None;
     }
@@ -289,20 +325,27 @@ pub fn ground_call_values(name: &str, arguments: &Value, request: &str, offered:
     let call = ToolCall::new(name.to_string(), arguments.clone());
     let (grounded, stats) = ground_values(&call, request, &schemas);
 
-    let changed = stats.numeric_regrounded > 0 || stats.enum_regrounded > 0 || stats.string_regrounded > 0;
+    let changed =
+        stats.numeric_regrounded > 0 || stats.enum_regrounded > 0 || stats.string_regrounded > 0;
     if !changed {
         return None;
     }
 
     let mut notes = Vec::new();
     if stats.numeric_regrounded > 0 {
-        notes.push(format!("{} numeric value(s) grounded", stats.numeric_regrounded));
+        notes.push(format!(
+            "{} numeric value(s) grounded",
+            stats.numeric_regrounded
+        ));
     }
     if stats.enum_regrounded > 0 {
         notes.push(format!("{} enum value(s) grounded", stats.enum_regrounded));
     }
     if stats.string_regrounded > 0 {
-        notes.push(format!("{} string value(s) grounded", stats.string_regrounded));
+        notes.push(format!(
+            "{} string value(s) grounded",
+            stats.string_regrounded
+        ));
     }
     Some(RepairedCall {
         name: grounded.name,
@@ -336,7 +379,11 @@ fn schema_from_catalog(tool: &Value) -> Option<ToolSchema> {
             .unwrap_or_default();
         for (pname, spec) in props {
             let ty = param_type_from_schema(spec);
-            params.push(ParamSpec::new(pname.clone(), ty, required.contains(&pname.as_str())));
+            params.push(ParamSpec::new(
+                pname.clone(),
+                ty,
+                required.contains(&pname.as_str()),
+            ));
         }
     }
     Some(ToolSchema::new(name, description, params))
@@ -418,7 +465,12 @@ mod tests {
     #[test]
     fn retrieval_falls_back_to_lexical_without_an_engine() {
         let tools = sample_catalog();
-        let scoped = retrieve_scoped(&tools, "please add a calendar event for the review", 1, None);
+        let scoped = retrieve_scoped(
+            &tools,
+            "please add a calendar event for the review",
+            1,
+            None,
+        );
         assert_eq!(scoped.len(), 1);
         assert_eq!(scoped[0]["function"]["name"], "calendar_add_event");
         // A catalog already within k is returned whole, engine or not.
@@ -453,7 +505,11 @@ mod tests {
         assert_eq!(repaired.arguments["title"], json!("standup"));
         // Param renamed and value coerced to the declared integer type.
         assert_eq!(repaired.arguments["day_count"], json!(3));
-        assert!(repaired.note.contains("calendar_add_evnt → calendar_add_event"));
+        assert!(
+            repaired
+                .note
+                .contains("calendar_add_evnt → calendar_add_event")
+        );
     }
 
     #[test]
@@ -492,17 +548,21 @@ mod tests {
     #[test]
     fn known_call_repair_returns_none_when_nothing_changes() {
         let tools = sample_catalog();
-        assert!(repair_known_call_args(
-            "calendar_add_event",
-            &json!({"title": "standup", "day_count": 3}),
-            &tools,
-        )
-        .is_none());
+        assert!(
+            repair_known_call_args(
+                "calendar_add_event",
+                &json!({"title": "standup", "day_count": 3}),
+                &tools,
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn known_call_repair_returns_none_for_a_name_absent_from_the_catalog() {
-        assert!(repair_known_call_args("nonexistent_tool", &json!({}), &sample_catalog()).is_none());
+        assert!(
+            repair_known_call_args("nonexistent_tool", &json!({}), &sample_catalog()).is_none()
+        );
     }
 
     // --- Task B: ground_call_values (opt-in AKH_AGENT_VALUE_GROUND=1) ---

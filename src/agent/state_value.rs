@@ -9,8 +9,8 @@
 //! State encoding captures active goals + progress, KG fluent count, and an
 //! optional VSA fingerprint for similarity-based generalization to unseen states.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
@@ -110,8 +110,7 @@ impl Reward {
 
         // Knowledge gain: normalized triple count increase.
         let knowledge_gain = if before.fluent_count > 0 {
-            (after.fluent_count as f32 - before.fluent_count as f32)
-                / before.fluent_count as f32
+            (after.fluent_count as f32 - before.fluent_count as f32) / before.fluent_count as f32
         } else if after.fluent_count > 0 {
             1.0
         } else {
@@ -225,8 +224,8 @@ impl ValueFunction {
 
     /// Persist to durable store.
     pub fn persist(&self, engine: &Engine) -> Result<(), String> {
-        let bytes = bincode::serialize(self)
-            .map_err(|e| format!("serialize value function: {e}"))?;
+        let bytes =
+            bincode::serialize(self).map_err(|e| format!("serialize value function: {e}"))?;
         engine
             .store()
             .put_meta(b"agent:value_function", &bytes)
@@ -452,10 +451,7 @@ mod tests {
         assert_eq!(restored.alpha, 0.2);
         assert_eq!(restored.gamma, 0.95);
         assert_eq!(restored.update_count, 1);
-        assert_eq!(
-            restored.state_value(&state),
-            vf.state_value(&state)
-        );
+        assert_eq!(restored.state_value(&state), vf.state_value(&state));
     }
 
     // ── StateRoleVectors ──────────────────────────────────────────
@@ -477,10 +473,7 @@ mod tests {
         for i in 0..vecs.len() {
             for j in (i + 1)..vecs.len() {
                 let sim = ops.similarity(vecs[i], vecs[j]).unwrap_or(0.0);
-                assert!(
-                    sim < 0.7,
-                    "role vectors {i} and {j} too similar: {sim}"
-                );
+                assert!(sim < 0.7, "role vectors {i} and {j} too similar: {sim}");
             }
         }
     }

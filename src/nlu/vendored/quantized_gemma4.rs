@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use candle::quantized::QTensor;
 use candle::quantized::gguf_file;
-use candle::{DType, Device, IndexOp, Result, Tensor, D};
+use candle::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Module;
 
 pub const MAX_SEQ_LEN: usize = 131072; // Gemma 4 long-context window.
@@ -368,7 +368,11 @@ impl LayerWeights {
                 let gpu = |t: std::result::Result<Tensor, crate::nlu::error::NluError>| {
                     t.map_err(|e| candle_core::Error::Msg(format!("gpu attn proj: {e}")))
                 };
-                (gpu(g.wq.forward(x))?, gpu(g.wk.forward(x))?, gpu(g.wv.forward(x))?)
+                (
+                    gpu(g.wq.forward(x))?,
+                    gpu(g.wk.forward(x))?,
+                    gpu(g.wv.forward(x))?,
+                )
             }
             None => (
                 self.attention_wq.forward(x)?,
@@ -588,8 +592,7 @@ impl ModelWeights {
         let rms_norm_eps = md_get("attention.layer_norm_rms_epsilon")
             .and_then(|m| Ok(m.to_f32()? as f64))
             .unwrap_or(1e-6);
-        let sliding_window_size =
-            mdu("attention.sliding_window").unwrap_or(DEFAULT_SLIDING_WINDOW);
+        let sliding_window_size = mdu("attention.sliding_window").unwrap_or(DEFAULT_SLIDING_WINDOW);
 
         let rope_freq_base_full = md_get("rope.freq_base")
             .and_then(|m| m.to_f32())
@@ -734,7 +737,11 @@ impl ModelWeights {
 
             // Per-block [1] layer_output_scale scalar.
             let layer_output_scale = ct
-                .tensor(reader, &format!("{prefix}.layer_output_scale.weight"), device)?
+                .tensor(
+                    reader,
+                    &format!("{prefix}.layer_output_scale.weight"),
+                    device,
+                )?
                 .dequantize(device)?;
 
             let feed_forward_gate =
@@ -966,7 +973,9 @@ impl ModelWeights {
         // byte-exact to incremental decode). The normal path keeps the per-layer windowed
         // prefill mask / `None` for single-token decode.
         let verify_mask = if !last_only && seq_len > 1 {
-            Some(LayerWeights::verify_mask(seq_len, index_pos, dtype, &device)?)
+            Some(LayerWeights::verify_mask(
+                seq_len, index_pos, dtype, &device,
+            )?)
         } else {
             None
         };

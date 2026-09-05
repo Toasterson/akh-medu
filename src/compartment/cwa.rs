@@ -42,10 +42,7 @@ pub enum CwaError {
              Use `add_circumscribed_collection()` first."
         )
     )]
-    CollectionNotFound {
-        collection_id: u64,
-        context_id: u64,
-    },
+    CollectionNotFound { collection_id: u64, context_id: u64 },
 
     #[error("negation-as-failure query requires CWA to be active in context {context_id}")]
     #[diagnostic(
@@ -133,16 +130,32 @@ impl CwaPredicates {
     pub fn resolve(engine: &Engine) -> AkhResult<Self> {
         let cwa = engine
             .create_symbol(SymbolKind::Relation, "ctx:cwa")
-            .or_else(|_| engine.lookup_symbol("ctx:cwa").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:cwa")))?;
+            .or_else(|_| {
+                engine
+                    .lookup_symbol("ctx:cwa")
+                    .map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:cwa"))
+            })?;
         let una = engine
             .create_symbol(SymbolKind::Relation, "ctx:una")
-            .or_else(|_| engine.lookup_symbol("ctx:una").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:una")))?;
+            .or_else(|_| {
+                engine
+                    .lookup_symbol("ctx:una")
+                    .map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:una"))
+            })?;
         let circumscribes = engine
             .create_symbol(SymbolKind::Relation, "ctx:circumscribes")
-            .or_else(|_| engine.lookup_symbol("ctx:circumscribes").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:circumscribes")))?;
+            .or_else(|_| {
+                engine.lookup_symbol("ctx:circumscribes").map(|id| {
+                    crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "ctx:circumscribes")
+                })
+            })?;
         let is_a = engine
             .create_symbol(SymbolKind::Relation, "is-a")
-            .or_else(|_| engine.lookup_symbol("is-a").map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "is-a")))?;
+            .or_else(|_| {
+                engine
+                    .lookup_symbol("is-a")
+                    .map(|id| crate::symbol::SymbolMeta::new(id, SymbolKind::Relation, "is-a"))
+            })?;
 
         Ok(Self {
             cwa: cwa.id,
@@ -399,9 +412,7 @@ mod tests {
     fn naf_query_found() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
         let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
         engine
             .add_triple(&Triple::new(sun.id, is_a.id, star.id))
@@ -416,9 +427,7 @@ mod tests {
     fn naf_query_unknown_without_cwa() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
         let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
-        let likes = engine
-            .create_symbol(SymbolKind::Relation, "likes")
-            .unwrap();
+        let likes = engine.create_symbol(SymbolKind::Relation, "likes").unwrap();
 
         let reg = AssumptionRegistry::new();
         let result = query_naf(&engine, sun.id, likes.id, None, &reg);
@@ -432,9 +441,7 @@ mod tests {
             .create_symbol(SymbolKind::Entity, "TestContext")
             .unwrap();
         let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
-        let likes = engine
-            .create_symbol(SymbolKind::Relation, "likes")
-            .unwrap();
+        let likes = engine.create_symbol(SymbolKind::Relation, "likes").unwrap();
 
         let mut reg = AssumptionRegistry::new();
         reg.set_assumptions(ctx_sym.id, ContextAssumptions::with_cwa());
@@ -449,15 +456,9 @@ mod tests {
         let ctx_sym = engine
             .create_symbol(SymbolKind::Entity, "ScienceCtx")
             .unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
-        let planet = engine
-            .create_symbol(SymbolKind::Entity, "Planet")
-            .unwrap();
-        let earth = engine
-            .create_symbol(SymbolKind::Entity, "Earth")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
+        let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
+        let earth = engine.create_symbol(SymbolKind::Entity, "Earth").unwrap();
         let mars = engine.create_symbol(SymbolKind::Entity, "Mars").unwrap();
 
         engine
@@ -487,12 +488,8 @@ mod tests {
     #[test]
     fn circumscribed_instances_none_when_not_circumscribed() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let ctx_sym = engine
-            .create_symbol(SymbolKind::Entity, "OpenCtx")
-            .unwrap();
-        let planet = engine
-            .create_symbol(SymbolKind::Entity, "Planet")
-            .unwrap();
+        let ctx_sym = engine.create_symbol(SymbolKind::Entity, "OpenCtx").unwrap();
+        let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
 
         let predicates = CwaPredicates {
             cwa: SymbolId::new(100).unwrap(),
@@ -509,9 +506,7 @@ mod tests {
     #[test]
     fn una_same_entity_identical() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let ctx = engine
-            .create_symbol(SymbolKind::Entity, "UnaCtx")
-            .unwrap();
+        let ctx = engine.create_symbol(SymbolKind::Entity, "UnaCtx").unwrap();
         let entity = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
 
         let mut reg = AssumptionRegistry::new();
@@ -523,9 +518,7 @@ mod tests {
     #[test]
     fn una_different_entities() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
-        let ctx = engine
-            .create_symbol(SymbolKind::Entity, "UnaCtx")
-            .unwrap();
+        let ctx = engine.create_symbol(SymbolKind::Entity, "UnaCtx").unwrap();
         let a = engine.create_symbol(SymbolKind::Entity, "A").unwrap();
         let b = engine.create_symbol(SymbolKind::Entity, "B").unwrap();
 

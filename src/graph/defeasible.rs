@@ -21,7 +21,6 @@ use crate::error::AkhResult;
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
 
-
 // ---------------------------------------------------------------------------
 // Well-known predicates
 // ---------------------------------------------------------------------------
@@ -301,11 +300,7 @@ pub fn find_conflicts(engine: &Engine, subject: SymbolId, predicate: SymbolId) -
         .filter(|t| t.predicate == predicate)
         .collect();
 
-    if triples.len() > 1 {
-        triples
-    } else {
-        vec![]
-    }
+    if triples.len() > 1 { triples } else { vec![] }
 }
 
 /// Find conflicting triples across type hierarchy.
@@ -405,7 +400,11 @@ pub fn register_exception(
     specific_subject: SymbolId,
     preds: &DefeasiblePredicates,
 ) -> AkhResult<()> {
-    engine.add_triple(&Triple::new(general_subject, preds.except, specific_subject))
+    engine.add_triple(&Triple::new(
+        general_subject,
+        preds.except,
+        specific_subject,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -500,9 +499,7 @@ mod tests {
         mark_monotonic(&engine, animal, breathes, &preds).unwrap();
 
         // cat breathes no (default — should NOT override)
-        engine
-            .add_triple(&Triple::new(cat, breathes, no))
-            .unwrap();
+        engine.add_triple(&Triple::new(cat, breathes, no)).unwrap();
 
         let conflicts = find_hierarchy_conflicts(&engine, cat, breathes, &preds);
         assert_eq!(conflicts.len(), 2);
@@ -657,9 +654,7 @@ mod tests {
         let animal = engine.resolve_or_create_entity("animal").unwrap();
         let mammal = engine.resolve_or_create_entity("mammal").unwrap();
         let dog = engine.resolve_or_create_entity("dog").unwrap();
-        let golden = engine
-            .resolve_or_create_entity("golden-retriever")
-            .unwrap();
+        let golden = engine.resolve_or_create_entity("golden-retriever").unwrap();
 
         engine
             .add_triple(&Triple::new(mammal, preds.is_a, animal))
@@ -709,9 +704,7 @@ mod tests {
         engine
             .add_triple(&Triple::new(mammal, is_a, animal))
             .unwrap();
-        engine
-            .add_triple(&Triple::new(dog, is_a, mammal))
-            .unwrap();
+        engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
 
         assert_eq!(type_depth(&engine, thing, is_a), 0);
         assert_eq!(type_depth(&engine, animal, is_a), 1);
@@ -732,12 +725,8 @@ mod tests {
         engine
             .add_triple(&Triple::new(mammal, is_a, animal))
             .unwrap();
-        engine
-            .add_triple(&Triple::new(dog, is_a, mammal))
-            .unwrap();
-        engine
-            .add_triple(&Triple::new(fish, is_a, animal))
-            .unwrap();
+        engine.add_triple(&Triple::new(dog, is_a, mammal)).unwrap();
+        engine.add_triple(&Triple::new(fish, is_a, animal)).unwrap();
 
         assert!(is_subtype_of(&engine, dog, animal, is_a));
         assert!(is_subtype_of(&engine, dog, mammal, is_a));
@@ -754,9 +743,7 @@ mod tests {
         let color = engine.resolve_or_create_relation("color").unwrap();
         let brown = engine.resolve_or_create_entity("brown").unwrap();
 
-        engine
-            .add_triple(&Triple::new(dog, color, brown))
-            .unwrap();
+        engine.add_triple(&Triple::new(dog, color, brown)).unwrap();
 
         let conflicts = find_conflicts(&engine, dog, color);
         assert!(conflicts.is_empty()); // single triple = no conflict
@@ -766,10 +753,7 @@ mod tests {
     fn override_reason_display() {
         assert_eq!(OverrideReason::Monotonic.to_string(), "monotonic");
         assert_eq!(
-            OverrideReason::Specificity {
-                depth_advantage: 2
-            }
-            .to_string(),
+            OverrideReason::Specificity { depth_advantage: 2 }.to_string(),
             "specificity (depth advantage: 2)"
         );
         assert_eq!(OverrideReason::Exception.to_string(), "exception");

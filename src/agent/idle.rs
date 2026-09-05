@@ -44,11 +44,11 @@ impl Default for IdleScheduler {
             last_sleep: now,
             last_continuous_learning: now,
             // Longer intervals than daemon — TUI is interactive, don't steal CPU.
-            equivalence_interval: Duration::from_secs(600),  // 10 min
-            reflection_interval: Duration::from_secs(300),   // 5 min
+            equivalence_interval: Duration::from_secs(600), // 10 min
+            reflection_interval: Duration::from_secs(300),  // 5 min
             consolidation_interval: Duration::from_secs(120), // 2 min
-            rules_interval: Duration::from_secs(900),        // 15 min
-            sleep_interval: Duration::from_secs(3600),       // 60 min
+            rules_interval: Duration::from_secs(900),       // 15 min
+            sleep_interval: Duration::from_secs(3600),      // 60 min
             continuous_learning_interval: Duration::from_secs(7200), // 2 hours
         }
     }
@@ -290,7 +290,8 @@ impl IdleScheduler {
             || now.duration_since(self.last_equivalence) >= self.equivalence_interval
             || now.duration_since(self.last_rules) >= self.rules_interval
             || now.duration_since(self.last_sleep) >= self.sleep_interval
-            || now.duration_since(self.last_continuous_learning) >= self.continuous_learning_interval
+            || now.duration_since(self.last_continuous_learning)
+                >= self.continuous_learning_interval
     }
 }
 

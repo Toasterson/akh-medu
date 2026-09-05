@@ -134,9 +134,7 @@ impl Tool for GlobTool {
 
         let mut body = matches.join("\n");
         if truncated {
-            body.push_str(&format!(
-                "\n... [truncated at {MAX_MATCHES} matches]"
-            ));
+            body.push_str(&format!("\n... [truncated at {MAX_MATCHES} matches]"));
         }
         Ok(ToolOutput::ok(body))
     }
@@ -316,7 +314,11 @@ mod tests {
             .with_param("path", root.to_string_lossy().to_string());
         let out = tool.execute(&engine, input).unwrap();
         assert!(out.success, "result: {}", out.result);
-        assert!(out.result.contains("a.rs"), "should find a.rs: {}", out.result);
+        assert!(
+            out.result.contains("a.rs"),
+            "should find a.rs: {}",
+            out.result
+        );
         assert!(
             !out.result.contains("loop/"),
             "must not follow the symlink into loop/...: {}",

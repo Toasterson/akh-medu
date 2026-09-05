@@ -250,8 +250,9 @@ impl ExecPath {
         ]);
 
         let joined: Vec<&OsStr> = parts.iter().map(|p| p.as_os_str()).collect();
-        std::env::join_paths(joined)
-            .expect("derived PATH components contain no ':' — they are fixed literals and a home dir")
+        std::env::join_paths(joined).expect(
+            "derived PATH components contain no ':' — they are fixed literals and a home dir",
+        )
     }
 }
 
@@ -821,7 +822,9 @@ mod tests {
     }
 
     fn current_user() -> Option<String> {
-        std::env::var("USER").ok().or_else(|| std::env::var("LOGNAME").ok())
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("LOGNAME").ok())
     }
 
     /// Why an end-to-end exec test cannot run in this environment.
@@ -848,7 +851,10 @@ mod tests {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::NoPrincipal => {
-                    write!(f, "neither USER nor LOGNAME is set, so there is no principal to drop to")
+                    write!(
+                        f,
+                        "neither USER nor LOGNAME is set, so there is no principal to drop to"
+                    )
                 }
                 Self::BackendRejected(e) => {
                     write!(f, "the backend would not construct for this principal: {e}")
@@ -892,8 +898,9 @@ mod tests {
     /// Build a backend and prove it can run a trivial command that writes to stdout.
     fn probe_exec_environment() -> Result<LocalDropBackend, ExecUnavailable> {
         let user = current_user().ok_or(ExecUnavailable::NoPrincipal)?;
-        let backend = LocalDropBackend::new(LocalDropConfig::new(&user), Arc::new(LocalFs::denied()))
-            .map_err(ExecUnavailable::BackendRejected)?;
+        let backend =
+            LocalDropBackend::new(LocalDropConfig::new(&user), Arc::new(LocalFs::denied()))
+                .map_err(ExecUnavailable::BackendRejected)?;
         let probe = backend
             .exec(ExecRequest::shell(
                 "printf 'probe'",
@@ -922,11 +929,8 @@ mod tests {
     #[test]
     fn root_is_refused_as_a_drop_target() {
         // Targeting root would keep full privilege while claiming a boundary.
-        let err = LocalDropBackend::new(
-            LocalDropConfig::new("root"),
-            Arc::new(LocalFs::denied()),
-        )
-        .expect_err("root must never be accepted as the drop target");
+        let err = LocalDropBackend::new(LocalDropConfig::new("root"), Arc::new(LocalFs::denied()))
+            .expect_err("root must never be accepted as the drop target");
         assert!(matches!(err, LocalDropError::RefusesRoot));
     }
 
@@ -974,10 +978,7 @@ mod tests {
             return; // as root the drop is permitted, so there is nothing to refuse
         }
         // `nobody` exists on macOS, Linux and illumos alike and is never us.
-        match LocalDropBackend::new(
-            LocalDropConfig::new("nobody"),
-            Arc::new(LocalFs::denied()),
-        ) {
+        match LocalDropBackend::new(LocalDropConfig::new("nobody"), Arc::new(LocalFs::denied())) {
             Err(LocalDropError::NotPrivileged { .. }) => {}
             Err(LocalDropError::UnknownUser { .. }) => {} // no `nobody` here
             Err(other) => panic!("expected NotPrivileged, got {other:?}"),
@@ -1014,14 +1015,20 @@ mod tests {
 
         backend.apply_execution_context(&mut command, &request);
 
-        assert_eq!(command.get_current_dir(), Some(Path::new("/workspace/default")));
-        assert_eq!(command_env(&command, "HOME"), Some(OsStr::new("/home/build")));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/workspace/default"))
+        );
+        assert_eq!(
+            command_env(&command, "HOME"),
+            Some(OsStr::new("/home/build"))
+        );
         assert_eq!(command_env(&command, "USER"), Some(OsStr::new("build")));
         assert_eq!(command_env(&command, "LOGNAME"), Some(OsStr::new("build")));
-        assert!(
-            command_env(&command, "PATH")
-                .is_some_and(|path| path.to_string_lossy().starts_with("/home/build/.local/bin:"))
-        );
+        assert!(command_env(&command, "PATH").is_some_and(|path| {
+            path.to_string_lossy()
+                .starts_with("/home/build/.local/bin:")
+        }));
     }
 
     #[test]
@@ -1036,9 +1043,18 @@ mod tests {
 
         backend.apply_execution_context(&mut command, &request);
 
-        assert_eq!(command.get_current_dir(), Some(Path::new("/workspace/request")));
-        assert_eq!(command_env(&command, "HOME"), Some(OsStr::new("/tmp/explicit-home")));
-        assert_eq!(command_env(&command, "PATH"), Some(OsStr::new("/opt/pinned/bin")));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/workspace/request"))
+        );
+        assert_eq!(
+            command_env(&command, "HOME"),
+            Some(OsStr::new("/tmp/explicit-home"))
+        );
+        assert_eq!(
+            command_env(&command, "PATH"),
+            Some(OsStr::new("/opt/pinned/bin"))
+        );
     }
 
     #[test]
@@ -1050,9 +1066,16 @@ mod tests {
             return;
         };
         let outcome = backend
-            .exec(ExecRequest::shell("id -u", std::time::Duration::from_secs(30)))
+            .exec(ExecRequest::shell(
+                "id -u",
+                std::time::Duration::from_secs(30),
+            ))
             .expect("`id -u` must run");
-        assert!(outcome.success, "stderr: {}", String::from_utf8_lossy(&outcome.stderr));
+        assert!(
+            outcome.success,
+            "stderr: {}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
         let reported: u32 = String::from_utf8_lossy(&outcome.stdout)
             .trim()
             .parse()
@@ -1092,11 +1115,8 @@ mod tests {
         };
         let outcome = backend
             .exec(
-                ExecRequest::shell(
-                    "printf '%s' \"$HOME\"",
-                    std::time::Duration::from_secs(30),
-                )
-                .with_env("HOME", "/tmp/akh-explicit-home"),
+                ExecRequest::shell("printf '%s' \"$HOME\"", std::time::Duration::from_secs(30))
+                    .with_env("HOME", "/tmp/akh-explicit-home"),
             )
             .expect("printf must run");
         assert_eq!(
@@ -1180,11 +1200,8 @@ mod tests {
         };
         let outcome = backend
             .exec(
-                ExecRequest::shell(
-                    "printf '%s' \"$PATH\"",
-                    std::time::Duration::from_secs(30),
-                )
-                .with_env("PATH", "/opt/pinned/bin"),
+                ExecRequest::shell("printf '%s' \"$PATH\"", std::time::Duration::from_secs(30))
+                    .with_env("PATH", "/opt/pinned/bin"),
             )
             .expect("printf must run");
         assert_eq!(String::from_utf8_lossy(&outcome.stdout), "/opt/pinned/bin");

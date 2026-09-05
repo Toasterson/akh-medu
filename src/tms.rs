@@ -131,10 +131,7 @@ impl TruthMaintenanceSystem {
 
     /// Get all symbols that directly depend on the given premise.
     pub fn direct_dependents(&self, premise: SymbolId) -> HashSet<SymbolId> {
-        self.dependents
-            .get(&premise)
-            .cloned()
-            .unwrap_or_default()
+        self.dependents.get(&premise).cloned().unwrap_or_default()
     }
 
     /// Compute the effective confidence for a symbol from its surviving support sets.
@@ -143,11 +140,7 @@ impl TruthMaintenanceSystem {
     pub fn effective_confidence(&self, derived: SymbolId) -> f64 {
         self.supports
             .get(&derived)
-            .map(|sets| {
-                sets.iter()
-                    .map(|s| s.confidence)
-                    .fold(0.0_f64, f64::max)
-            })
+            .map(|sets| sets.iter().map(|s| s.confidence).fold(0.0_f64, f64::max))
             .unwrap_or(0.0)
     }
 
@@ -178,10 +171,7 @@ impl TruthMaintenanceSystem {
             self.supports.remove(&current);
 
             // Find all symbols that depend on `current`
-            let dependents = self
-                .dependents
-                .remove(&current)
-                .unwrap_or_default();
+            let dependents = self.dependents.remove(&current).unwrap_or_default();
 
             for dependent in dependents {
                 // Remove support sets that contain the retracted premise
@@ -288,11 +278,7 @@ mod tests {
 
         tms.add_support(
             derived,
-            SupportSet::new(
-                vec![premise_a, premise_b],
-                DerivationKind::Reasoned,
-                0.9,
-            ),
+            SupportSet::new(vec![premise_a, premise_b], DerivationKind::Reasoned, 0.9),
         );
 
         assert!(tms.is_supported(derived));
@@ -306,19 +292,37 @@ mod tests {
         let derived = sym(10);
         let never = sym(99);
 
-        tms.add_support(derived, SupportSet::new(vec![sym(1)], DerivationKind::Reasoned, 0.9));
+        tms.add_support(
+            derived,
+            SupportSet::new(vec![sym(1)], DerivationKind::Reasoned, 0.9),
+        );
         assert!(!tms.was_retracted(derived));
-        assert!(!tms.was_retracted(never), "never-tracked symbol is not 'retracted'");
+        assert!(
+            !tms.was_retracted(never),
+            "never-tracked symbol is not 'retracted'"
+        );
 
         // Retract the premise → derived cascades out and is remembered as superseded.
         tms.retract(sym(1));
         assert!(!tms.is_supported(derived));
-        assert!(tms.was_retracted(derived), "retracted fact remembered (vs. untracked)");
-        assert!(!tms.was_retracted(never), "untracked symbol still not retracted");
+        assert!(
+            tms.was_retracted(derived),
+            "retracted fact remembered (vs. untracked)"
+        );
+        assert!(
+            !tms.was_retracted(never),
+            "untracked symbol still not retracted"
+        );
 
         // Re-justifying clears the supersession flag.
-        tms.add_support(derived, SupportSet::new(vec![sym(2)], DerivationKind::Extracted, 0.8));
-        assert!(!tms.was_retracted(derived), "re-justified fact is no longer superseded");
+        tms.add_support(
+            derived,
+            SupportSet::new(vec![sym(2)], DerivationKind::Extracted, 0.8),
+        );
+        assert!(
+            !tms.was_retracted(derived),
+            "re-justified fact is no longer superseded"
+        );
     }
 
     #[test]
@@ -403,14 +407,8 @@ mod tests {
             a,
             SupportSet::new(vec![axiom], DerivationKind::Reasoned, 0.9),
         );
-        tms.add_support(
-            b,
-            SupportSet::new(vec![a], DerivationKind::Reasoned, 0.8),
-        );
-        tms.add_support(
-            c,
-            SupportSet::new(vec![b], DerivationKind::Reasoned, 0.7),
-        );
+        tms.add_support(b, SupportSet::new(vec![a], DerivationKind::Reasoned, 0.8));
+        tms.add_support(c, SupportSet::new(vec![b], DerivationKind::Reasoned, 0.7));
 
         let result = tms.retract(axiom);
 
@@ -437,10 +435,7 @@ mod tests {
             a,
             SupportSet::new(vec![axiom_1], DerivationKind::Reasoned, 0.9),
         );
-        tms.add_support(
-            b,
-            SupportSet::new(vec![a], DerivationKind::Reasoned, 0.8),
-        );
+        tms.add_support(b, SupportSet::new(vec![a], DerivationKind::Reasoned, 0.8));
         tms.add_support(
             b,
             SupportSet::new(vec![axiom_2], DerivationKind::Extracted, 0.7),

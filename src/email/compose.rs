@@ -32,11 +32,7 @@ pub struct ComposedEmail {
 /// and quotes the original body.
 pub fn compose_reply(original: &ParsedEmail, body: &str) -> ComposedEmail {
     // Subject: add "Re: " prefix if not already present.
-    let subject = if original
-        .subject
-        .to_lowercase()
-        .starts_with("re:")
-    {
+    let subject = if original.subject.to_lowercase().starts_with("re:") {
         original.subject.clone()
     } else {
         format!("Re: {}", original.subject)
@@ -80,13 +76,12 @@ pub fn compose_new(to: Vec<String>, subject: &str, body: &str) -> ComposedEmail 
 
 /// Render a `ComposedEmail` to an RFC 5322 MIME string via `lettre`.
 pub fn to_mime(email: &ComposedEmail, from: &str) -> EmailResult<String> {
-    use lettre::message::header;
     use lettre::message::Message;
+    use lettre::message::header;
 
-    let from_mailbox: lettre::message::Mailbox =
-        from.parse().map_err(|e| EmailError::Send {
-            message: format!("invalid From address \"{from}\": {e}"),
-        })?;
+    let from_mailbox: lettre::message::Mailbox = from.parse().map_err(|e| EmailError::Send {
+        message: format!("invalid From address \"{from}\": {e}"),
+    })?;
 
     let mut builder = Message::builder()
         .from(from_mailbox)
@@ -94,19 +89,17 @@ pub fn to_mime(email: &ComposedEmail, from: &str) -> EmailResult<String> {
 
     // Add recipients.
     for addr in &email.to {
-        let mailbox: lettre::message::Mailbox =
-            addr.parse().map_err(|e| EmailError::Send {
-                message: format!("invalid To address \"{addr}\": {e}"),
-            })?;
+        let mailbox: lettre::message::Mailbox = addr.parse().map_err(|e| EmailError::Send {
+            message: format!("invalid To address \"{addr}\": {e}"),
+        })?;
         builder = builder.to(mailbox);
     }
 
     // Add CC.
     for addr in &email.cc {
-        let mailbox: lettre::message::Mailbox =
-            addr.parse().map_err(|e| EmailError::Send {
-                message: format!("invalid Cc address \"{addr}\": {e}"),
-            })?;
+        let mailbox: lettre::message::Mailbox = addr.parse().map_err(|e| EmailError::Send {
+            message: format!("invalid Cc address \"{addr}\": {e}"),
+        })?;
         builder = builder.cc(mailbox);
     }
 
@@ -139,15 +132,9 @@ pub fn to_mime(email: &ComposedEmail, from: &str) -> EmailResult<String> {
 
 /// Quote the original message body for inclusion in a reply.
 fn quote_body(original: &ParsedEmail) -> String {
-    let sender = original
-        .from_display
-        .as_deref()
-        .unwrap_or(&original.from);
+    let sender = original.from_display.as_deref().unwrap_or(&original.from);
 
-    let body = original
-        .body_text
-        .as_deref()
-        .unwrap_or("[no text]");
+    let body = original.body_text.as_deref().unwrap_or("[no text]");
 
     let quoted_lines: String = body
         .lines()
@@ -155,7 +142,8 @@ fn quote_body(original: &ParsedEmail) -> String {
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!("On {date}, {sender} wrote:\n{quoted_lines}",
+    format!(
+        "On {date}, {sender} wrote:\n{quoted_lines}",
         date = original
             .date
             .map(|ts| format!("{ts}"))
@@ -208,7 +196,10 @@ mod tests {
     fn reply_sets_in_reply_to() {
         let original = sample_email();
         let reply = compose_reply(&original, "Reply body");
-        assert_eq!(reply.in_reply_to, Some("<orig-001@example.com>".to_string()));
+        assert_eq!(
+            reply.in_reply_to,
+            Some("<orig-001@example.com>".to_string())
+        );
     }
 
     #[test]
@@ -217,8 +208,16 @@ mod tests {
         original.references = vec!["<ancestor@example.com>".to_string()];
         let reply = compose_reply(&original, "Reply");
         assert_eq!(reply.references.len(), 2);
-        assert!(reply.references.contains(&"<ancestor@example.com>".to_string()));
-        assert!(reply.references.contains(&"<orig-001@example.com>".to_string()));
+        assert!(
+            reply
+                .references
+                .contains(&"<ancestor@example.com>".to_string())
+        );
+        assert!(
+            reply
+                .references
+                .contains(&"<orig-001@example.com>".to_string())
+        );
     }
 
     #[test]
@@ -274,11 +273,7 @@ mod tests {
 
     #[test]
     fn to_mime_invalid_from_returns_error() {
-        let email = compose_new(
-            vec!["bob@example.com".to_string()],
-            "Test",
-            "Body",
-        );
+        let email = compose_new(vec!["bob@example.com".to_string()], "Test", "Body");
         let result = to_mime(&email, "not-an-email");
         assert!(result.is_err());
     }

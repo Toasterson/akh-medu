@@ -71,7 +71,9 @@ impl Tool for FileIoTool {
                 },
                 ToolParam {
                     name: "limit".into(),
-                    description: "For 'read': number of lines to read (optional, defaults to whole file).".into(),
+                    description:
+                        "For 'read': number of lines to read (optional, defaults to whole file)."
+                            .into(),
                     required: false,
                 },
             ],
@@ -270,7 +272,10 @@ mod tests {
 
     fn setup_test_fs() -> (TempDir, Arc<dyn Filesystem>) {
         let temp = TempDir::new().unwrap();
-        let fs = LocalFs::new(vec![temp.path().to_path_buf()], vec![temp.path().to_path_buf()]);
+        let fs = LocalFs::new(
+            vec![temp.path().to_path_buf()],
+            vec![temp.path().to_path_buf()],
+        );
         (temp, Arc::new(fs))
     }
 
@@ -323,7 +328,11 @@ mod tests {
         let mut content = String::new();
         // Fill to approach the 8KB truncation limit with multi-byte chars
         for i in 0..300 {
-            content.push_str(&format!("Line {} with emoji 🎉 and unicode ñ ü ö {}\n", i, "x".repeat(20)));
+            content.push_str(&format!(
+                "Line {} with emoji 🎉 and unicode ñ ü ö {}\n",
+                i,
+                "x".repeat(20)
+            ));
         }
         std::fs::write(&test_path, &content).unwrap();
 
@@ -419,7 +428,11 @@ mod tests {
         let manifest = tool.manifest();
 
         // Check that offset and limit are in the manifest
-        let param_names: Vec<&str> = manifest.parameters.iter().map(|p| p.name.as_str()).collect();
+        let param_names: Vec<&str> = manifest
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         assert!(param_names.contains(&"offset"));
         assert!(param_names.contains(&"limit"));
 
@@ -455,7 +468,11 @@ mod tests {
         let tool = FileIoTool::new(fs);
         let signature = tool.signature();
 
-        let param_names: Vec<&str> = signature.parameters.iter().map(|p| p.name.as_str()).collect();
+        let param_names: Vec<&str> = signature
+            .parameters
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         assert!(param_names.contains(&"offset"));
         assert!(param_names.contains(&"limit"));
     }
@@ -474,7 +491,8 @@ mod tests {
         // Create content similar to the real file - each line ~65 bytes
         for i in 1..=800 {
             if i == 749 {
-                content.push_str("const OPERATING_CONVENTIONS: &str = \"conventions text here\";\n");
+                content
+                    .push_str("const OPERATING_CONVENTIONS: &str = \"conventions text here\";\n");
             } else {
                 content.push_str(&format!(
                     "// Line {} - some typical source code content here, padding to realistic size\n",
@@ -484,7 +502,10 @@ mod tests {
         }
 
         // Verify we created a file large enough to trigger the old bug
-        assert!(content.len() > 40000, "Test file should be >40KB to trigger truncation bug");
+        assert!(
+            content.len() > 40000,
+            "Test file should be >40KB to trigger truncation bug"
+        );
         std::fs::write(&test_path, &content).unwrap();
 
         // This is what the agent tried: read lines around 749

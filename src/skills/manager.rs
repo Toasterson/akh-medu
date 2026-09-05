@@ -1140,7 +1140,11 @@ mod tests {
             Err(SkillError::MemoryBudgetExceeded { .. })
         ));
         assert_eq!(mgr.skill_state("astronomy"), Some(SkillState::Warm));
-        assert_eq!(kg.triple_count(), 0, "a rejected plan must not touch the KG");
+        assert_eq!(
+            kg.triple_count(),
+            0,
+            "a rejected plan must not touch the KG"
+        );
     }
 
     #[test]

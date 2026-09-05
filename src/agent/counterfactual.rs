@@ -137,11 +137,7 @@ impl PredictionTracker {
     /// Log a prediction before executing an action.
     ///
     /// Returns the prediction ID for later verification.
-    pub fn log_prediction(
-        &mut self,
-        action_id: SymbolId,
-        predicted: StateTransition,
-    ) -> u64 {
+    pub fn log_prediction(&mut self, action_id: SymbolId, predicted: StateTransition) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.predictions_made += 1;
@@ -175,9 +171,7 @@ impl PredictionTracker {
             .pending
             .iter_mut()
             .find(|r| r.id == prediction_id)
-            .ok_or(CounterfactualError::PredictionNotFound {
-                id: prediction_id,
-            })?;
+            .ok_or(CounterfactualError::PredictionNotFound { id: prediction_id })?;
 
         let correct = causal_manager.verify_prediction(&record.predicted_transition, engine);
         record.verified = true;
@@ -231,11 +225,7 @@ impl PredictionTracker {
     ///
     /// Returns action IDs with accuracy below `threshold` and at least
     /// `min_samples` verification attempts.
-    pub fn refinement_suggestions(
-        &self,
-        threshold: f32,
-        min_samples: u32,
-    ) -> Vec<(u64, f32)> {
+    pub fn refinement_suggestions(&self, threshold: f32, min_samples: u32) -> Vec<(u64, f32)> {
         self.per_action_accuracy
             .iter()
             .filter_map(|(&action_key, &(correct, total))| {
@@ -283,11 +273,12 @@ pub fn counterfactual_query(
         })?;
 
     // Predict hypothetical outcome.
-    let hypothetical_outcome = causal_manager
-        .predict_effects(&hypo_name, engine)
-        .map_err(|_| CounterfactualError::SchemaNotFound {
-            action: hypo_name.clone(),
-        })?;
+    let hypothetical_outcome =
+        causal_manager
+            .predict_effects(&hypo_name, engine)
+            .map_err(|_| CounterfactualError::SchemaNotFound {
+                action: hypo_name.clone(),
+            })?;
 
     // Find divergent fluents: symbols that are asserted in one but not the other,
     // or retracted in one but not the other.
@@ -311,7 +302,11 @@ pub fn counterfactual_query(
     }
 
     // Find symbols that differ.
-    let mut all_keys: Vec<u64> = actual_asserted.keys().chain(hypo_asserted.keys()).copied().collect();
+    let mut all_keys: Vec<u64> = actual_asserted
+        .keys()
+        .chain(hypo_asserted.keys())
+        .copied()
+        .collect();
     all_keys.sort_unstable();
     all_keys.dedup();
 
@@ -320,18 +315,14 @@ pub fn counterfactual_query(
         let hypo = hypo_asserted.get(&key).copied();
         if actual != hypo {
             if let Some(sym_id) = SymbolId::new(key) {
-                divergent_fluents.push((
-                    sym_id,
-                    actual.unwrap_or(false),
-                    hypo.unwrap_or(false),
-                ));
+                divergent_fluents.push((sym_id, actual.unwrap_or(false), hypo.unwrap_or(false)));
             }
         }
     }
 
     // Simple heuristic: hypothetical is "better" if it has more net assertions.
-    let actual_net = actual_outcome.assertions.len() as i32
-        - actual_outcome.retractions.len() as i32;
+    let actual_net =
+        actual_outcome.assertions.len() as i32 - actual_outcome.retractions.len() as i32;
     let hypo_net = hypothetical_outcome.assertions.len() as i32
         - hypothetical_outcome.retractions.len() as i32;
     let hypothetical_better = if actual_net == hypo_net {
@@ -492,12 +483,12 @@ mod tests {
     fn counterfactual_divergence_detection() {
         // Simulate the divergence logic without needing an engine.
         let mut actual: HashMap<u64, bool> = HashMap::new();
-        actual.insert(1, true);  // asserted
+        actual.insert(1, true); // asserted
         actual.insert(2, false); // retracted
 
         let mut hypo: HashMap<u64, bool> = HashMap::new();
-        hypo.insert(1, true);  // same
-        hypo.insert(3, true);  // new assertion
+        hypo.insert(1, true); // same
+        hypo.insert(3, true); // new assertion
 
         let mut all_keys: Vec<u64> = actual.keys().chain(hypo.keys()).copied().collect();
         all_keys.sort_unstable();

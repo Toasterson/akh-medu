@@ -424,7 +424,10 @@ mod tests {
             prompt.contains("architect-precision"),
             "Expected architect-precision in Tecton prompt:\n{prompt}"
         );
-        assert!(prompt.contains("{kg_context}"), "Missing {{kg_context}} placeholder");
+        assert!(
+            prompt.contains("{kg_context}"),
+            "Missing {{kg_context}} placeholder"
+        );
         assert!(
             estimate_tokens(&prompt) < 1_800,
             "Tecton prompt exceeds 1 800 tokens: {} tokens",
@@ -486,7 +489,10 @@ mod tests {
         };
         let prompt = ser().serialize(&input);
         assert!(prompt.contains("Openness"), "Missing OCEAN Openness");
-        assert!(prompt.contains("Conscientiousness"), "Missing Conscientiousness");
+        assert!(
+            prompt.contains("Conscientiousness"),
+            "Missing Conscientiousness"
+        );
     }
 
     #[test]
@@ -533,8 +539,14 @@ mod tests {
             archetype_profile: Some(&ap),
         };
         let prompt = ser().serialize(&input);
-        assert!(prompt.contains("Individuation Level"), "Missing Individuation Level");
-        assert!(prompt.contains("Shadow Encounters"), "Missing Shadow Encounters");
+        assert!(
+            prompt.contains("Individuation Level"),
+            "Missing Individuation Level"
+        );
+        assert!(
+            prompt.contains("Shadow Encounters"),
+            "Missing Shadow Encounters"
+        );
     }
 
     #[test]

@@ -83,15 +83,51 @@ pub struct PaletteItem {
 /// `ctrl+p` palette, `/`-autocomplete, and `/help`.
 #[cfg(feature = "acp")]
 pub const COMMANDS: &[PaletteItem] = &[
-    PaletteItem { name: "model", desc: "switch the active model (picker if no name)", needs_arg: false },
-    PaletteItem { name: "effort", desc: "reasoning effort: low | medium | high | off", needs_arg: true },
-    PaletteItem { name: "goals", desc: "show the akh's current goals", needs_arg: false },
-    PaletteItem { name: "status", desc: "show workspace status", needs_arg: false },
-    PaletteItem { name: "seed", desc: "seed a knowledge pack by name", needs_arg: true },
-    PaletteItem { name: "audit", desc: "toggle audit-log display", needs_arg: false },
-    PaletteItem { name: "sidebar", desc: "toggle the right sidebar (ctrl+b)", needs_arg: false },
-    PaletteItem { name: "help", desc: "list commands", needs_arg: false },
-    PaletteItem { name: "quit", desc: "exit the TUI", needs_arg: false },
+    PaletteItem {
+        name: "model",
+        desc: "switch the active model (picker if no name)",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "effort",
+        desc: "reasoning effort: low | medium | high | off",
+        needs_arg: true,
+    },
+    PaletteItem {
+        name: "goals",
+        desc: "show the akh's current goals",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "status",
+        desc: "show workspace status",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "seed",
+        desc: "seed a knowledge pack by name",
+        needs_arg: true,
+    },
+    PaletteItem {
+        name: "audit",
+        desc: "toggle audit-log display",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "sidebar",
+        desc: "toggle the right sidebar (ctrl+b)",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "help",
+        desc: "list commands",
+        needs_arg: false,
+    },
+    PaletteItem {
+        name: "quit",
+        desc: "exit the TUI",
+        needs_arg: false,
+    },
 ];
 
 /// A centered command-palette overlay (the `ctrl+p` popup): a substring-filtered
@@ -226,8 +262,7 @@ impl AkhTui {
         #[cfg(unix)]
         {
             use signal_hook::consts::SIGTERM;
-            signal_hook::flag::register(SIGTERM, Arc::clone(&sigterm_flag))
-                .into_diagnostic()?;
+            signal_hook::flag::register(SIGTERM, Arc::clone(&sigterm_flag)).into_diagnostic()?;
         }
 
         let mut terminal = ratatui::init();
@@ -277,8 +312,8 @@ impl AkhTui {
                             self.scroll_offset = self.scroll_offset.saturating_sub(3);
                         }
                         MouseEventKind::ScrollDown => {
-                            self.scroll_offset = (self.scroll_offset + 3)
-                                .min(self.messages.len().saturating_sub(1));
+                            self.scroll_offset =
+                                (self.scroll_offset + 3).min(self.messages.len().saturating_sub(1));
                         }
                         _ => {}
                     },
@@ -561,7 +596,9 @@ impl AkhTui {
     /// Fetch a fresh `_akh/status` snapshot synchronously for the `/goals` and
     /// `/status` commands. Best-effort: `None` on any transport/parse error.
     fn fetch_status(&self) -> Option<status::StatusSnapshot> {
-        let v = self.control_call("_akh/status", serde_json::json!({})).ok()?;
+        let v = self
+            .control_call("_akh/status", serde_json::json!({}))
+            .ok()?;
         serde_json::from_value(v).ok()
     }
 
@@ -606,7 +643,11 @@ impl AkhTui {
         let cycle = snap
             .cycle
             .map_or_else(|| "—".to_string(), |c| c.to_string());
-        let stale = if snap.stale { " (stale: agent busy)" } else { "" };
+        let stale = if snap.stale {
+            " (stale: agent busy)"
+        } else {
+            ""
+        };
         self.messages.push(AkhMessage::system(format!(
             "Status — workspace {ws} · cycle {cycle} · {g} goals · {t} tools · {s} skills · {p} projects{stale}",
             ws = self.workspace,
@@ -801,9 +842,8 @@ impl AkhTui {
             "audit" => {
                 self.show_audit = !self.show_audit;
                 let state = if self.show_audit { "ON" } else { "OFF" };
-                self.messages.push(AkhMessage::system(format!(
-                    "Audit log display: {state}"
-                )));
+                self.messages
+                    .push(AkhMessage::system(format!("Audit log display: {state}")));
             }
             "sidebar" => {
                 self.show_sidebar = !self.show_sidebar;
@@ -854,7 +894,9 @@ fn detect_git_branch() -> Option<String> {
     if !branch_out.status.success() {
         return None;
     }
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
     if branch.is_empty() {
         return None;
     }
@@ -868,10 +910,7 @@ fn detect_git_branch() -> Option<String> {
 
 /// Launch the TUI connected to a remote akhomed server.
 #[cfg(feature = "acp")]
-pub fn launch_remote(
-    workspace: &str,
-    info: &crate::client::ServerInfo,
-) -> miette::Result<()> {
+pub fn launch_remote(workspace: &str, info: &crate::client::ServerInfo) -> miette::Result<()> {
     let remote = remote::RemoteChat::connect(info, workspace)
         .map_err(|e| miette::miette!("failed to connect: {e}"))?;
 
@@ -881,7 +920,7 @@ pub fn launch_remote(
 
 #[cfg(all(test, feature = "acp"))]
 mod tests {
-    use super::{CommandPalette, COMMANDS, summarize_title};
+    use super::{COMMANDS, CommandPalette, summarize_title};
 
     #[test]
     fn title_keeps_short_prompts_verbatim() {
@@ -906,27 +945,39 @@ mod tests {
 
     #[test]
     fn palette_empty_filter_shows_all_commands() {
-        let p = CommandPalette { filter: String::new(), selected: 0 };
+        let p = CommandPalette {
+            filter: String::new(),
+            selected: 0,
+        };
         assert_eq!(p.filtered().len(), COMMANDS.len());
     }
 
     #[test]
     fn palette_substring_filter_matches_anywhere_in_name() {
         // "dit" is a substring of "audit" but not a prefix.
-        let p = CommandPalette { filter: "dit".to_string(), selected: 0 };
+        let p = CommandPalette {
+            filter: "dit".to_string(),
+            selected: 0,
+        };
         let names: Vec<&str> = p.filtered().iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["audit"]);
     }
 
     #[test]
     fn palette_no_match_yields_empty() {
-        let p = CommandPalette { filter: "zzz".to_string(), selected: 0 };
+        let p = CommandPalette {
+            filter: "zzz".to_string(),
+            selected: 0,
+        };
         assert!(p.filtered().is_empty());
     }
 
     #[test]
     fn palette_filter_is_case_insensitive() {
-        let p = CommandPalette { filter: "MODEL".to_string(), selected: 0 };
+        let p = CommandPalette {
+            filter: "MODEL".to_string(),
+            selected: 0,
+        };
         let names: Vec<&str> = p.filtered().iter().map(|c| c.name).collect();
         assert_eq!(names, vec!["model"]);
     }

@@ -70,10 +70,7 @@ pub enum MessageContent {
     /// Free-form text input.
     Text(String),
     /// A structured command (e.g. `/goals`, `/status`).
-    Command {
-        name: String,
-        args: Option<String>,
-    },
+    Command { name: String, args: Option<String> },
     /// A structured agent-to-agent protocol message (Phase 12g).
     ///
     /// Bypasses the NLP classifier and is dispatched directly to the
@@ -98,7 +95,11 @@ pub struct InboundMessage {
 
 impl InboundMessage {
     /// Create a new inbound message with the current timestamp.
-    pub fn new(channel_id: impl Into<String>, sender: InterlocutorId, content: MessageContent) -> Self {
+    pub fn new(
+        channel_id: impl Into<String>,
+        sender: InterlocutorId,
+        content: MessageContent,
+    ) -> Self {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -121,32 +122,37 @@ impl InboundMessage {
         match &self.content {
             #[allow(deprecated)]
             MessageContent::Text(text) => crate::agent::nlp::classify_intent(text),
-            MessageContent::Command { name, args } => {
-                match name.as_str() {
-                    "help" | "h" => crate::agent::nlp::UserIntent::Help,
-                    "status" | "goals" => crate::agent::nlp::UserIntent::ShowStatus,
-                    "run" | "cycle" => {
-                        let cycles = args
-                            .as_ref()
-                            .and_then(|a| a.trim().parse::<usize>().ok());
-                        crate::agent::nlp::UserIntent::RunAgent { cycles }
-                    }
-                    "show" | "render" | "graph" => {
-                        let entity = args.as_ref().map(|a| a.trim().to_string()).filter(|s| !s.is_empty());
-                        crate::agent::nlp::UserIntent::RenderHiero { entity }
-                    }
-                    "detail" | "set-detail" => {
-                        let level = args.as_ref().map(|a| a.trim().to_lowercase()).unwrap_or_default();
-                        crate::agent::nlp::UserIntent::SetDetail { level }
-                    }
-                    _ => crate::agent::nlp::UserIntent::Freeform {
-                        text: format!("/{name}{}", args.as_deref().map(|a| format!(" {a}")).unwrap_or_default()),
-                    },
+            MessageContent::Command { name, args } => match name.as_str() {
+                "help" | "h" => crate::agent::nlp::UserIntent::Help,
+                "status" | "goals" => crate::agent::nlp::UserIntent::ShowStatus,
+                "run" | "cycle" => {
+                    let cycles = args.as_ref().and_then(|a| a.trim().parse::<usize>().ok());
+                    crate::agent::nlp::UserIntent::RunAgent { cycles }
                 }
-            }
-            MessageContent::AgentMessage(msg) => {
-                crate::agent::nlp::UserIntent::AgentProtocol { message: msg.clone() }
-            }
+                "show" | "render" | "graph" => {
+                    let entity = args
+                        .as_ref()
+                        .map(|a| a.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    crate::agent::nlp::UserIntent::RenderHiero { entity }
+                }
+                "detail" | "set-detail" => {
+                    let level = args
+                        .as_ref()
+                        .map(|a| a.trim().to_lowercase())
+                        .unwrap_or_default();
+                    crate::agent::nlp::UserIntent::SetDetail { level }
+                }
+                _ => crate::agent::nlp::UserIntent::Freeform {
+                    text: format!(
+                        "/{name}{}",
+                        args.as_deref().map(|a| format!(" {a}")).unwrap_or_default()
+                    ),
+                },
+            },
+            MessageContent::AgentMessage(msg) => crate::agent::nlp::UserIntent::AgentProtocol {
+                message: msg.clone(),
+            },
         }
     }
 
@@ -332,7 +338,10 @@ mod tests {
             MessageContent::Text("What is a dog?".to_string()),
         );
         let intent = msg.classify();
-        assert!(matches!(intent, crate::agent::nlp::UserIntent::Query { .. }));
+        assert!(matches!(
+            intent,
+            crate::agent::nlp::UserIntent::Query { .. }
+        ));
     }
 
     #[test]
@@ -343,7 +352,10 @@ mod tests {
             MessageContent::Text("find similar animals to Cat".to_string()),
         );
         let intent = msg.classify();
-        assert!(matches!(intent, crate::agent::nlp::UserIntent::SetGoal { .. }));
+        assert!(matches!(
+            intent,
+            crate::agent::nlp::UserIntent::SetGoal { .. }
+        ));
     }
 
     #[test]
@@ -427,7 +439,10 @@ mod tests {
     #[test]
     fn constraint_check_defaults_to_unchecked() {
         let msg = OutboundMessage::single(AkhMessage::system("test"));
-        assert!(matches!(msg.constraint_check, ConstraintCheckStatus::Unchecked));
+        assert!(matches!(
+            msg.constraint_check,
+            ConstraintCheckStatus::Unchecked
+        ));
         assert!(msg.constraint_check.is_passed());
     }
 

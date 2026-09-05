@@ -129,7 +129,8 @@ pub struct CountingSink {
 #[cfg(test)]
 impl MutationSink for CountingSink {
     fn record(&self, _mutation: MutationRecord) {
-        self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -161,7 +162,10 @@ mod tests {
         assert_eq!(MutationKind::RetractBatch.as_str(), "retract_batch");
         assert_eq!(MutationKind::Replace.as_str(), "replace");
         assert_eq!(MutationKind::MicrotheoryLoad.as_str(), "microtheory_load");
-        assert_eq!(MutationKind::CompartmentDestroy.as_str(), "compartment_destroy");
+        assert_eq!(
+            MutationKind::CompartmentDestroy.as_str(),
+            "compartment_destroy"
+        );
         assert_eq!(MutationKind::Turn.as_str(), "turn");
     }
 
@@ -186,8 +190,14 @@ mod tests {
     #[test]
     fn sink_receives_records() {
         let sink = CountingSink::default();
-        sink.record(MutationRecord::new(MutationKind::Assert, serde_json::json!({})));
-        sink.record(MutationRecord::new(MutationKind::Retract, serde_json::json!({})));
+        sink.record(MutationRecord::new(
+            MutationKind::Assert,
+            serde_json::json!({}),
+        ));
+        sink.record(MutationRecord::new(
+            MutationKind::Retract,
+            serde_json::json!({}),
+        ));
         assert_eq!(sink.count.load(Ordering::Relaxed), 2);
     }
 }

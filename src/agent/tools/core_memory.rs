@@ -16,10 +16,11 @@
 //!
 //! Each editing tool is constructed with the akh's `agent_id` baked in (the tool
 //! API only passes `&Engine`), so a registered tool always edits *its own* akh's
-//! core memory. They are registered only when the akh runs the `virtual` context
-//! strategy — today's tier-gating mechanism (small models get no self-edit
-//! tools at all; capable models run `virtual` and get the full set, `archival_search`
-//! + `query_graph` included). All are `Safe`: core memory is the akh's own
+//! core memory. The editing tools and `query_graph` are registered only when the
+//! akh runs the `virtual` context strategy. [`ArchivalSearchTool`] is different:
+//! it is a bounded read-only page-in registered for every daemon strategy, so a
+//! small append-only model can retrieve a note it wrote without gaining core-
+//! memory mutation privileges. All are `Safe`: core memory is the akh's own
 //! scratchpad, archival search / graph query are read-only.
 
 use std::collections::HashSet;
@@ -41,7 +42,9 @@ pub struct CoreMemoryAppendTool {
 
 impl CoreMemoryAppendTool {
     pub fn new(agent_id: impl Into<String>) -> Self {
-        Self { agent_id: agent_id.into() }
+        Self {
+            agent_id: agent_id.into(),
+        }
     }
 }
 
@@ -68,7 +71,9 @@ impl Tool for CoreMemoryAppendTool {
                 message: e.to_string(),
             }
         })?;
-        Ok(ToolOutput::ok(format!("Core memory updated ({count} line(s)).")))
+        Ok(ToolOutput::ok(format!(
+            "Core memory updated ({count} line(s))."
+        )))
     }
 
     fn manifest(&self) -> ToolManifest {
@@ -95,7 +100,9 @@ pub struct CoreMemoryReplaceTool {
 
 impl CoreMemoryReplaceTool {
     pub fn new(agent_id: impl Into<String>) -> Self {
-        Self { agent_id: agent_id.into() }
+        Self {
+            agent_id: agent_id.into(),
+        }
     }
 }
 
@@ -133,7 +140,9 @@ impl Tool for CoreMemoryReplaceTool {
         if replaced {
             Ok(ToolOutput::ok("Core memory line replaced."))
         } else {
-            Ok(ToolOutput::err(format!("No core-memory line matched: {old:?}")))
+            Ok(ToolOutput::err(format!(
+                "No core-memory line matched: {old:?}"
+            )))
         }
     }
 
@@ -216,7 +225,14 @@ impl Tool for ArchivalSearchTool {
             }
             let mut out = String::from("Notes:\n");
             for note in &hits {
-                out.push_str(&format!("### {} (note:{})\n{}\n\n", note.document.title, note.id, note.body));
+                let frontmatter = note.frontmatter.to_block();
+                out.push_str(&format!("### {} (note:{})\n", note.document.title, note.id));
+                if !frontmatter.trim().is_empty() {
+                    out.push_str("Frontmatter:\n");
+                    out.push_str(&frontmatter);
+                }
+                out.push_str(&note.body);
+                out.push_str("\n\n");
             }
             Some(out)
         });
@@ -349,7 +365,9 @@ impl Tool for QueryGraphTool {
                     })
                     .collect();
                 if lines.is_empty() {
-                    Ok(ToolOutput::ok(format!("(no properties for {entity_label})")))
+                    Ok(ToolOutput::ok(format!(
+                        "(no properties for {entity_label})"
+                    )))
                 } else {
                     Ok(ToolOutput::ok(format!(
                         "Properties of {entity_label}:\n{}",
@@ -418,7 +436,9 @@ mod tests {
         let out = tool
             .execute(
                 &e,
-                ToolInput::new().with_param("old", "nope").with_param("new", "x"),
+                ToolInput::new()
+                    .with_param("old", "nope")
+                    .with_param("new", "x"),
             )
             .unwrap();
         assert!(!out.success, "replacing a non-existent line fails cleanly");
@@ -445,7 +465,9 @@ mod tests {
     fn archival_search_without_notes_stays_kg_only() {
         let (e, _t) = engine();
         let tool = ArchivalSearchTool::new();
-        let out = tool.execute(&e, ToolInput::new().with_param("query", "Paris")).unwrap();
+        let out = tool
+            .execute(&e, ToolInput::new().with_param("query", "Paris"))
+            .unwrap();
         assert!(out.success);
         assert_eq!(out.result, "(no archival matches)");
     }
@@ -456,10 +478,15 @@ mod tests {
 
         let (e, _t) = engine();
         let catalog = InMemoryNoteCatalog::new();
-        catalog.insert(note("Paris", "Paris is the capital of France and has the Eiffel Tower."));
+        catalog.insert(note(
+            "Paris",
+            "Paris is the capital of France and has the Eiffel Tower.",
+        ));
         let tool = ArchivalSearchTool::with_notes(std::sync::Arc::new(catalog));
 
-        let out = tool.execute(&e, ToolInput::new().with_param("query", "Eiffel")).unwrap();
+        let out = tool
+            .execute(&e, ToolInput::new().with_param("query", "Eiffel"))
+            .unwrap();
         assert!(out.success);
         assert!(
             out.result.contains("Eiffel Tower"),
@@ -524,13 +551,18 @@ mod tests {
         install_seed(&e);
         let jane = e.resolve_or_create_entity("Jane").unwrap();
         let person = e.resolve_symbol("Person").unwrap();
-        let is_a = e.resolve_or_create_relation(crate::schema::compile::PRED_IS_A).unwrap();
-        e.add_triple(&crate::graph::Triple::new(jane, is_a, person)).unwrap();
+        let is_a = e
+            .resolve_or_create_relation(crate::schema::compile::PRED_IS_A)
+            .unwrap();
+        e.add_triple(&crate::graph::Triple::new(jane, is_a, person))
+            .unwrap();
 
         let out = QueryGraphTool
             .execute(
                 &e,
-                ToolInput::new().with_param("mode", "entities_of_type").with_param("type", "Person"),
+                ToolInput::new()
+                    .with_param("mode", "entities_of_type")
+                    .with_param("type", "Person"),
             )
             .unwrap();
         assert!(out.result.contains("Jane"), "{}", out.result);
@@ -543,10 +575,16 @@ mod tests {
         let jane = e.resolve_or_create_entity("Jane").unwrap();
         let email_pred = e.resolve_or_create_relation("email").unwrap();
         let addr = e.resolve_or_create_entity("jane@example.org").unwrap();
-        e.add_triple(&crate::graph::Triple::new(jane, email_pred, addr)).unwrap();
+        e.add_triple(&crate::graph::Triple::new(jane, email_pred, addr))
+            .unwrap();
 
         let out = QueryGraphTool
-            .execute(&e, ToolInput::new().with_param("mode", "properties").with_param("entity", "Jane"))
+            .execute(
+                &e,
+                ToolInput::new()
+                    .with_param("mode", "properties")
+                    .with_param("entity", "Jane"),
+            )
             .unwrap();
         assert!(out.result.contains("jane@example.org"), "{}", out.result);
     }

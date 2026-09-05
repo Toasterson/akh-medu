@@ -12,9 +12,7 @@ mod inner {
     use miette::Diagnostic;
     use tantivy::collector::TopDocs;
     use tantivy::query::QueryParser;
-    use tantivy::schema::{
-        Field, Schema, Value, FAST, STORED, TEXT,
-    };
+    use tantivy::schema::{FAST, Field, STORED, Schema, TEXT, Value};
     use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
     use thiserror::Error;
 

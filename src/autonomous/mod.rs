@@ -16,7 +16,9 @@ pub mod schema;
 pub use error::{AutonomousError, AutonomousResult};
 pub use fusion::{FusedConfidence, FusionConfig, InferencePath};
 pub use gap::{GapAnalysisConfig, GapAnalysisResult, GapKind, KnowledgeGap};
-pub use rule_engine::{DerivedTriple, RuleEngine, RuleEngineConfig, RuleEngineResult, is_noise_entity};
+pub use rule_engine::{
+    DerivedTriple, RuleEngine, RuleEngineConfig, RuleEngineResult, is_noise_entity,
+};
 pub use rules::{InferenceRule, RuleKind, RuleSet, RuleTerm, TriplePattern};
 pub use schema::{
     DiscoveredType, PredicatePattern, RelationHierarchy, SchemaDiscoveryConfig,

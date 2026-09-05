@@ -39,7 +39,9 @@ pub struct VirtualContextManager {
 impl VirtualContextManager {
     /// Manager keeping the last `tail` turns as the recall tier.
     pub fn with_tail(tail: usize) -> Self {
-        Self { tail: Some(tail.max(1)) }
+        Self {
+            tail: Some(tail.max(1)),
+        }
     }
 
     fn tail(&self) -> usize {
@@ -77,7 +79,9 @@ impl ContextManager for VirtualContextManager {
         let mut assembled = assemble_with_cap(episode, &inner, counter, Some(self.tail()))?;
 
         if let Some(block) = core_block {
-            assembled.messages.insert(0, json!({ "role": "system", "content": block }));
+            assembled
+                .messages
+                .insert(0, json!({ "role": "system", "content": block }));
             assembled
                 .section_tokens
                 .entry(ContextSection::System)
@@ -156,7 +160,12 @@ mod tests {
             .expect("assemble");
         // Core memory leads as a system block; the prompt is the final user turn.
         assert_eq!(out.messages[0]["role"], "system");
-        assert!(out.messages[0]["content"].as_str().unwrap().contains("Toni"));
+        assert!(
+            out.messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Toni")
+        );
         assert_eq!(out.messages.last().unwrap()["role"], "user");
         assert!(out.section_tokens.contains_key(&ContextSection::System));
     }

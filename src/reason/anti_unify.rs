@@ -194,19 +194,17 @@ fn anti_unify_pair_inner(
             trait_name: unify_opt_str(t1, t2, ctr),
         },
 
-        (
-            SimplifiedAst::Match { arm_count: a1 },
-            SimplifiedAst::Match { arm_count: a2 },
-        ) => GeneralizedAst::Match {
-            arm_count: unify_usize(*a1, *a2, ctr),
-        },
+        (SimplifiedAst::Match { arm_count: a1 }, SimplifiedAst::Match { arm_count: a2 }) => {
+            GeneralizedAst::Match {
+                arm_count: unify_usize(*a1, *a2, ctr),
+            }
+        }
 
-        (
-            SimplifiedAst::IfElse { has_else: e1 },
-            SimplifiedAst::IfElse { has_else: e2 },
-        ) => GeneralizedAst::IfElse {
-            has_else: unify_bool(*e1, *e2, ctr),
-        },
+        (SimplifiedAst::IfElse { has_else: e1 }, SimplifiedAst::IfElse { has_else: e2 }) => {
+            GeneralizedAst::IfElse {
+                has_else: unify_bool(*e1, *e2, ctr),
+            }
+        }
 
         (SimplifiedAst::ForLoop, SimplifiedAst::ForLoop) => GeneralizedAst::ForLoop,
 
@@ -217,12 +215,11 @@ fn anti_unify_pair_inner(
             param_count: unify_usize(*p1, *p2, ctr),
         },
 
-        (
-            SimplifiedAst::Block { children: c1 },
-            SimplifiedAst::Block { children: c2 },
-        ) => GeneralizedAst::Block {
-            children: unify_vec(c1, c2, ctr),
-        },
+        (SimplifiedAst::Block { children: c1 }, SimplifiedAst::Block { children: c2 }) => {
+            GeneralizedAst::Block {
+                children: unify_vec(c1, c2, ctr),
+            }
+        }
 
         // Different variants → whole thing is a hole
         _ => {
@@ -284,9 +281,7 @@ fn unify_vec(
     }
     for extra in b.iter().skip(min_len) {
         let fp = ast_fingerprint(extra);
-        result.push(GeneralizedAst::Var(
-            ctr.fresh(vec!["<absent>".into(), fp]),
-        ));
+        result.push(GeneralizedAst::Var(ctr.fresh(vec!["<absent>".into(), fp])));
     }
 
     result
@@ -301,7 +296,10 @@ fn unify_vec(
 /// Produces a progressively more general pattern as more inputs are considered.
 /// With N inputs, the result has at most N-1 folding steps.
 pub fn anti_unify_multi(asts: &[&SimplifiedAst]) -> GeneralizedAst {
-    assert!(!asts.is_empty(), "anti_unify_multi requires at least one input");
+    assert!(
+        !asts.is_empty(),
+        "anti_unify_multi requires at least one input"
+    );
 
     if asts.len() == 1 {
         return GeneralizedAst::Concrete(asts[0].clone());
@@ -437,13 +435,21 @@ pub fn generalized_fingerprint(g: &GeneralizedAst) -> String {
             field_count,
             derive_count,
         } => {
-            format!("struct({},d{})", slot_fp(field_count), slot_fp(derive_count))
+            format!(
+                "struct({},d{})",
+                slot_fp(field_count),
+                slot_fp(derive_count)
+            )
         }
         GeneralizedAst::Enum {
             variant_count,
             derive_count,
         } => {
-            format!("enum({},d{})", slot_fp(variant_count), slot_fp(derive_count))
+            format!(
+                "enum({},d{})",
+                slot_fp(variant_count),
+                slot_fp(derive_count)
+            )
         }
         GeneralizedAst::Impl {
             method_count,
@@ -495,9 +501,7 @@ fn slot_fp(slot: &AstSlot) -> String {
 /// Count non-variable nodes in a `GeneralizedAst`.
 pub fn node_count(g: &GeneralizedAst) -> usize {
     match g {
-        GeneralizedAst::Function { body, .. } => {
-            1 + body.iter().map(node_count).sum::<usize>()
-        }
+        GeneralizedAst::Function { body, .. } => 1 + body.iter().map(node_count).sum::<usize>(),
         GeneralizedAst::Struct { .. }
         | GeneralizedAst::Enum { .. }
         | GeneralizedAst::Impl { .. }
@@ -505,9 +509,7 @@ pub fn node_count(g: &GeneralizedAst) -> usize {
         | GeneralizedAst::IfElse { .. }
         | GeneralizedAst::ForLoop
         | GeneralizedAst::Closure { .. } => 1,
-        GeneralizedAst::Block { children } => {
-            1 + children.iter().map(node_count).sum::<usize>()
-        }
+        GeneralizedAst::Block { children } => 1 + children.iter().map(node_count).sum::<usize>(),
         GeneralizedAst::Var(_) => 0,
         GeneralizedAst::Concrete(_) => 1,
     }
@@ -516,7 +518,10 @@ pub fn node_count(g: &GeneralizedAst) -> usize {
 /// Count variable (hole) nodes in a `GeneralizedAst`.
 pub fn var_count(g: &GeneralizedAst) -> usize {
     let slot_vars = |slots: &[&AstSlot]| -> usize {
-        slots.iter().filter(|s| matches!(s, AstSlot::Var(_))).count()
+        slots
+            .iter()
+            .filter(|s| matches!(s, AstSlot::Var(_)))
+            .count()
     };
 
     match g {
@@ -524,10 +529,7 @@ pub fn var_count(g: &GeneralizedAst) -> usize {
             param_count,
             has_return,
             body,
-        } => {
-            slot_vars(&[param_count, has_return])
-                + body.iter().map(var_count).sum::<usize>()
-        }
+        } => slot_vars(&[param_count, has_return]) + body.iter().map(var_count).sum::<usize>(),
         GeneralizedAst::Struct {
             field_count,
             derive_count,
@@ -544,9 +546,7 @@ pub fn var_count(g: &GeneralizedAst) -> usize {
         GeneralizedAst::IfElse { has_else } => slot_vars(&[has_else]),
         GeneralizedAst::ForLoop => 0,
         GeneralizedAst::Closure { param_count } => slot_vars(&[param_count]),
-        GeneralizedAst::Block { children } => {
-            children.iter().map(var_count).sum()
-        }
+        GeneralizedAst::Block { children } => children.iter().map(var_count).sum(),
         GeneralizedAst::Var(_) => 1,
         GeneralizedAst::Concrete(_) => 0,
     }
@@ -654,9 +654,7 @@ pub fn score_abstractions(
 ///
 /// Groups ASTs by top-level variant, anti-unifies within each group,
 /// and produces scored candidates.
-pub fn discover_abstractions(
-    asts: &[SimplifiedAst],
-) -> Vec<DiscoveredAbstraction> {
+pub fn discover_abstractions(asts: &[SimplifiedAst]) -> Vec<DiscoveredAbstraction> {
     if asts.len() < 2 {
         return Vec::new();
     }

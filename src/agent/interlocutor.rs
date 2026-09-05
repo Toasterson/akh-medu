@@ -28,7 +28,9 @@ pub enum InterlocutorError {
     #[error("interlocutor not found: \"{id}\"")]
     #[diagnostic(
         code(akh::interlocutor::not_found),
-        help("The interlocutor has not been registered. They will be auto-registered on first message.")
+        help(
+            "The interlocutor has not been registered. They will be auto-registered on first message."
+        )
     )]
     NotFound { id: String },
 
@@ -69,7 +71,8 @@ impl InterlocutorPredicates {
             has_trust_level: engine.resolve_or_create_relation("interlocutor:has-trust-level")?,
             has_interest: engine.resolve_or_create_relation("interlocutor:has-interest")?,
             last_interaction: engine.resolve_or_create_relation("interlocutor:last-interaction")?,
-            interaction_count: engine.resolve_or_create_relation("interlocutor:interaction-count")?,
+            interaction_count: engine
+                .resolve_or_create_relation("interlocutor:interaction-count")?,
             has_knowledge_mt: engine.resolve_or_create_relation("interlocutor:has-knowledge-mt")?,
         })
     }
@@ -214,11 +217,7 @@ impl InterlocutorRegistry {
         // Create personal microtheory (theory of mind context).
         let mt_label = format!("mt:{}-knowledge", id_str);
         let knowledge_mt = engine
-            .create_context(
-                &mt_label,
-                crate::compartment::ContextDomain::Belief,
-                &[],
-            )
+            .create_context(&mt_label, crate::compartment::ContextDomain::Belief, &[])
             .ok()
             .map(|mt| mt.id);
 
@@ -226,21 +225,27 @@ impl InterlocutorRegistry {
         if let Some(ref preds) = self.predicates {
             let trust_str = format!("{trust_level}");
             let trust_sym = engine.resolve_or_create_entity(&trust_str)?;
-            let _ = engine.add_triple(
-                &crate::graph::Triple::new(sym_id, preds.has_trust_level, trust_sym),
-            );
+            let _ = engine.add_triple(&crate::graph::Triple::new(
+                sym_id,
+                preds.has_trust_level,
+                trust_sym,
+            ));
 
             // Store channel association.
             let ch_sym = engine.resolve_or_create_entity(channel_id)?;
-            let _ = engine.add_triple(
-                &crate::graph::Triple::new(sym_id, preds.has_channel, ch_sym),
-            );
+            let _ = engine.add_triple(&crate::graph::Triple::new(
+                sym_id,
+                preds.has_channel,
+                ch_sym,
+            ));
 
             // Store microtheory link.
             if let Some(mt_id) = knowledge_mt {
-                let _ = engine.add_triple(
-                    &crate::graph::Triple::new(sym_id, preds.has_knowledge_mt, mt_id),
-                );
+                let _ = engine.add_triple(&crate::graph::Triple::new(
+                    sym_id,
+                    preds.has_knowledge_mt,
+                    mt_id,
+                ));
             }
         }
 
@@ -267,21 +272,23 @@ impl InterlocutorRegistry {
         concept: SymbolId,
         engine: &Engine,
     ) -> InterlocutorResult<()> {
-        let profile = self
-            .profiles
-            .get_mut(interlocutor_id)
-            .ok_or_else(|| InterlocutorError::NotFound {
-                id: interlocutor_id.to_string(),
-            })?;
+        let profile =
+            self.profiles
+                .get_mut(interlocutor_id)
+                .ok_or_else(|| InterlocutorError::NotFound {
+                    id: interlocutor_id.to_string(),
+                })?;
 
         if !profile.interests.contains(&concept) {
             profile.interests.push(concept);
 
             // Record in KG.
             if let Some(ref preds) = self.predicates {
-                let _ = engine.add_triple(
-                    &crate::graph::Triple::new(profile.symbol_id, preds.has_interest, concept),
-                );
+                let _ = engine.add_triple(&crate::graph::Triple::new(
+                    profile.symbol_id,
+                    preds.has_interest,
+                    concept,
+                ));
             }
 
             // Rebuild interest vector.
@@ -297,12 +304,12 @@ impl InterlocutorRegistry {
         interlocutor_id: &str,
         trust_level: ChannelKind,
     ) -> InterlocutorResult<()> {
-        let profile = self
-            .profiles
-            .get_mut(interlocutor_id)
-            .ok_or_else(|| InterlocutorError::NotFound {
-                id: interlocutor_id.to_string(),
-            })?;
+        let profile =
+            self.profiles
+                .get_mut(interlocutor_id)
+                .ok_or_else(|| InterlocutorError::NotFound {
+                    id: interlocutor_id.to_string(),
+                })?;
 
         if profile.is_operator() {
             return Err(InterlocutorError::OperatorImmutable);
@@ -319,12 +326,12 @@ impl InterlocutorRegistry {
         concept: SymbolId,
         engine: &Engine,
     ) -> InterlocutorResult<()> {
-        let profile = self
-            .profiles
-            .get(interlocutor_id)
-            .ok_or_else(|| InterlocutorError::NotFound {
-                id: interlocutor_id.to_string(),
-            })?;
+        let profile =
+            self.profiles
+                .get(interlocutor_id)
+                .ok_or_else(|| InterlocutorError::NotFound {
+                    id: interlocutor_id.to_string(),
+                })?;
 
         if let Some(mt_id) = profile.knowledge_mt {
             let mt_label = format!("mt:{}-knowledge", interlocutor_id);
@@ -344,11 +351,7 @@ impl InterlocutorRegistry {
     /// Find similar interlocutors to a given one (impression formation).
     ///
     /// Uses HNSW nearest-neighbor search on interest vectors.
-    pub fn find_similar(
-        &self,
-        interlocutor_id: &str,
-        k: usize,
-    ) -> Vec<(String, f32)> {
+    pub fn find_similar(&self, interlocutor_id: &str, k: usize) -> Vec<(String, f32)> {
         let query = match self.interest_vectors.get(interlocutor_id) {
             Some(v) => v,
             None => return Vec::new(),

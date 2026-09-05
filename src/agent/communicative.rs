@@ -114,10 +114,7 @@ pub fn context_from_grounded(
 }
 
 /// Find a taxonomic neighbour `(topic, connection)` of the subject.
-fn find_related_topic(
-    triples: &[GroundedTriple],
-    subject: &str,
-) -> Option<(String, String)> {
+fn find_related_topic(triples: &[GroundedTriple], subject: &str) -> Option<(String, String)> {
     const TAXONOMIC: [&str; 6] = [
         "is-a",
         "subclass-of",
@@ -162,14 +159,13 @@ pub fn compose_grounded(
     // Shadow filter (34e) — needs a provisional content slice to inspect.
     let provisional = select_content(&choice.primary, &gr.supporting_triples);
     let shadow = ShadowFilter::from_psyche(psyche);
-    let (strategy, shadow_journal) =
-        match shadow.filter(&choice.primary, &provisional.primary) {
-            ShadowFilterResult::Pass => (choice.primary.clone(), None),
-            ShadowFilterResult::Inhibited {
-                replacement,
-                journal_entry,
-            } => (replacement, Some(journal_entry)),
-        };
+    let (strategy, shadow_journal) = match shadow.filter(&choice.primary, &provisional.primary) {
+        ShadowFilterResult::Pass => (choice.primary.clone(), None),
+        ShadowFilterResult::Inhibited {
+            replacement,
+            journal_entry,
+        } => (replacement, Some(journal_entry)),
+    };
 
     // Stage 2: content selection (34c) for the final strategy.
     let content = select_content(&strategy, &gr.supporting_triples);
@@ -293,9 +289,7 @@ fn strategy_core_prose(
             what_is_missing,
         } => {
             let pct = (confidence * 100.0).round() as u32;
-            let mut s = format!(
-                "I'm not certain about this — my confidence is around {pct}%."
-            );
+            let mut s = format!("I'm not certain about this — my confidence is around {pct}%.");
             if !facts.is_empty() {
                 s.push(' ');
                 s.push_str(&format!("What I have: {facts}"));
@@ -360,9 +354,7 @@ fn strategy_core_prose(
             to_topic,
             reason,
         } => {
-            format!(
-                "I can't say much about {from_topic}, but {reason}: {to_topic}. {facts}"
-            )
+            format!("I can't say much about {from_topic}, but {reason}: {to_topic}. {facts}")
         }
         ResponseStrategy::Empathy { recognized_state } => {
             let mut s = format!("I recognise {recognized_state} here.");
@@ -373,9 +365,7 @@ fn strategy_core_prose(
             s
         }
         ResponseStrategy::SelfReflection { new_connection } => {
-            format!(
-                "{facts} Curiously, while answering this I noticed {new_connection}."
-            )
+            format!("{facts} Curiously, while answering this I noticed {new_connection}.")
         }
         ResponseStrategy::ConfidenceCalibration { level, summary } => {
             format!(
@@ -586,20 +576,32 @@ mod tests {
         // which the default high-severity shadow pattern then softens.
         let p = psyche([0.2, 0.5, 0.4, 0.5], [0.6, 0.6, 0.6, 0.1, 0.2]);
         let mut gr = grounded_dog();
-        gr.supporting_triples.push(gt("dog", "is-a", "reptile", 0.1));
+        gr.supporting_triples
+            .push(gt("dog", "is-a", "reptile", 0.1));
         let mut ctx = ctx_for(&gr);
         ctx.discourse_mode = crate::agent::trajectory::DiscourseMode::Argumentative;
         let out = compose_grounded(&gr, "dog", &p, &ctx);
         assert_eq!(out.strategy, "EvidenceWeighing");
-        let journal = out.shadow_journal.expect("shadow must journal the inhibition");
+        let journal = out
+            .shadow_journal
+            .expect("shadow must journal the inhibition");
         assert!(journal.contains("considered Challenge"), "got: {journal}");
     }
 
     #[test]
     fn query_type_classification() {
-        assert_eq!(classify_query_type("Why do dogs bark?", "dog"), QueryType::Causal);
-        assert_eq!(classify_query_type("How does a dog run?", "dog"), QueryType::Procedural);
-        assert_eq!(classify_query_type("What is a dog?", "dog"), QueryType::Factual);
+        assert_eq!(
+            classify_query_type("Why do dogs bark?", "dog"),
+            QueryType::Causal
+        );
+        assert_eq!(
+            classify_query_type("How does a dog run?", "dog"),
+            QueryType::Procedural
+        );
+        assert_eq!(
+            classify_query_type("What is a dog?", "dog"),
+            QueryType::Factual
+        );
         assert_eq!(classify_query_type("who are you?", "self"), QueryType::Meta);
     }
 }

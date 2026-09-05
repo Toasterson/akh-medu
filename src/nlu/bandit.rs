@@ -297,7 +297,11 @@ mod tests {
     #[test]
     fn bandit_selects_valid_arm() {
         let bandit = LinUcbBandit::new(
-            &[BackendId::RuleParser, BackendId::CandleLlm, BackendId::VsaDirect],
+            &[
+                BackendId::RuleParser,
+                BackendId::CandleLlm,
+                BackendId::VsaDirect,
+            ],
             0.25,
         );
         let x = [0.1, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5];
@@ -332,10 +336,7 @@ mod tests {
 
     #[test]
     fn serialization_roundtrip() {
-        let mut bandit = LinUcbBandit::new(
-            &[BackendId::RuleParser, BackendId::CandleLlm],
-            0.25,
-        );
+        let mut bandit = LinUcbBandit::new(&[BackendId::RuleParser, BackendId::CandleLlm], 0.25);
         let x = [0.5; D];
         bandit.update(0, &x, 0.8);
 

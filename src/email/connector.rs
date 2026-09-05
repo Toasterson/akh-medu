@@ -191,10 +191,9 @@ impl JmapConnector {
                 message: format!("JMAP discovery failed: {e}"),
             })?;
 
-        let body: serde_json::Value =
-            resp.into_json().map_err(|e| EmailError::Connection {
-                message: format!("JMAP discovery response parse failed: {e}"),
-            })?;
+        let body: serde_json::Value = resp.into_json().map_err(|e| EmailError::Connection {
+            message: format!("JMAP discovery response parse failed: {e}"),
+        })?;
 
         self.api_url = body["apiUrl"].as_str().map(|s| s.to_string());
         self.session_url = Some(well_known);
@@ -299,8 +298,7 @@ impl EmailConnector for JmapConnector {
                 {
                     if let Some(list) = arr.get(1).and_then(|v| v["list"].as_array()) {
                         for email in list {
-                            let id =
-                                email["id"].as_str().unwrap_or("unknown").to_string();
+                            let id = email["id"].as_str().unwrap_or("unknown").to_string();
                             // JMAP returns structured data, not raw RFC5322.
                             // We serialize the JSON as the "raw" data for downstream parsing.
                             let data = serde_json::to_vec(email).unwrap_or_default();
@@ -453,25 +451,24 @@ impl ImapConnector {
             }
         };
 
-        let tls = native_tls::TlsConnector::builder()
-            .build()
-            .map_err(|e| EmailError::Connection {
-                message: format!("TLS connector build failed: {e}"),
-            })?;
+        let tls =
+            native_tls::TlsConnector::builder()
+                .build()
+                .map_err(|e| EmailError::Connection {
+                    message: format!("TLS connector build failed: {e}"),
+                })?;
 
         let addr = (&*self.config.host, self.config.port);
         let client =
-            imap::connect(addr, &self.config.host, &tls).map_err(|e| {
-                EmailError::Connection {
-                    message: format!("IMAP connection failed: {e}"),
-                }
+            imap::connect(addr, &self.config.host, &tls).map_err(|e| EmailError::Connection {
+                message: format!("IMAP connection failed: {e}"),
             })?;
 
-        let session = client.login(&user, &pass).map_err(|e| {
-            EmailError::Authentication {
+        let session = client
+            .login(&user, &pass)
+            .map_err(|e| EmailError::Authentication {
                 message: format!("IMAP login failed: {}", e.0),
-            }
-        })?;
+            })?;
 
         Ok(session)
     }
@@ -489,9 +486,11 @@ impl EmailConnector for ImapConnector {
             .unwrap_or_else(|| "INBOX".to_string());
 
         // EXAMINE (read-only) to avoid marking messages as seen.
-        session.examine(&mailbox).map_err(|e| EmailError::Connection {
-            message: format!("IMAP EXAMINE {mailbox} failed: {e}"),
-        })?;
+        session
+            .examine(&mailbox)
+            .map_err(|e| EmailError::Connection {
+                message: format!("IMAP EXAMINE {mailbox} failed: {e}"),
+            })?;
 
         // Search for unseen messages, optionally above our last UID.
         let search_query = if let Some(uid) = self.last_uid {
@@ -500,11 +499,11 @@ impl EmailConnector for ImapConnector {
             "UNSEEN".to_string()
         };
 
-        let uids = session.uid_search(&search_query).map_err(|e| {
-            EmailError::Connection {
+        let uids = session
+            .uid_search(&search_query)
+            .map_err(|e| EmailError::Connection {
                 message: format!("IMAP UID SEARCH failed: {e}"),
-            }
-        })?;
+            })?;
 
         if uids.is_empty() {
             session.logout().ok();
@@ -519,11 +518,12 @@ impl EmailConnector for ImapConnector {
             .join(",");
 
         // Fetch full RFC822 messages.
-        let fetches = session
-            .uid_fetch(&uid_set, "RFC822")
-            .map_err(|e| EmailError::Connection {
-                message: format!("IMAP UID FETCH failed: {e}"),
-            })?;
+        let fetches =
+            session
+                .uid_fetch(&uid_set, "RFC822")
+                .map_err(|e| EmailError::Connection {
+                    message: format!("IMAP UID FETCH failed: {e}"),
+                })?;
 
         let mut emails = Vec::new();
         for fetch in fetches.iter() {
@@ -560,27 +560,27 @@ impl EmailConnector for ImapConnector {
             .cloned()
             .unwrap_or_else(|| "INBOX".to_string());
 
-        session.examine(&mailbox).map_err(|e| EmailError::Connection {
-            message: format!("IMAP EXAMINE failed: {e}"),
-        })?;
-
-        let fetches = session
-            .uid_fetch(uid.to_string(), "RFC822")
+        session
+            .examine(&mailbox)
             .map_err(|e| EmailError::Connection {
-                message: format!("IMAP UID FETCH failed: {e}"),
+                message: format!("IMAP EXAMINE failed: {e}"),
             })?;
 
-        let result = fetches
-            .iter()
-            .next()
-            .and_then(|f: &imap::types::Fetch| {
-                f.body().map(|body: &[u8]| RawEmail {
-                    uid: id.to_string(),
-                    mailbox: mailbox.clone(),
-                    flags: Vec::new(),
-                    data: body.to_vec(),
-                })
-            });
+        let fetches =
+            session
+                .uid_fetch(uid.to_string(), "RFC822")
+                .map_err(|e| EmailError::Connection {
+                    message: format!("IMAP UID FETCH failed: {e}"),
+                })?;
+
+        let result = fetches.iter().next().and_then(|f: &imap::types::Fetch| {
+            f.body().map(|body: &[u8]| RawEmail {
+                uid: id.to_string(),
+                mailbox: mailbox.clone(),
+                flags: Vec::new(),
+                data: body.to_vec(),
+            })
+        });
 
         session.logout().ok();
         Ok(result)

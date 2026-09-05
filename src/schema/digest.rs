@@ -248,13 +248,24 @@ mod tests {
         assert_eq!(names, vec!["Employee", "Organization", "Person"]);
 
         let employee = d.types.iter().find(|t| t.name == "Employee").unwrap();
-        assert_eq!(employee.chain, vec!["Employee".to_string(), "Person".to_string()]);
-        let prop_names: Vec<&str> = employee.properties.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            employee.chain,
+            vec!["Employee".to_string(), "Person".to_string()]
+        );
+        let prop_names: Vec<&str> = employee
+            .properties
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         let mut sorted = prop_names.clone();
         sorted.sort();
         assert_eq!(sorted, vec!["employer", "name", "url"]);
         // Inherited-vs-direct distinction survives into the digest.
-        let name_prop = employee.properties.iter().find(|p| p.name == "name").unwrap();
+        let name_prop = employee
+            .properties
+            .iter()
+            .find(|p| p.name == "name")
+            .unwrap();
         assert!(!name_prop.direct);
         assert_eq!(name_prop.declared_on, "Person");
         let employer_prop = employee
@@ -291,7 +302,10 @@ mod tests {
         let rendered = d.render_compact();
         assert!(rendered.contains("Employee (is-a Person)"), "{rendered}");
         assert!(rendered.contains("employer"), "{rendered}");
-        assert!(rendered.contains("worksFor(Person, Organization)"), "{rendered}");
+        assert!(
+            rendered.contains("worksFor(Person, Organization)"),
+            "{rendered}"
+        );
     }
 
     #[test]

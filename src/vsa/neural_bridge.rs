@@ -494,7 +494,10 @@ mod tests {
         let bridge = NeuralVsaBridge::new(32, Dimension::TEST);
         let hidden = vec![1.0f32; 32];
         let conf = bridge.encoding_confidence(&hidden);
-        assert!(conf >= 0.0 && conf <= 1.0, "confidence out of range: {conf}");
+        assert!(
+            conf >= 0.0 && conf <= 1.0,
+            "confidence out of range: {conf}"
+        );
     }
 
     #[test]

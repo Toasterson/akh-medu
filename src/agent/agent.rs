@@ -14,34 +14,35 @@ use bincode;
 
 use super::channel::{ChannelRegistry, ChannelResult};
 use super::channel_message::{ConstraintCheckStatus, InboundMessage};
+use super::chunking::{self, ChunkingConfig, MethodIndex};
 use super::constraint_check::{ConstraintChecker, EmissionDecision, emission_decision};
 use super::conversation::{ConversationState, ResponseDetail};
-use super::interlocutor::InterlocutorRegistry;
-use super::operator_channel::InboundHandle;
 use super::decomposition::{self, DecompositionOutput, MethodRegistry, MethodStats};
 use super::drives::DriveSystem;
 use super::error::{AgentError, AgentResult};
 use super::goal::{self, Goal, GoalStatus};
 use super::goal_generation::{self, GoalGenerationConfig, GoalGenerationResult};
-use super::metacognition::{self, CompetenceModel, FailureCase, FailureIndex, MetacognitionConfig};
-use super::chunking::{self, ChunkingConfig, MethodIndex};
-use super::resource::{self, EffortIndex, ImprovementHistory};
-use super::watch::{self, Watch, WatchFiring};
+use super::interlocutor::InterlocutorRegistry;
 use super::memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
-    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary, index_cycle_episode,
-    recall_episodes, recall_recent_episodes, restore_session_summary,
+    WorkingMemoryEntry, WorkingMemoryKind, consolidate, generate_session_summary,
+    index_cycle_episode, recall_episodes, recall_recent_episodes, restore_session_summary,
 };
+use super::metacognition::{self, CompetenceModel, FailureCase, FailureIndex, MetacognitionConfig};
 use super::ooda::{self, DecisionImpasse, OodaCycleResult};
-use super::vsa_decide::DecideMode;
+use super::operator_channel::InboundHandle;
 use super::plan::{self, Plan, PlanStatus};
 use super::priority_reasoning::Audience;
 use super::project::{
-    self, Agenda, Project, ProjectPredicates, ProjectStatus, project_progress, update_project_status,
+    self, Agenda, Project, ProjectPredicates, ProjectStatus, project_progress,
+    update_project_status,
 };
 use super::reflect::{self, Adjustment, ReflectionConfig, ReflectionResult};
+use super::resource::{self, EffortIndex, ImprovementHistory};
 use super::tool::{ToolRegistry, ToolSignature};
 use super::tools;
+use super::vsa_decide::DecideMode;
+use super::watch::{self, Watch, WatchFiring};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -275,7 +276,13 @@ pub struct Agent {
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
-    pub(crate) context_manager: std::sync::Mutex<Option<std::sync::Arc<dyn super::context::ContextManager>>>,
+    pub(crate) context_manager:
+        std::sync::Mutex<Option<std::sync::Arc<dyn super::context::ContextManager>>>,
+    /// Durable note catalog used by context assembly (frontmatter only) and
+    /// explicit archival tools (full bodies only on demand). Optional so
+    /// embedded/tests without a workspace retain their historical behavior.
+    pub(crate) note_catalog:
+        std::sync::Mutex<Option<std::sync::Arc<dyn crate::library::NoteCatalog>>>,
     /// Last [`ContextWindowStats`] committed by `run_agentic_turn`, behind its
     /// own `Mutex` so the ACP `_akh/usage` handler can read it **without** the
     /// agent lock (Phase 44m, ADR 065 D12.1). `None` until the first turn.
@@ -288,9 +295,8 @@ pub struct Agent {
     /// the same way as [`last_context_stats`] so the ACP `_akh/usage` panel
     /// can show "loaded-but-deferred" tiers without the agent lock. Each entry
     /// is `(label, tokens, count, reason)`. Empty until the first turn.
-    pub(crate) last_deferred_tools: std::sync::Arc<
-        std::sync::Mutex<Vec<super::context::DeferredToolGroup>>,
-    >,
+    pub(crate) last_deferred_tools:
+        std::sync::Arc<std::sync::Mutex<Vec<super::context::DeferredToolGroup>>>,
     /// Delegation manager for offloading LLM-class tasks (Phase 36).
     #[cfg(feature = "delegation")]
     pub(crate) delegation_manager: super::delegation::DelegationManager,
@@ -344,8 +350,9 @@ impl Agent {
         predicates: &AgentPredicates,
         engine: &Engine,
         exec_wiring: ExecToolWiring,
-        #[cfg(feature = "delegation")]
-        delegation_pending: std::sync::Arc<std::sync::Mutex<Vec<super::delegation::DelegationTask>>>,
+        #[cfg(feature = "delegation")] delegation_pending: std::sync::Arc<
+            std::sync::Mutex<Vec<super::delegation::DelegationTask>>,
+        >,
     ) -> AgentResult<()> {
         // Core KG tools.
         registry.register(Box::new(tools::KgQueryTool));
@@ -372,7 +379,8 @@ impl Agent {
         let cfg = engine.config();
         let fs: std::sync::Arc<dyn crate::fs::Filesystem> = match cfg.data_dir.as_ref() {
             Some(dir) => {
-                let mut read_roots = vec![cfg.workspace_root.clone().unwrap_or_else(|| dir.clone())];
+                let mut read_roots =
+                    vec![cfg.workspace_root.clone().unwrap_or_else(|| dir.clone())];
                 read_roots.extend(cfg.extra_read_roots.iter().cloned());
                 let write_root = cfg
                     .scratch_dir
@@ -490,7 +498,9 @@ impl Agent {
             task_predicates.clone(),
             predicates.clone(),
         )));
-        registry.register(Box::new(tools::StructuredTaskListTool::new(task_predicates)));
+        registry.register(Box::new(tools::StructuredTaskListTool::new(
+            task_predicates,
+        )));
 
         Ok(())
     }
@@ -543,7 +553,10 @@ impl Agent {
                                         cli_manifest,
                                         Some(info.id.clone()),
                                     );
-                                    self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(tool));
+                                    self.tool_registry
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .register(Box::new(tool));
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -576,7 +589,10 @@ impl Agent {
                             manifest.tool_config.clone(),
                         ) {
                             Ok(wasm_tool) => {
-                                self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(wasm_tool));
+                                self.tool_registry
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .register(Box::new(wasm_tool));
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -604,7 +620,9 @@ impl Agent {
     /// be cleanly removed via `remove_schemas_by_skill` / `remove_methods_by_skill`
     /// when the skill is deactivated.
     pub(crate) fn wire_skill_procedures(&mut self) {
-        use super::causal::{ActionSchema, CausalEffect, CausalPattern, EffectKind, PatternElement};
+        use super::causal::{
+            ActionSchema, CausalEffect, CausalPattern, EffectKind, PatternElement,
+        };
         use super::decomposition::{DecompositionMethod, DecompositionStrategy, SubtaskTemplate};
         use crate::skills::{PlanMethod, SkillState};
 
@@ -621,8 +639,7 @@ impl Agent {
             let actions = self.engine.skill_actions(skill_id);
             if !actions.is_empty() {
                 // Resolve shared predicate + context entity once per skill.
-                let Ok(has_state_pred) =
-                    self.engine.resolve_or_create_relation("skill:has-state")
+                let Ok(has_state_pred) = self.engine.resolve_or_create_relation("skill:has-state")
                 else {
                     tracing::warn!(skill = %skill_id, "wire_skill_procedures: resolve skill:has-state failed");
                     continue;
@@ -821,12 +838,14 @@ impl Agent {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
-        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
+        let dialogue_manager =
+            super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         // Create delegation manager early so we can pass the pending queue to DelegateTool.
         #[cfg(feature = "delegation")]
-        let delegation_manager =
-            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        let delegation_manager = super::delegation::DelegationManager::new(
+            super::delegation::DelegationConfig::default(),
+        );
         #[cfg(feature = "delegation")]
         let delegation_pending = delegation_manager.pending_queue();
 
@@ -870,9 +889,18 @@ impl Agent {
                     .collect();
                 // Prefer higher-priority and user-requested goals; discard the rest.
                 nt.sort_by(|a, b| {
-                    let ea = a.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
-                    let eb = b.justification.as_ref().map(|j| j.entrenchment()).unwrap_or(0);
-                    eb.cmp(&ea).then(b.computed_priority().cmp(&a.computed_priority()))
+                    let ea = a
+                        .justification
+                        .as_ref()
+                        .map(|j| j.entrenchment())
+                        .unwrap_or(0);
+                    let eb = b
+                        .justification
+                        .as_ref()
+                        .map(|j| j.entrenchment())
+                        .unwrap_or(0);
+                    eb.cmp(&ea)
+                        .then(b.computed_priority().cmp(&a.computed_priority()))
                 });
                 nt.iter().skip(max_restore).map(|g| g.symbol_id).collect()
             };
@@ -963,6 +991,7 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             context_manager: std::sync::Mutex::new(None),
+            note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -1017,9 +1046,7 @@ impl Agent {
             mv.declare_multi_valued(agent.predicates.has_criteria);
             mv.declare_multi_valued(agent.predicates.blocked_by);
             // tool:access is one-to-many: a tool may be granted to multiple agents.
-            if let Ok(access_pred) =
-                agent.engine.resolve_or_create_relation("tool:access")
-            {
+            if let Ok(access_pred) = agent.engine.resolve_or_create_relation("tool:access") {
                 mv.declare_multi_valued(access_pred);
             }
         }
@@ -1062,7 +1089,11 @@ impl Agent {
         // Runs after load_skill_tools() so skill-contributed tools are included.
         // Existing schemas (manually tuned or restored from disk) are preserved.
         {
-            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
+            let signatures = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -1080,7 +1111,9 @@ impl Agent {
                     }
                     Ok(_) => {} // all schemas already present
                     Err(e) => {
-                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                        tracing::warn!(
+                            "failed to bootstrap causal schemas from tool registry: {e}"
+                        );
                     }
                 }
             }
@@ -1162,8 +1195,7 @@ impl Agent {
         parent: Option<SymbolId>,
     ) -> AgentResult<goal::Goal> {
         if let Some(existing_idx) = self.goals.iter().position(|existing| {
-            self.engine.resolve_label(existing.symbol_id)
-                == goal::canonical_goal_label(description)
+            self.engine.resolve_label(existing.symbol_id) == goal::canonical_goal_label(description)
         }) {
             let existing_id = self.goals[existing_idx].symbol_id;
             if let Some(parent_id) = parent {
@@ -1187,8 +1219,10 @@ impl Agent {
                     parent_id,
                 ))?;
                 self.goals[existing_idx].parent = Some(parent_id);
-                if let Some(parent_goal) =
-                    self.goals.iter_mut().find(|goal| goal.symbol_id == parent_id)
+                if let Some(parent_goal) = self
+                    .goals
+                    .iter_mut()
+                    .find(|goal| goal.symbol_id == parent_id)
                     && !parent_goal.children.contains(&existing_id)
                 {
                     parent_goal.children.push(existing_id);
@@ -1267,8 +1301,8 @@ impl Agent {
         }
 
         // Phase 11i: Check if the agent should enter a sleep cycle before OODA.
-        let wm_pressure = self.working_memory.len() as f32
-            / self.config.working_memory_capacity.max(1) as f32;
+        let wm_pressure =
+            self.working_memory.len() as f32 / self.config.working_memory_capacity.max(1) as f32;
         if super::sleep::should_sleep(&self.sleep_cycle, self.cycle_count, wm_pressure)
             && let Err(e) = super::sleep::run_sleep_cycle(
                 &self.engine,
@@ -1337,9 +1371,7 @@ impl Agent {
                 }
             }
         }
-        if should_backtrack
-            && let Err(e) = self.backtrack_goal(goal_id)
-        {
+        if should_backtrack && let Err(e) = self.backtrack_goal(goal_id) {
             tracing::warn!("failed to backtrack goal: {e}");
         }
 
@@ -1364,14 +1396,14 @@ impl Agent {
             if goal_completed || goal_failed {
                 if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
                     let category = metacognition::categorize_goal(g);
-                    self.competence_model.update_category(&category, goal_completed);
+                    self.competence_model
+                        .update_category(&category, goal_completed);
                 }
                 // Mark resolved failures if a goal completed.
                 if goal_completed
                     && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id)
                 {
-                    self.failure_index
-                        .mark_resolved(&g.description, tool_name);
+                    self.failure_index.mark_resolved(&g.description, tool_name);
                 }
                 // Record effort case for CBR (Phase 11g).
                 if let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
@@ -1424,7 +1456,11 @@ impl Agent {
                         0.5
                     } else {
                         let cycles_since = self.cycle_count.saturating_sub(g.last_progress_cycle);
-                        if cycles_since == 0 { 1.0 } else { (1.0 / cycles_since as f32).min(1.0) }
+                        if cycles_since == 0 {
+                            1.0
+                        } else {
+                            (1.0 / cycles_since as f32).min(1.0)
+                        }
                     };
                     resource::record_improvement(
                         &mut self.improvement_history,
@@ -1437,9 +1473,7 @@ impl Agent {
             }
 
             // Record failure in failure index.
-            if !tool_success
-                && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id)
-            {
+            if !tool_success && let Some(g) = self.goals.iter().find(|g| g.symbol_id == goal_id) {
                 let error_msg = match &result.action_result.goal_progress {
                     ooda::GoalProgress::Failed { reason } => reason.clone(),
                     _ => "unknown".to_string(),
@@ -1470,8 +1504,7 @@ impl Agent {
                     .filter(|a| {
                         matches!(
                             a,
-                            Adjustment::SuggestAbandon { .. }
-                                | Adjustment::SuggestNewGoal { .. }
+                            Adjustment::SuggestAbandon { .. } | Adjustment::SuggestNewGoal { .. }
                         )
                     })
                     .cloned()
@@ -1546,10 +1579,8 @@ impl Agent {
 
         // Evaluate watches against world delta (Phase 11e).
         {
-            let snap_before = watch::take_snapshot(
-                &self.engine,
-                self.cycle_count.saturating_sub(1),
-            );
+            let snap_before =
+                watch::take_snapshot(&self.engine, self.cycle_count.saturating_sub(1));
             let snap_after = watch::take_snapshot(&self.engine, self.cycle_count);
             let firings = watch::evaluate_watches(
                 &mut self.watches,
@@ -1814,12 +1845,8 @@ impl Agent {
             if vsa_goals_created >= goal_generation::MAX_COMPETENCE_GAP_GOALS {
                 break;
             }
-            if goal::existing_by_description(
-                &self.engine,
-                &self.goals,
-                &proposal.description,
-            )
-            .is_some()
+            if goal::existing_by_description(&self.engine, &self.goals, &proposal.description)
+                .is_some()
             {
                 continue;
             }
@@ -1869,7 +1896,13 @@ impl Agent {
     /// Recall episodic memories by query symbols.
     pub fn recall(&self, query: &[SymbolId], top_k: usize) -> AgentResult<Vec<EpisodicEntry>> {
         let current_affect = *self.affective_system.current_affect();
-        recall_episodes(&self.engine, query, &self.predicates, top_k, Some(&current_affect))
+        recall_episodes(
+            &self.engine,
+            query,
+            &self.predicates,
+            top_k,
+            Some(&current_affect),
+        )
     }
 
     /// Recall the most recent episodic memories without requiring resolved symbols.
@@ -1897,13 +1930,20 @@ impl Agent {
     /// updates the engine's live-tool view. ACP prompt-scoped proxies use
     /// [`Self::begin_tool_session`] instead and never enter global state.
     pub fn register_tool(&self, tool: Box<dyn super::tool::Tool>) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(tool);
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(tool);
         self.sync_live_tools();
     }
 
     /// Remove a workspace-global tool by name. Returns `true` if one was removed.
     pub fn unregister_tool(&self, name: &str) -> bool {
-        let removed = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        let removed = self
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
         self.sync_live_tools();
         removed
     }
@@ -1921,9 +1961,16 @@ impl Agent {
     /// case, and skipping it there is what let stale tools survive.
     pub(crate) fn seed_tool_graph_and_live_view(&self) {
         if let Ok(registrar) = super::tool_graph::ToolGraphRegistrar::init(&self.engine) {
-            let (registered, pruned) =
-                registrar.reconcile(&*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()), "akhomed", &["agent:any"]);
-            tracing::debug!(registered, pruned, "tool_graph: reconciled tool manifests in KG");
+            let (registered, pruned) = registrar.reconcile(
+                &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
+                "akhomed",
+                &["agent:any"],
+            );
+            tracing::debug!(
+                registered,
+                pruned,
+                "tool_graph: reconciled tool manifests in KG"
+            );
         } else {
             tracing::warn!("tool_graph: failed to initialise ToolGraphRegistrar");
         }
@@ -1948,7 +1995,8 @@ impl Agent {
         }
         let tools = self
             .tool_registry
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .list_manifests()
             .into_iter()
             .map(|m| crate::engine::LiveTool {
@@ -1962,17 +2010,40 @@ impl Agent {
 
     /// List all registered tool signatures.
     pub fn list_tools(&self) -> Vec<ToolSignature> {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list()
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list()
+    }
+
+    /// List the full live LLM-advertised tool contracts, including structured
+    /// parameter schemas and danger/capability metadata. This is the canonical
+    /// source for Akh-native training snapshots; callers must not maintain a
+    /// hand-copied tool list that can drift from runtime.
+    pub fn list_tool_manifests(&self) -> Vec<crate::agent::tool_manifest::ToolManifest> {
+        let mut manifests = self
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_advertised_manifests();
+        manifests.sort_by(|a, b| a.name.cmp(&b.name));
+        manifests
     }
 
     /// Set the permission mode gating this agent's tool execution.
     pub fn set_permission_mode(&self, mode: crate::agent::permission::PermissionMode) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_mode(mode);
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_permission_mode(mode);
     }
 
     /// The active tool-permission mode.
     pub fn permission_mode(&self) -> crate::agent::permission::PermissionMode {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).permission_mode()
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .permission_mode()
     }
 
     /// Attach an approver that resolves `Ask` permission decisions (e.g. an ACP
@@ -1981,12 +2052,18 @@ impl Agent {
         &self,
         asker: std::sync::Arc<dyn crate::agent::permission::PermissionAsker>,
     ) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_permission_asker(asker);
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_permission_asker(asker);
     }
 
     /// Remove the permission approver (`Ask` then fails closed).
     pub fn clear_permission_asker(&self) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_permission_asker();
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear_permission_asker();
     }
 
     /// Install a tool execution tracker (for ACP ToolCall events).
@@ -1994,12 +2071,18 @@ impl Agent {
         &self,
         tracker: std::sync::Arc<crate::agent::tool_execution_tracker::ToolExecutionTracker>,
     ) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).set_tracker(tracker);
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_tracker(tracker);
     }
 
     /// Remove the tool execution tracker.
     pub fn clear_tool_tracker(&self) {
-        self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).clear_tracker();
+        self.tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear_tracker();
     }
 
     /// Install a thread-confined tool overlay for one synchronous ACP turn.
@@ -2048,13 +2131,21 @@ impl Agent {
     /// too), recalls a wider candidate pool, drops any episode referencing a
     /// **TMS-retracted** (superseded) fact, then re-ranks by a blend of VSA
     /// relevance ⊕ recency ⊕ confidence. Empty when nothing resolves or matches.
-    pub(crate) fn recall_for_prompt(&self, engine: &Engine, prompt: &str, top_k: usize) -> Vec<String> {
+    pub(crate) fn recall_for_prompt(
+        &self,
+        engine: &Engine,
+        prompt: &str,
+        top_k: usize,
+    ) -> Vec<String> {
         use std::collections::HashMap;
 
         // 1. Resolve the prompt's content words to seed symbols.
         let seeds: Vec<crate::symbol::SymbolId> = prompt
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .filter(|w| w.len() > 2)
             .filter_map(|w| engine.resolve_symbol(w.as_str()).ok())
             .collect();
@@ -2235,9 +2326,7 @@ impl Agent {
     }
 
     /// Get a reference to the model manager, if one is attached.
-    pub fn model_manager(
-        &self,
-    ) -> Option<&super::model_manager::AgentModelManager> {
+    pub fn model_manager(&self) -> Option<&super::model_manager::AgentModelManager> {
         self.model_manager.as_deref()
     }
 
@@ -2255,7 +2344,17 @@ impl Agent {
     /// no manager set behaves exactly as before. Shipped managers should be
     /// wrapped in [`SafetyEnforced`](super::context::SafetyEnforced) by the caller.
     pub fn set_context_manager(&self, manager: std::sync::Arc<dyn super::context::ContextManager>) {
-        *self.context_manager.lock().unwrap_or_else(|e| e.into_inner()) = Some(manager);
+        *self
+            .context_manager
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(manager);
+    }
+
+    /// Attach this akh's durable note catalog. Context assembly can only read
+    /// the catalog's body-blanked view; note bodies remain available solely to
+    /// explicit archival tools that hold the same catalog.
+    pub fn set_note_catalog(&self, catalog: std::sync::Arc<dyn crate::library::NoteCatalog>) {
+        *self.note_catalog.lock().unwrap_or_else(|e| e.into_inner()) = Some(catalog);
     }
 
     /// Set whether completed agentic turns are captured to the WAL as raw
@@ -2279,8 +2378,13 @@ impl Agent {
         let Some(ref mgr) = self.model_manager else {
             return false;
         };
-        let manifests = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list_advertised_manifests();
-        let manifest_refs: Vec<&crate::agent::tool_manifest::ToolManifest> = manifests.iter().collect();
+        let manifests = self
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_advertised_manifests();
+        let manifest_refs: Vec<&crate::agent::tool_manifest::ToolManifest> =
+            manifests.iter().collect();
         mgr.load_agent(agent_id, agent_name, self.psyche.as_ref(), &manifest_refs);
         true
     }
@@ -2305,7 +2409,9 @@ impl Agent {
 
     /// Get a locked reference to the channel registry.
     pub fn channel_registry(&self) -> std::sync::MutexGuard<'_, ChannelRegistry> {
-        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner())
+        self.channel_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Register a communication channel.
@@ -2313,7 +2419,10 @@ impl Agent {
         &self,
         channel: Box<dyn super::channel::CommChannel>,
     ) -> ChannelResult<()> {
-        self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(channel)
+        self.channel_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(channel)
     }
 
     /// Create and register an operator channel wrapping the current sink,
@@ -2322,14 +2431,19 @@ impl Agent {
         let op = super::operator_channel::OperatorChannel::new(Arc::clone(&self.sink));
         let handle = op.inbound_handle();
         // Registration cannot fail here: we are creating the first operator channel.
-        let _ = self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(op));
+        let _ = self
+            .channel_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(op));
         handle
     }
 
     /// Drain all pending inbound messages from all registered channels.
     pub fn drain_inbound(&self) -> Vec<InboundMessage> {
         self.channel_registry
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .drain_all()
             .into_iter()
             .map(|(_id, msg)| msg)
@@ -2345,7 +2459,9 @@ impl Agent {
     /// work by replacing `self.conversation_state_mut()` with
     /// `self.conversation_state()` — the guard is mutable.
     pub fn conversation_state(&self) -> std::sync::MutexGuard<'_, ConversationState> {
-        self.conversation_state.lock().unwrap_or_else(|e| e.into_inner())
+        self.conversation_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set the response detail level for grounded dialogue.
@@ -2369,12 +2485,16 @@ impl Agent {
 
     /// Get a shared reference to the constraint checker.
     pub fn constraint_checker(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
-        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
+        self.constraint_checker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a mutable reference to the constraint checker.
     pub fn constraint_checker_mut(&self) -> std::sync::MutexGuard<'_, ConstraintChecker> {
-        self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner())
+        self.constraint_checker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     /// Get a reference to the interlocutor registry.
@@ -2483,7 +2603,9 @@ impl Agent {
     }
 
     /// Get a mutable reference to the source reliability manager.
-    pub fn reliability_manager_mut(&mut self) -> &mut super::source_reliability::SourceReliabilityManager {
+    pub fn reliability_manager_mut(
+        &mut self,
+    ) -> &mut super::source_reliability::SourceReliabilityManager {
         &mut self.reliability_manager
     }
 
@@ -2497,8 +2619,12 @@ impl Agent {
         channel_id: &str,
         channel_kind: super::channel::ChannelKind,
     ) -> AgentResult<()> {
-        self.interlocutor_registry
-            .register(interlocutor_id, channel_id, channel_kind, &self.engine)?;
+        self.interlocutor_registry.register(
+            interlocutor_id,
+            channel_id,
+            channel_kind,
+            &self.engine,
+        )?;
         Ok(())
     }
 
@@ -2517,9 +2643,11 @@ impl Agent {
         let grammar = self.conversation_state().grammar.clone();
 
         // Run the constraint pipeline.
-        let outcome = self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).check_grounded(
-            response, channel_id, channel_kind, &self.engine,
-        );
+        let outcome = self
+            .constraint_checker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .check_grounded(response, channel_id, channel_kind, &self.engine);
 
         let decision = emission_decision(channel_kind, &outcome);
 
@@ -2529,7 +2657,10 @@ impl Agent {
 
         // Record emission in the budget.
         if decision == EmissionDecision::Emit {
-            self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()).record_emission(channel_id);
+            self.constraint_checker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_emission(channel_id);
         }
 
         (msg, decision)
@@ -2715,8 +2846,7 @@ impl Agent {
             // Only abandon after meaningful work has been done (cycles_worked > 0)
             // and no progress for the configured threshold.
             .filter(|g| {
-                g.cycles_worked > 0
-                    && cycle.saturating_sub(g.last_progress_cycle) >= threshold
+                g.cycles_worked > 0 && cycle.saturating_sub(g.last_progress_cycle) >= threshold
             })
             .map(|g| g.symbol_id)
             .collect();
@@ -2749,7 +2879,9 @@ impl Agent {
                 let reason = if matches!(g.status, GoalStatus::Active) {
                     format!("abandoned: no progress for {threshold} cycles")
                 } else {
-                    format!("abandoned: pending/dormant with no work for {pending_threshold} cycles")
+                    format!(
+                        "abandoned: pending/dormant with no work for {pending_threshold} cycles"
+                    )
                 };
                 tracing::debug!(
                     goal = %goal_id,
@@ -2781,9 +2913,7 @@ impl Agent {
                     && g.children.is_empty()
                     && g.is_stalled(
                         self.cycle_count,
-                        resource::dynamic_stall_threshold(
-                            g.estimated_effort.as_ref(),
-                        ),
+                        resource::dynamic_stall_threshold(g.estimated_effort.as_ref()),
                     )
             })
             .map(|g| g.symbol_id)
@@ -3176,9 +3306,7 @@ impl Agent {
     ///
     /// Collects code entities from the KG, anti-unifies them, scores candidates,
     /// and stores the top abstractions as learned templates.
-    pub fn run_library_learning(
-        &self,
-    ) -> AgentResult<super::library_learn::LibraryLearningResult> {
+    pub fn run_library_learning(&self) -> AgentResult<super::library_learn::LibraryLearningResult> {
         let learner = super::library_learn::LibraryLearner::with_defaults();
         learner.run_cycle(&self.engine)
     }
@@ -3325,12 +3453,7 @@ impl Agent {
                 &self.predicates,
             )?;
             g.source = Some(proposal.source.clone());
-            goal::update_goal_status(
-                &self.engine,
-                &mut g,
-                GoalStatus::Dormant,
-                &self.predicates,
-            )?;
+            goal::update_goal_status(&self.engine, &mut g, GoalStatus::Dormant, &self.predicates)?;
             goal::insert_if_novel(&mut self.goals, g);
         }
 
@@ -3445,24 +3568,27 @@ impl Agent {
 
     /// Estimate effort for a goal using the CBR case base.
     pub fn estimate_goal_effort(&self, goal_id: SymbolId) -> AgentResult<resource::EffortEstimate> {
-        let goal = self
-            .goals
-            .iter()
-            .find(|g| g.symbol_id == goal_id)
-            .ok_or(AgentError::GoalNotFound {
-                goal_id: goal_id.get(),
-            })?;
-        resource::estimate_effort(goal, &self.effort_index, &self.engine, 3)
-            .map_err(|e| AgentError::ConsolidationFailed {
+        let goal =
+            self.goals
+                .iter()
+                .find(|g| g.symbol_id == goal_id)
+                .ok_or(AgentError::GoalNotFound {
+                    goal_id: goal_id.get(),
+                })?;
+        resource::estimate_effort(goal, &self.effort_index, &self.engine, 3).map_err(|e| {
+            AgentError::ConsolidationFailed {
                 message: e.to_string(),
-            })
+            }
+        })
     }
 
     /// Prune dormant learned methods from the method index (Phase 11h).
     pub fn prune_methods(&mut self) -> Vec<SymbolId> {
-        let session_cycles = self.cycle_count.saturating_sub(self.session_start_cycle).max(1);
-        let mut methods: Vec<chunking::LearnedMethod> =
-            self.method_index.methods().to_vec();
+        let session_cycles = self
+            .cycle_count
+            .saturating_sub(self.session_start_cycle)
+            .max(1);
+        let mut methods: Vec<chunking::LearnedMethod> = self.method_index.methods().to_vec();
         let pruned = chunking::prune_dormant(
             &mut methods,
             self.cycle_count,
@@ -3711,12 +3837,11 @@ impl Agent {
             })?;
 
         // Persist improvement history (Phase 11g).
-        let history_bytes =
-            bincode::serialize(&self.improvement_history).map_err(|e| {
-                AgentError::ConsolidationFailed {
-                    message: format!("failed to serialize improvement history: {e}"),
-                }
-            })?;
+        let history_bytes = bincode::serialize(&self.improvement_history).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize improvement history: {e}"),
+            }
+        })?;
         store
             .put_meta(b"agent:improvement_history", &history_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
@@ -3724,12 +3849,11 @@ impl Agent {
             })?;
 
         // Persist learned methods for HNSW rebuild (Phase 11h).
-        let methods_bytes =
-            bincode::serialize(self.method_index.methods()).map_err(|e| {
-                AgentError::ConsolidationFailed {
-                    message: format!("failed to serialize learned methods: {e}"),
-                }
-            })?;
+        let methods_bytes = bincode::serialize(self.method_index.methods()).map_err(|e| {
+            AgentError::ConsolidationFailed {
+                message: format!("failed to serialize learned methods: {e}"),
+            }
+        })?;
         store
             .put_meta(b"agent:learned_methods", &methods_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
@@ -3752,11 +3876,10 @@ impl Agent {
         watch::persist_watches(&self.engine, &self.watches)?;
 
         // Persist PIM manager (Phase 13e).
-        let pim_bytes = bincode::serialize(&self.pim_manager).map_err(|e| {
-            AgentError::ConsolidationFailed {
+        let pim_bytes =
+            bincode::serialize(&self.pim_manager).map_err(|e| AgentError::ConsolidationFailed {
                 message: format!("failed to serialize PIM manager: {e}"),
-            }
-        })?;
+            })?;
         store
             .put_meta(b"agent:pim_manager", &pim_bytes)
             .map_err(|e| AgentError::ConsolidationFailed {
@@ -3857,11 +3980,11 @@ impl Agent {
                     message: format!("failed to serialize ec engine: {e}"),
                 }
             })?;
-            store
-                .put_meta(b"agent:ec_engine", &ec_bytes)
-                .map_err(|e| AgentError::ConsolidationFailed {
+            store.put_meta(b"agent:ec_engine", &ec_bytes).map_err(|e| {
+                AgentError::ConsolidationFailed {
                     message: format!("failed to persist ec engine: {e}"),
-                })?;
+                }
+            })?;
         }
 
         // Persist contact manager (Phase 25a).
@@ -4002,13 +4125,15 @@ impl Agent {
         let predicates = AgentPredicates::init(&engine)?;
         let project_predicates = ProjectPredicates::init(&engine)?;
         let dialogue_predicates = super::dialogue::DialoguePredicates::init(&engine)?;
-        let dialogue_manager = super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
+        let dialogue_manager =
+            super::dialogue::DialogueManager::new(dialogue_predicates, "operator");
 
         // Create delegation manager (delegation state is not persisted between sessions
         // — active delegations are transient; the config reloads from defaults).
         #[cfg(feature = "delegation")]
-        let delegation_manager =
-            super::delegation::DelegationManager::new(super::delegation::DelegationConfig::default());
+        let delegation_manager = super::delegation::DelegationManager::new(
+            super::delegation::DelegationConfig::default(),
+        );
         #[cfg(feature = "delegation")]
         let delegation_pending = delegation_manager.pending_queue();
 
@@ -4069,7 +4194,9 @@ impl Agent {
             .ok()
             .flatten()
             .and_then(|bytes| bincode::deserialize::<DriveSystem>(&bytes).ok())
-            .unwrap_or_else(|| DriveSystem::with_thresholds(config.goal_generation.drive_thresholds));
+            .unwrap_or_else(|| {
+                DriveSystem::with_thresholds(config.goal_generation.drive_thresholds)
+            });
 
         // Restore audience: prefer persisted state, fall back to exploration default.
         let audience = store
@@ -4089,8 +4216,8 @@ impl Agent {
         }
 
         // Restore projects from KG.
-        let projects =
-            project::restore_projects(&engine, &project_predicates, &predicates).unwrap_or_default();
+        let projects = project::restore_projects(&engine, &project_predicates, &predicates)
+            .unwrap_or_default();
 
         // Restore agenda from durable store.
         let agenda = store
@@ -4146,9 +4273,7 @@ impl Agent {
             .get_meta(b"agent:effort_cases")
             .ok()
             .flatten()
-            .and_then(|bytes| {
-                bincode::deserialize::<Vec<resource::EffortCase>>(&bytes).ok()
-            })
+            .and_then(|bytes| bincode::deserialize::<Vec<resource::EffortCase>>(&bytes).ok())
             .map(EffortIndex::from_cases)
             .unwrap_or_default();
 
@@ -4165,9 +4290,7 @@ impl Agent {
             .get_meta(b"agent:learned_methods")
             .ok()
             .flatten()
-            .and_then(|bytes| {
-                bincode::deserialize::<Vec<chunking::LearnedMethod>>(&bytes).ok()
-            })
+            .and_then(|bytes| bincode::deserialize::<Vec<chunking::LearnedMethod>>(&bytes).ok())
             .map(MethodIndex::from_methods)
             .unwrap_or_default();
 
@@ -4176,15 +4299,11 @@ impl Agent {
 
         // Restore PIM manager (Phase 13e).
         let pim_manager = super::pim::PimManager::restore(&engine)
-            .unwrap_or_else(|_| {
-                super::pim::PimManager::new(&engine).unwrap_or_default()
-            });
+            .unwrap_or_else(|_| super::pim::PimManager::new(&engine).unwrap_or_default());
 
         // Restore calendar manager (Phase 13f).
         let calendar_manager = super::calendar::CalendarManager::restore(&engine)
-            .unwrap_or_else(|_| {
-                super::calendar::CalendarManager::new(&engine).unwrap_or_default()
-            });
+            .unwrap_or_else(|_| super::calendar::CalendarManager::new(&engine).unwrap_or_default());
 
         // Restore preference manager (Phase 13g).
         let preference_manager = super::preference::PreferenceManager::restore(&engine)
@@ -4194,9 +4313,7 @@ impl Agent {
 
         // Restore causal manager (Phase 15a).
         let causal_manager = super::causal::CausalManager::restore(&engine)
-            .unwrap_or_else(|_| {
-                super::causal::CausalManager::new(&engine).unwrap_or_default()
-            });
+            .unwrap_or_else(|_| super::causal::CausalManager::new(&engine).unwrap_or_default());
 
         // Restore event calculus engine (Phase 15b).
         let ec_engine = super::event_calculus::EventCalculusEngine::restore(&engine)
@@ -4214,7 +4331,8 @@ impl Agent {
         let epistemic_manager = super::epistemic::EpistemicStateManager::restore(&engine);
 
         // Restore reliability manager (Phase 18a).
-        let reliability_manager = super::source_reliability::SourceReliabilityManager::restore(&engine);
+        let reliability_manager =
+            super::source_reliability::SourceReliabilityManager::restore(&engine);
 
         // Restore evidence manager (Phase 17).
         let evidence_manager = super::evidence::EvidenceManager::restore(&engine);
@@ -4233,9 +4351,7 @@ impl Agent {
 
         // Restore contact manager (Phase 25a).
         let contact_manager = super::contact::ContactManager::restore(&engine)
-            .unwrap_or_else(|_| {
-                super::contact::ContactManager::new(&engine).unwrap_or_default()
-            });
+            .unwrap_or_else(|_| super::contact::ContactManager::new(&engine).unwrap_or_default());
 
         // Restore relationship graph (Phase 25b).
         let relationship_graph = super::contact_rel::RelationshipGraph::restore(&engine)
@@ -4254,8 +4370,8 @@ impl Agent {
             .unwrap_or_else(|| super::contact_memory::PersonMemoryIndex::new(100));
 
         // Restore style manager (Phase 25d).
-        let style_manager = super::contact_style::StyleManager::restore(&engine)
-            .unwrap_or_else(|_| {
+        let style_manager =
+            super::contact_style::StyleManager::restore(&engine).unwrap_or_else(|_| {
                 super::contact_style::StyleManager::new(&engine).unwrap_or_default()
             });
 
@@ -4341,6 +4457,7 @@ impl Agent {
             model_manager: None,
             chat_backend: None,
             context_manager: std::sync::Mutex::new(None),
+            note_catalog: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(feature = "delegation")]
@@ -4377,7 +4494,11 @@ impl Agent {
 
         // Bootstrap causal world model from the full tool registry (Phase 15a / WI 019e1ab7).
         {
-            let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
+            let signatures = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .list();
             if !signatures.is_empty() {
                 match agent
                     .causal_manager
@@ -4395,7 +4516,9 @@ impl Agent {
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!("failed to bootstrap causal schemas from tool registry: {e}");
+                        tracing::warn!(
+                            "failed to bootstrap causal schemas from tool registry: {e}"
+                        );
                     }
                 }
             }
@@ -4424,7 +4547,10 @@ impl std::fmt::Debug for Agent {
         f.debug_struct("Agent")
             .field("goals", &self.goals.len())
             .field("working_memory", &self.working_memory)
-            .field("tools", &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()))
+            .field(
+                "tools",
+                &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
+            )
             .field("cycle_count", &self.cycle_count)
             .field("active_plans", &self.plans.len())
             .field("has_reflection", &self.last_reflection.is_some())
@@ -4439,9 +4565,25 @@ impl std::fmt::Debug for Agent {
             )
             .field("failure_index_size", &self.failure_index.len())
             .field("learned_methods", &self.method_index.len())
-            .field("channels", &self.channel_registry.lock().unwrap_or_else(|e| e.into_inner()).len())
-            .field("response_detail", &self.conversation_state().response_detail)
-            .field("constraint_checker", &self.constraint_checker.lock().unwrap_or_else(|e| e.into_inner()))
+            .field(
+                "channels",
+                &self
+                    .channel_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .len(),
+            )
+            .field(
+                "response_detail",
+                &self.conversation_state().response_detail,
+            )
+            .field(
+                "constraint_checker",
+                &self
+                    .constraint_checker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+            )
             .field("interlocutors", &self.interlocutor_registry.len())
             .finish()
     }
@@ -4477,7 +4619,13 @@ mod backend_seam_tests {
         // Sanity: the executor-facing tools registered by register_builtin_tools
         // are present, proving the in-process default backend path still ran.
         assert!(
-            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().iter().any(|sig| sig.name == "shell_exec"),
+            agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .list()
+                .iter()
+                .any(|sig| sig.name == "shell_exec"),
             "shell_exec tool should be registered via the default in-process backend"
         );
     }
@@ -4490,10 +4638,15 @@ mod backend_seam_tests {
     /// serves a shell under a dropped-privilege user.
     #[test]
     fn with_exec_wiring_none_registers_no_executor_tools() {
-        let agent = Agent::with_exec_wiring(test_engine(), AgentConfig::default(), ExecToolWiring::None)
-            .expect("Agent::with_exec_wiring(.., ExecToolWiring::None) should construct");
+        let agent =
+            Agent::with_exec_wiring(test_engine(), AgentConfig::default(), ExecToolWiring::None)
+                .expect("Agent::with_exec_wiring(.., ExecToolWiring::None) should construct");
 
-        let tools = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
+        let tools = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list();
         let names: std::collections::HashSet<&str> =
             tools.iter().map(|sig| sig.name.as_str()).collect();
 
@@ -4504,11 +4657,20 @@ mod backend_seam_tests {
             );
         }
         // Network tools are not executor tools — they survive.
-        assert!(names.contains("http_fetch"), "http_fetch should remain registered");
-        assert!(names.contains("web_search"), "web_search should remain registered");
+        assert!(
+            names.contains("http_fetch"),
+            "http_fetch should remain registered"
+        );
+        assert!(
+            names.contains("web_search"),
+            "web_search should remain registered"
+        );
         // A KG/reasoning tool should also still be there, proving the rest of
         // register_builtin_tools ran normally.
-        assert!(names.contains("kg_query"), "kg_query should remain registered");
+        assert!(
+            names.contains("kg_query"),
+            "kg_query should remain registered"
+        );
     }
 
     /// Regression: `Agent::resume` (the production path for any akh with
@@ -4541,8 +4703,12 @@ mod backend_seam_tests {
                 },
                 source: ToolSource::Native,
             };
-            reg.register_tool(&stale, "akhomed", &["agent:any"]).unwrap();
-            assert!(reg.list_all_tools().contains(&"tool:library_search".to_string()));
+            reg.register_tool(&stale, "akhomed", &["agent:any"])
+                .unwrap();
+            assert!(
+                reg.list_all_tools()
+                    .contains(&"tool:library_search".to_string())
+            );
         }
 
         // Drive the resume path directly (its restores default gracefully with

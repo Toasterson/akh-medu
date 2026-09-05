@@ -78,7 +78,11 @@ fn framing_for(archetype: &str, seed: u64) -> ArchetypeFraming {
                 seed,
             )),
             closing_move: Some("Does that clarify things?".into()),
-            characteristic_phrases: vec!["notably".into(), "in essence".into(), "fundamentally".into()],
+            characteristic_phrases: vec![
+                "notably".into(),
+                "in essence".into(),
+                "fundamentally".into(),
+            ],
         },
         "explorer" => ArchetypeFraming {
             archetype: "explorer".into(),
@@ -91,7 +95,11 @@ fn framing_for(archetype: &str, seed: u64) -> ArchetypeFraming {
                 seed,
             )),
             closing_move: Some("There might be more to explore here.".into()),
-            characteristic_phrases: vec!["curiously".into(), "I wonder if".into(), "this reminds me of".into()],
+            characteristic_phrases: vec![
+                "curiously".into(),
+                "I wonder if".into(),
+                "this reminds me of".into(),
+            ],
         },
         "healer" => ArchetypeFraming {
             archetype: "healer".into(),
@@ -103,7 +111,11 @@ fn framing_for(archetype: &str, seed: u64) -> ArchetypeFraming {
                 seed,
             )),
             closing_move: Some("I hope that helps.".into()),
-            characteristic_phrases: vec!["importantly".into(), "it's worth noting".into(), "gently put".into()],
+            characteristic_phrases: vec![
+                "importantly".into(),
+                "it's worth noting".into(),
+                "gently put".into(),
+            ],
         },
         "guardian" => ArchetypeFraming {
             archetype: "guardian".into(),
@@ -115,7 +127,11 @@ fn framing_for(archetype: &str, seed: u64) -> ArchetypeFraming {
                 seed,
             )),
             closing_move: Some("Keep that caveat in mind.".into()),
-            characteristic_phrases: vec!["crucially".into(), "be aware that".into(), "a critical detail".into()],
+            characteristic_phrases: vec![
+                "crucially".into(),
+                "be aware that".into(),
+                "a critical detail".into(),
+            ],
         },
         _ => ArchetypeFraming {
             archetype: archetype.to_string(),
@@ -268,7 +284,10 @@ impl StyleTransform {
             return text.to_string();
         }
         let mut chars = tail.chars();
-        let first = chars.next().map(|c| c.to_lowercase().to_string()).unwrap_or_default();
+        let first = chars
+            .next()
+            .map(|c| c.to_lowercase().to_string())
+            .unwrap_or_default();
         let rest: String = chars.collect();
         let mut phrase_cap = String::new();
         let mut pc = phrase.chars();
@@ -489,7 +508,10 @@ mod tests {
         let p = psyche([0.3, 0.9, 0.3, 0.3], [0.9, 0.9, 0.4, 0.4, 0.2]);
         let st = StyleTransform::from_psyche(&p, 0);
         let out = st.apply("A dog is a mammal. Dogs descend from wolves.");
-        assert!(out.contains("Notably, dogs descend from wolves"), "got: {out}");
+        assert!(
+            out.contains("Notably, dogs descend from wolves"),
+            "got: {out}"
+        );
     }
 
     #[test]

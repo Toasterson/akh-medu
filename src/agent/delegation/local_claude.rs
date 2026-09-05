@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::error::{DelegationError, DelegationResult};
-use super::types::{DelegationId, DelegationOutcome, DelegationOutput, DelegationTask, LocalDelegationConfig};
+use super::types::{
+    DelegationId, DelegationOutcome, DelegationOutput, DelegationTask, LocalDelegationConfig,
+};
 
 /// Worker that delegates tasks to a local `claude` CLI subprocess.
 pub struct LocalClaudeWorker {
@@ -38,11 +40,13 @@ impl LocalClaudeWorker {
             }
         });
         let path = std::env::temp_dir().join("akh-delegate.mcp.json");
-        std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| {
-            DelegationError::McpConfig {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&config).map_err(|e| DelegationError::McpConfig {
                 message: e.to_string(),
-            }
-        })?).map_err(|e| DelegationError::McpConfig {
+            })?,
+        )
+        .map_err(|e| DelegationError::McpConfig {
             message: e.to_string(),
         })?;
         Ok(path)
@@ -159,17 +163,14 @@ impl LocalClaudeWorker {
         prompt.push_str("## Instructions\n\n");
         prompt.push_str("1. Use the akh-medu MCP tools to query relevant knowledge.\n");
         prompt.push_str("2. Perform the task.\n");
-        prompt.push_str(
-            "3. At the end of your response, include a structured result block:\n\n",
-        );
+        prompt.push_str("3. At the end of your response, include a structured result block:\n\n");
         prompt.push_str("```akh-result\n");
         prompt.push_str("{\n");
         prompt.push_str("  \"status\": \"success\" | \"partial\" | \"failed\",\n");
         prompt.push_str("  \"summary\": \"brief description of what was done\",\n");
         prompt.push_str("  \"triples\": [\n");
-        prompt.push_str(
-            "    {\"subject\": \"...\", \"predicate\": \"...\", \"object\": \"...\"}\n",
-        );
+        prompt
+            .push_str("    {\"subject\": \"...\", \"predicate\": \"...\", \"object\": \"...\"}\n");
         prompt.push_str("  ],\n");
         prompt.push_str("  \"files_modified\": [\"path/to/file\"],\n");
         prompt.push_str("  \"follow_up\": \"optional: what should happen next\"\n");
@@ -194,10 +195,7 @@ impl LocalClaudeWorker {
 /// Locate the `claude` binary on PATH.
 fn which_claude() -> DelegationResult<PathBuf> {
     // Check common locations, then fall back to PATH lookup.
-    let candidates = [
-        "/usr/local/bin/claude",
-        "/usr/bin/claude",
-    ];
+    let candidates = ["/usr/local/bin/claude", "/usr/bin/claude"];
     for path in &candidates {
         let p = PathBuf::from(path);
         if p.exists() {
@@ -205,10 +203,7 @@ fn which_claude() -> DelegationResult<PathBuf> {
         }
     }
     // Try which(1)
-    match std::process::Command::new("which")
-        .arg("claude")
-        .output()
-    {
+    match std::process::Command::new("which").arg("claude").output() {
         Ok(output) if output.status.success() => {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !path.is_empty() {

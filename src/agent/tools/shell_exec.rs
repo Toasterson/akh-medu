@@ -113,12 +113,17 @@ impl Tool for ShellExecTool {
                     timeout.as_secs()
                 )));
             }
-            Err(ExecError::Stuck { command, reason, partial_stdout, partial_stderr, elapsed_secs }) => {
+            Err(ExecError::Stuck {
+                command,
+                reason,
+                partial_stdout,
+                partial_stderr,
+                elapsed_secs,
+            }) => {
                 let stdout_str = String::from_utf8_lossy(&partial_stdout);
                 let stderr_str = String::from_utf8_lossy(&partial_stderr);
-                let mut msg = format!(
-                    "Command stuck after {elapsed_secs}s: {reason} (command: {command})\n"
-                );
+                let mut msg =
+                    format!("Command stuck after {elapsed_secs}s: {reason} (command: {command})\n");
                 if !stdout_str.is_empty() {
                     let trimmed = if stdout_str.len() > MAX_OUTPUT_SIZE {
                         &stdout_str[..MAX_OUTPUT_SIZE]
@@ -144,7 +149,7 @@ impl Tool for ShellExecTool {
                 msg.push_str(
                     "\nThe process produced no output for an extended period and was \
                      terminated. Increase the timeout or investigate whether the command \
-                     is waiting for input or stuck on a network operation."
+                     is waiting for input or stuck on a network operation.",
                 );
                 return Ok(ToolOutput::err(msg));
             }
@@ -158,7 +163,9 @@ impl Tool for ShellExecTool {
             // the host/auth/timeout detail, so surface it verbatim.
             #[cfg(feature = "remote-executor")]
             Err(remote @ ExecError::Remote(_)) => {
-                return Ok(ToolOutput::err(format!("Remote execution failed: {remote}")));
+                return Ok(ToolOutput::err(format!(
+                    "Remote execution failed: {remote}"
+                )));
             }
         };
 

@@ -593,7 +593,10 @@ mod tests {
         // Confidence wrappers survive with the band's minimum.
         match &out[0] {
             AbsTree::WithConfidence { confidence, .. } => {
-                assert!((confidence - 0.92).abs() < 1e-6, "min of band, got {confidence}")
+                assert!(
+                    (confidence - 0.92).abs() < 1e-6,
+                    "min of band, got {confidence}"
+                )
             }
             other => panic!("expected WithConfidence wrapper, got {other:?}"),
         }
@@ -684,7 +687,8 @@ mod tests {
             t("dog", "lives-in", "forests"),
         ];
         for node in aggregate_statements(&items, &cfg()) {
-            node.validate().expect("aggregated trees must be well-typed");
+            node.validate()
+                .expect("aggregated trees must be well-typed");
         }
     }
 
@@ -708,7 +712,10 @@ mod tests {
         let out = aggregate_statements(&items, &cfg());
         assert_eq!(out.len(), 1);
         let after = realize_statement(&out[0]).unwrap();
-        assert_eq!(after, "dog, a mammal, has fur and tail and lives in forests");
+        assert_eq!(
+            after,
+            "dog, a mammal, has fur and tail and lives in forests"
+        );
     }
 
     // ── Env knob ─────────────────────────────────────────────────────

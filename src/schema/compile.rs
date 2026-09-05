@@ -214,7 +214,10 @@ pub struct RegistryRow {
 
 impl RegistryRow {
     /// Build a registry row from a compiled pack at the human-confirm step.
-    pub fn from_pack(pack: &CompiledSchemaPack, confirmed_by: impl Into<String>) -> SchemaResult<Self> {
+    pub fn from_pack(
+        pack: &CompiledSchemaPack,
+        confirmed_by: impl Into<String>,
+    ) -> SchemaResult<Self> {
         let blob = pack.to_blob()?;
         Ok(Self {
             name: pack.name.clone(),
@@ -559,7 +562,12 @@ mod tests {
             .admit(RegistryRow::from_pack(&extension, "toasty").unwrap())
             .unwrap();
 
-        let mut names: Vec<_> = registry.list().unwrap().into_iter().map(|(n, _)| n).collect();
+        let mut names: Vec<_> = registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         names.sort();
         assert_eq!(names, vec!["core-test".to_string(), "hr".to_string()]);
     }

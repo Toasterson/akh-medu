@@ -164,7 +164,13 @@ impl ElizaEngine {
     // -----------------------------------------------------------------------
 
     /// Select the next reassembly template (cyclic) and substitute captures.
-    fn assemble(&mut self, ki: usize, ri: usize, templates: &[String], captures: &[String]) -> String {
+    fn assemble(
+        &mut self,
+        ki: usize,
+        ri: usize,
+        templates: &[String],
+        captures: &[String],
+    ) -> String {
         let counter = self.reassembly_counter.entry((ki, ri)).or_insert(0);
         let template = &templates[*counter % templates.len()];
         *counter += 1;
@@ -262,7 +268,10 @@ fn compile_rule(pattern: &str, synonyms: &HashMap<String, Vec<String>>) -> Compi
         Regex::new("$^").unwrap() // sentinel that never matches
     });
 
-    CompiledRule { pattern: re, wildcard_count }
+    CompiledRule {
+        pattern: re,
+        wildcard_count,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +301,9 @@ fn word_match(text: &str, keyword: &str) -> bool {
     if kw_words.len() > text_words.len() {
         return false;
     }
-    text_words.windows(kw_words.len()).any(|w| w == kw_words.as_slice())
+    text_words
+        .windows(kw_words.len())
+        .any(|w| w == kw_words.as_slice())
 }
 
 // ---------------------------------------------------------------------------
@@ -403,8 +414,14 @@ decomposition = "* i am *"
 reassembly = ["How long have you been {2}?"]
 "#,
         );
-        assert_eq!(engine.respond("i am very tired"), "How long have you been very tired?");
-        assert_eq!(engine.respond("i think i am confused"), "How long have you been confused?");
+        assert_eq!(
+            engine.respond("i am very tired"),
+            "How long have you been very tired?"
+        );
+        assert_eq!(
+            engine.respond("i think i am confused"),
+            "How long have you been confused?"
+        );
     }
 
     #[test]
@@ -569,7 +586,10 @@ reassembly = ["Why do you say that?"]
 "#,
         );
         assert_eq!(engine.respond("i feel lonely"), "Why do you say that?");
-        assert_eq!(engine.respond("i think you are wrong"), "Why do you say that?");
+        assert_eq!(
+            engine.respond("i think you are wrong"),
+            "Why do you say that?"
+        );
         assert_eq!(engine.respond("i believe so"), "Why do you say that?");
     }
 
@@ -659,8 +679,8 @@ reassembly = ["About: {2}."]
 "#,
         );
         // Push two memory entries.
-        engine.respond("my cat");  // pushed "About: cat."
-        engine.respond("my dog");  // pushed "About: dog."
+        engine.respond("my cat"); // pushed "About: cat."
+        engine.respond("my dog"); // pushed "About: dog."
 
         // LIFO: last pushed is first recalled.
         let r1 = engine.respond("nothing"); // pops "About: dog."

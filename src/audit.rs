@@ -8,11 +8,13 @@
 //! truncate operations exist.**
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use miette::Diagnostic;
-use redb::{Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{
+    Database, MultimapTableDefinition, ReadableTable, ReadableTableMetadata, TableDefinition,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -144,10 +146,7 @@ pub enum AuditKind {
         triple_count: usize,
     },
     /// The agent voluntarily logged a message.
-    AgentLog {
-        level: LogLevel,
-        message: String,
-    },
+    AgentLog { level: LogLevel, message: String },
 }
 
 impl AuditKind {
@@ -383,16 +382,13 @@ impl AuditLedger {
         let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(AUDIT_TABLE).map_err(redb_err)?;
-            table
-                .insert(raw_id, encoded.as_slice())
-                .map_err(redb_err)?;
+            table.insert(raw_id, encoded.as_slice()).map_err(redb_err)?;
         }
         {
             let mut idx = txn
                 .open_multimap_table(AUDIT_KIND_INDEX)
                 .map_err(redb_err)?;
-            idx.insert(entry.kind.tag(), raw_id)
-                .map_err(redb_err)?;
+            idx.insert(entry.kind.tag(), raw_id).map_err(redb_err)?;
         }
         txn.commit().map_err(redb_err)?;
 
@@ -967,7 +963,9 @@ mod tests {
         let kind: AuditKind = serde_json::from_str(old_format_json).unwrap();
         match kind {
             AuditKind::ToolInvocation {
-                tool_name, envelope, ..
+                tool_name,
+                envelope,
+                ..
             } => {
                 assert_eq!(tool_name, "kg_query");
                 assert_eq!(envelope, ExecEnvelope::default());

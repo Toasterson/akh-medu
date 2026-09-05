@@ -140,11 +140,7 @@ impl PersonMemoryIndex {
     }
 
     /// Topics discussed with both contacts (shared context).
-    pub fn shared_context_between(
-        &self,
-        contact_a: &str,
-        contact_b: &str,
-    ) -> Vec<SymbolId> {
+    pub fn shared_context_between(&self, contact_a: &str, contact_b: &str) -> Vec<SymbolId> {
         let topics_a: std::collections::HashSet<SymbolId> = self
             .topic_index
             .keys()
@@ -424,15 +420,8 @@ mod tests {
             preds,
         )
         .unwrap();
-        idx.tag_episode(
-            &engine,
-            ep2,
-            &cid,
-            contact.symbol_id,
-            &[topic_rust],
-            preds,
-        )
-        .unwrap();
+        idx.tag_episode(&engine, ep2, &cid, contact.symbol_id, &[topic_rust], preds)
+            .unwrap();
 
         let topics = idx.topics_discussed_with(&cid);
         assert_eq!(topics[0].0, topic_rust);

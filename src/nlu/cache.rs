@@ -68,9 +68,7 @@ impl SemanticCache {
 
         // Fast path: exact hash match
         for entry in &mut self.entries {
-            if entry.key_hash == hash
-                && now.duration_since(entry.inserted_at) < self.ttl
-            {
+            if entry.key_hash == hash && now.duration_since(entry.inserted_at) < self.ttl {
                 entry.last_accessed = now;
                 tracing::trace!(cache = "hit:exact", "semantic cache exact match");
                 return Some(entry.result.clone());
@@ -162,9 +160,9 @@ mod tests {
     use super::*;
     use crate::grammar::abs::AbsTree;
     use crate::simd;
-    use crate::vsa::{Dimension, Encoding};
     use crate::vsa::encode::encode_label;
     use crate::vsa::ops::VsaOps;
+    use crate::vsa::{Dimension, Encoding};
 
     fn make_ops() -> VsaOps {
         VsaOps::new(simd::best_kernel(), Dimension::TEST, Encoding::Bipolar)

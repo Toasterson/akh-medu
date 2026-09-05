@@ -113,12 +113,12 @@ impl Tool for TriggerManageTool {
             }
 
             "remove" => {
-                let id = input
-                    .get("id")
-                    .ok_or_else(|| crate::agent::error::AgentError::ToolExecution {
+                let id = input.get("id").ok_or_else(|| {
+                    crate::agent::error::AgentError::ToolExecution {
                         tool_name: "trigger_manage".into(),
                         message: "\"id\" is required for remove".into(),
-                    })?;
+                    }
+                })?;
                 store.remove(id)?;
                 Ok(ToolOutput::ok(format!("Trigger \"{id}\" removed.")))
             }

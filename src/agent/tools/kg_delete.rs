@@ -33,11 +33,10 @@ impl Tool for KgDeleteTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "kg_delete".into(),
-            description:
-                "Delete a triple (subject, predicate, object) from the knowledge graph. \
+            description: "Delete a triple (subject, predicate, object) from the knowledge graph. \
                  Returns the number of triples removed. Symbols are looked up, not \
                  created — deleting a non-existent triple is a no-op."
-                    .into(),
+                .into(),
             parameters: vec![
                 ToolParam {
                     name: "subject".into(),
@@ -117,10 +116,7 @@ impl Tool for KgDeleteTool {
             format!(
                 "Deleted 1 triple(s) — \"{}\" -> {} -> \"{}\" — plus {cascaded} \
                  cascaded retraction(s) from TMS support sets (depth {}).",
-                label_s,
-                label_p,
-                label_o,
-                result.cascade_depth,
+                label_s, label_p, label_o, result.cascade_depth,
             )
         } else {
             format!(
@@ -135,10 +131,9 @@ impl Tool for KgDeleteTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "kg_delete".into(),
-            description:
-                "Delete a triple (subject, predicate, object) from the knowledge graph. \
+            description: "Delete a triple (subject, predicate, object) from the knowledge graph. \
                  Returns the number of triples removed."
-                    .into(),
+                .into(),
             parameters: vec![
                 ToolParamSchema::required("subject", "Subject symbol name or ID."),
                 ToolParamSchema::required("predicate", "Predicate (relation) symbol name or ID."),
@@ -147,10 +142,9 @@ impl Tool for KgDeleteTool {
             danger: DangerInfo {
                 level: DangerLevel::Dangerous,
                 capabilities: HashSet::from([Capability::WriteKg]),
-                description:
-                    "Destructively retracts a triple from the knowledge graph. When TMS \
+                description: "Destructively retracts a triple from the knowledge graph. When TMS \
                      is enabled, retraction cascades through dependent support sets."
-                        .into(),
+                    .into(),
                 shadow_triggers: vec!["delete triple".into(), "retract".into(), "remove".into()],
             },
             source: ToolSource::Native,

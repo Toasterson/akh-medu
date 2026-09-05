@@ -136,11 +136,17 @@ impl DrainHandle {
     }
 
     /// Receive a drain event with a timeout.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<DrainEvent>, mpsc::RecvTimeoutError> {
-        self.rx.recv_timeout(timeout).map(Some).or_else(|e| match e {
-            mpsc::RecvTimeoutError::Timeout => Ok(None),
-            mpsc::RecvTimeoutError::Disconnected => Err(e),
-        })
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<DrainEvent>, mpsc::RecvTimeoutError> {
+        self.rx
+            .recv_timeout(timeout)
+            .map(Some)
+            .or_else(|e| match e {
+                mpsc::RecvTimeoutError::Timeout => Ok(None),
+                mpsc::RecvTimeoutError::Disconnected => Err(e),
+            })
     }
 
     /// Join both drain threads, retaining the receiver so callers can collect
@@ -561,7 +567,13 @@ impl SupervisedExecution {
                             DrainEvent::StderrEof => stderr_eof = true,
                         }
                     }
-                    return Ok((status, DrainedOutput { stdout: stdout_buf, stderr: stderr_buf }));
+                    return Ok((
+                        status,
+                        DrainedOutput {
+                            stdout: stdout_buf,
+                            stderr: stderr_buf,
+                        },
+                    ));
                 }
                 Ok(None) => {
                     // Still running — continue polling
@@ -591,10 +603,7 @@ impl SupervisedExecution {
     /// (which calls this directly since the drain threads own the pipes).
     fn kill_process_group(&mut self) {
         let pid = self.child.id() as i32;
-        tracing::warn!(
-            pid,
-            "killing stuck process (pid={pid})"
-        );
+        tracing::warn!(pid, "killing stuck process (pid={pid})");
 
         #[cfg(unix)]
         unsafe {
@@ -749,9 +758,7 @@ mod tests {
     #[test]
     fn supervised_exec_kills_stuck_process() {
         let mut cmd = Command::new("sleep");
-        cmd.arg("600")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.arg("600").stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let exec = SupervisedExecution::spawn(cmd).unwrap();
         let tracker = ProgressTracker::with_timeout(Duration::from_secs(2));

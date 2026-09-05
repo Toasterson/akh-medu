@@ -18,7 +18,7 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
 
-use super::goal::{Goal, GoalStatus, DEFAULT_STALL_THRESHOLD};
+use super::goal::{DEFAULT_STALL_THRESHOLD, Goal, GoalStatus};
 use super::memory::{WorkingMemory, WorkingMemoryKind};
 use super::metacognition::CompetenceModel;
 
@@ -252,8 +252,8 @@ pub fn estimate_effort(
     // KG richness scaling: if the current KG has more triples than the average
     // case's initial_coverage, the goal may need fewer cycles.
     let current_triples = engine.all_symbols().len() as u32;
-    let avg_coverage: u32 = neighbours.iter().map(|c| c.initial_coverage).sum::<u32>()
-        / neighbours.len().max(1) as u32;
+    let avg_coverage: u32 =
+        neighbours.iter().map(|c| c.initial_coverage).sum::<u32>() / neighbours.len().max(1) as u32;
     let scale = if avg_coverage > 0 && current_triples > avg_coverage {
         (avg_coverage as f32 / current_triples as f32).max(0.5)
     } else {
@@ -354,12 +354,7 @@ pub fn history_diminishing_returns(history: &ImprovementHistory, key: SymbolId) 
         return false;
     }
     let current = entries.last().map(|&(_, r)| r).unwrap_or(0.0);
-    let prev = entries
-        .iter()
-        .rev()
-        .nth(1)
-        .map(|&(_, r)| r)
-        .unwrap_or(0.0);
+    let prev = entries.iter().rev().nth(1).map(|&(_, r)| r).unwrap_or(0.0);
     prev > 0.01 && current < prev * 0.5
 }
 
@@ -369,7 +364,9 @@ pub fn history_diminishing_returns(history: &ImprovementHistory, key: SymbolId) 
 /// to `DEFAULT_STALL_THRESHOLD`.
 pub fn dynamic_stall_threshold(estimate: Option<&EffortEstimate>) -> u32 {
     match estimate {
-        Some(est) => ((est.estimated_cycles as f32 * 1.5).ceil() as u32).max(DEFAULT_STALL_THRESHOLD),
+        Some(est) => {
+            ((est.estimated_cycles as f32 * 1.5).ceil() as u32).max(DEFAULT_STALL_THRESHOLD)
+        }
         None => DEFAULT_STALL_THRESHOLD,
     }
 }
@@ -396,12 +393,7 @@ pub fn detect_diminishing_returns(
     let current_rate = current_improvement_rate(goal, history, cycle, window);
 
     // Previous rate: the second-to-last entry.
-    let prev_rate = entries
-        .iter()
-        .rev()
-        .nth(1)
-        .map(|&(_, r)| r)
-        .unwrap_or(0.0);
+    let prev_rate = entries.iter().rev().nth(1).map(|&(_, r)| r).unwrap_or(0.0);
 
     prev_rate > 0.01 && current_rate < prev_rate * 0.5
 }
@@ -515,11 +507,7 @@ pub fn record_opportunity_cost(
 // ---------------------------------------------------------------------------
 
 /// Create an EffortCase from a completed/failed goal and current WM state.
-pub fn create_effort_case(
-    goal: &Goal,
-    wm: &WorkingMemory,
-    engine: &Engine,
-) -> EffortCase {
+pub fn create_effort_case(goal: &Goal, wm: &WorkingMemory, engine: &Engine) -> EffortCase {
     // Count tool usage from WM decision entries.
     let mut tool_usage: HashMap<String, u32> = HashMap::new();
     for entry in wm.by_kind(WorkingMemoryKind::Decision) {

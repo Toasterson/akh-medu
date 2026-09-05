@@ -20,13 +20,12 @@ pub mod prompt;
 pub mod psyche;
 pub mod psyche_compiler;
 
-pub use eliza::{DefaultResponses, Decomposition, ElizaRule, ElizaScript, ScriptMeta};
+pub use eliza::{Decomposition, DefaultResponses, ElizaRule, ElizaScript, ScriptMeta};
 pub use error::{CompartmentError, CompartmentResult};
 pub use manager::CompartmentManager;
 pub use manifest::{CompartmentKind, CompartmentManifest, CompartmentScope, CompartmentState};
 pub use microtheory::{
-    ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule,
-    Microtheory,
+    ContextAncestryCache, ContextDomain, ContextPredicates, LiftCondition, LiftingRule, Microtheory,
 };
 pub use prompt::{PsychePromptInput, PsychePromptSerializer, estimate_tokens};
 pub use psyche::{OceanProfile, Psyche};

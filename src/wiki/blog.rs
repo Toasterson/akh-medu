@@ -74,11 +74,19 @@ impl ArchetypeVoice {
     /// A short style instruction suitable for an LLM writing prompt.
     pub fn style_hint(&self) -> &'static str {
         match self {
-            Self::Creator => "Write with a constructive, building mindset. Use examples and propose concrete solutions.",
+            Self::Creator => {
+                "Write with a constructive, building mindset. Use examples and propose concrete solutions."
+            }
             Self::Sage => "Write with analytical depth. Define terms precisely and explore theory.",
-            Self::Explorer => "Draw connections across domains. Express genuine curiosity and wonder.",
-            Self::Rebel => "Challenge conventional wisdom. Take a contrarian stance where justified.",
-            Self::Caregiver => "Center the impact on people and community. Use compassionate language.",
+            Self::Explorer => {
+                "Draw connections across domains. Express genuine curiosity and wonder."
+            }
+            Self::Rebel => {
+                "Challenge conventional wisdom. Take a contrarian stance where justified."
+            }
+            Self::Caregiver => {
+                "Center the impact on people and community. Use compassionate language."
+            }
         }
     }
 
@@ -238,10 +246,7 @@ pub fn posts_by_stance(store: &ArticleStore, position: &str) -> Vec<BlogPost> {
 
 /// Build a `DebateThread` from a root topic article and all articles that
 /// respond to it (transitively via `responds_to`).
-pub fn build_debate_thread(
-    store: &ArticleStore,
-    root_title: &str,
-) -> BlogResult<DebateThread> {
+pub fn build_debate_thread(store: &ArticleStore, root_title: &str) -> BlogResult<DebateThread> {
     let root = store
         .get_by_title(root_title)
         .ok_or_else(|| BlogError::NotFound {
@@ -446,7 +451,11 @@ mod tests {
     #[test]
     fn archetype_voice_style_hints() {
         assert!(ArchetypeVoice::Sage.style_hint().contains("analytical"));
-        assert!(ArchetypeVoice::Creator.style_hint().contains("constructive"));
+        assert!(
+            ArchetypeVoice::Creator
+                .style_hint()
+                .contains("constructive")
+        );
         assert!(ArchetypeVoice::Rebel.style_hint().contains("contrarian"));
     }
 }

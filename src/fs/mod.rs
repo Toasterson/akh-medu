@@ -113,7 +113,9 @@ pub enum FsError {
     #[error("path \"{path}\" is outside the allowed {kind} roots")]
     #[diagnostic(
         code(akh::fs::outside_sandbox),
-        help("Only paths within the akh's sandbox roots are permitted ({roots:?}). Use a path inside the workspace.")
+        help(
+            "Only paths within the akh's sandbox roots are permitted ({roots:?}). Use a path inside the workspace."
+        )
     )]
     OutsideSandbox {
         /// The offending path (as requested).
@@ -139,7 +141,9 @@ pub enum FsError {
     #[error("writes are disabled for this akh's filesystem")]
     #[diagnostic(
         code(akh::fs::writes_disabled),
-        help("This filesystem has no writable roots configured. Run the akh with a data directory to enable writes.")
+        help(
+            "This filesystem has no writable roots configured. Run the akh with a data directory to enable writes."
+        )
     )]
     WritesDisabled,
 
@@ -625,7 +629,11 @@ mod tests {
 
     #[test]
     fn set_session_cwd_guard_restores_the_previous_value_on_drop() {
-        assert_eq!(session_cwd(), None, "sanity: nothing active before the test");
+        assert_eq!(
+            session_cwd(),
+            None,
+            "sanity: nothing active before the test"
+        );
         let a = PathBuf::from("/tmp/akh-session-cwd-test-a");
         let b = PathBuf::from("/tmp/akh-session-cwd-test-b");
         {
@@ -641,6 +649,10 @@ mod tests {
                 "dropping the inner guard must restore the outer value, not clear it"
             );
         }
-        assert_eq!(session_cwd(), None, "dropping the outer guard must restore None");
+        assert_eq!(
+            session_cwd(),
+            None,
+            "dropping the outer guard must restore None"
+        );
     }
 }

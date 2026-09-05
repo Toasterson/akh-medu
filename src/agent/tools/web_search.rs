@@ -20,8 +20,7 @@ use std::collections::HashSet;
 const DDG_ENDPOINT: &str = "https://html.duckduckgo.com/html/";
 
 /// Desktop User-Agent so DuckDuckGo returns the full HTML result page.
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
      AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 /// Request timeout in seconds.
@@ -84,9 +83,7 @@ impl Tool for WebSearchTool {
                 )));
             }
             Err(ureq::Error::Transport(transport)) => {
-                return Ok(ToolOutput::err(format!(
-                    "web search failed: {transport}"
-                )));
+                return Ok(ToolOutput::err(format!("web search failed: {transport}")));
             }
         };
 

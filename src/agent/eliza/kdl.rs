@@ -319,16 +319,12 @@ impl ScriptEngine {
 /// to log-and-skip or propagate.
 pub fn parse_scripts(path: &Path, source: &str) -> ElizaResult<Vec<CompiledScript>> {
     let file_name = path.display().to_string();
-    let nodes: Vec<ScriptNode> = knuffel::parse(&file_name, source).map_err(|e| {
-        ElizaError::Parse {
+    let nodes: Vec<ScriptNode> =
+        knuffel::parse(&file_name, source).map_err(|e| ElizaError::Parse {
             path: file_name.clone(),
             message: format!("{e}"),
-        }
-    })?;
-    nodes
-        .into_iter()
-        .map(CompiledScript::compile)
-        .collect()
+        })?;
+    nodes.into_iter().map(CompiledScript::compile).collect()
 }
 
 /// Load all `.kdl` files from `dir` into a [`ScriptBank`].
@@ -464,10 +460,7 @@ script name="test" persona="Tester" priority=10 {
         let scripts = parse_scripts(path, kdl).unwrap();
         assert_eq!(scripts.len(), 1);
         assert_eq!(scripts[0].name, "test");
-        assert_eq!(
-            scripts[0].match_input("hello"),
-            Some("Hi!".into())
-        );
+        assert_eq!(scripts[0].match_input("hello"), Some("Hi!".into()));
         assert_eq!(
             scripts[0].match_input("anything"),
             Some("Tell me more.".into())

@@ -107,7 +107,11 @@ fn mark_imported(engine: &Engine, journal_id: &str) {
 
 /// Convert one OpenClaw journal entry into a synthetic `WorkingMemoryEntry`
 /// ready for episodic persistence.
-fn journal_to_wm_entry(journal: &OpenClawJournal, entry_text: &str, cycle: u64) -> WorkingMemoryEntry {
+fn journal_to_wm_entry(
+    journal: &OpenClawJournal,
+    entry_text: &str,
+    cycle: u64,
+) -> WorkingMemoryEntry {
     let content = format!(
         "[OpenClaw {}] {}: {}",
         journal.date, journal.title, entry_text
@@ -144,7 +148,11 @@ fn persist_journal_episode(
     let episode_label = format!(
         "episode:openclaw:{}:{}",
         journal.id,
-        entry_text.chars().take(40).collect::<String>().replace(' ', "_")
+        entry_text
+            .chars()
+            .take(40)
+            .collect::<String>()
+            .replace(' ', "_")
     );
     let episode = engine.create_symbol(SymbolKind::Entity, &episode_label)?;
 
@@ -154,11 +162,7 @@ fn persist_journal_episode(
         wm_entry.content.chars().take(80).collect::<String>()
     );
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let mut triples = vec![Triple::new(
-        episode.id,
-        predicates.has_summary,
-        summary_sym,
-    )];
+    let mut triples = vec![Triple::new(episode.id, predicates.has_summary, summary_sym)];
 
     // Tag with "openclaw" source and the journal's own tags.
     let source_tag = engine.resolve_or_create_entity("tag:openclaw")?;
@@ -308,7 +312,10 @@ mod tests {
 
     #[test]
     fn synced_label_format() {
-        assert_eq!(synced_label("2026-05-19-abc"), "openclaw:synced:2026-05-19-abc");
+        assert_eq!(
+            synced_label("2026-05-19-abc"),
+            "openclaw:synced:2026-05-19-abc"
+        );
     }
 
     #[test]

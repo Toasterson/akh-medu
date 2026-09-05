@@ -44,9 +44,9 @@ pub use routing::{ElizaRouter, ElizaRouting, FallbackReason};
 // submodule; both are re-exported at the `eliza` root so existing paths such as
 // `agent::eliza::ScriptEngine` keep working.
 #[cfg(feature = "eliza")]
-pub mod kdl;
-#[cfg(feature = "eliza")]
 pub mod hot_reload;
+#[cfg(feature = "eliza")]
+pub mod kdl;
 
 #[cfg(feature = "eliza")]
 pub use kdl::*;

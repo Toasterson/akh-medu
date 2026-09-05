@@ -623,7 +623,10 @@ fn acp_call(method: &str, params: serde_json::Value) -> Result<serde_json::Value
 /// Pretty-print an ACP JSON result to stdout.
 #[cfg(feature = "acp")]
 fn print_acp(result: &serde_json::Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(result).into_diagnostic()?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(result).into_diagnostic()?
+    );
     Ok(())
 }
 
@@ -635,9 +638,7 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
         AcpOp::Status => ("_akh/workspace/status", serde_json::json!({})),
         AcpOp::Capabilities => ("_akh/meta/capabilities", serde_json::json!({})),
         AcpOp::Symbols { limit } => ("_akh/symbols/list", serde_json::json!({ "limit": limit })),
-        AcpOp::Triples { symbol } => {
-            ("_akh/triples/from", serde_json::json!({ "symbol": symbol }))
-        }
+        AcpOp::Triples { symbol } => ("_akh/triples/from", serde_json::json!({ "symbol": symbol })),
         AcpOp::AddTriple {
             subject,
             predicate,
@@ -686,9 +687,7 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
             "_akh/symbols/create",
             serde_json::json!({ "label": label, "kind": kind }),
         ),
-        AcpOp::Query { query } => {
-            ("_akh/query/sparql", serde_json::json!({ "query": query }))
-        }
+        AcpOp::Query { query } => ("_akh/query/sparql", serde_json::json!({ "query": query })),
         AcpOp::Recall { query, limit } => {
             let mut params = serde_json::json!({ "top_k": limit });
             if let Some(q) = query {
@@ -754,12 +753,8 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
         },
         AcpOp::Skill { action } => match action {
             SkillOp::List => ("_akh/skills", serde_json::json!({})),
-            SkillOp::Inspect { id } => {
-                ("_akh/skills/inspect", serde_json::json!({ "id": id }))
-            }
-            SkillOp::Activate { id } => {
-                ("_akh/skills/activate", serde_json::json!({ "id": id }))
-            }
+            SkillOp::Inspect { id } => ("_akh/skills/inspect", serde_json::json!({ "id": id })),
+            SkillOp::Activate { id } => ("_akh/skills/activate", serde_json::json!({ "id": id })),
             SkillOp::Deactivate { id } => {
                 ("_akh/skills/deactivate", serde_json::json!({ "id": id }))
             }
@@ -811,9 +806,10 @@ fn run_acp_command(ws: &str, op: &AcpOp) -> Result<()> {
         }
         AcpOp::Evidence { action } => match action {
             EvidenceOp::Summary => ("_akh/evidence", serde_json::json!({})),
-            EvidenceOp::Assess { claim } => {
-                ("_akh/evidence/assess", serde_json::json!({ "claim": claim }))
-            }
+            EvidenceOp::Assess { claim } => (
+                "_akh/evidence/assess",
+                serde_json::json!({ "claim": claim }),
+            ),
         },
         AcpOp::Trust { top } => ("_akh/trust", serde_json::json!({ "top_k": top })),
     };
@@ -858,14 +854,12 @@ fn run_config_acp(action: ConfigAction) -> Result<()> {
     let (method, params): (&str, serde_json::Value) = match action {
         ConfigAction::Get => ("_akh/config/get", serde_json::json!({})),
         ConfigAction::Set { file } => {
-            let text = std::fs::read_to_string(&file).map_err(|e| {
-                miette::miette!("reading config file {}: {e}", file.display())
-            })?;
+            let text = std::fs::read_to_string(&file)
+                .map_err(|e| miette::miette!("reading config file {}: {e}", file.display()))?;
             // Parse TOML into a generic JSON value — the CLI stays agnostic of
             // the config schema; akhomed validates it as an `AkhomedConfig`.
-            let cfg: serde_json::Value = toml::from_str(&text).map_err(|e| {
-                miette::miette!("parsing {} as TOML: {e}", file.display())
-            })?;
+            let cfg: serde_json::Value = toml::from_str(&text)
+                .map_err(|e| miette::miette!("parsing {} as TOML: {e}", file.display()))?;
             ("_akh/config/set", serde_json::json!({ "config": cfg }))
         }
         ConfigAction::Env => {
@@ -935,9 +929,7 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
         }
         WorkspaceAction::Delete { name, yes } => {
             confirm_destructive(
-                &format!(
-                    "This will permanently delete workspace '{name}' and all its data."
-                ),
+                &format!("This will permanently delete workspace '{name}' and all its data."),
                 &format!("delete workspace '{name}'"),
                 yes,
             )?;
@@ -947,12 +939,8 @@ fn run_workspace_acp(current_ws: &str, action: WorkspaceAction) -> Result<()> {
             let target = name.unwrap_or_else(|| current_ws.to_string());
             ("_akh/workspace/info", serde_json::json!({ "name": target }))
         }
-        WorkspaceAction::Join { id } => {
-            ("_akh/workspace/join", serde_json::json!({ "id": id }))
-        }
-        WorkspaceAction::Leave { id } => {
-            ("_akh/workspace/leave", serde_json::json!({ "id": id }))
-        }
+        WorkspaceAction::Join { id } => ("_akh/workspace/join", serde_json::json!({ "id": id })),
+        WorkspaceAction::Leave { id } => ("_akh/workspace/leave", serde_json::json!({ "id": id })),
         WorkspaceAction::ListMembers { id } => (
             "_akh/workspace/list-members",
             serde_json::json!({ "id": id }),
@@ -1020,12 +1008,16 @@ fn run_chat_acp(ws_name: &str, headless: bool) -> Result<()> {
         .into_diagnostic()?;
     if let Some(sock) = info.acp_socket.as_deref() {
         eprintln!("Connecting to akh '{ws_name}' over ACP (unix:{sock})...");
-        rt.block_on(akh_medu::acp::run_headless_chat_unix(sock, "akh-cli", ws_name))
-            .map_err(miette::Report::from)
+        rt.block_on(akh_medu::acp::run_headless_chat_unix(
+            sock, "akh-cli", ws_name,
+        ))
+        .map_err(miette::Report::from)
     } else if let Some(tcp) = info.acp_tcp.as_deref() {
         eprintln!("Connecting to akh '{ws_name}' over ACP (tcp:{tcp})...");
-        rt.block_on(akh_medu::acp::run_headless_chat_tcp(tcp, "akh-cli", ws_name))
-            .map_err(miette::Report::from)
+        rt.block_on(akh_medu::acp::run_headless_chat_tcp(
+            tcp, "akh-cli", ws_name,
+        ))
+        .map_err(miette::Report::from)
     } else {
         miette::bail!(
             "akhomed is running but advertises no ACP endpoint — build it with --features acp."
@@ -1179,49 +1171,46 @@ fn main() -> Result<()> {
     let _ = REMOTE_ENDPOINT.set(remote);
 
     {
-    match cli.command {
+        match cli.command {
+            Commands::Workspace { action } => run_workspace_acp(&cli.workspace, action)?,
 
-        Commands::Workspace { action } => run_workspace_acp(&cli.workspace, action)?,
+            Commands::Acp { op } => run_acp_command(&cli.workspace, &op)?,
 
-        Commands::Acp { op } => run_acp_command(&cli.workspace, &op)?,
+            Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
 
-        Commands::Daemon { action } => run_daemon_acp(&cli.workspace, action)?,
+            Commands::Config { action } => match action {
+                ConfigAction::Env => dispatch_config_env()?,
+                other => run_config_acp(other)?,
+            },
 
-        Commands::Config { action } => match action {
-            ConfigAction::Env => dispatch_config_env()?,
-            other => run_config_acp(other)?,
-        },
+            Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
+            Commands::Snapshot => run_akh_acp(&cli.workspace, AkhAction::Snapshot)?,
+            Commands::Wake => run_akh_acp(&cli.workspace, AkhAction::Wake)?,
+            Commands::Sleep => run_akh_acp(&cli.workspace, AkhAction::Sleep)?,
+            Commands::Relocate => run_akh_acp(&cli.workspace, AkhAction::Relocate)?,
 
-        Commands::Akh { action } => run_akh_acp(&cli.workspace, action)?,
-        Commands::Snapshot => run_akh_acp(&cli.workspace, AkhAction::Snapshot)?,
-        Commands::Wake => run_akh_acp(&cli.workspace, AkhAction::Wake)?,
-        Commands::Sleep => run_akh_acp(&cli.workspace, AkhAction::Sleep)?,
-        Commands::Relocate => run_akh_acp(&cli.workspace, AkhAction::Relocate)?,
+            Commands::Projection { action } => run_projection_acp(&cli.workspace, action)?,
 
-        Commands::Projection { action } => run_projection_acp(&cli.workspace, action)?,
+            Commands::Migrate => run_migrate_acp()?,
 
-        Commands::Migrate => run_migrate_acp()?,
+            Commands::Chat { headless } => run_chat_acp(&cli.workspace, headless)?,
 
-        Commands::Chat { headless } => run_chat_acp(&cli.workspace, headless)?,
+            Commands::Service { action } => {
+                dispatch_service(action)?;
+            }
 
-        Commands::Service { action } => {
-            dispatch_service(action)?;
+            // ── Setup (models & runtime) ────────────────────────────────────
+            Commands::Setup { action } => {
+                dispatch_setup(action)?;
+            }
+
+            // ── Schema packs (ADR 081) ──────────────────────────────────────
+            Commands::Schema { action } => {
+                dispatch_schema(&cli.workspace, action)?;
+            } // ── Wiki (Akhipedia) ─────────────────────────────────────────────
         }
 
-        // ── Setup (models & runtime) ────────────────────────────────────
-        Commands::Setup { action } => {
-            dispatch_setup(action)?;
-        }
-
-        // ── Schema packs (ADR 081) ──────────────────────────────────────
-        Commands::Schema { action } => {
-            dispatch_schema(&cli.workspace, action)?;
-        }
-
-        // ── Wiki (Akhipedia) ─────────────────────────────────────────────
-    }
-
-    Ok(())
+        Ok(())
     }
 }
 
@@ -1308,7 +1297,10 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             // before ever reaching the daemon, and so the summary the human
             // confirms against is read straight from the artifact.
             let pack = CompiledSchemaPack::from_blob(&bytes)?;
-            println!("Schema pack {}@{} ({})", pack.name, pack.version, pack.scope);
+            println!(
+                "Schema pack {}@{} ({})",
+                pack.name, pack.version, pack.scope
+            );
             println!("  microtheory: {}", pack.microtheory_label());
             println!("  types: {}", pack.types.join(", "));
             if !pack.relations.is_empty() {
@@ -1386,7 +1378,11 @@ fn dispatch_schema(current_ws: &str, action: SchemaAction) -> Result<()> {
             let result = acp_call("_akh/schema/proposals", params)?;
             print_acp(&result)?;
         }
-        SchemaAction::Promote { id, yes, confirmed_by } => {
+        SchemaAction::Promote {
+            id,
+            yes,
+            confirmed_by,
+        } => {
             let ws = current_ws.to_string();
             // Print the pending proposal first, so the human confirming
             // promotion sees exactly what they are about to admit — same
@@ -1578,7 +1574,10 @@ fn dispatch_setup(action: SetupAction) -> Result<()> {
                 eprintln!("=== Downloading LLM model (Tier 3) ===");
                 setup::download_llm_model(&paths).into_diagnostic()?;
             }
-            eprintln!("\nDone. Models installed to: {}", paths.models_dir().display());
+            eprintln!(
+                "\nDone. Models installed to: {}",
+                paths.models_dir().display()
+            );
         }
         SetupAction::OnnxRuntime { version } => {
             let v = version.as_deref().unwrap_or(setup::default_ort_version());
@@ -1592,5 +1591,3 @@ fn dispatch_setup(action: SetupAction) -> Result<()> {
 
     Ok(())
 }
-
-

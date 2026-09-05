@@ -37,7 +37,9 @@ pub enum CompetenceError {
     )]
     NoConcepts,
 
-    #[error("knowledge graph too sparse for meaningful assessment ({triple_count} triple(s), need at least {min_required})")]
+    #[error(
+        "knowledge graph too sparse for meaningful assessment ({triple_count} triple(s), need at least {min_required})"
+    )]
     #[diagnostic(
         code(akh::bootstrap::competence::insufficient_triples),
         help(
@@ -45,7 +47,10 @@ pub enum CompetenceError {
              to populate the knowledge graph before assessment."
         )
     )]
-    InsufficientTriples { triple_count: usize, min_required: usize },
+    InsufficientTriples {
+        triple_count: usize,
+        min_required: usize,
+    },
 
     #[error("{0}")]
     #[diagnostic(
@@ -313,10 +318,7 @@ impl CompetenceAssessor {
         }
 
         // Aggregate overall score (weighted average by concept count per KA).
-        let total_concepts: usize = ka_assessments
-            .iter()
-            .map(|ka| ka.cq_total.max(1))
-            .sum();
+        let total_concepts: usize = ka_assessments.iter().map(|ka| ka.cq_total.max(1)).sum();
         let overall_score = if total_concepts > 0 {
             ka_assessments
                 .iter()
@@ -330,18 +332,19 @@ impl CompetenceAssessor {
 
         // Generate recommendation.
         let target_score = dreyfus_to_min_score(&purpose_model.competence_level);
-        let recommendation = self.generate_recommendation(
-            overall_score,
-            target_score,
-            &ka_assessments,
-            &total_gaps,
-        );
+        let recommendation =
+            self.generate_recommendation(overall_score, target_score, &ka_assessments, &total_gaps);
 
         // Collect remaining gaps as descriptive strings.
         let remaining_gaps: Vec<String> = ka_assessments
             .iter()
             .filter(|ka| ka.score < target_score)
-            .map(|ka| format!("{} (score: {:.2}, level: {})", ka.name, ka.score, ka.dreyfus_level))
+            .map(|ka| {
+                format!(
+                    "{} (score: {:.2}, level: {})",
+                    ka.name, ka.score, ka.dreyfus_level
+                )
+            })
             .collect();
 
         // Store assessment provenance.
@@ -516,10 +519,7 @@ impl CompetenceAssessor {
                 let peer = self.find_peer(entry, entries);
                 let answered = if let Some(peer_id) = peer {
                     let kg = engine.knowledge_graph();
-                    shortest_path(kg, concept, peer_id)
-                        .ok()
-                        .flatten()
-                        .is_some()
+                    shortest_path(kg, concept, peer_id).ok().flatten().is_some()
                 } else {
                     false
                 };
@@ -567,11 +567,7 @@ impl CompetenceAssessor {
     }
 
     /// Find a peer concept for the Understand CQ — pick another entry at the same tier.
-    fn find_peer(
-        &self,
-        entry: &CurriculumEntry,
-        entries: &[&CurriculumEntry],
-    ) -> Option<SymbolId> {
+    fn find_peer(&self, entry: &CurriculumEntry, entries: &[&CurriculumEntry]) -> Option<SymbolId> {
         entries
             .iter()
             .find(|other| other.concept != entry.concept && other.tier == entry.tier)
@@ -593,12 +589,8 @@ impl CompetenceAssessor {
         for &concept in concept_ids {
             let outgoing = engine.triples_from(concept);
             let incoming = engine.triples_to(concept);
-            let has_external = outgoing
-                .iter()
-                .any(|t| !concept_set.contains(&t.object))
-                || incoming
-                    .iter()
-                    .any(|t| !concept_set.contains(&t.subject));
+            let has_external = outgoing.iter().any(|t| !concept_set.contains(&t.object))
+                || incoming.iter().any(|t| !concept_set.contains(&t.subject));
             if has_external {
                 cross_domain_count += 1;
             }
@@ -891,7 +883,10 @@ mod tests {
     // 12. BootstrapRecommendation equality
     #[test]
     fn recommendation_equality() {
-        assert_eq!(BootstrapRecommendation::Ready, BootstrapRecommendation::Ready);
+        assert_eq!(
+            BootstrapRecommendation::Ready,
+            BootstrapRecommendation::Ready
+        );
         assert_ne!(
             BootstrapRecommendation::Ready,
             BootstrapRecommendation::NeedsOperatorInput {

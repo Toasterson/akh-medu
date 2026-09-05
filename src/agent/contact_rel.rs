@@ -13,9 +13,9 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::contact::{ContactError, ContactManager, ContactResult};
 
@@ -194,15 +194,11 @@ impl Serialize for RelationshipGraph {
 
 impl<'de> Deserialize<'de> for RelationshipGraph {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let edges =
-            HashMap::<(String, String), Relationship>::deserialize(deserializer)?;
+        let edges = HashMap::<(String, String), Relationship>::deserialize(deserializer)?;
         // Rebuild adjacency index.
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         for (from, to) in edges.keys() {
-            adjacency
-                .entry(from.clone())
-                .or_default()
-                .push(to.clone());
+            adjacency.entry(from.clone()).or_default().push(to.clone());
         }
         Ok(Self {
             edges,
@@ -278,9 +274,11 @@ impl RelationshipGraph {
         kind: RelationshipKind,
         strength: f32,
     ) -> ContactResult<()> {
-        let from_contact = contact_mgr.get(from).ok_or_else(|| ContactError::NotFound {
-            contact_id: from.to_string(),
-        })?;
+        let from_contact = contact_mgr
+            .get(from)
+            .ok_or_else(|| ContactError::NotFound {
+                contact_id: from.to_string(),
+            })?;
         let to_contact = contact_mgr.get(to).ok_or_else(|| ContactError::NotFound {
             contact_id: to.to_string(),
         })?;
@@ -295,7 +293,11 @@ impl RelationshipGraph {
         let strength = strength.clamp(0.0, 1.0);
 
         // Store KG triple: from --rel-kind--> to.
-        engine.add_triple(&Triple::new(from_contact.symbol_id, kind_pred, to_contact.symbol_id))?;
+        engine.add_triple(&Triple::new(
+            from_contact.symbol_id,
+            kind_pred,
+            to_contact.symbol_id,
+        ))?;
 
         let rel = Relationship {
             from: from.to_string(),
@@ -308,8 +310,7 @@ impl RelationshipGraph {
             to_symbol: to_contact.symbol_id,
         };
 
-        self.edges
-            .insert((from.to_string(), to.to_string()), rel);
+        self.edges.insert((from.to_string(), to.to_string()), rel);
         self.adjacency
             .entry(from.to_string())
             .or_default()
@@ -350,9 +351,7 @@ impl RelationshipGraph {
             .map(|neighbors| {
                 neighbors
                     .iter()
-                    .filter_map(|n| {
-                        self.edges.get(&(contact_id.to_string(), n.clone()))
-                    })
+                    .filter_map(|n| self.edges.get(&(contact_id.to_string(), n.clone())))
                     .collect()
             })
             .unwrap_or_default()
@@ -372,10 +371,7 @@ impl RelationshipGraph {
 
     /// Reinforce a relationship (bumps strength toward 1.0).
     pub fn reinforce(&mut self, from: &str, to: &str, timestamp: u64) {
-        if let Some(rel) = self
-            .edges
-            .get_mut(&(from.to_string(), to.to_string()))
-        {
+        if let Some(rel) = self.edges.get_mut(&(from.to_string(), to.to_string())) {
             // Move strength 20% closer to 1.0.
             rel.strength += (1.0 - rel.strength) * 0.2;
             rel.strength = rel.strength.clamp(0.0, 1.0);
@@ -398,11 +394,7 @@ impl RelationshipGraph {
     /// Detect social circles by grouping contacts with similar VSA relationship vectors.
     ///
     /// Returns clusters of contacts whose relationship vectors have high Hamming similarity.
-    pub fn detect_circles(
-        &self,
-        _engine: &Engine,
-        min_members: usize,
-    ) -> Vec<SocialCircle> {
+    pub fn detect_circles(&self, _engine: &Engine, min_members: usize) -> Vec<SocialCircle> {
         // Simple greedy clustering: for each unassigned contact, find all contacts
         // with Hamming similarity > 0.6 to form a circle.
         let contacts_with_vecs: Vec<(&String, &HyperVec)> = self.rel_vectors.iter().collect();
@@ -472,10 +464,7 @@ impl RelationshipGraph {
                 rel.from = new_from.clone();
                 rel.to = new_to.clone();
                 self.edges.insert((new_from.clone(), new_to.clone()), rel);
-                self.adjacency
-                    .entry(new_from)
-                    .or_default()
-                    .push(new_to);
+                self.adjacency.entry(new_from).or_default().push(new_to);
             }
         }
 
@@ -647,7 +636,14 @@ mod tests {
             .add_relationship(&engine, &mgr, &alice, &bob, RelationshipKind::Friend, 0.8)
             .unwrap();
         graph
-            .add_relationship(&engine, &mgr, &alice, &carol, RelationshipKind::Colleague, 0.6)
+            .add_relationship(
+                &engine,
+                &mgr,
+                &alice,
+                &carol,
+                RelationshipKind::Colleague,
+                0.6,
+            )
             .unwrap();
 
         let friends = graph.relationships_of_kind(&alice, RelationshipKind::Friend);
@@ -701,7 +697,14 @@ mod tests {
             .add_relationship(&engine, &mgr, &alice, &carol, RelationshipKind::Friend, 0.8)
             .unwrap();
         graph
-            .add_relationship(&engine, &mgr, &bob, &carol, RelationshipKind::Colleague, 0.6)
+            .add_relationship(
+                &engine,
+                &mgr,
+                &bob,
+                &carol,
+                RelationshipKind::Colleague,
+                0.6,
+            )
             .unwrap();
 
         // Merge alice into bob.

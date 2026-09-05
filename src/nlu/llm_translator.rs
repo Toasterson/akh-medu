@@ -150,7 +150,8 @@ impl LlmTranslator {
         kg_context: Option<&str>,
     ) -> NluResult<LlmTranslation> {
         let prompt = build_prompt_with_context(input, kg_context);
-        let (raw, n_generated) = self.run_generation(&prompt, self.max_tokens, StopCondition::JsonObject)?;
+        let (raw, n_generated) =
+            self.run_generation(&prompt, self.max_tokens, StopCondition::JsonObject)?;
 
         // Extract the JSON object (trim anything before first '{' or after last '}')
         let raw = raw.trim();
@@ -204,7 +205,11 @@ impl LlmTranslator {
     pub fn generate(&self, prompt: &str, max_tokens: u32) -> NluResult<String> {
         let (raw, n_generated) = self.run_generation(prompt, max_tokens, StopCondition::Text)?;
         let text = Self::clean_generated_text(&raw);
-        tracing::debug!(tokens = n_generated, len = text.len(), "LLM text generation complete");
+        tracing::debug!(
+            tokens = n_generated,
+            len = text.len(),
+            "LLM text generation complete"
+        );
         Ok(text)
     }
 
@@ -257,21 +262,18 @@ impl LlmTranslator {
 
         if tokens.len() > 1800 {
             return Err(NluError::LlmGenerationFailed {
-                reason: format!(
-                    "Prompt too long ({} tokens, max 1800).",
-                    tokens.len()
-                ),
+                reason: format!("Prompt too long ({} tokens, max 1800).", tokens.len()),
             });
         }
 
         let mut batch = LlamaBatch::new(tokens.len().max(2048), 1);
         for (i, &token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
-            batch
-                .add(token, i as i32, &[0], is_last)
-                .map_err(|_| NluError::LlmGenerationFailed {
+            batch.add(token, i as i32, &[0], is_last).map_err(|_| {
+                NluError::LlmGenerationFailed {
                     reason: "Batch add failed".to_string(),
-                })?;
+                }
+            })?;
         }
 
         ctx.decode(&mut batch)
@@ -404,10 +406,13 @@ impl LlmTranslator {
 
         // Strip numbered list prefixes: "1. " "2. " etc.
         let lines: Vec<&str> = text.lines().collect();
-        if lines.len() > 1 && lines.iter().all(|l| {
-            let t = l.trim();
-            t.is_empty() || (t.len() > 2 && t.as_bytes()[0].is_ascii_digit() && t.as_bytes()[1] == b'.')
-        }) {
+        if lines.len() > 1
+            && lines.iter().all(|l| {
+                let t = l.trim();
+                t.is_empty()
+                    || (t.len() > 2 && t.as_bytes()[0].is_ascii_digit() && t.as_bytes()[1] == b'.')
+            })
+        {
             // All lines are numbered — strip the numbering and join
             text = lines
                 .iter()
@@ -426,7 +431,8 @@ impl LlmTranslator {
         }
 
         // Trim trailing incomplete sentences (no period at end)
-        if !text.is_empty() && !text.ends_with('.') && !text.ends_with('!') && !text.ends_with('?') {
+        if !text.is_empty() && !text.ends_with('.') && !text.ends_with('!') && !text.ends_with('?')
+        {
             if let Some(last_period) = text.rfind(|c: char| c == '.' || c == '!' || c == '?') {
                 text.truncate(last_period + 1);
             }
@@ -877,7 +883,11 @@ mod tests {
     #[test]
     fn serde_roundtrip_conjunction() {
         let tree = AbsTree::Conjunction {
-            items: vec![AbsTree::entity("a"), AbsTree::entity("b"), AbsTree::entity("c")],
+            items: vec![
+                AbsTree::entity("a"),
+                AbsTree::entity("b"),
+                AbsTree::entity("c"),
+            ],
             is_and: false,
         };
         let json = serde_json::to_string(&tree).unwrap();

@@ -41,7 +41,12 @@ impl ProvenanceRetentionClassifier {
 
     /// Classify `symbol` by its provenance. Cached after the first lookup.
     pub fn classify(&self, engine: &Engine, symbol: SymbolId) -> Retention {
-        if let Some(r) = self.cache.lock().expect("retention cache poisoned").get(&symbol) {
+        if let Some(r) = self
+            .cache
+            .lock()
+            .expect("retention cache poisoned")
+            .get(&symbol)
+        {
             return *r;
         }
         let r = self.classify_uncached(engine, symbol);
@@ -124,14 +129,24 @@ mod tests {
         let classifier = ProvenanceRetentionClassifier::new();
 
         // AgentDecision ⇒ PinnedSafety.
-        let decided = engine.create_symbol(SymbolKind::Entity, "decided").unwrap().id;
+        let decided = engine
+            .create_symbol(SymbolKind::Entity, "decided")
+            .unwrap()
+            .id;
         let goal = engine.create_symbol(SymbolKind::Entity, "goal").unwrap().id;
-        let mut rec = ProvenanceRecord::new(decided, DerivationKind::AgentDecision { goal, cycle: 1 });
+        let mut rec =
+            ProvenanceRecord::new(decided, DerivationKind::AgentDecision { goal, cycle: 1 });
         engine.store_provenance(&mut rec).unwrap();
-        assert_eq!(classifier.classify(&engine, decided), Retention::PinnedSafety);
+        assert_eq!(
+            classifier.classify(&engine, decided),
+            Retention::PinnedSafety
+        );
 
         // ShadowVeto ⇒ PinnedSafety.
-        let vetoed = engine.create_symbol(SymbolKind::Entity, "vetoed").unwrap().id;
+        let vetoed = engine
+            .create_symbol(SymbolKind::Entity, "vetoed")
+            .unwrap()
+            .id;
         let mut rec = ProvenanceRecord::new(
             vetoed,
             DerivationKind::ShadowVeto {
@@ -140,10 +155,16 @@ mod tests {
             },
         );
         engine.store_provenance(&mut rec).unwrap();
-        assert_eq!(classifier.classify(&engine, vetoed), Retention::PinnedSafety);
+        assert_eq!(
+            classifier.classify(&engine, vetoed),
+            Retention::PinnedSafety
+        );
 
         // Critical CLI tool execution ⇒ PinnedSafety.
-        let danger = engine.create_symbol(SymbolKind::Entity, "danger").unwrap().id;
+        let danger = engine
+            .create_symbol(SymbolKind::Entity, "danger")
+            .unwrap()
+            .id;
         let mut rec = ProvenanceRecord::new(
             danger,
             DerivationKind::CliToolExecution {
@@ -153,7 +174,10 @@ mod tests {
             },
         );
         engine.store_provenance(&mut rec).unwrap();
-        assert_eq!(classifier.classify(&engine, danger), Retention::PinnedSafety);
+        assert_eq!(
+            classifier.classify(&engine, danger),
+            Retention::PinnedSafety
+        );
 
         // A Cautious tool execution is NOT pinned.
         let mild = engine.create_symbol(SymbolKind::Entity, "mild").unwrap().id;
@@ -169,7 +193,10 @@ mod tests {
         assert_eq!(classifier.classify(&engine, mild), Retention::Volatile);
 
         // AgentConsolidation ⇒ Recoverable.
-        let recalled = engine.create_symbol(SymbolKind::Entity, "recalled").unwrap().id;
+        let recalled = engine
+            .create_symbol(SymbolKind::Entity, "recalled")
+            .unwrap()
+            .id;
         let mut rec = ProvenanceRecord::new(
             recalled,
             DerivationKind::AgentConsolidation {
@@ -178,10 +205,16 @@ mod tests {
             },
         );
         engine.store_provenance(&mut rec).unwrap();
-        assert_eq!(classifier.classify(&engine, recalled), Retention::Recoverable);
+        assert_eq!(
+            classifier.classify(&engine, recalled),
+            Retention::Recoverable
+        );
 
         // No provenance ⇒ Volatile.
-        let plain = engine.create_symbol(SymbolKind::Entity, "plain").unwrap().id;
+        let plain = engine
+            .create_symbol(SymbolKind::Entity, "plain")
+            .unwrap()
+            .id;
         assert_eq!(classifier.classify(&engine, plain), Retention::Volatile);
     }
 

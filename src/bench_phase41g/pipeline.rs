@@ -16,9 +16,7 @@ use serde::Serialize;
 use crate::engine::{Engine, EngineConfig};
 use crate::graph::Triple;
 use crate::symbol::SymbolId;
-use crate::thinking::{
-    self, ThinkingBudget, ThinkingLoop, ThinkingPredicates, ThoughtStep,
-};
+use crate::thinking::{self, ThinkingBudget, ThinkingLoop, ThinkingPredicates, ThoughtStep};
 use crate::vsa::Dimension;
 
 use super::{AcceptancePredicate, BenchPrompt, PromptCategory};
@@ -101,7 +99,10 @@ fn stub_nlu_parse(prompt: &BenchPrompt) -> ParsedIntent {
         .prompt
         .split_whitespace()
         .take(20)
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|w| !w.is_empty())
         .collect();
     ParsedIntent {
@@ -386,6 +387,9 @@ mod tests {
             }],
         };
         let result = run_pipeline(&prompt, &PipelineConfig::new(1_000));
-        assert!(result.success, "OutputContains predicate should pass for 'struct Foo'");
+        assert!(
+            result.success,
+            "OutputContains predicate should pass for 'struct Foo'"
+        );
     }
 }

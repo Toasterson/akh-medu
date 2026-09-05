@@ -65,7 +65,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::graph::identity::TripleIdentity;
-use crate::library::note::{Note, NoteId, FrontmatterValue};
+use crate::library::note::{FrontmatterValue, Note, NoteId};
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
 
@@ -304,9 +304,9 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
 
         match property {
             Some(property) if !has_violation => {
-                let predicate = engine
-                    .resolve_or_create_relation(key)
-                    .map_err(|e| projection_err(&note.id, format!("property predicate '{key}': {e}")))?;
+                let predicate = engine.resolve_or_create_relation(key).map_err(|e| {
+                    projection_err(&note.id, format!("property predicate '{key}': {e}"))
+                })?;
                 let property_triple = Triple::new(note_entity, predicate, value_entity);
                 asserted_triples.push(property_triple);
                 typed_property_count += 1;
@@ -321,9 +321,12 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
                 // property — either way the value is still written, just
                 // marked frontier instead of typed (ADR 081 decision 7).
                 let frontier_label = format!("{FRONTIER_PREFIX}{key}");
-                let predicate = engine
-                    .resolve_or_create_relation(&frontier_label)
-                    .map_err(|e| projection_err(&note.id, format!("frontier predicate '{key}': {e}")))?;
+                let predicate =
+                    engine
+                        .resolve_or_create_relation(&frontier_label)
+                        .map_err(|e| {
+                            projection_err(&note.id, format!("frontier predicate '{key}': {e}"))
+                        })?;
                 let frontier_triple = Triple::new(note_entity, predicate, value_entity);
                 asserted_triples.push(frontier_triple);
                 frontier_property_count += 1;
@@ -350,9 +353,9 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
         .map_err(|e| projection_err(&note.id, format!("links-to relation: {e}")))?;
     let mut wikilink_count = 0usize;
     for link in &note.wikilinks {
-        let target = engine
-            .resolve_or_create_entity(&link.target)
-            .map_err(|e| projection_err(&note.id, format!("wikilink target '{}': {e}", link.target)))?;
+        let target = engine.resolve_or_create_entity(&link.target).map_err(|e| {
+            projection_err(&note.id, format!("wikilink target '{}': {e}", link.target))
+        })?;
         let link_triple = Triple::new(note_entity, links_to, target);
         asserted_triples.push(link_triple);
         sources.push(target);
@@ -377,9 +380,7 @@ pub fn project_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRepo
     let mut missing = asserted_triples
         .iter()
         .enumerate()
-        .filter(|(_, triple)| {
-            !engine.has_triple(triple.subject, triple.predicate, triple.object)
-        })
+        .filter(|(_, triple)| !engine.has_triple(triple.subject, triple.predicate, triple.object))
         .map(|(index, triple)| (index, triple.clone()))
         .collect::<Vec<_>>();
     let provenance_id = if missing.is_empty() {
@@ -451,7 +452,10 @@ fn identity_entity_label(identity: &TripleIdentity) -> String {
 /// Resolve (creating if absent) the manifest entity for `note_id`, and read
 /// back the set of [`TripleIdentity`] hashes its current manifest triples
 /// record. Empty for a note that has never been projected.
-fn read_manifest(engine: &Engine, note_id: &NoteId) -> SchemaResult<(SymbolId, HashSet<TripleIdentity>)> {
+fn read_manifest(
+    engine: &Engine,
+    note_id: &NoteId,
+) -> SchemaResult<(SymbolId, HashSet<TripleIdentity>)> {
     let manifest_entity = engine
         .resolve_or_create_entity(&manifest_entity_label(note_id))
         .map_err(|e| projection_err(note_id, format!("manifest entity: {e}")))?;
@@ -609,7 +613,13 @@ pub fn reproject_note(engine: &Engine, note: &Note) -> SchemaResult<ProjectionRe
         retracted += 1;
     }
 
-    write_manifest(engine, &note.id, manifest_entity, &prior_identities, &new_identities)?;
+    write_manifest(
+        engine,
+        &note.id,
+        manifest_entity,
+        &prior_identities,
+        &new_identities,
+    )?;
 
     report.diff = Some(ProjectionDiff {
         added,
@@ -719,18 +729,20 @@ pub fn typed_view(engine: &Engine, note_id: &NoteId) -> SchemaResult<TypedNoteVi
 /// Resolve a [`NoteId`] to its projected `note:{id}` KG entity.
 pub fn note_of_entity(engine: &Engine, note_id: &NoteId) -> SchemaResult<SymbolId> {
     let note_label = format!("note:{}", note_id.as_str());
-    engine.resolve_symbol(&note_label).map_err(|e| SchemaError::Projection {
-        note_id: note_id.as_str().to_string(),
-        message: format!("note was never projected (no `{note_label}` entity found): {e}"),
-    })
+    engine
+        .resolve_symbol(&note_label)
+        .map_err(|e| SchemaError::Projection {
+            note_id: note_id.as_str().to_string(),
+            message: format!("note was never projected (no `{note_label}` entity found): {e}"),
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::EngineConfig;
-    use crate::library::note::{Frontmatter, TaskRef};
     use crate::library::model::{ContentFormat, DocumentRecord, DocumentSource};
+    use crate::library::note::{Frontmatter, TaskRef};
     use crate::schema::compile::compile;
     use crate::schema::install::install_pack;
     use crate::vsa::Dimension;
@@ -847,7 +859,9 @@ mod tests {
         let report = project_note(&engine, &note).unwrap();
 
         assert!(!report.type_outcome.is_typed());
-        assert!(matches!(&report.type_outcome, TypeOutcome::UnknownType { type_name } if type_name == "Wizard"));
+        assert!(
+            matches!(&report.type_outcome, TypeOutcome::UnknownType { type_name } if type_name == "Wizard")
+        );
         assert!(report.type_outcome.diagnostic().unwrap().contains("Wizard"));
         assert_eq!(report.typed_property_count, 0);
         // Both `type` and `email` land in frontier — nothing is dropped.
@@ -872,7 +886,10 @@ mod tests {
         install_seed(&engine);
 
         let mut fm = Frontmatter::new();
-        fm.insert("email", FrontmatterValue::Text("no-type@example.org".into()));
+        fm.insert(
+            "email",
+            FrontmatterValue::Text("no-type@example.org".into()),
+        );
         let note = Note::new(sample_document("doc-3"), "plain body").with_frontmatter(fm);
 
         let report = project_note(&engine, &note).unwrap();
@@ -972,7 +989,10 @@ mod tests {
         let report = project_note(&engine, &note).unwrap();
 
         assert!(report.type_outcome.is_typed());
-        assert_eq!(report.typed_property_count, 2, "email (inherited) + employer (own)");
+        assert_eq!(
+            report.typed_property_count, 2,
+            "email (inherited) + employer (own)"
+        );
         assert_eq!(report.frontier_property_count, 0);
         assert!(report.shape_violations.is_empty());
 
@@ -981,7 +1001,10 @@ mod tests {
             .iter()
             .find(|p| p.key == "email")
             .expect("email must project as typed, not frontier — it is inherited from Person");
-        assert!(!email.direct, "email is inherited, not declared directly on Employee");
+        assert!(
+            !email.direct,
+            "email is inherited, not declared directly on Employee"
+        );
         assert_eq!(email.declared_on, "Person");
 
         let employer = report
@@ -1031,7 +1054,10 @@ mod tests {
         // The violation carries a rich miette diagnostic (help text), per
         // CLAUDE.md's "use miette's diagnostic pattern" convention.
         use miette::Diagnostic as _;
-        let help = violation.help().expect("missing-required carries help text").to_string();
+        let help = violation
+            .help()
+            .expect("missing-required carries help text")
+            .to_string();
         assert!(help.contains("employer"));
     }
 
@@ -1069,7 +1095,10 @@ mod tests {
 
         assert!(report.type_outcome.is_typed());
         assert_eq!(report.typed_property_count, 0);
-        assert_eq!(report.frontier_property_count, 1, "the mismatched value lands in frontier");
+        assert_eq!(
+            report.frontier_property_count, 1,
+            "the mismatched value lands in frontier"
+        );
         assert!(!report.typed_properties.iter().any(|p| p.key == "email"));
 
         assert_eq!(report.shape_violations.len(), 1);
@@ -1083,7 +1112,10 @@ mod tests {
 
         // The value was still written — just under the frontier predicate.
         let view = typed_view(&engine, &note.id).unwrap();
-        assert_eq!(view.frontier_properties.get("email"), Some(&vec!["42".to_string()]));
+        assert_eq!(
+            view.frontier_properties.get("email"),
+            Some(&vec!["42".to_string()])
+        );
         assert!(view.typed_properties.get("email").is_none());
     }
 
@@ -1099,7 +1131,10 @@ mod tests {
         let report = project_note(&engine, &note).unwrap();
 
         assert!(report.type_outcome.is_typed());
-        assert_eq!(report.typed_property_count, 2, "email + birthDate, exactly as before Employee existed");
+        assert_eq!(
+            report.typed_property_count, 2,
+            "email + birthDate, exactly as before Employee existed"
+        );
         assert!(!report.typed_properties.iter().any(|p| p.key == "employer"));
     }
 
@@ -1137,7 +1172,10 @@ mod tests {
 
         assert_eq!(second_diff.added, 0);
         assert_eq!(second_diff.retracted, 0);
-        assert_eq!(second_diff.retained, first_diff.added, "everything from pass 1 is retained in pass 2");
+        assert_eq!(
+            second_diff.retained, first_diff.added,
+            "everything from pass 1 is retained in pass 2"
+        );
     }
 
     #[test]
@@ -1168,7 +1206,10 @@ mod tests {
         // Edit just the email value — same NoteId (set_frontmatter preserves
         // identity, mirroring an in-place note edit), one changed field.
         let mut fm = note.frontmatter.clone();
-        fm.insert("email", FrontmatterValue::Text("jane.doe@example.org".into()));
+        fm.insert(
+            "email",
+            FrontmatterValue::Text("jane.doe@example.org".into()),
+        );
         note.set_frontmatter(fm);
 
         let second = reproject_note(&engine, &note).unwrap();
@@ -1182,7 +1223,11 @@ mod tests {
         // The old email triple is gone from the live KG and marked
         // superseded — discoverable via `was_retracted`, the exact primitive
         // Phase 44g recall hygiene already filters recall on.
-        assert!(!engine.has_triple(old_email_triple.subject, old_email_triple.predicate, old_email_triple.object));
+        assert!(!engine.has_triple(
+            old_email_triple.subject,
+            old_email_triple.predicate,
+            old_email_triple.object
+        ));
         assert!(
             engine.tms().was_retracted(old_email_triple.object),
             "retracted triple's object must be discoverable via TruthMaintenanceSystem::was_retracted"
@@ -1196,16 +1241,21 @@ mod tests {
         );
 
         // birthDate — untouched — keeps its exact confidence (no churn).
-        assert!(engine.has_triple(birth_date_triple.subject, birth_date_triple.predicate, birth_date_triple.object));
+        assert!(engine.has_triple(
+            birth_date_triple.subject,
+            birth_date_triple.predicate,
+            birth_date_triple.object
+        ));
         let live_birth_date = engine
             .triples_from(birth_date_triple.subject)
             .into_iter()
-            .find(|t| t.predicate == birth_date_triple.predicate && t.object == birth_date_triple.object)
+            .find(|t| {
+                t.predicate == birth_date_triple.predicate && t.object == birth_date_triple.object
+            })
             .expect("birthDate triple still live");
         assert!((live_birth_date.confidence - birth_date_triple.confidence).abs() < 1e-6);
         assert_eq!(
-            live_birth_date.provenance_id,
-            birth_date_triple.provenance_id,
+            live_birth_date.provenance_id, birth_date_triple.provenance_id,
             "a retained edge must keep its original provenance link",
         );
 
@@ -1229,7 +1279,9 @@ mod tests {
         let frontier_triple = first
             .asserted_triples
             .iter()
-            .find(|t| engine.resolve_label(t.predicate) == format!("{FRONTIER_PREFIX}favoriteColor"))
+            .find(|t| {
+                engine.resolve_label(t.predicate) == format!("{FRONTIER_PREFIX}favoriteColor")
+            })
             .cloned()
             .expect("favoriteColor frontier triple was asserted");
 
@@ -1248,7 +1300,11 @@ mod tests {
 
         assert_eq!(diff.added, 0);
         assert_eq!(diff.retracted, 1);
-        assert!(!engine.has_triple(frontier_triple.subject, frontier_triple.predicate, frontier_triple.object));
+        assert!(!engine.has_triple(
+            frontier_triple.subject,
+            frontier_triple.predicate,
+            frontier_triple.object
+        ));
         assert!(engine.tms().was_retracted(frontier_triple.object));
 
         let view = typed_view(&engine, &note.id).unwrap();
@@ -1280,7 +1336,10 @@ mod tests {
         // is only possible if the manifest triples survived the round trip.
         let second = reproject_note(&engine, &note).unwrap();
         let diff = second.diff.unwrap();
-        assert_eq!(diff.added, 0, "manifest content survived the bulk-restore round trip");
+        assert_eq!(
+            diff.added, 0,
+            "manifest content survived the bulk-restore round trip"
+        );
         assert_eq!(diff.retracted, 0);
         assert_eq!(diff.retained, asserted_before);
     }

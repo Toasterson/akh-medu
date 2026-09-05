@@ -23,8 +23,9 @@
 //!   discourse selection (recency / graph-proximity). The default.
 //! - [`PassiveManager`] (44h) — lean context; the longer thread is carried by
 //!   background consolidation + recall, not verbatim history.
-//! - [`VirtualContextManager`] (44i) — MemGPT tiers (core/recall/archival) with the
-//!   `core_memory_*` / `archival_search` self-edit tools.
+//! - [`VirtualContextManager`] (44i) — MemGPT tiers (core/recall/archival) with
+//!   the `core_memory_*` self-edit tools. The daemon exposes the read-only
+//!   `archival_search` page-in under every strategy.
 //!
 //! Also: [`discourse`] (44e selection), [`core_memory`] (44i store),
 //! [`bench_phase44`](crate::bench_phase44) (44j A/B harness), and the deferred
@@ -47,15 +48,17 @@ pub use compacting::CompactingManager;
 pub use error::{ContextError, ContextResult};
 pub use manager::{ContextManager, HeuristicTokenCounter, PassThroughManager, TokenCounter};
 pub use passive::PassiveManager;
-pub use policy::{BackendManagedKv, KgOnlyRetrieval, KvCachePolicy, RetrievalPolicy, RetrievalSource};
+pub use policy::{
+    BackendManagedKv, KgOnlyRetrieval, KvCachePolicy, RetrievalPolicy, RetrievalSource,
+};
 pub use retention::{ProvenanceRetentionClassifier, Retention};
-pub use virtual_ctx::VirtualContextManager;
 pub use safety::SafetyEnforced;
 pub use types::{
-    AssembledContext, ContextSection, ContextWindowStats, DeferredReason, DeferredToolGroup,
-    DroppedSpan, DropReason, EpisodeState, SectionStats, StrategyId, TokenBudget, TurnOutcome,
-    DEFAULT_CONTEXT_WINDOW, DEFAULT_RESERVED_OUTPUT,
+    AssembledContext, ContextSection, ContextWindowStats, DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_RESERVED_OUTPUT, DeferredReason, DeferredToolGroup, DropReason, DroppedSpan,
+    EpisodeState, SectionStats, StrategyId, TokenBudget, TurnOutcome,
 };
+pub use virtual_ctx::VirtualContextManager;
 
 #[cfg(feature = "candle-backend")]
 pub use manager::CandleTokenCounter;

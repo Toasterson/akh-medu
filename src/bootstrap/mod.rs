@@ -22,12 +22,23 @@ pub use competence::{
     BootstrapRecommendation, CompetenceAssessor, CompetenceConfig, CompetenceError,
     CompetenceReport, CompetenceResult, KnowledgeAreaAssessment,
 };
-pub use expand::{DomainExpandError, DomainExpander, ExpandResult, ExpansionConfig, ExpansionResult};
+pub use expand::{
+    DomainExpandError, DomainExpander, ExpandResult, ExpansionConfig, ExpansionResult,
+};
 pub use identity::{
     CharacterKnowledge, CultureOrigin, IdentityError, IdentityResult, RitualResult,
 };
 pub use ingest::{
     CurriculumIngestor, IngestionConfig, IngestionError, IngestionResult, IngestionRunResult,
+};
+pub use knowledge_elicit::{
+    ElicitBatch, ElicitConfig, ElicitPass, ElicitValidator, ElicitedTriple, FlagReason,
+    KnowledgeElicitor, RejectionReason, ValidatedTriple, ValidationResult, apply_web_corroboration,
+    compute_confidence, elicit_for_concept, elicit_for_expansion, ingest_validated,
+};
+pub use orchestrator::{
+    BootstrapOrchestrator, BootstrapSession, BootstrapStage, Checkpoint, OrchestrationResult,
+    OrchestratorConfig, OrchestratorError, OrchestratorResult,
 };
 pub use prerequisite::{
     PrereqAnalysisResult, PrerequisiteAnalyzer, PrerequisiteConfig, PrerequisiteError,
@@ -40,16 +51,6 @@ pub use purpose::{
 pub use recipe::{
     PrerequisiteEntry, PurposeRecipe, RecipeError, RecipeIdentity, RecipePurpose, RecipeResources,
     RecipeResult, RecipeSeeds, RecipeValidation,
-};
-pub use knowledge_elicit::{
-    ElicitBatch, ElicitConfig, ElicitPass, ElicitValidator, ElicitedTriple, FlagReason,
-    KnowledgeElicitor, RejectionReason, ValidatedTriple, ValidationResult,
-    apply_web_corroboration, compute_confidence, elicit_for_concept, elicit_for_expansion,
-    ingest_validated,
-};
-pub use orchestrator::{
-    BootstrapOrchestrator, BootstrapSession, BootstrapStage, Checkpoint, OrchestratorConfig,
-    OrchestratorError, OrchestratorResult, OrchestrationResult,
 };
 pub use resources::{
     ResourceDiscoverer, ResourceDiscoveryConfig, ResourceDiscoveryError, ResourceDiscoveryResult,

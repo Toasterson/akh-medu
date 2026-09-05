@@ -198,28 +198,31 @@ mod tests {
         let engine = test_engine();
         let tool = InferenceConfigTool;
         // unknown option
-        assert!(tool
-            .execute(
+        assert!(
+            tool.execute(
                 &engine,
                 ToolInput::new()
                     .with_param("action", "set")
                     .with_param("option", "nope")
                     .with_param("value", "on"),
             )
-            .is_err());
+            .is_err()
+        );
         // non-boolean value
-        assert!(tool
-            .execute(
+        assert!(
+            tool.execute(
                 &engine,
                 ToolInput::new()
                     .with_param("action", "set")
                     .with_param("option", "spec_decode")
                     .with_param("value", "perhaps"),
             )
-            .is_err());
+            .is_err()
+        );
         // unknown action
-        assert!(tool
-            .execute(&engine, ToolInput::new().with_param("action", "frobnicate"))
-            .is_err());
+        assert!(
+            tool.execute(&engine, ToolInput::new().with_param("action", "frobnicate"))
+                .is_err()
+        );
     }
 }

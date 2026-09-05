@@ -95,8 +95,7 @@ impl PeerInfo {
     pub fn record_success(&mut self, wall_time_ms: u64) {
         self.tasks_completed += 1;
         // Exponential moving average with α = 0.2.
-        self.avg_response_ms =
-            0.8 * self.avg_response_ms + 0.2 * wall_time_ms as f64;
+        self.avg_response_ms = 0.8 * self.avg_response_ms + 0.2 * wall_time_ms as f64;
         // Decay success rate toward 1.0 over time.
         self.success_rate = (self.success_rate * 0.9 + 0.1).min(1.0);
     }

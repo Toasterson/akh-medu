@@ -442,8 +442,8 @@ impl EvidenceManager {
             }
         }
 
-        let combined = MassFunction::combine_multiple(&discounted)
-            .unwrap_or_else(|_| MassFunction::vacuous());
+        let combined =
+            MassFunction::combine_multiple(&discounted).unwrap_or_else(|_| MassFunction::vacuous());
 
         let interval = combined.belief_interval();
         let verdict = ClaimVerdict::from_interval(&interval, max_conflict);
@@ -475,7 +475,9 @@ impl EvidenceManager {
             .filter_map(|&id| SymbolId::new(id).map(|s| self.assess_claim(s)))
             .collect();
         assessments.sort_by(|a, b| {
-            b.interval.width().partial_cmp(&a.interval.width())
+            b.interval
+                .width()
+                .partial_cmp(&a.interval.width())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         assessments.truncate(k);
@@ -656,7 +658,11 @@ mod tests {
             MassFunction::new(0.4, 0.0),
         ];
         let combined = MassFunction::combine_multiple(&masses).unwrap();
-        assert!(combined.m_true > 0.7, "three agreeing sources: {}", combined.m_true);
+        assert!(
+            combined.m_true > 0.7,
+            "three agreeing sources: {}",
+            combined.m_true
+        );
     }
 
     // ── Discounting ───────────────────────────────────────────────
@@ -682,26 +688,50 @@ mod tests {
 
     #[test]
     fn verdict_well_supported() {
-        let bi = BeliefInterval { belief: 0.85, plausibility: 0.95 };
-        assert_eq!(ClaimVerdict::from_interval(&bi, 0.0), ClaimVerdict::WellSupported);
+        let bi = BeliefInterval {
+            belief: 0.85,
+            plausibility: 0.95,
+        };
+        assert_eq!(
+            ClaimVerdict::from_interval(&bi, 0.0),
+            ClaimVerdict::WellSupported
+        );
     }
 
     #[test]
     fn verdict_insufficient_evidence() {
-        let bi = BeliefInterval { belief: 0.1, plausibility: 0.9 };
-        assert_eq!(ClaimVerdict::from_interval(&bi, 0.0), ClaimVerdict::InsufficientEvidence);
+        let bi = BeliefInterval {
+            belief: 0.1,
+            plausibility: 0.9,
+        };
+        assert_eq!(
+            ClaimVerdict::from_interval(&bi, 0.0),
+            ClaimVerdict::InsufficientEvidence
+        );
     }
 
     #[test]
     fn verdict_conflicting() {
-        let bi = BeliefInterval { belief: 0.5, plausibility: 0.8 };
-        assert_eq!(ClaimVerdict::from_interval(&bi, 0.7), ClaimVerdict::Conflicting);
+        let bi = BeliefInterval {
+            belief: 0.5,
+            plausibility: 0.8,
+        };
+        assert_eq!(
+            ClaimVerdict::from_interval(&bi, 0.7),
+            ClaimVerdict::Conflicting
+        );
     }
 
     #[test]
     fn verdict_likely_false() {
-        let bi = BeliefInterval { belief: 0.1, plausibility: 0.3 };
-        assert_eq!(ClaimVerdict::from_interval(&bi, 0.0), ClaimVerdict::LikelyFalse);
+        let bi = BeliefInterval {
+            belief: 0.1,
+            plausibility: 0.3,
+        };
+        assert_eq!(
+            ClaimVerdict::from_interval(&bi, 0.0),
+            ClaimVerdict::LikelyFalse
+        );
     }
 
     // ── Conflict ──────────────────────────────────────────────────
@@ -729,13 +759,16 @@ mod tests {
         let claim = SymbolId::new(1).unwrap();
         let source = SymbolId::new(10).unwrap();
 
-        mgr.add_evidence(claim, EvidenceItem {
-            source_id: source,
-            mass: MassFunction::new(0.9, 0.0),
-            timestamp: 100,
-            source_reliability: 1.0,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            claim,
+            EvidenceItem {
+                source_id: source,
+                mass: MassFunction::new(0.9, 0.0),
+                timestamp: 100,
+                source_reliability: 1.0,
+                provenance_id: None,
+            },
+        );
 
         let assessment = mgr.assess_claim(claim);
         assert_eq!(assessment.verdict, ClaimVerdict::WellSupported);
@@ -749,21 +782,27 @@ mod tests {
         let s1 = SymbolId::new(10).unwrap();
         let s2 = SymbolId::new(11).unwrap();
 
-        mgr.add_evidence(claim, EvidenceItem {
-            source_id: s1,
-            mass: MassFunction::new(0.9, 0.0),
-            timestamp: 100,
-            source_reliability: 1.0,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            claim,
+            EvidenceItem {
+                source_id: s1,
+                mass: MassFunction::new(0.9, 0.0),
+                timestamp: 100,
+                source_reliability: 1.0,
+                provenance_id: None,
+            },
+        );
 
-        mgr.add_evidence(claim, EvidenceItem {
-            source_id: s2,
-            mass: MassFunction::new(0.0, 0.9),
-            timestamp: 101,
-            source_reliability: 1.0,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            claim,
+            EvidenceItem {
+                source_id: s2,
+                mass: MassFunction::new(0.0, 0.9),
+                timestamp: 101,
+                source_reliability: 1.0,
+                provenance_id: None,
+            },
+        );
 
         let alerts = mgr.drain_alerts();
         assert!(!alerts.is_empty(), "should have conflict alert");
@@ -782,13 +821,16 @@ mod tests {
     fn evidence_manager_serialization_roundtrip() {
         let mut mgr = EvidenceManager::new();
         let claim = SymbolId::new(1).unwrap();
-        mgr.add_evidence(claim, EvidenceItem {
-            source_id: SymbolId::new(10).unwrap(),
-            mass: MassFunction::new(0.7, 0.1),
-            timestamp: 100,
-            source_reliability: 0.8,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            claim,
+            EvidenceItem {
+                source_id: SymbolId::new(10).unwrap(),
+                mass: MassFunction::new(0.7, 0.1),
+                timestamp: 100,
+                source_reliability: 0.8,
+                provenance_id: None,
+            },
+        );
 
         let bytes = bincode::serialize(&mgr).unwrap();
         let restored: EvidenceManager = bincode::deserialize(&bytes).unwrap();
@@ -799,21 +841,27 @@ mod tests {
     fn most_uncertain_claims() {
         let mut mgr = EvidenceManager::new();
         // Claim 1: high certainty.
-        mgr.add_evidence(SymbolId::new(1).unwrap(), EvidenceItem {
-            source_id: SymbolId::new(10).unwrap(),
-            mass: MassFunction::new(0.9, 0.0),
-            timestamp: 100,
-            source_reliability: 1.0,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            SymbolId::new(1).unwrap(),
+            EvidenceItem {
+                source_id: SymbolId::new(10).unwrap(),
+                mass: MassFunction::new(0.9, 0.0),
+                timestamp: 100,
+                source_reliability: 1.0,
+                provenance_id: None,
+            },
+        );
         // Claim 2: high uncertainty.
-        mgr.add_evidence(SymbolId::new(2).unwrap(), EvidenceItem {
-            source_id: SymbolId::new(11).unwrap(),
-            mass: MassFunction::new(0.1, 0.0),
-            timestamp: 101,
-            source_reliability: 1.0,
-            provenance_id: None,
-        });
+        mgr.add_evidence(
+            SymbolId::new(2).unwrap(),
+            EvidenceItem {
+                source_id: SymbolId::new(11).unwrap(),
+                mass: MassFunction::new(0.1, 0.0),
+                timestamp: 101,
+                source_reliability: 1.0,
+                provenance_id: None,
+            },
+        );
 
         let uncertain = mgr.most_uncertain_claims(1);
         assert_eq!(uncertain.len(), 1);

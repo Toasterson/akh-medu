@@ -58,25 +58,24 @@ impl AudioProjector {
             });
         }
 
-        let mut file =
-            std::fs::File::open(mmproj_path).map_err(|e| NluError::ModelLoadFailed {
-                reason: format!("open mmproj GGUF {}: {e}", mmproj_path.display()),
-            })?;
-        let content = gguf_file::Content::read(&mut file).map_err(|e| {
-            NluError::ModelLoadFailed {
-                reason: format!("read mmproj GGUF: {e}"),
-            }
+        let mut file = std::fs::File::open(mmproj_path).map_err(|e| NluError::ModelLoadFailed {
+            reason: format!("open mmproj GGUF {}: {e}", mmproj_path.display()),
         })?;
+        let content =
+            gguf_file::Content::read(&mut file).map_err(|e| NluError::ModelLoadFailed {
+                reason: format!("read mmproj GGUF: {e}"),
+            })?;
 
         const TENSOR: &str = "mm.a.input_projection.weight";
-        let qtensor = content
-            .tensor(&mut file, TENSOR, device)
-            .map_err(|e| NluError::ModelLoadFailed {
-                reason: format!(
-                    "mmproj is missing the audio projector tensor `{TENSOR}` \
+        let qtensor =
+            content
+                .tensor(&mut file, TENSOR, device)
+                .map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!(
+                        "mmproj is missing the audio projector tensor `{TENSOR}` \
                      (is this a Gemma 4 audio mmproj?): {e}"
-                ),
-            })?;
+                    ),
+                })?;
         let weight = qtensor
             .dequantize(device)
             .map_err(|e| NluError::ModelLoadFailed {
@@ -122,19 +121,19 @@ impl AudioProjector {
         padded.extend_from_slice(pcm_16k_mono);
         padded.resize(padded_len, 0.0);
 
-        let frames = Tensor::from_vec(padded, (n_frames, FRAME_SAMPLES), &self.device)
-            .map_err(|e| NluError::LlmGenerationFailed {
-                reason: format!("audio frame tensor: {e}"),
+        let frames =
+            Tensor::from_vec(padded, (n_frames, FRAME_SAMPLES), &self.device).map_err(|e| {
+                NluError::LlmGenerationFailed {
+                    reason: format!("audio frame tensor: {e}"),
+                }
             })?;
 
         // [n_frames, 640] @ [640, 3840] = [n_frames, 3840].
-        let w_t = self
-            .weight
-            .t()
-            .and_then(|w| w.contiguous())
-            .map_err(|e| NluError::LlmGenerationFailed {
+        let w_t = self.weight.t().and_then(|w| w.contiguous()).map_err(|e| {
+            NluError::LlmGenerationFailed {
                 reason: format!("transpose projector: {e}"),
-            })?;
+            }
+        })?;
         let projected = frames
             .matmul(&w_t)
             .map_err(|e| NluError::LlmGenerationFailed {
@@ -289,7 +288,11 @@ mod tests {
         let s: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.001).sin()).collect();
         let out = resample_linear(&s, 48_000, 16_000);
         // 48k -> 16k is a 3x reduction.
-        assert!((out.len() as i64 - 16_000).abs() <= 1, "len = {}", out.len());
+        assert!(
+            (out.len() as i64 - 16_000).abs() <= 1,
+            "len = {}",
+            out.len()
+        );
     }
 
     #[test]

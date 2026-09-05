@@ -125,14 +125,21 @@ mod tests {
             .assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
         let user_msgs = out.messages.iter().filter(|m| m["role"] == "user").count();
-        assert_eq!(user_msgs, 2, "passive keeps only the tail: {:?}", out.messages);
+        assert_eq!(
+            user_msgs, 2,
+            "passive keeps only the tail: {:?}",
+            out.messages
+        );
         assert_eq!(out.messages.last().unwrap()["content"], "turn 7");
         let dropped_history = out
             .dropped
             .iter()
             .filter(|d| d.section == ContextSection::History)
             .count();
-        assert!(dropped_history >= 6, "older turns left to recall, not verbatim");
+        assert!(
+            dropped_history >= 6,
+            "older turns left to recall, not verbatim"
+        );
     }
 
     #[test]
@@ -144,8 +151,12 @@ mod tests {
         conv.record_operator_turn("again");
         let ep = EpisodeState::new("a", "again", &engine).with_conversation(Some(&conv));
         let m = PassiveManager::default();
-        let a = m.assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter).unwrap();
-        let b = m.assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter).unwrap();
+        let a = m
+            .assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter)
+            .unwrap();
+        let b = m
+            .assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter)
+            .unwrap();
         assert_eq!(a.messages, b.messages, "assemble has no hidden state");
     }
 }

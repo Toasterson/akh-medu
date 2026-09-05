@@ -276,10 +276,7 @@ impl LibrarianModel for FakeLibrarianModel {
     ) -> LibrarianModelResult<PromotionAdvice> {
         if self.fail_sources.contains(&request.predicate) {
             return Err(LibrarianModelError::MalformedReply {
-                reason: format!(
-                    "fake model configured to fail on \"{}\"",
-                    request.predicate
-                ),
+                reason: format!("fake model configured to fail on \"{}\"", request.predicate),
             });
         }
         match self.canned_proposals.get(&request.predicate) {
@@ -661,18 +658,16 @@ fn schema_digest(engine: &Engine) -> SchemaDigest {
         // prompt shows e.g. Person with `name` from Thing (Slice 3's
         // is-a chain walk). Falls back to directly-declared properties if
         // the chain is degenerate (e.g. a cycle in a hand-built engine).
-        let properties: Vec<String> = match crate::schema::shape::effective_properties(
-            engine,
-            type_symbol,
-        ) {
-            Ok(set) => set.properties.into_keys().collect(),
-            Err(_) => property_pred
-                .map(|p| engine.knowledge_graph().objects_of(type_symbol, p))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| engine.resolve_label(s))
-                .collect(),
-        };
+        let properties: Vec<String> =
+            match crate::schema::shape::effective_properties(engine, type_symbol) {
+                Ok(set) => set.properties.into_keys().collect(),
+                Err(_) => property_pred
+                    .map(|p| engine.knowledge_graph().objects_of(type_symbol, p))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| engine.resolve_label(s))
+                    .collect(),
+            };
         for property in &properties {
             digest
                 .known_properties

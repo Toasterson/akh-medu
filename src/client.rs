@@ -137,7 +137,10 @@ fn discover_at(pid_path: &std::path::Path) -> Option<ServerInfo> {
 
     // Check process is alive.
     if !process_alive(info.pid) {
-        tracing::debug!(pid = info.pid, "stale PID file — process not alive, removing");
+        tracing::debug!(
+            pid = info.pid,
+            "stale PID file — process not alive, removing"
+        );
         let _ = std::fs::remove_file(&pid_path);
         clear_stale_probe(&pid_path);
         return None;
@@ -297,8 +300,8 @@ pub fn write_pid_file(
     acp_socket: Option<&str>,
     acp_tcp: Option<&str>,
 ) -> std::io::Result<()> {
-    let acp_version = (acp_socket.is_some() || acp_tcp.is_some())
-        .then(|| ACP_PROTOCOL_VERSION.to_string());
+    let acp_version =
+        (acp_socket.is_some() || acp_tcp.is_some()).then(|| ACP_PROTOCOL_VERSION.to_string());
     let info = ServerInfo {
         pid: std::process::id(),
         port,
@@ -447,10 +450,16 @@ mod tests {
         };
         let json = serde_json::to_string(&info).expect("serialize");
         // `None` fields are omitted from the record.
-        assert!(!json.contains("acp_tcp"), "None acp_tcp must be skipped: {json}");
+        assert!(
+            !json.contains("acp_tcp"),
+            "None acp_tcp must be skipped: {json}"
+        );
         assert!(json.contains("akhomed-acp.sock"));
         let back: ServerInfo = serde_json::from_str(&json).expect("round-trip");
-        assert_eq!(back.acp_socket.as_deref(), Some("/run/akh-medu/akhomed-acp.sock"));
+        assert_eq!(
+            back.acp_socket.as_deref(),
+            Some("/run/akh-medu/akhomed-acp.sock")
+        );
         assert_eq!(back.acp_version.as_deref(), Some(ACP_PROTOCOL_VERSION));
     }
 
@@ -532,8 +541,14 @@ mod tests {
 
         // A socket path nobody is listening on.
         let dead = tmp.path().join("nobody.sock");
-        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
-            .expect("write pid");
+        write_pid_file(
+            &paths,
+            8200,
+            "127.0.0.1",
+            Some(dead.to_str().unwrap()),
+            None,
+        )
+        .expect("write pid");
 
         assert!(
             discover_at(&paths.pid_file()).is_none(),
@@ -555,11 +570,20 @@ mod tests {
         let paths = test_paths(&runtime_dir);
 
         let dead = tmp.path().join("nobody.sock");
-        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
-            .expect("write pid");
+        write_pid_file(
+            &paths,
+            8200,
+            "127.0.0.1",
+            Some(dead.to_str().unwrap()),
+            None,
+        )
+        .expect("write pid");
 
         for _ in 0..STALE_ACP_PROBE_THRESHOLD - 1 {
-            assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
+            assert!(
+                discover_at(&paths.pid_file()).is_none(),
+                "dead transport ⇒ None"
+            );
             assert!(
                 paths.pid_file().exists(),
                 "PID file must survive fewer than {STALE_ACP_PROBE_THRESHOLD} failed probes"
@@ -591,9 +615,18 @@ mod tests {
         let paths = test_paths(&runtime_dir);
 
         let dead = tmp.path().join("nobody.sock");
-        write_pid_file(&paths, 8200, "127.0.0.1", Some(dead.to_str().unwrap()), None)
-            .expect("write pid");
-        assert!(discover_at(&paths.pid_file()).is_none(), "dead transport ⇒ None");
+        write_pid_file(
+            &paths,
+            8200,
+            "127.0.0.1",
+            Some(dead.to_str().unwrap()),
+            None,
+        )
+        .expect("write pid");
+        assert!(
+            discover_at(&paths.pid_file()).is_none(),
+            "dead transport ⇒ None"
+        );
         assert!(
             stale_probe_marker_path(&paths.pid_file()).exists(),
             "one failed probe must record a marker"
@@ -602,10 +635,19 @@ mod tests {
         // Now advertise a live socket and re-discover.
         let sock = tmp.path().join("acp.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind socket");
-        write_pid_file(&paths, 8200, "127.0.0.1", Some(sock.to_str().unwrap()), None)
-            .expect("rewrite pid");
+        write_pid_file(
+            &paths,
+            8200,
+            "127.0.0.1",
+            Some(sock.to_str().unwrap()),
+            None,
+        )
+        .expect("rewrite pid");
 
-        assert!(discover_at(&paths.pid_file()).is_some(), "live transport ⇒ Some");
+        assert!(
+            discover_at(&paths.pid_file()).is_some(),
+            "live transport ⇒ Some"
+        );
         assert!(
             !stale_probe_marker_path(&paths.pid_file()).exists(),
             "a successful probe must clear the stale-probe marker"
@@ -626,7 +668,10 @@ mod tests {
             acp_tcp: Some(addr),
             acp_version: Some(ACP_PROTOCOL_VERSION.into()),
         };
-        assert!(acp_transport_alive(&live), "bound TCP listener should probe alive");
+        assert!(
+            acp_transport_alive(&live),
+            "bound TCP listener should probe alive"
+        );
 
         // Port 1 on localhost has no listener ⇒ connection refused ⇒ not alive.
         let dead = ServerInfo {
@@ -637,6 +682,9 @@ mod tests {
             acp_tcp: Some("127.0.0.1:1".into()),
             acp_version: None,
         };
-        assert!(!acp_transport_alive(&dead), "refused TCP address should probe dead");
+        assert!(
+            !acp_transport_alive(&dead),
+            "refused TCP address should probe dead"
+        );
     }
 }

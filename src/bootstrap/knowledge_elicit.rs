@@ -27,9 +27,9 @@
 //! Feature gate: the generative backend requires `candle-backend`.  Without it
 //! all elicitation calls return empty results gracefully.
 
+use miette::Diagnostic;
 #[cfg(feature = "candle-backend")]
 use std::collections::HashMap;
-use miette::Diagnostic;
 use thiserror::Error;
 
 use crate::engine::Engine;
@@ -510,57 +510,59 @@ impl KnowledgeElicitor {
 
         #[cfg(feature = "candle-backend")]
         {
-        // If the model file is absent, degrade gracefully (same as no-backend).
-        if !self.is_available() {
-            return ElicitBatch {
-                triples: vec![],
-                total_rounds: 0,
-                prompt_hash: 0,
-                model_id: self.config.model_id.clone(),
-            };
-        }
+            // If the model file is absent, degrade gracefully (same as no-backend).
+            if !self.is_available() {
+                return ElicitBatch {
+                    triples: vec![],
+                    total_rounds: 0,
+                    prompt_hash: 0,
+                    model_id: self.config.model_id.clone(),
+                };
+            }
 
-        let rounds = self.config.self_consistency_rounds.max(1);
-        // Track (subject, predicate, object) → agreement_count.
-        let mut agreement: HashMap<(String, String, String), u8> = HashMap::new();
-        let mut last_prompt_hash: u64 = 0;
+            let rounds = self.config.self_consistency_rounds.max(1);
+            // Track (subject, predicate, object) → agreement_count.
+            let mut agreement: HashMap<(String, String, String), u8> = HashMap::new();
+            let mut last_prompt_hash: u64 = 0;
 
-        for pass in passes {
-            for round in 0..rounds {
-                let prompt = build_prompt(*pass, domain, seed_concepts, round);
-                last_prompt_hash = fnv64(&prompt);
+            for pass in passes {
+                for round in 0..rounds {
+                    let prompt = build_prompt(*pass, domain, seed_concepts, round);
+                    last_prompt_hash = fnv64(&prompt);
 
-                let output = self.generate_raw(&prompt);
-                let raw_triples = parse_json_triples(&output);
+                    let output = self.generate_raw(&prompt);
+                    let raw_triples = parse_json_triples(&output);
 
-                for rt in raw_triples {
-                    let key = (rt.s, rt.p, rt.o);
-                    *agreement.entry(key).or_insert(0) += 1;
+                    for rt in raw_triples {
+                        let key = (rt.s, rt.p, rt.o);
+                        *agreement.entry(key).or_insert(0) += 1;
+                    }
                 }
             }
-        }
 
-        let total_rounds = rounds * passes.len() as u8;
-        let min_count = ((self.config.min_agreement * rounds as f32).ceil() as u8).max(1);
+            let total_rounds = rounds * passes.len() as u8;
+            let min_count = ((self.config.min_agreement * rounds as f32).ceil() as u8).max(1);
 
-        let triples: Vec<ElicitedTriple> = agreement
-            .into_iter()
-            .filter(|(_, count)| *count >= min_count)
-            .map(|((subject, predicate, object), agreement_count)| ElicitedTriple {
-                subject,
-                predicate,
-                object,
-                agreement_count,
-            })
-            .take(self.config.max_triples_per_pass * passes.len())
-            .collect();
+            let triples: Vec<ElicitedTriple> = agreement
+                .into_iter()
+                .filter(|(_, count)| *count >= min_count)
+                .map(
+                    |((subject, predicate, object), agreement_count)| ElicitedTriple {
+                        subject,
+                        predicate,
+                        object,
+                        agreement_count,
+                    },
+                )
+                .take(self.config.max_triples_per_pass * passes.len())
+                .collect();
 
-        ElicitBatch {
-            triples,
-            total_rounds,
-            prompt_hash: last_prompt_hash,
-            model_id: self.config.model_id.clone(),
-        }
+            ElicitBatch {
+                triples,
+                total_rounds,
+                prompt_hash: last_prompt_hash,
+                model_id: self.config.model_id.clone(),
+            }
         } // end #[cfg(feature = "candle-backend")]
     }
 
@@ -590,15 +592,16 @@ impl KnowledgeElicitor {
     fn generate_candle(&mut self, prompt: &str) -> ElicitResult<String> {
         use crate::nlu::candle_backend::{CandleBackend, CandleConfig};
 
-        let data_dir = self.data_dir.as_deref().ok_or_else(|| ElicitError::BackendUnavailable {
-            reason: "no data_dir configured".to_string(),
-        })?;
+        let data_dir = self
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| ElicitError::BackendUnavailable {
+                reason: "no data_dir configured".to_string(),
+            })?;
 
         // T5 Knowledge model path (Phase 35 will produce this file).
         // Falls back to the standard Qwen model if T5 is not yet available.
-        let t5_path = data_dir
-            .join("models/llm")
-            .join("t5-knowledge-q6k.gguf");
+        let t5_path = data_dir.join("models/llm").join("t5-knowledge-q6k.gguf");
         let qwen_path = data_dir
             .join("models/llm")
             .join("qwen2.5-1.5b-instruct-q4_k_m.gguf");
@@ -610,7 +613,8 @@ impl KnowledgeElicitor {
             qwen_path
         } else {
             return Err(ElicitError::BackendUnavailable {
-                reason: "neither t5-knowledge-q6k.gguf nor qwen2.5-1.5b-instruct-q4_k_m.gguf found".to_string(),
+                reason: "neither t5-knowledge-q6k.gguf nor qwen2.5-1.5b-instruct-q4_k_m.gguf found"
+                    .to_string(),
             });
         };
 
@@ -620,11 +624,9 @@ impl KnowledgeElicitor {
             ..Default::default()
         };
 
-        let mut backend =
-            CandleBackend::load_with_config(&model_path, &tokenizer_path, cfg).map_err(|e| {
-                ElicitError::BackendUnavailable {
-                    reason: format!("model load: {e}"),
-                }
+        let mut backend = CandleBackend::load_with_config(&model_path, &tokenizer_path, cfg)
+            .map_err(|e| ElicitError::BackendUnavailable {
+                reason: format!("model load: {e}"),
             })?;
 
         backend
@@ -668,7 +670,11 @@ pub enum RejectionReason {
     /// Subject and object are the same token (self-referential).
     SelfReferential,
     /// Identical (or near-identical) triple already exists in the KG.
-    Duplicate { existing_subject: SymbolId, existing_predicate: SymbolId, existing_object: SymbolId },
+    Duplicate {
+        existing_subject: SymbolId,
+        existing_predicate: SymbolId,
+        existing_object: SymbolId,
+    },
     /// The triple violates an arity/type constraint.
     ArityViolation { description: String },
     /// The triple contradicts existing knowledge.
@@ -734,7 +740,12 @@ impl ElicitValidator {
     }
 
     /// Run the full validation pipeline on a set of elicited triples.
-    pub fn validate(&self, triples: &[ElicitedTriple], total_rounds: u8, engine: &Engine) -> ValidationResult {
+    pub fn validate(
+        &self,
+        triples: &[ElicitedTriple],
+        total_rounds: u8,
+        engine: &Engine,
+    ) -> ValidationResult {
         let well_known: &[&str] = &[
             "is-a",
             "subclass-of",
@@ -782,8 +793,7 @@ impl ElicitValidator {
                         predicate: triple.predicate.clone(),
                         object: triple.object.clone(),
                         final_confidence: validated,
-                        agreement: triple.agreement_count as f32
-                            / (total_rounds.max(1)) as f32,
+                        agreement: triple.agreement_count as f32 / (total_rounds.max(1)) as f32,
                         neural_coherence: None,
                         web_corroborated: false,
                         flags,
@@ -901,7 +911,9 @@ impl ElicitValidator {
         let desc = violations
             .iter()
             .map(|v| match v {
-                ConstraintViolation::Arity { expected, actual, .. } => {
+                ConstraintViolation::Arity {
+                    expected, actual, ..
+                } => {
                     format!("arity expects {expected} got {actual}")
                 }
                 ConstraintViolation::Type { arg_position, .. } => {
@@ -1043,11 +1055,7 @@ pub fn apply_web_corroboration(
     web_labels: &std::collections::HashSet<(String, String, String)>,
 ) {
     for vt in &mut validated.accepted {
-        let key = (
-            vt.subject.clone(),
-            vt.predicate.clone(),
-            vt.object.clone(),
-        );
+        let key = (vt.subject.clone(), vt.predicate.clone(), vt.object.clone());
         if web_labels.contains(&key) {
             vt.final_confidence = (vt.final_confidence + 0.2).min(0.95);
             vt.web_corroborated = true;

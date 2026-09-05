@@ -169,7 +169,8 @@ impl DriveSystem {
                 Ok(report) => {
                     // Use directed curiosity's strongest_drive, but also incorporate
                     // KG stagnation as a fallback signal.
-                    let stagnation = compute_curiosity(info.triple_count, &self.drives[0].last_snapshot);
+                    let stagnation =
+                        compute_curiosity(info.triple_count, &self.drives[0].last_snapshot);
                     // Blend: 70% directed, 30% stagnation.
                     (0.7 * report.strongest_drive + 0.3 * stagnation).clamp(0.0, 1.0)
                 }

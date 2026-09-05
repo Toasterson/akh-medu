@@ -57,8 +57,7 @@ impl Tool for EditTool {
             parameters: vec![
                 ToolParam {
                     name: "path".into(),
-                    description: "File path to edit (absolute or relative to scratch dir)."
-                        .into(),
+                    description: "File path to edit (absolute or relative to scratch dir).".into(),
                     required: true,
                 },
                 ToolParam {
@@ -228,7 +227,11 @@ mod tests {
         let out = tool.execute(&engine, input).unwrap();
 
         assert!(out.success, "expected success: {}", out.result);
-        assert!(out.result.contains("replaced 1 occurrence(s)"), "{}", out.result);
+        assert!(
+            out.result.contains("replaced 1 occurrence(s)"),
+            "{}",
+            out.result
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello akh");
     }
 
@@ -267,7 +270,11 @@ mod tests {
         let out = tool.execute(&engine, input).unwrap();
 
         assert!(out.success, "expected success: {}", out.result);
-        assert!(out.result.contains("replaced 3 occurrence(s)"), "{}", out.result);
+        assert!(
+            out.result.contains("replaced 3 occurrence(s)"),
+            "{}",
+            out.result
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "b b b");
     }
 

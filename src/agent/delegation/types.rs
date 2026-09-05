@@ -159,16 +159,17 @@ pub enum DelegationTargetKind {
         model: String,
     },
     /// Another akh-medu instance — for KG-level operations.
-    AkhMeduPeer {
-        endpoint: String,
-    },
+    AkhMeduPeer { endpoint: String },
 }
 
 impl std::fmt::Display for DelegationTargetKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::LocalClaude { model, .. } => write!(f, "local-claude:{model}"),
-            Self::RemoteTrigger { akhomed_public_url, model } => {
+            Self::RemoteTrigger {
+                akhomed_public_url,
+                model,
+            } => {
                 write!(f, "remote-trigger:{model}@{akhomed_public_url}")
             }
             Self::AkhMeduPeer { endpoint } => write!(f, "peer:{endpoint}"),

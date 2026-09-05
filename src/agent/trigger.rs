@@ -229,9 +229,7 @@ pub fn should_fire(trigger: &Trigger, agent: &Agent, now: u64) -> bool {
         } => {
             if let Ok(sym) = agent.engine().lookup_symbol(symbol_label) {
                 let triples = agent.engine().triples_from(sym);
-                triples
-                    .iter()
-                    .any(|t| (t.confidence as f64) < *below)
+                triples.iter().any(|t| (t.confidence as f64) < *below)
             } else {
                 false
             }
@@ -246,8 +244,7 @@ pub fn should_fire(trigger: &Trigger, agent: &Agent, now: u64) -> bool {
                 return false;
             }
             // Use a lightweight check: does the prototype have content?
-            pref.profile.interest_prototype.is_some()
-                && *similarity_threshold <= 1.0
+            pref.profile.interest_prototype.is_some() && *similarity_threshold <= 1.0
         }
         TriggerCondition::UrgencyThreshold { deadline_hours } => {
             let now = std::time::SystemTime::now()
@@ -339,7 +336,11 @@ pub fn execute_trigger(trigger: &Trigger, agent: &mut Agent) -> AgentResult<Stri
             for (k, v) in params {
                 input = input.with_param(k, v);
             }
-            let output = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(name, input, &agent.engine)?;
+            let output = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .execute(name, input, &agent.engine)?;
             Ok(format!(
                 "trigger \"{}\": tool {} → success={}",
                 trigger.name, name, output.success
@@ -347,11 +348,10 @@ pub fn execute_trigger(trigger: &Trigger, agent: &mut Agent) -> AgentResult<Stri
         }
         TriggerAction::SurfaceSuggestions { max_count } => {
             let engine = std::sync::Arc::clone(&agent.engine);
-            match agent.preference_manager.jitir_query(
-                &agent.working_memory,
-                &agent.goals,
-                &engine,
-            ) {
+            match agent
+                .preference_manager
+                .jitir_query(&agent.working_memory, &agent.goals, &engine)
+            {
                 Ok(jitir) => {
                     let total = (jitir.direct_matches.len() + jitir.serendipity_matches.len())
                         .min(*max_count);
@@ -375,8 +375,7 @@ pub fn execute_trigger(trigger: &Trigger, agent: &mut Agent) -> AgentResult<Stri
             let _ = agent.preference_manager.ensure_init(&engine);
             Ok(format!(
                 "trigger \"{}\": preferences refreshed ({} interactions)",
-                trigger.name,
-                agent.preference_manager.profile.interaction_count
+                trigger.name, agent.preference_manager.profile.interaction_count
             ))
         }
     }

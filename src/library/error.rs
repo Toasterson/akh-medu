@@ -111,6 +111,30 @@ pub enum LibraryError {
     )]
     FrontmatterParse { line: usize, message: String },
 
+    #[error("invalid note id: \"{value}\"")]
+    #[diagnostic(
+        code(akh::library::invalid_note_id),
+        help(
+            "Note ids must use the stable `note-` prefix followed by 32 lowercase or uppercase hexadecimal characters."
+        )
+    )]
+    InvalidNoteId { value: String },
+
+    #[error(
+        "note revision conflict for \"{note_id}\": expected {expected}, current head is {actual}"
+    )]
+    #[diagnostic(
+        code(akh::library::note_revision_conflict),
+        help(
+            "Read the current note with `study_note_read` and retry the revision using its returned revision token."
+        )
+    )]
+    NoteRevisionConflict {
+        note_id: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error(transparent)]
     #[diagnostic(transparent)]
     Engine(#[from] crate::error::EngineError),

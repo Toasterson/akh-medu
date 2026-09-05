@@ -134,9 +134,7 @@ fn parse_task(value: &serde_json::Value) -> Result<TaskItem, String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| "task entry missing string field \"status\"".to_string())?;
     let status = TaskStatus::parse(status_str).ok_or_else(|| {
-        format!(
-            "unknown status \"{status_str}\" (expected pending, in_progress, or completed)"
-        )
+        format!("unknown status \"{status_str}\" (expected pending, in_progress, or completed)")
     })?;
 
     // Accept either snake_case `active_form` or camelCase `activeForm`.
@@ -165,11 +163,10 @@ impl Tool for TaskListTool {
                     .into(),
             parameters: vec![ToolParam {
                 name: "tasks".into(),
-                description:
-                    "JSON array of task objects {content, status, active_form}. \
+                description: "JSON array of task objects {content, status, active_form}. \
                      When present, replaces the stored list. When absent, returns the \
                      current list."
-                        .into(),
+                    .into(),
                 required: false,
             }],
         }
@@ -285,7 +282,10 @@ mod tests {
         let view = tool.execute(&engine, ToolInput::new()).unwrap();
         assert!(view.success);
         assert!(view.result.contains("[x] Read the file"));
-        assert!(view.result.contains("[~] Run the tests (Running the tests)"));
+        assert!(
+            view.result
+                .contains("[~] Run the tests (Running the tests)")
+        );
         assert!(view.result.contains("2 task(s)"));
     }
 

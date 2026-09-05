@@ -229,10 +229,7 @@ impl MessageSink for StdoutSink {
                 println!("{question}");
             }
             AkhMessage::AuditLog {
-                id,
-                kind,
-                summary,
-                ..
+                id, kind, summary, ..
             } => {
                 println!("[audit:{kind}] #{id} {summary}");
             }
@@ -368,11 +365,7 @@ impl AkhMessage {
         }
     }
 
-    pub fn audit_log(
-        id: u64,
-        kind: impl Into<String>,
-        summary: impl Into<String>,
-    ) -> Self {
+    pub fn audit_log(id: u64, kind: impl Into<String>, summary: impl Into<String>) -> Self {
         Self::AuditLog {
             id,
             kind: kind.into(),
@@ -458,10 +451,7 @@ impl AkhMessage {
             }
             AkhMessage::Prompt { question } => question.clone(),
             AkhMessage::AuditLog {
-                id,
-                kind,
-                summary,
-                ..
+                id, kind, summary, ..
             } => format!("[audit:{kind}] #{id} {summary}"),
             AkhMessage::ToolCallStarted {
                 tool_id,

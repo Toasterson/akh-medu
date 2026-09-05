@@ -113,10 +113,7 @@ pub struct CompetenceModel {
 impl CompetenceModel {
     /// Update competence after a tool execution.
     pub fn update_tool(&mut self, tool_name: &str, success: bool) {
-        let record = self
-            .tools
-            .entry(tool_name.to_string())
-            .or_default();
+        let record = self.tools.entry(tool_name.to_string()).or_default();
         record.attempts += 1;
         if success {
             record.successes += 1;
@@ -125,10 +122,7 @@ impl CompetenceModel {
 
     /// Update competence after a goal completes or fails.
     pub fn update_category(&mut self, category: &str, completed: bool) {
-        let record = self
-            .categories
-            .entry(category.to_string())
-            .or_default();
+        let record = self.categories.entry(category.to_string()).or_default();
         record.attempted += 1;
         if completed {
             record.completed += 1;
@@ -137,7 +131,8 @@ impl CompetenceModel {
 
     /// Record a calibration observation.
     pub fn record_calibration(&mut self, predicted: f32, actual: f32, max_history: usize) {
-        self.calibration_history.push(CalibrationPoint { predicted, actual });
+        self.calibration_history
+            .push(CalibrationPoint { predicted, actual });
         if self.calibration_history.len() > max_history {
             self.calibration_history.remove(0);
         }
@@ -198,8 +193,7 @@ impl CompetenceModel {
                 let _ = engine.remove_triple(old.subject, old.predicate, old.object);
             }
 
-            let rate_sym =
-                engine.resolve_or_create_entity(&format!("rate:{rate:.4}"))?;
+            let rate_sym = engine.resolve_or_create_entity(&format!("rate:{rate:.4}"))?;
             let _ = engine.add_triple(&Triple::new(tool_sym, success_rate_pred, rate_sym));
         }
         Ok(())
@@ -230,7 +224,13 @@ pub fn categorize_goal(goal: &Goal) -> String {
     let keyword = goal
         .description
         .split_whitespace()
-        .find(|w| w.len() > 3 && !matches!(w.to_lowercase().as_str(), "find" | "make" | "this" | "that" | "with" | "from" | "about"))
+        .find(|w| {
+            w.len() > 3
+                && !matches!(
+                    w.to_lowercase().as_str(),
+                    "find" | "make" | "this" | "that" | "with" | "from" | "about"
+                )
+        })
         .unwrap_or("general");
 
     format!("{prefix}:{}", keyword.to_lowercase())
@@ -521,7 +521,12 @@ pub fn estimate_difficulty(goal: &Goal, all_goals: &[Goal]) -> f32 {
         // Keyword overlap score.
         let overlap = keywords
             .iter()
-            .filter(|kw| other.description.to_lowercase().contains(&kw.to_lowercase()))
+            .filter(|kw| {
+                other
+                    .description
+                    .to_lowercase()
+                    .contains(&kw.to_lowercase())
+            })
             .count();
         if overlap == 0 {
             continue;
@@ -561,10 +566,7 @@ pub fn autoepistemic_check(
         Some(format!(
             "Goal has consumed {} cycles (expected ~{:.0}, threshold {:.0}) \
              with improvement rate {:.2} — questioning value of continued pursuit",
-            goal.cycles_worked,
-            estimated_effort,
-            threshold,
-            improvement_rate,
+            goal.cycles_worked, estimated_effort, threshold, improvement_rate,
         ))
     } else {
         None
@@ -584,15 +586,13 @@ pub fn is_justification_valid(
 ) -> bool {
     match justification {
         GoalJustification::UserRequested => true,
-        GoalJustification::DecomposedFrom { parent } => {
-            all_goals.iter().any(|g| {
-                g.symbol_id == *parent
-                    && matches!(
-                        g.status,
-                        GoalStatus::Active | GoalStatus::Pending | GoalStatus::Suspended
-                    )
-            })
-        }
+        GoalJustification::DecomposedFrom { parent } => all_goals.iter().any(|g| {
+            g.symbol_id == *parent
+                && matches!(
+                    g.status,
+                    GoalStatus::Active | GoalStatus::Pending | GoalStatus::Suspended
+                )
+        }),
         GoalJustification::InferredFromKG { supporting } => {
             if supporting.is_empty() {
                 return true;
@@ -656,11 +656,7 @@ pub fn cascade_invalidation(
 /// If difficulty is within [competence × low_factor, competence × high_factor],
 /// the goal is in the ZPD sweet spot and gets a priority boost.
 /// If difficulty exceeds the upper bound, the goal gets a priority penalty.
-pub fn compute_zpd(
-    competence: f32,
-    difficulty: f32,
-    config: &MetacognitionConfig,
-) -> (bool, i16) {
+pub fn compute_zpd(competence: f32, difficulty: f32, config: &MetacognitionConfig) -> (bool, i16) {
     let low = competence * config.zpd_low_factor;
     let high = competence * config.zpd_high_factor;
 
@@ -758,9 +754,7 @@ pub fn relax_criteria(criteria: &str, engine: &Engine) -> String {
                 .filter(|w| w.len() > 2)
                 .filter(|w| {
                     engine.lookup_symbol(w).is_ok()
-                        || engine
-                            .lookup_symbol(&w.to_lowercase())
-                            .is_ok()
+                        || engine.lookup_symbol(&w.to_lowercase()).is_ok()
                 })
                 .count();
             (*clause, score)
@@ -841,7 +835,8 @@ pub fn evaluate_goals(
         };
 
         // Compute diminishing returns: improvement rate < previous window would indicate decline.
-        let diminishing_returns = improvement_rate == 0.0 && goal.cycles_worked >= config.progress_window as u32;
+        let diminishing_returns =
+            improvement_rate == 0.0 && goal.cycles_worked >= config.progress_window as u32;
 
         let eval = GoalEvaluation {
             goal_id: goal.symbol_id,
@@ -1143,9 +1138,7 @@ mod tests {
             rationale: "just because".into(),
         });
         let mut child_decomposed = make_goal(3, "child decomposed", 5);
-        child_decomposed.justification = Some(GoalJustification::DecomposedFrom {
-            parent: sym(1),
-        });
+        child_decomposed.justification = Some(GoalJustification::DecomposedFrom { parent: sym(1) });
 
         let goals = vec![parent, child_low, child_decomposed];
         let signals = cascade_invalidation(sym(1), &goals);

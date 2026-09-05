@@ -194,8 +194,7 @@ impl Tool for GrepTool {
                 },
                 ToolParam {
                     name: "output_mode".into(),
-                    description:
-                        "'files_with_matches' (default) | 'content' | 'count'.".into(),
+                    description: "'files_with_matches' (default) | 'content' | 'count'.".into(),
                     required: false,
                 },
             ],
@@ -495,17 +494,9 @@ mod tests {
         let out = tool.execute(&engine, input).unwrap();
         assert!(out.success, "result: {}", out.result);
         // beta.txt now matches both "hello world" and "Goodbye World" → 2.
-        assert!(
-            out.result.contains("beta.txt: 2"),
-            "result: {}",
-            out.result
-        );
+        assert!(out.result.contains("beta.txt: 2"), "result: {}", out.result);
         // gamma.rs matches "// world here" → 1.
-        assert!(
-            out.result.contains("gamma.rs: 1"),
-            "result: {}",
-            out.result
-        );
+        assert!(out.result.contains("gamma.rs: 1"), "result: {}", out.result);
     }
 
     #[test]

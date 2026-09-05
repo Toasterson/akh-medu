@@ -17,18 +17,26 @@ pub enum GoalStatus {
     Pending,
     Active,
     Completed,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
     Suspended,
     /// Proposed by autonomous goal generation but not yet activated.
     Proposed,
     /// Dormant: low-priority or infeasible, kept for opportunity detection.
     Dormant,
     /// Reformulated: replaced by a simpler version (Phase 11f).
-    Reformulated { replacement: SymbolId },
+    Reformulated {
+        replacement: SymbolId,
+    },
     /// Auto-cancelled by the hygiene pass (stale or exceeded child depth).
-    Cancelled { reason: String },
+    Cancelled {
+        reason: String,
+    },
     /// Collapsed into a primary goal by the deduplication hygiene pass.
-    Duplicate { primary: SymbolId },
+    Duplicate {
+        primary: SymbolId,
+    },
 }
 
 impl GoalStatus {
@@ -122,29 +130,21 @@ pub enum GoalSource {
         severity: f32,
     },
     /// Generated from contradiction detection.
-    ContradictionDetected {
-        existing: Triple,
-        incoming: Triple,
-    },
+    ContradictionDetected { existing: Triple, incoming: Triple },
     /// Generated from opportunity detection (reactivating a dormant/failed goal).
     OpportunityDetected {
         reactivated_goal: SymbolId,
         newly_satisfied: String,
     },
     /// Generated because a drive exceeded its threshold.
-    DriveExceeded {
-        drive: String,
-        strength: f32,
-    },
+    DriveExceeded { drive: String, strength: f32 },
     /// Generated because the OODA loop detected a decision impasse.
     ImpasseDetected {
         goal_id: SymbolId,
         impasse_kind: String,
     },
     /// Generated from a reflection insight.
-    ReflectionInsight {
-        insight: String,
-    },
+    ReflectionInsight { insight: String },
     /// Generated from a world-monitoring watch firing or expectation discrepancy.
     WorldChange {
         watch_name: String,
@@ -261,13 +261,15 @@ impl Goal {
             all_goals
                 .iter()
                 .find(|g| g.symbol_id == *blocker_id)
-                .is_some_and(|g| !matches!(
-                    g.status,
-                    GoalStatus::Completed
-                        | GoalStatus::Failed { .. }
-                        | GoalStatus::Cancelled { .. }
-                        | GoalStatus::Duplicate { .. }
-                ))
+                .is_some_and(|g| {
+                    !matches!(
+                        g.status,
+                        GoalStatus::Completed
+                            | GoalStatus::Failed { .. }
+                            | GoalStatus::Cancelled { .. }
+                            | GoalStatus::Duplicate { .. }
+                    )
+                })
         })
     }
 }
@@ -395,8 +397,7 @@ pub(crate) fn create_goal_with_identity(
     // label. Instance-identified goals need an explicit display property so a
     // KG-only restore does not expose the internal recurrence/decomposition ID.
     if canonical_goal_label(description) != label {
-        let description_sym =
-            engine.resolve_or_create_entity(&format!("desc:{description}"))?;
+        let description_sym = engine.resolve_or_create_entity(&format!("desc:{description}"))?;
         let _ = engine.add_triple(&Triple::new(
             goal_id,
             predicates.has_description,
@@ -495,24 +496,13 @@ pub fn decompose_goal(
 ) -> AgentResult<Vec<Goal>> {
     let mut children = Vec::new();
     for (position, (desc, priority, criteria)) in sub_descriptions.iter().enumerate() {
-        let identity = format!(
-            "decomposed:{}:{position}:{desc}",
-            parent.symbol_id.get()
-        );
-        let mut child = if let Some(existing) =
-            existing_by_identity(engine, existing_goals, &identity)
-        {
-            existing.clone()
-        } else {
-            create_goal_with_identity(
-                engine,
-                desc,
-                &identity,
-                *priority,
-                criteria,
-                predicates,
-            )?
-        };
+        let identity = format!("decomposed:{}:{position}:{desc}", parent.symbol_id.get());
+        let mut child =
+            if let Some(existing) = existing_by_identity(engine, existing_goals, &identity) {
+                existing.clone()
+            } else {
+                create_goal_with_identity(engine, desc, &identity, *priority, criteria, predicates)?
+            };
         child.parent = Some(parent.symbol_id);
 
         // Store parent→child relation.
@@ -561,7 +551,9 @@ pub fn update_goal_status(
         status_sym,
     ));
     let status_key = format!("goal_status:{}", goal.symbol_id.get());
-    let _ = engine.store().put_meta(status_key.as_bytes(), new_status.as_label().as_bytes());
+    let _ = engine
+        .store()
+        .put_meta(status_key.as_bytes(), new_status.as_label().as_bytes());
     goal.status = new_status;
     Ok(())
 }
@@ -800,24 +792,27 @@ pub fn restore_goals(engine: &Engine, predicates: &AgentPredicates) -> AgentResu
             }
         }
 
-        insert_if_novel(&mut goals, Goal {
-            symbol_id: meta.id,
-            description,
-            status,
-            priority,
-            success_criteria: criteria,
-            parent,
-            children,
-            created_at: meta.created_at,
-            cycles_worked: 0,
-            last_progress_cycle: 0,
-            source: None,
-            blocked_by,
-            priority_rationale: None,
-            justification: None,
-            reformulated_from: None,
-            estimated_effort: None,
-        });
+        insert_if_novel(
+            &mut goals,
+            Goal {
+                symbol_id: meta.id,
+                description,
+                status,
+                priority,
+                success_criteria: criteria,
+                parent,
+                children,
+                created_at: meta.created_at,
+                cycles_worked: 0,
+                last_progress_cycle: 0,
+                source: None,
+                blocked_by,
+                priority_rationale: None,
+                justification: None,
+                reformulated_from: None,
+                estimated_effort: None,
+            },
+        );
     }
 
     Ok(goals)
@@ -920,20 +915,19 @@ pub fn reformulate_goal(
 ) -> AgentResult<Goal> {
     let desc = format!("(reformulated) {}", original.description);
     let identity = format!("reformulated:{}", original.symbol_id.get());
-    let mut replacement = if let Some(existing) =
-        existing_by_identity(engine, existing_goals, &identity)
-    {
-        existing.clone()
-    } else {
-        create_goal_with_identity(
-            engine,
-            &desc,
-            &identity,
-            original.priority,
-            relaxed_criteria,
-            predicates,
-        )?
-    };
+    let mut replacement =
+        if let Some(existing) = existing_by_identity(engine, existing_goals, &identity) {
+            existing.clone()
+        } else {
+            create_goal_with_identity(
+                engine,
+                &desc,
+                &identity,
+                original.priority,
+                relaxed_criteria,
+                predicates,
+            )?
+        };
     replacement.parent = original.parent;
     replacement.reformulated_from = Some(original.symbol_id);
     replacement.justification = Some(GoalJustification::DecomposedFrom {
@@ -1008,8 +1002,9 @@ mod tests {
         ];
         for status in statuses {
             let label = status.as_label();
-            let restored = GoalStatus::from_label(&label)
-                .unwrap_or_else(|| panic!("from_label should recognize its own as_label output: {label}"));
+            let restored = GoalStatus::from_label(&label).unwrap_or_else(|| {
+                panic!("from_label should recognize its own as_label output: {label}")
+            });
             assert_eq!(restored, status);
         }
     }
@@ -1110,7 +1105,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -1128,7 +1123,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(3).unwrap(),
@@ -1146,7 +1141,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
         ];
 
@@ -1175,7 +1170,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -1193,7 +1188,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
         ];
 
@@ -1222,7 +1217,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
             Goal {
                 symbol_id: SymbolId::new(2).unwrap(),
@@ -1240,7 +1235,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
         ];
 
@@ -1288,9 +1283,7 @@ mod tests {
         let decomp = GoalJustification::DecomposedFrom {
             parent: SymbolId::new(1).unwrap(),
         };
-        let inferred = GoalJustification::InferredFromKG {
-            supporting: vec![],
-        };
+        let inferred = GoalJustification::InferredFromKG { supporting: vec![] };
         let default = GoalJustification::DefaultAssumption {
             rationale: "test".into(),
         };
@@ -1332,10 +1325,7 @@ mod tests {
         // Empty-after-strip falls back to empty.
         assert_eq!(normalize_goal_description("goal:"), "");
         // Nested prefix: only the outermost is stripped.
-        assert_eq!(
-            normalize_goal_description("goal:desc:inner"),
-            "desc:inner"
-        );
+        assert_eq!(normalize_goal_description("goal:desc:inner"), "desc:inner");
     }
 
     fn test_engine() -> crate::engine::Engine {
@@ -1399,7 +1389,10 @@ mod tests {
         let goal = create_goal(&engine, raw, 128, "done", &preds).unwrap();
 
         assert_eq!(canonical_goal_label(raw), "goal:desc:inner");
-        assert_eq!(engine.resolve_label(goal.symbol_id), canonical_goal_label(raw));
+        assert_eq!(
+            engine.resolve_label(goal.symbol_id),
+            canonical_goal_label(raw)
+        );
         assert_eq!(goal.description, "desc:inner");
     }
 

@@ -53,7 +53,13 @@ impl RemoteTriggerWorker {
         //   4. Parse the run output for akh-result block
         //
         // For now, return an unavailable error so callers can fall back to local.
-        let _ = (task, id, &self.akhomed_public_url, &self.model, self.max_cost_cents);
+        let _ = (
+            task,
+            id,
+            &self.akhomed_public_url,
+            &self.model,
+            self.max_cost_cents,
+        );
         Err(DelegationError::RemoteTriggerUnavailable)
     }
 
@@ -99,10 +105,7 @@ impl RemoteTriggerWorker {
 
 /// Polling helper — calls a status endpoint until completion or timeout.
 #[allow(dead_code)]
-async fn poll_completion(
-    _trigger_id: &str,
-    timeout: Duration,
-) -> DelegationResult<String> {
+async fn poll_completion(_trigger_id: &str, timeout: Duration) -> DelegationResult<String> {
     let _deadline = Instant::now() + timeout;
     // Polling implementation placeholder.
     // Real implementation: GET https://api.claude.ai/v1/code/triggers/{id}/runs/{run_id}
@@ -125,14 +128,14 @@ fn push_output_instructions(prompt: &mut String) {
     prompt.push_str("## Instructions\n\n");
     prompt.push_str("1. Use the akh-medu MCP tools to query relevant knowledge.\n");
     prompt.push_str("2. Perform the task.\n");
-    prompt.push_str(
-        "3. At the end of your response, include a structured result block:\n\n",
-    );
+    prompt.push_str("3. At the end of your response, include a structured result block:\n\n");
     prompt.push_str("```akh-result\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"status\": \"success\" | \"partial\" | \"failed\",\n");
     prompt.push_str("  \"summary\": \"brief description of what was done\",\n");
-    prompt.push_str("  \"triples\": [{\"subject\": \"...\", \"predicate\": \"...\", \"object\": \"...\"}],\n");
+    prompt.push_str(
+        "  \"triples\": [{\"subject\": \"...\", \"predicate\": \"...\", \"object\": \"...\"}],\n",
+    );
     prompt.push_str("  \"files_modified\": [\"path/to/file\"],\n");
     prompt.push_str("  \"follow_up\": \"optional: what should happen next\"\n");
     prompt.push_str("}\n");

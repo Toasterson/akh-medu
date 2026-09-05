@@ -36,14 +36,18 @@ pub enum DecompositionError {
     #[error("no applicable decomposition method for goal \"{goal_description}\"")]
     #[diagnostic(
         code(akh::agent::decomposition::no_method),
-        help("The goal did not match any HTN method (score < 0.2). Falling back to comma-split decomposition.")
+        help(
+            "The goal did not match any HTN method (score < 0.2). Falling back to comma-split decomposition."
+        )
     )]
     NoApplicableMethod { goal_description: String },
 
     #[error("dependency cycle detected in task tree for method \"{method_name}\"")]
     #[diagnostic(
         code(akh::agent::decomposition::cycle),
-        help("The ordering constraints in the decomposition method form a cycle. Check the method's ordering pairs.")
+        help(
+            "The ordering constraints in the decomposition method form a cycle. Check the method's ordering pairs."
+        )
     )]
     CycleDetected { method_name: String },
 
@@ -329,13 +333,8 @@ impl MethodRegistry {
         // Encode goal as a VSA vector for semantic matching.
         let ops = engine.ops();
         let im = engine.item_memory();
-        let goal_vec = crate::vsa::grounding::encode_text_as_vector(
-            &goal.description,
-            engine,
-            ops,
-            im,
-        )
-        .ok();
+        let goal_vec =
+            crate::vsa::grounding::encode_text_as_vector(&goal.description, engine, ops, im).ok();
 
         let mut best_score = 0.0f32;
         let mut best_method: Option<&DecompositionMethod> = None;
@@ -388,11 +387,7 @@ impl MethodRegistry {
         }
 
         // Only return a method if it scores above the threshold.
-        if best_score >= 0.2 {
-            best_method
-        } else {
-            None
-        }
+        if best_score >= 0.2 { best_method } else { None }
     }
 
     /// Get the methods (for serialization / stats).
@@ -693,24 +688,17 @@ pub fn decompose_with_method(
     goal: &Goal,
     method: &DecompositionMethod,
 ) -> DecompositionResult<TaskTree> {
-    let goal_short = goal
-        .description
-        .chars()
-        .take(40)
-        .collect::<String>();
+    let goal_short = goal.description.chars().take(40).collect::<String>();
 
     let mut dag: DiGraph<TaskNode, DependencyEdge> = DiGraph::new();
     let mut node_indices: Vec<NodeIndex> = Vec::new();
 
     // Create a node for each subtask template.
     for (i, template) in method.subtask_templates.iter().enumerate() {
-        let description = template
-            .description_template
-            .replace("{goal}", &goal_short);
+        let description = template.description_template.replace("{goal}", &goal_short);
         let criteria = template.criteria_template.replace("{goal}", &goal_short);
 
-        let priority = (goal.priority as i16 + template.priority_offset as i16)
-            .clamp(0, 255) as u8;
+        let priority = (goal.priority as i16 + template.priority_offset as i16).clamp(0, 255) as u8;
 
         let node = TaskNode {
             kind: TaskNodeKind::SubGoal {
@@ -859,11 +847,8 @@ fn extract_dependencies(tree: &TaskTree, topo: &[NodeIndex]) -> Vec<(usize, usiz
     use petgraph::visit::EdgeRef;
 
     // Build index: NodeIndex → position in topo order.
-    let pos: std::collections::HashMap<NodeIndex, usize> = topo
-        .iter()
-        .enumerate()
-        .map(|(i, &idx)| (idx, i))
-        .collect();
+    let pos: std::collections::HashMap<NodeIndex, usize> =
+        topo.iter().enumerate().map(|(i, &idx)| (idx, i)).collect();
 
     let mut deps = Vec::new();
     for edge in tree.dag.edge_references() {
@@ -1084,11 +1069,7 @@ mod tests {
         let goal = make_goal("test goal");
         for method in registry.methods() {
             let result = decompose_with_method(&goal, method);
-            assert!(
-                result.is_ok(),
-                "Method '{}' produced a cycle",
-                method.name
-            );
+            assert!(result.is_ok(), "Method '{}' produced a cycle", method.name);
         }
     }
 
@@ -1124,8 +1105,7 @@ mod tests {
             .find(|m| m.name == "compare_contrast")
             .unwrap();
 
-        let tree =
-            decompose_with_method(&make_goal("compare A vs B"), method).unwrap();
+        let tree = decompose_with_method(&make_goal("compare A vs B"), method).unwrap();
         let topo = tree.topological_order().unwrap();
 
         // 5 nodes in diamond shape.
@@ -1211,8 +1191,7 @@ mod tests {
             .unwrap();
 
         let tree = decompose_with_method(&make_goal("learn about VSA"), method).unwrap();
-        let plan =
-            super::super::plan::Plan::from_task_tree(&tree, SymbolId::new(1).unwrap());
+        let plan = super::super::plan::Plan::from_task_tree(&tree, SymbolId::new(1).unwrap());
 
         // All nodes are SubGoal, not PlanStep, so the Plan should be None.
         assert!(plan.is_none());

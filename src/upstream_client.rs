@@ -203,10 +203,7 @@ impl UpstreamMcpClient {
             parse_sse_last_data(&body)?
         } else {
             serde_json::from_str(&body).map_err(|e| UpstreamError::Parse {
-                message: format!(
-                    "{e}: {}",
-                    body.chars().take(256).collect::<String>()
-                ),
+                message: format!("{e}: {}", body.chars().take(256).collect::<String>()),
             })?
         };
 
@@ -236,10 +233,9 @@ impl UpstreamMcpClient {
                     // failing the call outright.
                     match json["result"]["protocolVersion"].as_str() {
                         Some(v) => {
-                            let negotiated: ProtocolVersion = serde_json::from_value(
-                                Value::String(v.to_string()),
-                            )
-                            .unwrap_or(ProtocolVersion::LATEST);
+                            let negotiated: ProtocolVersion =
+                                serde_json::from_value(Value::String(v.to_string()))
+                                    .unwrap_or(ProtocolVersion::LATEST);
                             if ProtocolVersion::KNOWN_VERSIONS.contains(&negotiated) {
                                 tracing::info!(
                                     endpoint = %self.endpoint,
@@ -500,7 +496,10 @@ mod tests {
             auth_header: None,
         };
         // Config convention: url is a base, `/mcp` is the transport path.
-        assert_eq!(UpstreamMcpClient::new(&cfg).endpoint, "http://anima.local:4100/mcp");
+        assert_eq!(
+            UpstreamMcpClient::new(&cfg).endpoint,
+            "http://anima.local:4100/mcp"
+        );
     }
 
     #[test]
@@ -576,10 +575,16 @@ mod tests {
         });
         let tools = parse_tools_list(&body);
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0], ("search".to_string(), "Search the corpus".to_string()));
+        assert_eq!(
+            tools[0],
+            ("search".to_string(), "Search the corpus".to_string())
+        );
         assert_eq!(
             tools[1],
-            ("list_work_items".to_string(), "List project work items".to_string())
+            (
+                "list_work_items".to_string(),
+                "List project work items".to_string()
+            )
         );
     }
 

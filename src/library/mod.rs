@@ -24,7 +24,9 @@ pub use error::{LibraryError, LibraryResult};
 pub use ingest::{IngestConfig, IngestResult, ingest_document, ingest_file, ingest_url};
 pub use model::{ContentFormat, DocumentRecord, DocumentSource};
 pub use note::{Frontmatter, FrontmatterValue, Note, NoteId, TaskRef, Wikilink, extract_wikilinks};
-pub use note_store::{InMemoryNoteCatalog, NoteCatalog};
+pub use note_store::{
+    InMemoryNoteCatalog, NoteCatalog, NoteCatalogEntry, NoteWriteReceipt, PersistentNoteCatalog,
+};
 pub use predicates::LibraryPredicates;
 
 // ---------------------------------------------------------------------------

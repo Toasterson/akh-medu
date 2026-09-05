@@ -376,11 +376,28 @@ fn is_goal_worthy_label(label: &str) -> bool {
     // Wikipedia/Wikidata meta-pages and agent-internal artifacts.
     let lower = trimmed.to_lowercase();
     let junk_prefixes = [
-        "user:", "wikipedia:", "category talk:", "talk:", "file:",
-        "template:", "portal:", "module:", "draft:", "mediawiki:",
-        "sym:", "para:", "episode:", "doc:",
+        "user:",
+        "wikipedia:",
+        "category talk:",
+        "talk:",
+        "file:",
+        "template:",
+        "portal:",
+        "module:",
+        "draft:",
+        "mediawiki:",
+        "sym:",
+        "para:",
+        "episode:",
+        "doc:",
         // Agent-internal entity kinds (must match is_noise_entity in rule_engine.rs).
-        "tool:", "goal:", "criteria:", "expand:", "desc:", "rate:", "wm:",
+        "tool:",
+        "goal:",
+        "criteria:",
+        "expand:",
+        "desc:",
+        "rate:",
+        "wm:",
     ];
     if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
         return false;
@@ -397,8 +414,13 @@ fn is_goal_worthy_label(label: &str) -> bool {
 
     // Common ingestion artifacts
     let junk_patterns = [
-        "list of", "index of", "timeline of", "articles for creation",
-        "categories for discussion", "redirects to", "sandbox",
+        "list of",
+        "index of",
+        "timeline of",
+        "articles for creation",
+        "categories for discussion",
+        "redirects to",
+        "sandbox",
     ];
     if junk_patterns.iter().any(|p| lower.contains(p)) {
         return false;
@@ -506,7 +528,10 @@ fn proposals_from_anomalies(engine: &Engine, goals: &[Goal]) -> Vec<GoalProposal
             let derived_label = engine.resolve_label(r.derived_id);
             GoalProposal {
                 description: format!("Resolve contradiction involving '{derived_label}'."),
-                rationale: format!("ContradictionDetected provenance for symbol {}", r.derived_id),
+                rationale: format!(
+                    "ContradictionDetected provenance for symbol {}",
+                    r.derived_id
+                ),
                 source: GoalSource::ContradictionDetected {
                     existing: Triple::new(
                         r.derived_id,
@@ -585,16 +610,17 @@ fn proposal_from_impasse(impasse: &DecisionImpasse) -> GoalProposal {
         super::ooda::ImpasseKind::AllBelowThreshold { threshold } => {
             format!("all_below_{threshold:.2}")
         }
-        super::ooda::ImpasseKind::Tie {
-            tool_a, tool_b, ..
-        } => {
+        super::ooda::ImpasseKind::Tie { tool_a, tool_b, .. } => {
             format!("tie_{tool_a}_{tool_b}")
         }
     };
 
     GoalProposal {
         description: format!("Resolve decision impasse for goal {}.", impasse.goal_id),
-        rationale: format!("OODA impasse: {kind_str}, best score {:.2}.", impasse.best_score),
+        rationale: format!(
+            "OODA impasse: {kind_str}, best score {:.2}.",
+            impasse.best_score
+        ),
         source: GoalSource::ImpasseDetected {
             goal_id: impasse.goal_id,
             impasse_kind: kind_str,
@@ -657,17 +683,28 @@ fn deliberate(
     let mut infeasible = 0usize;
 
     // Collect existing goal descriptions for dedup.
-    let existing_descriptions: Vec<&str> = existing_goals.iter().map(|g| g.description.as_str()).collect();
+    let existing_descriptions: Vec<&str> = existing_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .collect();
 
     for proposal in proposals.drain(..) {
         // Dedup: check against existing goals.
-        if is_duplicate(&proposal.description, &existing_descriptions, engine, config) {
+        if is_duplicate(
+            &proposal.description,
+            &existing_descriptions,
+            engine,
+            config,
+        ) {
             deduplicated += 1;
             continue;
         }
 
         // Dedup: check against already-kept proposals.
-        let kept_descriptions: Vec<&str> = kept.iter().map(|p: &GoalProposal| p.description.as_str()).collect();
+        let kept_descriptions: Vec<&str> = kept
+            .iter()
+            .map(|p: &GoalProposal| p.description.as_str())
+            .collect();
         if is_duplicate(&proposal.description, &kept_descriptions, engine, config) {
             deduplicated += 1;
             continue;
@@ -689,7 +726,9 @@ fn deliberate(
     kept.sort_by(|a, b| {
         let score_a = a.priority_suggestion as f32 * a.feasibility;
         let score_b = b.priority_suggestion as f32 * b.feasibility;
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     (kept, deduplicated, infeasible)
@@ -931,8 +970,10 @@ fn proposals_from_competence_gaps(
         return Vec::new();
     }
 
-    let existing_descs: Vec<&str> =
-        existing_goals.iter().map(|g| g.description.as_str()).collect();
+    let existing_descs: Vec<&str> = existing_goals
+        .iter()
+        .map(|g| g.description.as_str())
+        .collect();
 
     let mut proposals: Vec<GoalProposal> = Vec::new();
 
@@ -969,8 +1010,10 @@ fn proposals_from_competence_gaps(
         }
 
         // Deduplicate against already-queued proposals.
-        let queued_descs: Vec<&str> =
-            proposals.iter().map(|p: &GoalProposal| p.description.as_str()).collect();
+        let queued_descs: Vec<&str> = proposals
+            .iter()
+            .map(|p: &GoalProposal| p.description.as_str())
+            .collect();
         if is_duplicate(&description, &queued_descs, engine, config) {
             continue;
         }
@@ -1011,7 +1054,9 @@ mod tests {
     fn is_goal_worthy_rejects_summary_labels() {
         // OODA cycle creates "summary:..." entities in the KG; they must never
         // become goal candidates.
-        assert!(!is_goal_worthy_label("summary:Decide: tool=kg_query, goal=foo"));
+        assert!(!is_goal_worthy_label(
+            "summary:Decide: tool=kg_query, goal=foo"
+        ));
         assert!(!is_goal_worthy_label("summary:Cycle 5: 3 active goals"));
         assert!(!is_goal_worthy_label("episode:42"));
         assert!(!is_goal_worthy_label("tag:observation"));
@@ -1071,8 +1116,10 @@ mod tests {
     fn dedup_string_fallback_allows_different() {
         let new_words: std::collections::HashSet<&str> =
             ["explore", "knowledge", "areas"].iter().copied().collect();
-        let existing_words: std::collections::HashSet<&str> =
-            ["resolve", "contradiction", "logic"].iter().copied().collect();
+        let existing_words: std::collections::HashSet<&str> = ["resolve", "contradiction", "logic"]
+            .iter()
+            .copied()
+            .collect();
         let intersection = new_words.intersection(&existing_words).count();
         let union = new_words.union(&existing_words).count();
         let jaccard = intersection as f32 / union.max(1) as f32;
@@ -1427,7 +1474,20 @@ mod tests {
         }];
 
         let predicates = super::AgentPredicates::init(&engine).unwrap();
-        let proposals = collect_signals(&engine, &[], &drives, &[], &predicates, None, None, &firings);
-        assert!(proposals.iter().any(|p| p.description.contains("Watch-generated")));
+        let proposals = collect_signals(
+            &engine,
+            &[],
+            &drives,
+            &[],
+            &predicates,
+            None,
+            None,
+            &firings,
+        );
+        assert!(
+            proposals
+                .iter()
+                .any(|p| p.description.contains("Watch-generated"))
+        );
     }
 }

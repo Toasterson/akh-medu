@@ -77,7 +77,9 @@ impl LlmRequestMetrics {
 
     /// Wall duration of this request.
     pub fn duration_secs(&self) -> f64 {
-        self.started.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0)
+        self.started
+            .map(|s| s.elapsed().as_secs_f64())
+            .unwrap_or(0.0)
     }
 
     /// Structured log line for this request (one line per request, on completion

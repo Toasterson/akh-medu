@@ -542,10 +542,30 @@ impl Psyche {
         }
 
         // Archetype weights — confidence encodes the weight value.
-        add!(self_sym, preds.has_archetype_weight, sage_sym, self.archetypes.sage);
-        add!(self_sym, preds.has_archetype_weight, healer_sym, self.archetypes.healer);
-        add!(self_sym, preds.has_archetype_weight, guardian_sym, self.archetypes.guardian);
-        add!(self_sym, preds.has_archetype_weight, explorer_sym, self.archetypes.explorer);
+        add!(
+            self_sym,
+            preds.has_archetype_weight,
+            sage_sym,
+            self.archetypes.sage
+        );
+        add!(
+            self_sym,
+            preds.has_archetype_weight,
+            healer_sym,
+            self.archetypes.healer
+        );
+        add!(
+            self_sym,
+            preds.has_archetype_weight,
+            guardian_sym,
+            self.archetypes.guardian
+        );
+        add!(
+            self_sym,
+            preds.has_archetype_weight,
+            explorer_sym,
+            self.archetypes.explorer
+        );
 
         let dominant_sym = engine.resolve_or_create_entity(self.dominant_archetype())?;
         add!(self_sym, preds.dominant_archetype, dominant_sym, 1.0);
@@ -554,12 +574,22 @@ impl Psyche {
         for pattern in &self.shadow.veto_patterns {
             let pat_sym = engine.resolve_or_create_entity(&pattern.name)?;
             add!(self_sym, preds.has_veto_pattern, pat_sym, pattern.severity);
-            add!(self_sym, preds.has_shadow_pattern, pat_sym, pattern.severity);
+            add!(
+                self_sym,
+                preds.has_shadow_pattern,
+                pat_sym,
+                pattern.severity
+            );
         }
         for pattern in &self.shadow.bias_patterns {
             let pat_sym = engine.resolve_or_create_entity(&pattern.name)?;
             add!(self_sym, preds.has_bias_pattern, pat_sym, pattern.severity);
-            add!(self_sym, preds.has_shadow_pattern, pat_sym, pattern.severity);
+            add!(
+                self_sym,
+                preds.has_shadow_pattern,
+                pat_sym,
+                pattern.severity
+            );
         }
 
         // Self-integration — individuation level and shadow encounter count.
@@ -572,7 +602,12 @@ impl Psyche {
         // Normalize encounter count into [0.0, 1.0] (saturates at 100 encounters).
         let normalized_encounters =
             (self.self_integration.shadow_encounters as f32 / 100.0).min(1.0);
-        add!(self_sym, preds.shadow_encounter, shadow_count_sym, normalized_encounters);
+        add!(
+            self_sym,
+            preds.shadow_encounter,
+            shadow_count_sym,
+            normalized_encounters
+        );
 
         tracing::debug!(
             persona = %self.persona.name,
@@ -970,7 +1005,10 @@ mod tests {
         let mut p = Psyche::default();
         p.set_ennead_role("architect");
         let prev = p.set_ennead_role("architect");
-        assert!(prev.is_none(), "same role re-assignment should return None (no-op)");
+        assert!(
+            prev.is_none(),
+            "same role re-assignment should return None (no-op)"
+        );
         assert_eq!(p.ennead_role.as_deref(), Some("architect"));
     }
 
@@ -979,7 +1017,11 @@ mod tests {
         let mut p = Psyche::default();
         p.set_ennead_role("architect");
         let prev = p.set_ennead_role("investigator");
-        assert_eq!(prev.as_deref(), Some("architect"), "conflict should return the existing role");
+        assert_eq!(
+            prev.as_deref(),
+            Some("architect"),
+            "conflict should return the existing role"
+        );
         // Role must not be overwritten.
         assert_eq!(p.ennead_role.as_deref(), Some("architect"));
     }

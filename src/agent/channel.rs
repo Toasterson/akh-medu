@@ -218,12 +218,7 @@ impl ChannelCapabilities {
     /// the action is allowed, or `Err(CapabilityDenied)` if not.
     ///
     /// `action` should be a human-readable name like `"set_goals"`, `"query"`, etc.
-    pub fn require(
-        &self,
-        action: &str,
-        channel_id: &str,
-        kind: ChannelKind,
-    ) -> ChannelResult<()> {
+    pub fn require(&self, action: &str, channel_id: &str, kind: ChannelKind) -> ChannelResult<()> {
         let allowed = match action {
             "set_goals" => self.can_set_goals,
             "query" => self.can_query,
@@ -492,7 +487,10 @@ mod tests {
     #[test]
     fn require_passes_for_allowed_action() {
         let caps = ChannelCapabilities::operator();
-        assert!(caps.require("set_goals", "op-1", ChannelKind::Operator).is_ok());
+        assert!(
+            caps.require("set_goals", "op-1", ChannelKind::Operator)
+                .is_ok()
+        );
         assert!(caps.require("query", "op-1", ChannelKind::Operator).is_ok());
     }
 
@@ -546,7 +544,10 @@ mod tests {
 
         let result = reg.register(Box::new(TestChannel::new("op-2", ChannelKind::Operator)));
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ChannelError::DuplicateOperator));
+        assert!(matches!(
+            result.unwrap_err(),
+            ChannelError::DuplicateOperator
+        ));
     }
 
     #[test]

@@ -30,9 +30,7 @@ pub enum JournalIngestError {
     #[error("cannot read journal directory \"{path}\": {source}")]
     #[diagnostic(
         code(akh::agent::journal::read_dir),
-        help(
-            "Ensure the directory exists. Create it manually or run `akh memory init-journals`."
-        )
+        help("Ensure the directory exists. Create it manually or run `akh memory init-journals`.")
     )]
     ReadDir {
         path: String,
@@ -108,12 +106,7 @@ pub fn chunk_markdown(text: &str, max_chars: usize) -> Vec<JournalChunk> {
 
     for line in text.lines() {
         if line.trim_start().starts_with('#') {
-            flush(
-                &current_heading,
-                &current_body,
-                &mut index,
-                &mut chunks,
-            );
+            flush(&current_heading, &current_body, &mut index, &mut chunks);
             current_heading = line.trim_start_matches('#').trim().to_string();
             current_body.clear();
         } else {
@@ -339,11 +332,7 @@ fn create_episode(
         format!("summary:{summary_text}")
     };
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    let mut triples = vec![Triple::new(
-        episode,
-        predicates.has_summary,
-        summary_sym,
-    )];
+    let mut triples = vec![Triple::new(episode, predicates.has_summary, summary_sym)];
 
     // Tags.
     triples.extend([
@@ -359,8 +348,7 @@ fn create_episode(
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { '_' })
             .collect();
-        let heading_tag =
-            engine.resolve_or_create_entity(&format!("journal:section:{slug}"))?;
+        let heading_tag = engine.resolve_or_create_entity(&format!("journal:section:{slug}"))?;
         triples.push(Triple::new(episode, predicates.has_tag, heading_tag));
     }
 
@@ -476,10 +464,7 @@ pub fn ingest_journals_from_dir(
 ///
 /// Convenience wrapper for callers (CLI, scripts) that don't hold an
 /// `AgentPredicates` instance. Idempotent.
-pub fn ingest_journal_file_auto(
-    engine: &Engine,
-    path: &Path,
-) -> JournalIngestResult<usize> {
+pub fn ingest_journal_file_auto(engine: &Engine, path: &Path) -> JournalIngestResult<usize> {
     let predicates =
         super::agent::AgentPredicates::init(engine).map_err(|e| JournalIngestError::KgWrite {
             file: path.display().to_string(),
@@ -611,9 +596,16 @@ Chose Rust.
         use crate::vsa::Dimension;
 
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("2026-05-24.md"), "## Topology\n\nAll nodes up.\n").unwrap();
-        std::fs::write(dir.path().join("2026-05-25.md"), "## Goals\n\nImplemented recall.\n")
-            .unwrap();
+        std::fs::write(
+            dir.path().join("2026-05-24.md"),
+            "## Topology\n\nAll nodes up.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("2026-05-25.md"),
+            "## Goals\n\nImplemented recall.\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("notes.txt"), "ignored file").unwrap();
 
         let engine = Engine::new(EngineConfig {

@@ -112,8 +112,7 @@ pub fn ingest_topology(engine: &Engine, dry_run: bool) -> ClusterResult<IngestRe
     }
 
     // -- Pods (all namespaces) -----------------------------------------------
-    let pods_json =
-        kubectl_json(&["get", "pods", "--all-namespaces", "-o", "json"])?;
+    let pods_json = kubectl_json(&["get", "pods", "--all-namespaces", "-o", "json"])?;
     for item in json_items(&pods_json) {
         match extract_pod_triples(item) {
             Ok(mut t) => {
@@ -192,12 +191,13 @@ pub fn show_topology(engine: &Engine) {
 // ---------------------------------------------------------------------------
 
 fn kubectl_json(args: &[&str]) -> ClusterResult<Value> {
-    let output = Command::new("kubectl")
-        .args(args)
-        .output()
-        .map_err(|e| ClusterError::KubectlFailed {
-            msg: format!("{e} (is kubectl in PATH?)"),
-        })?;
+    let output =
+        Command::new("kubectl")
+            .args(args)
+            .output()
+            .map_err(|e| ClusterError::KubectlFailed {
+                msg: format!("{e} (is kubectl in PATH?)"),
+            })?;
 
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);
@@ -205,9 +205,8 @@ fn kubectl_json(args: &[&str]) -> ClusterResult<Value> {
         return Err(ClusterError::KubectlNonZero { code, stderr });
     }
 
-    serde_json::from_slice(&output.stdout).map_err(|e| ClusterError::ParseError {
-        msg: e.to_string(),
-    })
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| ClusterError::ParseError { msg: e.to_string() })
 }
 
 /// Extract the `.items[]` array from a kubectl List response.
@@ -260,7 +259,11 @@ fn extract_node_triples(node: &Value) -> ClusterResult<Vec<(String, String, Stri
         .pointer("/status/nodeInfo/kubeletVersion")
         .and_then(Value::as_str)
     {
-        triples.push((name.clone(), "cluster:kubelet-version".into(), ver.to_string()));
+        triples.push((
+            name.clone(),
+            "cluster:kubelet-version".into(),
+            ver.to_string(),
+        ));
     }
 
     Ok(triples)
@@ -278,8 +281,7 @@ fn node_name(node: &Value) -> ClusterResult<String> {
 fn infer_node_role(node: &Value, name: &str) -> String {
     // K8s standard label wins
     if let Some(labels) = node.pointer("/metadata/labels").and_then(Value::as_object) {
-        let is_control_plane =
-            labels.contains_key("node-role.kubernetes.io/control-plane")
+        let is_control_plane = labels.contains_key("node-role.kubernetes.io/control-plane")
             || labels.contains_key("node-role.kubernetes.io/master");
         if is_control_plane {
             return "control-plane".into();
@@ -316,17 +318,17 @@ fn node_internal_ip(node: &Value) -> Option<String> {
         .and_then(Value::as_array)?;
     for addr in addresses {
         if addr.get("type").and_then(Value::as_str) == Some("InternalIP") {
-            return addr.get("address").and_then(Value::as_str).map(str::to_string);
+            return addr
+                .get("address")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
     }
     None
 }
 
 fn node_ready_status(node: &Value) -> String {
-    let conditions = match node
-        .pointer("/status/conditions")
-        .and_then(Value::as_array)
-    {
+    let conditions = match node.pointer("/status/conditions").and_then(Value::as_array) {
         Some(c) => c,
         None => return "Unknown".into(),
     };
@@ -346,9 +348,7 @@ fn node_ready_status(node: &Value) -> String {
 // StorageClass triple extraction
 // ---------------------------------------------------------------------------
 
-fn extract_storageclass_triples(
-    sc: &Value,
-) -> ClusterResult<Vec<(String, String, String)>> {
+fn extract_storageclass_triples(sc: &Value) -> ClusterResult<Vec<(String, String, String)>> {
     let name = sc
         .pointer("/metadata/name")
         .and_then(Value::as_str)
@@ -373,7 +373,11 @@ fn extract_storageclass_triples(
 
     // Reclaim policy
     if let Some(policy) = sc.get("reclaimPolicy").and_then(Value::as_str) {
-        triples.push((name.clone(), "cluster:reclaim-policy".into(), policy.to_string()));
+        triples.push((
+            name.clone(),
+            "cluster:reclaim-policy".into(),
+            policy.to_string(),
+        ));
     }
 
     // Default annotation
@@ -432,7 +436,11 @@ fn extract_pod_triples(pod: &Value) -> ClusterResult<Vec<(String, String, String
     let mut triples = Vec::new();
 
     // Namespace
-    triples.push((pod_label.clone(), "cluster:namespace".into(), ns.to_string()));
+    triples.push((
+        pod_label.clone(),
+        "cluster:namespace".into(),
+        ns.to_string(),
+    ));
 
     // Node placement
     if let Some(node) = pod
@@ -440,7 +448,11 @@ fn extract_pod_triples(pod: &Value) -> ClusterResult<Vec<(String, String, String
         .and_then(Value::as_str)
         .filter(|n| !n.is_empty())
     {
-        triples.push((pod_label.clone(), "cluster:runs-on".into(), node.to_string()));
+        triples.push((
+            pod_label.clone(),
+            "cluster:runs-on".into(),
+            node.to_string(),
+        ));
     }
 
     // First container image
@@ -494,7 +506,10 @@ fn pod_stable_label(pod: &Value, ns: &str, pod_name: &str) -> String {
 ///
 /// e.g. `flux-controller-5f9bbd7b5a` → `flux-controller`
 fn strip_replicaset_suffix(rs_name: &str) -> &str {
-    rs_name.rfind('-').map(|pos| &rs_name[..pos]).unwrap_or(rs_name)
+    rs_name
+        .rfind('-')
+        .map(|pos| &rs_name[..pos])
+        .unwrap_or(rs_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -508,7 +523,10 @@ mod tests {
 
     #[test]
     fn strip_suffix_basic() {
-        assert_eq!(strip_replicaset_suffix("flux-controller-5f9bbd7b5a"), "flux-controller");
+        assert_eq!(
+            strip_replicaset_suffix("flux-controller-5f9bbd7b5a"),
+            "flux-controller"
+        );
     }
 
     #[test]
@@ -518,7 +536,10 @@ mod tests {
 
     #[test]
     fn strip_suffix_multi_dash() {
-        assert_eq!(strip_replicaset_suffix("my-long-deploy-name-abc123"), "my-long-deploy-name");
+        assert_eq!(
+            strip_replicaset_suffix("my-long-deploy-name-abc123"),
+            "my-long-deploy-name"
+        );
     }
 
     #[test]
@@ -566,11 +587,31 @@ mod tests {
             }
         });
         let triples = extract_node_triples(&node).unwrap();
-        assert!(triples.iter().any(|(s, p, o)| s == "wk01" && p == "cluster:ip" && o == "10.0.0.1"));
-        assert!(triples.iter().any(|(s, p, o)| s == "wk01" && p == "cluster:status" && o == "Ready"));
-        assert!(triples.iter().any(|(s, p, o)| s == "wk01" && p == "cluster:arch" && o == "amd64"));
-        assert!(triples.iter().any(|(s, p, o)| s == "wk01" && p == "cluster:role" && o == "worker"));
-        assert!(triples.iter().any(|(s, p, o)| s == "wk01" && p == "cluster:kubelet-version" && o == "v1.32.0"));
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "wk01" && p == "cluster:ip" && o == "10.0.0.1")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "wk01" && p == "cluster:status" && o == "Ready")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "wk01" && p == "cluster:arch" && o == "amd64")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "wk01" && p == "cluster:role" && o == "worker")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "wk01" && p == "cluster:kubelet-version" && o == "v1.32.0")
+        );
     }
 
     #[test]
@@ -586,9 +627,17 @@ mod tests {
             "reclaimPolicy": "Delete"
         });
         let triples = extract_storageclass_triples(&sc).unwrap();
-        assert!(triples.iter().any(|(s, p, o)| s == "longhorn" && p == "cluster:provisioner" && o == "driver.longhorn.io"));
-        assert!(triples.iter().any(|(s, p, o)| s == "longhorn" && p == "cluster:is-default-storage-class" && o == "true"));
-        assert!(triples.iter().any(|(s, p, o)| s == "longhorn" && p == "cluster:reclaim-policy" && o == "Delete"));
+        assert!(triples.iter().any(|(s, p, o)| s == "longhorn"
+            && p == "cluster:provisioner"
+            && o == "driver.longhorn.io"));
+        assert!(triples.iter().any(|(s, p, o)| s == "longhorn"
+            && p == "cluster:is-default-storage-class"
+            && o == "true"));
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == "longhorn" && p == "cluster:reclaim-policy" && o == "Delete")
+        );
     }
 
     #[test]
@@ -621,9 +670,21 @@ mod tests {
         });
         let triples = extract_pod_triples(&pod).unwrap();
         let label = "k8s-deploy:anima/anima-server";
-        assert!(triples.iter().any(|(s, p, o)| s == label && p == "cluster:runs-on" && o == "wk01"));
-        assert!(triples.iter().any(|(s, p, o)| s == label && p == "cluster:phase" && o == "Running"));
-        assert!(triples.iter().any(|(s, p, o)| s == label && p == "cluster:namespace" && o == "anima"));
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == label && p == "cluster:runs-on" && o == "wk01")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == label && p == "cluster:phase" && o == "Running")
+        );
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == label && p == "cluster:namespace" && o == "anima")
+        );
     }
 
     #[test]
@@ -644,6 +705,10 @@ mod tests {
         });
         let triples = extract_pod_triples(&pod).unwrap();
         let label = "k8s-statefulset:cnpg-system/pg-cluster";
-        assert!(triples.iter().any(|(s, p, o)| s == label && p == "cluster:runs-on" && o == "stor01"));
+        assert!(
+            triples
+                .iter()
+                .any(|(s, p, o)| s == label && p == "cluster:runs-on" && o == "stor01")
+        );
     }
 }

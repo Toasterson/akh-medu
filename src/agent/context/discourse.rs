@@ -107,6 +107,9 @@ mod tests {
         // The on-topic older turn (0) outranks the off-topic turn (1).
         let pos0 = order.iter().position(|&i| i == 0).unwrap();
         let pos1 = order.iter().position(|&i| i == 1).unwrap();
-        assert!(pos0 < pos1, "on-topic turn kept before off-topic: {order:?}");
+        assert!(
+            pos0 < pos1,
+            "on-topic turn kept before off-topic: {order:?}"
+        );
     }
 }

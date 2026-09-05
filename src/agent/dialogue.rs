@@ -253,7 +253,9 @@ impl DialogueManager {
             } else if has_trait("warm") || has_trait("supportive") {
                 format!("Welcome! I'm {persona_name}. How can I help you today?")
             } else {
-                format!("Hello. I am {persona_name}. Ask me a question or tell me something to learn.")
+                format!(
+                    "Hello. I am {persona_name}. Ask me a question or tell me something to learn."
+                )
             }
         } else {
             // Returning user — check for active topic.
@@ -296,11 +298,7 @@ impl DialogueManager {
     /// Prefers a persona-aware response from the psyche compartment. Falls back
     /// to a concise grounded query only if psyche is unavailable and the KG
     /// has meaningful (non-metadata) "self" triples.
-    pub fn handle_meta_query(
-        &self,
-        engine: &Arc<Engine>,
-        _grammar: &str,
-    ) -> Option<String> {
+    pub fn handle_meta_query(&self, engine: &Arc<Engine>, _grammar: &str) -> Option<String> {
         // Prefer psyche-based persona response.
         if let Some(psyche) = engine.compartments().and_then(|cm| cm.psyche()) {
             let name = &psyche.persona.name;
@@ -325,10 +323,7 @@ impl DialogueManager {
     /// Returns `None` if the active topic should be re-queried at Full detail.
     /// Checks the KG for a persisted active topic, so follow-ups survive
     /// session boundaries.
-    pub fn handle_follow_up(
-        &self,
-        engine: &Engine,
-    ) -> Option<String> {
+    pub fn handle_follow_up(&self, engine: &Engine) -> Option<String> {
         if self.query_active_topic(engine).is_some() {
             // Caller should re-query the active topic at Full detail.
             None

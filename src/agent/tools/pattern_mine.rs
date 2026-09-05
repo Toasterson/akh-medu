@@ -30,11 +30,9 @@ use crate::fs::Filesystem;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::{SymbolId, SymbolKind};
+use crate::vsa::code_encode::{AstNodeTypes, AstPathContext, encode_code_vector};
 use std::path::Path;
 use std::sync::Arc;
-use crate::vsa::code_encode::{
-    encode_code_vector, AstNodeTypes, AstPathContext,
-};
 
 // ---------------------------------------------------------------------------
 // Code block extraction
@@ -72,11 +70,19 @@ pub fn extract_code_blocks_markdown(text: &str) -> Vec<CodeBlock> {
             None
         } else {
             let lang = after_backticks.split_whitespace().next().unwrap_or("");
-            if lang.is_empty() { None } else { Some(lang.to_string()) }
+            if lang.is_empty() {
+                None
+            } else {
+                Some(lang.to_string())
+            }
         };
 
         // Capture preceding context (up to 100 chars before this line)
-        let line_start_byte = text.lines().take(line_idx).map(|l| l.len() + 1).sum::<usize>();
+        let line_start_byte = text
+            .lines()
+            .take(line_idx)
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
         let context_start = line_start_byte.saturating_sub(100);
         let context = if line_start_byte > 0 && context_start < text_bytes.len() {
             let end = line_start_byte.min(text_bytes.len());
@@ -117,9 +123,8 @@ pub fn extract_code_blocks_html(html: &str) -> Vec<CodeBlock> {
     use scraper::{Html, Selector};
 
     let document = Html::parse_document(html);
-    let code_sel = Selector::parse("pre code").unwrap_or_else(|_| {
-        Selector::parse("code").expect("fallback selector")
-    });
+    let code_sel = Selector::parse("pre code")
+        .unwrap_or_else(|_| Selector::parse("code").expect("fallback selector"));
 
     let mut blocks = Vec::new();
 
@@ -130,14 +135,11 @@ pub fn extract_code_blocks_html(html: &str) -> Vec<CodeBlock> {
         }
 
         // Extract language from class attribute
-        let language = element
-            .value()
-            .attr("class")
-            .and_then(|cls| {
-                cls.split_whitespace()
-                    .find(|c| c.starts_with("language-"))
-                    .map(|c| c.strip_prefix("language-").unwrap_or(c).to_string())
-            });
+        let language = element.value().attr("class").and_then(|cls| {
+            cls.split_whitespace()
+                .find(|c| c.starts_with("language-"))
+                .map(|c| c.strip_prefix("language-").unwrap_or(c).to_string())
+        });
 
         blocks.push(CodeBlock {
             language,
@@ -201,24 +203,44 @@ pub fn simplify_item(item: &syn::Item) -> SimplifiedAst {
             let param_count = f.sig.inputs.len();
             let has_return = !matches!(f.sig.output, syn::ReturnType::Default);
             let body = simplify_block_stmts(&f.block.stmts);
-            SimplifiedAst::Function { param_count, has_return, body }
+            SimplifiedAst::Function {
+                param_count,
+                has_return,
+                body,
+            }
         }
         syn::Item::Struct(s) => {
             let field_count = s.fields.len();
             let derive_count = count_derives(&s.attrs);
-            SimplifiedAst::Struct { field_count, derive_count }
+            SimplifiedAst::Struct {
+                field_count,
+                derive_count,
+            }
         }
         syn::Item::Enum(e) => {
             let variant_count = e.variants.len();
             let derive_count = count_derives(&e.attrs);
-            SimplifiedAst::Enum { variant_count, derive_count }
+            SimplifiedAst::Enum {
+                variant_count,
+                derive_count,
+            }
         }
         syn::Item::Impl(imp) => {
-            let method_count = imp.items.iter().filter(|i| matches!(i, syn::ImplItem::Fn(_))).count();
+            let method_count = imp
+                .items
+                .iter()
+                .filter(|i| matches!(i, syn::ImplItem::Fn(_)))
+                .count();
             let trait_name = imp.trait_.as_ref().map(|(_, path, _)| {
-                path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default()
+                path.segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default()
             });
-            SimplifiedAst::Impl { method_count, trait_name }
+            SimplifiedAst::Impl {
+                method_count,
+                trait_name,
+            }
         }
         _ => SimplifiedAst::Other,
     }
@@ -249,32 +271,42 @@ pub fn simplify_expr(expr: &syn::Expr) -> SimplifiedAst {
 fn simplify_block_stmts(stmts: &[syn::Stmt]) -> Vec<SimplifiedAst> {
     stmts
         .iter()
-        .filter_map(|stmt| {
-            match stmt {
-                syn::Stmt::Expr(expr, _) => {
-                    let s = simplify_expr(expr);
-                    if s != SimplifiedAst::Other { Some(s) } else { None }
+        .filter_map(|stmt| match stmt {
+            syn::Stmt::Expr(expr, _) => {
+                let s = simplify_expr(expr);
+                if s != SimplifiedAst::Other {
+                    Some(s)
+                } else {
+                    None
                 }
-                syn::Stmt::Local(syn::Local { init: Some(syn::LocalInit { expr, .. }), .. }) => {
-                    let s = simplify_expr(expr);
-                    if s != SimplifiedAst::Other { Some(s) } else { None }
-                }
-                syn::Stmt::Item(item) => {
-                    let s = simplify_item(item);
-                    if s != SimplifiedAst::Other { Some(s) } else { None }
-                }
-                _ => None,
             }
+            syn::Stmt::Local(syn::Local {
+                init: Some(syn::LocalInit { expr, .. }),
+                ..
+            }) => {
+                let s = simplify_expr(expr);
+                if s != SimplifiedAst::Other {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
+            syn::Stmt::Item(item) => {
+                let s = simplify_item(item);
+                if s != SimplifiedAst::Other {
+                    Some(s)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         })
         .collect()
 }
 
 /// Count `#[derive(...)]` attributes.
 fn count_derives(attrs: &[syn::Attribute]) -> usize {
-    attrs
-        .iter()
-        .filter(|a| a.path().is_ident("derive"))
-        .count()
+    attrs.iter().filter(|a| a.path().is_ident("derive")).count()
 }
 
 /// Produce a deterministic compact fingerprint string for a [`SimplifiedAst`].
@@ -282,7 +314,11 @@ fn count_derives(attrs: &[syn::Attribute]) -> usize {
 /// Same structure → same fingerprint, regardless of identifier names.
 pub fn ast_fingerprint(ast: &SimplifiedAst) -> String {
     match ast {
-        SimplifiedAst::Function { param_count, has_return, body } => {
+        SimplifiedAst::Function {
+            param_count,
+            has_return,
+            body,
+        } => {
             let ret = if *has_return { "ret" } else { "void" };
             let body_fps: Vec<String> = body.iter().map(ast_fingerprint).collect();
             if body_fps.is_empty() {
@@ -291,13 +327,22 @@ pub fn ast_fingerprint(ast: &SimplifiedAst) -> String {
                 format!("fn({param_count},{ret},[{}])", body_fps.join(","))
             }
         }
-        SimplifiedAst::Struct { field_count, derive_count } => {
+        SimplifiedAst::Struct {
+            field_count,
+            derive_count,
+        } => {
             format!("struct({field_count},d{derive_count})")
         }
-        SimplifiedAst::Enum { variant_count, derive_count } => {
+        SimplifiedAst::Enum {
+            variant_count,
+            derive_count,
+        } => {
             format!("enum({variant_count},d{derive_count})")
         }
-        SimplifiedAst::Impl { method_count, trait_name } => {
+        SimplifiedAst::Impl {
+            method_count,
+            trait_name,
+        } => {
             if let Some(t) = trait_name {
                 format!("impl({method_count},{t})")
             } else {
@@ -306,7 +351,11 @@ pub fn ast_fingerprint(ast: &SimplifiedAst) -> String {
         }
         SimplifiedAst::Match { arm_count } => format!("match({arm_count})"),
         SimplifiedAst::IfElse { has_else } => {
-            if *has_else { "if-else".to_string() } else { "if".to_string() }
+            if *has_else {
+                "if-else".to_string()
+            } else {
+                "if".to_string()
+            }
         }
         SimplifiedAst::ForLoop => "for".to_string(),
         SimplifiedAst::Closure { param_count } => format!("closure({param_count})"),
@@ -347,12 +396,11 @@ pub fn mine_patterns(blocks: &[CodeBlock], min_support: u32) -> Vec<MinedPattern
 
     for block in blocks {
         // Try to parse as a complete file first
-        let parsed = syn::parse_file(&block.source)
-            .or_else(|_| {
-                // Wrap in a function body for expression fragments
-                let wrapped = format!("fn __wrapper__() {{ {} }}", block.source);
-                syn::parse_file(&wrapped)
-            });
+        let parsed = syn::parse_file(&block.source).or_else(|_| {
+            // Wrap in a function body for expression fragments
+            let wrapped = format!("fn __wrapper__() {{ {} }}", block.source);
+            syn::parse_file(&wrapped)
+        });
 
         let file = match parsed {
             Ok(f) => f,
@@ -391,13 +439,15 @@ pub fn mine_patterns(blocks: &[CodeBlock], min_support: u32) -> Vec<MinedPattern
     let mut patterns: Vec<MinedPattern> = freq
         .into_iter()
         .filter(|(_, (_, support, _, _))| *support >= min_support)
-        .map(|(fingerprint, (simplified, support, category, example_source))| MinedPattern {
-            fingerprint,
-            simplified,
-            support,
-            category,
-            example_source,
-        })
+        .map(
+            |(fingerprint, (simplified, support, category, example_source))| MinedPattern {
+                fingerprint,
+                simplified,
+                support,
+                category,
+                example_source,
+            },
+        )
         .collect();
 
     patterns.sort_by(|a, b| b.support.cmp(&a.support));
@@ -411,15 +461,21 @@ pub fn infer_category(block: &CodeBlock, ast: &SimplifiedAst) -> String {
     let src_lower = block.source.to_lowercase();
 
     // Error handling patterns
-    if (ctx_lower.contains("error") || ctx_lower.contains("diagnostic")
-        || src_lower.contains("error") || src_lower.contains("result"))
+    if (ctx_lower.contains("error")
+        || ctx_lower.contains("diagnostic")
+        || src_lower.contains("error")
+        || src_lower.contains("result"))
         && let SimplifiedAst::Enum { .. } | SimplifiedAst::Match { .. } = ast
     {
         return "error-handling".to_string();
     }
 
     // Iterator patterns
-    if let SimplifiedAst::Impl { trait_name: Some(t), .. } = ast {
+    if let SimplifiedAst::Impl {
+        trait_name: Some(t),
+        ..
+    } = ast
+    {
         if t == "Iterator" || t == "IntoIterator" {
             return "iterator".to_string();
         }
@@ -575,10 +631,12 @@ fn store_pattern(
 
     for mut triple in triples {
         triple.compartment_id = comp.map(|s| s.to_string());
-        engine.add_triple(&triple).map_err(|e| AgentError::ToolExecution {
-            tool_name: "pattern_mine".into(),
-            message: format!("failed to add pattern triple: {e}"),
-        })?;
+        engine
+            .add_triple(&triple)
+            .map_err(|e| AgentError::ToolExecution {
+                tool_name: "pattern_mine".into(),
+                message: format!("failed to add pattern triple: {e}"),
+            })?;
     }
 
     // Provenance
@@ -605,11 +663,18 @@ pub fn extract_simplified_contexts(ast: &SimplifiedAst, label: &str) -> Vec<AstP
     let mut contexts = Vec::new();
 
     match ast {
-        SimplifiedAst::Function { param_count, has_return, body } => {
+        SimplifiedAst::Function {
+            param_count,
+            has_return,
+            body,
+        } => {
             // fn → param count
             contexts.push(AstPathContext::new(
                 label,
-                vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::PARAM.to_string()],
+                vec![
+                    AstNodeTypes::FN_DECL.to_string(),
+                    AstNodeTypes::PARAM.to_string(),
+                ],
                 format!("param_count:{param_count}"),
             ));
 
@@ -617,7 +682,10 @@ pub fn extract_simplified_contexts(ast: &SimplifiedAst, label: &str) -> Vec<AstP
             if *has_return {
                 contexts.push(AstPathContext::new(
                     label,
-                    vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::RETURN_TYPE.to_string()],
+                    vec![
+                        AstNodeTypes::FN_DECL.to_string(),
+                        AstNodeTypes::RETURN_TYPE.to_string(),
+                    ],
                     "has_return",
                 ));
             }
@@ -630,51 +698,81 @@ pub fn extract_simplified_contexts(ast: &SimplifiedAst, label: &str) -> Vec<AstP
                 if !sub_contexts.is_empty() {
                     contexts.push(AstPathContext::new(
                         label,
-                        vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::BLOCK.to_string()],
+                        vec![
+                            AstNodeTypes::FN_DECL.to_string(),
+                            AstNodeTypes::BLOCK.to_string(),
+                        ],
                         &sub_label,
                     ));
                 }
                 contexts.extend(sub_contexts);
             }
         }
-        SimplifiedAst::Struct { field_count, derive_count } => {
+        SimplifiedAst::Struct {
+            field_count,
+            derive_count,
+        } => {
             contexts.push(AstPathContext::new(
                 label,
-                vec![AstNodeTypes::STRUCT_DEF.to_string(), AstNodeTypes::FIELD.to_string()],
+                vec![
+                    AstNodeTypes::STRUCT_DEF.to_string(),
+                    AstNodeTypes::FIELD.to_string(),
+                ],
                 format!("field_count:{field_count}"),
             ));
             if *derive_count > 0 {
                 contexts.push(AstPathContext::new(
                     label,
-                    vec![AstNodeTypes::STRUCT_DEF.to_string(), AstNodeTypes::ATTRIBUTE.to_string()],
+                    vec![
+                        AstNodeTypes::STRUCT_DEF.to_string(),
+                        AstNodeTypes::ATTRIBUTE.to_string(),
+                    ],
                     format!("derive_count:{derive_count}"),
                 ));
             }
         }
-        SimplifiedAst::Enum { variant_count, derive_count } => {
+        SimplifiedAst::Enum {
+            variant_count,
+            derive_count,
+        } => {
             contexts.push(AstPathContext::new(
                 label,
-                vec![AstNodeTypes::ENUM_DEF.to_string(), AstNodeTypes::VARIANT.to_string()],
+                vec![
+                    AstNodeTypes::ENUM_DEF.to_string(),
+                    AstNodeTypes::VARIANT.to_string(),
+                ],
                 format!("variant_count:{variant_count}"),
             ));
             if *derive_count > 0 {
                 contexts.push(AstPathContext::new(
                     label,
-                    vec![AstNodeTypes::ENUM_DEF.to_string(), AstNodeTypes::ATTRIBUTE.to_string()],
+                    vec![
+                        AstNodeTypes::ENUM_DEF.to_string(),
+                        AstNodeTypes::ATTRIBUTE.to_string(),
+                    ],
                     format!("derive_count:{derive_count}"),
                 ));
             }
         }
-        SimplifiedAst::Impl { method_count, trait_name } => {
+        SimplifiedAst::Impl {
+            method_count,
+            trait_name,
+        } => {
             contexts.push(AstPathContext::new(
                 label,
-                vec![AstNodeTypes::IMPL_BLOCK.to_string(), AstNodeTypes::FN_DECL.to_string()],
+                vec![
+                    AstNodeTypes::IMPL_BLOCK.to_string(),
+                    AstNodeTypes::FN_DECL.to_string(),
+                ],
                 format!("method_count:{method_count}"),
             ));
             if let Some(t) = trait_name {
                 contexts.push(AstPathContext::new(
                     label,
-                    vec![AstNodeTypes::IMPL_BLOCK.to_string(), AstNodeTypes::TRAIT_DEF.to_string()],
+                    vec![
+                        AstNodeTypes::IMPL_BLOCK.to_string(),
+                        AstNodeTypes::TRAIT_DEF.to_string(),
+                    ],
                     t.as_str(),
                 ));
             }
@@ -682,7 +780,10 @@ pub fn extract_simplified_contexts(ast: &SimplifiedAst, label: &str) -> Vec<AstP
         SimplifiedAst::Match { arm_count } => {
             contexts.push(AstPathContext::new(
                 label,
-                vec![AstNodeTypes::MATCH_EXPR.to_string(), AstNodeTypes::MATCH_ARM.to_string()],
+                vec![
+                    AstNodeTypes::MATCH_EXPR.to_string(),
+                    AstNodeTypes::MATCH_ARM.to_string(),
+                ],
                 format!("arm_count:{arm_count}"),
             ));
         }
@@ -760,39 +861,54 @@ fn analogy_search(
     let ops = engine.ops();
     let im = engine.item_memory();
 
-    let pattern_vec = im.get(base_pattern).ok_or_else(|| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: "base pattern has no VSA vector".into(),
-    })?;
+    let pattern_vec = im
+        .get(base_pattern)
+        .ok_or_else(|| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: "base pattern has no VSA vector".into(),
+        })?;
 
-    let source_vec = im.get(source_concept).ok_or_else(|| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: "source concept has no VSA vector".into(),
-    })?;
+    let source_vec = im
+        .get(source_concept)
+        .ok_or_else(|| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: "source concept has no VSA vector".into(),
+        })?;
 
-    let target_vec = im.get(target_concept).ok_or_else(|| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: "target concept has no VSA vector".into(),
-    })?;
+    let target_vec = im
+        .get(target_concept)
+        .ok_or_else(|| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: "target concept has no VSA vector".into(),
+        })?;
 
     // transform = bind(pattern, source)
-    let transform = ops.bind(&pattern_vec, &source_vec).map_err(|e| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: format!("VSA bind failed: {e}"),
-    })?;
+    let transform = ops
+        .bind(&pattern_vec, &source_vec)
+        .map_err(|e| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: format!("VSA bind failed: {e}"),
+        })?;
 
     // query = bind(transform, target)
-    let query = ops.bind(&transform, &target_vec).map_err(|e| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: format!("VSA bind failed: {e}"),
-    })?;
+    let query = ops
+        .bind(&transform, &target_vec)
+        .map_err(|e| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: format!("VSA bind failed: {e}"),
+        })?;
 
-    let results = engine.search_similar(&query, k).map_err(|e| AgentError::ToolExecution {
-        tool_name: "pattern_mine".into(),
-        message: format!("similarity search failed: {e}"),
-    })?;
+    let results = engine
+        .search_similar(&query, k)
+        .map_err(|e| AgentError::ToolExecution {
+            tool_name: "pattern_mine".into(),
+            message: format!("similarity search failed: {e}"),
+        })?;
 
-    Ok(results.into_iter().map(|r| (r.symbol_id, r.similarity)).collect())
+    Ok(results
+        .into_iter()
+        .map(|r| (r.symbol_id, r.similarity))
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -825,17 +941,21 @@ impl Tool for PatternMineTool {
             parameters: vec![
                 ToolParam {
                     name: "source".into(),
-                    description: "Markdown or HTML text containing code blocks, or a file path.".into(),
+                    description: "Markdown or HTML text containing code blocks, or a file path."
+                        .into(),
                     required: true,
                 },
                 ToolParam {
                     name: "mode".into(),
-                    description: "Mode: 'mine' (extract patterns) or 'search' (find similar patterns).".into(),
+                    description:
+                        "Mode: 'mine' (extract patterns) or 'search' (find similar patterns)."
+                            .into(),
                     required: false,
                 },
                 ToolParam {
                     name: "min_support".into(),
-                    description: "Minimum frequency threshold for pattern discovery (default: 2).".into(),
+                    description: "Minimum frequency threshold for pattern discovery (default: 2)."
+                        .into(),
                     required: false,
                 },
                 ToolParam {
@@ -877,22 +997,37 @@ impl Tool for PatternMineTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "pattern_mine".into(),
-            description: "Mine structural code patterns from examples and store in KG with VSA encoding."
-                .into(),
+            description:
+                "Mine structural code patterns from examples and store in KG with VSA encoding."
+                    .into(),
             parameters: vec![
-                ToolParamSchema::required("source", "Markdown/HTML text or file path with code blocks."),
+                ToolParamSchema::required(
+                    "source",
+                    "Markdown/HTML text or file path with code blocks.",
+                ),
                 ToolParamSchema::optional("mode", "Mode: 'mine' or 'search'."),
-                ToolParamSchema::optional("min_support", "Minimum frequency threshold (default: 2)."),
-                ToolParamSchema::optional("language", "Filter code blocks by language (default: 'rust')."),
+                ToolParamSchema::optional(
+                    "min_support",
+                    "Minimum frequency threshold (default: 2).",
+                ),
+                ToolParamSchema::optional(
+                    "language",
+                    "Filter code blocks by language (default: 'rust').",
+                ),
                 ToolParamSchema::optional("query", "Symbol name for search mode."),
                 ToolParamSchema::optional("analogy_source", "Source concept for analogy search."),
                 ToolParamSchema::optional("analogy_target", "Target concept for analogy search."),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Cautious,
-                capabilities: [Capability::ReadKg, Capability::WriteKg, Capability::VsaAccess, Capability::ReadFilesystem]
-                    .into_iter()
-                    .collect(),
+                capabilities: [
+                    Capability::ReadKg,
+                    Capability::WriteKg,
+                    Capability::VsaAccess,
+                    Capability::ReadFilesystem,
+                ]
+                .into_iter()
+                .collect(),
                 description: "Reads text/files, parses code, writes pattern entities to KG.".into(),
                 shadow_triggers: vec!["pattern".into(), "mine".into(), "learn".into()],
             },
@@ -993,7 +1128,10 @@ impl PatternMineTool {
             patterns
                 .iter()
                 .take(5)
-                .map(|p| format!("  - {} (support={}, cat={})", p.fingerprint, p.support, p.category))
+                .map(|p| format!(
+                    "  - {} (support={}, cat={})",
+                    p.fingerprint, p.support, p.category
+                ))
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
@@ -1005,24 +1143,33 @@ impl PatternMineTool {
     fn execute_search(&self, engine: &Engine, input: &ToolInput) -> AgentResult<ToolOutput> {
         let query_label = input.require("query", "pattern_mine")?;
 
-        let query_id = engine.lookup_symbol(query_label).map_err(|_| AgentError::ToolExecution {
-            tool_name: "pattern_mine".into(),
-            message: format!("symbol not found: {query_label}"),
-        })?;
+        let query_id =
+            engine
+                .lookup_symbol(query_label)
+                .map_err(|_| AgentError::ToolExecution {
+                    tool_name: "pattern_mine".into(),
+                    message: format!("symbol not found: {query_label}"),
+                })?;
 
         // Check for analogy mode
         let analogy_source = input.get("analogy_source");
         let analogy_target = input.get("analogy_target");
 
         if let (Some(src_label), Some(tgt_label)) = (analogy_source, analogy_target) {
-            let src_id = engine.lookup_symbol(src_label).map_err(|_| AgentError::ToolExecution {
-                tool_name: "pattern_mine".into(),
-                message: format!("analogy source not found: {src_label}"),
-            })?;
-            let tgt_id = engine.lookup_symbol(tgt_label).map_err(|_| AgentError::ToolExecution {
-                tool_name: "pattern_mine".into(),
-                message: format!("analogy target not found: {tgt_label}"),
-            })?;
+            let src_id =
+                engine
+                    .lookup_symbol(src_label)
+                    .map_err(|_| AgentError::ToolExecution {
+                        tool_name: "pattern_mine".into(),
+                        message: format!("analogy source not found: {src_label}"),
+                    })?;
+            let tgt_id =
+                engine
+                    .lookup_symbol(tgt_label)
+                    .map_err(|_| AgentError::ToolExecution {
+                        tool_name: "pattern_mine".into(),
+                        message: format!("analogy target not found: {tgt_label}"),
+                    })?;
 
             let results = analogy_search(engine, query_id, src_id, tgt_id, 10)?;
 
@@ -1033,7 +1180,10 @@ impl PatternMineTool {
                 results
                     .iter()
                     .filter_map(|(id, sim)| {
-                        engine.get_symbol_meta(*id).ok().map(|m| format!("  - {} (sim={sim:.3})", m.label))
+                        engine
+                            .get_symbol_meta(*id)
+                            .ok()
+                            .map(|m| format!("  - {} (sim={sim:.3})", m.label))
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -1044,19 +1194,23 @@ impl PatternMineTool {
         }
 
         // Plain similarity search
-        let results = engine.search_similar_to(query_id, 10).map_err(|e| AgentError::ToolExecution {
-            tool_name: "pattern_mine".into(),
-            message: format!("similarity search failed: {e}"),
-        })?;
+        let results =
+            engine
+                .search_similar_to(query_id, 10)
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "pattern_mine".into(),
+                    message: format!("similarity search failed: {e}"),
+                })?;
 
         let summary = format!(
             "Similar patterns to '{query_label}':\n{}",
             results
                 .iter()
                 .filter_map(|r| {
-                    engine.get_symbol_meta(r.symbol_id).ok().map(|m| {
-                        format!("  - {} (sim={:.3})", m.label, r.similarity)
-                    })
+                    engine
+                        .get_symbol_meta(r.symbol_id)
+                        .ok()
+                        .map(|m| format!("  - {} (sim={:.3})", m.label, r.similarity))
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -1074,9 +1228,9 @@ impl PatternMineTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tool::ToolInput;
     use crate::engine::EngineConfig;
     use crate::vsa::Dimension;
-    use crate::agent::tool::ToolInput;
 
     fn test_engine() -> Engine {
         Engine::new(EngineConfig {
@@ -1163,7 +1317,11 @@ def greet(name):
         let simplified = simplify_item(&file.items[0]);
 
         match simplified {
-            SimplifiedAst::Function { param_count, has_return, .. } => {
+            SimplifiedAst::Function {
+                param_count,
+                has_return,
+                ..
+            } => {
                 assert_eq!(param_count, 1);
                 assert!(has_return);
             }
@@ -1178,7 +1336,10 @@ def greet(name):
         let simplified = simplify_item(&file.items[0]);
 
         match simplified {
-            SimplifiedAst::Struct { field_count, derive_count } => {
+            SimplifiedAst::Struct {
+                field_count,
+                derive_count,
+            } => {
                 assert_eq!(field_count, 2);
                 assert_eq!(derive_count, 1); // one #[derive(...)] attribute
             }
@@ -1189,13 +1350,23 @@ def greet(name):
     #[test]
     fn simplify_impl_with_trait() {
         let code = "impl Display for Foo { fn fmt(&self, f: &mut Formatter) -> Result { Ok(()) } }";
-        let file = syn::parse_file(&format!("use std::fmt::{{Display, Formatter, Result}};\n{code}")).unwrap();
+        let file = syn::parse_file(&format!(
+            "use std::fmt::{{Display, Formatter, Result}};\n{code}"
+        ))
+        .unwrap();
         // Find the impl item
-        let impl_item = file.items.iter().find(|i| matches!(i, syn::Item::Impl(_))).unwrap();
+        let impl_item = file
+            .items
+            .iter()
+            .find(|i| matches!(i, syn::Item::Impl(_)))
+            .unwrap();
         let simplified = simplify_item(impl_item);
 
         match simplified {
-            SimplifiedAst::Impl { method_count, trait_name } => {
+            SimplifiedAst::Impl {
+                method_count,
+                trait_name,
+            } => {
                 assert_eq!(method_count, 1);
                 assert_eq!(trait_name.as_deref(), Some("Display"));
             }
@@ -1294,7 +1465,10 @@ def greet(name):
             source: "enum MyError { IoError, ParseError }".into(),
             context: "Error handling example:".into(),
         };
-        let ast = SimplifiedAst::Enum { variant_count: 2, derive_count: 0 };
+        let ast = SimplifiedAst::Enum {
+            variant_count: 2,
+            derive_count: 0,
+        };
         assert_eq!(infer_category(&error_block, &ast), "error-handling");
 
         let general_block = CodeBlock {
@@ -1337,7 +1511,10 @@ def greet(name):
         );
 
         // Different structure (struct vs function)
-        let ast3 = SimplifiedAst::Struct { field_count: 5, derive_count: 2 };
+        let ast3 = SimplifiedAst::Struct {
+            field_count: 5,
+            derive_count: 2,
+        };
         let ctx3 = extract_simplified_contexts(&ast3, "pat");
         let v3 = encode_code_vector(ops, &ctx3).unwrap();
 
@@ -1383,7 +1560,11 @@ fn transform(src: &str) -> Result<Output, Error> {
 
         let output = tool.execute(&engine, input).unwrap();
         assert!(output.success, "mine should succeed: {}", output.result);
-        assert!(output.result.contains("pattern"), "should mention patterns: {}", output.result);
+        assert!(
+            output.result.contains("pattern"),
+            "should mention patterns: {}",
+            output.result
+        );
     }
 
     #[test]
@@ -1419,7 +1600,11 @@ fn c(z: u32) -> bool { z > 0 }
         let search_out = tool.execute(&engine, search_input).unwrap();
         // Search may or may not find results depending on item memory state,
         // but it should not error.
-        assert!(search_out.success, "search should succeed: {}", search_out.result);
+        assert!(
+            search_out.success,
+            "search should succeed: {}",
+            search_out.result
+        );
     }
 
     // -- Pattern predicates --
@@ -1430,11 +1615,19 @@ fn c(z: u32) -> bool { z > 0 }
         let preds = PatternPredicates::init(&engine).unwrap();
 
         let ids = [
-            preds.source, preds.frequency, preds.structure,
-            preds.category, preds.granularity, preds.example,
+            preds.source,
+            preds.frequency,
+            preds.structure,
+            preds.category,
+            preds.granularity,
+            preds.example,
         ];
         let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "all pattern predicates must be unique");
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "all pattern predicates must be unique"
+        );
     }
 
     #[test]

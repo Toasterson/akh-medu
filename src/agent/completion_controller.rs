@@ -214,9 +214,7 @@ impl CompletionController {
             .stages
             .iter()
             .enumerate()
-            .map(|(index, gate)| {
-                format!("{}. {}: {}", index + 1, gate.label, gate.expectation())
-            })
+            .map(|(index, gate)| format!("{}. {}: {}", index + 1, gate.label, gate.expectation()))
             .collect::<Vec<_>>()
             .join("\n");
         format!(

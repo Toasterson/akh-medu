@@ -164,13 +164,9 @@ impl ThoughtVerifier for CompositeVerifier {
         reasons.extend(s.reasons);
         reasons.extend(v.reasons);
 
-        let top_belief = state
-            .top_hypothesis()
-            .map(|h| h.belief())
-            .unwrap_or(0.0);
-        let sufficient = !contradicted
-            && score >= cfg.sufficiency_threshold
-            && top_belief >= cfg.min_belief;
+        let top_belief = state.top_hypothesis().map(|h| h.belief()).unwrap_or(0.0);
+        let sufficient =
+            !contradicted && score >= cfg.sufficiency_threshold && top_belief >= cfg.min_belief;
 
         Ok(VerifierVerdict {
             score: score.clamp(0.0, 1.0),

@@ -71,9 +71,15 @@ impl TriageDispatchTrapsTool {
     }
 
     /// Fetch work items for the project and identify trap candidates.
-    fn fetch_project_work_items(client: &UpstreamMcpClient, project_id: &str) -> AgentResult<Vec<Value>> {
+    fn fetch_project_work_items(
+        client: &UpstreamMcpClient,
+        project_id: &str,
+    ) -> AgentResult<Vec<Value>> {
         let text = client
-            .call_tool_text("list_work_items", serde_json::json!({"project_id": project_id}))
+            .call_tool_text(
+                "list_work_items",
+                serde_json::json!({"project_id": project_id}),
+            )
             .map_err(|e| AgentError::ToolExecution {
                 tool_name: "triage_dispatch_traps".into(),
                 message: format!("list_work_items failed: {e}"),
@@ -88,9 +94,15 @@ impl TriageDispatchTrapsTool {
     }
 
     /// Fetch full detail for a single work item.
-    fn fetch_work_item_detail(client: &UpstreamMcpClient, work_item_id: &str) -> AgentResult<Value> {
+    fn fetch_work_item_detail(
+        client: &UpstreamMcpClient,
+        work_item_id: &str,
+    ) -> AgentResult<Value> {
         let text = client
-            .call_tool_text("get_work_item_detail", serde_json::json!({"id": work_item_id}))
+            .call_tool_text(
+                "get_work_item_detail",
+                serde_json::json!({"id": work_item_id}),
+            )
             .map_err(|e| AgentError::ToolExecution {
                 tool_name: "triage_dispatch_traps".into(),
                 message: format!("get_work_item_detail({work_item_id}) failed: {e}"),
@@ -220,7 +232,8 @@ impl TriageDispatchTrapsTool {
         engine.add_triple(&Triple::new(wi_sym, needs_triage_pred, true_obj))?;
 
         if trap.has_explosion {
-            let explosion_pred = engine.resolve_or_create_relation("has-change-record-explosion")?;
+            let explosion_pred =
+                engine.resolve_or_create_relation("has-change-record-explosion")?;
             engine.add_triple(&Triple::new(wi_sym, explosion_pred, true_obj))?;
         }
 
@@ -244,8 +257,7 @@ impl Tool for TriageDispatchTrapsTool {
                 },
                 ToolParam {
                     name: "dry_run".into(),
-                    description:
-                        "If true, report findings without writing KG triples.".into(),
+                    description: "If true, report findings without writing KG triples.".into(),
                     required: false,
                 },
             ],

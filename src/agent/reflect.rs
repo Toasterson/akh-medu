@@ -210,7 +210,8 @@ pub fn reflect(
         adjustments.len(),
     );
 
-    let goal_proposals = generate_reflection_proposals(&goal_insights, &tool_insights, memory_pressure);
+    let goal_proposals =
+        generate_reflection_proposals(&goal_insights, &tool_insights, memory_pressure);
 
     // GTD weekly review (Phase 13e).
     let gtd_review = match (pim, projects) {
@@ -424,7 +425,10 @@ fn generate_reflection_proposals(
     for insight in goal_insights {
         if insight.is_stagnant {
             proposals.push(GoalProposal {
-                description: format!("Explore alternative approaches for '{}'", insight.description),
+                description: format!(
+                    "Explore alternative approaches for '{}'",
+                    insight.description
+                ),
                 rationale: format!(
                     "Goal stagnant after {} cycles — try different angle",
                     insight.cycles_worked
@@ -444,8 +448,8 @@ fn generate_reflection_proposals(
     }
 
     // All tools flagged ineffective → strategy improvement meta-goal.
-    let all_ineffective = !tool_insights.is_empty()
-        && tool_insights.iter().all(|t| t.flagged_ineffective);
+    let all_ineffective =
+        !tool_insights.is_empty() && tool_insights.iter().all(|t| t.flagged_ineffective);
     if all_ineffective {
         proposals.push(GoalProposal {
             description: "Develop new strategy for effective tool usage".to_string(),
@@ -464,7 +468,10 @@ fn generate_reflection_proposals(
     if memory_pressure > 0.9 {
         proposals.push(GoalProposal {
             description: "Consolidate and organize knowledge to reduce memory pressure".to_string(),
-            rationale: format!("Memory pressure at {:.0}% — needs consolidation", memory_pressure * 100.0),
+            rationale: format!(
+                "Memory pressure at {:.0}% — needs consolidation",
+                memory_pressure * 100.0
+            ),
             source: GoalSource::ReflectionInsight {
                 insight: format!("high_memory_pressure:{memory_pressure:.2}"),
             },
@@ -596,7 +603,8 @@ pub fn evaluate_goal_relevance(
                             goal_id,
                             from: g.priority,
                             to: new_priority,
-                            reason: "Goal difficulty exceeds current competence (beyond ZPD)".into(),
+                            reason: "Goal difficulty exceeds current competence (beyond ZPD)"
+                                .into(),
                         });
                     }
                 }

@@ -40,7 +40,9 @@ pub enum AkhConfigError {
     #[error("failed to read akh config at {path}")]
     #[diagnostic(
         code(akh::akh_config::read),
-        help("Ensure akh.toml exists and is readable, or omit it entirely to use name-only defaults.")
+        help(
+            "Ensure akh.toml exists and is readable, or omit it entirely to use name-only defaults."
+        )
     )]
     Read {
         path: String,
@@ -83,10 +85,18 @@ pub enum AkhConfigError {
              configured would invalidate any measurement taken against this akh."
         )
     )]
-    MissingOpenAiEndpoint {
-        akh: String,
-        field: &'static str,
-    },
+    MissingOpenAiEndpoint { akh: String, field: &'static str },
+
+    #[error("akh \"{akh}\" selects backend = \"grug\" but `model` is missing")]
+    #[diagnostic(
+        code(akh::akh_config::missing_grug_model),
+        help(
+            "Set `model` to a BabyLLM bundle directory containing active-model.json. \
+             Relative paths resolve below the shared Akh-Medu models directory; \
+             absolute paths are accepted for development runs."
+        )
+    )]
+    MissingGrugModel { akh: String },
 }
 
 /// One unrecognized key found while loading an `akh.toml`, surfaced so the
@@ -379,7 +389,9 @@ impl ExecBackendConfig {
         let mut cfg = RemoteBackendConfig::new(host.clone(), user.clone(), key.clone())
             .with_port(*port)
             .with_host_key_policy(match known_hosts {
-                Some(p) => HostKeyPolicy::KnownHosts { path: Some(p.clone()) },
+                Some(p) => HostKeyPolicy::KnownHosts {
+                    path: Some(p.clone()),
+                },
                 None => HostKeyPolicy::KnownHosts { path: None },
             });
         if let Some(dir) = workdir {
@@ -435,9 +447,8 @@ fn default_true() -> bool {
 /// Which LLM backing drives this akh's chat/agentic turn (ADR 070).
 ///
 /// `Ollama` is the common default (local or `ollama.com` cloud, native
-/// function-calling). `Candle` runs an in-process GGUF model with
-/// grammar-constrained tool calling — device-limited (GPU helps, but it runs
-/// CPU-only too), for hosts that prefer fully local inference.
+/// function-calling). `Candle` runs an in-process GGUF model. `Grug` runs the
+/// compact, from-scratch BabyLLM bundle trained against Akh's tool contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatBacking {
@@ -452,6 +463,8 @@ pub enum ChatBacking {
     /// this backing (an akh that selects it without one is a config error).
     #[serde(rename = "openai")]
     OpenAi,
+    /// Akh-Medu's own compact Burn transformer bundle (`active-model.json`).
+    Grug,
 }
 
 /// An OpenAI-compatible inference endpoint (`backend = "openai"`).
@@ -549,9 +562,9 @@ pub struct AkhConfig {
     #[serde(default = "default_true")]
     pub is_main: bool,
 
-    /// Which chat/agentic backing this akh uses (ADR 070): `"ollama"` (default,
-    /// local or cloud) or `"candle"` (in-process GGUF, grammar-constrained tool
-    /// calling, device-limited). Serialized as a top-level scalar.
+    /// Which chat/agentic backing this akh uses: `"ollama"` (default),
+    /// `"candle"`, `"openai"`, or `"grug"` (Akh-Medu's compact BabyLLM).
+    /// Serialized as a top-level scalar.
     #[serde(default)]
     pub backend: ChatBacking,
 
@@ -726,8 +739,11 @@ impl AkhConfig {
     /// always stay confined to `scratch/`. Empty when the switch is off and no
     /// extra roots are configured (normal akhs are unaffected).
     pub fn effective_read_roots(&self) -> Vec<std::path::PathBuf> {
-        let mut roots: Vec<std::path::PathBuf> =
-            self.extra_read_roots.iter().map(|p| expand_home(p)).collect();
+        let mut roots: Vec<std::path::PathBuf> = self
+            .extra_read_roots
+            .iter()
+            .map(|p| expand_home(p))
+            .collect();
         if self.openclaw_import {
             let openclaw = expand_home(std::path::Path::new("~/.openclaw"));
             if !roots.contains(&openclaw) {
@@ -761,9 +777,7 @@ impl AkhConfig {
 
     /// Like [`Self::load`], but also returns the list of unrecognized keys
     /// found in the raw TOML instead of only logging them.
-    pub fn load_checked(
-        path: &std::path::Path,
-    ) -> AkhConfigResult<(Self, Vec<UnknownConfigKey>)> {
+    pub fn load_checked(path: &std::path::Path) -> AkhConfigResult<(Self, Vec<UnknownConfigKey>)> {
         let content = std::fs::read_to_string(path).map_err(|e| AkhConfigError::Read {
             path: path.display().to_string(),
             source: e,
@@ -977,17 +991,19 @@ impl AkhConfig {
     /// akh explicitly sets `kind = "local-drop"` — host defaults resolve via
     /// [`AkhConfig::effective_exec`] + [`ExecBackendConfig::to_local_drop_config`].
     pub fn to_local_drop_config(&self) -> Option<crate::backend::LocalDropConfig> {
-        self.exec.as_ref().and_then(ExecBackendConfig::to_local_drop_config)
+        self.exec
+            .as_ref()
+            .and_then(ExecBackendConfig::to_local_drop_config)
     }
 
     /// Translate a per-akh `[exec]` override into the `RemoteBackendConfig`
     /// the daemon hands to `RemoteBackend::connect`. Returns `None` unless
     /// this akh explicitly sets `kind = "remote"`.
     #[cfg(feature = "remote-executor")]
-    pub fn to_remote_backend_config(
-        &self,
-    ) -> Option<crate::backend::remote::RemoteBackendConfig> {
-        self.exec.as_ref().and_then(ExecBackendConfig::to_remote_backend_config)
+    pub fn to_remote_backend_config(&self) -> Option<crate::backend::remote::RemoteBackendConfig> {
+        self.exec
+            .as_ref()
+            .and_then(ExecBackendConfig::to_remote_backend_config)
     }
 
     /// Build the [`ModelManagerConfig`] this akh's model manager should use:
@@ -1034,18 +1050,20 @@ impl AkhConfig {
         if self.backend != ChatBacking::OpenAi {
             return Ok(None);
         }
-        let endpoint = self.openai_endpoint.as_ref().ok_or_else(|| {
-            AkhConfigError::MissingOpenAiEndpoint {
-                akh: self.workspace.name.clone(),
-                field: "openai_endpoint",
-            }
-        })?;
-        let model = self.model.clone().ok_or_else(|| {
-            AkhConfigError::MissingOpenAiEndpoint {
+        let endpoint =
+            self.openai_endpoint
+                .as_ref()
+                .ok_or_else(|| AkhConfigError::MissingOpenAiEndpoint {
+                    akh: self.workspace.name.clone(),
+                    field: "openai_endpoint",
+                })?;
+        let model = self
+            .model
+            .clone()
+            .ok_or_else(|| AkhConfigError::MissingOpenAiEndpoint {
                 akh: self.workspace.name.clone(),
                 field: "model",
-            }
-        })?;
+            })?;
 
         Ok(Some(crate::agent::openai_backend::OpenAiConfig {
             base_url: endpoint.base_url.clone(),
@@ -1056,6 +1074,31 @@ impl AkhConfig {
             max_tokens: endpoint.max_tokens,
             temperature: endpoint.temperature,
             reasoning_effort: self.reasoning_effort.clone(),
+        }))
+    }
+
+    /// Resolve `model` for a `backend = "grug"` akh. Relative bundle paths
+    /// live below the shared models directory; an explicit absolute path is
+    /// useful for a run still under evaluation and is never rewritten.
+    pub fn to_grug_model_path(
+        &self,
+        models_dir: &std::path::Path,
+    ) -> Result<Option<std::path::PathBuf>, AkhConfigError> {
+        if self.backend != ChatBacking::Grug {
+            return Ok(None);
+        }
+        let configured = self
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| AkhConfigError::MissingGrugModel {
+                akh: self.workspace.name.clone(),
+            })?;
+        let configured = std::path::PathBuf::from(configured);
+        Ok(Some(if configured.is_absolute() {
+            configured
+        } else {
+            models_dir.join(configured)
         }))
     }
 }
@@ -1098,7 +1141,11 @@ mod tests {
         assert_eq!(cfg.ollama_endpoint, OllamaEndpoint::default());
         assert!(cfg.model.is_none());
         assert!(cfg.system_prompt.is_none());
-        assert_eq!(cfg.backend, ChatBacking::Ollama, "Ollama is the default backing");
+        assert_eq!(
+            cfg.backend,
+            ChatBacking::Ollama,
+            "Ollama is the default backing"
+        );
     }
 
     #[test]
@@ -1107,13 +1154,32 @@ mod tests {
         let legacy: AkhConfig = toml::from_str("name = \"a\"").unwrap();
         assert_eq!(legacy.backend, ChatBacking::Ollama);
         // Explicit candle backing (ADR 070).
-        let candle: AkhConfig =
-            toml::from_str("name = \"a\"\nbackend = \"candle\"").unwrap();
+        let candle: AkhConfig = toml::from_str("name = \"a\"\nbackend = \"candle\"").unwrap();
         assert_eq!(candle.backend, ChatBacking::Candle);
         // Round-trips through serialization.
         let s = toml::to_string(&candle).unwrap();
         let back: AkhConfig = toml::from_str(&s).unwrap();
         assert_eq!(back.backend, ChatBacking::Candle);
+
+        let grug: AkhConfig =
+            toml::from_str("name = \"a\"\nbackend = \"grug\"\nmodel = \"grug/akh-tool-small\"")
+                .unwrap();
+        assert_eq!(grug.backend, ChatBacking::Grug);
+        assert_eq!(
+            grug.to_grug_model_path(std::path::Path::new("/models"))
+                .unwrap()
+                .unwrap(),
+            std::path::PathBuf::from("/models/grug/akh-tool-small")
+        );
+    }
+
+    #[test]
+    fn grug_backend_requires_a_model_bundle() {
+        let cfg: AkhConfig = toml::from_str("name = \"a\"\nbackend = \"grug\"").unwrap();
+        assert!(matches!(
+            cfg.to_grug_model_path(std::path::Path::new("/models")),
+            Err(AkhConfigError::MissingGrugModel { .. })
+        ));
     }
 
     #[test]
@@ -1264,7 +1330,12 @@ mod tests {
 
         // None ⇒ the OllamaConfig field stays None (model default).
         let bare = AkhConfig::with_name("ptah");
-        assert!(bare.to_model_manager_config().ollama.reasoning_effort.is_none());
+        assert!(
+            bare.to_model_manager_config()
+                .ollama
+                .reasoning_effort
+                .is_none()
+        );
     }
 
     #[test]
@@ -1280,7 +1351,10 @@ mod tests {
         // The scalar must precede the [ollama_endpoint] table for valid TOML.
         let effort_at = content.find("reasoning_effort").expect("effort present");
         let table_at = content.find("[ollama_endpoint]").expect("table present");
-        assert!(effort_at < table_at, "reasoning_effort must serialize before the table:\n{content}");
+        assert!(
+            effort_at < table_at,
+            "reasoning_effort must serialize before the table:\n{content}"
+        );
 
         let loaded = AkhConfig::load(&path).expect("load");
         assert_eq!(loaded.reasoning_effort.as_deref(), Some("high"));
@@ -1335,8 +1409,8 @@ mod tests {
     /// invisible without exactly this check.
     #[test]
     fn shipped_example_workspace_configs_are_valid() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/three-akhs/workspaces");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/three-akhs/workspaces");
         let entries = std::fs::read_dir(&dir).expect("example workspace dir exists");
         let mut checked = 0;
         for entry in entries {
@@ -1354,7 +1428,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 4, "expected the example akhs to be checked, saw {checked}");
+        assert!(
+            checked >= 4,
+            "expected the example akhs to be checked, saw {checked}"
+        );
     }
 
     #[test]
@@ -1418,7 +1495,13 @@ mod tests {
             toml::from_str("name = \"d\"\nbackend = \"openai\"\nmodel = \"m\"\n").expect("parse");
         let err = cfg.to_openai_config().expect_err("must refuse");
         assert!(
-            matches!(err, AkhConfigError::MissingOpenAiEndpoint { field: "openai_endpoint", .. }),
+            matches!(
+                err,
+                AkhConfigError::MissingOpenAiEndpoint {
+                    field: "openai_endpoint",
+                    ..
+                }
+            ),
             "unexpected error: {err:?}"
         );
     }
@@ -1429,7 +1512,10 @@ mod tests {
         let cfg: AkhConfig = toml::from_str(toml_src).expect("parse");
         let err = cfg.to_openai_config().expect_err("must refuse");
         assert!(
-            matches!(err, AkhConfigError::MissingOpenAiEndpoint { field: "model", .. }),
+            matches!(
+                err,
+                AkhConfigError::MissingOpenAiEndpoint { field: "model", .. }
+            ),
             "unexpected error: {err:?}"
         );
     }
@@ -1472,8 +1558,15 @@ mod tests {
         let path = dir.path().join("akh.toml");
         let cfg = AkhConfig::with_name("thoth");
         cfg.save(&path).expect("save");
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "akh.toml may contain secrets and must be 0600, got {mode:o}");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "akh.toml may contain secrets and must be 0600, got {mode:o}"
+        );
     }
 
     #[test]
@@ -1504,9 +1597,15 @@ mod tests {
         let unknown = AkhConfig::unknown_keys(&raw);
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0].path, "ollama_endpoint.model");
-        assert_eq!(unknown[0].misplaced_under_table.as_deref(), Some("ollama_endpoint"));
+        assert_eq!(
+            unknown[0].misplaced_under_table.as_deref(),
+            Some("ollama_endpoint")
+        );
         let msg = unknown[0].to_string();
-        assert!(msg.contains("top-level"), "message should call out the footgun: {msg}");
+        assert!(
+            msg.contains("top-level"),
+            "message should call out the footgun: {msg}"
+        );
     }
 
     #[test]
@@ -1601,10 +1700,7 @@ mod tests {
         let toml_src = "name = \"thoth\"\n[exec]\nkind = \"none\"\n";
         let cfg: AkhConfig = toml::from_str(toml_src).unwrap();
         assert!(matches!(cfg.exec, Some(ExecBackendConfig::None)));
-        assert!(matches!(
-            cfg.effective_exec(None),
-            ExecBackendConfig::None
-        ));
+        assert!(matches!(cfg.effective_exec(None), ExecBackendConfig::None));
     }
 
     #[test]
@@ -1762,7 +1858,10 @@ mod tests {
         assert_eq!(rbc.host, "armini");
         assert_eq!(rbc.user, "toasty");
         assert_eq!(rbc.port, 2222);
-        assert_eq!(rbc.private_key_path, std::path::Path::new("/etc/akh/ssh/id_ed25519"));
+        assert_eq!(
+            rbc.private_key_path,
+            std::path::Path::new("/etc/akh/ssh/id_ed25519")
+        );
         assert!(matches!(
             rbc.host_key_policy,
             HostKeyPolicy::KnownHosts { path: Some(_) }

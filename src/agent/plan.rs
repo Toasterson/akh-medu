@@ -657,7 +657,10 @@ fn generate_code_plan(
         });
 
         // Step 2: If goal mentions a reference file, ingest it
-        if goal_lower.contains("like") || goal_lower.contains("similar to") || goal_lower.contains("based on") {
+        if goal_lower.contains("like")
+            || goal_lower.contains("similar to")
+            || goal_lower.contains("based on")
+        {
             steps.push(PlanStep {
                 tool_name: "code_ingest".into(),
                 tool_input: ToolInput::new().with_param("path", &target_name),
@@ -679,7 +682,11 @@ fn generate_code_plan(
                     .with_param("predicate", "is-a")
                     .with_param("object", scope_to_type(scope))
                     .with_param("confidence", "0.9"),
-                rationale: format!("Define '{}' as a {} in the KG.", target_name, scope_to_type(scope)),
+                rationale: format!(
+                    "Define '{}' as a {} in the KG.",
+                    target_name,
+                    scope_to_type(scope)
+                ),
                 status: StepStatus::Pending,
                 index: steps.len(),
                 expected_effects: Vec::new(),
@@ -702,7 +709,10 @@ fn generate_code_plan(
         strategy_parts.push("generate");
 
         // Step 5: Write to file if goal implies file output
-        if goal_lower.contains("file") || goal_lower.contains("write") || goal_lower.contains("save") {
+        if goal_lower.contains("file")
+            || goal_lower.contains("write")
+            || goal_lower.contains("save")
+        {
             let filename = format!("{}.rs", target_name.replace('-', "_").to_lowercase());
             steps.push(PlanStep {
                 tool_name: "file_io".into(),
@@ -721,8 +731,7 @@ fn generate_code_plan(
         // Step 6: Validate with compiler
         steps.push(PlanStep {
             tool_name: "compile_feedback".into(),
-            tool_input: ToolInput::new()
-                .with_param("command", "check"),
+            tool_input: ToolInput::new().with_param("command", "check"),
             rationale: "Validate generated code compiles.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
@@ -800,8 +809,7 @@ fn generate_code_plan(
         // Step 6: Validate
         steps.push(PlanStep {
             tool_name: "compile_feedback".into(),
-            tool_input: ToolInput::new()
-                .with_param("command", "check"),
+            tool_input: ToolInput::new().with_param("command", "check"),
             rationale: "Validate generated code compiles.".into(),
             status: StepStatus::Pending,
             index: steps.len(),
@@ -831,19 +839,15 @@ fn generate_code_plan(
 fn extract_code_target(description: &str) -> Option<String> {
     let lower = description.to_lowercase();
 
-    let prefixes = [
-        "implement ",
-        "generate ",
-        "create ",
-        "write ",
-        "scaffold ",
-    ];
+    let prefixes = ["implement ", "generate ", "create ", "write ", "scaffold "];
 
     for prefix in &prefixes {
         if let Some(rest) = lower.find(prefix).map(|i| &description[i + prefix.len()..]) {
             // Skip scope words
             let rest = rest.trim();
-            let skip_words = ["function", "struct", "enum", "trait", "module", "a", "an", "the"];
+            let skip_words = [
+                "function", "struct", "enum", "trait", "module", "a", "an", "the",
+            ];
             let mut words: Vec<&str> = rest.split_whitespace().collect();
             while !words.is_empty() && skip_words.contains(&words[0].to_lowercase().as_str()) {
                 words.remove(0);

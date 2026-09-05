@@ -62,9 +62,7 @@ impl Tool for AuditLogTool {
             Ok(id) => Ok(ToolOutput::ok(format!(
                 "Logged to audit ledger (id: {id}).",
             ))),
-            Err(e) => Ok(ToolOutput::err(format!(
-                "Failed to write audit log: {e}",
-            ))),
+            Err(e) => Ok(ToolOutput::err(format!("Failed to write audit log: {e}",))),
         }
     }
 

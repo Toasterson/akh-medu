@@ -205,9 +205,10 @@ impl<'e> ThinkingLoop<'e> {
             let primitive = scheduler.next(&state)?;
             let step_start = Instant::now();
             let step = self.run_primitive(primitive, &mut state)?;
-            state
-                .budget
-                .charge(primitive.voc_cost(), step_start.elapsed().as_millis() as u64);
+            state.budget.charge(
+                primitive.voc_cost(),
+                step_start.elapsed().as_millis() as u64,
+            );
             state.trace.push(step.clone());
             self.persistence.flush_step(state.id, flushed, &step)?;
             flushed += 1;
@@ -409,7 +410,8 @@ impl<'e> ThinkingLoop<'e> {
             voc_used: state.budget.used_voc,
             halt_reason,
         };
-        self.persistence.conclude(conclusion.thought_id, &conclusion)?;
+        self.persistence
+            .conclude(conclusion.thought_id, &conclusion)?;
         Ok(conclusion)
     }
 
@@ -651,12 +653,7 @@ impl<'e> ThinkingLoop<'e> {
             state.frontier.push_back(sym);
             new_concepts.push(sym);
             if self.is_answer_candidate(state, sym) {
-                self.upsert_hypothesis(
-                    state,
-                    sym,
-                    MassFunction::from_confidence(act * 0.9),
-                    &[],
-                );
+                self.upsert_hypothesis(state, sym, MassFunction::from_confidence(act * 0.9), &[]);
             }
             if new_vecs.len() < 4 {
                 new_vecs.push(
@@ -899,8 +896,8 @@ impl<'e> ThinkingLoop<'e> {
                 continue;
             }
             let kg_support = kg_evidence.get(&sym).copied();
-            let support = kg_support
-                .unwrap_or_else(|| state.activation.get(&sym).copied().unwrap_or(0.0));
+            let support =
+                kg_support.unwrap_or_else(|| state.activation.get(&sym).copied().unwrap_or(0.0));
             if support <= 0.0 {
                 continue;
             }

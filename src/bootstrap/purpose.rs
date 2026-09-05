@@ -19,7 +19,9 @@ pub enum BootstrapError {
     #[error("empty input — no purpose statement provided")]
     #[diagnostic(
         code(akh::bootstrap::empty_input),
-        help("Provide a statement like: \"You are the Architect based on Ptah, expert in systems\"")
+        help(
+            "Provide a statement like: \"You are the Architect based on Ptah, expert in systems\""
+        )
     )]
     EmptyInput,
 
@@ -187,8 +189,9 @@ static RE_BASED_ON: LazyLock<Regex> =
 static RE_LIKE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:be |act )like (\w[\w\s]*\w|\w+)").unwrap());
 
-static RE_INSPIRED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:inspired by|in the spirit of) (\w[\w\s]*\w|\w+)").unwrap());
+static RE_INSPIRED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:inspired by|in the spirit of) (\w[\w\s]*\w|\w+)").unwrap()
+});
 
 static RE_AS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)you are (?:the |an? )?(\w[\w\s]*\w|\w+)").unwrap());
@@ -230,26 +233,95 @@ static RE_DECLARATIVE: LazyLock<Regex> = LazyLock::new(|| {
 // ── Static Entity Sets ──────────────────────────────────────────────────
 
 const DEITIES: &[&str] = &[
-    "ptah", "ra", "thoth", "anubis", "osiris", "isis", "horus", "sekhmet",
-    "bastet", "sobek", "khnum", "atum", "maat", "ma'at", "hathor", "set",
-    "athena", "apollo", "hermes", "hephaestus", "zeus", "hera", "ares",
-    "artemis", "poseidon", "demeter", "dionysus", "prometheus",
-    "odin", "thor", "loki", "freya", "frigg", "tyr", "baldr", "heimdall",
-    "minerva", "mars", "jupiter", "neptune", "vulcan",
+    "ptah",
+    "ra",
+    "thoth",
+    "anubis",
+    "osiris",
+    "isis",
+    "horus",
+    "sekhmet",
+    "bastet",
+    "sobek",
+    "khnum",
+    "atum",
+    "maat",
+    "ma'at",
+    "hathor",
+    "set",
+    "athena",
+    "apollo",
+    "hermes",
+    "hephaestus",
+    "zeus",
+    "hera",
+    "ares",
+    "artemis",
+    "poseidon",
+    "demeter",
+    "dionysus",
+    "prometheus",
+    "odin",
+    "thor",
+    "loki",
+    "freya",
+    "frigg",
+    "tyr",
+    "baldr",
+    "heimdall",
+    "minerva",
+    "mars",
+    "jupiter",
+    "neptune",
+    "vulcan",
 ];
 
 const FICTIONAL: &[&str] = &[
-    "gandalf", "dumbledore", "sherlock", "spock", "yoda", "merlin",
-    "morpheus", "neo", "cortana", "jarvis", "hal", "data", "r2d2",
-    "samwise", "aragorn", "legolas", "hermione", "dr strange",
-    "tony stark", "batman", "superman",
+    "gandalf",
+    "dumbledore",
+    "sherlock",
+    "spock",
+    "yoda",
+    "merlin",
+    "morpheus",
+    "neo",
+    "cortana",
+    "jarvis",
+    "hal",
+    "data",
+    "r2d2",
+    "samwise",
+    "aragorn",
+    "legolas",
+    "hermione",
+    "dr strange",
+    "tony stark",
+    "batman",
+    "superman",
 ];
 
 const HISTORICAL: &[&str] = &[
-    "einstein", "turing", "curie", "davinci", "da vinci", "leonardo",
-    "newton", "tesla", "lovelace", "babbage", "dijkstra", "knuth",
-    "feynman", "hawking", "aristotle", "plato", "socrates",
-    "archimedes", "euclid", "gauss", "euler",
+    "einstein",
+    "turing",
+    "curie",
+    "davinci",
+    "da vinci",
+    "leonardo",
+    "newton",
+    "tesla",
+    "lovelace",
+    "babbage",
+    "dijkstra",
+    "knuth",
+    "feynman",
+    "hawking",
+    "aristotle",
+    "plato",
+    "socrates",
+    "archimedes",
+    "euclid",
+    "gauss",
+    "euler",
 ];
 
 // ── Parser Functions ────────────────────────────────────────────────────
@@ -393,11 +465,7 @@ fn extract_domain(input: &str) -> String {
     for prefix in &["architect of ", "builder of ", "engineer of "] {
         if let Some(idx) = lower.find(prefix) {
             let rest = &input[idx + prefix.len()..];
-            let domain = rest
-                .split([',', '.', ';'])
-                .next()
-                .unwrap_or("")
-                .trim();
+            let domain = rest.split([',', '.', ';']).next().unwrap_or("").trim();
             if !domain.is_empty() {
                 return domain.to_string();
             }
@@ -472,11 +540,32 @@ fn extract_seed_concepts(input: &str) -> Vec<String> {
 fn is_stopword(word: &str) -> bool {
     matches!(
         word.to_lowercase().as_str(),
-        "the" | "a" | "an" | "of" | "in" | "on" | "at" | "to" | "for"
-            | "is" | "are" | "was" | "be" | "been"
-            | "and" | "or" | "not" | "but"
-            | "you" | "your" | "like" | "based"
-            | "with" | "from" | "by" | "as"
+        "the"
+            | "a"
+            | "an"
+            | "of"
+            | "in"
+            | "on"
+            | "at"
+            | "to"
+            | "for"
+            | "is"
+            | "are"
+            | "was"
+            | "be"
+            | "been"
+            | "and"
+            | "or"
+            | "not"
+            | "but"
+            | "you"
+            | "your"
+            | "like"
+            | "based"
+            | "with"
+            | "from"
+            | "by"
+            | "as"
     )
 }
 
@@ -494,8 +583,8 @@ mod tests {
 
     #[test]
     fn parse_based_on_deity() {
-        let intent = parse_purpose("You are the Architect based on Ptah, expert in systems")
-            .unwrap();
+        let intent =
+            parse_purpose("You are the Architect based on Ptah, expert in systems").unwrap();
         let id = intent.identity.unwrap();
         assert_eq!(id.name, "Ptah");
         assert_eq!(id.entity_type, EntityType::Deity);
@@ -517,15 +606,28 @@ mod tests {
 
     #[test]
     fn parse_competence_level() {
-        assert_eq!(extract_competence("a beginner in Rust"), DreyfusLevel::Novice);
-        assert_eq!(extract_competence("expert in systems"), DreyfusLevel::Expert);
-        assert_eq!(extract_competence("master of compilers"), DreyfusLevel::Expert);
-        assert_eq!(extract_competence("proficient developer"), DreyfusLevel::Proficient);
+        assert_eq!(
+            extract_competence("a beginner in Rust"),
+            DreyfusLevel::Novice
+        );
+        assert_eq!(
+            extract_competence("expert in systems"),
+            DreyfusLevel::Expert
+        );
+        assert_eq!(
+            extract_competence("master of compilers"),
+            DreyfusLevel::Expert
+        );
+        assert_eq!(
+            extract_competence("proficient developer"),
+            DreyfusLevel::Proficient
+        );
     }
 
     #[test]
     fn parse_seed_concepts() {
-        let concepts = extract_seed_concepts("Study the System Architecture based on Egyptian methods");
+        let concepts =
+            extract_seed_concepts("Study the System Architecture based on Egyptian methods");
         assert!(concepts.iter().any(|c| c == "System"));
         assert!(concepts.iter().any(|c| c == "Architecture"));
         assert!(concepts.iter().any(|c| c == "Egyptian"));
@@ -578,9 +680,18 @@ mod tests {
 
     #[test]
     fn classify_fictional_names() {
-        assert_eq!(classify_entity_type("Gandalf"), EntityType::FictionalCharacter);
-        assert_eq!(classify_entity_type("Sherlock"), EntityType::FictionalCharacter);
-        assert_eq!(classify_entity_type("Spock"), EntityType::FictionalCharacter);
+        assert_eq!(
+            classify_entity_type("Gandalf"),
+            EntityType::FictionalCharacter
+        );
+        assert_eq!(
+            classify_entity_type("Sherlock"),
+            EntityType::FictionalCharacter
+        );
+        assert_eq!(
+            classify_entity_type("Spock"),
+            EntityType::FictionalCharacter
+        );
     }
 
     #[test]
@@ -599,7 +710,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            intent.purpose.domain.to_lowercase().contains("architecture")
+            intent
+                .purpose
+                .domain
+                .to_lowercase()
+                .contains("architecture")
                 || intent.purpose.domain.to_lowercase().contains("systems"),
             "unexpected domain: {}",
             intent.purpose.domain
@@ -610,15 +725,21 @@ mod tests {
     #[test]
     fn parse_natural_want_to_become() {
         let intent = parse_purpose("I want to become a distributed systems engineer.").unwrap();
-        assert!(!intent.purpose.domain.is_empty(), "domain should not be empty");
+        assert!(
+            !intent.purpose.domain.is_empty(),
+            "domain should not be empty"
+        );
     }
 
     #[test]
     fn parse_natural_purpose_is() {
-        let intent =
-            parse_purpose("My purpose is to keep the constellation healthy.").unwrap();
+        let intent = parse_purpose("My purpose is to keep the constellation healthy.").unwrap();
         assert!(
-            intent.purpose.domain.to_lowercase().contains("constellation")
+            intent
+                .purpose
+                .domain
+                .to_lowercase()
+                .contains("constellation")
                 || intent.purpose.domain.to_lowercase().contains("keep"),
             "unexpected domain: {}",
             intent.purpose.domain
@@ -640,7 +761,10 @@ mod tests {
     #[test]
     fn parse_natural_i_will_serve_as() {
         let intent = parse_purpose("I will serve as the memory keeper when needed.").unwrap();
-        assert!(!intent.purpose.domain.is_empty(), "domain should not be empty");
+        assert!(
+            !intent.purpose.domain.is_empty(),
+            "domain should not be empty"
+        );
     }
 
     #[test]

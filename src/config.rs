@@ -596,49 +596,221 @@ pub struct EnvVarSpec {
 /// function only builds the table.
 pub fn env_var_registry() -> &'static [EnvVarSpec] {
     &[
-        EnvVarSpec { name: "AKH_ACP_TCP_BIND", description: "ACP TCP listener bind host override.", default: "unset: uses [acp] config / 127.0.0.1" },
-        EnvVarSpec { name: "AKH_ACP_TCP_PORT", description: "ACP TCP listener port override.", default: "unset: TCP listener disabled unless configured" },
-        EnvVarSpec { name: "AKH_AGENT_DEBUG", description: "Verbose agentic-chat debug logging to stderr.", default: "\"1\" enables; unset/other = off" },
-        EnvVarSpec { name: "AKH_AGENT_MAX_ROUNDS", description: "Hard cap on agentic tool-call rounds per turn.", default: "unset: scaled default (see agentic_chat.rs)" },
-        EnvVarSpec { name: "AKH_AGENT_MAX_TOOLS", description: "Cap on distinct tools exposed per agentic turn.", default: "unset: no cap" },
-        EnvVarSpec { name: "AKH_AGENT_PARAM_REPAIR", description: "Enable automatic tool-call parameter repair.", default: "on by default; \"0\" opts out" },
-        EnvVarSpec { name: "AKH_AGENT_REPEAT_LIMIT", description: "Max identical consecutive tool calls before the loop aborts.", default: "unset: DEFAULT_REPEAT_LIMIT" },
-        EnvVarSpec { name: "AKH_AGENT_TOOL_REPAIR", description: "Enable tool-name repair (fuzzy match on unknown tool names).", default: "on by default; \"0\" opts out" },
-        EnvVarSpec { name: "AKH_AGENT_TOOL_RETRIEVAL", description: "Cap on tools surfaced via semantic tool retrieval.", default: "unset: retrieval cap default" },
-        EnvVarSpec { name: "AKH_AGENT_TURN_TIMEOUT_SECS", description: "Wall-clock timeout for one agentic turn.", default: "unset: built-in default" },
-        EnvVarSpec { name: "AKH_AGENT_VALUE_GROUND", description: "Enable value-grounding pass on agentic turns.", default: "test-toggled; see agentic_chat.rs" },
-        EnvVarSpec { name: "AKH_AUDIO_SCALE", description: "Scale audio embeddings in the Candle NLU backend.", default: "\"1\" enables; unset = off" },
-        EnvVarSpec { name: "AKH_AUTO_START", description: "Comma-separated workspaces to auto-start daemons for (CLI/service override of [daemon].auto_start).", default: "unset: uses config; empty = no auto-start (P5)" },
-        EnvVarSpec { name: "AKH_COMM_INTEL", description: "Enable Phase-34 communicative-intelligence response shaping.", default: "on by default; \"0\" disables" },
-        EnvVarSpec { name: "AKH_COMPILE_FEEDBACK_TIMEOUT_SECS", description: "Per-process default timeout for the compile_feedback tool's `cargo check`/`clippy`/`test` runs. Distinct from AKH_TURN_IDLE_TIMEOUT_SECS (the ACP idle watchdog) and from acp_adapter.py's --timeout (the client-side transport deadline); see src/agent/tools/compile_feedback.rs module docs for how the three reconcile.", default: "unset: built-in default (600s)" },
-        EnvVarSpec { name: "AKH_CONTEXT_STRATEGY", description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual.", default: "\"compacting\"" },
-        EnvVarSpec { name: "AKH_ENRICH_MEMORY", description: "Enable memory enrichment during goal generation.", default: "on by default; \"0\" disables" },
-        EnvVarSpec { name: "AKH_EXTRACTION_API_KEY", description: "API key for the LLM used by triple/knowledge extraction.", default: "unset: extraction falls back to configured key or is disabled" },
-        EnvVarSpec { name: "AKH_FONT", description: "Override glyph catalog font path.", default: "unset: built-in catalog default" },
-        EnvVarSpec { name: "AKH_GEMV_BATCH", description: "Enable batched GEMV verify path (Phase 47d) in the Candle backend.", default: "on by default; \"0\" disables" },
-        EnvVarSpec { name: "AKH_HIP_Q8_GEMV", description: "Select the parity-gated Q8-activation/packed-Q4_K RDNA3 decode path.", default: "on by default; \"0\" restores f32" },
-        EnvVarSpec { name: "AKH_GPU_MATMUL", description: "Route quantized matmul through the GPU backend.", default: "off by default; \"1\" enables" },
-        EnvVarSpec { name: "AKH_GPU_QUANT", description: "Enable GPU-side quantization for quantized model backends.", default: "off by default; \"1\" enables" },
-        EnvVarSpec { name: "AKH_GRAMMAR_AGGREGATE", description: "Enable Phase-33a grammar aggregation (N triples -> one fluent sentence).", default: "on by default; \"0\" disables" },
-        EnvVarSpec { name: "AKH_JOURNAL_DIR", description: "Override the akh-medu journal directory.", default: "unset: platform default under paths::journal_dir" },
-        EnvVarSpec { name: "AKH_KG_DELTA", description: "Include KG delta context in agentic turns (opt-in, Phase 44d).", default: "off by default; \"1\" enables" },
-        EnvVarSpec { name: "AKH_KV_CTX", description: "Override KV-cache context length for quantized Gemma models.", default: "unset: model default" },
-        EnvVarSpec { name: "AKH_LIBRARIAN", description: "Enable the librarian daemon task.", default: "off by default; \"1\" enables" },
-        EnvVarSpec { name: "AKH_LIBRARIAN_MODEL", description: "Model tag the librarian task uses.", default: "unset: built-in default tag" },
-        EnvVarSpec { name: "AKH_LIBRARIAN_OLLAMA_URL", description: "Ollama endpoint for the librarian task (e.g. https://ollama.com on hosts with no local Ollama).", default: "unset: local Ollama" },
-        EnvVarSpec { name: "AKH_LIBRARIAN_OLLAMA_API_KEY", description: "Auth for the librarian's Ollama endpoint; supports env:VAR indirection (secret-looking, masked).", default: "unset: no auth header" },
-        EnvVarSpec { name: "AKH_LLM_MODEL", description: "Model hint for the Candle NLU backend.", default: "unset: backend default" },
-        EnvVarSpec { name: "AKH_LLM_VERBALIZE", description: "Verbalization strategy override for chat responses.", default: "unset: built-in default strategy" },
-        EnvVarSpec { name: "AKH_NLU_LLM", description: "Enable LLM-backed NLU.", default: "on by default; \"0\" disables" },
-        EnvVarSpec { name: "AKH_OLLAMA_TIMEOUT_SECS", description: "HTTP timeout for Ollama requests.", default: "unset: built-in default" },
-        EnvVarSpec { name: "AKH_OPENROUTER_API_KEY", description: "API key for OpenRouter, used by the Phase 41g benchmark pattern.", default: "unset: benchmark pattern disabled" },
-        EnvVarSpec { name: "AKH_PERMISSION_ASK_TIMEOUT_SECS", description: "Timeout waiting on an ACP client permission prompt before failing closed.", default: "unset: built-in default" },
-        EnvVarSpec { name: "AKH_REMOTE", description: "Remote akhomed target for the CLI (host/URL) instead of the local daemon.", default: "unset: talk to local daemon" },
-        EnvVarSpec { name: "AKH_SERVER_BIND", description: "HTTP server bind address.", default: "\"0.0.0.0\"" },
-        EnvVarSpec { name: "AKH_SERVER_PORT", description: "HTTP server port.", default: "\"8200\"" },
-        EnvVarSpec { name: "AKH_SPEC_DECODE", description: "Enable speculative (prompt-lookup) decode for the Candle backing (Phase 47/ADR 075), unless overridden per-akh by AkhConfig::spec_decode.", default: "off by default; \"1\" enables" },
-        EnvVarSpec { name: "AKH_TRANSCRIPT_CAPTURE", description: "Override per-akh capture_transcripts at the emit site.", default: "unset: follows AkhConfig::capture_transcripts (on by default)" },
-        EnvVarSpec { name: "AKH_TURN_IDLE_TIMEOUT_SECS", description: "ACP turn idle timeout before the session is considered stalled.", default: "unset: built-in default (300s)" },
+        EnvVarSpec {
+            name: "AKH_ACP_TCP_BIND",
+            description: "ACP TCP listener bind host override.",
+            default: "unset: uses [acp] config / 127.0.0.1",
+        },
+        EnvVarSpec {
+            name: "AKH_ACP_TCP_PORT",
+            description: "ACP TCP listener port override.",
+            default: "unset: TCP listener disabled unless configured",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_DEBUG",
+            description: "Verbose agentic-chat debug logging to stderr.",
+            default: "\"1\" enables; unset/other = off",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_MAX_ROUNDS",
+            description: "Hard cap on agentic tool-call rounds per turn.",
+            default: "unset: scaled default (see agentic_chat.rs)",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_MAX_TOOLS",
+            description: "Cap on distinct tools exposed per agentic turn.",
+            default: "unset: no cap",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_PARAM_REPAIR",
+            description: "Enable automatic tool-call parameter repair.",
+            default: "on by default; \"0\" opts out",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_REPEAT_LIMIT",
+            description: "Max identical consecutive tool calls before the loop aborts.",
+            default: "unset: DEFAULT_REPEAT_LIMIT",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_TOOL_REPAIR",
+            description: "Enable tool-name repair (fuzzy match on unknown tool names).",
+            default: "on by default; \"0\" opts out",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_TOOL_RETRIEVAL",
+            description: "Cap on tools surfaced via semantic tool retrieval.",
+            default: "unset: retrieval cap default",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_TURN_TIMEOUT_SECS",
+            description: "Wall-clock timeout for one agentic turn.",
+            default: "unset: built-in default",
+        },
+        EnvVarSpec {
+            name: "AKH_AGENT_VALUE_GROUND",
+            description: "Enable value-grounding pass on agentic turns.",
+            default: "test-toggled; see agentic_chat.rs",
+        },
+        EnvVarSpec {
+            name: "AKH_AUDIO_SCALE",
+            description: "Scale audio embeddings in the Candle NLU backend.",
+            default: "\"1\" enables; unset = off",
+        },
+        EnvVarSpec {
+            name: "AKH_AUTO_START",
+            description: "Comma-separated workspaces to auto-start daemons for (CLI/service override of [daemon].auto_start).",
+            default: "unset: uses config; empty = no auto-start (P5)",
+        },
+        EnvVarSpec {
+            name: "AKH_COMM_INTEL",
+            description: "Enable Phase-34 communicative-intelligence response shaping.",
+            default: "on by default; \"0\" disables",
+        },
+        EnvVarSpec {
+            name: "AKH_COMPILE_FEEDBACK_TIMEOUT_SECS",
+            description: "Per-process default timeout for the compile_feedback tool's `cargo check`/`clippy`/`test` runs. Distinct from AKH_TURN_IDLE_TIMEOUT_SECS (the ACP idle watchdog) and from acp_adapter.py's --timeout (the client-side transport deadline); see src/agent/tools/compile_feedback.rs module docs for how the three reconcile.",
+            default: "unset: built-in default (600s)",
+        },
+        EnvVarSpec {
+            name: "AKH_CONTEXT_STRATEGY",
+            description: "Which ContextManager strategy to use (Phase 44): compacting|passive|virtual.",
+            default: "\"compacting\"",
+        },
+        EnvVarSpec {
+            name: "AKH_ENRICH_MEMORY",
+            description: "Enable memory enrichment during goal generation.",
+            default: "on by default; \"0\" disables",
+        },
+        EnvVarSpec {
+            name: "AKH_EXTRACTION_API_KEY",
+            description: "API key for the LLM used by triple/knowledge extraction.",
+            default: "unset: extraction falls back to configured key or is disabled",
+        },
+        EnvVarSpec {
+            name: "AKH_FONT",
+            description: "Override glyph catalog font path.",
+            default: "unset: built-in catalog default",
+        },
+        EnvVarSpec {
+            name: "AKH_GEMV_BATCH",
+            description: "Enable batched GEMV verify path (Phase 47d) in the Candle backend.",
+            default: "on by default; \"0\" disables",
+        },
+        EnvVarSpec {
+            name: "AKH_HIP_Q8_GEMV",
+            description: "Select the parity-gated Q8-activation/packed-Q4_K RDNA3 decode path.",
+            default: "on by default; \"0\" restores f32",
+        },
+        EnvVarSpec {
+            name: "AKH_GPU_MATMUL",
+            description: "Route quantized matmul through the GPU backend.",
+            default: "off by default; \"1\" enables",
+        },
+        EnvVarSpec {
+            name: "AKH_GPU_QUANT",
+            description: "Enable GPU-side quantization for quantized model backends.",
+            default: "off by default; \"1\" enables",
+        },
+        EnvVarSpec {
+            name: "AKH_GRAMMAR_AGGREGATE",
+            description: "Enable Phase-33a grammar aggregation (N triples -> one fluent sentence).",
+            default: "on by default; \"0\" disables",
+        },
+        EnvVarSpec {
+            name: "AKH_JOURNAL_DIR",
+            description: "Override the akh-medu journal directory.",
+            default: "unset: platform default under paths::journal_dir",
+        },
+        EnvVarSpec {
+            name: "AKH_KG_DELTA",
+            description: "Include KG delta context in agentic turns (opt-in, Phase 44d).",
+            default: "off by default; \"1\" enables",
+        },
+        EnvVarSpec {
+            name: "AKH_KV_CTX",
+            description: "Override KV-cache context length for quantized Gemma models.",
+            default: "unset: model default",
+        },
+        EnvVarSpec {
+            name: "AKH_LIBRARIAN",
+            description: "Enable the librarian daemon task.",
+            default: "off by default; \"1\" enables",
+        },
+        EnvVarSpec {
+            name: "AKH_LIBRARIAN_MODEL",
+            description: "Model tag the librarian task uses.",
+            default: "unset: built-in default tag",
+        },
+        EnvVarSpec {
+            name: "AKH_LIBRARIAN_OLLAMA_URL",
+            description: "Ollama endpoint for the librarian task (e.g. https://ollama.com on hosts with no local Ollama).",
+            default: "unset: local Ollama",
+        },
+        EnvVarSpec {
+            name: "AKH_LIBRARIAN_OLLAMA_API_KEY",
+            description: "Auth for the librarian's Ollama endpoint; supports env:VAR indirection (secret-looking, masked).",
+            default: "unset: no auth header",
+        },
+        EnvVarSpec {
+            name: "AKH_LLM_MODEL",
+            description: "Model hint for the Candle NLU backend.",
+            default: "unset: backend default",
+        },
+        EnvVarSpec {
+            name: "AKH_LLM_VERBALIZE",
+            description: "Verbalization strategy override for chat responses.",
+            default: "unset: built-in default strategy",
+        },
+        EnvVarSpec {
+            name: "AKH_NLU_LLM",
+            description: "Enable LLM-backed NLU.",
+            default: "on by default; \"0\" disables",
+        },
+        EnvVarSpec {
+            name: "AKH_OLLAMA_TIMEOUT_SECS",
+            description: "HTTP timeout for Ollama requests.",
+            default: "unset: built-in default",
+        },
+        EnvVarSpec {
+            name: "AKH_OPENROUTER_API_KEY",
+            description: "API key for OpenRouter, used by the Phase 41g benchmark pattern.",
+            default: "unset: benchmark pattern disabled",
+        },
+        EnvVarSpec {
+            name: "AKH_PERMISSION_ASK_TIMEOUT_SECS",
+            description: "Timeout waiting on an ACP client permission prompt before failing closed.",
+            default: "unset: built-in default",
+        },
+        EnvVarSpec {
+            name: "AKH_REMOTE",
+            description: "Remote akhomed target for the CLI (host/URL) instead of the local daemon.",
+            default: "unset: talk to local daemon",
+        },
+        EnvVarSpec {
+            name: "AKH_SERVER_BIND",
+            description: "HTTP server bind address.",
+            default: "\"0.0.0.0\"",
+        },
+        EnvVarSpec {
+            name: "AKH_SERVER_PORT",
+            description: "HTTP server port.",
+            default: "\"8200\"",
+        },
+        EnvVarSpec {
+            name: "AKH_SPEC_DECODE",
+            description: "Enable speculative (prompt-lookup) decode for the Candle backing (Phase 47/ADR 075), unless overridden per-akh by AkhConfig::spec_decode.",
+            default: "off by default; \"1\" enables",
+        },
+        EnvVarSpec {
+            name: "AKH_TRANSCRIPT_CAPTURE",
+            description: "Override per-akh capture_transcripts at the emit site.",
+            default: "unset: follows AkhConfig::capture_transcripts (on by default)",
+        },
+        EnvVarSpec {
+            name: "AKH_TURN_IDLE_TIMEOUT_SECS",
+            description: "ACP turn idle timeout before the session is considered stalled.",
+            default: "unset: built-in default (300s)",
+        },
     ]
 }
 
@@ -655,7 +827,10 @@ mod tests {
         let config = AkhomedConfig::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: AkhomedConfig = toml::from_str(&toml_str).unwrap();
-        assert!(parsed.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
+        assert!(
+            parsed.daemon.auto_start.is_empty(),
+            "P5: auto_start is empty by default"
+        );
         assert_eq!(parsed.daemon.max_cycles, 0);
     }
 
@@ -691,7 +866,10 @@ auto_start = []
     #[test]
     fn load_nonexistent_returns_defaults() {
         let config = AkhomedConfig::load(Path::new("/tmp/akh-does-not-exist.toml")).unwrap();
-        assert!(config.daemon.auto_start.is_empty(), "P5: auto_start is empty by default");
+        assert!(
+            config.daemon.auto_start.is_empty(),
+            "P5: auto_start is empty by default"
+        );
     }
 
     #[test]
@@ -806,7 +984,10 @@ migrate_on_start = true
         let path = dir.path().join("config.toml");
         AkhomedConfig::default().save(&path).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "config.toml may contain secrets and must be 0600, got {mode:o}");
+        assert_eq!(
+            mode, 0o600,
+            "config.toml may contain secrets and must be 0600, got {mode:o}"
+        );
     }
 
     #[test]
@@ -828,8 +1009,16 @@ migrate_on_start = true
         let registry = env_var_registry();
         assert!(!registry.is_empty());
         for spec in registry {
-            assert!(spec.name.starts_with("AKH_"), "{} must be AKH_-prefixed", spec.name);
-            assert!(!spec.description.is_empty(), "{} needs a description", spec.name);
+            assert!(
+                spec.name.starts_with("AKH_"),
+                "{} must be AKH_-prefixed",
+                spec.name
+            );
+            assert!(
+                !spec.description.is_empty(),
+                "{} needs a description",
+                spec.name
+            );
         }
         // No duplicate names.
         let mut names: Vec<&str> = registry.iter().map(|s| s.name).collect();

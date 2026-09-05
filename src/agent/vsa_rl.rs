@@ -238,11 +238,7 @@ pub fn compute_and_apply(
 ///
 /// Returns the confidence of the `(goal, agent:rl_quality, tool)` triple,
 /// or `None` if no learning has occurred for this pair yet.
-pub fn learned_quality(
-    engine: &Engine,
-    goal_id: SymbolId,
-    tool_name: &str,
-) -> Option<f32> {
+pub fn learned_quality(engine: &Engine, goal_id: SymbolId, tool_name: &str) -> Option<f32> {
     let tool_sym = engine.resolve_symbol(tool_name).ok()?;
     let rl_quality = engine.resolve_symbol("agent:rl_quality").ok()?;
     engine
@@ -300,7 +296,10 @@ mod tests {
         let reward = 1.0_f32;
         let delta = config.learning_rate * (reward - existing);
         let new_conf = (existing + delta).clamp(config.min_confidence, config.max_confidence);
-        assert!(new_conf > existing, "conf should increase for reward > conf");
+        assert!(
+            new_conf > existing,
+            "conf should increase for reward > conf"
+        );
     }
 
     #[test]
@@ -310,7 +309,10 @@ mod tests {
         let reward = 0.0_f32;
         let delta = config.learning_rate * (reward - existing);
         let new_conf = (existing + delta).clamp(config.min_confidence, config.max_confidence);
-        assert!(new_conf < existing, "conf should decrease for reward < conf");
+        assert!(
+            new_conf < existing,
+            "conf should decrease for reward < conf"
+        );
     }
 
     #[test]

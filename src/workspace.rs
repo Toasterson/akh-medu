@@ -40,7 +40,11 @@ pub fn validate_workspace_name(name: &str) -> WorkspaceResult<()> {
         "name contains a colon — workspace names must not contain query-like syntax".to_string()
     } else if name.contains(' ') {
         "name contains spaces".to_string()
-    } else if name.chars().next().is_none_or(|c| !c.is_ascii_alphanumeric()) {
+    } else if name
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphanumeric())
+    {
         "name must start with a lowercase letter or digit".to_string()
     } else {
         "name contains characters other than lowercase letters, digits, hyphens, and underscores"
@@ -501,7 +505,10 @@ mod tests {
 
         let invalid = mgr.list_invalid_names();
         for junk in &junk_names {
-            assert!(invalid.contains(&junk.to_string()), "expected \"{junk}\" in invalid list");
+            assert!(
+                invalid.contains(&junk.to_string()),
+                "expected \"{junk}\" in invalid list"
+            );
         }
         assert!(!invalid.contains(&"good".to_string()));
     }
@@ -536,7 +543,13 @@ mod tests {
         let cfg = WorkspaceConfig::default();
         assert_eq!(cfg.name, "default");
         assert_eq!(cfg.seed_packs.len(), 5);
-        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+        for pack in &[
+            "identity",
+            "ontology",
+            "common-sense",
+            "computing",
+            "architecture",
+        ] {
             assert!(
                 cfg.seed_packs.contains(&pack.to_string()),
                 "default seed_packs missing: {pack}"
@@ -558,8 +571,18 @@ max_memory_mb = 1024
 max_symbols = 1000000
 "#;
         let cfg: WorkspaceConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.seed_packs.len(), 5, "missing seed_packs field must default to 5 packs");
-        for pack in &["identity", "ontology", "common-sense", "computing", "architecture"] {
+        assert_eq!(
+            cfg.seed_packs.len(),
+            5,
+            "missing seed_packs field must default to 5 packs"
+        );
+        for pack in &[
+            "identity",
+            "ontology",
+            "common-sense",
+            "computing",
+            "architecture",
+        ] {
             assert!(
                 cfg.seed_packs.contains(&pack.to_string()),
                 "default seed_packs missing: {pack}"

@@ -13,7 +13,9 @@ pub enum NluError {
     #[error("NLU parse failed: no tier could handle \"{input}\"")]
     #[diagnostic(
         code(akh::nlu::parse_failed),
-        help("The input could not be parsed by any NLU tier. It will be treated as freeform text.")
+        help(
+            "The input could not be parsed by any NLU tier. It will be treated as freeform text."
+        )
     )]
     ParseFailed { input: String },
 
@@ -46,10 +48,7 @@ pub enum NluError {
 
     /// A model file exists but could not be loaded.
     #[error("NLU model load failed: {reason}")]
-    #[diagnostic(
-        code(akh::nlu::model_load),
-        help("Check model file integrity")
-    )]
+    #[diagnostic(code(akh::nlu::model_load), help("Check model file integrity"))]
     ModelLoadFailed { reason: String },
 
     /// A valid GGUF belongs to an architecture whose Candle loader has not landed.

@@ -111,9 +111,7 @@ impl GoalView {
     pub fn status_label(&self) -> &str {
         match &self.status {
             serde_json::Value::String(s) => s.as_str(),
-            serde_json::Value::Object(map) => {
-                map.keys().next().map(String::as_str).unwrap_or("?")
-            }
+            serde_json::Value::Object(map) => map.keys().next().map(String::as_str).unwrap_or("?"),
             _ => "?",
         }
     }

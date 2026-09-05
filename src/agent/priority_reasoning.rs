@@ -256,9 +256,7 @@ fn drive_to_value(drive: &str) -> Value {
 fn count_goals_blocked_by(goal_id: SymbolId, all_goals: &[Goal]) -> usize {
     all_goals
         .iter()
-        .filter(|g| {
-            matches!(g.status, GoalStatus::Active) && g.blocked_by.contains(&goal_id)
-        })
+        .filter(|g| matches!(g.status, GoalStatus::Active) && g.blocked_by.contains(&goal_id))
         .count()
 }
 
@@ -325,9 +323,7 @@ pub fn generate_arguments(
 
     // ── Stalled: Con/Efficiency ──
     let cycles_since_progress = current_cycle.saturating_sub(goal.last_progress_cycle);
-    if goal.cycles_worked >= stall_threshold
-        && cycles_since_progress >= stall_threshold as u64
-    {
+    if goal.cycles_worked >= stall_threshold && cycles_since_progress >= stall_threshold as u64 {
         let over = cycles_since_progress.saturating_sub(stall_threshold as u64);
         let weight = (0.4 + 0.05 * over as f64).min(0.9);
         args.push(PriorityArgument {
@@ -344,8 +340,7 @@ pub fn generate_arguments(
     }
 
     // ── MakingProgress: Pro/Efficiency ──
-    if goal.last_progress_cycle > 0 && current_cycle.saturating_sub(goal.last_progress_cycle) <= 3
-    {
+    if goal.last_progress_cycle > 0 && current_cycle.saturating_sub(goal.last_progress_cycle) <= 3 {
         args.push(PriorityArgument {
             direction: PriorityDirection::Pro,
             value: Value::Efficiency,
@@ -375,10 +370,7 @@ pub fn generate_arguments(
     }
 
     // ── ResolvesContradiction: Pro/Accuracy ──
-    if matches!(
-        &goal.source,
-        Some(GoalSource::ContradictionDetected { .. })
-    ) {
+    if matches!(&goal.source, Some(GoalSource::ContradictionDetected { .. })) {
         args.push(PriorityArgument {
             direction: PriorityDirection::Pro,
             value: Value::Accuracy,
@@ -402,9 +394,7 @@ pub fn generate_arguments(
                     parent_priority: parent_p,
                 },
                 base_weight: weight,
-                reasoning: format!(
-                    "Child of high-priority parent (priority {parent_p})."
-                ),
+                reasoning: format!("Child of high-priority parent (priority {parent_p})."),
             });
         }
     }
@@ -435,9 +425,7 @@ pub fn generate_arguments(
                     total_siblings: total,
                 },
                 base_weight: 0.7,
-                reasoning: format!(
-                    "Near completion: {completed}/{total} siblings done."
-                ),
+                reasoning: format!("Near completion: {completed}/{total} siblings done."),
             });
         }
     }
@@ -778,7 +766,9 @@ mod tests {
         let args = vec![PriorityArgument {
             direction: PriorityDirection::Con,
             value: Value::Efficiency,
-            source: ArgumentSource::Stalled { cycles_stalled: 100 },
+            source: ArgumentSource::Stalled {
+                cycles_stalled: 100,
+            },
             base_weight: 1.0,
             reasoning: "max con".into(),
         }];

@@ -64,46 +64,81 @@ const PRONOUNS: &[&str] = &[
 ];
 
 const FILLER_ADVERBS: &[&str] = &[
-    "very", "quite", "rather", "amply", "clearly", "obviously", "also", "indeed",
-    "simply", "just",
+    "very",
+    "quite",
+    "rather",
+    "amply",
+    "clearly",
+    "obviously",
+    "also",
+    "indeed",
+    "simply",
+    "just",
 ];
 
 const CLAUSE_BOUNDARIES: &[&str] = &[
-    "that", "which", "who", "whom", "where", "when", "while", "because",
-    "although", "since", "if", "unless",
+    "that", "which", "who", "whom", "where", "when", "while", "because", "although", "since", "if",
+    "unless",
 ];
 
 const TRAILING_AUX_VERBS: &[&str] = &[
     "is", "are", "was", "were", "has", "have", "had", "been", "being", "does", "do",
 ];
 
-const TRAILING_PARTICIPLES: &[&str] = &[
-    "shown", "said", "called", "known", "considered", "given",
-];
+const TRAILING_PARTICIPLES: &[&str] = &["shown", "said", "called", "known", "considered", "given"];
 
 /// Common verbs that indicate structure rather than content when scanning
 /// right-to-left for the rightmost noun cluster.
 const VERB_STOPS: &[&str] = &[
-    "is", "are", "was", "were", "has", "have", "had", "been", "being",
-    "does", "do", "shown", "said", "called", "known", "considered", "given",
-    "agree", "resemble", "oppose", "complement", "influence", "produce",
-    "require", "enable", "prevent", "seldom", "rarely", "often", "usually",
-    "sometimes", "occasionally", "always", "never", "frequently", "invariably",
+    "is",
+    "are",
+    "was",
+    "were",
+    "has",
+    "have",
+    "had",
+    "been",
+    "being",
+    "does",
+    "do",
+    "shown",
+    "said",
+    "called",
+    "known",
+    "considered",
+    "given",
+    "agree",
+    "resemble",
+    "oppose",
+    "complement",
+    "influence",
+    "produce",
+    "require",
+    "enable",
+    "prevent",
+    "seldom",
+    "rarely",
+    "often",
+    "usually",
+    "sometimes",
+    "occasionally",
+    "always",
+    "never",
+    "frequently",
+    "invariably",
 ];
 
 /// Preposition/conjunction connectors allowed inside noun clusters.
 const NOUN_CONNECTORS: &[&str] = &["of", "and", "in", "for"];
 
 const STOPWORDS: &[&str] = &[
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
-    "with", "by", "from", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "this", "that", "these", "those",
-    "it", "its", "he", "she", "they", "we", "you", "his", "her", "their",
-    "my", "your", "our", "not", "no", "so", "if", "as", "up", "out", "about",
-    "into", "over", "after", "than", "then", "just", "also", "very", "quite",
-    "rather", "some", "any", "each", "all", "more", "most", "such", "only",
-    "same", "other", "own",
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+    "from", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does",
+    "did", "will", "would", "could", "should", "may", "might", "shall", "can", "this", "that",
+    "these", "those", "it", "its", "he", "she", "they", "we", "you", "his", "her", "their", "my",
+    "your", "our", "not", "no", "so", "if", "as", "up", "out", "about", "into", "over", "after",
+    "than", "then", "just", "also", "very", "quite", "rather", "some", "any", "each", "all",
+    "more", "most", "such", "only", "same", "other", "own",
 ];
 
 // ---------------------------------------------------------------------------
@@ -262,8 +297,15 @@ fn adverb_weight(adverb: &str) -> Option<f32> {
 
 /// Bare relational verbs beyond is-a/has-a.
 const BARE_VERBS: &[&str] = &[
-    "agree", "resemble", "oppose", "complement", "influence",
-    "produce", "require", "enable", "prevent",
+    "agree",
+    "resemble",
+    "oppose",
+    "complement",
+    "influence",
+    "produce",
+    "require",
+    "enable",
+    "prevent",
 ];
 
 /// Check if a word matches a bare verb (base or 3rd-person-singular form).
@@ -288,9 +330,7 @@ fn matches_bare_verb(word: &str, verb: &str) -> bool {
 /// and bare verb patterns.
 pub fn extract_richer_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
-    let s = sentence
-        .trim()
-        .trim_end_matches(['.', '!', '?']);
+    let s = sentence.trim().trim_end_matches(['.', '!', '?']);
     let words: Vec<&str> = s.split_whitespace().collect();
     if words.len() < 3 {
         return results;
@@ -402,9 +442,10 @@ fn extract_conjunction_relational(
             continue;
         }
         for i in 1..lower.len().saturating_sub(plen) {
-            let matches = pattern.iter().enumerate().all(|(j, p)| {
-                i + j < lower.len() && lower[i + j] == *p
-            });
+            let matches = pattern
+                .iter()
+                .enumerate()
+                .all(|(j, p)| i + j < lower.len() && lower[i + j] == *p);
             if !matches {
                 continue;
             }
@@ -466,10 +507,8 @@ pub fn extract_concepts_from_chunk(
     relational_labels: &HashSet<String>,
 ) -> Vec<ExtractedConcept> {
     let mut concepts = Vec::new();
-    let normalized_relational: HashSet<String> = relational_labels
-        .iter()
-        .map(|l| l.to_lowercase())
-        .collect();
+    let normalized_relational: HashSet<String> =
+        relational_labels.iter().map(|l| l.to_lowercase()).collect();
 
     // --- Capitalized sequences (confidence 0.8) ---
     for sentence in text.split(['.', '!', '?']) {
@@ -481,7 +520,8 @@ pub fn extract_concepts_from_chunk(
         let mut i = 1;
         while i < words.len() {
             let w = words[i].trim_matches(|c: char| !c.is_alphanumeric());
-            if !w.is_empty() && w.chars().next().is_some_and(|c| c.is_uppercase())
+            if !w.is_empty()
+                && w.chars().next().is_some_and(|c| c.is_uppercase())
                 && w.len() > 1
                 && !is_stopword(w)
             {
@@ -490,9 +530,7 @@ pub fn extract_concepts_from_chunk(
                 let mut end = i + 1;
                 while end < words.len() && end - start < 3 {
                     let next = words[end].trim_matches(|c: char| !c.is_alphanumeric());
-                    if !next.is_empty()
-                        && next.chars().next().is_some_and(|c| c.is_uppercase())
-                    {
+                    if !next.is_empty() && next.chars().next().is_some_and(|c| c.is_uppercase()) {
                         end += 1;
                     } else {
                         break;
@@ -603,8 +641,16 @@ mod tests {
     #[test]
     fn head_noun_clause_truncation() {
         let words = vec![
-            "Amply", "shown", "that", "the", "conscious", "and", "the",
-            "unconscious", "seldom", "agree",
+            "Amply",
+            "shown",
+            "that",
+            "the",
+            "conscious",
+            "and",
+            "the",
+            "unconscious",
+            "seldom",
+            "agree",
         ];
         // Truncate at "that" → ["Amply", "shown"]
         // Strip "Amply" (filler) → ["shown"]
@@ -624,10 +670,7 @@ mod tests {
     #[test]
     fn head_noun_single_word() {
         let words = vec!["Shadow"];
-        assert_eq!(
-            extract_head_noun_phrase(&words),
-            Some("Shadow".into())
-        );
+        assert_eq!(extract_head_noun_phrase(&words), Some("Shadow".into()));
     }
 
     #[test]
@@ -645,19 +688,26 @@ mod tests {
     #[test]
     fn head_noun_strips_trailing_verb() {
         let words = vec!["the", "shadow", "is"];
-        assert_eq!(
-            extract_head_noun_phrase(&words),
-            Some("Shadow".into())
-        );
+        assert_eq!(extract_head_noun_phrase(&words), Some("Shadow".into()));
     }
 
     #[test]
     fn head_noun_long_span_takes_rightmost_cluster() {
         // >5 content words: should take rightmost noun cluster.
         let words = vec![
-            "very", "complex", "internal", "structure", "of", "the",
-            "deeply", "buried", "psychological", "archetype", "pattern",
-            "of", "individuation",
+            "very",
+            "complex",
+            "internal",
+            "structure",
+            "of",
+            "the",
+            "deeply",
+            "buried",
+            "psychological",
+            "archetype",
+            "pattern",
+            "of",
+            "individuation",
         ];
         let result = extract_head_noun_phrase(&words);
         assert!(result.is_some());
@@ -691,8 +741,7 @@ mod tests {
 
     #[test]
     fn richer_conjunction_splitting() {
-        let triples =
-            extract_richer_triples("Anima and Animus are contrasexual archetypes");
+        let triples = extract_richer_triples("Anima and Animus are contrasexual archetypes");
         // Should produce 2 triples: one for Anima, one for Animus.
         assert!(triples.len() >= 2);
         let labels: Vec<&str> = triples.iter().map(|(s, _, _, _)| s.as_str()).collect();
@@ -708,7 +757,11 @@ mod tests {
         let relational = HashSet::new();
         let concepts = extract_concepts_from_chunk(text, &relational);
         let labels: Vec<&str> = concepts.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.iter().any(|l| l.contains("Carl") || l.contains("Jung")));
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("Carl") || l.contains("Jung"))
+        );
     }
 
     #[test]
@@ -717,7 +770,11 @@ mod tests {
         let relational = HashSet::new();
         let concepts = extract_concepts_from_chunk(text, &relational);
         let labels: Vec<&str> = concepts.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.iter().any(|l| l.to_lowercase().contains("self-knowledge")));
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.to_lowercase().contains("self-knowledge"))
+        );
     }
 
     #[test]

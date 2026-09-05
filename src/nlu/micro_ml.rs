@@ -246,10 +246,12 @@ pub fn classify_intent(entities: &[EntitySpan], parse_result: &ParseResult) -> I
     }
 
     // Classify from entity types
-    let has_date = entities.iter().any(|e| e.entity_type == NerEntityType::Date);
-    let has_social = entities
+    let has_date = entities
         .iter()
-        .any(|e| e.entity_type == NerEntityType::Person || e.entity_type == NerEntityType::Organization);
+        .any(|e| e.entity_type == NerEntityType::Date);
+    let has_social = entities.iter().any(|e| {
+        e.entity_type == NerEntityType::Person || e.entity_type == NerEntityType::Organization
+    });
 
     if has_date {
         IntentClass::Temporal
@@ -337,10 +339,11 @@ impl MicroMlLayer {
             })?;
 
         // Load tokenizer
-        let tokenizer =
-            tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| NluError::ModelLoadFailed {
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            NluError::ModelLoadFailed {
                 reason: format!("Tokenizer load: {e}"),
-            })?;
+            }
+        })?;
 
         Ok(Self {
             ner_session,
@@ -369,15 +372,19 @@ impl MicroMlLayer {
         use ort::value::Tensor;
 
         // Tokenize
-        let encoding = self
-            .tokenizer
-            .encode(text, false)
-            .map_err(|e| NluError::ModelLoadFailed {
-                reason: format!("Tokenization failed: {e}"),
-            })?;
+        let encoding =
+            self.tokenizer
+                .encode(text, false)
+                .map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("Tokenization failed: {e}"),
+                })?;
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
-        let attention_mask: Vec<i64> = encoding.get_attention_mask().iter().map(|&m| m as i64).collect();
+        let attention_mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&m| m as i64)
+            .collect();
         let seq_len = input_ids.len();
 
         // Build input tensors [1, seq_len]
@@ -401,11 +408,12 @@ impl MicroMlLayer {
             })?;
 
         // Extract logits: shape [1, seq_len, num_labels]
-        let (shape, logits_data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| NluError::ModelLoadFailed {
-                reason: format!("Logit extraction: {e}"),
-            })?;
+        let (shape, logits_data) =
+            outputs[0]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| NluError::ModelLoadFailed {
+                    reason: format!("Logit extraction: {e}"),
+                })?;
         let num_labels = if shape.len() == 3 {
             shape[2] as usize
         } else {
@@ -626,10 +634,26 @@ mod tests {
     fn bio_merge_single_entity() {
         let text = "John Smith went home";
         let tokens = vec![
-            BioToken { tag: "B-PER".into(), char_start: 0, char_end: 4 },
-            BioToken { tag: "I-PER".into(), char_start: 5, char_end: 10 },
-            BioToken { tag: "O".into(), char_start: 11, char_end: 15 },
-            BioToken { tag: "O".into(), char_start: 16, char_end: 20 },
+            BioToken {
+                tag: "B-PER".into(),
+                char_start: 0,
+                char_end: 4,
+            },
+            BioToken {
+                tag: "I-PER".into(),
+                char_start: 5,
+                char_end: 10,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 11,
+                char_end: 15,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 16,
+                char_end: 20,
+            },
         ];
 
         let spans = merge_bio_spans(&tokens, text);
@@ -644,11 +668,31 @@ mod tests {
     fn bio_merge_multiple_entities() {
         let text = "John visited Paris on Monday";
         let tokens = vec![
-            BioToken { tag: "B-PER".into(), char_start: 0, char_end: 4 },
-            BioToken { tag: "O".into(), char_start: 5, char_end: 12 },
-            BioToken { tag: "B-LOC".into(), char_start: 13, char_end: 18 },
-            BioToken { tag: "O".into(), char_start: 19, char_end: 21 },
-            BioToken { tag: "B-DATE".into(), char_start: 22, char_end: 28 },
+            BioToken {
+                tag: "B-PER".into(),
+                char_start: 0,
+                char_end: 4,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 5,
+                char_end: 12,
+            },
+            BioToken {
+                tag: "B-LOC".into(),
+                char_start: 13,
+                char_end: 18,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 19,
+                char_end: 21,
+            },
+            BioToken {
+                tag: "B-DATE".into(),
+                char_start: 22,
+                char_end: 28,
+            },
         ];
 
         let spans = merge_bio_spans(&tokens, text);
@@ -665,9 +709,21 @@ mod tests {
     fn bio_merge_all_o_tokens() {
         let text = "nothing special here";
         let tokens = vec![
-            BioToken { tag: "O".into(), char_start: 0, char_end: 7 },
-            BioToken { tag: "O".into(), char_start: 8, char_end: 15 },
-            BioToken { tag: "O".into(), char_start: 16, char_end: 20 },
+            BioToken {
+                tag: "O".into(),
+                char_start: 0,
+                char_end: 7,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 8,
+                char_end: 15,
+            },
+            BioToken {
+                tag: "O".into(),
+                char_start: 16,
+                char_end: 20,
+            },
         ];
 
         let spans = merge_bio_spans(&tokens, text);
@@ -679,8 +735,16 @@ mod tests {
         // I-LOC after B-PER should start a new entity
         let text = "John Paris";
         let tokens = vec![
-            BioToken { tag: "B-PER".into(), char_start: 0, char_end: 4 },
-            BioToken { tag: "I-LOC".into(), char_start: 5, char_end: 10 },
+            BioToken {
+                tag: "B-PER".into(),
+                char_start: 0,
+                char_end: 4,
+            },
+            BioToken {
+                tag: "I-LOC".into(),
+                char_start: 5,
+                char_end: 10,
+            },
         ];
 
         let spans = merge_bio_spans(&tokens, text);
@@ -693,8 +757,16 @@ mod tests {
     fn bio_merge_trailing_entity() {
         let text = "hello World";
         let tokens = vec![
-            BioToken { tag: "O".into(), char_start: 0, char_end: 5 },
-            BioToken { tag: "B-LOC".into(), char_start: 6, char_end: 11 },
+            BioToken {
+                tag: "O".into(),
+                char_start: 0,
+                char_end: 5,
+            },
+            BioToken {
+                tag: "B-LOC".into(),
+                char_start: 6,
+                char_end: 11,
+            },
         ];
 
         let spans = merge_bio_spans(&tokens, text);

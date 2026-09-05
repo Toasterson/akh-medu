@@ -110,8 +110,8 @@ impl MctsNode {
             return f32::INFINITY; // always explore unvisited nodes first
         }
         let exploitation = self.avg_value();
-        let exploration = exploration_constant
-            * ((parent_visits as f32).ln() / self.visits as f32).sqrt();
+        let exploration =
+            exploration_constant * ((parent_visits as f32).ln() / self.visits as f32).sqrt();
         exploitation + exploration
     }
 
@@ -225,22 +225,21 @@ impl MctsPlanner {
                 && leaf.depth < self.config.max_depth
             {
                 // Find unexplored actions.
-                let explored: Vec<SymbolId> = leaf.children.iter()
-                    .filter_map(|c| c.action)
-                    .collect();
-                let unexplored: Vec<SymbolId> = applicable.iter()
+                let explored: Vec<SymbolId> =
+                    leaf.children.iter().filter_map(|c| c.action).collect();
+                let unexplored: Vec<SymbolId> = applicable
+                    .iter()
                     .filter(|a| !explored.contains(a))
                     .copied()
                     .collect();
 
                 if let Some(&action) = unexplored.first() {
                     // Create child node with predicted state.
-                    let child_state = self.predict_next_state(
-                        &leaf.state, action, causal_manager, engine,
-                    );
+                    let child_state =
+                        self.predict_next_state(&leaf.state, action, causal_manager, engine);
                     let child_depth = leaf.depth + 1;
-                    let terminal = child_depth >= self.config.max_depth
-                        || self.is_goal_reached(&child_state);
+                    let terminal =
+                        child_depth >= self.config.max_depth || self.is_goal_reached(&child_state);
 
                     leaf.children.push(MctsNode {
                         state: child_state.clone(),
@@ -253,13 +252,8 @@ impl MctsPlanner {
                     });
 
                     // Rollout from the new child.
-                    let value = self.rollout(
-                        &child_state,
-                        child_depth,
-                        causal_manager,
-                        value_fn,
-                        engine,
-                    );
+                    let value =
+                        self.rollout(&child_state, child_depth, causal_manager, value_fn, engine);
 
                     // Backpropagate: update the new child and all ancestors.
                     let child_idx = leaf.children.len() - 1;
@@ -332,9 +326,10 @@ impl MctsPlanner {
         engine: &Engine,
     ) -> f32 {
         let mut current_state = state.clone();
-        let remaining = self.config.rollout_depth.min(
-            self.config.max_depth.saturating_sub(current_depth),
-        );
+        let remaining = self
+            .config
+            .rollout_depth
+            .min(self.config.max_depth.saturating_sub(current_depth));
 
         let applicable: Vec<SymbolId> = causal_manager
             .applicable_actions(engine)
@@ -350,9 +345,7 @@ impl MctsPlanner {
             // Simple rollout policy: pick first applicable action.
             // (A more sophisticated policy would use utility scoring.)
             let action = applicable[0];
-            current_state = self.predict_next_state(
-                &current_state, action, causal_manager, engine,
-            );
+            current_state = self.predict_next_state(&current_state, action, causal_manager, engine);
 
             if self.is_goal_reached(&current_state) {
                 return 1.0; // goal reached — maximum value
@@ -381,7 +374,8 @@ impl MctsPlanner {
 
         if let Ok(t) = transition {
             // Adjust fluent count based on assertions/retractions.
-            next.fluent_count = next.fluent_count
+            next.fluent_count = next
+                .fluent_count
                 .saturating_add(t.assertions.len())
                 .saturating_sub(t.retractions.len());
         }
@@ -391,8 +385,7 @@ impl MctsPlanner {
 
     /// Simple goal-reached heuristic: all goals have progress > 0.8.
     fn is_goal_reached(&self, state: &AgentState) -> bool {
-        !state.goal_states.is_empty()
-            && state.goal_states.iter().all(|(_, p)| *p > 0.8)
+        !state.goal_states.is_empty() && state.goal_states.iter().all(|(_, p)| *p > 0.8)
     }
 
     // ─── Backpropagation ──────────────────────────────────────────
@@ -423,13 +416,13 @@ impl MctsPlanner {
         for seq in &reflection.successful_sequences {
             if let Some(&first_action) = seq.first() {
                 if applicable.contains(&first_action) {
-                    let already_exists = root.children.iter()
-                        .any(|c| c.action == Some(first_action));
+                    let already_exists =
+                        root.children.iter().any(|c| c.action == Some(first_action));
                     if !already_exists {
                         let mut child = MctsNode {
                             state: root.state.clone(),
                             action: Some(first_action),
-                            visits: 1, // virtual visit
+                            visits: 1,        // virtual visit
                             total_value: 0.5, // positive prior
                             children: Vec::new(),
                             terminal: false,
@@ -454,9 +447,7 @@ impl MctsPlanner {
         let first_action_scores: Vec<(SymbolId, f32, u32)> = root
             .children
             .iter()
-            .filter_map(|c| {
-                c.action.map(|a| (a, c.avg_value(), c.visits))
-            })
+            .filter_map(|c| c.action.map(|a| (a, c.avg_value(), c.visits)))
             .collect();
 
         // Best plan: follow most-visited children.
@@ -465,10 +456,7 @@ impl MctsPlanner {
         let mut reaches_goal = false;
 
         while !current.children.is_empty() {
-            let best = current
-                .children
-                .iter()
-                .max_by_key(|c| c.visits);
+            let best = current.children.iter().max_by_key(|c| c.visits);
 
             match best {
                 Some(node) if node.visits > 0 => {
@@ -485,9 +473,7 @@ impl MctsPlanner {
             }
         }
 
-        let expected_value = if let Some(first) = root.children.iter()
-            .max_by_key(|c| c.visits)
-        {
+        let expected_value = if let Some(first) = root.children.iter().max_by_key(|c| c.visits) {
             first.avg_value()
         } else {
             0.0
@@ -588,7 +574,10 @@ mod tests {
         let expected = expected_exploitation + expected_exploration;
 
         let actual = node.uct_score(parent_visits, c);
-        assert!((actual - expected).abs() < 0.01, "UCT: got {actual}, expected {expected}");
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "UCT: got {actual}, expected {expected}"
+        );
     }
 
     #[test]
@@ -596,7 +585,9 @@ mod tests {
         let mut root = MctsNode::root(make_state(vec![], 0));
         root.children.push(MctsNode::root(make_state(vec![], 0)));
         root.children.push(MctsNode::root(make_state(vec![], 0)));
-        root.children[0].children.push(MctsNode::root(make_state(vec![], 0)));
+        root.children[0]
+            .children
+            .push(MctsNode::root(make_state(vec![], 0)));
         assert_eq!(root.tree_size(), 4);
     }
 

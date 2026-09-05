@@ -758,22 +758,24 @@ impl ChatBackend for OpenAiChatBackend {
         // startup is treated as up, and a genuine mid-session outage surfaces as
         // a `TurnFailed` (which the loop already falls back on) rather than
         // costing every turn an extra round-trip.
-        *self.reachable.get_or_init(|| match self.client.list_models() {
-            Ok(models) => {
-                let model = self.client.model();
-                if !models.is_empty() && !models.iter().any(|m| m == model) {
-                    tracing::warn!(
-                        model, advertised = ?models,
-                        "openai endpoint does not advertise this akh's model; sending it anyway"
-                    );
+        *self
+            .reachable
+            .get_or_init(|| match self.client.list_models() {
+                Ok(models) => {
+                    let model = self.client.model();
+                    if !models.is_empty() && !models.iter().any(|m| m == model) {
+                        tracing::warn!(
+                            model, advertised = ?models,
+                            "openai endpoint does not advertise this akh's model; sending it anyway"
+                        );
+                    }
+                    true
                 }
-                true
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "openai endpoint probe failed; backing unavailable");
-                false
-            }
-        })
+                Err(e) => {
+                    tracing::warn!(error = %e, "openai endpoint probe failed; backing unavailable");
+                    false
+                }
+            })
     }
 
     fn prepare(
@@ -800,6 +802,7 @@ impl ChatBackend for OpenAiChatBackend {
             context_window: self.client.config.context_window,
             supports_thinking: self.client.config.reasoning_effort.is_some(),
             supports_tools: true,
+            supports_images: false,
         }
     }
 
@@ -1063,7 +1066,11 @@ mod tests {
             "tool_calls": [{"function": {"name": "grep", "arguments": "{oops"}}],
         });
         let (_c, calls) = parse_message(&msg);
-        assert_eq!(calls.len(), 1, "the call must survive for the tool to reject");
+        assert_eq!(
+            calls.len(),
+            1,
+            "the call must survive for the tool to reject"
+        );
         assert_eq!(calls[0].arguments, json!({}));
     }
 

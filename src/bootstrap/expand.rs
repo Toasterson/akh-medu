@@ -16,9 +16,9 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::{encode_label, encode_token};
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 use super::purpose::PurposeModel;
 
@@ -36,7 +36,9 @@ pub enum DomainExpandError {
     )]
     NoSeeds,
 
-    #[error("all {candidate_count} candidate concepts fell below similarity threshold {threshold:.2}")]
+    #[error(
+        "all {candidate_count} candidate concepts fell below similarity threshold {threshold:.2}"
+    )]
     #[diagnostic(
         code(akh::bootstrap::expand::empty_expansion),
         help(
@@ -44,14 +46,15 @@ pub enum DomainExpandError {
              or provide more specific seed concepts."
         )
     )]
-    EmptyExpansion { threshold: f32, candidate_count: usize },
+    EmptyExpansion {
+        threshold: f32,
+        candidate_count: usize,
+    },
 
     #[error("API call budget exhausted after {calls} calls")]
     #[diagnostic(
         code(akh::bootstrap::expand::rate_limit),
-        help(
-            "Increase max_api_calls in ExpansionConfig or reduce the number of seed concepts."
-        )
+        help("Increase max_api_calls in ExpansionConfig or reduce the number of seed concepts.")
     )]
     RateLimitReached { calls: usize },
 
@@ -214,7 +217,13 @@ pub struct DiscoveredRelation {
 }
 
 /// Internal result from KG insertion.
-type InsertionResult = (usize, usize, Vec<ProvenanceId>, Option<SymbolId>, Option<SymbolId>);
+type InsertionResult = (
+    usize,
+    usize,
+    Vec<ProvenanceId>,
+    Option<SymbolId>,
+    Option<SymbolId>,
+);
 
 /// Result of a domain expansion run.
 #[derive(Debug, Clone)]
@@ -318,11 +327,16 @@ impl DomainExpander {
         // 5. Cap at max_concepts.
         // Sort accepted by similarity descending, take top max_concepts.
         let mut accepted: Vec<_> = candidates.iter().filter(|c| c.accepted).cloned().collect();
-        accepted.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        accepted.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         accepted.truncate(self.config.max_concepts);
 
         let accepted_labels: Vec<String> = accepted.iter().map(|c| c.label.clone()).collect();
-        let accepted_set: HashSet<String> = accepted_labels.iter().map(|l| normalize_label(l)).collect();
+        let accepted_set: HashSet<String> =
+            accepted_labels.iter().map(|l| normalize_label(l)).collect();
 
         let rejected: Vec<_> = candidates
             .iter()
@@ -384,11 +398,7 @@ impl DomainExpander {
     // ── VSA Boundary ────────────────────────────────────────────────────
 
     /// Build the domain prototype vector by bundling encoded seed labels.
-    fn build_domain_prototype(
-        &self,
-        ops: &VsaOps,
-        seeds: &[String],
-    ) -> ExpandResult<HyperVec> {
+    fn build_domain_prototype(&self, ops: &VsaOps, seeds: &[String]) -> ExpandResult<HyperVec> {
         let vecs: Vec<HyperVec> = seeds
             .iter()
             .filter_map(|s| encode_label(ops, s).ok())
@@ -403,9 +413,8 @@ impl DomainExpander {
         }
 
         let refs: Vec<&HyperVec> = vecs.iter().collect();
-        ops.bundle(&refs).map_err(|e| {
-            DomainExpandError::Engine(Box::new(crate::error::AkhError::Vsa(e)))
-        })
+        ops.bundle(&refs)
+            .map_err(|e| DomainExpandError::Engine(Box::new(crate::error::AkhError::Vsa(e))))
     }
 
     /// Check if a candidate is within the domain boundary.
@@ -655,11 +664,7 @@ impl DomainExpander {
     }
 
     /// Map a predicate label string to the appropriate predicate SymbolId.
-    fn map_predicate_label(
-        &self,
-        label: &str,
-        engine: &Engine,
-    ) -> ExpandResult<SymbolId> {
+    fn map_predicate_label(&self, label: &str, engine: &Engine) -> ExpandResult<SymbolId> {
         match label {
             "instance_of" => Ok(self.predicates.instance_of),
             "subclass_of" => Ok(self.predicates.subclass_of),
@@ -828,10 +833,7 @@ pub fn parse_conceptnet_edges(
             .pointer("/end/label")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let weight = edge
-            .get("weight")
-            .and_then(|w| w.as_f64())
-            .unwrap_or(1.0) as f32;
+        let weight = edge.get("weight").and_then(|w| w.as_f64()).unwrap_or(1.0) as f32;
 
         // Only handle known relations.
         let predicate_label = match rel {
@@ -934,8 +936,16 @@ fn is_valid_expansion_label(label: &str) -> bool {
     // Wikipedia/Wikidata meta-pages
     let lower = trimmed.to_lowercase();
     let junk_prefixes = [
-        "user:", "wikipedia:", "category talk:", "talk:", "file:",
-        "template:", "portal:", "module:", "draft:", "mediawiki:",
+        "user:",
+        "wikipedia:",
+        "category talk:",
+        "talk:",
+        "file:",
+        "template:",
+        "portal:",
+        "module:",
+        "draft:",
+        "mediawiki:",
     ];
     if junk_prefixes.iter().any(|p| lower.starts_with(p)) {
         return false;
@@ -943,15 +953,21 @@ fn is_valid_expansion_label(label: &str) -> bool {
 
     // Common meta/list/index artifacts
     let junk_patterns = [
-        "articles for creation", "categories for discussion",
-        "redirects to", "/sandbox", "/export/",
+        "articles for creation",
+        "categories for discussion",
+        "redirects to",
+        "/sandbox",
+        "/export/",
     ];
     if junk_patterns.iter().any(|p| lower.contains(p)) {
         return false;
     }
 
     // Mostly non-alphanumeric (Unicode control chars, combining marks, RTL markers)
-    let alpha_count = trimmed.chars().filter(|c| c.is_alphanumeric() || c.is_ascii_whitespace()).count();
+    let alpha_count = trimmed
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_ascii_whitespace())
+        .count();
     let total = trimmed.chars().count();
     if total > 0 && (alpha_count as f64 / total as f64) < 0.5 {
         return false;
@@ -1134,7 +1150,10 @@ mod tests {
             }
         });
         let cats = parse_wikipedia_categories(&data);
-        assert_eq!(cats, vec!["Computer science", "Articles with short description"]);
+        assert_eq!(
+            cats,
+            vec!["Computer science", "Articles with short description"]
+        );
     }
 
     #[test]
@@ -1210,7 +1229,10 @@ mod tests {
         let mut relations = Vec::new();
         parse_conceptnet_edges(&data, "dog", &mut candidates, &mut relations);
 
-        let pred_labels: Vec<_> = relations.iter().map(|r| r.predicate_label.as_str()).collect();
+        let pred_labels: Vec<_> = relations
+            .iter()
+            .map(|r| r.predicate_label.as_str())
+            .collect();
         assert!(pred_labels.contains(&"instance_of"));
         assert!(pred_labels.contains(&"has_part"));
         assert!(pred_labels.contains(&"has_prerequisite"));
@@ -1266,7 +1288,9 @@ mod tests {
 
     #[test]
     fn meta_category_filter() {
-        assert!(is_wikipedia_meta_category("Articles with short description"));
+        assert!(is_wikipedia_meta_category(
+            "Articles with short description"
+        ));
         assert!(is_wikipedia_meta_category("All stub articles"));
         assert!(is_wikipedia_meta_category("CS1 maint: archived copy"));
         assert!(!is_wikipedia_meta_category("Computer science"));

@@ -75,14 +75,15 @@ impl Tool for SkillAuthorTool {
         let domains = input.get_str_list("domains");
 
         // Persistence is required to write the skill directory.
-        let data_dir = engine
-            .config()
-            .data_dir
-            .clone()
-            .ok_or_else(|| AgentError::ToolExecution {
-                tool_name: "skill_author".into(),
-                message: "skill authoring requires a persistent workspace (--data-dir)".into(),
-            })?;
+        let data_dir =
+            engine
+                .config()
+                .data_dir
+                .clone()
+                .ok_or_else(|| AgentError::ToolExecution {
+                    tool_name: "skill_author".into(),
+                    message: "skill authoring requires a persistent workspace (--data-dir)".into(),
+                })?;
         let skills_dir = data_dir.join("skills");
 
         // Build a stub skill carrying the metadata, then graft the supplied body
@@ -111,10 +112,12 @@ impl Tool for SkillAuthorTool {
                 tool_name: "skill_author".into(),
                 message: e.to_string(),
             })?;
-        let activation = engine.load_skill(&id).map_err(|e| AgentError::ToolExecution {
-            tool_name: "skill_author".into(),
-            message: e.to_string(),
-        })?;
+        let activation = engine
+            .load_skill(&id)
+            .map_err(|e| AgentError::ToolExecution {
+                tool_name: "skill_author".into(),
+                message: e.to_string(),
+            })?;
 
         Ok(ToolOutput::ok(format!(
             "Authored and loaded skill \"{id}\" ({} triple(s) loaded).",
@@ -125,8 +128,8 @@ impl Tool for SkillAuthorTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "skill_author".into(),
-            description: "Register a skill from id/name/description/markdown body (e.g. a SKILL.md)."
-                .into(),
+            description:
+                "Register a skill from id/name/description/markdown body (e.g. a SKILL.md).".into(),
             parameters: vec![
                 ToolParamSchema::required("id", "Stable skill id (kebab-case)."),
                 ToolParamSchema::required("name", "Human-readable skill name."),

@@ -227,8 +227,9 @@ mod tests {
     #[test]
     fn ec_persist_rule_fires() {
         // If initiates(e, f) and happens(e, t) then holds-at(f, t) should be derivable.
-        let expr: egg::RecExpr<AkhLang> =
-            "(and (initiates ev fluent) (happens ev time))".parse().unwrap();
+        let expr: egg::RecExpr<AkhLang> = "(and (initiates ev fluent) (happens ev time))"
+            .parse()
+            .unwrap();
         let runner = Runner::default().with_expr(&expr).run(&causal_rules());
 
         // Check that holds-at(fluent, time) is in the e-graph.
@@ -242,8 +243,7 @@ mod tests {
 
     #[test]
     fn cause_transitivity_rule_fires() {
-        let expr: egg::RecExpr<AkhLang> =
-            "(and (causes a b) (causes b c))".parse().unwrap();
+        let expr: egg::RecExpr<AkhLang> = "(and (causes a b) (causes b c))".parse().unwrap();
         let runner = Runner::default().with_expr(&expr).run(&causal_rules());
 
         let target: egg::RecExpr<AkhLang> = "(causes a c)".parse().unwrap();

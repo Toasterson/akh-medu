@@ -18,9 +18,9 @@ use candle_core as candle;
 
 use std::sync::Arc;
 
-use candle::quantized::gguf_file;
-use candle::quantized::QTensor;
 use candle::D;
+use candle::quantized::QTensor;
+use candle::quantized::gguf_file;
 use candle::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Module;
 
@@ -385,7 +385,11 @@ impl LayerWeights {
                 let gpu = |t: std::result::Result<Tensor, crate::nlu::error::NluError>| {
                     t.map_err(|e| candle_core::Error::Msg(format!("gpu attn proj: {e}")))
                 };
-                (gpu(g.wq.forward(x))?, gpu(g.wk.forward(x))?, gpu(g.wv.forward(x))?)
+                (
+                    gpu(g.wq.forward(x))?,
+                    gpu(g.wk.forward(x))?,
+                    gpu(g.wv.forward(x))?,
+                )
             }
             None => (
                 self.attention_wq.forward(x)?,
@@ -474,8 +478,12 @@ impl LayerWeights {
                 None => len,
             };
             (
-                kbuf.narrow(2, 0, read_len)?.contiguous()?.to_dtype(DType::F32)?,
-                vbuf.narrow(2, 0, read_len)?.contiguous()?.to_dtype(DType::F32)?,
+                kbuf.narrow(2, 0, read_len)?
+                    .contiguous()?
+                    .to_dtype(DType::F32)?,
+                vbuf.narrow(2, 0, read_len)?
+                    .contiguous()?
+                    .to_dtype(DType::F32)?,
             )
         } else {
             // CPU path: dynamic grow-by-cat (byte-identical to the original).
@@ -637,7 +645,9 @@ impl ModelWeights {
             if std::env::var("AKH_GPU_MATMUL").ok().as_deref() == Some("1") {
                 match crate::nlu::hip::RocmBlas::load() {
                     Ok(b) => {
-                        tracing::info!("AKH_GPU_MATMUL=1: routing Gemma linear matmuls through the AMD GPU");
+                        tracing::info!(
+                            "AKH_GPU_MATMUL=1: routing Gemma linear matmuls through the AMD GPU"
+                        );
                         Some(std::sync::Arc::new(b))
                     }
                     Err(e) => {
@@ -784,7 +794,11 @@ impl ModelWeights {
             let rotary_embedding = match rope_cache.get(&rope_key) {
                 Some(r) => r.clone(),
                 None => {
-                    let r = Arc::new(RotaryEmbedding::new(key_length, layer_rope_frequency, device)?);
+                    let r = Arc::new(RotaryEmbedding::new(
+                        key_length,
+                        layer_rope_frequency,
+                        device,
+                    )?);
                     rope_cache.insert(rope_key, r.clone());
                     r
                 }

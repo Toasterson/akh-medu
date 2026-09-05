@@ -394,6 +394,9 @@ mod tests {
 
         let dest_dir = TempDir::new().unwrap();
         let result = import_skill(&tampered_path, dest_dir.path());
-        assert!(result.is_err(), "tampered archive should fail checksum validation");
+        assert!(
+            result.is_err(),
+            "tampered archive should fail checksum validation"
+        );
     }
 }

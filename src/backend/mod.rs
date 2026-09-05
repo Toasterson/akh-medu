@@ -51,7 +51,9 @@ pub mod remote;
 
 pub use local_drop::{ExecPath, LocalDropBackend, LocalDropConfig, LocalDropError};
 
-pub use process_supervisor::{DrainedOutput, ProgressTracker, SupervisedExecution, SupervisorError, SupervisorResult};
+pub use process_supervisor::{
+    DrainedOutput, ProgressTracker, SupervisedExecution, SupervisorError, SupervisorResult,
+};
 
 /// Errors from process execution through a [`Backend`].
 ///
@@ -392,11 +394,12 @@ impl Backend for InProcessBackend {
         let command = Self::command_for(&request);
 
         // Spawn under supervision (includes process group setup for clean kill)
-        let mut exec = SupervisedExecution::spawn(command)
-            .map_err(|e| match e {
-                SupervisorError::Spawn { source } => ExecError::Spawn { source },
-                _ => ExecError::Spawn { source: std::io::Error::new(std::io::ErrorKind::Other, e) },
-            })?;
+        let mut exec = SupervisedExecution::spawn(command).map_err(|e| match e {
+            SupervisorError::Spawn { source } => ExecError::Spawn { source },
+            _ => ExecError::Spawn {
+                source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            },
+        })?;
 
         // Progress tracker: use the request timeout as the stuck threshold.
         // A process that produces no output for `request.timeout` is stuck;
@@ -419,15 +422,18 @@ impl Backend for InProcessBackend {
                 stdout: output.stdout,
                 stderr: output.stderr,
             }),
-            Err(SupervisorError::Killed { reason, partial_stdout, partial_stderr, elapsed }) => {
-                Err(ExecError::Stuck {
-                    command: request.command.clone(),
-                    reason,
-                    partial_stdout,
-                    partial_stderr,
-                    elapsed_secs: elapsed.as_secs(),
-                })
-            }
+            Err(SupervisorError::Killed {
+                reason,
+                partial_stdout,
+                partial_stderr,
+                elapsed,
+            }) => Err(ExecError::Stuck {
+                command: request.command.clone(),
+                reason,
+                partial_stdout,
+                partial_stderr,
+                elapsed_secs: elapsed.as_secs(),
+            }),
             Err(SupervisorError::Wait { source }) => Err(ExecError::Wait { source }),
             Err(SupervisorError::Spawn { source }) => Err(ExecError::Spawn { source }),
         }
@@ -450,7 +456,9 @@ impl Backend for InProcessBackend {
         ExecLocus {
             backend: "in-process",
             host: local_hostname(),
-            os_user: std::env::var("USER").or_else(|_| std::env::var("LOGNAME")).ok(),
+            os_user: std::env::var("USER")
+                .or_else(|_| std::env::var("LOGNAME"))
+                .ok(),
             correlation_id: Some(format!("inproc-{}", std::process::id())),
         }
     }
@@ -518,9 +526,14 @@ mod tests {
         // progress-based supervisor detected no output, Timeout was the
         // old elapsed-time deadline.
         match err {
-            ExecError::Stuck { command, reason, .. } => {
+            ExecError::Stuck {
+                command, reason, ..
+            } => {
                 assert_eq!(command, "sleep 60");
-                assert!(reason.contains("stuck"), "reason must mention stuck: {reason}");
+                assert!(
+                    reason.contains("stuck"),
+                    "reason must mention stuck: {reason}"
+                );
             }
             other => panic!("expected Stuck, got: {other:?}"),
         }
@@ -530,8 +543,7 @@ mod tests {
     fn exec_applies_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let canonical = dir.path().canonicalize().unwrap();
-        let request = ExecRequest::shell("pwd", Duration::from_secs(10))
-            .with_cwd(&canonical);
+        let request = ExecRequest::shell("pwd", Duration::from_secs(10)).with_cwd(&canonical);
         let command = InProcessBackend::command_for(&request);
 
         assert_eq!(command.get_current_dir(), Some(canonical.as_path()));
@@ -556,7 +568,9 @@ mod tests {
         let backend = sandboxed(dir.path());
 
         // In-sandbox write + read round-trips.
-        backend.write(Path::new("note.txt"), "through the seam").unwrap();
+        backend
+            .write(Path::new("note.txt"), "through the seam")
+            .unwrap();
         let read = backend
             .read_to_string(&dir.path().join("note.txt"))
             .unwrap();
@@ -572,7 +586,10 @@ mod tests {
         );
         let denied_write = backend.write(Path::new("/tmp/akh-backend-evil.txt"), "nope");
         assert!(
-            matches!(denied_write, Err(FsError::OutsideSandbox { kind: "write", .. })),
+            matches!(
+                denied_write,
+                Err(FsError::OutsideSandbox { kind: "write", .. })
+            ),
             "backend must preserve write containment: {denied_write:?}"
         );
     }

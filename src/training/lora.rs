@@ -65,7 +65,10 @@ pub enum LoraError {
     SlowLoad { agent_id: String, elapsed_ms: u64 },
 
     #[error("I/O error for agent '{agent_id}': {reason}")]
-    #[diagnostic(code(akh::lora::io), help("Check that the data directory is readable."))]
+    #[diagnostic(
+        code(akh::lora::io),
+        help("Check that the data directory is readable.")
+    )]
     Io { agent_id: String, reason: String },
 }
 
@@ -512,7 +515,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = LoraRegistry::new(tmp.path().join("adapters"));
         let result = reg.activate(AgentId::Horus);
-        assert!(matches!(result, Err(LoraError::NotFound { .. } | LoraError::MetaCorrupt { .. } | LoraError::Io { .. })));
+        assert!(matches!(
+            result,
+            Err(LoraError::NotFound { .. } | LoraError::MetaCorrupt { .. } | LoraError::Io { .. })
+        ));
     }
 
     #[test]

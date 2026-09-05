@@ -200,9 +200,11 @@ fn build_node(
     }
 
     // Query provenance for this symbol.
-    let records = engine.provenance_of(symbol).map_err(|e| ExplainError::Provenance {
-        message: e.to_string(),
-    })?;
+    let records = engine
+        .provenance_of(symbol)
+        .map_err(|e| ExplainError::Provenance {
+            message: e.to_string(),
+        })?;
 
     if records.is_empty() {
         return Ok(DerivationNode {
@@ -264,7 +266,10 @@ fn render_node(node: &DerivationNode, lines: &mut Vec<String>, prefix: &str, is_
         lines.push(format!("{conf} {}{derivation_tag}", node.label));
     } else {
         let connector = if is_last { "└─ " } else { "├─ " };
-        lines.push(format!("{prefix}{connector}{conf} {}{derivation_tag}", node.label));
+        lines.push(format!(
+            "{prefix}{connector}{conf} {}{derivation_tag}",
+            node.label
+        ));
     }
 
     let child_count = node.children.len();
@@ -359,7 +364,9 @@ pub fn explain_entity(engine: &Arc<Engine>, subject: &str) -> ExplainResult<Stri
     }
 
     if triple_lines.is_empty() {
-        return Ok(format!("No non-metadata knowledge found about \"{subject}\"."));
+        return Ok(format!(
+            "No non-metadata knowledge found about \"{subject}\"."
+        ));
     }
 
     let mut result = format!("Explanation for \"{subject}\":\n\n");
@@ -392,7 +399,9 @@ pub fn explain_confidence(engine: &Arc<Engine>, subject: &str) -> ExplainResult<
         .collect();
 
     if all_triples.is_empty() {
-        return Ok(format!("No knowledge found about \"{subject}\" to assess confidence."));
+        return Ok(format!(
+            "No knowledge found about \"{subject}\" to assess confidence."
+        ));
     }
 
     // Compute aggregate confidence.
@@ -482,7 +491,9 @@ pub fn explain_known(engine: &Arc<Engine>, subject: &str) -> ExplainResult<Strin
     }
 
     if lines.is_empty() {
-        return Ok(format!("No non-metadata knowledge found about \"{subject}\"."));
+        return Ok(format!(
+            "No non-metadata knowledge found about \"{subject}\"."
+        ));
     }
 
     let mut result = format!("Known facts about \"{subject}\" ({fact_count} total):\n\n");
@@ -502,10 +513,7 @@ pub fn explain_changes(
     let all = engine.all_triples();
     let threshold = since_timestamp.unwrap_or(0);
 
-    let changed: Vec<_> = all
-        .iter()
-        .filter(|t| t.timestamp > threshold)
-        .collect();
+    let changed: Vec<_> = all.iter().filter(|t| t.timestamp > threshold).collect();
 
     if changed.is_empty() {
         return Ok("No changes since last check.".to_string());
@@ -641,18 +649,14 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("concept extraction: {extraction_method}")
         }
-        DerivationKind::ContextInheritance { .. } => {
-            "inherited from ancestor context".to_string()
-        }
+        DerivationKind::ContextInheritance { .. } => "inherited from ancestor context".to_string(),
         DerivationKind::ContextLifting { condition, .. } => {
             format!("lifted between contexts: {condition}")
         }
         DerivationKind::PredicateGeneralization { .. } => {
             "inferred via predicate generalization".to_string()
         }
-        DerivationKind::PredicateInverse { .. } => {
-            "inferred via predicate inverse".to_string()
-        }
+        DerivationKind::PredicateInverse { .. } => "inferred via predicate inverse".to_string(),
         DerivationKind::DefeasibleOverride { reason, .. } => {
             format!("defeasible override: {reason}")
         }
@@ -670,22 +674,14 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             decayed_confidence,
             ..
         } => {
-            format!(
-                "temporal decay: {original_confidence:.2} → {decayed_confidence:.2}"
-            )
+            format!("temporal decay: {original_confidence:.2} → {decayed_confidence:.2}")
         }
         DerivationKind::ContradictionDetected { kind, .. } => {
             format!("contradiction detected: {kind}")
         }
-        DerivationKind::SkolemWitness { .. } => {
-            "Skolem witness (existential)".to_string()
-        }
-        DerivationKind::SkolemGrounding { .. } => {
-            "Skolem grounded to concrete entity".to_string()
-        }
-        DerivationKind::CwaQuery { .. } => {
-            "closed-world assumption query".to_string()
-        }
+        DerivationKind::SkolemWitness { .. } => "Skolem witness (existential)".to_string(),
+        DerivationKind::SkolemGrounding { .. } => "Skolem grounded to concrete entity".to_string(),
+        DerivationKind::CwaQuery { .. } => "closed-world assumption query".to_string(),
         DerivationKind::SecondOrderInstantiation { rule_name, .. } => {
             format!("second-order rule: {rule_name}")
         }
@@ -772,7 +768,9 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             format!("calendar event managed: '{event_summary}' ({dur_min} min)")
         }
         DerivationKind::PreferenceLearned {
-            signal_kind, weight, ..
+            signal_kind,
+            weight,
+            ..
         } => {
             format!("preference learned from {signal_kind} signal (weight: {weight:.2})")
         }
@@ -822,9 +820,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             culture,
             trait_count,
         } => {
-            format!(
-                "identity resolved: {name} ({entity_type}, {culture}, {trait_count} traits)"
-            )
+            format!("identity resolved: {name} ({entity_type}, {culture}, {trait_count} traits)")
         }
         DerivationKind::DomainExpansion {
             seed_label,
@@ -862,9 +858,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             merged_count,
             pruned_count,
         } => {
-            format!(
-                "sleep consolidation ({phase}): merged {merged_count}, pruned {pruned_count}"
-            )
+            format!("sleep consolidation ({phase}): merged {merged_count}, pruned {pruned_count}")
         }
         DerivationKind::DirectedCuriosity {
             concept,
@@ -978,11 +972,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
         } => {
             format!("calendar attendee linked: event {event_id} ↔ contact \"{contact_id}\"")
         }
-        DerivationKind::LlmTripleExtraction {
-            backend,
-            model,
-            ..
-        } => {
+        DerivationKind::LlmTripleExtraction { backend, model, .. } => {
             format!("LLM-extracted triple (backend: {backend}, model: {model})")
         }
         DerivationKind::EventCalculusProjection {
@@ -1084,12 +1074,8 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             wall_time_ms,
             ..
         } => {
-            let model = model_used
-                .as_deref()
-                .unwrap_or("unknown");
-            format!(
-                "delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}"
-            )
+            let model = model_used.as_deref().unwrap_or("unknown");
+            format!("delegated to {target} (model: {model}, {wall_time_ms}ms): {task_description}")
         }
         DerivationKind::AffectiveAppraisal {
             trigger_kind,
@@ -1101,9 +1087,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             )
         }
         DerivationKind::ArticleCreated {
-            title,
-            block_count,
-            ..
+            title, block_count, ..
         } => {
             format!("wiki article created: \"{title}\" ({block_count} blocks)")
         }
@@ -1127,9 +1111,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             stance,
             confidence,
         } => {
-            format!(
-                "opinion expressed in \"{title}\": {stance} (confidence: {confidence:.2})"
-            )
+            format!("opinion expressed in \"{title}\": {stance} (confidence: {confidence:.2})")
         }
         DerivationKind::DebateContribution {
             topic,
@@ -1158,7 +1140,11 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
                 "LLM-elicited triple (model: {model_id}, pass: {pass}, self-consistency: {self_consistency:.2})"
             )
         }
-        DerivationKind::VsaRlUpdate { tool, reward, cycle } => {
+        DerivationKind::VsaRlUpdate {
+            tool,
+            reward,
+            cycle,
+        } => {
             format!(
                 "VSA RL update at cycle {cycle}: tool sym:{} received reward {reward:.3}",
                 tool.get()
@@ -1185,9 +1171,7 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             confidence,
             source_id,
         } => {
-            format!(
-                "perceived via {modality} (confidence: {confidence:.2}, source: {source_id})"
-            )
+            format!("perceived via {modality} (confidence: {confidence:.2}, source: {source_id})")
         }
         DerivationKind::RelationEnrichment {
             relations_added,
@@ -1218,7 +1202,10 @@ pub fn derivation_kind_prose(kind: &DerivationKind) -> String {
             format!("retracted by re-projecting note {note_id}: {reason}")
         }
         DerivationKind::SourceAttributed { source, .. } => {
-            format!("source-attributed assertion (source symbol {})", source.get())
+            format!(
+                "source-attributed assertion (source symbol {})",
+                source.get()
+            )
         }
     }
 }
@@ -1274,7 +1261,9 @@ mod tests {
     #[test]
     fn parse_why_query() {
         let q = ExplanationQuery::parse("why is Rust a programming language?").unwrap();
-        assert!(matches!(q, ExplanationQuery::Why { ref subject } if subject == "Rust a programming language"));
+        assert!(
+            matches!(q, ExplanationQuery::Why { ref subject } if subject == "Rust a programming language")
+        );
     }
 
     #[test]
@@ -1424,11 +1413,13 @@ mod tests {
         assert!(derivation_kind_prose(&DerivationKind::Extracted).contains("extracted"));
         assert!(derivation_kind_prose(&DerivationKind::Reasoned).contains("reasoning"));
         assert!(derivation_kind_prose(&DerivationKind::Aggregated).contains("aggregated"));
-        assert!(derivation_kind_prose(&DerivationKind::RuleInference {
-            rule_name: "transitivity".to_string(),
-            antecedents: vec![],
-        })
-        .contains("transitivity"));
+        assert!(
+            derivation_kind_prose(&DerivationKind::RuleInference {
+                rule_name: "transitivity".to_string(),
+                antecedents: vec![],
+            })
+            .contains("transitivity")
+        );
     }
 
     // ── Helper tests ─────────────────────────────────────────────────

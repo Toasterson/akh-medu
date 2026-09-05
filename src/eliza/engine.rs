@@ -84,7 +84,11 @@ impl ElizaEngine {
         // Stable sort so equal-priority rules keep their script order.
         rules.sort_by(|a, b| b.rule.priority.cmp(&a.rule.priority));
 
-        Ok(Self { meta: script.script, rules, ops })
+        Ok(Self {
+            meta: script.script,
+            rules,
+            ops,
+        })
     }
 
     /// Optional opening line configured in the script.
@@ -135,7 +139,10 @@ impl ElizaEngine {
             .iter()
             .zip(&compiled.keyword_vecs)
             .filter_map(|(kw, kv)| {
-                self.ops.similarity(&word_vec, kv).ok().map(|s| (kw.clone(), s))
+                self.ops
+                    .similarity(&word_vec, kv)
+                    .ok()
+                    .map(|s| (kw.clone(), s))
             })
             .collect()
     }
@@ -166,14 +173,24 @@ impl ElizaEngine {
 
         for &word in words {
             // Fast path: exact string match against keyword list.
-            if compiled.rule.keywords.iter().any(|kw| kw.to_lowercase() == word) {
+            if compiled
+                .rule
+                .keywords
+                .iter()
+                .any(|kw| kw.to_lowercase() == word)
+            {
                 return true;
             }
 
             // Fuzzy path: VSA similarity against each keyword's hypervector.
             let word_vec = encode_token(&self.ops, word);
             for kv in &compiled.keyword_vecs {
-                if self.ops.similarity(&word_vec, kv).ok().is_some_and(|s| s >= threshold) {
+                if self
+                    .ops
+                    .similarity(&word_vec, kv)
+                    .ok()
+                    .is_some_and(|s| s >= threshold)
+                {
                     return true;
                 }
             }
@@ -218,21 +235,30 @@ priority = 10
     fn mother_keyword_matches_mom() {
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         let resp = engine.respond("I miss my mom");
-        assert_ne!(resp, engine.meta.default_response, "'mom' should match family rule");
+        assert_ne!(
+            resp, engine.meta.default_response,
+            "'mom' should match family rule"
+        );
     }
 
     #[test]
     fn mother_keyword_matches_mama() {
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         let resp = engine.respond("my mama used to say that");
-        assert_ne!(resp, engine.meta.default_response, "'mama' should match family rule");
+        assert_ne!(
+            resp, engine.meta.default_response,
+            "'mama' should match family rule"
+        );
     }
 
     #[test]
     fn mother_keyword_matches_parent() {
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         let resp = engine.respond("my parent was strict");
-        assert_ne!(resp, engine.meta.default_response, "'parent' should match family rule");
+        assert_ne!(
+            resp, engine.meta.default_response,
+            "'parent' should match family rule"
+        );
     }
 
     // ── acceptance: non-match ────────────────────────────────────────────────
@@ -242,7 +268,10 @@ priority = 10
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         // "moth" is not in the keyword list; VSA sim to any keyword is ~0.5 < 0.70
         let resp = engine.respond("I saw a moth");
-        assert_eq!(resp, engine.meta.default_response, "'moth' must NOT match family rule");
+        assert_eq!(
+            resp, engine.meta.default_response,
+            "'moth' must NOT match family rule"
+        );
     }
 
     // ── acceptance: exact match regression ───────────────────────────────────
@@ -258,7 +287,10 @@ priority = 10
     fn exact_keyword_hello_matches() {
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         let resp = engine.respond("hello there");
-        assert_ne!(resp, engine.meta.default_response, "'hello' should match greeting rule");
+        assert_ne!(
+            resp, engine.meta.default_response,
+            "'hello' should match greeting rule"
+        );
     }
 
     // ── round-robin responses ─────────────────────────────────────────────────
@@ -281,7 +313,10 @@ priority = 10
         let mut engine = ElizaEngine::new(family_script()).unwrap();
         // greeting rule (priority 10) should fire before family rule (priority 5)
         let resp = engine.respond("hello mom");
-        assert_eq!(resp, "How do you do.", "greeting rule should win via priority");
+        assert_eq!(
+            resp, "How do you do.",
+            "greeting rule should win via priority"
+        );
     }
 
     // ── default response ──────────────────────────────────────────────────────
@@ -327,7 +362,11 @@ priority = 10
         let _ = engine.respond("warm up");
         let (_, us) = engine.measure_respond_us("I think about my mother all the time");
         // Debug builds have no optimisation; use a generous ceiling there.
-        let limit = if cfg!(debug_assertions) { 50_000 } else { 1_000 };
+        let limit = if cfg!(debug_assertions) {
+            50_000
+        } else {
+            1_000
+        };
         assert!(us < limit, "respond() took {us}µs, should be < {limit}µs");
     }
 

@@ -13,7 +13,7 @@ use crate::graph::Triple;
 use crate::library::catalog::{LibraryCatalog, slugify};
 use crate::library::chunker::{ChunkConfig, normalize_chunks};
 use crate::library::concepts::{
-    extract_concepts_from_chunk, extract_head_noun_phrase, extract_richer_triples, ConceptSource,
+    ConceptSource, extract_concepts_from_chunk, extract_head_noun_phrase, extract_richer_triples,
 };
 use crate::library::error::{LibraryError, LibraryResult};
 use crate::library::model::*;
@@ -99,7 +99,6 @@ pub struct IngestConfig {
     /// `"sub.example.com"`.
     pub allowed_domains: Option<Vec<String>>,
 }
-
 
 /// Result of a successful document ingestion.
 pub struct IngestResult {
@@ -373,8 +372,14 @@ pub fn ingest_url(
     timeout_secs: u64,
 ) -> LibraryResult<IngestResult> {
     let mut req = ureq::get(url)
-        .set("User-Agent", "akh-medu/0.5 (+https://github.com/Toasterson/akh-medu)")
-        .set("Accept", "text/html,application/xhtml+xml,application/pdf,text/plain,*/*");
+        .set(
+            "User-Agent",
+            "akh-medu/0.5 (+https://github.com/Toasterson/akh-medu)",
+        )
+        .set(
+            "Accept",
+            "text/html,application/xhtml+xml,application/pdf,text/plain,*/*",
+        );
     if timeout_secs > 0 {
         req = req.timeout(std::time::Duration::from_secs(timeout_secs));
     }
@@ -561,23 +566,21 @@ fn run_concept_extraction(
         let subj_words: Vec<&str> = subject_span.split_whitespace().collect();
         let obj_words: Vec<&str> = object_span.split_whitespace().collect();
 
-        let atomic_subj = extract_head_noun_phrase(&subj_words)
-            .or_else(|| {
-                // Fallback: if original span ≤3 words after determiner stripping, use directly.
-                if subj_words.len() <= 3 {
-                    Some(capitalize(&subj_words.join(" ")))
-                } else {
-                    None
-                }
-            });
-        let atomic_obj = extract_head_noun_phrase(&obj_words)
-            .or_else(|| {
-                if obj_words.len() <= 3 {
-                    Some(capitalize(&obj_words.join(" ")))
-                } else {
-                    None
-                }
-            });
+        let atomic_subj = extract_head_noun_phrase(&subj_words).or_else(|| {
+            // Fallback: if original span ≤3 words after determiner stripping, use directly.
+            if subj_words.len() <= 3 {
+                Some(capitalize(&subj_words.join(" ")))
+            } else {
+                None
+            }
+        });
+        let atomic_obj = extract_head_noun_phrase(&obj_words).or_else(|| {
+            if obj_words.len() <= 3 {
+                Some(capitalize(&obj_words.join(" ")))
+            } else {
+                None
+            }
+        });
 
         if let (Some(subj), Some(obj)) = (atomic_subj, atomic_obj) {
             if subj.is_empty() || obj.is_empty() {
@@ -606,12 +609,8 @@ fn run_concept_extraction(
             relational_labels.insert(obj.to_lowercase());
 
             // Provenance for each concept.
-            store_concept_provenance(
-                engine, s, slug, chunk_index, ConceptSource::RelationalHead,
-            );
-            store_concept_provenance(
-                engine, o, slug, chunk_index, ConceptSource::RelationalHead,
-            );
+            store_concept_provenance(engine, s, slug, chunk_index, ConceptSource::RelationalHead);
+            store_concept_provenance(engine, o, slug, chunk_index, ConceptSource::RelationalHead);
             concept_count += 2;
         }
     }
@@ -657,12 +656,13 @@ fn run_concept_extraction(
             }
 
             // Commit the grounded tree to the KG.
-            let committed = engine.commit_abs_tree(&grounded).map_err(|e| {
-                LibraryError::IngestFailed {
-                    document: slug.into(),
-                    message: format!("NLU commit: {e}"),
-                }
-            })?;
+            let committed =
+                engine
+                    .commit_abs_tree(&grounded)
+                    .map_err(|e| LibraryError::IngestFailed {
+                        document: slug.into(),
+                        message: format!("NLU commit: {e}"),
+                    })?;
             nlu_triple_count += committed;
             triple_count += committed;
 
@@ -818,9 +818,7 @@ type ExtractedTriple = (String, String, String, f32);
 
 fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
-    let s = sentence
-        .trim()
-        .trim_end_matches(['.', '!', '?']);
+    let s = sentence.trim().trim_end_matches(['.', '!', '?']);
     let words: Vec<&str> = s.split_whitespace().collect();
     if words.len() < 3 {
         return results;

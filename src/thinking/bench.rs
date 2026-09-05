@@ -33,11 +33,11 @@ use crate::graph::Triple;
 use crate::symbol::SymbolId;
 use crate::vsa::Dimension;
 
+use super::ThinkingPredicates;
 use super::budget::ThinkingBudget;
 use super::error::ThinkingResult;
 use super::loop_runner::ThinkingLoop;
 use super::state::HaltReason;
-use super::ThinkingPredicates;
 
 /// Step budgets swept by the harness (plan 41f sweep points).
 pub const STEP_BUDGETS: &[u32] = &[100, 300, 1_000, 3_000, 10_000];
@@ -266,8 +266,7 @@ fn build_factual(
     for i in 0..cfg.factual_distractors {
         let weak = engine.resolve_or_create_entity(&format!("{tag}:weak{i}"))?;
         engine.add_triple(
-            &Triple::new(subject, relation, weak)
-                .with_confidence(0.15 + rng.gen_range(0.0..0.25)),
+            &Triple::new(subject, relation, weak).with_confidence(0.15 + rng.gen_range(0.0..0.25)),
         )?;
         engine.add_triple(&Triple::new(weak, preds.is_a, answer_type))?;
     }
@@ -417,8 +416,7 @@ pub fn summarize(runs: &[BenchRun]) -> Vec<BucketSummary> {
                     / total.max(1) as f64,
                 mean_wall_ms: rs.iter().map(|r| r.wall_ms as f64).sum::<f64>()
                     / total.max(1) as f64,
-                mean_voc: rs.iter().map(|r| r.voc_used as f64).sum::<f64>()
-                    / total.max(1) as f64,
+                mean_voc: rs.iter().map(|r| r.voc_used as f64).sum::<f64>() / total.max(1) as f64,
             }
         })
         .collect()

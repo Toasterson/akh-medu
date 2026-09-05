@@ -21,8 +21,8 @@ pub mod router;
 #[cfg(feature = "nlu-ml")]
 pub mod micro_ml;
 
-pub mod llm_translator;
 pub mod candle_backend;
+pub mod llm_translator;
 /// Speculative decoding (Phase 47 / ADR 075): draft-free prompt-lookup drafter + the
 /// greedy verify/accept loop. The drafter is pure token logic (no model dependency).
 pub mod spec_decode;
@@ -31,13 +31,13 @@ pub mod spec_decode;
 // host-capability probe (no candle dep); `hip` needs the ROCm toolchain
 // (`rocm` feature); `audio` (Gemma-4) and the `vendored` hidden-states model
 // forks need the Candle backend.
+#[cfg(feature = "candle-backend")]
+pub mod audio;
 pub mod channel;
-pub mod json_constraint;
 pub mod gpu;
 #[cfg(feature = "rocm")]
 pub mod hip;
-#[cfg(feature = "candle-backend")]
-pub mod audio;
+pub mod json_constraint;
 #[cfg(feature = "candle-backend")]
 pub mod vendored;
 
@@ -239,7 +239,9 @@ impl NluPipeline {
                         // SAFETY: set_var is called during single-threaded pipeline init,
                         // before any ONNX threads are spawned. The `ort` crate reads this
                         // variable only once during its lazy init.
-                        unsafe { std::env::set_var("ORT_DYLIB_PATH", candidate); }
+                        unsafe {
+                            std::env::set_var("ORT_DYLIB_PATH", candidate);
+                        }
                         break;
                     }
                 }
@@ -278,11 +280,14 @@ impl NluPipeline {
         }
         #[cfg(feature = "nlu-llm")]
         if std::env::var("AKH_NLU_LLM").as_deref() == Ok("0") {
-            tracing::info!(tier = 3, "NLU LLM tier disabled (AKH_NLU_LLM=0); skipping llama-cpp translator");
+            tracing::info!(
+                tier = 3,
+                "NLU LLM tier disabled (AKH_NLU_LLM=0); skipping llama-cpp translator"
+            );
         } else {
             let llm_file = "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf";
-            let result = llm_translator::LlmTranslator::load(&_data_dir.join(llm_file))
-                .or_else(|_| {
+            let result =
+                llm_translator::LlmTranslator::load(&_data_dir.join(llm_file)).or_else(|_| {
                     if let Some(ref shared) = _shared_dir {
                         llm_translator::LlmTranslator::load(
                             &shared.join("llm/qwen2.5-1.5b-instruct-q4_k_m.gguf"),
@@ -314,18 +319,20 @@ impl NluPipeline {
                 "NLU LLM tier disabled (AKH_NLU_LLM=0); using tiers 1/2/4 (rules/NER/ranker) only"
             );
         } else {
-            let result = candle_backend::CandleBackend::try_load(_data_dir)
-                .or_else(|| {
-                    _shared_dir
-                        .as_ref()
-                        .and_then(|shared| candle_backend::CandleBackend::try_load(shared))
-                });
+            let result = candle_backend::CandleBackend::try_load(_data_dir).or_else(|| {
+                _shared_dir
+                    .as_ref()
+                    .and_then(|shared| candle_backend::CandleBackend::try_load(shared))
+            });
             if let Some(backend) = result {
                 tracing::info!(tier = 3, backend = "candle", "Candle LLM backend loaded");
-                self.candle_backend =
-                    Some(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+                self.candle_backend = Some(std::sync::Arc::new(std::sync::Mutex::new(backend)));
             } else {
-                tracing::debug!(tier = 3, backend = "candle", "Candle backend not loaded (model absent)");
+                tracing::debug!(
+                    tier = 3,
+                    backend = "candle",
+                    "Candle backend not loaded (model absent)"
+                );
             }
         }
     }
@@ -442,9 +449,9 @@ impl NluPipeline {
                 BackendId::CandleLlm => self.tier3_parse(input, kg_context),
                 BackendId::VsaDirect => self.tier4_parse(input),
                 // CloudApi and BurnLocal are not yet implemented; cascade handles them.
-                BackendId::CloudApi | BackendId::BurnLocal => {
-                    Err(NluError::ParseFailed { input: input.to_string() })
-                }
+                BackendId::CloudApi | BackendId::BurnLocal => Err(NluError::ParseFailed {
+                    input: input.to_string(),
+                }),
             };
 
             let (result, reward_override) = match result {
@@ -503,7 +510,9 @@ impl NluPipeline {
             }
             _ => {
                 tracing::debug!(tier = 1, "rule parser did not match");
-                Err(NluError::ParseFailed { input: input.to_string() })
+                Err(NluError::ParseFailed {
+                    input: input.to_string(),
+                })
             }
         }
     }
@@ -530,7 +539,9 @@ impl NluPipeline {
         }
         #[cfg(not(feature = "nlu-ml"))]
         let _ = ctx;
-        Err(NluError::ParseFailed { input: input.to_string() })
+        Err(NluError::ParseFailed {
+            input: input.to_string(),
+        })
     }
 
     #[allow(unused_variables)] // kg_context used only when nlu-llm or candle-backend is enabled
@@ -539,8 +550,16 @@ impl NluPipeline {
         // Preferred over llama-cpp-2 when both are loaded.
         #[cfg(feature = "candle-backend")]
         if let Some(candle_arc) = self.candle_backend.as_ref().map(Arc::clone) {
-            tracing::debug!(tier = 3, backend = "candle", has_kg_context = kg_context.is_some(), "attempting Candle translation");
-            let translation_result = candle_arc.lock().unwrap().translate_with_context(input, kg_context);
+            tracing::debug!(
+                tier = 3,
+                backend = "candle",
+                has_kg_context = kg_context.is_some(),
+                "attempting Candle translation"
+            );
+            let translation_result = candle_arc
+                .lock()
+                .unwrap()
+                .translate_with_context(input, kg_context);
             match translation_result {
                 Ok(translation) => {
                     tracing::info!(
@@ -566,7 +585,11 @@ impl NluPipeline {
             let llm = Arc::clone(llm_arc);
             let input_owned = input.to_string();
             let ctx_owned = kg_context.map(str::to_string);
-            tracing::debug!(tier = 3, has_kg_context = ctx_owned.is_some(), "attempting LLM translation");
+            tracing::debug!(
+                tier = 3,
+                has_kg_context = ctx_owned.is_some(),
+                "attempting LLM translation"
+            );
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 llm.translate_with_context(&input_owned, ctx_owned.as_deref())
             }));
@@ -591,7 +614,9 @@ impl NluPipeline {
             }
         }
 
-        Err(NluError::ParseFailed { input: input.to_string() })
+        Err(NluError::ParseFailed {
+            input: input.to_string(),
+        })
     }
 
     fn tier4_parse(&mut self, input: &str) -> NluResult<NluParseResult> {
@@ -611,7 +636,9 @@ impl NluPipeline {
                 Some(ranked.similarity),
             ));
         }
-        Err(NluError::ParseFailed { input: input.to_string() })
+        Err(NluError::ParseFailed {
+            input: input.to_string(),
+        })
     }
 
     /// Sequential cascade: tries each tier in order, returns first success.
@@ -880,7 +907,8 @@ impl NluPipeline {
         #[cfg(feature = "nlu-llm")]
         if let Some(ref llm_arc) = self.llm_translator {
             let llm = std::sync::Arc::clone(llm_arc);
-            let prompt = llm_translator::build_open_ended_prompt(query, persona_name, traits, kg_context);
+            let prompt =
+                llm_translator::build_open_ended_prompt(query, persona_name, traits, kg_context);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 llm.generate(&prompt, 256)
             }));
@@ -977,4 +1005,3 @@ fn build_vsa_nl_prompt(structured_text: &str) -> String {
          <|im_start|>assistant\n"
     )
 }
-

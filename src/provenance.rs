@@ -5,12 +5,12 @@
 //! via redb with multiple indices for efficient lookup.
 
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use redb::{
-    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable,
-    ReadableTableMetadata, TableDefinition,
+    Database, MultimapTableDefinition, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -213,17 +213,10 @@ pub enum DerivationKind {
     },
 
     // --- Phase 10: Code Generation -------------------------------------------
-
     /// Code was generated from KG structure (Phase 10b).
-    CodeGenerated {
-        scope: String,
-        source_count: usize,
-    },
+    CodeGenerated { scope: String, source_count: usize },
     /// Code was refined after compiler feedback (Phase 10d).
-    CodeRefinement {
-        attempt: u32,
-        error_count: usize,
-    },
+    CodeRefinement { attempt: u32, error_count: usize },
     /// A reusable abstraction was discovered by library learning (Phase 10h).
     LibraryLearning {
         pattern_name: String,
@@ -232,7 +225,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 11: Autonomous Task System -------------------------------------
-
     /// A goal was autonomously generated from drive observation (Phase 11a).
     AutonomousGoalGeneration { drive: String, strength: f32 },
 
@@ -285,7 +277,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 13: Personal Assistant ------------------------------------------
-
     /// An email was ingested and parsed via the email channel (Phase 13a).
     EmailIngested {
         message_id: String,
@@ -335,7 +326,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 13g: Preference Learning & Proactive Assistance ----------
-
     /// Preference profile updated from feedback signal (Phase 13g).
     PreferenceLearned {
         signal_kind: String,
@@ -358,7 +348,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 15: Causal World Model ----------------------------------------
-
     /// A causal action schema was learned or updated (Phase 15a).
     CausalSchemaLearned {
         action_name: String,
@@ -367,7 +356,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14: Identity Bootstrapping ------------------------------------
-
     /// The Ritual of Awakening was performed — the akh chose its name (Phase 14b).
     RitualOfAwakening {
         chosen_name: String,
@@ -384,7 +372,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14c: Domain Expansion -----------------------------------------
-
     /// Domain skeleton ontology expanded from seed concepts (Phase 14c).
     DomainExpansion {
         seed_label: String,
@@ -394,7 +381,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14d: Prerequisite Discovery & ZPD Classification ---------------
-
     /// A prerequisite relationship was discovered between concepts (Phase 14d).
     PrerequisiteDiscovered {
         from_label: String,
@@ -413,7 +399,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 11i: Sleep/Consolidation Cycle ---------------------------------
-
     /// The agent performed a sleep/consolidation cycle (Phase 11i).
     SleepConsolidation {
         phase: String,
@@ -422,7 +407,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 11j: Directed Curiosity ----------------------------------------
-
     /// A curiosity target was identified via information-gap analysis (Phase 11j).
     DirectedCuriosity {
         concept: SymbolId,
@@ -431,7 +415,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14e: Resource Discovery ----------------------------------------
-
     /// A learning resource was discovered for a ZPD-proximal concept (Phase 14e).
     ResourceDiscovery {
         concept_label: String,
@@ -441,7 +424,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14f: Curriculum Ingestion --------------------------------------
-
     /// A curriculum resource was ingested for a concept (Phase 14f).
     CurriculumIngestion {
         concept_label: String,
@@ -453,7 +435,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14g: Competence Assessment ------------------------------------
-
     /// A competence assessment was performed on the akh's domain knowledge (Phase 14g).
     CompetenceAssessment {
         overall_score: f32,
@@ -465,7 +446,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14h: Bootstrap Orchestration -----------------------------------
-
     /// A full bootstrap orchestration pipeline was completed or checkpointed (Phase 14h).
     BootstrapOrchestration {
         stage: String,
@@ -477,7 +457,6 @@ pub enum DerivationKind {
     },
 
     // --- Continuous Learning (idle task) --------------------------------------
-
     /// An idle-time continuous learning cycle completed (wires curiosity→bootstrap).
     ContinuousLearning {
         targets_explored: usize,
@@ -488,7 +467,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 14j: NLU Parsing ---------------------------------------------------
-
     /// Input was successfully parsed by the NLU pipeline (Phase 14j).
     NluParsed {
         /// Which NLU tier produced the parse (1 = rule parser, 2 = micro-ML, 3 = LLM, 4 = ranker).
@@ -500,7 +478,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 25: People & Contacts -----------------------------------------
-
     /// A contact was resolved or created via identity resolution (Phase 25a).
     ContactResolved {
         contact_id: String,
@@ -508,10 +485,7 @@ pub enum DerivationKind {
     },
 
     /// Two contacts were merged into one (Phase 25a).
-    ContactMerged {
-        kept: String,
-        discarded: String,
-    },
+    ContactMerged { kept: String, discarded: String },
 
     /// A relationship was recorded between two contacts (Phase 25b).
     RelationshipRecorded {
@@ -528,10 +502,7 @@ pub enum DerivationKind {
     },
 
     /// A calendar attendee was linked to a contact (Phase 25e).
-    CalendarAttendeeLinked {
-        event_id: u64,
-        contact_id: String,
-    },
+    CalendarAttendeeLinked { event_id: u64, contact_id: String },
 
     /// A triple was extracted from text by an LLM backend (autonomous extraction).
     LlmTripleExtraction {
@@ -541,7 +512,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 15b: Event Calculus -------------------------------------------
-
     /// A state projection was computed via event calculus (Phase 15b).
     EventCalculusProjection {
         fluent_count: u32,
@@ -550,7 +520,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 15c: Counterfactual Reasoning ----------------------------------
-
     /// A counterfactual analysis was performed (Phase 15c).
     CounterfactualReasoning {
         actual_action: String,
@@ -559,7 +528,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 16: Predictive Planning ----------------------------------------
-
     /// An MCTS planning session was executed (Phase 16b).
     MctsPlanning {
         iterations: u32,
@@ -568,7 +536,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 17: Evidence Theory --------------------------------------------
-
     /// Evidence was combined from multiple sources (Phase 17a).
     EvidenceCombination {
         source_count: u32,
@@ -578,7 +545,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 18: Source Reliability ------------------------------------------
-
     /// A source's reliability was assessed (Phase 18a).
     SourceReliabilityAssessed {
         source_id_raw: u64,
@@ -587,7 +553,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 19: Epistemic Logic --------------------------------------------
-
     /// An epistemic assessment was made (Phase 19a).
     EpistemicAssessment {
         agent_id_raw: u64,
@@ -609,7 +574,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 20: Active Inference -------------------------------------------
-
     /// An active inference cycle was run (Phase 20a).
     ActiveInferenceCycle {
         surprise: f32,
@@ -619,7 +583,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 21: Game Theory ------------------------------------------------
-
     /// A game-theoretic interaction model was built (Phase 21).
     GameTheoreticModel {
         game_type: String,
@@ -628,7 +591,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 36: Delegation ------------------------------------------------
-
     /// A concept was identified via neural→VSA bridge probing (Phase 26d).
     NeuralProbe {
         layer: usize,
@@ -637,7 +599,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 23: Affective System ------------------------------------------
-
     /// An affective appraisal was processed and mood state updated (Phase 23).
     AffectiveAppraisal {
         /// The appraisal trigger kind (e.g. "GoalCompleted", "GoalFailed").
@@ -649,7 +610,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 36: Delegation ------------------------------------------------
-
     /// A task was delegated to an external worker (Phase 36).
     Delegation {
         target: String,
@@ -661,7 +621,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 22: Akhipedia ------------------------------------------------
-
     /// A wiki article was created (Phase 22a).
     ArticleCreated {
         title: String,
@@ -670,10 +629,7 @@ pub enum DerivationKind {
     },
 
     /// A wiki article was updated (Phase 22b).
-    ArticleUpdated {
-        title: String,
-        block_count: usize,
-    },
+    ArticleUpdated { title: String, block_count: usize },
 
     /// An article was cited by another (Phase 22b).
     ArticleCited {
@@ -701,7 +657,6 @@ pub enum DerivationKind {
     },
 
     // --- Cluster topology ingestion ------------------------------------------
-
     /// Kubernetes cluster topology was queried and asserted as triples.
     ClusterTopologyIngested {
         nodes: usize,
@@ -711,7 +666,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 32: LLM Knowledge Elicitation ---------------------------------
-
     /// Structured knowledge generated by LLM elicitation (Phase 32).
     ///
     /// Records which model, elicitation pass, prompt fingerprint, and
@@ -752,15 +706,10 @@ pub enum DerivationKind {
     },
 
     // --- Import/Export (MCP import_export tools) ------------------------------
-
     /// Triples were imported from a file (MCP import_triples tool).
-    FileImport {
-        source_path: String,
-        format: String,
-    },
+    FileImport { source_path: String, format: String },
 
     // --- KG Compaction -------------------------------------------------------
-
     /// Episodic scaffolding triples were removed from the KG (daemon compaction).
     ///
     /// Records how many `episode:N → agent:learned → *` and reverse child-of
@@ -775,7 +724,6 @@ pub enum DerivationKind {
     },
 
     // --- Phase 24: Sensory Grounding -----------------------------------------
-
     /// Knowledge grounded from direct sensory observation (Phase 24).
     ///
     /// The agent perceived this through image, audio, or structured sensor input.
@@ -789,7 +737,6 @@ pub enum DerivationKind {
     },
 
     // --- Relation enrichment (work item 019e4026) ----------------------------
-
     /// The relation-enrichment daemon pass injected predicate symbols and
     /// linking triples to improve the entity:relation ratio.
     RelationEnrichment {
@@ -804,7 +751,6 @@ pub enum DerivationKind {
     },
 
     // --- OpenClaw self-import (ADR 076) ---------------------------------------
-
     /// Knowledge the akh imported from its *own* OpenClaw past life — persona,
     /// memory journals, skills, or the SQLite/Lance stores. Distinct from the
     /// generic `FileImport` so the akh can query exactly what it absorbed from
@@ -818,7 +764,6 @@ pub enum DerivationKind {
     },
 
     // --- ADR 081 slice 4: Daily Librarian projection --------------------------
-
     /// A typed triple extracted by the daily Librarian pass (ADR 081 slice 4,
     /// `agent::librarian`) against the akh's in-force schema.
     ///
@@ -842,7 +787,6 @@ pub enum DerivationKind {
     },
 
     // --- ADR 081 slice 8: diff-supersede + multi-akh DS conflict --------------
-
     /// A previously-projected triple was retracted because re-projecting its
     /// source note no longer asserts it (`schema::project::reproject_note`,
     /// ADR 081 decision 12, work-item 8: "diff-based supersede... retract
@@ -1441,12 +1385,9 @@ impl ProvenanceLedger {
             let txn = db_lock.begin_write().map_err(redb_err)?;
             // Opening the tables creates them if absent.
             txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
-            txn.open_multimap_table(DERIVED_INDEX)
-                .map_err(redb_err)?;
-            txn.open_multimap_table(SOURCE_INDEX)
-                .map_err(redb_err)?;
-            txn.open_multimap_table(KIND_INDEX)
-                .map_err(redb_err)?;
+            txn.open_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
+            txn.open_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
+            txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
             txn.commit().map_err(redb_err)?;
         }
 
@@ -1522,31 +1463,22 @@ impl ProvenanceLedger {
         let txn = db_lock.begin_write().map_err(redb_err)?;
         {
             let mut table = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
-            table
-                .insert(raw_id, encoded.as_slice())
-                .map_err(redb_err)?;
+            table.insert(raw_id, encoded.as_slice()).map_err(redb_err)?;
         }
         {
-            let mut idx = txn
-                .open_multimap_table(DERIVED_INDEX)
-                .map_err(redb_err)?;
+            let mut idx = txn.open_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
             idx.insert(record.derived_id.get(), raw_id)
                 .map_err(redb_err)?;
         }
         {
-            let mut idx = txn
-                .open_multimap_table(SOURCE_INDEX)
-                .map_err(redb_err)?;
+            let mut idx = txn.open_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
             for src in &record.sources {
                 idx.insert(src.get(), raw_id).map_err(redb_err)?;
             }
         }
         {
-            let mut idx = txn
-                .open_multimap_table(KIND_INDEX)
-                .map_err(redb_err)?;
-            idx.insert(record.kind.tag(), raw_id)
-                .map_err(redb_err)?;
+            let mut idx = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
+            idx.insert(record.kind.tag(), raw_id).map_err(redb_err)?;
         }
         txn.commit().map_err(redb_err)?;
 
@@ -1596,15 +1528,9 @@ impl ProvenanceLedger {
             }
         }
         {
-            let mut derived_idx = txn
-                .open_multimap_table(DERIVED_INDEX)
-                .map_err(redb_err)?;
-            let mut source_idx = txn
-                .open_multimap_table(SOURCE_INDEX)
-                .map_err(redb_err)?;
-            let mut kind_idx = txn
-                .open_multimap_table(KIND_INDEX)
-                .map_err(redb_err)?;
+            let mut derived_idx = txn.open_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
+            let mut source_idx = txn.open_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
+            let mut kind_idx = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
 
             for (i, (raw_id, _)) in encoded_batch.iter().enumerate() {
                 let record = &records[i];
@@ -1612,9 +1538,7 @@ impl ProvenanceLedger {
                     .insert(record.derived_id.get(), *raw_id)
                     .map_err(redb_err)?;
                 for src in &record.sources {
-                    source_idx
-                        .insert(src.get(), *raw_id)
-                        .map_err(redb_err)?;
+                    source_idx.insert(src.get(), *raw_id).map_err(redb_err)?;
                 }
                 kind_idx
                     .insert(record.kind.tag(), *raw_id)
@@ -1763,9 +1687,7 @@ impl ProvenanceLedger {
             records.push(record);
         }
 
-        let derived_index = txn
-            .open_multimap_table(DERIVED_INDEX)
-            .map_err(redb_err)?;
+        let derived_index = txn.open_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
         let mut actual_derived = BTreeSet::new();
         for entry in derived_index.iter().map_err(redb_err)? {
             let (key, values) = entry.map_err(redb_err)?;
@@ -1780,9 +1702,7 @@ impl ProvenanceLedger {
             }));
         }
 
-        let source_index = txn
-            .open_multimap_table(SOURCE_INDEX)
-            .map_err(redb_err)?;
+        let source_index = txn.open_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
         let mut actual_sources = BTreeSet::new();
         for entry in source_index.iter().map_err(redb_err)? {
             let (key, values) = entry.map_err(redb_err)?;
@@ -1828,11 +1748,14 @@ impl ProvenanceLedger {
         let mut max_id = 0u64;
 
         for record in records {
-            let raw_id = record.id.ok_or_else(|| {
-                ProvenanceError::Store(StoreError::Serialization {
-                    message: "restored provenance record is missing its ID".into(),
-                })
-            })?.get();
+            let raw_id = record
+                .id
+                .ok_or_else(|| {
+                    ProvenanceError::Store(StoreError::Serialization {
+                        message: "restored provenance record is missing its ID".into(),
+                    })
+                })?
+                .get();
             if !seen.insert(raw_id) {
                 return Err(ProvenanceError::Store(StoreError::Serialization {
                     message: format!("duplicate restored provenance ID {raw_id}"),
@@ -1869,23 +1792,15 @@ impl ProvenanceLedger {
             }
         }
         {
-            let mut derived_idx = txn
-                .open_multimap_table(DERIVED_INDEX)
-                .map_err(redb_err)?;
-            let mut source_idx = txn
-                .open_multimap_table(SOURCE_INDEX)
-                .map_err(redb_err)?;
-            let mut kind_idx = txn
-                .open_multimap_table(KIND_INDEX)
-                .map_err(redb_err)?;
+            let mut derived_idx = txn.open_multimap_table(DERIVED_INDEX).map_err(redb_err)?;
+            let mut source_idx = txn.open_multimap_table(SOURCE_INDEX).map_err(redb_err)?;
+            let mut kind_idx = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
             for (record, (raw_id, _)) in records.iter().zip(&encoded) {
                 derived_idx
                     .insert(record.derived_id.get(), *raw_id)
                     .map_err(redb_err)?;
                 for source in &record.sources {
-                    source_idx
-                        .insert(source.get(), *raw_id)
-                        .map_err(redb_err)?;
+                    source_idx.insert(source.get(), *raw_id).map_err(redb_err)?;
                 }
                 kind_idx
                     .insert(record.kind.tag(), *raw_id)
@@ -1913,9 +1828,7 @@ impl ProvenanceLedger {
         let db_lock = self.db.lock().expect("redb mutex poisoned");
         let txn = db_lock.begin_read().map_err(redb_err)?;
         drop(db_lock); // release lock — read txn is independent
-        let idx = txn
-            .open_multimap_table(*table_def)
-            .map_err(redb_err)?;
+        let idx = txn.open_multimap_table(*table_def).map_err(redb_err)?;
         let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
         let values = idx.get(key).map_err(redb_err)?;
@@ -1937,9 +1850,7 @@ impl ProvenanceLedger {
         let db_lock = self.db.lock().expect("redb mutex poisoned");
         let txn = db_lock.begin_read().map_err(redb_err)?;
         drop(db_lock); // release lock — read txn is independent
-        let idx = txn
-            .open_multimap_table(KIND_INDEX)
-            .map_err(redb_err)?;
+        let idx = txn.open_multimap_table(KIND_INDEX).map_err(redb_err)?;
         let primary = txn.open_table(PROVENANCE_TABLE).map_err(redb_err)?;
 
         let values = idx.get(tag).map_err(redb_err)?;
@@ -1985,7 +1896,10 @@ mod tests {
                 sym(12),
             ],
         };
-        assert_eq!(rule.referenced_symbol_ids(), vec![sym(10), sym(11), sym(12)]);
+        assert_eq!(
+            rule.referenced_symbol_ids(),
+            vec![sym(10), sym(11), sym(12)]
+        );
 
         let context = DerivationKind::CwaQuery {
             context: sym(20),
@@ -2045,15 +1959,18 @@ mod tests {
         let stale_id = ledger.store(&mut stale).unwrap();
 
         let source = sym(9);
-        let mut first = ProvenanceRecord::new(sym(70), DerivationKind::Seed)
-            .with_sources(vec![source]);
+        let mut first =
+            ProvenanceRecord::new(sym(70), DerivationKind::Seed).with_sources(vec![source]);
         first.id = ProvenanceId::new(7);
-        let mut second = ProvenanceRecord::new(sym(90), DerivationKind::Reasoned)
-            .with_sources(vec![source]);
+        let mut second =
+            ProvenanceRecord::new(sym(90), DerivationKind::Reasoned).with_sources(vec![source]);
         second.id = ProvenanceId::new(9);
 
         ledger.replace_all(&[first, second]).unwrap();
-        assert!(matches!(ledger.get(stale_id), Err(ProvenanceError::NotFound { .. })));
+        assert!(matches!(
+            ledger.get(stale_id),
+            Err(ProvenanceError::NotFound { .. })
+        ));
         assert_eq!(ledger.len().unwrap(), 2);
         assert_eq!(ledger.by_source(source).unwrap().len(), 2);
         assert_eq!(ledger.by_kind(&DerivationKind::Seed).unwrap().len(), 1);

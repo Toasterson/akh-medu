@@ -114,10 +114,21 @@ impl MetricsSummary {
 fn budget_summary(step_budget: u64, rs: &[&BenchResult]) -> BudgetSummary {
     let total = rs.len();
     let successes = rs.iter().filter(|r| r.success).count();
-    let accuracy = if total == 0 { 0.0 } else { successes as f64 / total as f64 };
+    let accuracy = if total == 0 {
+        0.0
+    } else {
+        successes as f64 / total as f64
+    };
     let mean_wall_ms = rs.iter().map(|r| r.wall_ms as f64).sum::<f64>() / total.max(1) as f64;
     let mean_voc = rs.iter().map(|r| r.voc_consumed as f64).sum::<f64>() / total.max(1) as f64;
-    BudgetSummary { step_budget, total, successes, accuracy, mean_wall_ms, mean_voc }
+    BudgetSummary {
+        step_budget,
+        total,
+        successes,
+        accuracy,
+        mean_wall_ms,
+        mean_voc,
+    }
 }
 
 // ---------------------------------------------------------------------------

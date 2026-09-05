@@ -75,8 +75,7 @@ impl PredicateHierarchy {
         let kg = engine.knowledge_graph();
 
         // Collect direct generalization edges: (specific, general)
-        let direct_edges: Vec<(SymbolId, SymbolId)> =
-            kg.triples_for_predicate(preds.generalizes);
+        let direct_edges: Vec<(SymbolId, SymbolId)> = kg.triples_for_predicate(preds.generalizes);
 
         // Build adjacency lists for both directions
         let mut children_of: HashMap<SymbolId, Vec<SymbolId>> = HashMap::new(); // general → specifics
@@ -498,13 +497,10 @@ mod tests {
         // Assert: alice parent-of bob
         let alice = engine.resolve_or_create_entity("alice").unwrap();
         let bob = engine.resolve_or_create_entity("bob").unwrap();
-        engine
-            .add_triple(&Triple::new(alice, parent, bob))
-            .unwrap();
+        engine.add_triple(&Triple::new(alice, parent, bob)).unwrap();
 
         // Query: child-of(bob, ?) should find alice via inverse
-        let results =
-            objects_with_hierarchy_and_inverse(&engine, bob, child, &hierarchy);
+        let results = objects_with_hierarchy_and_inverse(&engine, bob, child, &hierarchy);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], (parent, alice));
     }
@@ -536,9 +532,7 @@ mod tests {
         let bob = engine.resolve_or_create_entity("bob").unwrap();
 
         // Direct: alice parent bob
-        engine
-            .add_triple(&Triple::new(alice, parent, bob))
-            .unwrap();
+        engine.add_triple(&Triple::new(alice, parent, bob)).unwrap();
         // Specialization: alice biologicalMother bob
         engine
             .add_triple(&Triple::new(alice, bio_mother, bob))
@@ -565,13 +559,9 @@ mod tests {
             .unwrap();
 
         // Diamond: bio_mother → mother, bio_mother → female_parent, mother → parent, female_parent → parent
-        let bio_mother = engine
-            .resolve_or_create_relation("bio-mother")
-            .unwrap();
+        let bio_mother = engine.resolve_or_create_relation("bio-mother").unwrap();
         let mother = engine.resolve_or_create_relation("mother").unwrap();
-        let female_parent = engine
-            .resolve_or_create_relation("female-parent")
-            .unwrap();
+        let female_parent = engine.resolve_or_create_relation("female-parent").unwrap();
         let parent = engine.resolve_or_create_relation("parent").unwrap();
 
         engine

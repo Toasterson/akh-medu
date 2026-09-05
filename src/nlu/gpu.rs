@@ -144,12 +144,7 @@ mod tests {
             .is_ready()
         );
         assert!(!RocmStatus::KernelReadyUserspaceMissing.is_ready());
-        assert!(
-            !RocmStatus::Unavailable {
-                reason: "x".into()
-            }
-            .is_ready()
-        );
+        assert!(!RocmStatus::Unavailable { reason: "x".into() }.is_ready());
     }
 
     #[test]
@@ -157,7 +152,10 @@ mod tests {
         // The actionable diagnostic must carry a help message with the install command.
         let d = GpuDiagnostic::RocmUserspaceMissing;
         let help = d.help().map(|h| h.to_string()).unwrap_or_default();
-        assert!(help.contains("rocm-hip-runtime"), "help must name the package");
+        assert!(
+            help.contains("rocm-hip-runtime"),
+            "help must name the package"
+        );
     }
 }
 
@@ -246,7 +244,10 @@ mod hip_backend_tests {
             .to_vec1()
             .unwrap();
         for (x, y) in c2_cpu.iter().zip(&c2_gpu) {
-            assert!((x - y).abs() < 1e-3, "batched matmul mismatch: cpu={x} gpu={y}");
+            assert!(
+                (x - y).abs() < 1e-3,
+                "batched matmul mismatch: cpu={x} gpu={y}"
+            );
         }
     }
 

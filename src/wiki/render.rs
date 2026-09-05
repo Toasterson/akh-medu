@@ -26,7 +26,10 @@ mod inner {
     #[derive(Debug, Error, Diagnostic)]
     pub enum RenderError {
         #[error("I/O error writing to {path}: {message}")]
-        #[diagnostic(code(akh::wiki::render::io), help("Check output directory permissions."))]
+        #[diagnostic(
+            code(akh::wiki::render::io),
+            help("Check output directory permissions.")
+        )]
         Io { path: String, message: String },
 
         #[error("template error: {message}")]
@@ -174,10 +177,15 @@ mod inner {
     ) -> RenderResult<String> {
         let mut env = Environment::new();
         env.add_template("article.html", ARTICLE_TEMPLATE)
-            .map_err(|e| RenderError::Template { message: e.to_string() })?;
+            .map_err(|e| RenderError::Template {
+                message: e.to_string(),
+            })?;
 
-        let tmpl = env.get_template("article.html")
-            .map_err(|e| RenderError::Template { message: e.to_string() })?;
+        let tmpl = env
+            .get_template("article.html")
+            .map_err(|e| RenderError::Template {
+                message: e.to_string(),
+            })?;
 
         let ctx = minijinja::context! {
             site_title,
@@ -192,8 +200,9 @@ mod inner {
             responds_to,
         };
 
-        tmpl.render(ctx)
-            .map_err(|e| RenderError::Template { message: e.to_string() })
+        tmpl.render(ctx).map_err(|e| RenderError::Template {
+            message: e.to_string(),
+        })
     }
 
     fn render_index_page(
@@ -204,10 +213,15 @@ mod inner {
     ) -> RenderResult<String> {
         let mut env = Environment::new();
         env.add_template("index.html", INDEX_TEMPLATE)
-            .map_err(|e| RenderError::Template { message: e.to_string() })?;
+            .map_err(|e| RenderError::Template {
+                message: e.to_string(),
+            })?;
 
-        let tmpl = env.get_template("index.html")
-            .map_err(|e| RenderError::Template { message: e.to_string() })?;
+        let tmpl = env
+            .get_template("index.html")
+            .map_err(|e| RenderError::Template {
+                message: e.to_string(),
+            })?;
 
         // Build a list of context objects for the template.
         let article_list: Vec<_> = articles
@@ -228,8 +242,9 @@ mod inner {
             total,
         };
 
-        tmpl.render(ctx)
-            .map_err(|e| RenderError::Template { message: e.to_string() })
+        tmpl.render(ctx).map_err(|e| RenderError::Template {
+            message: e.to_string(),
+        })
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────
@@ -381,7 +396,14 @@ mod inner {
                 .id;
             let mut store = ArticleStore::new();
             store
-                .create_article("Hello World", "# Hello\n\nContent.", author, &[], vec![], &eng)
+                .create_article(
+                    "Hello World",
+                    "# Hello\n\nContent.",
+                    author,
+                    &[],
+                    vec![],
+                    &eng,
+                )
                 .unwrap();
 
             let config = RenderConfig {

@@ -232,7 +232,10 @@ fn render_inline(text: &str) -> Vec<Span<'static>> {
             if let Some(end) = find_char(&chars, i + 1, '`') {
                 let content: String = chars[i + 1..end].iter().collect();
                 flush_plain(&mut plain, &mut spans);
-                spans.push(Span::styled(content, Style::default().fg(Color::LightGreen)));
+                spans.push(Span::styled(
+                    content,
+                    Style::default().fg(Color::LightGreen),
+                ));
                 i = end + 1;
                 continue;
             }

@@ -267,7 +267,13 @@ fn build_tool_input(
             let sanitize = |label: String| -> String {
                 label
                     .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect()
             };
             let expr = orientation
@@ -281,9 +287,7 @@ fn build_tool_input(
                         sanitize(engine.resolve_label(t.object)),
                     )
                 })
-                .unwrap_or_else(|| {
-                    format!("(goal {})", goal_label.replace(' ', "_"))
-                });
+                .unwrap_or_else(|| format!("(goal {})", goal_label.replace(' ', "_")));
             ToolInput::new().with_param("expression", &expr)
         }
         "similarity_search" => {
@@ -328,9 +332,11 @@ fn build_tool_input(
                                 .iter()
                                 .find_map(|(sym, _)| {
                                     let label = engine.resolve_label(*sym);
-                                    if orientation.relevant_knowledge.iter().any(|t| {
-                                        t.subject == *sym || t.object == *sym
-                                    }) {
+                                    if orientation
+                                        .relevant_knowledge
+                                        .iter()
+                                        .any(|t| t.subject == *sym || t.object == *sym)
+                                    {
                                         Some(label.to_lowercase())
                                     } else {
                                         None
@@ -378,31 +384,26 @@ pub fn vsa_native_decide(
     let goal_label = engine.resolve_label(goal.symbol_id);
 
     // ── Step 1: Encode query hypervector ─────────────────────────────────
-    let query_vec = match encode_goal_semantics(
-        &goal.description,
-        &goal.success_criteria,
-        engine,
-        ops,
-        im,
-    ) {
-        Ok(v) => v,
-        Err(_) => {
-            return VsaNativeOutcome {
-                tool_name: "kg_query".into(),
-                tool_input: ToolInput::new()
-                    .with_param("symbol", &goal_label)
-                    .with_param("direction", "both"),
-                reasoning: "VSA encode failed — fallback to KG query.".into(),
-                impasse: None,
-                diagnostics: VsaDecideDiagnostics {
-                    tools_scored: 0,
-                    best_similarity: 0.0,
-                    used_mcts: false,
-                    mcts_iterations_used: 0,
-                },
-            };
-        }
-    };
+    let query_vec =
+        match encode_goal_semantics(&goal.description, &goal.success_criteria, engine, ops, im) {
+            Ok(v) => v,
+            Err(_) => {
+                return VsaNativeOutcome {
+                    tool_name: "kg_query".into(),
+                    tool_input: ToolInput::new()
+                        .with_param("symbol", &goal_label)
+                        .with_param("direction", "both"),
+                    reasoning: "VSA encode failed — fallback to KG query.".into(),
+                    impasse: None,
+                    diagnostics: VsaDecideDiagnostics {
+                        tools_scored: 0,
+                        best_similarity: 0.0,
+                        used_mcts: false,
+                        mcts_iterations_used: 0,
+                    },
+                };
+            }
+        };
 
     // ── Step 2: Score all registered tools ───────────────────────────────
     let profiles = build_tool_profiles(engine, ops, im, tool_registry);
@@ -494,8 +495,7 @@ pub fn vsa_native_decide(
     };
 
     // ── Step 5: Build tool input and reasoning ────────────────────────────
-    let tool_input =
-        build_tool_input(&selected.name, goal, orientation, engine, tool_registry);
+    let tool_input = build_tool_input(&selected.name, goal, orientation, engine, tool_registry);
 
     let path = if used_mcts { "VSA+MCTS" } else { "VSA" };
     let mcts_note = if used_mcts {
@@ -604,14 +604,23 @@ mod tests {
 
     #[test]
     fn decide_mode_from_str_vsa() {
-        assert_eq!(DecideMode::from_str("vsa_native"), Some(DecideMode::VsaNative));
-        assert_eq!(DecideMode::from_str("VSA-NATIVE"), Some(DecideMode::VsaNative));
+        assert_eq!(
+            DecideMode::from_str("vsa_native"),
+            Some(DecideMode::VsaNative)
+        );
+        assert_eq!(
+            DecideMode::from_str("VSA-NATIVE"),
+            Some(DecideMode::VsaNative)
+        );
         assert_eq!(DecideMode::from_str("vsa"), Some(DecideMode::VsaNative));
     }
 
     #[test]
     fn decide_mode_from_str_llm() {
-        assert_eq!(DecideMode::from_str("llm_driven"), Some(DecideMode::LlmDriven));
+        assert_eq!(
+            DecideMode::from_str("llm_driven"),
+            Some(DecideMode::LlmDriven)
+        );
         assert_eq!(DecideMode::from_str("llm"), Some(DecideMode::LlmDriven));
         assert_eq!(DecideMode::from_str("legacy"), Some(DecideMode::LlmDriven));
     }
@@ -643,9 +652,18 @@ mod tests {
     #[test]
     fn ucb1_mcts_selects_highest_similarity() {
         let tools = vec![
-            ScoredTool { name: "kg_query".into(), similarity: 0.8 },
-            ScoredTool { name: "reason".into(), similarity: 0.6 },
-            ScoredTool { name: "gap_analysis".into(), similarity: 0.4 },
+            ScoredTool {
+                name: "kg_query".into(),
+                similarity: 0.8,
+            },
+            ScoredTool {
+                name: "reason".into(),
+                similarity: 0.6,
+            },
+            ScoredTool {
+                name: "gap_analysis".into(),
+                similarity: 0.4,
+            },
         ];
         let config = VsaDecideConfig::default();
         let idx = ucb1_mcts(&tools, &config);
@@ -655,8 +673,14 @@ mod tests {
     #[test]
     fn ucb1_mcts_handles_tie_without_panic() {
         let tools = vec![
-            ScoredTool { name: "a".into(), similarity: 0.7 },
-            ScoredTool { name: "b".into(), similarity: 0.7 },
+            ScoredTool {
+                name: "a".into(),
+                similarity: 0.7,
+            },
+            ScoredTool {
+                name: "b".into(),
+                similarity: 0.7,
+            },
         ];
         let config = VsaDecideConfig::default();
         let idx = ucb1_mcts(&tools, &config);
@@ -678,7 +702,11 @@ mod tests {
                 similarity: 1.0 - i as f32 * 0.05,
             })
             .collect();
-        let config = VsaDecideConfig { mcts_top_k: 3, mcts_iterations: 10, ..Default::default() };
+        let config = VsaDecideConfig {
+            mcts_top_k: 3,
+            mcts_iterations: 10,
+            ..Default::default()
+        };
         let idx = ucb1_mcts(&tools, &config);
         assert!(idx < 3, "should only choose from top-3: got {idx}");
     }
@@ -694,7 +722,8 @@ mod tests {
         let (obs, orient) = empty_context();
         let config = VsaDecideConfig::default();
 
-        let outcome = vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
+        let outcome =
+            vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
 
         assert!(!outcome.tool_name.is_empty());
         assert!(!outcome.reasoning.is_empty());
@@ -714,10 +743,14 @@ mod tests {
             ..Default::default()
         };
 
-        let outcome = vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
+        let outcome =
+            vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
 
         // With MCTS disabled, the top-scored tool is selected without MCTS.
-        assert!(!outcome.diagnostics.used_mcts, "MCTS should be disabled when threshold is 0.0");
+        assert!(
+            !outcome.diagnostics.used_mcts,
+            "MCTS should be disabled when threshold is 0.0"
+        );
         // Similarity must be a real number in [0, 1].
         assert!(
             (0.0..=1.0).contains(&outcome.diagnostics.best_similarity),
@@ -764,8 +797,15 @@ mod tests {
             ..Default::default()
         };
 
-        let outcome = vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
-        assert!(outcome.diagnostics.used_mcts, "expected MCTS to be triggered");
-        assert_eq!(outcome.diagnostics.mcts_iterations_used, config.mcts_iterations);
+        let outcome =
+            vsa_native_decide(&goal, &obs, &orient, &engine, &wm, None, &registry, &config);
+        assert!(
+            outcome.diagnostics.used_mcts,
+            "expected MCTS to be triggered"
+        );
+        assert_eq!(
+            outcome.diagnostics.mcts_iterations_used,
+            config.mcts_iterations
+        );
     }
 }

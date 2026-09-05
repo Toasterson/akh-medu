@@ -278,7 +278,10 @@ impl PurposeRecipe {
             in_degree.entry(topic.clone()).or_insert(0);
             for successor in &entry.before {
                 in_degree.entry(successor.clone()).or_insert(0);
-                graph.entry(topic.clone()).or_default().push(successor.clone());
+                graph
+                    .entry(topic.clone())
+                    .or_default()
+                    .push(successor.clone());
                 *in_degree.entry(successor.clone()).or_insert(0) += 1;
             }
         }
@@ -322,9 +325,7 @@ impl PurposeRecipe {
         for (topic, dep) in prerequisite_pairs {
             prerequisites
                 .entry(topic.clone())
-                .or_insert_with(|| PrerequisiteEntry {
-                    before: Vec::new(),
-                })
+                .or_insert_with(|| PrerequisiteEntry { before: Vec::new() })
                 .before
                 .push(dep.clone());
         }

@@ -18,9 +18,7 @@ pub enum OpenClawError {
     #[error("OpenClaw API key not configured")]
     #[diagnostic(
         code(akh::openclaw::no_api_key),
-        help(
-            "Set the OPENCLAW_API_KEY environment variable to your OpenClaw bearer token."
-        )
+        help("Set the OPENCLAW_API_KEY environment variable to your OpenClaw bearer token.")
     )]
     NoApiKey,
 
@@ -161,11 +159,9 @@ impl OpenClawClient {
                 },
             })?;
 
-        let parsed: JournalsResponse = response
-            .into_json()
-            .map_err(|e| OpenClawError::Parse {
-                message: e.to_string(),
-            })?;
+        let parsed: JournalsResponse = response.into_json().map_err(|e| OpenClawError::Parse {
+            message: e.to_string(),
+        })?;
 
         Ok(parsed.journals)
     }

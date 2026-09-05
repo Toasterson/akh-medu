@@ -55,7 +55,9 @@ pub enum NartError {
     #[error("NART requires at least one argument")]
     #[diagnostic(
         code(akh::nart::empty_args),
-        help("A NART must have at least one argument. Use a plain Entity for zero-argument terms.")
+        help(
+            "A NART must have at least one argument. Use a plain Entity for zero-argument terms."
+        )
     )]
     EmptyArgs,
 }
@@ -163,11 +165,7 @@ impl NartRegistry {
     }
 
     /// Find a NART by its structural identity (function + args).
-    pub fn find_structural(
-        &self,
-        function: SymbolId,
-        args: &[SymbolId],
-    ) -> Option<&NartDef> {
+    pub fn find_structural(&self, function: SymbolId, args: &[SymbolId]) -> Option<&NartDef> {
         let key = NartKey {
             function,
             args: args.to_vec(),
@@ -205,11 +203,7 @@ impl NartRegistry {
 
     /// Structural unification: match a pattern (function, arg_patterns) against
     /// registered NARTs. `None` in a pattern position matches any argument.
-    pub fn unify(
-        &self,
-        function: SymbolId,
-        arg_patterns: &[Option<SymbolId>],
-    ) -> Vec<&NartDef> {
+    pub fn unify(&self, function: SymbolId, arg_patterns: &[Option<SymbolId>]) -> Vec<&NartDef> {
         self.narts
             .values()
             .filter(|n| {
@@ -256,9 +250,7 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
 
         let mut registry = NartRegistry::new();
         let nart = registry
@@ -277,9 +269,7 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
 
         let mut registry = NartRegistry::new();
         let n1 = registry
@@ -299,12 +289,8 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
-        let germany = engine
-            .create_symbol(SymbolKind::Entity, "Germany")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
+        let germany = engine.create_symbol(SymbolKind::Entity, "Germany").unwrap();
 
         let mut registry = NartRegistry::new();
         let n1 = registry
@@ -336,9 +322,7 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
 
         let mut registry = NartRegistry::new();
         registry
@@ -361,12 +345,8 @@ mod tests {
         let cap_fn = engine
             .create_symbol(SymbolKind::Relation, "CapitalFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
-        let germany = engine
-            .create_symbol(SymbolKind::Entity, "Germany")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
+        let germany = engine.create_symbol(SymbolKind::Entity, "Germany").unwrap();
 
         let mut registry = NartRegistry::new();
         registry
@@ -395,9 +375,7 @@ mod tests {
         let cap_fn = engine
             .create_symbol(SymbolKind::Relation, "CapitalFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
 
         let mut registry = NartRegistry::new();
         registry
@@ -417,12 +395,8 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
-        let germany = engine
-            .create_symbol(SymbolKind::Entity, "Germany")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
+        let germany = engine.create_symbol(SymbolKind::Entity, "Germany").unwrap();
 
         let mut registry = NartRegistry::new();
         registry
@@ -451,9 +425,7 @@ mod tests {
         let gov_fn = engine
             .create_symbol(SymbolKind::Relation, "GovernmentFn")
             .unwrap();
-        let france = engine
-            .create_symbol(SymbolKind::Entity, "France")
-            .unwrap();
+        let france = engine.create_symbol(SymbolKind::Entity, "France").unwrap();
 
         let mut registry = NartRegistry::new();
         let nart = registry

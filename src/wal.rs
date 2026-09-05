@@ -27,8 +27,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use akhomed_store::uuid::Uuid;
 use akhomed_store::MutationRow;
+use akhomed_store::uuid::Uuid;
 
 use crate::mutation::{MutationKind, MutationRecord, MutationSink};
 
@@ -121,7 +121,11 @@ impl WalBuffer {
         // Approximate cost: serialised payload + per-row overhead estimate.
         let bytes = payload.to_string().len() + 64;
         let mut st = self.inner.lock().unwrap();
-        st.queue.push_back(Pending { kind, payload, bytes });
+        st.queue.push_back(Pending {
+            kind,
+            payload,
+            bytes,
+        });
         st.bytes += bytes;
         self.enforce_cap(&mut st);
     }
@@ -228,7 +232,9 @@ pub struct MutationLog {
 
 #[cfg(test)]
 type TestAppender = std::sync::Arc<
-    dyn Fn(Vec<MutationRow>) -> Pin<Box<dyn Future<Output = akhomed_store::StoreResult<u64>> + Send>>
+    dyn Fn(
+            Vec<MutationRow>,
+        ) -> Pin<Box<dyn Future<Output = akhomed_store::StoreResult<u64>> + Send>>
         + Send
         + Sync,
 >;
@@ -472,7 +478,10 @@ mod tests {
         buf.reinsert_front(batch);
         assert_eq!(buf.len(), 5);
         let all = buf.take_front(10);
-        let seen: Vec<i64> = all.iter().map(|p| p.payload["i"].as_i64().unwrap()).collect();
+        let seen: Vec<i64> = all
+            .iter()
+            .map(|p| p.payload["i"].as_i64().unwrap())
+            .collect();
         assert_eq!(seen, vec![0, 1, 2, 3, 4]);
     }
 
@@ -550,8 +559,14 @@ mod tests {
         assert!(buf.dropped_on_overflow() >= 1);
         // The oldest (n:1) is the one dropped first.
         let remaining = buf.take_front(10);
-        let ns: Vec<i64> = remaining.iter().map(|p| p.payload["n"].as_i64().unwrap()).collect();
-        assert!(!ns.contains(&1), "oldest assert should be dropped first: {ns:?}");
+        let ns: Vec<i64> = remaining
+            .iter()
+            .map(|p| p.payload["n"].as_i64().unwrap())
+            .collect();
+        assert!(
+            !ns.contains(&1),
+            "oldest assert should be dropped first: {ns:?}"
+        );
     }
 
     #[test]

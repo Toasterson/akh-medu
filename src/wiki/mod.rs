@@ -30,9 +30,8 @@ pub use tools::{CiteArticleTool, RespondToArticleTool, SearchWikiTool, WriteArti
 pub use blog::{ArchetypeVoice, BlogError, BlogPost, BlogResult, DebateThread};
 
 pub use federation::{
-    ApActivity, ApArticle, FederationError, FederationResult,
-    build_announce_activity, build_create_activity, build_update_activity,
-    parse_inbound_activity,
+    ApActivity, ApArticle, FederationError, FederationResult, build_announce_activity,
+    build_create_activity, build_update_activity, parse_inbound_activity,
 };
 
 #[cfg(feature = "wiki")]

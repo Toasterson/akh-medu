@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use egg::{AstSize, Extractor, Rewrite, Runner};
 
 use crate::error::{AkhResult, EngineError, ProvenanceError, ReasonError, SymbolError};
-use crate::workspace::WorkspaceError;
 use crate::export::{ProvenanceExport, SymbolExport, TripleExport};
 use crate::grammar::GrammarRegistry;
 use crate::grammar::abs::AbsTree;
@@ -40,6 +39,7 @@ use crate::symbol::{AtomicSymbolAllocator, SymbolId, SymbolKind, SymbolMeta};
 use crate::vsa::item_memory::{ItemMemory, SearchResult};
 use crate::vsa::ops::VsaOps;
 use crate::vsa::{Dimension, Encoding, HyperVec};
+use crate::workspace::WorkspaceError;
 
 /// Configuration for the akh-medu engine.
 #[derive(Debug, Clone)]
@@ -309,10 +309,7 @@ fn validate_provenance_record_symbols(
     Ok(())
 }
 
-fn validate_triple_symbols_and_shape(
-    registry: &SymbolRegistry,
-    triple: &Triple,
-) -> AkhResult<()> {
+fn validate_triple_symbols_and_shape(registry: &SymbolRegistry, triple: &Triple) -> AkhResult<()> {
     if !triple.confidence.is_finite() || !(0.0..=1.0).contains(&triple.confidence) {
         return Err(invalid_persistent_state(format!(
             "triple ({}, {}, {}) confidence {} is outside [0,1]",
@@ -451,11 +448,9 @@ impl Engine {
                 // marker. Once present, read/decode/load failures must abort;
                 // falling back to lossy S/P/O quads would erase confidence,
                 // timestamps, compartments, and provenance links.
-                let bincode_triples: Vec<crate::graph::Triple> =
-                    bincode::deserialize(&bytes).map_err(|error| {
-                        crate::error::StoreError::Serialization {
-                            message: format!("failed to decode rich KG snapshot: {error}"),
-                        }
+                let bincode_triples: Vec<crate::graph::Triple> = bincode::deserialize(&bytes)
+                    .map_err(|error| crate::error::StoreError::Serialization {
+                        message: format!("failed to decode rich KG snapshot: {error}"),
                     })?;
                 (bincode_triples, true)
             } else {
@@ -489,8 +484,10 @@ impl Engine {
         };
 
         if !defer_startup_loads {
-            let provenance_ids: std::collections::HashSet<ProvenanceId> =
-                restored_provenance.iter().filter_map(|record| record.id).collect();
+            let provenance_ids: std::collections::HashSet<ProvenanceId> = restored_provenance
+                .iter()
+                .filter_map(|record| record.id)
+                .collect();
             for record in &restored_provenance {
                 validate_provenance_record_symbols(&registry, record)?;
             }
@@ -562,11 +559,10 @@ impl Engine {
                     }
                     Arc::new(AtomicSymbolAllocator::starting_from(next))
                 }
-                None
-                    if !defer_startup_loads
-                        && registry.is_empty()
-                        && restored_triples.is_empty()
-                        && !ledger_has_records =>
+                None if !defer_startup_loads
+                    && registry.is_empty()
+                    && restored_triples.is_empty()
+                    && !ledger_has_records =>
                 {
                     Arc::new(AtomicSymbolAllocator::new())
                 }
@@ -606,17 +602,17 @@ impl Engine {
             .as_ref()
             .or(config.data_dir.as_ref())
             .map(|dir| {
-            let compartments_dir = if config.compartments_dir.is_some() {
-                dir.clone()
-            } else {
-                dir.join("compartments")
-            };
-            let mgr = crate::compartment::CompartmentManager::new(compartments_dir);
-            if let Err(e) = mgr.discover() {
-                tracing::debug!(error = %e, "compartment discovery skipped");
-            }
-            mgr
-        });
+                let compartments_dir = if config.compartments_dir.is_some() {
+                    dir.clone()
+                } else {
+                    dir.join("compartments")
+                };
+                let mgr = crate::compartment::CompartmentManager::new(compartments_dir);
+                if let Err(e) = mgr.discover() {
+                    tracing::debug!(error = %e, "compartment discovery skipped");
+                }
+                mgr
+            });
 
         let engine = Self {
             config,
@@ -638,9 +634,15 @@ impl Engine {
             tms: RwLock::new(crate::tms::TruthMaintenanceSystem::new()),
             temporal_registry: RwLock::new(crate::temporal::TemporalRegistry::new()),
             constraint_registry: RwLock::new(crate::graph::arity::ConstraintRegistry::new()),
-            functional_predicates: RwLock::new(crate::graph::contradiction::FunctionalPredicates::new()),
-            multi_valued_predicates: RwLock::new(crate::graph::contradiction::MultiValuedPredicates::new()),
-            disjointness_constraints: RwLock::new(crate::graph::contradiction::DisjointnessConstraints::new()),
+            functional_predicates: RwLock::new(
+                crate::graph::contradiction::FunctionalPredicates::new(),
+            ),
+            multi_valued_predicates: RwLock::new(
+                crate::graph::contradiction::MultiValuedPredicates::new(),
+            ),
+            disjointness_constraints: RwLock::new(
+                crate::graph::contradiction::DisjointnessConstraints::new(),
+            ),
             skolem_registry: RwLock::new(crate::skolem::SkolemRegistry::new()),
             nart_registry: RwLock::new(crate::graph::nart::NartRegistry::new()),
             predicate_hierarchy: RwLock::new(None),
@@ -838,8 +840,8 @@ impl Engine {
         let provenance = match triple.provenance_id {
             None => None,
             Some(raw_id) => {
-                let id = ProvenanceId::new(raw_id)
-                    .ok_or(ProvenanceError::NotFound { id: raw_id })?;
+                let id =
+                    ProvenanceId::new(raw_id).ok_or(ProvenanceError::NotFound { id: raw_id })?;
                 let record = self.get_provenance(id)?;
                 if record.id != Some(id) {
                     return Err(invalid_persistent_state(format!(
@@ -874,11 +876,10 @@ impl Engine {
     /// without mutating the graph. This lets the full post-insert WAL envelope
     /// be validated before any displaced edge is removed.
     fn merged_assertion(&self, incoming: &Triple) -> Triple {
-        let Some(existing) = self.knowledge_graph.triple(
-            incoming.subject,
-            incoming.predicate,
-            incoming.object,
-        ) else {
+        let Some(existing) =
+            self.knowledge_graph
+                .triple(incoming.subject, incoming.predicate, incoming.object)
+        else {
             return incoming.clone();
         };
         Triple {
@@ -893,11 +894,7 @@ impl Engine {
         }
     }
 
-    fn assertion_payload(
-        &self,
-        triple: &Triple,
-        prepared: PreparedAssertion,
-    ) -> serde_json::Value {
+    fn assertion_payload(&self, triple: &Triple, prepared: PreparedAssertion) -> serde_json::Value {
         serde_json::json!({
             "v": crate::mutation::ASSERT_MUTATION_VERSION,
             "subject": triple.subject.get(),
@@ -959,8 +956,7 @@ impl Engine {
             self.multi_valued_predicates.read().unwrap().clone();
         *shadow.disjointness_constraints.write().unwrap() =
             self.disjointness_constraints.read().unwrap().clone();
-        *shadow.temporal_registry.write().unwrap() =
-            self.temporal_registry.read().unwrap().clone();
+        *shadow.temporal_registry.write().unwrap() = self.temporal_registry.read().unwrap().clone();
         Ok(shadow)
     }
 
@@ -1047,10 +1043,19 @@ impl Engine {
                 let violations = registry.check_triple(&stored_triple, self);
                 if let Some(v) = violations.first() {
                     let msg = match v {
-                        crate::graph::arity::ConstraintViolation::Arity { expected, actual, .. } => {
+                        crate::graph::arity::ConstraintViolation::Arity {
+                            expected,
+                            actual,
+                            ..
+                        } => {
                             format!("arity mismatch: expected {expected}, got {actual}")
                         }
-                        crate::graph::arity::ConstraintViolation::Type { arg_position, expected_type, actual_symbol, .. } => {
+                        crate::graph::arity::ConstraintViolation::Type {
+                            arg_position,
+                            expected_type,
+                            actual_symbol,
+                            ..
+                        } => {
                             format!(
                                 "type violation: arg {arg_position} expected type sym:{}, got sym:{}",
                                 expected_type.get(),
@@ -1061,7 +1066,9 @@ impl Engine {
                     return Err(crate::graph::arity::ArityError::TypeViolation {
                         relation_label: self.resolve_label(triple.predicate),
                         arg_position: match v {
-                            crate::graph::arity::ConstraintViolation::Type { arg_position, .. } => *arg_position,
+                            crate::graph::arity::ConstraintViolation::Type {
+                                arg_position, ..
+                            } => *arg_position,
                             _ => 0,
                         },
                         expected_label: msg.clone(),
@@ -1069,7 +1076,8 @@ impl Engine {
                         relation: triple.predicate,
                         expected: triple.subject,
                         actual: triple.object,
-                    }.into());
+                    }
+                    .into());
                 }
             }
         }
@@ -1082,7 +1090,12 @@ impl Engine {
             let temp = self.temporal_registry.read().unwrap();
             let mv = self.multi_valued_predicates.read().unwrap();
             let contradictions = crate::graph::contradiction::check_contradictions(
-                self, &stored_triple, &func, &disj, Some(&temp), Some(&mv),
+                self,
+                &stored_triple,
+                &func,
+                &disj,
+                Some(&temp),
+                Some(&mv),
             );
 
             if !contradictions.is_empty() {
@@ -1202,8 +1215,7 @@ impl Engine {
         if let (Ok(gen_sym), Ok(inv_sym)) = (
             self.registry.lookup("rel:generalizes").ok_or(()),
             self.registry.lookup("rel:inverse").ok_or(()),
-        )
-            && (stored_triple.predicate == gen_sym || stored_triple.predicate == inv_sym)
+        ) && (stored_triple.predicate == gen_sym || stored_triple.predicate == inv_sym)
         {
             self.hierarchy_dirty.store(true, Ordering::Release);
         }
@@ -1214,7 +1226,10 @@ impl Engine {
             if !skolem_reg.is_empty() {
                 let grounded = skolem_reg.auto_ground(self);
                 if grounded > 0 {
-                    tracing::debug!(grounded, "skolem symbols auto-grounded after triple insertion");
+                    tracing::debug!(
+                        grounded,
+                        "skolem symbols auto-grounded after triple insertion"
+                    );
                 }
             }
         }
@@ -1736,9 +1751,7 @@ impl Engine {
                 let subject = self.resolve_or_create_entity(subject)?;
                 let predicate = self.resolve_or_create_relation(predicate)?;
                 let object = self.resolve_or_create_entity(object)?;
-                triples.push(
-                    Triple::new(subject, predicate, object).with_confidence(*confidence),
-                );
+                triples.push(Triple::new(subject, predicate, object).with_confidence(*confidence));
             }
 
             // Parse/resolve and sequentially pre-admit the complete pack before
@@ -1800,9 +1813,12 @@ impl Engine {
         &self,
         payload: &crate::skills::SkillInstallPayload,
     ) -> AkhResult<crate::skills::SkillActivation> {
-        let mgr = self.skill_manager.as_ref().ok_or(EngineError::InvalidConfig {
-            message: "skill installation requires persistence (--data-dir)".into(),
-        })?;
+        let mgr = self
+            .skill_manager
+            .as_ref()
+            .ok_or(EngineError::InvalidConfig {
+                message: "skill installation requires persistence (--data-dir)".into(),
+            })?;
 
         let skill_dir = mgr.skills_dir().join(&payload.manifest.id);
         std::fs::create_dir_all(&skill_dir).map_err(|e| EngineError::DataDir {
@@ -1810,12 +1826,11 @@ impl Engine {
         })?;
 
         // Write skill.json (manifest).
-        let manifest_json =
-            serde_json::to_string_pretty(&payload.manifest).map_err(|e| {
-                EngineError::InvalidConfig {
-                    message: format!("failed to serialize manifest: {e}"),
-                }
-            })?;
+        let manifest_json = serde_json::to_string_pretty(&payload.manifest).map_err(|e| {
+            EngineError::InvalidConfig {
+                message: format!("failed to serialize manifest: {e}"),
+            }
+        })?;
         std::fs::write(skill_dir.join("skill.json"), manifest_json).map_err(|e| {
             EngineError::DataDir {
                 path: format!("{}/skill.json: {e}", skill_dir.display()),
@@ -1823,12 +1838,11 @@ impl Engine {
         })?;
 
         // Write triples.json.
-        let triples_json =
-            serde_json::to_string_pretty(&payload.triples).map_err(|e| {
-                EngineError::InvalidConfig {
-                    message: format!("failed to serialize triples: {e}"),
-                }
-            })?;
+        let triples_json = serde_json::to_string_pretty(&payload.triples).map_err(|e| {
+            EngineError::InvalidConfig {
+                message: format!("failed to serialize triples: {e}"),
+            }
+        })?;
         std::fs::write(skill_dir.join("triples.json"), triples_json).map_err(|e| {
             EngineError::DataDir {
                 path: format!("{}/triples.json: {e}", skill_dir.display()),
@@ -1951,8 +1965,7 @@ impl Engine {
 
     /// Get triples meeting a confidence floor via the ordered reverse index.
     pub fn triples_at_or_above_confidence(&self, minimum: f32) -> Vec<Triple> {
-        self.knowledge_graph
-            .triples_at_or_above_confidence(minimum)
+        self.knowledge_graph.triples_at_or_above_confidence(minimum)
     }
 
     /// All registered symbols (id ↔ kind ↔ label). Used by the Phase 38c
@@ -1983,8 +1996,7 @@ impl Engine {
         }
         // ADR 081 P2: this path bypasses `add_triple`, so the identity index
         // is no longer complete; it lazily rebuilds on next identity query.
-        self.identity_index_built
-            .store(false, Ordering::Release);
+        self.identity_index_built.store(false, Ordering::Release);
         Ok(count)
     }
 
@@ -2028,11 +2040,10 @@ impl Engine {
     /// otherwise the tail is corrupt or out of order and wake fails closed.
     #[cfg(feature = "postgres")]
     pub(crate) fn replay_retract_edge_exact(&self, expected: &Triple) -> AkhResult<()> {
-        if let Some(actual) = self.knowledge_graph.triple(
-            expected.subject,
-            expected.predicate,
-            expected.object,
-        ) {
+        if let Some(actual) =
+            self.knowledge_graph
+                .triple(expected.subject, expected.predicate, expected.object)
+        {
             if actual != *expected {
                 return Err(invalid_persistent_state(format!(
                     "retract batch edge ({}, {}, {}) metadata does not match replay state",
@@ -2339,11 +2350,10 @@ impl Engine {
                 || is_invalid_type_hierarchy_participant(&pred_label, &obj_label);
 
             if contaminated {
-                let existed = self.knowledge_graph.triple(
-                    triple.subject,
-                    triple.predicate,
-                    triple.object,
-                ).is_some();
+                let existed = self
+                    .knowledge_graph
+                    .triple(triple.subject, triple.predicate, triple.object)
+                    .is_some();
                 self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
                 removed += usize::from(existed);
             }
@@ -2388,18 +2398,15 @@ impl Engine {
         let to_remove: Vec<Triple> = self
             .all_triples()
             .into_iter()
-            .filter(|t| {
-                artifact_set.contains(&t.subject) || artifact_set.contains(&t.object)
-            })
+            .filter(|t| artifact_set.contains(&t.subject) || artifact_set.contains(&t.object))
             .collect();
 
         let mut removed = 0;
         for triple in to_remove {
-            let existed = self.knowledge_graph.triple(
-                triple.subject,
-                triple.predicate,
-                triple.object,
-            ).is_some();
+            let existed = self
+                .knowledge_graph
+                .triple(triple.subject, triple.predicate, triple.object)
+                .is_some();
             self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
             removed += usize::from(existed);
         }
@@ -2434,11 +2441,10 @@ impl Engine {
 
         let mut removed = 0usize;
         for triple in candidates {
-            let existed = self.knowledge_graph.triple(
-                triple.subject,
-                triple.predicate,
-                triple.object,
-            ).is_some();
+            let existed = self
+                .knowledge_graph
+                .triple(triple.subject, triple.predicate, triple.object)
+                .is_some();
             self.remove_triple_locked(triple.subject, triple.predicate, triple.object)?;
             removed += usize::from(existed);
         }
@@ -2811,11 +2817,7 @@ impl Engine {
     ///
     /// Domain assumptions are triples that are implicitly true within the context.
     /// The assumption is stored as `context ctx:assumes assumption_entity`.
-    pub fn add_context_assumption(
-        &self,
-        context: SymbolId,
-        assumption: SymbolId,
-    ) -> AkhResult<()> {
+    pub fn add_context_assumption(&self, context: SymbolId, assumption: SymbolId) -> AkhResult<()> {
         let preds = crate::compartment::ContextPredicates::resolve(self)?;
         self.add_triple(&Triple::new(context, preds.assumes, assumption))
     }
@@ -2860,8 +2862,7 @@ impl Engine {
     /// Lifting rules govern when entailments propagate between contexts.
     pub fn add_lifting_rule(&self, rule: &crate::compartment::LiftingRule) -> AkhResult<()> {
         let preds = crate::compartment::ContextPredicates::resolve(self)?;
-        let condition_entity =
-            self.resolve_or_create_entity(&rule.condition.to_string())?;
+        let condition_entity = self.resolve_or_create_entity(&rule.condition.to_string())?;
 
         self.add_triple(&Triple::new(rule.from, preds.lifts_to, rule.to))?;
         self.add_triple(&Triple::new(
@@ -2882,14 +2883,13 @@ impl Engine {
     }
 
     /// Check if two contexts are declared disjoint.
-    pub fn contexts_are_disjoint(
-        &self,
-        ctx_a: SymbolId,
-        ctx_b: SymbolId,
-    ) -> AkhResult<bool> {
+    pub fn contexts_are_disjoint(&self, ctx_a: SymbolId, ctx_b: SymbolId) -> AkhResult<bool> {
         let preds = crate::compartment::ContextPredicates::resolve(self)?;
         Ok(crate::compartment::microtheory::contexts_are_disjoint(
-            self, ctx_a, ctx_b, preds.disjoint,
+            self,
+            ctx_a,
+            ctx_b,
+            preds.disjoint,
         ))
     }
 
@@ -2898,16 +2898,12 @@ impl Engine {
     /// Returns the number of triples propagated.
     pub fn apply_lifting_rules(&self, from_context: SymbolId) -> AkhResult<usize> {
         let preds = crate::compartment::ContextPredicates::resolve(self)?;
-        let rules =
-            crate::compartment::microtheory::lifting_rules_from(self, from_context, &preds);
+        let rules = crate::compartment::microtheory::lifting_rules_from(self, from_context, &preds);
 
         let mut propagated = 0;
         for rule in &rules {
-            let triples = crate::compartment::microtheory::apply_lifting_rule(
-                self,
-                rule,
-                preds.specializes,
-            );
+            let triples =
+                crate::compartment::microtheory::apply_lifting_rule(self, rule, preds.specializes);
             for triple in &triples {
                 self.add_triple(triple)?;
 
@@ -2921,7 +2917,11 @@ impl Engine {
                             condition: rule.condition.to_string(),
                         },
                     )
-                    .with_sources(vec![triple.subject, triple.predicate, triple.object]);
+                    .with_sources(vec![
+                        triple.subject,
+                        triple.predicate,
+                        triple.object,
+                    ]);
                     let _ = ledger.store(&mut record);
                 }
 
@@ -2966,10 +2966,7 @@ impl Engine {
         object: SymbolId,
     ) -> AkhResult<crate::tms::RetractionResult> {
         self.ensure_mutations_active()?;
-        let Some(primary) = self
-            .knowledge_graph
-            .triple(subject, predicate, object)
-        else {
+        let Some(primary) = self.knowledge_graph.triple(subject, predicate, object) else {
             return Ok(crate::tms::RetractionResult {
                 retracted: vec![],
                 re_evaluated: vec![],
@@ -2985,11 +2982,14 @@ impl Engine {
             let result = planned.retract(object);
             (Some(planned), result)
         } else {
-            (None, crate::tms::RetractionResult {
-                retracted: vec![object],
-                re_evaluated: vec![],
-                cascade_depth: 0,
-            })
+            (
+                None,
+                crate::tms::RetractionResult {
+                    retracted: vec![object],
+                    re_evaluated: vec![],
+                    cascade_depth: 0,
+                },
+            )
         };
 
         let mut removals = std::collections::BTreeMap::new();
@@ -3022,7 +3022,9 @@ impl Engine {
                 symbol_metadata.entry(meta.id).or_insert(meta);
             }
             if let Some(record) = prepared.provenance {
-                let id = record.id.expect("prepare_assertion validates provenance IDs");
+                let id = record
+                    .id
+                    .expect("prepare_assertion validates provenance IDs");
                 provenance_records.entry(id).or_insert(record);
             }
         }
@@ -3096,7 +3098,10 @@ impl Engine {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.add_triple_locked(triple)?;
         if self.phase9_config.tms_enabled {
-            self.tms.write().unwrap().add_support(triple.object, support);
+            self.tms
+                .write()
+                .unwrap()
+                .add_support(triple.object, support);
         }
         Ok(())
     }
@@ -3181,11 +3186,7 @@ impl Engine {
         let Ok(prepared) = self.prepare_assertion(&updated) else {
             return false;
         };
-        if self
-            .knowledge_graph
-            .replace_triple_exact(&updated)
-            .is_err()
-        {
+        if self.knowledge_graph.replace_triple_exact(&updated).is_err() {
             return false;
         }
         self.record_mutation(
@@ -3225,17 +3226,34 @@ impl Engine {
             let (sl, pl, ol) = (s_ref.as_ref(), p_ref.as_ref(), o_ref.as_ref());
             let s = match self.resolve_or_create_entity(sl) {
                 Ok(id) => id,
-                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+                Err(e) => {
+                    errors.push(format!("{sl} {pl} {ol}: {e}"));
+                    continue;
+                }
             };
             let p = match self.resolve_or_create_relation(pl) {
                 Ok(id) => id,
-                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+                Err(e) => {
+                    errors.push(format!("{sl} {pl} {ol}: {e}"));
+                    continue;
+                }
             };
             let o = match self.resolve_or_create_entity(ol) {
                 Ok(id) => id,
-                Err(e) => { errors.push(format!("{sl} {pl} {ol}: {e}")); continue; }
+                Err(e) => {
+                    errors.push(format!("{sl} {pl} {ol}: {e}"));
+                    continue;
+                }
             };
-            resolved.push(Resolved { s, p, o, conf: default_confidence, label_s: sl, label_p: pl, label_o: ol });
+            resolved.push(Resolved {
+                s,
+                p,
+                o,
+                conf: default_confidence,
+                label_s: sl,
+                label_p: pl,
+                label_o: ol,
+            });
         }
 
         // Phase 2: insert each resolved triple
@@ -3320,24 +3338,21 @@ impl Engine {
             .into());
         }
 
-        let s_re = subject_pattern
-            .map(Regex::new)
-            .transpose()
-            .map_err(|e| EngineError::InvalidPattern {
+        let s_re = subject_pattern.map(Regex::new).transpose().map_err(|e| {
+            EngineError::InvalidPattern {
                 message: format!("subject pattern: {e}"),
-            })?;
-        let p_re = predicate_pattern
-            .map(Regex::new)
-            .transpose()
-            .map_err(|e| EngineError::InvalidPattern {
+            }
+        })?;
+        let p_re = predicate_pattern.map(Regex::new).transpose().map_err(|e| {
+            EngineError::InvalidPattern {
                 message: format!("predicate pattern: {e}"),
-            })?;
-        let o_re = object_pattern
-            .map(Regex::new)
-            .transpose()
-            .map_err(|e| EngineError::InvalidPattern {
+            }
+        })?;
+        let o_re = object_pattern.map(Regex::new).transpose().map_err(|e| {
+            EngineError::InvalidPattern {
                 message: format!("object pattern: {e}"),
-            })?;
+            }
+        })?;
 
         let chunk_sz = chunk_size.clamp(1, 500);
 
@@ -3354,14 +3369,13 @@ impl Engine {
             .all_triples()
             .into_iter()
             .filter(|t| {
-                s_re.as_ref()
-                    .map_or(true, |re| re.is_match(&self.registry.resolve_label(t.subject)))
-                    && p_re.as_ref().map_or(true, |re| {
-                        re.is_match(&self.registry.resolve_label(t.predicate))
-                    })
-                    && o_re.as_ref().map_or(true, |re| {
-                        re.is_match(&self.registry.resolve_label(t.object))
-                    })
+                s_re.as_ref().map_or(true, |re| {
+                    re.is_match(&self.registry.resolve_label(t.subject))
+                }) && p_re.as_ref().map_or(true, |re| {
+                    re.is_match(&self.registry.resolve_label(t.predicate))
+                }) && o_re.as_ref().map_or(true, |re| {
+                    re.is_match(&self.registry.resolve_label(t.object))
+                })
             })
             .map(|t| (t.subject, t.predicate, t.object))
             .collect();
@@ -3404,17 +3418,16 @@ impl Engine {
             message: "SPARQL DELETE requires persistence (--data-dir)".into(),
         })?;
 
-        let select_query = Self::sparql_delete_to_select(query).ok_or_else(|| {
-            EngineError::SparqlDeleteParse {
+        let select_query =
+            Self::sparql_delete_to_select(query).ok_or_else(|| EngineError::SparqlDeleteParse {
                 message: format!("unrecognised query: {query}"),
+            })?;
+
+        let rows = sparql_store.query_select(&select_query).map_err(|e| {
+            EngineError::SparqlDeleteParse {
+                message: format!("SELECT failed: {e}"),
             }
         })?;
-
-        let rows = sparql_store
-            .query_select(&select_query)
-            .map_err(|e| EngineError::SparqlDeleteParse {
-                message: format!("SELECT failed: {e}"),
-            })?;
 
         let candidates: Vec<(SymbolId, SymbolId, SymbolId)> = rows
             .iter()
@@ -3458,7 +3471,9 @@ impl Engine {
         // Find WHERE keyword position; must come after DELETE.
         let delete_pos = upper.find("DELETE")?;
         let where_search_start = delete_pos + "DELETE".len();
-        let where_pos = upper[where_search_start..].find("WHERE").map(|p| where_search_start + p)?;
+        let where_pos = upper[where_search_start..]
+            .find("WHERE")
+            .map(|p| where_search_start + p)?;
 
         // Extract WHERE body from the original (case-preserving) string.
         let after_where = trimmed[where_pos + "WHERE".len()..].trim_start();
@@ -3519,9 +3534,11 @@ impl Engine {
         self.ensure_hierarchy()?;
         let guard = self.predicate_hierarchy.read().unwrap();
         match guard.as_ref() {
-            Some(hierarchy) => Ok(crate::graph::predicate_hierarchy::objects_with_hierarchy_and_inverse(
-                self, subject, predicate, hierarchy,
-            )),
+            Some(hierarchy) => Ok(
+                crate::graph::predicate_hierarchy::objects_with_hierarchy_and_inverse(
+                    self, subject, predicate, hierarchy,
+                ),
+            ),
             None => Ok(vec![]),
         }
     }
@@ -3553,11 +3570,7 @@ impl Engine {
     ///
     /// Monotonic assertions are never overridden by defaults, even when
     /// a more specific type provides a conflicting value.
-    pub fn mark_monotonic(
-        &self,
-        subject: SymbolId,
-        predicate: SymbolId,
-    ) -> AkhResult<()> {
+    pub fn mark_monotonic(&self, subject: SymbolId, predicate: SymbolId) -> AkhResult<()> {
         let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
         crate::graph::defeasible::mark_monotonic(self, subject, predicate, &preds)
     }
@@ -3566,11 +3579,7 @@ impl Engine {
     ///
     /// This declares that `specific`'s assertions override `general`'s
     /// for conflicting predicates.
-    pub fn register_exception(
-        &self,
-        general: SymbolId,
-        specific: SymbolId,
-    ) -> AkhResult<()> {
+    pub fn register_exception(&self, general: SymbolId, specific: SymbolId) -> AkhResult<()> {
         let preds = crate::graph::defeasible::DefeasiblePredicates::resolve(self)?;
         crate::graph::defeasible::register_exception(self, general, specific, &preds)
     }
@@ -3621,10 +3630,12 @@ impl Engine {
     pub fn dispatch(
         &self,
         problem: &crate::dispatch::Problem,
-    ) -> AkhResult<(crate::dispatch::ReasonerOutput, crate::dispatch::DispatchTrace)> {
-        let registry = crate::dispatch::ReasonerRegistry::with_builtins(
-            std::time::Duration::from_secs(5),
-        );
+    ) -> AkhResult<(
+        crate::dispatch::ReasonerOutput,
+        crate::dispatch::DispatchTrace,
+    )> {
+        let registry =
+            crate::dispatch::ReasonerRegistry::with_builtins(std::time::Duration::from_secs(5));
         Ok(registry.dispatch(problem, self)?)
     }
 
@@ -3633,7 +3644,10 @@ impl Engine {
         &self,
         problem: &crate::dispatch::Problem,
         budget: std::time::Duration,
-    ) -> AkhResult<(crate::dispatch::ReasonerOutput, crate::dispatch::DispatchTrace)> {
+    ) -> AkhResult<(
+        crate::dispatch::ReasonerOutput,
+        crate::dispatch::DispatchTrace,
+    )> {
         let registry = crate::dispatch::ReasonerRegistry::with_builtins(budget);
         Ok(registry.dispatch_with_budget(problem, self, budget)?)
     }
@@ -3683,7 +3697,9 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Get a read lock on the temporal registry.
-    pub fn temporal_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::temporal::TemporalRegistry> {
+    pub fn temporal_reg(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::temporal::TemporalRegistry> {
         self.temporal_registry.read().unwrap()
     }
 
@@ -3694,7 +3710,10 @@ impl Engine {
         profile: crate::temporal::TemporalProfile,
     ) -> AkhResult<()> {
         profile.validate()?;
-        self.temporal_registry.write().unwrap().set_profile(relation, profile)?;
+        self.temporal_registry
+            .write()
+            .unwrap()
+            .set_profile(relation, profile)?;
         Ok(())
     }
 
@@ -3703,12 +3722,16 @@ impl Engine {
     // -----------------------------------------------------------------------
 
     /// Get a read lock on the constraint registry.
-    pub fn constraint_reg(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::arity::ConstraintRegistry> {
+    pub fn constraint_reg(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::graph::arity::ConstraintRegistry> {
         self.constraint_registry.read().unwrap()
     }
 
     /// Get a write lock on the constraint registry.
-    pub fn constraint_reg_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::arity::ConstraintRegistry> {
+    pub fn constraint_reg_mut(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, crate::graph::arity::ConstraintRegistry> {
         self.constraint_registry.write().unwrap()
     }
 
@@ -3729,32 +3752,44 @@ impl Engine {
     }
 
     /// Get a read lock on the functional predicates set.
-    pub fn functional_preds(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
+    pub fn functional_preds(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
         self.functional_predicates.read().unwrap()
     }
 
     /// Get a write lock on the functional predicates set.
-    pub fn functional_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
+    pub fn functional_preds_mut(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::FunctionalPredicates> {
         self.functional_predicates.write().unwrap()
     }
 
     /// Get a read lock on the disjointness constraints set.
-    pub fn disjointness(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
+    pub fn disjointness(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
         self.disjointness_constraints.read().unwrap()
     }
 
     /// Get a write lock on the disjointness constraints set.
-    pub fn disjointness_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
+    pub fn disjointness_mut(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::DisjointnessConstraints> {
         self.disjointness_constraints.write().unwrap()
     }
 
     /// Get a read lock on the multi-valued predicates set.
-    pub fn multi_valued_preds(&self) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+    pub fn multi_valued_preds(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
         self.multi_valued_predicates.read().unwrap()
     }
 
     /// Get a write lock on the multi-valued predicates set.
-    pub fn multi_valued_preds_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
+    pub fn multi_valued_preds_mut(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, crate::graph::contradiction::MultiValuedPredicates> {
         self.multi_valued_predicates.write().unwrap()
     }
 
@@ -3767,7 +3802,11 @@ impl Engine {
     /// register their own multi-valued predicates when they resolve/create them.
     fn register_builtin_multi_valued(&self) {
         let labels = [
-            "child-of", "part-of", "similar-to", "has-a", "parent-of",
+            "child-of",
+            "part-of",
+            "similar-to",
+            "has-a",
+            "parent-of",
             "is-a",
         ];
         let mut mv = self.multi_valued_predicates.write().unwrap();
@@ -3865,7 +3904,9 @@ impl Engine {
     }
 
     /// Get a write lock on the NART registry.
-    pub fn nart_reg_mut(&self) -> std::sync::RwLockWriteGuard<'_, crate::graph::nart::NartRegistry> {
+    pub fn nart_reg_mut(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, crate::graph::nart::NartRegistry> {
         self.nart_registry.write().unwrap()
     }
 
@@ -4028,7 +4069,10 @@ impl Engine {
     /// Get a read lock on the cached predicate hierarchy.
     ///
     /// Call `ensure_hierarchy()` first to guarantee it's up-to-date.
-    pub fn predicate_hierarchy(&self) -> std::sync::RwLockReadGuard<'_, Option<crate::graph::predicate_hierarchy::PredicateHierarchy>> {
+    pub fn predicate_hierarchy(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, Option<crate::graph::predicate_hierarchy::PredicateHierarchy>>
+    {
         self.predicate_hierarchy.read().unwrap()
     }
 
@@ -4111,14 +4155,34 @@ impl Engine {
             })
         }
 
-        self.store.put_meta(b"phase9:tms", &enc(&*self.tms.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:temporal", &enc(&*self.temporal_registry.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:constraints", &enc(&*self.constraint_registry.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:functional", &enc(&*self.functional_predicates.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:multi_valued", &enc(&*self.multi_valued_predicates.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:disjointness", &enc(&*self.disjointness_constraints.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:skolem", &enc(&*self.skolem_registry.read().unwrap())?)?;
-        self.store.put_meta(b"phase9:nart", &enc(&*self.nart_registry.read().unwrap())?)?;
+        self.store
+            .put_meta(b"phase9:tms", &enc(&*self.tms.read().unwrap())?)?;
+        self.store.put_meta(
+            b"phase9:temporal",
+            &enc(&*self.temporal_registry.read().unwrap())?,
+        )?;
+        self.store.put_meta(
+            b"phase9:constraints",
+            &enc(&*self.constraint_registry.read().unwrap())?,
+        )?;
+        self.store.put_meta(
+            b"phase9:functional",
+            &enc(&*self.functional_predicates.read().unwrap())?,
+        )?;
+        self.store.put_meta(
+            b"phase9:multi_valued",
+            &enc(&*self.multi_valued_predicates.read().unwrap())?,
+        )?;
+        self.store.put_meta(
+            b"phase9:disjointness",
+            &enc(&*self.disjointness_constraints.read().unwrap())?,
+        )?;
+        self.store.put_meta(
+            b"phase9:skolem",
+            &enc(&*self.skolem_registry.read().unwrap())?,
+        )?;
+        self.store
+            .put_meta(b"phase9:nart", &enc(&*self.nart_registry.read().unwrap())?)?;
         // PredicateHierarchy NOT persisted — rebuilt from KG on startup.
 
         tracing::debug!("phase 9 registries persisted");
@@ -4127,9 +4191,7 @@ impl Engine {
 
     /// Restore Phase 9 registries from the durable store.
     fn restore_phase9(&self) {
-        let load = |key: &[u8]| -> Option<Vec<u8>> {
-            self.store.get_meta(key).ok().flatten()
-        };
+        let load = |key: &[u8]| -> Option<Vec<u8>> { self.store.get_meta(key).ok().flatten() };
 
         if let Some(bytes) = load(b"phase9:tms")
             && let Ok(tms) = bincode::deserialize(&bytes)
@@ -4330,14 +4392,14 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            engine.create_symbol(SymbolKind::Entity, "Existing").unwrap();
+            engine
+                .create_symbol(SymbolKind::Entity, "Existing")
+                .unwrap();
             engine.persist().unwrap();
         }
         {
             let store = TieredStore::with_persistence(allocator_dir.path(), "symbols").unwrap();
-            store
-                .put_meta(b"sym_allocator_next", b"bad")
-                .unwrap();
+            store.put_meta(b"sym_allocator_next", b"bad").unwrap();
         }
         assert!(
             Engine::new(EngineConfig {
@@ -4360,16 +4422,16 @@ mod tests {
         })
         .unwrap();
         let subject = engine.resolve_or_create_entity("subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("functional:predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("functional:predicate")
+            .unwrap();
         let old_object = engine.resolve_or_create_entity("old-object").unwrap();
         let new_object = engine.resolve_or_create_entity("new-object").unwrap();
         let old = Triple::new(subject, predicate, old_object);
         engine.add_triple(&old).unwrap();
         let old_identity = engine.triple_identity(&old);
 
-        engine
-            .functional_preds_mut()
-            .declare_functional(predicate);
+        engine.functional_preds_mut().declare_functional(predicate);
         let mut phase9 = engine.phase9_config().clone();
         phase9.contradiction_policy = ContradictionPolicy::Replace;
         engine.set_phase9_config(phase9);
@@ -4432,7 +4494,15 @@ mod tests {
         let tracked = Triple::new(subject, predicate, object).with_provenance(provenance_id.get());
         assert!(engine.add_triple(&tracked).is_err());
         assert_eq!(engine.triple_count(), 0);
-        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(
+            engine
+                .sparql
+                .as_ref()
+                .unwrap()
+                .all_triples()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
@@ -4445,7 +4515,9 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let predicate = engine.resolve_or_create_relation("duplicate-predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("duplicate-predicate")
+            .unwrap();
         let mut keys = Vec::new();
         for label in ["lower", "new-provenance", "incoming-none"] {
             let subject = engine
@@ -4474,9 +4546,11 @@ mod tests {
             .unwrap();
 
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
         engine
             .add_triple(&Triple::new(keys[0].0, predicate, keys[0].2).with_confidence(0.2))
             .unwrap();
@@ -4496,13 +4570,16 @@ mod tests {
         let records = sink.0.lock().unwrap();
         assert_eq!(records.len(), 3);
         for (record, key) in records.iter().zip(keys) {
-            let live = engine
-                .knowledge_graph
-                .triple(key.0, key.1, key.2)
-                .unwrap();
+            let live = engine.knowledge_graph.triple(key.0, key.1, key.2).unwrap();
             assert_eq!(record.kind, crate::mutation::MutationKind::Assert);
-            assert_eq!(record.payload["confidence"].as_f64().unwrap() as f32, live.confidence);
-            assert_eq!(record.payload["timestamp"].as_u64().unwrap(), live.timestamp);
+            assert_eq!(
+                record.payload["confidence"].as_f64().unwrap() as f32,
+                live.confidence
+            );
+            assert_eq!(
+                record.payload["timestamp"].as_u64().unwrap(),
+                live.timestamp
+            );
             assert_eq!(record.payload["provenance_id"].as_u64(), live.provenance_id);
             assert_eq!(
                 record.payload["compartment"].as_str().map(str::to_owned),
@@ -4513,8 +4590,14 @@ mod tests {
             records[0].payload["confidence"].as_f64().unwrap() as f32,
             0.9_f32
         );
-        assert_eq!(records[1].payload["provenance_id"].as_u64(), Some(new_provenance.get()));
-        assert_eq!(records[2].payload["provenance_id"].as_u64(), Some(old_provenance.get()));
+        assert_eq!(
+            records[1].payload["provenance_id"].as_u64(),
+            Some(new_provenance.get())
+        );
+        assert_eq!(
+            records[2].payload["provenance_id"].as_u64(),
+            Some(old_provenance.get())
+        );
     }
 
     #[test]
@@ -4527,7 +4610,9 @@ mod tests {
         })
         .unwrap();
         let subject = engine.resolve_or_create_entity("retained-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("retained-predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("retained-predicate")
+            .unwrap();
         let object = engine.resolve_or_create_entity("retained-object").unwrap();
         let triple = Triple::new(subject, predicate, object)
             .with_confidence(0.8)
@@ -4535,9 +4620,11 @@ mod tests {
         engine.add_triple(&triple).unwrap();
         let before = engine.all_triples();
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         // Models an Arc<Engine> retained by a request/OODA task after the
         // daemon has started a residency handoff.
@@ -4548,22 +4635,22 @@ mod tests {
             engine.remove_triples_in_compartment("retained-compartment"),
             0
         );
-        assert!(!engine.update_triple_confidence(
-            subject, predicate, object, -0.5, 0.0, 1.0
-        ));
-        assert!(engine
-            .remove_triples_batch(&[(
-                "retained-subject",
-                "retained-predicate",
-                "retained-object",
-            )])
-            .is_err());
-        assert!(engine
-            .purge_by_pattern(Some("retained-subject"), None, None, 1)
-            .is_err());
-        assert!(engine
-            .sparql_delete("DELETE WHERE { ?s ?p ?o }")
-            .is_err());
+        assert!(!engine.update_triple_confidence(subject, predicate, object, -0.5, 0.0, 1.0));
+        assert!(
+            engine
+                .remove_triples_batch(&[(
+                    "retained-subject",
+                    "retained-predicate",
+                    "retained-object",
+                )])
+                .is_err()
+        );
+        assert!(
+            engine
+                .purge_by_pattern(Some("retained-subject"), None, None, 1)
+                .is_err()
+        );
+        assert!(engine.sparql_delete("DELETE WHERE { ?s ?p ?o }").is_err());
         assert!(engine.purge_contaminated_inferences().is_err());
         assert!(engine.purge_runtime_artifacts().is_err());
         assert!(engine.purge_self_referential_triples().is_err());
@@ -4573,9 +4660,7 @@ mod tests {
         let sparql_triples = engine.sparql.as_ref().unwrap().all_triples().unwrap();
         assert_eq!(sparql_triples.len(), 1);
         assert!(sparql_triples.iter().any(|triple| {
-            triple.subject == subject
-                && triple.predicate == predicate
-                && triple.object == object
+            triple.subject == subject && triple.predicate == predicate && triple.object == object
         }));
     }
 
@@ -4588,11 +4673,15 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let subject = engine.resolve_or_create_entity("skill-quiesced-subject").unwrap();
+        let subject = engine
+            .resolve_or_create_entity("skill-quiesced-subject")
+            .unwrap();
         let predicate = engine
             .resolve_or_create_relation("skill-quiesced-predicate")
             .unwrap();
-        let object = engine.resolve_or_create_entity("skill-quiesced-object").unwrap();
+        let object = engine
+            .resolve_or_create_entity("skill-quiesced-object")
+            .unwrap();
         write_numeric_skill(
             dir.path(),
             "quiesced-skill",
@@ -4609,9 +4698,11 @@ mod tests {
             Some(crate::skills::SkillState::Cold)
         );
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
         let before = engine.all_triples();
 
         engine.quiesce_mutations();
@@ -4623,7 +4714,15 @@ mod tests {
             Some(crate::skills::SkillState::Cold)
         );
         assert_eq!(engine.all_triples(), before);
-        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(
+            engine
+                .sparql
+                .as_ref()
+                .unwrap()
+                .all_triples()
+                .unwrap()
+                .is_empty()
+        );
         assert!(sink.0.lock().unwrap().is_empty());
     }
 
@@ -4636,11 +4735,15 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let subject = engine.resolve_or_create_entity("skill-canonical-subject").unwrap();
+        let subject = engine
+            .resolve_or_create_entity("skill-canonical-subject")
+            .unwrap();
         let predicate = engine
             .resolve_or_create_relation("skill-canonical-predicate")
             .unwrap();
-        let object = engine.resolve_or_create_entity("skill-canonical-object").unwrap();
+        let object = engine
+            .resolve_or_create_entity("skill-canonical-object")
+            .unwrap();
         write_numeric_skill(
             dir.path(),
             "canonical-skill",
@@ -4651,9 +4754,11 @@ mod tests {
             })],
         );
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         let activation = engine.load_skill("canonical-skill").unwrap();
 
@@ -4669,25 +4774,17 @@ mod tests {
         assert!(engine.has_triple(subject, predicate, object));
         let rdf = engine.sparql.as_ref().unwrap().all_triples().unwrap();
         assert!(rdf.iter().any(|triple| {
-            triple.subject == subject
-                && triple.predicate == predicate
-                && triple.object == object
+            triple.subject == subject && triple.predicate == predicate && triple.object == object
         }));
         let records = sink.0.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, crate::mutation::MutationKind::Assert);
-        assert_eq!(
-            records[0].payload["subject"].as_u64(),
-            Some(subject.get())
-        );
+        assert_eq!(records[0].payload["subject"].as_u64(), Some(subject.get()));
         assert_eq!(
             records[0].payload["predicate"].as_u64(),
             Some(predicate.get())
         );
-        assert_eq!(
-            records[0].payload["object"].as_u64(),
-            Some(object.get())
-        );
+        assert_eq!(records[0].payload["object"].as_u64(), Some(object.get()));
     }
 
     #[test]
@@ -4699,10 +4796,18 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let first_subject = engine.resolve_or_create_entity("skill-first-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("skill-preflight-predicate").unwrap();
-        let first_object = engine.resolve_or_create_entity("skill-first-object").unwrap();
-        let self_ref = engine.resolve_or_create_entity("skill-self-reference").unwrap();
+        let first_subject = engine
+            .resolve_or_create_entity("skill-first-subject")
+            .unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("skill-preflight-predicate")
+            .unwrap();
+        let first_object = engine
+            .resolve_or_create_entity("skill-first-object")
+            .unwrap();
+        let self_ref = engine
+            .resolve_or_create_entity("skill-self-reference")
+            .unwrap();
         write_numeric_skill(
             dir.path(),
             "invalid-skill",
@@ -4726,9 +4831,11 @@ mod tests {
             Some(crate::skills::SkillState::Cold)
         );
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         assert!(engine.load_skill("invalid-skill").is_err());
 
@@ -4737,7 +4844,15 @@ mod tests {
             Some(crate::skills::SkillState::Cold)
         );
         assert_eq!(engine.triple_count(), 0);
-        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(
+            engine
+                .sparql
+                .as_ref()
+                .unwrap()
+                .all_triples()
+                .unwrap()
+                .is_empty()
+        );
         assert!(sink.0.lock().unwrap().is_empty());
     }
 
@@ -4753,8 +4868,12 @@ mod tests {
         let predicate = engine.resolve_or_create_relation("bulk-predicate").unwrap();
         let mut triples = Vec::new();
         for label in ["confidence", "batch", "pattern", "sparql", "compartment"] {
-            let subject = engine.resolve_or_create_entity(&format!("{label}-subject")).unwrap();
-            let object = engine.resolve_or_create_entity(&format!("{label}-object")).unwrap();
+            let subject = engine
+                .resolve_or_create_entity(&format!("{label}-subject"))
+                .unwrap();
+            let object = engine
+                .resolve_or_create_entity(&format!("{label}-object"))
+                .unwrap();
             let mut triple = Triple::new(subject, predicate, object).with_confidence(0.8);
             if label == "compartment" {
                 triple = triple.with_compartment("bulk-compartment".into());
@@ -4763,9 +4882,11 @@ mod tests {
             triples.push(triple);
         }
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         assert!(engine.update_triple_confidence(
             triples[0].subject,
@@ -4796,40 +4917,21 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(
-            engine.remove_triples_in_compartment("bulk-compartment"),
-            1
-        );
+        assert_eq!(engine.remove_triples_in_compartment("bulk-compartment"), 1);
 
         let records = sink.0.lock().unwrap();
         assert_eq!(records[0].kind, crate::mutation::MutationKind::Assert);
+        assert!((records[0].payload["confidence"].as_f64().unwrap() as f32 - 0.5).abs() < 1e-6);
         assert!(
-            (records[0].payload["confidence"].as_f64().unwrap() as f32 - 0.5).abs() < 1e-6
+            records[1..]
+                .iter()
+                .all(|record| record.kind == crate::mutation::MutationKind::RetractBatch)
         );
-        assert!(records[1..]
-            .iter()
-            .all(|record| record.kind == crate::mutation::MutationKind::RetractBatch));
         assert_eq!(records.len(), 5);
-        assert!(!engine.has_triple(
-            triples[1].subject,
-            predicate,
-            triples[1].object
-        ));
-        assert!(!engine.has_triple(
-            triples[2].subject,
-            predicate,
-            triples[2].object
-        ));
-        assert!(!engine.has_triple(
-            triples[3].subject,
-            predicate,
-            triples[3].object
-        ));
-        assert!(!engine.has_triple(
-            triples[4].subject,
-            predicate,
-            triples[4].object
-        ));
+        assert!(!engine.has_triple(triples[1].subject, predicate, triples[1].object));
+        assert!(!engine.has_triple(triples[2].subject, predicate, triples[2].object));
+        assert!(!engine.has_triple(triples[3].subject, predicate, triples[3].object));
+        assert!(!engine.has_triple(triples[4].subject, predicate, triples[4].object));
     }
 
     #[test]
@@ -4842,7 +4944,9 @@ mod tests {
         })
         .unwrap();
         let subject = engine.resolve_or_create_entity("rollback-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("rollback-functional").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("rollback-functional")
+            .unwrap();
         let old_object = engine.resolve_or_create_entity("rollback-old").unwrap();
         let new_object = engine.resolve_or_create_entity("rollback-new").unwrap();
         engine.functional_preds_mut().declare_functional(predicate);
@@ -4853,14 +4957,18 @@ mod tests {
             .add_triple(&Triple::new(subject, predicate, old_object))
             .unwrap();
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
 
         engine.fail_next_sparql_transition_for_test();
-        assert!(engine
-            .add_triple(&Triple::new(subject, predicate, new_object))
-            .is_err());
+        assert!(
+            engine
+                .add_triple(&Triple::new(subject, predicate, new_object))
+                .is_err()
+        );
         assert!(engine.has_triple(subject, predicate, old_object));
         assert!(!engine.has_triple(subject, predicate, new_object));
         let rdf = engine.sparql.as_ref().unwrap().all_triples().unwrap();
@@ -4879,7 +4987,9 @@ mod tests {
         })
         .unwrap();
         let subject = engine.resolve_or_create_entity("race-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("race-functional").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("race-functional")
+            .unwrap();
         let old_object = engine.resolve_or_create_entity("race-old").unwrap();
         let object_b = engine.resolve_or_create_entity("race-b").unwrap();
         let object_c = engine.resolve_or_create_entity("race-c").unwrap();
@@ -4891,9 +5001,11 @@ mod tests {
             .add_triple(&Triple::new(subject, predicate, old_object))
             .unwrap();
         let sink = Arc::new(RecordingSink::default());
-        assert!(engine
-            .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
-            .is_ok());
+        assert!(
+            engine
+                .set_mutation_sink(Arc::clone(&sink) as Arc<dyn MutationSink>)
+                .is_ok()
+        );
         let engine = Arc::new(engine);
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let writers = [object_b, object_c]
@@ -4921,9 +5033,11 @@ mod tests {
         assert_eq!(live.len(), 1);
         let records = sink.0.lock().unwrap();
         assert_eq!(records.len(), 2);
-        assert!(records.iter().all(|record| {
-            record.kind == crate::mutation::MutationKind::Replace
-        }));
+        assert!(
+            records
+                .iter()
+                .all(|record| { record.kind == crate::mutation::MutationKind::Replace })
+        );
 
         let mut replay_object = old_object.get();
         for record in records.iter() {
@@ -4984,12 +5098,12 @@ mod tests {
         })
         .unwrap();
         let subject = engine.resolve_or_create_entity("subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("functional:predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("functional:predicate")
+            .unwrap();
         let first_object = engine.resolve_or_create_entity("first-object").unwrap();
         let rejected_object = engine.resolve_or_create_entity("rejected-object").unwrap();
-        engine
-            .functional_preds_mut()
-            .declare_functional(predicate);
+        engine.functional_preds_mut().declare_functional(predicate);
         let mut phase9 = engine.phase9_config().clone();
         phase9.contradiction_policy = ContradictionPolicy::Reject;
         engine.set_phase9_config(phase9);
@@ -5015,7 +5129,15 @@ mod tests {
         assert!(triples.iter().all(|triple| triple.provenance_id.is_none()));
         assert_eq!(engine.all_provenance().unwrap().len(), 0);
         assert_eq!(engine.triple_count(), 0);
-        assert!(engine.sparql.as_ref().unwrap().all_triples().unwrap().is_empty());
+        assert!(
+            engine
+                .sparql
+                .as_ref()
+                .unwrap()
+                .all_triples()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(sink.count.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
@@ -5487,8 +5609,12 @@ mod tests {
         let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
         let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
 
-        engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
-        engine.add_triple(&Triple::new(moon.id, is_a.id, planet.id)).unwrap();
+        engine
+            .add_triple(&Triple::new(sun.id, is_a.id, star.id))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(moon.id, is_a.id, planet.id))
+            .unwrap();
         assert_eq!(engine.all_triples().len(), 2);
 
         // Purge only triples whose object label starts with "Star".

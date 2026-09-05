@@ -38,10 +38,7 @@ pub enum WikiError {
     DuplicateTitle { title: String },
 
     #[error("{0}")]
-    #[diagnostic(
-        code(akh::wiki::engine),
-        help("An engine-level error occurred.")
-    )]
+    #[diagnostic(code(akh::wiki::engine), help("An engine-level error occurred."))]
     Engine(Box<crate::error::AkhError>),
 }
 
@@ -244,11 +241,16 @@ impl ArticleStore {
         if let Ok(preds) = WikiPredicates::init(engine) {
             let marker = engine.resolve_or_create_entity("wiki:article-type").ok();
             if let Some(m) = marker {
-                let _ = engine.add_triple(&Triple::new(article_id, preds.has_article, m).with_confidence(1.0));
+                let _ = engine.add_triple(
+                    &Triple::new(article_id, preds.has_article, m).with_confidence(1.0),
+                );
             }
-            let _ = engine.add_triple(&Triple::new(article_id, preds.authored_by, author).with_confidence(1.0));
+            let _ = engine.add_triple(
+                &Triple::new(article_id, preds.authored_by, author).with_confidence(1.0),
+            );
             for &subj in subjects {
-                let _ = engine.add_triple(&Triple::new(article_id, preds.subject, subj).with_confidence(1.0));
+                let _ = engine
+                    .add_triple(&Triple::new(article_id, preds.subject, subj).with_confidence(1.0));
             }
         }
 
@@ -262,12 +264,18 @@ impl ArticleStore {
         body: &str,
         blocks: Vec<BlockRef>,
     ) -> WikiResult<&Article> {
-        let &id = self.title_index.get(title).ok_or_else(|| WikiError::ArticleNotFound {
-            title: title.into(),
-        })?;
-        let article = self.articles.get_mut(&id).ok_or_else(|| WikiError::ArticleNotFound {
-            title: title.into(),
-        })?;
+        let &id = self
+            .title_index
+            .get(title)
+            .ok_or_else(|| WikiError::ArticleNotFound {
+                title: title.into(),
+            })?;
+        let article = self
+            .articles
+            .get_mut(&id)
+            .ok_or_else(|| WikiError::ArticleNotFound {
+                title: title.into(),
+            })?;
         article.body = body.into();
         article.header.blocks = blocks;
         article.header.modified = now_secs();
@@ -313,38 +321,43 @@ impl ArticleStore {
     }
 
     /// Add a citation from one article to another.
-    pub fn add_citation(
-        &mut self,
-        from_title: &str,
-        to_title: &str,
-    ) -> WikiResult<()> {
-        let &to_id = self.title_index.get(to_title).ok_or_else(|| WikiError::ArticleNotFound {
-            title: to_title.into(),
-        })?;
-        let &from_id_raw = self.title_index.get(from_title).ok_or_else(|| WikiError::ArticleNotFound {
-            title: from_title.into(),
-        })?;
+    pub fn add_citation(&mut self, from_title: &str, to_title: &str) -> WikiResult<()> {
+        let &to_id = self
+            .title_index
+            .get(to_title)
+            .ok_or_else(|| WikiError::ArticleNotFound {
+                title: to_title.into(),
+            })?;
+        let &from_id_raw =
+            self.title_index
+                .get(from_title)
+                .ok_or_else(|| WikiError::ArticleNotFound {
+                    title: from_title.into(),
+                })?;
         if let (Some(article), Some(to_sym)) = (
             self.articles.get_mut(&from_id_raw),
             crate::symbol::SymbolId::new(to_id),
-        ) && !article.header.cites.contains(&to_sym) {
+        ) && !article.header.cites.contains(&to_sym)
+        {
             article.header.cites.push(to_sym);
         }
         Ok(())
     }
 
     /// Set the `responds_to` link on an existing article.
-    pub fn set_responds_to(
-        &mut self,
-        title: &str,
-        parent_id: SymbolId,
-    ) -> WikiResult<()> {
-        let &id = self.title_index.get(title).ok_or_else(|| WikiError::ArticleNotFound {
-            title: title.into(),
-        })?;
-        let article = self.articles.get_mut(&id).ok_or_else(|| WikiError::ArticleNotFound {
-            title: title.into(),
-        })?;
+    pub fn set_responds_to(&mut self, title: &str, parent_id: SymbolId) -> WikiResult<()> {
+        let &id = self
+            .title_index
+            .get(title)
+            .ok_or_else(|| WikiError::ArticleNotFound {
+                title: title.into(),
+            })?;
+        let article = self
+            .articles
+            .get_mut(&id)
+            .ok_or_else(|| WikiError::ArticleNotFound {
+                title: title.into(),
+            })?;
         article.header.responds_to = Some(parent_id);
         article.header.modified = now_secs();
         Ok(())
@@ -405,7 +418,10 @@ mod tests {
     }
 
     fn test_author(engine: &Engine) -> SymbolId {
-        engine.create_symbol(SymbolKind::Entity, "test-author").unwrap().id
+        engine
+            .create_symbol(SymbolKind::Entity, "test-author")
+            .unwrap()
+            .id
     }
 
     // ── CRUD ──────────────────────────────────────────────────────
@@ -417,7 +433,14 @@ mod tests {
         let mut store = ArticleStore::new();
 
         let article = store
-            .create_article("Test Article", "# Hello\n\nWorld", author, &[], vec![], &engine)
+            .create_article(
+                "Test Article",
+                "# Hello\n\nWorld",
+                author,
+                &[],
+                vec![],
+                &engine,
+            )
             .unwrap();
 
         assert_eq!(article.header.title, "Test Article");
@@ -431,7 +454,9 @@ mod tests {
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
 
-        store.create_article("Dup", "body", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Dup", "body", author, &[], vec![], &engine)
+            .unwrap();
         let result = store.create_article("Dup", "body2", author, &[], vec![], &engine);
         assert!(result.is_err());
     }
@@ -442,7 +467,9 @@ mod tests {
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
 
-        store.create_article("Rust", "# Rust", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Rust", "# Rust", author, &[], vec![], &engine)
+            .unwrap();
         let article = store.get_by_title("Rust");
         assert!(article.is_some());
         assert_eq!(article.unwrap().body, "# Rust");
@@ -460,7 +487,9 @@ mod tests {
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
 
-        store.create_article("Update Me", "v1", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Update Me", "v1", author, &[], vec![], &engine)
+            .unwrap();
         store.update_article("Update Me", "v2", vec![]).unwrap();
 
         let article = store.get_by_title("Update Me").unwrap();
@@ -480,12 +509,21 @@ mod tests {
     fn list_by_subject() {
         let engine = test_engine();
         let author = test_author(&engine);
-        let subject = engine.create_symbol(SymbolKind::Entity, "compilers").unwrap().id;
+        let subject = engine
+            .create_symbol(SymbolKind::Entity, "compilers")
+            .unwrap()
+            .id;
         let mut store = ArticleStore::new();
 
-        store.create_article("GCC", "about gcc", author, &[subject], vec![], &engine).unwrap();
-        store.create_article("LLVM", "about llvm", author, &[subject], vec![], &engine).unwrap();
-        store.create_article("Cooking", "about food", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("GCC", "about gcc", author, &[subject], vec![], &engine)
+            .unwrap();
+        store
+            .create_article("LLVM", "about llvm", author, &[subject], vec![], &engine)
+            .unwrap();
+        store
+            .create_article("Cooking", "about food", author, &[], vec![], &engine)
+            .unwrap();
 
         let results = store.list_by_subject(subject);
         assert_eq!(results.len(), 2);
@@ -495,11 +533,18 @@ mod tests {
     fn list_by_author() {
         let engine = test_engine();
         let a1 = test_author(&engine);
-        let a2 = engine.create_symbol(SymbolKind::Entity, "other-author").unwrap().id;
+        let a2 = engine
+            .create_symbol(SymbolKind::Entity, "other-author")
+            .unwrap()
+            .id;
         let mut store = ArticleStore::new();
 
-        store.create_article("A1", "by a1", a1, &[], vec![], &engine).unwrap();
-        store.create_article("A2", "by a2", a2, &[], vec![], &engine).unwrap();
+        store
+            .create_article("A1", "by a1", a1, &[], vec![], &engine)
+            .unwrap();
+        store
+            .create_article("A2", "by a2", a2, &[], vec![], &engine)
+            .unwrap();
 
         assert_eq!(store.list_by_author(a1).len(), 1);
         assert_eq!(store.list_by_author(a2).len(), 1);
@@ -544,8 +589,12 @@ mod tests {
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
 
-        store.create_article("Source", "src", author, &[], vec![], &engine).unwrap();
-        store.create_article("Citing", "cites src", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Source", "src", author, &[], vec![], &engine)
+            .unwrap();
+        store
+            .create_article("Citing", "cites src", author, &[], vec![], &engine)
+            .unwrap();
         store.add_citation("Citing", "Source").unwrap();
 
         let citing = store.get_by_title("Citing").unwrap();
@@ -560,7 +609,9 @@ mod tests {
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
 
-        store.create_article("Persist", "body", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Persist", "body", author, &[], vec![], &engine)
+            .unwrap();
 
         let bytes = bincode::serialize(&store).unwrap();
         let restored: ArticleStore = bincode::deserialize(&bytes).unwrap();
@@ -574,13 +625,17 @@ mod tests {
     fn block_type_labels() {
         assert_eq!(BlockType::Definition.as_label(), "definition");
         assert_eq!(BlockType::Prose.as_label(), "prose");
-        assert_eq!(BlockType::Opinion {
-            stance: Stance {
-                position: "for".into(),
-                confidence: 0.9,
-                reasoning: "test".into(),
+        assert_eq!(
+            BlockType::Opinion {
+                stance: Stance {
+                    position: "for".into(),
+                    confidence: 0.9,
+                    reasoning: "test".into(),
+                }
             }
-        }.as_label(), "opinion");
+            .as_label(),
+            "opinion"
+        );
     }
 
     #[test]
@@ -588,8 +643,12 @@ mod tests {
         let engine = test_engine();
         let author = test_author(&engine);
         let mut store = ArticleStore::new();
-        store.create_article("Alpha", "a", author, &[], vec![], &engine).unwrap();
-        store.create_article("Beta", "b", author, &[], vec![], &engine).unwrap();
+        store
+            .create_article("Alpha", "a", author, &[], vec![], &engine)
+            .unwrap();
+        store
+            .create_article("Beta", "b", author, &[], vec![], &engine)
+            .unwrap();
         let titles = store.list_titles();
         assert_eq!(titles.len(), 2);
     }

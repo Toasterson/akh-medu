@@ -11,7 +11,7 @@ use miette::Diagnostic;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::bootstrap::expand::{normalize_label, ExpansionResult};
+use crate::bootstrap::expand::{ExpansionResult, normalize_label};
 use crate::bootstrap::prerequisite::{CurriculumEntry, PrereqAnalysisResult, ZpdZone};
 use crate::bootstrap::purpose::DreyfusLevel;
 use crate::engine::Engine;
@@ -326,11 +326,7 @@ impl ResourceDiscoverer {
 
     // ── API search methods ──────────────────────────────────────────
 
-    fn search_semantic_scholar(
-        &mut self,
-        query: &str,
-        concept_label: &str,
-    ) -> Vec<RawResource> {
+    fn search_semantic_scholar(&mut self, query: &str, concept_label: &str) -> Vec<RawResource> {
         let encoded = url_encode(query);
         let url = format!(
             "https://api.semanticscholar.org/graph/v1/paper/search?query={encoded}&fields=title,url,abstract,year,citationCount,openAccessPdf,isOpenAccess&limit=5"
@@ -364,10 +360,7 @@ impl ResourceDiscoverer {
                     .unwrap_or("")
                     .to_string();
 
-                let year = item
-                    .get("year")
-                    .and_then(|v| v.as_u64())
-                    .map(|y| y as u32);
+                let year = item.get("year").and_then(|v| v.as_u64()).map(|y| y as u32);
 
                 let citation_count = item
                     .get("citationCount")
@@ -481,10 +474,7 @@ impl ResourceDiscoverer {
                     continue;
                 }
 
-                let key = item
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let key = item.get("key").and_then(|v| v.as_str()).unwrap_or("");
                 let url_val = format!("https://openlibrary.org{key}");
 
                 let year = item
@@ -626,7 +616,11 @@ impl ResourceDiscoverer {
             })?;
 
             // Open access triple.
-            let oa_label = if resource.open_access { "true" } else { "false" };
+            let oa_label = if resource.open_access {
+                "true"
+            } else {
+                "false"
+            };
             let oa_obj = engine.resolve_or_create_entity(oa_label)?;
             engine.add_triple(&Triple {
                 subject: entity_id,
@@ -865,7 +859,11 @@ fn limit_per_concept(
     max_per_concept: usize,
 ) -> Vec<DiscoveredResource> {
     // Sort by quality descending.
-    resources.sort_by(|a, b| b.quality_score.partial_cmp(&a.quality_score).unwrap_or(std::cmp::Ordering::Equal));
+    resources.sort_by(|a, b| {
+        b.quality_score
+            .partial_cmp(&a.quality_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     resources

@@ -391,7 +391,9 @@ pub fn coverage_report_top_n(engine: &Engine, top_n: usize) -> CoverageReport {
                 frontier += 1;
                 entry.frontier += 1;
                 let predicate_label = engine.resolve_label(t.predicate);
-                *frontier_predicate_counts.entry(predicate_label).or_insert(0) += 1;
+                *frontier_predicate_counts
+                    .entry(predicate_label)
+                    .or_insert(0) += 1;
             }
             TripleClass::SchemaInfra => {
                 schema_infra += 1;
@@ -483,7 +485,10 @@ mod tests {
 
     fn person_note(doc_id: &str) -> Note {
         let mut fm = Frontmatter::new();
-        fm.insert("type", crate::library::note::FrontmatterValue::Text("Person".into()));
+        fm.insert(
+            "type",
+            crate::library::note::FrontmatterValue::Text("Person".into()),
+        );
         fm.insert(
             "email",
             crate::library::note::FrontmatterValue::Text("jane@example.org".into()),
@@ -519,7 +524,10 @@ mod tests {
         install_seed(&engine);
 
         let report = coverage_report(&engine);
-        assert_eq!(report.typed_core, 0, "no instance data yet, just the pack's own vocabulary");
+        assert_eq!(
+            report.typed_core, 0,
+            "no instance data yet, just the pack's own vocabulary"
+        );
         assert_eq!(report.frontier, 0);
         assert!(report.schema_infra > 0);
         assert_eq!(report.total_triples, report.schema_infra);
@@ -594,10 +602,7 @@ mod tests {
         let report = coverage_report(&engine);
         assert_eq!(report.frontier, 1);
         assert_eq!(report.typed_core, 0);
-        assert_eq!(
-            report.top_frontier_predicates,
-            vec![("bar".to_string(), 1)]
-        );
+        assert_eq!(report.top_frontier_predicates, vec![("bar".to_string(), 1)]);
     }
 
     #[test]
@@ -630,9 +635,13 @@ mod tests {
         let engine = test_engine();
         install_seed(&engine);
 
-        let a = engine.resolve_or_create_entity("mt:akh/test-effective").unwrap();
+        let a = engine
+            .resolve_or_create_entity("mt:akh/test-effective")
+            .unwrap();
         let mt = engine.resolve_symbol("mt:schema/core-test@0.1.0").unwrap();
-        let specializes = engine.resolve_or_create_relation("ctx:specializes").unwrap();
+        let specializes = engine
+            .resolve_or_create_relation("ctx:specializes")
+            .unwrap();
         engine.add_triple(&Triple::new(a, specializes, mt)).unwrap();
 
         let report = coverage_report(&engine);

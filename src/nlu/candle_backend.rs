@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use super::error::{NluError, NluResult};
-use super::llm_translator::{build_prompt_with_context, parse_abstree_json, LlmTranslation};
+use super::llm_translator::{LlmTranslation, build_prompt_with_context, parse_abstree_json};
 
 #[cfg(feature = "candle-backend")]
 use candle_core::{Device, IndexOp, Tensor};
@@ -79,9 +79,7 @@ impl ModelFamily {
         match self {
             ModelFamily::Gemma => &["<end_of_turn>", "<eos>", "</s>"],
             ModelFamily::Gemma4 => &["<turn|>", "<eos>", "</s>"],
-            ModelFamily::Qwen2 | ModelFamily::Qwen35 => {
-                &["<|endoftext|>", "<|im_end|>", "</s>"]
-            }
+            ModelFamily::Qwen2 | ModelFamily::Qwen35 => &["<|endoftext|>", "<|im_end|>", "</s>"],
         }
     }
 }
@@ -452,12 +450,11 @@ impl CandleBackend {
         let mut file = std::fs::File::open(model_path).map_err(|e| NluError::ModelLoadFailed {
             reason: format!("open GGUF: {e}"),
         })?;
-        let content =
-            candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
-                NluError::ModelLoadFailed {
-                    reason: format!("read GGUF: {e}"),
-                }
-            })?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file).map_err(|e| {
+            NluError::ModelLoadFailed {
+                reason: format!("read GGUF: {e}"),
+            }
+        })?;
 
         // Detect model family from GGUF metadata before `from_gguf` consumes it.
         let architecture = content
@@ -676,9 +673,11 @@ impl CandleBackend {
                         })
                     })
             })
-            .or_else(|| ggufs.iter().find(|p| {
-                p.file_name().and_then(|n| n.to_str()) == Some(CANDLE_MODEL_FILE)
-            }))
+            .or_else(|| {
+                ggufs
+                    .iter()
+                    .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(CANDLE_MODEL_FILE))
+            })
             .or_else(|| ggufs.first())?
             .clone();
 
@@ -771,7 +770,9 @@ impl CandleBackend {
     /// so cleaning to the answer channel discards the call before it can be parsed.
     #[cfg(feature = "candle-backend")]
     pub fn generate_raw(&mut self, prompt: &str, max_tokens: u32) -> NluResult<String> {
-        Ok(self.generate_inner(prompt, max_tokens, StopMode::Text)?.text)
+        Ok(self
+            .generate_inner(prompt, max_tokens, StopMode::Text)?
+            .text)
     }
 
     /// Generate and return decode-throughput stats (Phase 45a / ADR 073).
@@ -842,11 +843,17 @@ impl CandleBackend {
         // --- gemma3-only (the model with the static-KV + embed split) --------------
         let model = match &mut self.model {
             LoadedModel::Gemma(m) => m,
-            _ => return Err(fail("graph replay probe currently supports gemma3 only".to_string())),
+            _ => {
+                return Err(fail(
+                    "graph replay probe currently supports gemma3 only".to_string(),
+                ));
+            }
         };
 
         // The embedding lookup stays OUTSIDE the captured region (host-sync D2H+H2D).
-        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+        let embed = model
+            .embed(&tok_input)
+            .map_err(|e| fail(format!("embed: {e}")))?;
 
         // Bisection toggle (Phase 46c): capture only the transformer stack + final norm
         // (`hidden_states_from_embed`, excluding the lm_head GEMV) when AKH_BENCH_GRAPH_HIDDEN
@@ -874,7 +881,10 @@ impl CandleBackend {
                 .0
         };
         let max_diff = |a: &[f32], b: &[f32]| -> f32 {
-            a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
         };
 
         // --- Eager baseline ---------------------------------------------------------
@@ -912,7 +922,11 @@ impl CandleBackend {
             cuda::device_synchronize().map_err(|e| fail(format!("sync: {e}")))?;
         }
         let eager_secs = eager_t0.elapsed().as_secs_f32();
-        let eager_tok_s = if eager_secs > 0.0 { iters as f32 / eager_secs } else { 0.0 };
+        let eager_tok_s = if eager_secs > 0.0 {
+            iters as f32 / eager_secs
+        } else {
+            0.0
+        };
 
         // --- Capture the forward at the fixed position (non-fatal on failure) -------
         let capture = cuda::HipGraph::capture(|| run(model));
@@ -929,7 +943,9 @@ impl CandleBackend {
             Ok((graph, replay_logits)) => {
                 captured = true;
                 // First replay → its output (read before any further replays).
-                graph.replay().map_err(|e| fail(format!("replay warmup: {e}")))?;
+                graph
+                    .replay()
+                    .map_err(|e| fail(format!("replay warmup: {e}")))?;
                 let first_vec = to_vec0(&replay_logits, "replay-first")?;
 
                 let replay_t0 = std::time::Instant::now();
@@ -937,7 +953,11 @@ impl CandleBackend {
                     graph.replay().map_err(|e| fail(format!("replay: {e}")))?;
                 }
                 let replay_secs = replay_t0.elapsed().as_secs_f32();
-                replay_tok_s = if replay_secs > 0.0 { iters as f32 / replay_secs } else { 0.0 };
+                replay_tok_s = if replay_secs > 0.0 {
+                    iters as f32 / replay_secs
+                } else {
+                    0.0
+                };
                 let last_vec = to_vec0(&replay_logits, "replay-last")?;
 
                 replay_determinism = max_diff(&first_vec, &last_vec);
@@ -1010,11 +1030,13 @@ impl CandleBackend {
             _ => {
                 return Err(fail(
                     "graph decode parity probe supports gemma3 only".to_string(),
-                ))
+                ));
             }
         };
         // The embedding lookup is a host-sync op; the graph-ready forward starts from it.
-        let embed = model.embed(&tok_input).map_err(|e| fail(format!("embed: {e}")))?;
+        let embed = model
+            .embed(&tok_input)
+            .map_err(|e| fail(format!("embed: {e}")))?;
 
         let to_vec = |t: &Tensor| -> NluResult<Vec<f32>> {
             t.i((0, ..))
@@ -1121,7 +1143,7 @@ impl CandleBackend {
             _ => {
                 return Err(fail(
                     "graph decode loop probe supports gemma3 only".to_string(),
-                ))
+                ));
             }
         };
 
@@ -1178,8 +1200,8 @@ impl CandleBackend {
             .map_err(|e| fail(format!("prefill (graph): {e}")))?;
         let tok0 = greedy(&prefill2)?;
 
-        let gctx = GraphDecodeCtx::new(&device, read_len)
-            .map_err(|e| fail(format!("graph ctx: {e}")))?;
+        let gctx =
+            GraphDecodeCtx::new(&device, read_len).map_err(|e| fail(format!("graph ctx: {e}")))?;
 
         // Fixed embedding buffer the captured forward reads — overwritten in place each
         // token (its address stays stable, so the graph reads the refreshed embedding).
@@ -1384,7 +1406,7 @@ impl CandleBackend {
     /// writes from the new position, overwriting the rejected tail). gemma4 only.
     #[cfg(all(feature = "candle-backend", feature = "hip"))]
     pub fn bench_spec_decode(&mut self, prompt: &str, max_new: u32) -> NluResult<SpecDecodeStats> {
-        use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
+        use super::spec_decode::{DrafterConfig, NgramDrafter, accept_run};
         use candle_core::cuda;
         let fail = |reason: String| NluError::LlmGenerationFailed { reason };
         let max_new = max_new.max(1) as usize;
@@ -1557,9 +1579,9 @@ impl CandleBackend {
             ),
             // Gemma 4 uses a new turn format: `<|turn>role\n ... <turn|>\n` with the
             // generation prompt `<|turn>model\n`. (BOS is prepended in generate_inner.)
-            ChatTemplate::Gemma4 => format!(
-                "<|turn>user\n{system}\n\n{user}<turn|>\n<|turn>model\n"
-            ),
+            ChatTemplate::Gemma4 => {
+                format!("<|turn>user\n{system}\n\n{user}<turn|>\n<|turn>model\n")
+            }
             ChatTemplate::ChatMl => format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
@@ -1720,11 +1742,7 @@ impl CandleBackend {
     /// Requires the Gemma 4 family and a loadable mmproj sidecar
     /// (`<model-stem>.mmproj.gguf`).
     #[cfg(feature = "candle-backend")]
-    pub fn understand_audio(
-        &mut self,
-        pcm_16k_mono: &[f32],
-        question: &str,
-    ) -> NluResult<String> {
+    pub fn understand_audio(&mut self, pcm_16k_mono: &[f32], question: &str) -> NluResult<String> {
         use super::audio::AudioProjector;
 
         if self.family != ModelFamily::Gemma4 {
@@ -1778,9 +1796,7 @@ impl CandleBackend {
         let post = encode(&format!("\n{question}<turn|>\n<|turn>model\n"))?;
 
         // Assemble the full id sequence with the audio frames as placeholders.
-        let mut ids: Vec<u32> = Vec::with_capacity(
-            1 + pre.len() + 1 + n_frames + 1 + post.len(),
-        );
+        let mut ids: Vec<u32> = Vec::with_capacity(1 + pre.len() + 1 + n_frames + 1 + post.len());
         ids.push(bos);
         ids.extend_from_slice(&pre);
         ids.push(boa);
@@ -1831,11 +1847,11 @@ impl CandleBackend {
             LoadedModel::Gemma4(m) => {
                 let scale = m.embedding_scale();
                 let embed_dim = m.embedding_length();
-                let base = m.embed_tokens(&id_tensor).map_err(|e| {
-                    NluError::LlmGenerationFailed {
-                        reason: format!("embed_tokens: {e}"),
-                    }
-                })?; // [1, seq, 3840]
+                let base =
+                    m.embed_tokens(&id_tensor)
+                        .map_err(|e| NluError::LlmGenerationFailed {
+                            reason: format!("embed_tokens: {e}"),
+                        })?; // [1, seq, 3840]
                 let scaled = (base * scale).map_err(|e| NluError::LlmGenerationFailed {
                     reason: format!("scale text embeds: {e}"),
                 })?;
@@ -1967,21 +1983,21 @@ impl CandleBackend {
     /// `output` private, so this required owning the model code.
     #[cfg(feature = "candle-backend")]
     pub fn extract_hidden_state(&mut self, input: &str) -> NluResult<Vec<f32>> {
-        let encoding = self.tokenizer.encode(input, true).map_err(|e| {
-            NluError::LlmGenerationFailed {
-                reason: format!("tokenization: {e}"),
-            }
-        })?;
-        let token_ids = encoding.get_ids();
-        let input_tensor =
-            Tensor::new(token_ids, &self.device)
+        let encoding =
+            self.tokenizer
+                .encode(input, true)
                 .map_err(|e| NluError::LlmGenerationFailed {
-                    reason: format!("tensor creation: {e}"),
-                })?
-                .unsqueeze(0)
-                .map_err(|e| NluError::LlmGenerationFailed {
-                    reason: format!("unsqueeze: {e}"),
+                    reason: format!("tokenization: {e}"),
                 })?;
+        let token_ids = encoding.get_ids();
+        let input_tensor = Tensor::new(token_ids, &self.device)
+            .map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("tensor creation: {e}"),
+            })?
+            .unsqueeze(0)
+            .map_err(|e| NluError::LlmGenerationFailed {
+                reason: format!("unsqueeze: {e}"),
+            })?;
 
         let (_logits, hidden) = self
             .model
@@ -1991,12 +2007,11 @@ impl CandleBackend {
             })?;
 
         // `hidden` is [batch, hidden_dim]; take row 0 → [hidden_dim].
-        let hidden_vec: Vec<f32> = hidden
-            .i((0, ..))
-            .and_then(|h| h.to_vec1())
-            .map_err(|e| NluError::LlmGenerationFailed {
+        let hidden_vec: Vec<f32> = hidden.i((0, ..)).and_then(|h| h.to_vec1()).map_err(|e| {
+            NluError::LlmGenerationFailed {
                 reason: format!("hidden to_vec1: {e}"),
-            })?;
+            }
+        })?;
 
         Ok(hidden_vec)
     }
@@ -2012,7 +2027,10 @@ impl CandleBackend {
     ///
     /// The compressed representation uses 3-bit Lloyd-Max quantization with
     /// randomized Hadamard rotation, achieving ~5.3× compression.
-    pub fn compress_kv_vector(values: &[f32], seed: u64) -> crate::vsa::polar_quant::QuantizedVector {
+    pub fn compress_kv_vector(
+        values: &[f32],
+        seed: u64,
+    ) -> crate::vsa::polar_quant::QuantizedVector {
         crate::vsa::polar_quant::compress(values, seed)
     }
 
@@ -2034,11 +2052,12 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        let encoding = self.tokenizer.encode(prompt, true).map_err(|e| {
-            NluError::LlmGenerationFailed {
-                reason: format!("tokenization: {e}"),
-            }
-        })?;
+        let encoding =
+            self.tokenizer
+                .encode(prompt, true)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("tokenization: {e}"),
+                })?;
         let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
 
         // Gemma is critically dependent on a leading BOS token: without it the
@@ -2055,7 +2074,10 @@ impl CandleBackend {
             }
         }
 
-        tracing::debug!(prompt_tokens = prompt_tokens.len(), "Candle prompt tokenized");
+        tracing::debug!(
+            prompt_tokens = prompt_tokens.len(),
+            "Candle prompt tokenized"
+        );
 
         if prompt_tokens.len() > self.context_length {
             return Err(NluError::LlmGenerationFailed {
@@ -2077,11 +2099,12 @@ impl CandleBackend {
                 reason: format!("unsqueeze: {e}"),
             })?;
 
-        let logits = self.model.forward(&input, 0).map_err(|e| {
-            NluError::LlmGenerationFailed {
+        let logits = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("prefill: {e}"),
-            }
-        })?;
+            })?;
 
         // Continue token-by-token from the prefilled prompt. Eligible gemma4 turns take the
         // speculative (prompt-lookup) path (Phase 47 / ADR 075): greedy → byte-exact vs plain
@@ -2115,13 +2138,7 @@ impl CandleBackend {
     /// [`spec_decode_loop`](Self::spec_decode_loop) so their detokenization and stop semantics
     /// are byte-identical — the speculative loop just calls this once per accepted/bonus token.
     #[cfg(feature = "candle-backend")]
-    fn process_token(
-        &self,
-        token: u32,
-        eos: &[u32],
-        stop: StopMode,
-        st: &mut DecodeState,
-    ) -> bool {
+    fn process_token(&self, token: u32, eos: &[u32], stop: StopMode, st: &mut DecodeState) -> bool {
         if !matches!(stop, StopMode::Fixed) && eos.contains(&token) {
             return true;
         }
@@ -2222,18 +2239,18 @@ impl CandleBackend {
                     })?
             } else {
                 // Temperature sampling
-                let scaled = (&last_logits / self.config.temperature as f64)
-                    .map_err(|e| NluError::LlmGenerationFailed {
+                let scaled = (&last_logits / self.config.temperature as f64).map_err(|e| {
+                    NluError::LlmGenerationFailed {
                         reason: format!("scale: {e}"),
-                    })?;
+                    }
+                })?;
                 let probs = candle_nn::ops::softmax(&scaled, 0).map_err(|e| {
                     NluError::LlmGenerationFailed {
                         reason: format!("softmax: {e}"),
                     }
                 })?;
-                let probs_vec: Vec<f32> = probs
-                    .to_vec1()
-                    .map_err(|e| NluError::LlmGenerationFailed {
+                let probs_vec: Vec<f32> =
+                    probs.to_vec1().map_err(|e| NluError::LlmGenerationFailed {
                         reason: format!("to_vec1: {e}"),
                     })?;
                 sample_from_probs(&probs_vec)
@@ -2330,7 +2347,7 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        use super::spec_decode::{accept_run, DrafterConfig, NgramDrafter};
+        use super::spec_decode::{DrafterConfig, NgramDrafter, accept_run};
         let fail = |reason: String| NluError::LlmGenerationFailed { reason };
 
         if std::env::var("AKH_GEMV_BATCH").as_deref() == Ok("0") {
@@ -2455,7 +2472,7 @@ impl CandleBackend {
         max_tokens: u32,
         stop: StopMode,
     ) -> NluResult<GenerationResult> {
-        use super::spec_decode::{categorical, spec_sample_step, DrafterConfig, NgramDrafter};
+        use super::spec_decode::{DrafterConfig, NgramDrafter, categorical, spec_sample_step};
         use rand::Rng;
         let fail = |reason: String| NluError::LlmGenerationFailed { reason };
 
@@ -2524,8 +2541,9 @@ impl CandleBackend {
                 let verify = model
                     .forward_verify(&feed_t, pos)
                     .map_err(|e| fail(format!("verify forward: {e}")))?;
-                let (_, _seq, vocab) =
-                    verify.dims3().map_err(|e| fail(format!("verify dims: {e}")))?;
+                let (_, _seq, vocab) = verify
+                    .dims3()
+                    .map_err(|e| fail(format!("verify dims: {e}")))?;
                 (drafts, to_probs(&verify)?, vocab) // probs: (drafts.len()+1) rows × vocab
             };
 
@@ -2544,8 +2562,7 @@ impl CandleBackend {
                 }
             }
             // All drafts accepted → sample the extra (bonus) position; else use the residual draw.
-            let bonus =
-                bonus.unwrap_or_else(|| categorical(row(drafts.len()), rng.r#gen::<f32>()));
+            let bonus = bonus.unwrap_or_else(|| categorical(row(drafts.len()), rng.r#gen::<f32>()));
 
             // Emit the k accepted drafts + the bonus, each through the shared per-token path.
             for i in 0..k {
@@ -2592,11 +2609,12 @@ impl CandleBackend {
     /// vendored) generate path.
     #[cfg(feature = "candle-backend")]
     fn prefill(&mut self, prompt: &str) -> NluResult<(Tensor, usize)> {
-        let encoding = self.tokenizer.encode(prompt, true).map_err(|e| {
-            NluError::LlmGenerationFailed {
-                reason: format!("tokenization: {e}"),
-            }
-        })?;
+        let encoding =
+            self.tokenizer
+                .encode(prompt, true)
+                .map_err(|e| NluError::LlmGenerationFailed {
+                    reason: format!("tokenization: {e}"),
+                })?;
         let mut prompt_tokens: Vec<u32> = encoding.get_ids().to_vec();
 
         if matches!(self.family, ModelFamily::Gemma | ModelFamily::Gemma4) {
@@ -2625,11 +2643,12 @@ impl CandleBackend {
             .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("unsqueeze: {e}"),
             })?;
-        let logits = self.model.forward(&input, 0).map_err(|e| {
-            NluError::LlmGenerationFailed {
+        let logits = self
+            .model
+            .forward(&input, 0)
+            .map_err(|e| NluError::LlmGenerationFailed {
                 reason: format!("prefill: {e}"),
-            }
-        })?;
+            })?;
         Ok((logits, prompt_tokens.len()))
     }
 
@@ -2643,7 +2662,11 @@ impl CandleBackend {
     /// JSON. This is the in-process advantage Candle has over an HTTP backend:
     /// we own the sampling loop. See `tool_call.gbnf`.
     #[cfg(feature = "candle-backend")]
-    pub fn generate_constrained_json(&mut self, prompt: &str, max_tokens: u32) -> NluResult<String> {
+    pub fn generate_constrained_json(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> NluResult<String> {
         let (mut logits, prompt_len) = self.prefill(prompt)?;
         let mut constraint = super::json_constraint::JsonConstraint::object();
         let mut out = String::new();

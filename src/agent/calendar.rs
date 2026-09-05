@@ -16,9 +16,9 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Error
@@ -115,9 +115,17 @@ impl AllenRelation {
         if s1 == s2 && e1 == e2 {
             Self::Equals
         } else if s1 == s2 {
-            if e1 < e2 { Self::Starts } else { Self::StartedBy }
+            if e1 < e2 {
+                Self::Starts
+            } else {
+                Self::StartedBy
+            }
         } else if e1 == e2 {
-            if s1 > s2 { Self::Finishes } else { Self::FinishedBy }
+            if s1 > s2 {
+                Self::Finishes
+            } else {
+                Self::FinishedBy
+            }
         } else if e1 < s2 {
             Self::Before
         } else if e2 < s1 {
@@ -388,7 +396,6 @@ impl<'de> Deserialize<'de> for CalendarManager {
     }
 }
 
-
 impl fmt::Debug for CalendarManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CalendarManager")
@@ -546,19 +553,19 @@ impl CalendarManager {
 
         let event = match self.events.get(&event_id.get()) {
             Some(e) => e,
-            None => return Err(CalendarError::EventNotFound { event_id: event_id.get() }),
+            None => {
+                return Err(CalendarError::EventNotFound {
+                    event_id: event_id.get(),
+                });
+            }
         };
 
         for other in self.events.values() {
             if other.symbol_id == event_id {
                 continue;
             }
-            let relation = AllenRelation::compute(
-                event.dtstart,
-                event.dtend,
-                other.dtstart,
-                other.dtend,
-            );
+            let relation =
+                AllenRelation::compute(event.dtstart, event.dtend, other.dtstart, other.dtend);
             let pred = predicates.allen_predicate(relation);
             let triple = Triple::new(event_id, pred, other.symbol_id);
             let _ = engine.add_triple(&triple);
@@ -607,7 +614,9 @@ impl CalendarManager {
         let dur_bound = ops.bind(&roles.duration, &dur_filler).ok()?;
 
         // Bundle all bindings.
-        let pattern = ops.bundle(&[&day_bound, &time_bound, &activity_bound, &dur_bound]).ok()?;
+        let pattern = ops
+            .bundle(&[&day_bound, &time_bound, &activity_bound, &dur_bound])
+            .ok()?;
         Some(pattern)
     }
 
@@ -638,11 +647,7 @@ impl CalendarManager {
 
         // dtend triple.
         let end_obj = engine.resolve_or_create_entity(&format!("ts:{}", event.dtend))?;
-        let _ = engine.add_triple(&Triple::new(
-            event.symbol_id,
-            predicates.cal_dtend,
-            end_obj,
-        ));
+        let _ = engine.add_triple(&Triple::new(event.symbol_id, predicates.cal_dtend, end_obj));
 
         // Location triple (if present).
         if let Some(ref loc) = event.location {
@@ -723,19 +728,14 @@ pub fn import_ical(
 ) -> CalendarResult<Vec<SymbolId>> {
     use icalendar::{Calendar, Component, EventLike};
 
-    let calendar: Calendar = data
-        .parse()
-        .map_err(|_| CalendarError::ParseError {
-            message: "failed to parse iCalendar data".to_string(),
-        })?;
+    let calendar: Calendar = data.parse().map_err(|_| CalendarError::ParseError {
+        message: "failed to parse iCalendar data".to_string(),
+    })?;
 
     let mut imported = Vec::new();
     for component in calendar.components {
         if let Some(event) = component.as_event() {
-            let summary = event
-                .get_summary()
-                .unwrap_or("Untitled")
-                .to_string();
+            let summary = event.get_summary().unwrap_or("Untitled").to_string();
 
             let dtstart = event
                 .get_start()
@@ -750,15 +750,14 @@ pub fn import_ical(
             let location = event.get_location().map(|s| s.to_string());
             let description = event.get_description().map(|s| s.to_string());
 
-            let uid = event
-                .property_value("UID")
-                .map(|s| s.to_string());
+            let uid = event.property_value("UID").map(|s| s.to_string());
 
             // Skip if already imported (dedup by ical_uid).
             if let Some(ref uid_str) = uid {
-                let exists = manager.events.values().any(|e| {
-                    e.ical_uid.as_deref() == Some(uid_str.as_str())
-                });
+                let exists = manager
+                    .events
+                    .values()
+                    .any(|e| e.ical_uid.as_deref() == Some(uid_str.as_str()));
                 if exists {
                     continue;
                 }
@@ -786,9 +785,7 @@ fn extract_timestamp(dp: &icalendar::DatePerhapsTime) -> Option<u64> {
     use chrono::{NaiveDateTime, NaiveTime};
     match dp {
         icalendar::DatePerhapsTime::DateTime(cdt) => match cdt {
-            icalendar::CalendarDateTime::Floating(ndt) => {
-                Some(ndt.and_utc().timestamp() as u64)
-            }
+            icalendar::CalendarDateTime::Floating(ndt) => Some(ndt.and_utc().timestamp() as u64),
             icalendar::CalendarDateTime::Utc(dt) => Some(dt.timestamp() as u64),
             icalendar::CalendarDateTime::WithTimezone { date_time, tzid: _ } => {
                 // Best-effort: treat as UTC when we can't resolve timezone.
@@ -819,10 +816,10 @@ pub fn sync_caldav(
     pass: &str,
 ) -> CalendarResult<Vec<SymbolId>> {
     let response = ureq::get(url)
-        .set("Authorization", &format!(
-            "Basic {}",
-            base64_encode(&format!("{user}:{pass}"))
-        ))
+        .set(
+            "Authorization",
+            &format!("Basic {}", base64_encode(&format!("{user}:{pass}"))),
+        )
         .call()
         .map_err(|e| CalendarError::SyncError {
             message: format!("CalDAV request failed: {e}"),
@@ -1094,7 +1091,16 @@ mod tests {
         let mut mgr = CalendarManager::new(&engine).unwrap();
 
         let sym = mgr
-            .add_event(&engine, "Meeting", 1000, 2000, Some("Room A"), None, None, None)
+            .add_event(
+                &engine,
+                "Meeting",
+                1000,
+                2000,
+                Some("Room A"),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(mgr.event_count(), 1);
 
@@ -1264,8 +1270,17 @@ mod tests {
         let engine = Engine::new(config).unwrap();
         let mut mgr = CalendarManager::new(&engine).unwrap();
 
-        mgr.add_event(&engine, "Persisted", 1000, 2000, Some("Loc"), None, None, None)
-            .unwrap();
+        mgr.add_event(
+            &engine,
+            "Persisted",
+            1000,
+            2000,
+            Some("Loc"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         mgr.persist(&engine).unwrap();
 
         let restored = CalendarManager::restore(&engine).unwrap();

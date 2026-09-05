@@ -20,9 +20,9 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Error
@@ -65,7 +65,9 @@ pub enum PimError {
     #[error("weekly recurrence requires at least one weekday")]
     #[diagnostic(
         code(akh::agent::pim::empty_weekdays),
-        help("Provide at least one weekday, e.g. `weekly:mon,fri`. Valid names: mon,tue,wed,thu,fri,sat,sun.")
+        help(
+            "Provide at least one weekday, e.g. `weekly:mon,fri`. Valid names: mon,tue,wed,thu,fri,sat,sun."
+        )
     )]
     EmptyWeekdays,
 
@@ -699,7 +701,9 @@ impl SerializableDag {
 
         let mut edges = Vec::new();
         for edge in dag.edge_references() {
-            if let (Some(&src), Some(&tgt)) = (idx_map.get(&edge.source()), idx_map.get(&edge.target())) {
+            if let (Some(&src), Some(&tgt)) =
+                (idx_map.get(&edge.source()), idx_map.get(&edge.target()))
+            {
                 edges.push((src, tgt, *edge.weight()));
             }
         }
@@ -742,7 +746,10 @@ impl Serialize for PimManager {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PimManager", 2)?;
         state.serialize_field("metadata", &self.metadata)?;
-        state.serialize_field("dag", &SerializableDag::from_dag(&self.dep_dag, &self.node_index))?;
+        state.serialize_field(
+            "dag",
+            &SerializableDag::from_dag(&self.dep_dag, &self.node_index),
+        )?;
         state.end()
     }
 }
@@ -1041,7 +1048,10 @@ impl PimManager {
                     (None, _)
                         | (_, None)
                         | (Some(EnergyLevel::Low), _)
-                        | (Some(EnergyLevel::Medium), Some(EnergyLevel::Medium | EnergyLevel::High))
+                        | (
+                            Some(EnergyLevel::Medium),
+                            Some(EnergyLevel::Medium | EnergyLevel::High)
+                        )
                         | (Some(EnergyLevel::High), Some(EnergyLevel::High))
                 )
             })
@@ -1059,7 +1069,10 @@ impl PimManager {
         let Some(&idx) = self.node_index.get(&goal_id.get()) else {
             return false;
         };
-        for edge in self.dep_dag.edges_directed(idx, petgraph::Direction::Incoming) {
+        for edge in self
+            .dep_dag
+            .edges_directed(idx, petgraph::Direction::Incoming)
+        {
             let blocker_sym = self.dep_dag[edge.source()];
             // Check if blocker is Done in PIM metadata or completed as a Goal.
             let pim_done = self
@@ -1111,18 +1124,10 @@ impl PimManager {
 
         // Record in KG.
         if let Some(preds) = &self.predicates {
-            if let Err(e) = engine.add_triple(&Triple::new(
-                blocked,
-                preds.blocked_by,
-                blocker,
-            )) {
+            if let Err(e) = engine.add_triple(&Triple::new(blocked, preds.blocked_by, blocker)) {
                 tracing::debug!("failed to add blocked_by triple: {e}");
             }
-            if let Err(e) = engine.add_triple(&Triple::new(
-                blocker,
-                preds.blocks,
-                blocked,
-            )) {
+            if let Err(e) = engine.add_triple(&Triple::new(blocker, preds.blocks, blocked)) {
                 tracing::debug!("failed to add blocks triple: {e}");
             }
         }
@@ -1292,11 +1297,9 @@ impl PimManager {
                 .get(&old_id)
                 .is_some_and(|meta| meta.last_completed.is_none())
             {
-                let old_symbol = SymbolId::new(old_id).ok_or(PimError::TaskNotFound {
-                    goal_id: old_id,
-                })?;
-                self.metadata.get_mut(&old_id).unwrap().last_completed =
-                    Some(completion_anchor);
+                let old_symbol =
+                    SymbolId::new(old_id).ok_or(PimError::TaskNotFound { goal_id: old_id })?;
+                self.metadata.get_mut(&old_id).unwrap().last_completed = Some(completion_anchor);
                 let snapshot = self.metadata[&old_id].clone();
                 self.sync_to_kg(engine, old_symbol, &snapshot)?;
                 self.persist(engine)?;
@@ -1322,11 +1325,13 @@ impl PimManager {
                     &criteria,
                     agent_predicates,
                 )
-                .map_err(|e| PimError::Engine(Box::new(
-                    crate::error::AkhError::Store(crate::error::StoreError::Serialization {
-                        message: format!("goal creation failed: {e}"),
-                    }),
-                )))?;
+                .map_err(|e| {
+                    PimError::Engine(Box::new(crate::error::AkhError::Store(
+                        crate::error::StoreError::Serialization {
+                            message: format!("goal creation failed: {e}"),
+                        },
+                    )))
+                })?;
                 let symbol = new_goal.symbol_id;
                 super::goal::insert_if_novel(goals, new_goal);
                 symbol
@@ -1357,8 +1362,7 @@ impl PimManager {
         self.metadata
             .values()
             .filter(|m| {
-                m.gtd_state != GtdState::Done
-                    && m.next_due.is_some_and(|due| due < deadline_ts)
+                m.gtd_state != GtdState::Done && m.next_due.is_some_and(|due| due < deadline_ts)
             })
             .map(|m| m.goal_id)
             .collect()
@@ -1475,140 +1479,131 @@ impl PimManager {
     // ── KG sync ──────────────────────────────────────────────────────
 
     /// Write PIM metadata to KG triples.
-    fn sync_to_kg(
-        &self,
-        engine: &Engine,
-        goal_id: SymbolId,
-        meta: &PimMetadata,
-    ) -> PimResult<()> {
+    fn sync_to_kg(&self, engine: &Engine, goal_id: SymbolId, meta: &PimMetadata) -> PimResult<()> {
         let Some(preds) = &self.predicates else {
             return Ok(());
         };
 
         // GTD state.
         let gtd_entity = engine.resolve_or_create_entity(&format!("pim-gtd:{}", meta.gtd_state))?;
-        if let Err(e) = engine.add_triple(&Triple::new(
-            goal_id,
-            preds.gtd_state,
-            gtd_entity,
-        )) {
-            tracing::warn!("failed to sync gtd_state triple for goal {}: {e}", goal_id.get());
+        if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.gtd_state, gtd_entity)) {
+            tracing::warn!(
+                "failed to sync gtd_state triple for goal {}: {e}",
+                goal_id.get()
+            );
         }
 
         // Quadrant.
         let quad_entity =
             engine.resolve_or_create_entity(&format!("pim-quadrant:{}", meta.quadrant))?;
-        if let Err(e) = engine.add_triple(&Triple::new(
-            goal_id,
-            preds.quadrant,
-            quad_entity,
-        )) {
-            tracing::warn!("failed to sync quadrant triple for goal {}: {e}", goal_id.get());
+        if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.quadrant, quad_entity)) {
+            tracing::warn!(
+                "failed to sync quadrant triple for goal {}: {e}",
+                goal_id.get()
+            );
         }
 
         // Urgency/Importance as label entities.
         let urgency_entity =
             engine.resolve_or_create_entity(&format!("pim-urgency:{:.2}", meta.urgency))?;
-        if let Err(e) = engine.add_triple(&Triple::new(
-            goal_id,
-            preds.urgency,
-            urgency_entity,
-        )) {
-            tracing::warn!("failed to sync urgency triple for goal {}: {e}", goal_id.get());
+        if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.urgency, urgency_entity)) {
+            tracing::warn!(
+                "failed to sync urgency triple for goal {}: {e}",
+                goal_id.get()
+            );
         }
 
         let importance_entity =
             engine.resolve_or_create_entity(&format!("pim-importance:{:.2}", meta.importance))?;
-        if let Err(e) = engine.add_triple(&Triple::new(
-            goal_id,
-            preds.importance,
-            importance_entity,
-        )) {
-            tracing::warn!("failed to sync importance triple for goal {}: {e}", goal_id.get());
+        if let Err(e) =
+            engine.add_triple(&Triple::new(goal_id, preds.importance, importance_entity))
+        {
+            tracing::warn!(
+                "failed to sync importance triple for goal {}: {e}",
+                goal_id.get()
+            );
         }
 
         // Optional fields.
         if let Some(para) = meta.para {
-            let para_entity =
-                engine.resolve_or_create_entity(&format!("pim-para:{}", para))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.para_category,
-                para_entity,
-            )) {
-                tracing::warn!("failed to sync para_category triple for goal {}: {e}", goal_id.get());
+            let para_entity = engine.resolve_or_create_entity(&format!("pim-para:{}", para))?;
+            if let Err(e) =
+                engine.add_triple(&Triple::new(goal_id, preds.para_category, para_entity))
+            {
+                tracing::warn!(
+                    "failed to sync para_category triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         if let Some(energy) = meta.energy {
             let energy_entity =
                 engine.resolve_or_create_entity(&format!("pim-energy:{}", energy))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.energy,
-                energy_entity,
-            )) {
-                tracing::warn!("failed to sync energy triple for goal {}: {e}", goal_id.get());
+            if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.energy, energy_entity)) {
+                tracing::warn!(
+                    "failed to sync energy triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         for ctx in &meta.contexts {
-            let ctx_entity =
-                engine.resolve_or_create_entity(&format!("pim-context:{}", ctx.0))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.context,
-                ctx_entity,
-            )) {
-                tracing::warn!("failed to sync context triple for goal {}: {e}", goal_id.get());
+            let ctx_entity = engine.resolve_or_create_entity(&format!("pim-context:{}", ctx.0))?;
+            if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.context, ctx_entity)) {
+                tracing::warn!(
+                    "failed to sync context triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         if let Some(deadline) = meta.deadline {
             let deadline_entity =
                 engine.resolve_or_create_entity(&format!("pim-deadline:{deadline}"))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.deadline,
-                deadline_entity,
-            )) {
-                tracing::warn!("failed to sync deadline triple for goal {}: {e}", goal_id.get());
+            if let Err(e) =
+                engine.add_triple(&Triple::new(goal_id, preds.deadline, deadline_entity))
+            {
+                tracing::warn!(
+                    "failed to sync deadline triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         if let Some(ref recurrence) = meta.recurrence {
             let recur_entity =
                 engine.resolve_or_create_entity(&format!("pim-recur:{}", recurrence.as_label()))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.recurrence,
-                recur_entity,
-            )) {
-                tracing::warn!("failed to sync recurrence triple for goal {}: {e}", goal_id.get());
+            if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.recurrence, recur_entity))
+            {
+                tracing::warn!(
+                    "failed to sync recurrence triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         if let Some(next_due) = meta.next_due {
             let due_entity =
                 engine.resolve_or_create_entity(&format!("pim-next-due:{next_due}"))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.next_due,
-                due_entity,
-            )) {
-                tracing::warn!("failed to sync next_due triple for goal {}: {e}", goal_id.get());
+            if let Err(e) = engine.add_triple(&Triple::new(goal_id, preds.next_due, due_entity)) {
+                tracing::warn!(
+                    "failed to sync next_due triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
         if let Some(time_est) = meta.time_estimate_minutes {
             let est_entity =
                 engine.resolve_or_create_entity(&format!("pim-time-est:{time_est}"))?;
-            if let Err(e) = engine.add_triple(&Triple::new(
-                goal_id,
-                preds.time_estimate,
-                est_entity,
-            )) {
-                tracing::warn!("failed to sync time_estimate triple for goal {}: {e}", goal_id.get());
+            if let Err(e) =
+                engine.add_triple(&Triple::new(goal_id, preds.time_estimate, est_entity))
+            {
+                tracing::warn!(
+                    "failed to sync time_estimate triple for goal {}: {e}",
+                    goal_id.get()
+                );
             }
         }
 
@@ -1626,7 +1621,10 @@ impl PimManager {
             },
         );
         if let Err(e) = engine.store_provenance(&mut record) {
-            tracing::warn!("failed to store PIM provenance for goal {}: {e}", goal_id.get());
+            tracing::warn!(
+                "failed to store PIM provenance for goal {}: {e}",
+                goal_id.get()
+            );
         }
     }
 
@@ -1634,11 +1632,13 @@ impl PimManager {
 
     /// Persist PIM state to the engine's durable store.
     pub fn persist(&self, engine: &Engine) -> PimResult<()> {
-        let bytes = bincode::serialize(self).map_err(|e| PimError::Engine(Box::new(
-            crate::error::AkhError::Store(crate::error::StoreError::Serialization {
-                message: format!("failed to serialize PIM manager: {e}"),
-            }),
-        )))?;
+        let bytes = bincode::serialize(self).map_err(|e| {
+            PimError::Engine(Box::new(crate::error::AkhError::Store(
+                crate::error::StoreError::Serialization {
+                    message: format!("failed to serialize PIM manager: {e}"),
+                },
+            )))
+        })?;
         engine
             .store()
             .put_meta(b"agent:pim_manager", &bytes)
@@ -1653,12 +1653,13 @@ impl PimManager {
             .get_meta(b"agent:pim_manager")
             .map_err(|e| PimError::Engine(Box::new(crate::error::AkhError::Store(e))))?
             .ok_or(PimError::TaskNotFound { goal_id: 0 })?;
-        let mut manager: Self =
-            bincode::deserialize(&bytes).map_err(|e| PimError::Engine(Box::new(
-                crate::error::AkhError::Store(crate::error::StoreError::Serialization {
+        let mut manager: Self = bincode::deserialize(&bytes).map_err(|e| {
+            PimError::Engine(Box::new(crate::error::AkhError::Store(
+                crate::error::StoreError::Serialization {
                     message: format!("failed to deserialize PIM manager: {e}"),
-                }),
-            )))?;
+                },
+            )))
+        })?;
         manager.ensure_init(engine)?;
         Ok(manager)
     }
@@ -1721,12 +1722,7 @@ pub fn gtd_weekly_review(
     // Stalled projects: projects whose goals have no PIM Next tasks.
     let stalled_projects: Vec<SymbolId> = projects
         .iter()
-        .filter(|p| {
-            matches!(
-                p.status,
-                super::project::ProjectStatus::Active
-            )
-        })
+        .filter(|p| matches!(p.status, super::project::ProjectStatus::Active))
         .filter(|p| {
             !p.goals.iter().any(|gid| {
                 pim.get_metadata(gid.get())
@@ -1745,9 +1741,7 @@ pub fn gtd_weekly_review(
             goals
                 .iter()
                 .find(|g| g.symbol_id == m.goal_id)
-                .is_some_and(|g| {
-                    current_ts.saturating_sub(g.created_at) > FOURTEEN_DAYS
-                })
+                .is_some_and(|g| current_ts.saturating_sub(g.created_at) > FOURTEEN_DAYS)
         })
         .map(|m| m.goal_id)
         .collect();
@@ -1821,11 +1815,13 @@ pub fn action_items_to_pim_tasks(
             &spec.criteria,
             agent_predicates,
         )
-        .map_err(|e| PimError::Engine(Box::new(
-            crate::error::AkhError::Store(crate::error::StoreError::Serialization {
-                            message: format!("goal creation failed: {e}"),
-                        }),
-        )))?;
+        .map_err(|e| {
+            PimError::Engine(Box::new(crate::error::AkhError::Store(
+                crate::error::StoreError::Serialization {
+                    message: format!("goal creation failed: {e}"),
+                },
+            )))
+        })?;
 
         let urgency = if spec.priority >= 7 { 0.8 } else { 0.4 };
         let importance = 0.5;
@@ -1918,9 +1914,17 @@ mod tests {
 
     #[test]
     fn eisenhower_priority_bonus_ordering() {
-        assert!(EisenhowerQuadrant::Do.priority_bonus() > EisenhowerQuadrant::Schedule.priority_bonus());
-        assert!(EisenhowerQuadrant::Schedule.priority_bonus() > EisenhowerQuadrant::Delegate.priority_bonus());
-        assert!(EisenhowerQuadrant::Delegate.priority_bonus() > EisenhowerQuadrant::Eliminate.priority_bonus());
+        assert!(
+            EisenhowerQuadrant::Do.priority_bonus() > EisenhowerQuadrant::Schedule.priority_bonus()
+        );
+        assert!(
+            EisenhowerQuadrant::Schedule.priority_bonus()
+                > EisenhowerQuadrant::Delegate.priority_bonus()
+        );
+        assert!(
+            EisenhowerQuadrant::Delegate.priority_bonus()
+                > EisenhowerQuadrant::Eliminate.priority_bonus()
+        );
     }
 
     // ── Recurrence ───────────────────────────────────────────────────
@@ -1933,7 +1937,10 @@ mod tests {
     #[test]
     fn recurrence_parse_weekly() {
         let rec = Recurrence::parse("weekly:mon,wed,fri").unwrap();
-        assert_eq!(rec, Recurrence::Weekly(Weekdays::new(vec![0, 2, 4]).unwrap()));
+        assert_eq!(
+            rec,
+            Recurrence::Weekly(Weekdays::new(vec![0, 2, 4]).unwrap())
+        );
     }
 
     #[test]
@@ -1990,7 +1997,9 @@ mod tests {
         for d in 0..=6u8 {
             cases.push(Recurrence::Weekly(Weekdays::new(vec![d]).unwrap()));
         }
-        cases.push(Recurrence::Weekly(Weekdays::new((0..=6).collect()).unwrap()));
+        cases.push(Recurrence::Weekly(
+            Weekdays::new((0..=6).collect()).unwrap(),
+        ));
         // Order and duplicates are preserved, not normalized.
         cases.push(Recurrence::Weekly(Weekdays::new(vec![6, 0]).unwrap()));
         cases.push(Recurrence::Weekly(Weekdays::new(vec![2, 2, 4]).unwrap()));
@@ -2027,7 +2036,10 @@ mod tests {
 
     #[test]
     fn weekdays_rejects_empty_and_out_of_range() {
-        assert!(matches!(Weekdays::new(vec![]), Err(PimError::EmptyWeekdays)));
+        assert!(matches!(
+            Weekdays::new(vec![]),
+            Err(PimError::EmptyWeekdays)
+        ));
         assert!(matches!(
             Weekdays::new(vec![0, 7]),
             Err(PimError::WeekdayOutOfRange { day: 7 })
@@ -2056,7 +2068,8 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let preds = PimPredicates::init(&engine);
         assert!(preds.is_ok());
         let preds = preds.unwrap();
@@ -2068,7 +2081,8 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let preds = PimPredicates::init(&engine).unwrap();
         let ids = [
             preds.gtd_state,
@@ -2097,17 +2111,13 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
-        let goal = super::super::goal::create_goal(
-            &engine,
-            "test task",
-            128,
-            "task done",
-            &agent_preds,
-        )
-        .unwrap();
+        let goal =
+            super::super::goal::create_goal(&engine, "test task", 128, "task done", &agent_preds)
+                .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Inbox, 0.5, 0.5)
             .unwrap();
@@ -2124,34 +2134,32 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
-        let goal = super::super::goal::create_goal(
-            &engine,
-            "test task 2",
-            128,
-            "task done",
-            &agent_preds,
-        )
-        .unwrap();
+        let goal =
+            super::super::goal::create_goal(&engine, "test task 2", 128, "task done", &agent_preds)
+                .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Inbox, 0.3, 0.7)
             .unwrap();
 
         // Valid transition.
-        assert!(pim
-            .transition_gtd(&engine, goal.symbol_id, GtdState::Next)
-            .is_ok());
+        assert!(
+            pim.transition_gtd(&engine, goal.symbol_id, GtdState::Next)
+                .is_ok()
+        );
         assert_eq!(
             pim.get_metadata(goal.symbol_id.get()).unwrap().gtd_state,
             GtdState::Next
         );
 
         // Invalid transition.
-        assert!(pim
-            .transition_gtd(&engine, goal.symbol_id, GtdState::Inbox)
-            .is_err());
+        assert!(
+            pim.transition_gtd(&engine, goal.symbol_id, GtdState::Inbox)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2179,8 +2187,7 @@ mod tests {
             .unwrap();
         pim.set_recurrence(&engine, old_id, Recurrence::Daily)
             .unwrap();
-        pim.transition_gtd(&engine, old_id, GtdState::Done)
-            .unwrap();
+        pim.transition_gtd(&engine, old_id, GtdState::Done).unwrap();
         pim.persist(&engine).unwrap();
 
         let created = pim
@@ -2192,11 +2199,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(created.len(), 1);
-        assert_eq!(retry, created, "restored retry must reuse the same instance");
+        assert_eq!(
+            retry, created,
+            "restored retry must reuse the same instance"
+        );
         assert_eq!(goals.len(), 2);
         assert_ne!(created[0], old_id);
         assert_eq!(goals[1].description, "review queue");
-        assert!(engine.resolve_label(created[0]).starts_with("goal:recurrence:"));
+        assert!(
+            engine
+                .resolve_label(created[0])
+                .starts_with("goal:recurrence:")
+        );
     }
 
     #[test]
@@ -2204,17 +2218,13 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
-        let goal = super::super::goal::create_goal(
-            &engine,
-            "eisenhower test",
-            128,
-            "done",
-            &agent_preds,
-        )
-        .unwrap();
+        let goal =
+            super::super::goal::create_goal(&engine, "eisenhower test", 128, "done", &agent_preds)
+                .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Next, 0.8, 0.8)
             .unwrap();
@@ -2236,12 +2246,12 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
-        let goal =
-            super::super::goal::create_goal(&engine, "para test", 128, "done", &agent_preds)
-                .unwrap();
+        let goal = super::super::goal::create_goal(&engine, "para test", 128, "done", &agent_preds)
+            .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Inbox, 0.5, 0.5)
             .unwrap();
@@ -2259,12 +2269,12 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
-        let goal =
-            super::super::goal::create_goal(&engine, "ctx test", 128, "done", &agent_preds)
-                .unwrap();
+        let goal = super::super::goal::create_goal(&engine, "ctx test", 128, "done", &agent_preds)
+            .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Next, 0.5, 0.5)
             .unwrap();
@@ -2285,7 +2295,8 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
         let goal =
@@ -2308,7 +2319,8 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let pim = PimManager::new(&engine).unwrap();
         assert!(pim.get_metadata(99999).is_none());
     }
@@ -2318,14 +2330,14 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
         assert_eq!(pim.task_count(), 0);
 
-        let g1 = super::super::goal::create_goal(&engine, "t1", 128, "done", &agent_preds)
-            .unwrap();
+        let g1 = super::super::goal::create_goal(&engine, "t1", 128, "done", &agent_preds).unwrap();
         pim.add_task(&engine, g1.symbol_id, GtdState::Inbox, 0.5, 0.5)
             .unwrap();
 
@@ -2339,14 +2351,15 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
         let g1 =
             super::super::goal::create_goal(&engine, "first", 128, "done", &agent_preds).unwrap();
-        let g2 = super::super::goal::create_goal(&engine, "second", 128, "done", &agent_preds)
-            .unwrap();
+        let g2 =
+            super::super::goal::create_goal(&engine, "second", 128, "done", &agent_preds).unwrap();
 
         pim.add_task(&engine, g1.symbol_id, GtdState::Next, 0.5, 0.5)
             .unwrap();
@@ -2367,14 +2380,13 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
-        let g1 =
-            super::super::goal::create_goal(&engine, "a", 128, "done", &agent_preds).unwrap();
-        let g2 =
-            super::super::goal::create_goal(&engine, "b", 128, "done", &agent_preds).unwrap();
+        let g1 = super::super::goal::create_goal(&engine, "a", 128, "done", &agent_preds).unwrap();
+        let g2 = super::super::goal::create_goal(&engine, "b", 128, "done", &agent_preds).unwrap();
 
         pim.add_task(&engine, g1.symbol_id, GtdState::Next, 0.5, 0.5)
             .unwrap();
@@ -2385,9 +2397,10 @@ mod tests {
             .unwrap();
 
         // Reverse edge should create a cycle.
-        assert!(pim
-            .add_dependency(&engine, g2.symbol_id, g1.symbol_id)
-            .is_err());
+        assert!(
+            pim.add_dependency(&engine, g2.symbol_id, g1.symbol_id)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2395,14 +2408,13 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
-        let g1 =
-            super::super::goal::create_goal(&engine, "x", 128, "done", &agent_preds).unwrap();
-        let g2 =
-            super::super::goal::create_goal(&engine, "y", 128, "done", &agent_preds).unwrap();
+        let g1 = super::super::goal::create_goal(&engine, "x", 128, "done", &agent_preds).unwrap();
+        let g2 = super::super::goal::create_goal(&engine, "y", 128, "done", &agent_preds).unwrap();
 
         pim.add_task(&engine, g1.symbol_id, GtdState::Next, 0.5, 0.5)
             .unwrap();
@@ -2423,18 +2435,14 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
-        let goal = super::super::goal::create_goal(
-            &engine,
-            "overdue task",
-            128,
-            "done",
-            &agent_preds,
-        )
-        .unwrap();
+        let goal =
+            super::super::goal::create_goal(&engine, "overdue task", 128, "done", &agent_preds)
+                .unwrap();
 
         pim.add_task(&engine, goal.symbol_id, GtdState::Next, 0.5, 0.5)
             .unwrap();
@@ -2461,13 +2469,13 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 
-        let goal =
-            super::super::goal::create_goal(&engine, "vsa test", 128, "done", &agent_preds)
-                .unwrap();
+        let goal = super::super::goal::create_goal(&engine, "vsa test", 128, "done", &agent_preds)
+            .unwrap();
         pim.add_task(&engine, goal.symbol_id, GtdState::Next, 0.7, 0.3)
             .unwrap();
 
@@ -2480,7 +2488,8 @@ mod tests {
         let engine = Engine::new(crate::engine::EngineConfig {
             dimension: crate::vsa::Dimension::TEST,
             ..Default::default()
-        }).unwrap();
+        })
+        .unwrap();
         let mut pim = PimManager::new(&engine).unwrap();
         let agent_preds = super::super::agent::AgentPredicates::init(&engine).unwrap();
 

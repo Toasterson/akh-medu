@@ -66,11 +66,7 @@ impl TrainingVerifier {
     /// Capture baseline similarity scores for all grounded symbols.
     ///
     /// Call this **before** training starts.
-    pub fn capture_baselines(
-        &mut self,
-        bridge: &NeuralVsaBridge,
-        engine: &Engine,
-    ) {
+    pub fn capture_baselines(&mut self, bridge: &NeuralVsaBridge, engine: &Engine) {
         let item_memory = engine.item_memory();
         let ops = engine.ops();
         self.baselines.clear();
@@ -78,7 +74,8 @@ impl TrainingVerifier {
         for &sym_id in &item_memory.all_symbols() {
             if let Some(grounded) = item_memory.get(sym_id) {
                 // Encode via proxy (same as trainer).
-                let proxy = super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
+                let proxy =
+                    super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
                 let encoded = bridge.encode(&proxy);
                 if let Ok(sim) = ops.similarity(&encoded, &grounded) {
                     self.baselines.insert(sym_id, sim);
@@ -90,11 +87,7 @@ impl TrainingVerifier {
     /// Verify alignment after training.
     ///
     /// Call this **after** training completes but before accepting the weights.
-    pub fn verify(
-        &self,
-        bridge: &NeuralVsaBridge,
-        engine: &Engine,
-    ) -> VerificationResult {
+    pub fn verify(&self, bridge: &NeuralVsaBridge, engine: &Engine) -> VerificationResult {
         if self.baselines.is_empty() {
             return VerificationResult::Passed {
                 concepts_checked: 0,
@@ -113,7 +106,8 @@ impl TrainingVerifier {
 
         for (&sym_id, &baseline_sim) in &self.baselines {
             if let Some(grounded) = item_memory.get(sym_id) {
-                let proxy = super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
+                let proxy =
+                    super::trainer::proxy_hidden_state_public(sym_id.get(), bridge.hidden_dim());
                 let encoded = bridge.encode(&proxy);
                 if let Ok(current_sim) = ops.similarity(&encoded, &grounded) {
                     let delta = baseline_sim - current_sim;

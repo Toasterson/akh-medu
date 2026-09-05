@@ -194,6 +194,21 @@ impl ConversationState {
         self.add_turn(Speaker::Operator, text, Vec::new());
     }
 
+    /// Retain model-produced perceptual evidence with the current operator
+    /// turn so a later follow-up can refer to the image without resending it.
+    /// The caller supplies the host-authored trust boundary around the evidence.
+    pub fn append_to_latest_operator_turn(&mut self, evidence: &str) -> bool {
+        let Some(turn) = self.turns.back_mut() else {
+            return false;
+        };
+        if turn.speaker != Speaker::Operator || evidence.trim().is_empty() {
+            return false;
+        }
+        turn.text.push_str("\n\n");
+        turn.text.push_str(evidence);
+        true
+    }
+
     /// Track a subject string as an active referent (by resolving to SymbolId).
     ///
     /// This is a best-effort operation — if the subject cannot be resolved,
@@ -328,15 +343,9 @@ impl GroundedResponse {
         match detail {
             ResponseDetail::Concise => {
                 // Just the first line of prose.
-                self.prose
-                    .lines()
-                    .next()
-                    .unwrap_or(&self.prose)
-                    .to_string()
+                self.prose.lines().next().unwrap_or(&self.prose).to_string()
             }
-            ResponseDetail::Normal => {
-                self.prose.clone()
-            }
+            ResponseDetail::Normal => self.prose.clone(),
             ResponseDetail::Full => {
                 let mut lines = vec![self.prose.clone()];
 
@@ -445,7 +454,11 @@ pub fn ground_query(
             predicate_id: Some(triple.predicate),
             object_id: Some(triple.object),
             confidence: Some(triple.confidence),
-            derivation_tag: if derivation.is_empty() { None } else { Some(derivation) },
+            derivation_tag: if derivation.is_empty() {
+                None
+            } else {
+                Some(derivation)
+            },
         });
     }
 
@@ -456,7 +469,10 @@ pub fn ground_query(
     // Step 3b: Reject thin knowledge — too few triples with only provisional
     // confidence signals "we barely know this entity" and a grounded response
     // would be unhelpful. Let downstream decomposition + escalation handle it.
-    let high_conf_count = grounded.iter().filter(|g| g.confidence.unwrap_or(1.0) > 0.70).count();
+    let high_conf_count = grounded
+        .iter()
+        .filter(|g| g.confidence.unwrap_or(1.0) > 0.70)
+        .count();
     if grounded.len() <= 3 && high_conf_count == 0 {
         return None;
     }
@@ -470,12 +486,8 @@ pub fn ground_query(
     };
 
     // Step 5: Use existing synthesis to produce prose.
-    let summary = super::synthesize::synthesize_from_triples(
-        subject,
-        &all_triples,
-        engine,
-        grammar_name,
-    );
+    let summary =
+        super::synthesize::synthesize_from_triples(subject, &all_triples, engine, grammar_name);
 
     // Step 6: Also try discourse-aware rendering for richer prose.
     let prose = if summary.overview.is_empty() {
@@ -508,7 +520,9 @@ pub fn ground_query(
         };
         let remaining = grounded.len().saturating_sub(MAX_FALLBACK_TRIPLES);
         if remaining > 0 {
-            lines.push(format!("There are {remaining} additional relation(s) on record."));
+            lines.push(format!(
+                "There are {remaining} additional relation(s) on record."
+            ));
         }
         format!("Regarding {subject}: {}", lines.join(". "))
     } else {
@@ -725,7 +739,13 @@ mod tests {
         assert_eq!(ResponseDetail::from_str_loose("bogus"), None);
     }
 
-    fn test_grounded_triple(subj: &str, pred: &str, obj: &str, conf: f32, deriv: &str) -> GroundedTriple {
+    fn test_grounded_triple(
+        subj: &str,
+        pred: &str,
+        obj: &str,
+        conf: f32,
+        deriv: &str,
+    ) -> GroundedTriple {
         GroundedTriple {
             subject_label: subj.to_string(),
             predicate_label: pred.to_string(),
@@ -734,7 +754,11 @@ mod tests {
             predicate_id: None,
             object_id: None,
             confidence: Some(conf),
-            derivation_tag: if deriv.is_empty() { None } else { Some(deriv.to_string()) },
+            derivation_tag: if deriv.is_empty() {
+                None
+            } else {
+                Some(deriv.to_string())
+            },
         }
     }
 
@@ -742,7 +766,9 @@ mod tests {
     fn grounded_response_render_concise() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.\nThey are canine.".to_string(),
-            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "asserted")],
+            supporting_triples: vec![test_grounded_triple(
+                "dog", "is-a", "mammal", 0.95, "asserted",
+            )],
             confidence: Some(0.95),
             provenance_ids: vec![],
             gaps: vec![],
@@ -755,7 +781,9 @@ mod tests {
     fn grounded_response_render_normal() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.".to_string(),
-            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "asserted")],
+            supporting_triples: vec![test_grounded_triple(
+                "dog", "is-a", "mammal", 0.95, "asserted",
+            )],
             confidence: Some(0.95),
             provenance_ids: vec![],
             gaps: vec![],
@@ -768,7 +796,13 @@ mod tests {
     fn grounded_response_render_full() {
         let resp = GroundedResponse {
             prose: "Dogs are mammals.".to_string(),
-            supporting_triples: vec![test_grounded_triple("dog", "is-a", "mammal", 0.95, "extracted")],
+            supporting_triples: vec![test_grounded_triple(
+                "dog",
+                "is-a",
+                "mammal",
+                0.95,
+                "extracted",
+            )],
             confidence: Some(0.95),
             provenance_ids: vec![sym(42)],
             gaps: vec!["diet unknown".to_string()],
@@ -811,6 +845,20 @@ mod tests {
         assert!(state.active_referents.is_empty());
     }
 
+    #[test]
+    fn visual_evidence_is_retained_only_on_the_latest_operator_turn() {
+        let mut state = ConversationState::new("ch", "formal");
+        assert!(!state.append_to_latest_operator_turn("ocr"));
+        state.record_operator_turn("read this");
+        assert!(state.append_to_latest_operator_turn("[image OCR] text"));
+        assert_eq!(
+            state.turns.back().unwrap().text,
+            "read this\n\n[image OCR] text"
+        );
+        state.record_agent_turn("answer");
+        assert!(!state.append_to_latest_operator_turn("wrong turn"));
+    }
+
     // ── respond_conversational tests (deprecated, kept for backwards compat) ──
 
     #[test]
@@ -846,11 +894,7 @@ mod tests {
     fn respond_follow_up_no_topic() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
-        let resp = state.respond_conversational(
-            &ConversationalKind::FollowUp,
-            "Scholar",
-            &[],
-        );
+        let resp = state.respond_conversational(&ConversationalKind::FollowUp, "Scholar", &[]);
         assert!(resp.text.contains("don't have a current topic"));
     }
 
@@ -860,11 +904,7 @@ mod tests {
         use crate::agent::nlp::ConversationalKind;
         let mut state = ConversationState::new("ch", "formal");
         state.add_turn(Speaker::Operator, "dogs", vec![sym(42)]);
-        let resp = state.respond_conversational(
-            &ConversationalKind::FollowUp,
-            "Scholar",
-            &[],
-        );
+        let resp = state.respond_conversational(&ConversationalKind::FollowUp, "Scholar", &[]);
         // Empty text → TUI should re-query.
         assert!(resp.text.is_empty());
     }
@@ -900,11 +940,7 @@ mod tests {
     fn respond_meta_question_delegates() {
         use crate::agent::nlp::ConversationalKind;
         let state = ConversationState::new("ch", "formal");
-        let resp = state.respond_conversational(
-            &ConversationalKind::MetaQuestion,
-            "Scholar",
-            &[],
-        );
+        let resp = state.respond_conversational(&ConversationalKind::MetaQuestion, "Scholar", &[]);
         assert!(resp.text.is_empty());
     }
 }

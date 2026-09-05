@@ -85,19 +85,34 @@ impl PlanMonitor {
 
     /// Overall monitoring summary.
     pub fn summary(&self) -> String {
-        let critical = self.step_deviations.iter()
-            .filter(|d| matches!(d, DeviationSeverity::Critical)).count();
-        let moderate = self.step_deviations.iter()
-            .filter(|d| matches!(d, DeviationSeverity::Moderate)).count();
-        let minor = self.step_deviations.iter()
-            .filter(|d| matches!(d, DeviationSeverity::Minor)).count();
-        let none = self.step_deviations.iter()
-            .filter(|d| matches!(d, DeviationSeverity::None)).count();
+        let critical = self
+            .step_deviations
+            .iter()
+            .filter(|d| matches!(d, DeviationSeverity::Critical))
+            .count();
+        let moderate = self
+            .step_deviations
+            .iter()
+            .filter(|d| matches!(d, DeviationSeverity::Moderate))
+            .count();
+        let minor = self
+            .step_deviations
+            .iter()
+            .filter(|d| matches!(d, DeviationSeverity::Minor))
+            .count();
+        let none = self
+            .step_deviations
+            .iter()
+            .filter(|d| matches!(d, DeviationSeverity::None))
+            .count();
 
         format!(
             "{} steps monitored: {} on-track, {} minor, {} moderate, {} critical{}",
             self.actual_states.len(),
-            none, minor, moderate, critical,
+            none,
+            minor,
+            moderate,
+            critical,
             if self.replanned { " (replanned)" } else { "" }
         )
     }
@@ -141,11 +156,7 @@ fn compute_deviation(expected: &AgentState, actual: &AgentState) -> DeviationSev
 // ═══════════════════════════════════════════════════════════════════════
 
 /// Convert an MCTS result into an executable Plan.
-pub fn plan_from_mcts(
-    goal_id: SymbolId,
-    result: &MctsResult,
-    engine: &Engine,
-) -> Plan {
+pub fn plan_from_mcts(goal_id: SymbolId, result: &MctsResult, engine: &Engine) -> Plan {
     let steps: Vec<PlanStep> = result
         .best_plan
         .iter()
@@ -234,7 +245,10 @@ mod tests {
         let expected = make_state(vec![(1, 0.5)], 1000);
         let actual = make_state(vec![(1, 0.48)], 1020);
         let sev = compute_deviation(&expected, &actual);
-        assert!(matches!(sev, DeviationSeverity::None | DeviationSeverity::Minor));
+        assert!(matches!(
+            sev,
+            DeviationSeverity::None | DeviationSeverity::Minor
+        ));
     }
 
     #[test]
@@ -242,7 +256,10 @@ mod tests {
         let expected = make_state(vec![(1, 0.9)], 1000);
         let actual = make_state(vec![(1, 0.1)], 300);
         let sev = compute_deviation(&expected, &actual);
-        assert!(matches!(sev, DeviationSeverity::Moderate | DeviationSeverity::Critical));
+        assert!(matches!(
+            sev,
+            DeviationSeverity::Moderate | DeviationSeverity::Critical
+        ));
     }
 
     // ── PlanMonitor ───────────────────────────────────────────────
@@ -266,7 +283,10 @@ mod tests {
         let mut monitor = PlanMonitor::new(initial, vec![expected]);
 
         let sev = monitor.record_step(actual);
-        assert!(matches!(sev, DeviationSeverity::Moderate | DeviationSeverity::Critical));
+        assert!(matches!(
+            sev,
+            DeviationSeverity::Moderate | DeviationSeverity::Critical
+        ));
     }
 
     #[test]

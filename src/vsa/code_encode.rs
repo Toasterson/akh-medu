@@ -351,10 +351,7 @@ pub fn extract_function_contexts(
 /// - (struct_name, [StructDef, Field], field_name) for each field
 /// - (field_name, [Field, TypeRef], field_type) for each typed field
 /// - (field_name, [Field, StructDef, Field], next_field) for field co-occurrence
-pub fn extract_struct_contexts(
-    struct_name: &str,
-    fields: &[(&str, &str)],
-) -> Vec<AstPathContext> {
+pub fn extract_struct_contexts(struct_name: &str, fields: &[(&str, &str)]) -> Vec<AstPathContext> {
     let mut contexts = Vec::new();
 
     for (field_name, field_type) in fields {
@@ -401,10 +398,7 @@ pub fn extract_struct_contexts(
 ///
 /// - (enum_name, [EnumDef, Variant], variant_name) for each variant
 /// - (variant_name, [Variant, EnumDef, Variant], next_variant) for co-occurrence
-pub fn extract_enum_contexts(
-    enum_name: &str,
-    variants: &[&str],
-) -> Vec<AstPathContext> {
+pub fn extract_enum_contexts(enum_name: &str, variants: &[&str]) -> Vec<AstPathContext> {
     let mut contexts = Vec::new();
 
     for variant in variants {
@@ -523,7 +517,10 @@ mod tests {
         let ops = test_ops();
         let ctx = AstPathContext::new(
             "parse",
-            vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::PARAM.to_string()],
+            vec![
+                AstNodeTypes::FN_DECL.to_string(),
+                AstNodeTypes::PARAM.to_string(),
+            ],
             "input",
         );
 
@@ -538,12 +535,18 @@ mod tests {
 
         let ctx1 = AstPathContext::new(
             "parse",
-            vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::PARAM.to_string()],
+            vec![
+                AstNodeTypes::FN_DECL.to_string(),
+                AstNodeTypes::PARAM.to_string(),
+            ],
             "input",
         );
         let ctx2 = AstPathContext::new(
             "render",
-            vec![AstNodeTypes::FN_DECL.to_string(), AstNodeTypes::RETURN_TYPE.to_string()],
+            vec![
+                AstNodeTypes::FN_DECL.to_string(),
+                AstNodeTypes::RETURN_TYPE.to_string(),
+            ],
             "String",
         );
 
@@ -573,23 +576,11 @@ mod tests {
         let ops = test_ops();
 
         // Two similar functions: both take &str and return String
-        let ctx1 = extract_function_contexts(
-            "greet",
-            &[("name", Some("&str"))],
-            Some("String"),
-        );
-        let ctx2 = extract_function_contexts(
-            "farewell",
-            &[("name", Some("&str"))],
-            Some("String"),
-        );
+        let ctx1 = extract_function_contexts("greet", &[("name", Some("&str"))], Some("String"));
+        let ctx2 = extract_function_contexts("farewell", &[("name", Some("&str"))], Some("String"));
 
         // A very different function: takes u64, returns bool
-        let ctx3 = extract_function_contexts(
-            "is_prime",
-            &[("n", Some("u64"))],
-            Some("bool"),
-        );
+        let ctx3 = extract_function_contexts("is_prime", &[("n", Some("u64"))], Some("bool"));
 
         let v1 = encode_code_vector(&ops, &ctx1).unwrap();
         let v2 = encode_code_vector(&ops, &ctx2).unwrap();
@@ -618,10 +609,7 @@ mod tests {
 
     #[test]
     fn enum_context_extraction() {
-        let contexts = extract_enum_contexts(
-            "Color",
-            &["Red", "Green", "Blue"],
-        );
+        let contexts = extract_enum_contexts("Color", &["Red", "Green", "Blue"]);
 
         // 3 enum→variant + 2 variant→variant co-occurrence = 5
         assert_eq!(contexts.len(), 5);
@@ -629,11 +617,7 @@ mod tests {
 
     #[test]
     fn impl_context_extraction() {
-        let contexts = extract_impl_contexts(
-            "Config",
-            Some("Display"),
-            &["fmt", "to_string"],
-        );
+        let contexts = extract_impl_contexts("Config", Some("Display"), &["fmt", "to_string"]);
 
         // 1 type→trait + 2 type→method + 1 method→method = 4
         assert_eq!(contexts.len(), 4);
@@ -671,7 +655,8 @@ mod tests {
         let ops = test_ops();
 
         let token_vec = encode_token_level(&ops, &["parse", "input", "String"]).unwrap();
-        let ast_contexts = extract_function_contexts("parse", &[("input", Some("&str"))], Some("String"));
+        let ast_contexts =
+            extract_function_contexts("parse", &[("input", Some("&str"))], Some("String"));
         let ast_vec = encode_code_vector(&ops, &ast_contexts).unwrap();
 
         let composite = encode_composite(
@@ -689,8 +674,14 @@ mod tests {
         let sim_token = ops.similarity(&composite, &token_vec).unwrap();
         let sim_ast = ops.similarity(&composite, &ast_vec).unwrap();
         // With bundle of 2, each layer contributes ~50%
-        assert!(sim_token > 0.3, "composite should resemble token layer: {sim_token}");
-        assert!(sim_ast > 0.3, "composite should resemble ast layer: {sim_ast}");
+        assert!(
+            sim_token > 0.3,
+            "composite should resemble token layer: {sim_token}"
+        );
+        assert!(
+            sim_ast > 0.3,
+            "composite should resemble ast layer: {sim_ast}"
+        );
     }
 
     #[test]
@@ -724,7 +715,12 @@ mod tests {
         let ast_b = encode_code_vector(&ops, &ctx_b).unwrap();
 
         // Token level should be similar (same tokens)
-        let token_sim_a = ops.similarity(&encode_token_level(&ops, &["fn_a", "name", "&str", "String"]).unwrap(), &encode_token_level(&ops, &["fn_b", "String", "&str"]).unwrap()).unwrap();
+        let token_sim_a = ops
+            .similarity(
+                &encode_token_level(&ops, &["fn_a", "name", "&str", "String"]).unwrap(),
+                &encode_token_level(&ops, &["fn_b", "String", "&str"]).unwrap(),
+            )
+            .unwrap();
 
         // AST level should differ (different structure)
         let ast_sim = ops.similarity(&ast_a, &ast_b).unwrap();

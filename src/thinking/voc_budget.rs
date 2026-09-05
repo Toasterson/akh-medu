@@ -158,7 +158,10 @@ mod tests {
     fn no_observations_means_continue() {
         let budget = ThinkingBudget::steps(100);
         let ctl = VocBudgetController::for_budget(&budget);
-        assert_eq!(ctl.decide(goal(), &budget, 0.0, false), VocDecision::Continue);
+        assert_eq!(
+            ctl.decide(goal(), &budget, 0.0, false),
+            VocDecision::Continue
+        );
     }
 
     #[test]
@@ -184,7 +187,10 @@ mod tests {
         ctl.observe_score(goal(), 0.1);
         ctl.observe_score(goal(), 0.4);
         ctl.observe_score(goal(), 0.7);
-        assert_eq!(ctl.decide(goal(), &budget, 0.3, false), VocDecision::Continue);
+        assert_eq!(
+            ctl.decide(goal(), &budget, 0.3, false),
+            VocDecision::Continue
+        );
     }
 
     #[test]
@@ -232,6 +238,9 @@ mod tests {
         for _ in 0..9 {
             budget.charge(1.0, 0);
         }
-        assert_eq!(ctl.decide(goal(), &budget, 0.2, false), VocDecision::Continue);
+        assert_eq!(
+            ctl.decide(goal(), &budget, 0.2, false),
+            VocDecision::Continue
+        );
     }
 }

@@ -194,6 +194,7 @@ impl AkhPaths {
             kg_dir: root.join("kg"),
             skills_dir: root.join("skills"),
             compartments_dir: root.join("compartments"),
+            notes_dir: root.join("notes"),
             scratch_dir: root.join("scratch"),
             session_file: self.state_dir.join("sessions").join(format!("{name}.bin")),
         }
@@ -333,6 +334,8 @@ pub struct WorkspacePaths {
     pub skills_dir: PathBuf,
     /// `root/compartments/` — compartment data
     pub compartments_dir: PathBuf,
+    /// `root/notes/` — append-only study-note heads and revision history
+    pub notes_dir: PathBuf,
     /// `root/scratch/` — agent scratch space
     pub scratch_dir: PathBuf,
     /// `state_dir/sessions/{name}.bin` — agent session state
@@ -347,6 +350,7 @@ impl WorkspacePaths {
             &self.kg_dir,
             &self.skills_dir,
             &self.compartments_dir,
+            &self.notes_dir,
             &self.scratch_dir,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| PathError::CreateDir {
@@ -425,6 +429,10 @@ mod tests {
             PathBuf::from("/data/akh-medu/workspaces/myproject/skills")
         );
         assert_eq!(
+            ws.notes_dir,
+            PathBuf::from("/data/akh-medu/workspaces/myproject/notes")
+        );
+        assert_eq!(
             ws.scratch_dir,
             PathBuf::from("/data/akh-medu/workspaces/myproject/scratch")
         );
@@ -466,7 +474,10 @@ mod tests {
                 !s.starts_with("/Users/") && !s.starts_with("/home/"),
                 "system daemon path must not live in a user home: {s}"
             );
-            assert!(dir.is_absolute(), "system daemon path must be absolute: {s}");
+            assert!(
+                dir.is_absolute(),
+                "system daemon path must be absolute: {s}"
+            );
         }
     }
 
@@ -509,9 +520,6 @@ mod tests {
         assert_eq!(p.runtime_dir, PathBuf::from("/var/run/akh-medu"));
         assert_eq!(p.cache_dir, PathBuf::from("/Library/Caches/akh-medu"));
         // The PID file lands where the installer and the client both expect.
-        assert_eq!(
-            p.pid_file(),
-            PathBuf::from("/var/run/akh-medu/akhomed.pid")
-        );
+        assert_eq!(p.pid_file(), PathBuf::from("/var/run/akh-medu/akhomed.pid"));
     }
 }

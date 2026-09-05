@@ -531,7 +531,11 @@ fn package_for_path(index: &WorkspaceIndex, absolute_path: &Path) -> Option<Stri
     Some(package.name.clone())
 }
 
-pub(crate) fn scope_for_changes(index: &WorkspaceIndex, repo_root: &Path, files: &[String]) -> CompileScope {
+pub(crate) fn scope_for_changes(
+    index: &WorkspaceIndex,
+    repo_root: &Path,
+    files: &[String],
+) -> CompileScope {
     if files.is_empty() {
         return CompileScope::NoRustChanges;
     }
@@ -619,7 +623,11 @@ pub(crate) fn append_scope_args(command: &mut Command, scope: &CompileScope) {
     }
 }
 
-pub(crate) fn cargo_command(command: &str, workdir: &Path, scope: &CompileScope) -> Result<Command, String> {
+pub(crate) fn cargo_command(
+    command: &str,
+    workdir: &Path,
+    scope: &CompileScope,
+) -> Result<Command, String> {
     let mut cargo = Command::new("cargo");
     match command {
         "check" => {
@@ -757,7 +765,9 @@ impl Drop for DetachedBaselineWorktree {
     }
 }
 
-pub(crate) fn diagnostic_counts(diagnostics: &[CompilerDiagnostic]) -> HashMap<DiagnosticKey, usize> {
+pub(crate) fn diagnostic_counts(
+    diagnostics: &[CompilerDiagnostic],
+) -> HashMap<DiagnosticKey, usize> {
     let mut counts = HashMap::new();
     for diagnostic in diagnostics {
         *counts.entry(DiagnosticKey::from(diagnostic)).or_insert(0) += 1;
@@ -1057,8 +1067,7 @@ pub(crate) fn run_diagnostics_pipeline(
     }
 
     if compilation.success {
-        result
-            .push_str("\n✓ No task-introduced compile errors in the selected blast radius.\n");
+        result.push_str("\n✓ No task-introduced compile errors in the selected blast radius.\n");
         if blocked_only_by_baseline {
             result.push_str(
                 "The command remains non-zero only because the same errors exist on the immutable base. \

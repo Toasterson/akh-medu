@@ -34,21 +34,27 @@ pub enum RuleMacroError {
     #[error("rule macro not found: {name}")]
     #[diagnostic(
         code(akh::rule_macro::not_found),
-        help("No rule macro with this name is registered. Check available macros with the registry.")
+        help(
+            "No rule macro with this name is registered. Check available macros with the registry."
+        )
     )]
     NotFound { name: String },
 
     #[error("rule macro expansion failed for {macro_name}: {reason}")]
     #[diagnostic(
         code(akh::rule_macro::expansion_failed),
-        help("The rule macro could not expand the given triple. Check that the triple matches the macro's pattern.")
+        help(
+            "The rule macro could not expand the given triple. Check that the triple matches the macro's pattern."
+        )
     )]
     ExpansionFailed { macro_name: String, reason: String },
 
     #[error("duplicate rule macro registration: {name}")]
     #[diagnostic(
         code(akh::rule_macro::duplicate),
-        help("A rule macro with this name is already registered. Use a different name or remove the existing one first.")
+        help(
+            "A rule macro with this name is already registered. Use a different name or remove the existing one first."
+        )
     )]
     Duplicate { name: String },
 }
@@ -78,10 +84,8 @@ impl MacroPredicates {
     pub fn resolve(engine: &Engine) -> AkhResult<Self> {
         Ok(Self {
             genls: engine.resolve_or_create_relation("macro:genls")?,
-            relation_all_exists: engine
-                .resolve_or_create_relation("macro:relationAllExists")?,
-            relation_exists_all: engine
-                .resolve_or_create_relation("macro:relationExistsAll")?,
+            relation_all_exists: engine.resolve_or_create_relation("macro:relationAllExists")?,
+            relation_exists_all: engine.resolve_or_create_relation("macro:relationExistsAll")?,
             is_a: engine.resolve_or_create_relation("is-a")?,
         })
     }
@@ -172,7 +176,8 @@ impl RuleMacro for GenlsMacro {
     fn expand(&self, engine: &Engine) -> RuleMacroResult<Vec<Triple>> {
         // Find all instances of child: (X, is-a, child)
         let kg = engine.knowledge_graph();
-        let instances = kg.triples_to(self.child)
+        let instances = kg
+            .triples_to(self.child)
             .into_iter()
             .filter(|t| t.predicate == self.is_a)
             .collect::<Vec<_>>();
@@ -251,7 +256,8 @@ impl RuleMacro for RelationAllExistsMacro {
     fn expand(&self, engine: &Engine) -> RuleMacroResult<Vec<Triple>> {
         let kg = engine.knowledge_graph();
         // Find all domain instances
-        let domain_instances = kg.triples_to(self.domain)
+        let domain_instances = kg
+            .triples_to(self.domain)
             .into_iter()
             .filter(|t| t.predicate == self.is_a)
             .collect::<Vec<_>>();
@@ -351,12 +357,14 @@ impl RuleMacro for RelationExistsAllMacro {
     fn expand(&self, engine: &Engine) -> RuleMacroResult<Vec<Triple>> {
         let kg = engine.knowledge_graph();
         // Find all range instances
-        let range_instances = kg.triples_to(self.range)
+        let range_instances = kg
+            .triples_to(self.range)
             .into_iter()
             .filter(|t| t.predicate == self.is_a)
             .collect::<Vec<_>>();
         // Find a domain instance linked to all of them
-        let domain_instances = kg.triples_to(self.domain)
+        let domain_instances = kg
+            .triples_to(self.domain)
             .into_iter()
             .filter(|t| t.predicate == self.is_a)
             .collect::<Vec<_>>();
@@ -417,7 +425,8 @@ impl RuleMacro for RelationExistsAllMacro {
             return Ok(vec![]);
         }
         // Return all range instances as relation targets
-        let range_instances = kg.triples_to(self.range)
+        let range_instances = kg
+            .triples_to(self.range)
             .into_iter()
             .filter(|t| t.predicate == self.is_a)
             .collect::<Vec<_>>();

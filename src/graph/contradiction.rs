@@ -32,7 +32,9 @@ use crate::temporal::TemporalRegistry;
 /// Errors specific to contradiction detection.
 #[derive(Debug, Error, Diagnostic)]
 pub enum ContradictionError {
-    #[error("functional violation: ({subject_label}, {predicate_label}) already maps to \"{existing_label}\", cannot also map to \"{incoming_label}\"")]
+    #[error(
+        "functional violation: ({subject_label}, {predicate_label}) already maps to \"{existing_label}\", cannot also map to \"{incoming_label}\""
+    )]
     #[diagnostic(
         code(akh::contradiction::functional_violation),
         help(
@@ -48,7 +50,9 @@ pub enum ContradictionError {
         incoming_label: String,
     },
 
-    #[error("disjointness violation: \"{entity_label}\" cannot be both \"{type_a_label}\" and \"{type_b_label}\" (they are disjoint)")]
+    #[error(
+        "disjointness violation: \"{entity_label}\" cannot be both \"{type_a_label}\" and \"{type_b_label}\" (they are disjoint)"
+    )]
     #[diagnostic(
         code(akh::contradiction::disjointness_violation),
         help(
@@ -116,9 +120,7 @@ pub enum ContradictionKind {
         incoming_confidence: f32,
     },
     /// Contradiction within the same microtheory/compartment.
-    IntraMicrotheoryConflict {
-        context: SymbolId,
-    },
+    IntraMicrotheoryConflict { context: SymbolId },
 }
 
 /// A detected contradiction between an existing and incoming triple.
@@ -323,9 +325,7 @@ pub fn check_contradictions(
     let is_multi = multi_valued
         .map(|mv| mv.is_multi_valued(incoming.predicate))
         .unwrap_or(false);
-    if !is_multi
-        && let Some(temp_reg) = temporal_registry
-    {
+    if !is_multi && let Some(temp_reg) = temporal_registry {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -428,8 +428,7 @@ mod tests {
 
         // Try to add Alice spouse Charlie — functional violation
         let incoming = Triple::new(alice.id, spouse.id, charlie.id);
-        let contradictions =
-            check_contradictions(&engine, &incoming, &func, &disjoint, None, None);
+        let contradictions = check_contradictions(&engine, &incoming, &func, &disjoint, None, None);
 
         assert_eq!(contradictions.len(), 1);
         assert!(matches!(
@@ -649,9 +648,15 @@ mod tests {
     fn multi_valued_skips_temporal_conflict() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
 
-        let ep = engine.create_symbol(SymbolKind::Entity, "episode:1").unwrap();
-        let sym_a = engine.create_symbol(SymbolKind::Entity, "concept:A").unwrap();
-        let sym_b = engine.create_symbol(SymbolKind::Entity, "concept:B").unwrap();
+        let ep = engine
+            .create_symbol(SymbolKind::Entity, "episode:1")
+            .unwrap();
+        let sym_a = engine
+            .create_symbol(SymbolKind::Entity, "concept:A")
+            .unwrap();
+        let sym_b = engine
+            .create_symbol(SymbolKind::Entity, "concept:B")
+            .unwrap();
         let learned = engine
             .create_symbol(SymbolKind::Relation, "agent:learned")
             .unwrap();

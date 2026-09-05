@@ -287,11 +287,7 @@ impl EventCalculusEngine {
     /// suppressed to prevent history bloat from repeated wake triggers.
     /// Two-layer guard: an in-session `HashSet` for fast rejection, and a
     /// history-Vec scan for cross-restart idempotency.
-    pub fn record_event(
-        &mut self,
-        event: Event,
-        engine: &Engine,
-    ) -> EventCalculusResult<()> {
+    pub fn record_event(&mut self, event: Event, engine: &Engine) -> EventCalculusResult<()> {
         let preds = self.preds().clone();
         let event_id = event.symbol_id;
         let ts = event.timestamp;
@@ -311,22 +307,20 @@ impl EventCalculusEngine {
         // `add_triple` is idempotent at the KG tier — existing edges are upserted,
         // never duplicated — so these calls are safe even without the dedup guard.
         let marker_sym = engine.resolve_or_create_entity("ec:event-marker")?;
-        let marker_triple = Triple::new(event_id, preds.is_event, marker_sym)
-            .with_confidence(1.0);
+        let marker_triple = Triple::new(event_id, preds.is_event, marker_sym).with_confidence(1.0);
         engine.add_triple(&marker_triple)?;
 
         // Store timestamp as a triple: event → ec:at-time → timestamp-entity
         let ts_label = format!("ec:t:{ts}");
         let ts_sym = engine.resolve_or_create_entity(&ts_label)?;
-        let ts_triple = Triple::new(event_id, preds.at_time, ts_sym)
-            .with_confidence(1.0);
+        let ts_triple = Triple::new(event_id, preds.at_time, ts_sym).with_confidence(1.0);
         engine.add_triple(&ts_triple)?;
 
         // Process initiations.
         for &fluent_id in &event.initiates {
             // Store ec:initiates triple.
-            let init_triple = Triple::new(event_id, preds.initiates, fluent_id)
-                .with_confidence(1.0);
+            let init_triple =
+                Triple::new(event_id, preds.initiates, fluent_id).with_confidence(1.0);
             engine.add_triple(&init_triple)?;
 
             // Update fluent state.
@@ -370,8 +364,8 @@ impl EventCalculusEngine {
 
         // Process terminations.
         for &fluent_id in &event.terminates {
-            let term_triple = Triple::new(event_id, preds.terminates, fluent_id)
-                .with_confidence(1.0);
+            let term_triple =
+                Triple::new(event_id, preds.terminates, fluent_id).with_confidence(1.0);
             engine.add_triple(&term_triple)?;
 
             // Update fluent state.
@@ -461,9 +455,9 @@ impl EventCalculusEngine {
         let Some(history) = self.history.get(&fluent_id.get()) else {
             return false;
         };
-        history.iter().any(|entry| {
-            !entry.initiated && entry.timestamp > t1 && entry.timestamp <= t2
-        })
+        history
+            .iter()
+            .any(|entry| !entry.initiated && entry.timestamp > t1 && entry.timestamp <= t2)
     }
 
     // ─── State Projection ─────────────────────────────────────────
@@ -556,17 +550,15 @@ impl EventCalculusEngine {
                 );
                 // Also track the predicate as a fluent.
                 let plabel = engine.resolve_label(p);
-                current_fluents
-                    .entry(p.get())
-                    .or_insert(Fluent {
-                        symbol_id: p,
-                        label: plabel,
-                        current_value: true,
-                        last_initiated_by: Some(action_id),
-                        last_initiated_at: None,
-                        last_terminated_by: None,
-                        last_terminated_at: None,
-                    });
+                current_fluents.entry(p.get()).or_insert(Fluent {
+                    symbol_id: p,
+                    label: plabel,
+                    current_value: true,
+                    last_initiated_by: Some(action_id),
+                    last_initiated_at: None,
+                    last_terminated_by: None,
+                    last_terminated_at: None,
+                });
             }
 
             // Retractions → terminate fluents.
@@ -879,9 +871,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(ec.holds_at(fluent, 150));  // between boot and crash
+        assert!(ec.holds_at(fluent, 150)); // between boot and crash
         assert!(!ec.holds_at(fluent, 250)); // between crash and reboot
-        assert!(ec.holds_at(fluent, 350));  // after reboot
+        assert!(ec.holds_at(fluent, 350)); // after reboot
     }
 
     // ── project_state ─────────────────────────────────────────────
@@ -1066,9 +1058,9 @@ mod tests {
 
         let history = ec.fluent_history(f).unwrap();
         assert_eq!(history.len(), 3);
-        assert!(history[0].initiated);   // open
-        assert!(!history[1].initiated);  // close
-        assert!(history[2].initiated);   // reopen
+        assert!(history[0].initiated); // open
+        assert!(!history[1].initiated); // close
+        assert!(history[2].initiated); // reopen
     }
 
     // ── persist / restore roundtrip ───────────────────────────────
@@ -1157,7 +1149,12 @@ mod tests {
 
         // History for the fluent must have exactly one entry, not three.
         let hist = ec.history.get(&fluent.get()).expect("history missing");
-        assert_eq!(hist.len(), 1, "expected 1 history entry, got {}", hist.len());
+        assert_eq!(
+            hist.len(),
+            1,
+            "expected 1 history entry, got {}",
+            hist.len()
+        );
 
         // The events map still contains the event.
         assert!(ec.get_event(event).is_some());
@@ -1187,7 +1184,12 @@ mod tests {
 
         // Three distinct timestamps → three history entries.
         let hist = ec.history.get(&fluent.get()).expect("history missing");
-        assert_eq!(hist.len(), 3, "expected 3 history entries, got {}", hist.len());
+        assert_eq!(
+            hist.len(),
+            3,
+            "expected 3 history entries, got {}",
+            hist.len()
+        );
     }
 
     #[test]
@@ -1231,7 +1233,12 @@ mod tests {
         let initiations: Vec<_> = hist.iter().filter(|e| e.initiated).collect();
         let terminations: Vec<_> = hist.iter().filter(|e| !e.initiated).collect();
         assert_eq!(initiations.len(), 1, "expected 1 initiation");
-        assert_eq!(terminations.len(), 1, "expected 1 termination, got {}", terminations.len());
+        assert_eq!(
+            terminations.len(),
+            1,
+            "expected 1 termination, got {}",
+            terminations.len()
+        );
     }
 
     #[test]
@@ -1273,7 +1280,15 @@ mod tests {
             )
             .unwrap();
 
-        let hist = restored.history.get(&fluent.get()).expect("history missing");
-        assert_eq!(hist.len(), 1, "history bloated after restore+replay: {}", hist.len());
+        let hist = restored
+            .history
+            .get(&fluent.get())
+            .expect("history missing");
+        assert_eq!(
+            hist.len(),
+            1,
+            "history bloated after restore+replay: {}",
+            hist.len()
+        );
     }
 }

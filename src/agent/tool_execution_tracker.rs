@@ -123,7 +123,10 @@ impl ToolExecutionTracker {
 
             let should_create_new = bursts
                 .get(&burst_key)
-                .map(|b| now.duration_since(b.started_at) > Duration::from_millis(SEARCH_COALESCE_WINDOW_MS))
+                .map(|b| {
+                    now.duration_since(b.started_at)
+                        > Duration::from_millis(SEARCH_COALESCE_WINDOW_MS)
+                })
                 .unwrap_or(true);
 
             if should_create_new {
@@ -235,7 +238,13 @@ impl ToolExecutionTracker {
         let output = if burst.results.is_empty() {
             format!("{} queries", query_count)
         } else {
-            let preview = burst.results.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+            let preview = burst
+                .results
+                .iter()
+                .take(3)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("{} queries, top results: {}", query_count, preview)
         };
 
@@ -363,8 +372,14 @@ mod tests {
 
         // Should have emitted one ToolCallStarted and one ToolCallCompleted.
         let messages = sink.messages();
-        let started = messages.iter().filter(|m| matches!(m, AkhMessage::ToolCallStarted { .. })).count();
-        let completed = messages.iter().filter(|m| matches!(m, AkhMessage::ToolCallCompleted { .. })).count();
+        let started = messages
+            .iter()
+            .filter(|m| matches!(m, AkhMessage::ToolCallStarted { .. }))
+            .count();
+        let completed = messages
+            .iter()
+            .filter(|m| matches!(m, AkhMessage::ToolCallCompleted { .. }))
+            .count();
 
         assert_eq!(started, 1);
         assert_eq!(completed, 1);

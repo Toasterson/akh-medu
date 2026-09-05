@@ -189,6 +189,9 @@ akhomed-store = { path = "crates/akhomed-store", optional = true }
 # KG-repair of near-miss calls) at the live agent boundary. Pure Rust, no ML
 # dependency — the tested lab implementation, reused rather than reimplemented.
 grug-data = { path = "crates/grug-data" }
+# The from-scratch BabyLLM runtime is opt-in so lean clients and existing
+# Candle/Ollama deployments do not pay Burn's compile/runtime cost.
+grug-train = { path = "crates/grug-train", optional = true }
 
 # Calendar (feature-gated)
 icalendar = { version = "0.16", optional = true, features = ["parser"] }
@@ -261,6 +264,7 @@ metal = ["candle-backend", "candle-core/metal", "candle-nn/metal", "candle-trans
 # on top of the `rocm` dlopen runtime (nlu::hip). Off by default; superset of rocm.
 hip = ["rocm", "candle-core/hip"]
 burn-training = ["candle-backend"]  # will add "burn" when sqlite3 conflict resolved
+grug-backend = ["dep:grug-train"]
 training-data = []
 wiki = ["dep:comrak", "dep:syntect", "dep:minijinja", "dep:tantivy"]
 sparql-persist = ["oxigraph/rocksdb"]
@@ -274,7 +278,7 @@ agent-client-protocol = ["dep:agent-client-protocol"]
 # Phase P0 spike: ACP agent over a Unix domain socket, wrapping ChatProcessor
 # for one in-process workspace. Additive and OFF by default — does not touch
 # REST/WS/MCP transports. See src/acp/mod.rs and ADR-027 (concurrency invariant).
-acp = ["dep:agent-client-protocol", "dep:tokio-util", "dep:futures", "tokio"]
+acp = ["dep:agent-client-protocol", "dep:tokio-util", "dep:futures", "dep:base64", "tokio"]
 # Lean TUI/CLI client: ACP transport only, no in-process LLM/candle. `akh` is a
 # pure ACP client (all engine work happens in the daemon), so it needs none of
 # the nlu-candle stack. This is what ships as the binstall `akh` binary and the

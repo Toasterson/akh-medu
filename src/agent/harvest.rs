@@ -192,11 +192,7 @@ pub fn mint_turn_episode(
     let excerpt = char_boundary_truncate(user_prompt, 80);
     let summary_label = format!("summary:{excerpt}");
     let summary_sym = engine.resolve_or_create_entity(&summary_label)?;
-    triples.push(Triple::new(
-        episode_id,
-        predicates.has_summary,
-        summary_sym,
-    ));
+    triples.push(Triple::new(episode_id, predicates.has_summary, summary_sym));
 
     // 5. Provenance: reason string carries the source seq as the Librarian's
     // future re-projection key (ADR 091: no new DerivationKind variant).

@@ -188,7 +188,11 @@ impl TemporalExperience {
             self.boredom(),
             self.deadline_pressure,
             self.circadian_phase,
-            if self.is_consolidation_phase() { " [consolidation]" } else { "" },
+            if self.is_consolidation_phase() {
+                " [consolidation]"
+            } else {
+                ""
+            },
             arousal,
             valence,
         )
@@ -378,7 +382,10 @@ mod tests {
         exp.event_count = 20; // moderate activity
         exp.update(3600);
         let (valence, _) = exp.affective_signal();
-        assert!(valence >= 0.0, "should be positive/neutral: valence={valence}");
+        assert!(
+            valence >= 0.0,
+            "should be positive/neutral: valence={valence}"
+        );
     }
 
     // ── Summary ───────────────────────────────────────────────────

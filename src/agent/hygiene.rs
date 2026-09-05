@@ -95,7 +95,11 @@ fn word_overlap(a: &str, b: &str) -> f32 {
     }
     let intersection = wa.intersection(&wb).count();
     let union = wa.union(&wb).count();
-    if union == 0 { 0.0 } else { intersection as f32 / union as f32 }
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,9 +170,7 @@ fn find_stale_goals(
         };
 
         if idle_cycles >= max_idle {
-            let reason = format!(
-                "idle for {idle_cycles} cycles (threshold: {max_idle})"
-            );
+            let reason = format!("idle for {idle_cycles} cycles (threshold: {max_idle})");
             stale.push((goal.symbol_id, reason));
         }
     }
@@ -260,9 +262,7 @@ fn find_deep_goals(goals: &[Goal], max_depth: u32) -> Vec<(SymbolId, String)> {
         }
         let depth = goal_depth(goal.symbol_id, goals);
         if depth > max_depth {
-            let reason = format!(
-                "child depth {depth} exceeds max {max_depth}"
-            );
+            let reason = format!("child depth {depth} exceeds max {max_depth}");
             deep.push((goal.symbol_id, reason));
         }
     }
@@ -288,10 +288,7 @@ pub fn run_hygiene_pass(
     session_start_cycle: u64,
     config: &HygieneConfig,
 ) -> HygieneResult {
-    let total_before = goals
-        .iter()
-        .filter(|g| is_live(&g.status))
-        .count();
+    let total_before = goals.iter().filter(|g| is_live(&g.status)).count();
 
     let mut result = HygieneResult {
         total_before,
@@ -299,10 +296,17 @@ pub fn run_hygiene_pass(
     };
 
     // ── Sub-pass 1: Staleness ────────────────────────────────────────────
-    let stale = find_stale_goals(goals, current_cycle, session_start_cycle, config.max_idle_cycles);
+    let stale = find_stale_goals(
+        goals,
+        current_cycle,
+        session_start_cycle,
+        config.max_idle_cycles,
+    );
     for (gid, reason) in &stale {
         if let Some(g) = goals.iter_mut().find(|g| g.symbol_id == *gid) {
-            let status = GoalStatus::Cancelled { reason: reason.clone() };
+            let status = GoalStatus::Cancelled {
+                reason: reason.clone(),
+            };
             if let Err(e) = update_goal_status(engine, g, status, predicates) {
                 tracing::warn!(goal = %gid, "hygiene: failed to cancel stale goal: {e}");
             } else {
@@ -317,7 +321,9 @@ pub fn run_hygiene_pass(
         let dups = find_duplicate_goals(goals, config.dedup_overlap_threshold);
         for (dup_id, primary_id) in &dups {
             if let Some(g) = goals.iter_mut().find(|g| g.symbol_id == *dup_id) {
-                let status = GoalStatus::Duplicate { primary: *primary_id };
+                let status = GoalStatus::Duplicate {
+                    primary: *primary_id,
+                };
                 if let Err(e) = update_goal_status(engine, g, status, predicates) {
                     tracing::warn!(goal = %dup_id, "hygiene: failed to mark goal as duplicate: {e}");
                 } else {
@@ -336,7 +342,9 @@ pub fn run_hygiene_pass(
     let deep = find_deep_goals(goals, config.max_child_depth);
     for (gid, reason) in &deep {
         if let Some(g) = goals.iter_mut().find(|g| g.symbol_id == *gid) {
-            let status = GoalStatus::Cancelled { reason: reason.clone() };
+            let status = GoalStatus::Cancelled {
+                reason: reason.clone(),
+            };
             if let Err(e) = update_goal_status(engine, g, status, predicates) {
                 tracing::warn!(goal = %gid, "hygiene: failed to cancel deep goal: {e}");
             } else {
@@ -381,7 +389,11 @@ mod tests {
 
     #[test]
     fn word_overlap_identical() {
-        assert!((word_overlap("explore the knowledge graph", "explore the knowledge graph") - 1.0).abs() < f32::EPSILON);
+        assert!(
+            (word_overlap("explore the knowledge graph", "explore the knowledge graph") - 1.0)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     #[test]
@@ -393,10 +405,7 @@ mod tests {
     #[test]
     fn word_overlap_partial() {
         // Three identical content words out of a slightly larger union — moderate overlap.
-        let s = word_overlap(
-            "what is the Ennead and its members",
-            "what is the Ennead",
-        );
+        let s = word_overlap("what is the Ennead and its members", "what is the Ennead");
         // Union = {what, the, ennead, and, its, members}, intersection = {what, the, ennead}
         // Jaccard = 3/6 for the first sentence alone but "is" is filtered (len 2).
         // Actual: intersection 3, union ~6..8 → between 0.3 and 0.6
@@ -405,9 +414,12 @@ mod tests {
 
     #[test]
     fn find_stale_detects_never_progressed() {
-        let goals = vec![
-            make_goal(1, "find is-a for rate:0.8", GoalStatus::Pending, 128),
-        ];
+        let goals = vec![make_goal(
+            1,
+            "find is-a for rate:0.8",
+            GoalStatus::Pending,
+            128,
+        )];
         // session_start=0, current=25, max_idle=20 → idle=25 → stale
         let stale = find_stale_goals(&goals, 25, 0, 20);
         assert_eq!(stale.len(), 1);
@@ -418,24 +430,37 @@ mod tests {
     fn find_stale_skips_restored_goal_in_fresh_session() {
         // A goal restored at session start has last_progress_cycle=0.
         // With session_start=100 and current=110, idle=10 which is below threshold.
-        let goals = vec![
-            make_goal(1, "restored but recently started", GoalStatus::Pending, 128),
-        ];
+        let goals = vec![make_goal(
+            1,
+            "restored but recently started",
+            GoalStatus::Pending,
+            128,
+        )];
         // session_start=100, current=110, max_idle=20 → idle=10 → not stale
         let stale = find_stale_goals(&goals, 110, 100, 20);
-        assert!(stale.is_empty(), "restored goals should not be immediately stale");
+        assert!(
+            stale.is_empty(),
+            "restored goals should not be immediately stale"
+        );
     }
 
     #[test]
     fn find_stale_detects_restored_goal_after_idle() {
         // A restored goal (last_progress_cycle=0) should become stale after
         // max_idle_cycles have passed in the current session.
-        let goals = vec![
-            make_goal(1, "zombie goal never worked on", GoalStatus::Pending, 128),
-        ];
+        let goals = vec![make_goal(
+            1,
+            "zombie goal never worked on",
+            GoalStatus::Pending,
+            128,
+        )];
         // session_start=100, current=121, max_idle=20 → idle=21 → stale
         let stale = find_stale_goals(&goals, 121, 100, 20);
-        assert_eq!(stale.len(), 1, "goal should be stale after idle threshold passed");
+        assert_eq!(
+            stale.len(),
+            1,
+            "goal should be stale after idle threshold passed"
+        );
     }
 
     #[test]
@@ -462,9 +487,24 @@ mod tests {
     fn find_duplicates_groups_similar() {
         // Two goals with nearly identical wording — only a trailing word differs.
         let goals = vec![
-            make_goal(1, "What is the Ennead and its role", GoalStatus::Pending, 200),
-            make_goal(2, "What is the Ennead and its role here", GoalStatus::Pending, 100),
-            make_goal(3, "explore the knowledge graph structure", GoalStatus::Pending, 150),
+            make_goal(
+                1,
+                "What is the Ennead and its role",
+                GoalStatus::Pending,
+                200,
+            ),
+            make_goal(
+                2,
+                "What is the Ennead and its role here",
+                GoalStatus::Pending,
+                100,
+            ),
+            make_goal(
+                3,
+                "explore the knowledge graph structure",
+                GoalStatus::Pending,
+                150,
+            ),
         ];
         // threshold 0.75 — goals 1 & 2 share {what, the, ennead, and, its, role} out of
         // {what, the, ennead, and, its, role, here} → 6/7 ≈ 0.86 → should be flagged.

@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use crate::engine::Engine;
-use crate::vsa::neural_bridge::{BridgeTrainer, NeuralVsaBridge};
 use crate::vsa::HyperVec;
+use crate::vsa::neural_bridge::{BridgeTrainer, NeuralVsaBridge};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -195,11 +195,7 @@ impl BridgeTrainingSession {
     }
 
     /// Measure average bit match rate between encoded and target vectors.
-    fn measure_match_rate(
-        &self,
-        bridge: &NeuralVsaBridge,
-        pairs: &[(Vec<f32>, HyperVec)],
-    ) -> f32 {
+    fn measure_match_rate(&self, bridge: &NeuralVsaBridge, pairs: &[(Vec<f32>, HyperVec)]) -> f32 {
         if pairs.is_empty() {
             return 0.0;
         }

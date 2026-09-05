@@ -22,13 +22,11 @@ use crate::bootstrap::expand::ExpansionResult;
 use crate::bootstrap::ingest::{CurriculumIngestor, IngestionConfig};
 use crate::bootstrap::prerequisite::{PrerequisiteAnalyzer, PrerequisiteConfig, ZpdZone};
 use crate::bootstrap::purpose::{DreyfusLevel, PurposeModel};
-use crate::bootstrap::resources::{
-    self, ResourceDiscoverer, ResourceDiscoveryConfig,
-};
+use crate::bootstrap::resources::{self, ResourceDiscoverer, ResourceDiscoveryConfig};
 use crate::engine::Engine;
 use crate::provenance::{DerivationKind, ProvenanceId, ProvenanceRecord};
 
-use super::curiosity::{compute_directed_curiosity, DirectedCuriosityConfig};
+use super::curiosity::{DirectedCuriosityConfig, compute_directed_curiosity};
 
 // ── Errors ──────────────────────────────────────────────────────────────
 
@@ -63,10 +61,7 @@ pub enum ContinuousLearningError {
              The next idle cycle will retry automatically."
         )
     )]
-    StageFailed {
-        stage: &'static str,
-        reason: String,
-    },
+    StageFailed { stage: &'static str, reason: String },
 
     #[error("{0}")]
     #[diagnostic(
@@ -190,11 +185,12 @@ pub fn run_continuous_learning(
     curiosity_cfg.max_targets = config.max_targets;
 
     // No goal context in background learning — pass empty slice to scan all domain entities.
-    let report = compute_directed_curiosity(engine, &curiosity_cfg, &[])
-        .map_err(|e| ContinuousLearningError::StageFailed {
+    let report = compute_directed_curiosity(engine, &curiosity_cfg, &[]).map_err(|e| {
+        ContinuousLearningError::StageFailed {
             stage: "curiosity",
             reason: e.to_string(),
-        })?;
+        }
+    })?;
 
     // 2. Filter to proximal targets above min_gap_score.
     let proximal_targets: Vec<_> = report
@@ -208,8 +204,8 @@ pub fn run_continuous_learning(
     }
 
     let targets_found = proximal_targets.len();
-    let gap_score_avg = proximal_targets.iter().map(|t| t.gap_score).sum::<f32>()
-        / targets_found as f32;
+    let gap_score_avg =
+        proximal_targets.iter().map(|t| t.gap_score).sum::<f32>() / targets_found as f32;
 
     // 3. Resolve labels and build synthetic expansion.
     let labels: Vec<String> = proximal_targets
@@ -255,11 +251,7 @@ pub fn run_continuous_learning(
                     };
 
                     // Still store provenance for the curiosity stage.
-                    if let Ok(prov_id) = store_provenance(
-                        engine,
-                        &result,
-                        gap_score_avg,
-                    ) {
+                    if let Ok(prov_id) = store_provenance(engine, &result, gap_score_avg) {
                         result.provenance_ids.push(prov_id);
                     }
 

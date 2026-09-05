@@ -123,10 +123,7 @@ pub enum SchemaError {
         code(akh::schema::duplicate_property),
         help("List each property once per type. Subtypes add properties additively via `is_a`.")
     )]
-    DuplicateProperty {
-        type_name: String,
-        property: String,
-    },
+    DuplicateProperty { type_name: String, property: String },
 
     #[error("type \"{type_name}\" extends unknown supertype \"{super_name}\"")]
     #[diagnostic(
@@ -223,7 +220,9 @@ pub enum SchemaError {
     #[error("failed to install schema pack \"{pack}\": {message}")]
     #[diagnostic(
         code(akh::schema::install),
-        help("Check that the engine is writable; the pack blob decoded cleanly, so this is an engine-side failure.")
+        help(
+            "Check that the engine is writable; the pack blob decoded cleanly, so this is an engine-side failure."
+        )
     )]
     Install { pack: String, message: String },
 

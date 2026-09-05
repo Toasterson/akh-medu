@@ -174,9 +174,7 @@ fn build_activity(
 ///
 /// Returns `(activity_type, title, body)` for supported activities, or an
 /// error for unsupported types.
-pub fn parse_inbound_activity(
-    json: &str,
-) -> FederationResult<(String, String, String)> {
+pub fn parse_inbound_activity(json: &str) -> FederationResult<(String, String, String)> {
     let activity: ApActivity =
         serde_json::from_str(json).map_err(|e| FederationError::Serialization {
             message: e.to_string(),
@@ -297,7 +295,10 @@ mod tests {
         let store = ArticleStore::new();
         let result = build_create_activity(&store, "NonExistent", "act-004");
         assert!(result.is_err());
-        assert!(matches!(result, Err(FederationError::ArticleNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(FederationError::ArticleNotFound { .. })
+        ));
     }
 
     #[test]

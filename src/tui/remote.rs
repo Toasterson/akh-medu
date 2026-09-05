@@ -20,9 +20,11 @@ mod inner {
     use std::sync::mpsc;
     use std::thread;
 
-    use agent_client_protocol::schema::{ContentBlock, ContentChunk, SessionNotification, SessionUpdate};
-    use agent_client_protocol::util::MatchDispatch;
     use agent_client_protocol::SessionMessage;
+    use agent_client_protocol::schema::{
+        ContentBlock, ContentChunk, SessionNotification, SessionUpdate,
+    };
+    use agent_client_protocol::util::MatchDispatch;
 
     use crate::client::ServerInfo;
     use crate::message::AkhMessage;
@@ -222,20 +224,16 @@ mod inner {
                 match out_rx.try_recv() {
                     Ok(Outbound::Input(text)) => {
                         if let Err(e) = session.send_prompt(&text) {
-                            let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::error(
-                                "acp",
-                                e.to_string(),
-                            )));
+                            let _ = in_tx
+                                .send(ChatUpdate::Notice(AkhMessage::error("acp", e.to_string())));
                             let _ = in_tx.send(ChatUpdate::TurnEnd);
                             break;
                         }
                         // Stream this turn's updates until its stop reason,
                         // forwarding answer/thought deltas live.
                         if let Err(e) = relay_turn(&mut session, &in_tx).await {
-                            let _ = in_tx.send(ChatUpdate::Notice(AkhMessage::error(
-                                "acp",
-                                e.to_string(),
-                            )));
+                            let _ = in_tx
+                                .send(ChatUpdate::Notice(AkhMessage::error("acp", e.to_string())));
                             let _ = in_tx.send(ChatUpdate::TurnEnd);
                             break;
                         }
@@ -398,7 +396,8 @@ mod tests {
                 let engine = Arc::new(engine);
                 let processor = ChatProcessor::new(&engine, NluPipeline::new());
                 let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-                let me = crate::acp::AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
+                let me =
+                    crate::acp::AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
                 let listener = tokio::net::UnixListener::bind(&sock_for_server).expect("bind");
                 let _ = crate::acp::serve_unix_loop(me, listener, shutdown_rx).await;
             });

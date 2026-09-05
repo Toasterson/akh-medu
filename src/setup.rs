@@ -118,11 +118,9 @@ pub fn install_onnx_runtime(version: &str) -> SetupResult<PathBuf> {
 
     // Download tarball to a temp file, then extract the shared library.
     eprintln!("Downloading ONNX Runtime v{version} for {platform}...");
-    let resp = ureq::get(&url)
-        .call()
-        .map_err(|e| SetupError::Http {
-            reason: format!("{e}"),
-        })?;
+    let resp = ureq::get(&url).call().map_err(|e| SetupError::Http {
+        reason: format!("{e}"),
+    })?;
 
     let mut tarball = Vec::new();
     resp.into_reader()
@@ -256,15 +254,11 @@ fn download_file(url: &str, dest: &Path) -> SetupResult<()> {
         .unwrap_or_else(|| "file".to_string());
     eprintln!("  Downloading {filename}...");
 
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| SetupError::Http {
-            reason: format!("{e}"),
-        })?;
+    let resp = ureq::get(url).call().map_err(|e| SetupError::Http {
+        reason: format!("{e}"),
+    })?;
 
-    let content_length: Option<u64> = resp
-        .header("content-length")
-        .and_then(|v| v.parse().ok());
+    let content_length: Option<u64> = resp.header("content-length").and_then(|v| v.parse().ok());
 
     let mut body = resp.into_reader();
     let mut out = fs::File::create(dest)?;

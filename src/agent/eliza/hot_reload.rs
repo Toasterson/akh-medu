@@ -91,12 +91,7 @@ impl ScriptLoader {
             })?;
 
         // Spawn the async task that processes events with debouncing.
-        tokio::spawn(watcher_task(
-            bank_arc,
-            dir_owned.clone(),
-            event_rx,
-            stop_rx,
-        ));
+        tokio::spawn(watcher_task(bank_arc, dir_owned.clone(), event_rx, stop_rx));
 
         let loader = Self {
             engine: engine.clone(),
@@ -211,11 +206,7 @@ fn reload_file(bank: &Arc<RwLock<ScriptBank>>, dir: &Path, path: &Path) {
             match bank.write() {
                 Ok(mut guard) => {
                     guard.replace_from_file(path, scripts);
-                    info!(
-                        "eliza: reloaded {} — scripts: {:?}",
-                        path.display(),
-                        names
-                    );
+                    info!("eliza: reloaded {} — scripts: {:?}", path.display(), names);
                 }
                 Err(e) => warn!("eliza: bank lock poisoned: {e}"),
             }
@@ -315,7 +306,10 @@ script name="stable" priority=10 {
         write_kdl(dir.path(), "stable.kdl", valid_kdl);
 
         let (engine, _loader) = ScriptLoader::start(dir.path()).unwrap();
-        assert_eq!(engine.match_input("anything"), Some("Stable response.".into()));
+        assert_eq!(
+            engine.match_input("anything"),
+            Some("Stable response.".into())
+        );
 
         // Overwrite with invalid KDL.
         write_kdl(dir.path(), "stable.kdl", "this is not { valid kdl !!!");
@@ -324,6 +318,9 @@ script name="stable" priority=10 {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // The old response must still work.
-        assert_eq!(engine.match_input("anything"), Some("Stable response.".into()));
+        assert_eq!(
+            engine.match_input("anything"),
+            Some("Stable response.".into())
+        );
     }
 }

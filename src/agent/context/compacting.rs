@@ -23,7 +23,7 @@ use super::budget::BudgetAllocator;
 use super::error::ContextResult;
 use super::manager::{ContextManager, TokenCounter};
 use super::types::{
-    AssembledContext, ContextSection, ContextWindowStats, DroppedSpan, DropReason, EpisodeState,
+    AssembledContext, ContextSection, ContextWindowStats, DropReason, DroppedSpan, EpisodeState,
     StrategyId, TokenBudget,
 };
 
@@ -45,7 +45,9 @@ fn render_notes_frontmatter(notes: &[Note]) -> String {
             _ => note.document.title.clone(),
         };
         out.push_str(&format!("### {title} (note:{})\n", note.id.as_str()));
-        out.push_str(&note.frontmatter.to_block());
+        // Source excerpts are durable audit evidence, not resident metadata.
+        // They return only through explicit archival/note reads.
+        out.push_str(&note.frontmatter.without("supporting_quotes").to_block());
         out.push('\n');
     }
     out
@@ -123,276 +125,288 @@ pub(super) fn assemble_with_cap(
     counter: &dyn TokenCounter,
     history_cap: Option<usize>,
 ) -> ContextResult<AssembledContext> {
-        let available = budget.available();
+    let available = budget.available();
 
-        // Keep-first priority (what survives budget pressure): continuity seed →
-        // schema digest → active-note frontmatter (the core tier, ADR 081 slice
-        // 7) → the question → grounding facts → recently-touched-note
-        // frontmatter → recalled episodes (the recall tier) → recent history →
-        // tools (trimmed first). The *render* order differs (positional): blocks
-        // lead, history + current prompt trail, closest to the generation point.
-        let allocator = BudgetAllocator::new(vec![
-            ContextSection::System,
+    // Keep-first priority (what survives budget pressure): continuity seed →
+    // schema digest → active-note frontmatter (the core tier, ADR 081 slice
+    // 7) → the question → grounding facts → recently-touched-note
+    // frontmatter → recalled episodes (the recall tier) → recent history →
+    // tools (trimmed first). The *render* order differs (positional): blocks
+    // lead, history + current prompt trail, closest to the generation point.
+    let allocator = BudgetAllocator::new(vec![
+        ContextSection::System,
+        ContextSection::Schema,
+        ContextSection::ActiveNotes,
+        ContextSection::UserPrompt,
+        ContextSection::KnowledgeGraph,
+        ContextSection::RecentNotes,
+        ContextSection::RecalledEpisodes,
+        ContextSection::History,
+        ContextSection::Tools,
+    ]);
+
+    // ── Candidate atomic blocks (each → one leading `system` message) ──
+    let make_block = |section: ContextSection,
+                      header: &str,
+                      body: &str|
+     -> Option<(ContextSection, String, usize)> {
+        let body = body.trim();
+        if body.is_empty() {
+            return None;
+        }
+        let content = format!("{header}\n{body}");
+        let tokens = counter.count(&content);
+        Some((section, content, tokens))
+    };
+    let mut blocks: Vec<(ContextSection, String, usize)> = Vec::new();
+    if let Some(seed) = episode.session_seed
+        && let Some(b) = make_block(ContextSection::System, "Session so far:", seed)
+    {
+        blocks.push(b);
+    }
+    // Core tier (ADR 081 slice 7): the in-force schema digest, so the model
+    // always knows the installed types/relations — degrades like every
+    // other atomic section under budget pressure (an engine with no schema
+    // pack installed yields an empty digest, so this is silently absent).
+    if let Ok(digest) = crate::schema::digest(episode.engine)
+        && !digest.is_empty()
+        && let Some(b) = make_block(
             ContextSection::Schema,
-            ContextSection::ActiveNotes,
-            ContextSection::UserPrompt,
+            "In-force schema (get_graph_schema digest):",
+            &digest.render_compact(),
+        )
+    {
+        blocks.push(b);
+    }
+    // Core tier: active-note frontmatter only — never bodies (see
+    // `render_notes_frontmatter`).
+    if let Some(b) = make_block(
+        ContextSection::ActiveNotes,
+        "Active notes (frontmatter only):",
+        &render_notes_frontmatter(episode.active_notes),
+    ) {
+        blocks.push(b);
+    }
+    if let Some(kg) = episode.kg_context
+        && let Some(b) = make_block(
             ContextSection::KnowledgeGraph,
-            ContextSection::RecentNotes,
+            "Relevant knowledge from your memory:",
+            kg,
+        )
+    {
+        blocks.push(b);
+    }
+    // Recall tier: recently-touched-note frontmatter only — never bodies.
+    if let Some(b) = make_block(
+        ContextSection::RecentNotes,
+        "Recently touched notes (frontmatter only):",
+        &render_notes_frontmatter(episode.recent_notes),
+    ) {
+        blocks.push(b);
+    }
+    if !episode.recalled.is_empty() {
+        let body = format!("- {}", episode.recalled.join("\n- "));
+        if let Some(b) = make_block(
             ContextSection::RecalledEpisodes,
-            ContextSection::History,
-            ContextSection::Tools,
-        ]);
-
-        // ── Candidate atomic blocks (each → one leading `system` message) ──
-        let make_block = |section: ContextSection,
-                          header: &str,
-                          body: &str|
-         -> Option<(ContextSection, String, usize)> {
-            let body = body.trim();
-            if body.is_empty() {
-                return None;
-            }
-            let content = format!("{header}\n{body}");
-            let tokens = counter.count(&content);
-            Some((section, content, tokens))
-        };
-        let mut blocks: Vec<(ContextSection, String, usize)> = Vec::new();
-        if let Some(seed) = episode.session_seed
-            && let Some(b) = make_block(ContextSection::System, "Session so far:", seed)
-        {
-            blocks.push(b);
-        }
-        // Core tier (ADR 081 slice 7): the in-force schema digest, so the model
-        // always knows the installed types/relations — degrades like every
-        // other atomic section under budget pressure (an engine with no schema
-        // pack installed yields an empty digest, so this is silently absent).
-        if let Ok(digest) = crate::schema::digest(episode.engine)
-            && !digest.is_empty()
-            && let Some(b) = make_block(
-                ContextSection::Schema,
-                "In-force schema (get_graph_schema digest):",
-                &digest.render_compact(),
-            )
-        {
-            blocks.push(b);
-        }
-        // Core tier: active-note frontmatter only — never bodies (see
-        // `render_notes_frontmatter`).
-        if let Some(b) = make_block(
-            ContextSection::ActiveNotes,
-            "Active notes (frontmatter only):",
-            &render_notes_frontmatter(episode.active_notes),
+            "Relevant past episodes:",
+            &body,
         ) {
             blocks.push(b);
         }
-        if let Some(kg) = episode.kg_context
-            && let Some(b) =
-                make_block(ContextSection::KnowledgeGraph, "Relevant knowledge from your memory:", kg)
-        {
-            blocks.push(b);
-        }
-        // Recall tier: recently-touched-note frontmatter only — never bodies.
-        if let Some(b) = make_block(
-            ContextSection::RecentNotes,
-            "Recently touched notes (frontmatter only):",
-            &render_notes_frontmatter(episode.recent_notes),
-        ) {
-            blocks.push(b);
-        }
-        if !episode.recalled.is_empty() {
-            let body = format!("- {}", episode.recalled.join("\n- "));
-            if let Some(b) = make_block(ContextSection::RecalledEpisodes, "Relevant past episodes:", &body)
-            {
-                blocks.push(b);
-            }
-        }
+    }
 
-        // ── Divisible sections: history turns + the tool catalog ──
-        let history: Vec<(&'static str, &str, usize)> = episode
-            .conversation
-            .map(|c| {
-                c.turns
-                    .iter()
-                    .map(|t| {
-                        let role = match t.speaker {
-                            Speaker::Operator => "user",
-                            Speaker::Agent => "assistant",
-                        };
-                        (role, t.text.as_str(), counter.count(&t.text))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let history_total: usize = history.iter().map(|(_, _, t)| *t).sum();
+    // ── Divisible sections: history turns + the tool catalog ──
+    let history: Vec<(&'static str, &str, usize)> = episode
+        .conversation
+        .map(|c| {
+            c.turns
+                .iter()
+                .map(|t| {
+                    let role = match t.speaker {
+                        Speaker::Operator => "user",
+                        Speaker::Agent => "assistant",
+                    };
+                    (role, t.text.as_str(), counter.count(&t.text))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let history_total: usize = history.iter().map(|(_, _, t)| *t).sum();
 
-        let tool_costs: Vec<usize> = episode
-            .tool_catalog
-            .iter()
-            .map(|t| counter.count(&t.to_string()))
-            .collect();
-        let tools_total: usize = tool_costs.iter().sum();
+    let tool_costs: Vec<usize> = episode
+        .tool_catalog
+        .iter()
+        .map(|t| counter.count(&t.to_string()))
+        .collect();
+    let tools_total: usize = tool_costs.iter().sum();
 
-        // ── Budget division (one allocator, not three independent caps) ──
-        let mut requested: BTreeMap<ContextSection, usize> = BTreeMap::new();
-        for (section, _, tokens) in &blocks {
-            *requested.entry(*section).or_insert(0) += *tokens;
-        }
-        if history_total > 0 {
-            requested.insert(ContextSection::History, history_total);
+    // ── Budget division (one allocator, not three independent caps) ──
+    let mut requested: BTreeMap<ContextSection, usize> = BTreeMap::new();
+    for (section, _, tokens) in &blocks {
+        *requested.entry(*section).or_insert(0) += *tokens;
+    }
+    if history_total > 0 {
+        requested.insert(ContextSection::History, history_total);
+    } else {
+        requested.insert(
+            ContextSection::UserPrompt,
+            counter.count(episode.user_prompt),
+        );
+    }
+    if tools_total > 0 {
+        requested.insert(ContextSection::Tools, tools_total);
+    }
+    // Atomic sections render whole-or-not (no partial block without a summary —
+    // that's 44c-full); history + tools degrade smoothly within their grant.
+    let atomic = [
+        ContextSection::System,
+        ContextSection::Schema,
+        ContextSection::ActiveNotes,
+        ContextSection::KnowledgeGraph,
+        ContextSection::RecentNotes,
+        ContextSection::RecalledEpisodes,
+        ContextSection::UserPrompt,
+    ];
+    let granted = allocator.allocate_keep_first(available, &requested, &atomic);
+
+    // ── Render ──
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
+    let mut dropped: Vec<DroppedSpan> = Vec::new();
+
+    // Leading atomic blocks, in render order (seed → kg → recalled). A block
+    // that didn't win its grant is recorded as dropped (safety can veto).
+    for (section, content, tokens) in &blocks {
+        let grant = granted.get(section).copied().unwrap_or(0);
+        if *tokens > 0 && grant >= *tokens {
+            messages.push(json!({ "role": "system", "content": content }));
+            *section_tokens.entry(*section).or_insert(0) += *tokens;
         } else {
-            requested.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
+            dropped.push(DroppedSpan::with_reason(
+                *section,
+                content.clone(),
+                None,
+                DropReason::Budget,
+            ));
         }
-        if tools_total > 0 {
-            requested.insert(ContextSection::Tools, tools_total);
+    }
+
+    // History within its grant: 44e discourse selection chooses *which* turns
+    // (recency, or graph-proximity when the conversation carries entities),
+    // always keeping the most recent turn (= the current prompt), then renders
+    // the kept turns chronologically.
+    if history_total > 0 {
+        let conv = episode
+            .conversation
+            .expect("history_total > 0 implies a conversation is present");
+        let grant = granted.get(&ContextSection::History).copied().unwrap_or(0);
+        let proximity = super::discourse::has_proximity_signal(conv);
+        // PassiveManager caps eligibility to the last `tail` turns (the
+        // immediate exchange); the rest is carried by recall, not verbatim.
+        let considered: Option<std::collections::HashSet<usize>> = history_cap.map(|n| {
+            let start = history.len().saturating_sub(n.max(1));
+            (start..history.len()).collect()
+        });
+        let mut used = 0usize;
+        let mut keep: Vec<usize> = Vec::new();
+        for i in super::discourse::rank_turns_keep_first(conv) {
+            if let Some(set) = &considered
+                && !set.contains(&i)
+            {
+                continue;
+            }
+            let t = history[i].2;
+            if keep.is_empty() {
+                used += t;
+                keep.push(i);
+                continue;
+            }
+            if used + t > grant {
+                // Recency keeps a contiguous recent tail (stop); proximity may
+                // still fit a smaller, more-relevant earlier turn (skip on).
+                if proximity {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            used += t;
+            keep.push(i);
         }
-        // Atomic sections render whole-or-not (no partial block without a summary —
-        // that's 44c-full); history + tools degrade smoothly within their grant.
-        let atomic = [
-            ContextSection::System,
-            ContextSection::Schema,
-            ContextSection::ActiveNotes,
-            ContextSection::KnowledgeGraph,
-            ContextSection::RecentNotes,
-            ContextSection::RecalledEpisodes,
+        keep.sort_unstable(); // chronological render order
+        for &i in &keep {
+            let (role, text, _) = history[i];
+            messages.push(json!({ "role": role, "content": text }));
+        }
+        section_tokens.insert(ContextSection::History, used);
+        // Per-span drop reasons (ADR 065 D12, open question 5 — per-span, not
+        // per-section): a turn dropped because it was outside the tail cap is
+        // `Age`; a turn that *was* eligible (inside the tail) but lost the
+        // budget race is `Budget`. `history_cap=None` (CompactingManager)
+        // ⇒ every drop is Budget.
+        let tail_start = history_cap.map(|n| history.len().saturating_sub(n.max(1)));
+        for (i, (_, text, _)) in history.iter().enumerate() {
+            if !keep.contains(&i) {
+                let reason = match tail_start {
+                    Some(start) if i < start => DropReason::Age,
+                    _ => DropReason::Budget,
+                };
+                dropped.push(DroppedSpan::with_reason(
+                    ContextSection::History,
+                    (*text).to_string(),
+                    None,
+                    reason,
+                ));
+            }
+        }
+    } else {
+        // No conversation ⇒ the current prompt as a single user turn (never
+        // dropped, even under an impossibly tight budget).
+        messages.push(json!({ "role": "user", "content": episode.user_prompt }));
+        section_tokens.insert(
             ContextSection::UserPrompt,
-        ];
-        let granted = allocator.allocate_keep_first(available, &requested, &atomic);
+            counter.count(episode.user_prompt),
+        );
+    }
 
-        // ── Render ──
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
-        let mut dropped: Vec<DroppedSpan> = Vec::new();
-
-        // Leading atomic blocks, in render order (seed → kg → recalled). A block
-        // that didn't win its grant is recorded as dropped (safety can veto).
-        for (section, content, tokens) in &blocks {
-            let grant = granted.get(section).copied().unwrap_or(0);
-            if *tokens > 0 && grant >= *tokens {
-                messages.push(json!({ "role": "system", "content": content }));
-                *section_tokens.entry(*section).or_insert(0) += *tokens;
+    // Tools within their grant: keep whole tools in catalog order until full
+    // (the lowest-priority section — measure-first Q2's #1 lever for small
+    // windows). With a large window the whole catalog passes unchanged.
+    let mut tools: Vec<serde_json::Value> = Vec::new();
+    if tools_total > 0 {
+        let grant = granted.get(&ContextSection::Tools).copied().unwrap_or(0);
+        let mut used = 0usize;
+        for (tool, cost) in episode.tool_catalog.iter().zip(&tool_costs) {
+            if used + *cost <= grant {
+                used += *cost;
+                tools.push(tool.clone());
             } else {
                 dropped.push(DroppedSpan::with_reason(
-                    *section,
-                    content.clone(),
+                    ContextSection::Tools,
+                    "(tool)",
                     None,
                     DropReason::Budget,
                 ));
             }
         }
-
-        // History within its grant: 44e discourse selection chooses *which* turns
-        // (recency, or graph-proximity when the conversation carries entities),
-        // always keeping the most recent turn (= the current prompt), then renders
-        // the kept turns chronologically.
-        if history_total > 0 {
-            let conv = episode
-                .conversation
-                .expect("history_total > 0 implies a conversation is present");
-            let grant = granted.get(&ContextSection::History).copied().unwrap_or(0);
-            let proximity = super::discourse::has_proximity_signal(conv);
-            // PassiveManager caps eligibility to the last `tail` turns (the
-            // immediate exchange); the rest is carried by recall, not verbatim.
-            let considered: Option<std::collections::HashSet<usize>> = history_cap.map(|n| {
-                let start = history.len().saturating_sub(n.max(1));
-                (start..history.len()).collect()
-            });
-            let mut used = 0usize;
-            let mut keep: Vec<usize> = Vec::new();
-            for i in super::discourse::rank_turns_keep_first(conv) {
-                if let Some(set) = &considered
-                    && !set.contains(&i)
-                {
-                    continue;
-                }
-                let t = history[i].2;
-                if keep.is_empty() {
-                    used += t;
-                    keep.push(i);
-                    continue;
-                }
-                if used + t > grant {
-                    // Recency keeps a contiguous recent tail (stop); proximity may
-                    // still fit a smaller, more-relevant earlier turn (skip on).
-                    if proximity {
-                        continue;
-                    } else {
-                        break;
-                    }
-                }
-                used += t;
-                keep.push(i);
-            }
-            keep.sort_unstable(); // chronological render order
-            for &i in &keep {
-                let (role, text, _) = history[i];
-                messages.push(json!({ "role": role, "content": text }));
-            }
-            section_tokens.insert(ContextSection::History, used);
-            // Per-span drop reasons (ADR 065 D12, open question 5 — per-span, not
-            // per-section): a turn dropped because it was outside the tail cap is
-            // `Age`; a turn that *was* eligible (inside the tail) but lost the
-            // budget race is `Budget`. `history_cap=None` (CompactingManager)
-            // ⇒ every drop is Budget.
-            let tail_start = history_cap.map(|n| history.len().saturating_sub(n.max(1)));
-            for (i, (_, text, _)) in history.iter().enumerate() {
-                if !keep.contains(&i) {
-                    let reason = match tail_start {
-                        Some(start) if i < start => DropReason::Age,
-                        _ => DropReason::Budget,
-                    };
-                    dropped.push(DroppedSpan::with_reason(
-                        ContextSection::History,
-                        (*text).to_string(),
-                        None,
-                        reason,
-                    ));
-                }
-            }
-        } else {
-            // No conversation ⇒ the current prompt as a single user turn (never
-            // dropped, even under an impossibly tight budget).
-            messages.push(json!({ "role": "user", "content": episode.user_prompt }));
-            section_tokens.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
+        if used > 0 {
+            section_tokens.insert(ContextSection::Tools, used);
         }
+    }
 
-        // Tools within their grant: keep whole tools in catalog order until full
-        // (the lowest-priority section — measure-first Q2's #1 lever for small
-        // windows). With a large window the whole catalog passes unchanged.
-        let mut tools: Vec<serde_json::Value> = Vec::new();
-        if tools_total > 0 {
-            let grant = granted.get(&ContextSection::Tools).copied().unwrap_or(0);
-            let mut used = 0usize;
-            for (tool, cost) in episode.tool_catalog.iter().zip(&tool_costs) {
-                if used + *cost <= grant {
-                    used += *cost;
-                    tools.push(tool.clone());
-                } else {
-                    dropped.push(DroppedSpan::with_reason(
-                        ContextSection::Tools,
-                        "(tool)",
-                        None,
-                        DropReason::Budget,
-                    ));
-                }
-            }
-            if used > 0 {
-                section_tokens.insert(ContextSection::Tools, used);
-            }
-        }
-
-        Ok(AssembledContext {
-            messages,
-            tools,
-            section_tokens,
-            dropped,
-        })
+    Ok(AssembledContext {
+        messages,
+        tools,
+        section_tokens,
+        dropped,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::conversation::ConversationState;
     use crate::agent::context::manager::HeuristicTokenCounter;
+    use crate::agent::conversation::ConversationState;
     use crate::engine::{Engine, EngineConfig};
 
     fn test_engine() -> (Engine, tempfile::TempDir) {
@@ -422,7 +436,10 @@ mod tests {
         // All three turns rendered, in order, with the right roles.
         assert_eq!(out.messages.len(), 3);
         assert_eq!(out.messages[0]["role"], "user");
-        assert_eq!(out.messages[0]["content"], "I'm thinking of the Eiffel Tower.");
+        assert_eq!(
+            out.messages[0]["content"],
+            "I'm thinking of the Eiffel Tower."
+        );
         assert_eq!(out.messages[1]["role"], "assistant");
         assert_eq!(out.messages[2]["role"], "user");
         assert_eq!(out.messages[2]["content"], "What city is it in?");
@@ -442,15 +459,31 @@ mod tests {
             .expect("assemble");
         // Three leading `system` context blocks (seed → kg → recalled), then the
         // current prompt as the final user turn.
-        let systems = out.messages.iter().filter(|m| m["role"] == "system").count();
-        assert_eq!(systems, 3, "seed + kg + recalled blocks: {:?}", out.messages);
+        let systems = out
+            .messages
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .count();
+        assert_eq!(
+            systems, 3,
+            "seed + kg + recalled blocks: {:?}",
+            out.messages
+        );
         assert!(
-            out.messages.iter().any(|m| m["content"].as_str().unwrap_or("").contains("Paris")),
+            out.messages
+                .iter()
+                .any(|m| m["content"].as_str().unwrap_or("").contains("Paris")),
             "KG/recalled content present"
         );
         assert_eq!(out.messages.last().unwrap()["role"], "user");
-        assert!(out.section_tokens.contains_key(&ContextSection::KnowledgeGraph));
-        assert!(out.section_tokens.contains_key(&ContextSection::RecalledEpisodes));
+        assert!(
+            out.section_tokens
+                .contains_key(&ContextSection::KnowledgeGraph)
+        );
+        assert!(
+            out.section_tokens
+                .contains_key(&ContextSection::RecalledEpisodes)
+        );
     }
 
     #[test]
@@ -475,7 +508,11 @@ mod tests {
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
         assert_eq!(out.tools.len(), 2, "large budget keeps every tool");
-        assert!(out.dropped.iter().all(|d| d.section != ContextSection::Tools));
+        assert!(
+            out.dropped
+                .iter()
+                .all(|d| d.section != ContextSection::Tools)
+        );
     }
 
     #[test]
@@ -490,9 +527,15 @@ mod tests {
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::new(30, 6), &HeuristicTokenCounter)
             .expect("assemble");
-        assert!(out.tools.len() < 3, "tool catalog trimmed to the budget: {}", out.tools.len());
         assert!(
-            out.dropped.iter().any(|d| d.section == ContextSection::Tools),
+            out.tools.len() < 3,
+            "tool catalog trimmed to the budget: {}",
+            out.tools.len()
+        );
+        assert!(
+            out.dropped
+                .iter()
+                .any(|d| d.section == ContextSection::Tools),
             "trimmed tools recorded as dropped"
         );
     }
@@ -559,7 +602,9 @@ mod tests {
             "digest didn't fit whole ⇒ dropped, not partially rendered"
         );
         assert!(
-            out.dropped.iter().any(|d| d.section == ContextSection::Schema),
+            out.dropped
+                .iter()
+                .any(|d| d.section == ContextSection::Schema),
             "the drop is recorded for telemetry/safety"
         );
     }
@@ -596,18 +641,54 @@ mod tests {
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
 
-        assert!(out.section_tokens.contains_key(&ContextSection::ActiveNotes));
+        assert!(
+            out.section_tokens
+                .contains_key(&ContextSection::ActiveNotes)
+        );
         let rendered: String = out
             .messages
             .iter()
             .filter_map(|m| m["content"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("Paris"), "frontmatter title present: {rendered}");
+        assert!(
+            rendered.contains("Paris"),
+            "frontmatter title present: {rendered}"
+        );
         assert!(
             !rendered.contains("SECRET BODY TEXT"),
             "body must never be resident: {rendered}"
         );
+    }
+
+    #[test]
+    fn supporting_source_quotes_are_archival_not_resident() {
+        use crate::library::note::FrontmatterValue;
+
+        let (engine, _tmp) = test_engine();
+        let mut note = note_with_body("Keph", "The answer is QZ-731.");
+        note.frontmatter.insert(
+            "supporting_quotes",
+            FrontmatterValue::List(vec!["The answer is QZ-731.".into()]),
+        );
+        note.frontmatter.insert(
+            "citations",
+            FrontmatterValue::List(vec!["book:alpha#chapter 3".into()]),
+        );
+        let notes = vec![note];
+        let episode = EpisodeState::new("a", "resume", &engine).with_notes(&notes, &[]);
+        let out = CompactingManager
+            .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
+            .expect("assemble");
+        let rendered = out
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("book:alpha#chapter 3"));
+        assert!(!rendered.contains("QZ-731"));
+        assert!(!rendered.contains("supporting_quotes"));
     }
 
     #[test]
@@ -621,14 +702,20 @@ mod tests {
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
 
-        assert!(out.section_tokens.contains_key(&ContextSection::RecentNotes));
+        assert!(
+            out.section_tokens
+                .contains_key(&ContextSection::RecentNotes)
+        );
         let rendered: String = out
             .messages
             .iter()
             .filter_map(|m| m["content"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("Berlin"), "frontmatter title present: {rendered}");
+        assert!(
+            rendered.contains("Berlin"),
+            "frontmatter title present: {rendered}"
+        );
         assert!(
             !rendered.contains("SECRET BODY TEXT"),
             "body must never be resident: {rendered}"
@@ -656,8 +743,14 @@ mod tests {
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
-        assert!(!out.section_tokens.contains_key(&ContextSection::ActiveNotes));
-        assert!(!out.section_tokens.contains_key(&ContextSection::RecentNotes));
+        assert!(
+            !out.section_tokens
+                .contains_key(&ContextSection::ActiveNotes)
+        );
+        assert!(
+            !out.section_tokens
+                .contains_key(&ContextSection::RecentNotes)
+        );
     }
 
     #[test]
@@ -668,15 +761,18 @@ mod tests {
         for i in 0..20 {
             conv.record_operator_turn(&format!("turn number {i} here"));
         }
-        let episode = EpisodeState::new("a", "turn number 19 here", &engine)
-            .with_conversation(Some(&conv));
+        let episode =
+            EpisodeState::new("a", "turn number 19 here", &engine).with_conversation(Some(&conv));
         // available = window - reserved; use a tiny window to force trimming.
         let out = CompactingManager
             .assemble(&episode, &TokenBudget::new(40, 16), &HeuristicTokenCounter)
             .expect("assemble");
         // Fewer than all 20 turns, and the LAST rendered is the most recent.
         assert!(out.messages.len() < 20, "history trimmed to budget");
-        assert_eq!(out.messages.last().unwrap()["content"], "turn number 19 here");
+        assert_eq!(
+            out.messages.last().unwrap()["content"],
+            "turn number 19 here"
+        );
     }
 
     // ── Phase 44m: stats + drop-reason tests (ADR 065 D12) ────────────────
@@ -692,8 +788,9 @@ mod tests {
         let tools: Vec<_> = (0..3)
             .map(|i| json!({"type":"function","function":{"name":format!("tool{i}"),"description":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}}))
             .collect();
-        let episode = EpisodeState::new("a", "the quick brown fox jumps over the lazy dog", &engine)
-            .with_tools(&tools);
+        let episode =
+            EpisodeState::new("a", "the quick brown fox jumps over the lazy dog", &engine)
+                .with_tools(&tools);
         let budget = TokenBudget::new(60, 10); // available = 50
         let out = CompactingManager
             .assemble(&episode, &budget, &HeuristicTokenCounter)
@@ -710,7 +807,10 @@ mod tests {
 
         // Tools is the lowest-priority section ⇒ degrades first. Either it's
         // absent (got 0 grant) or its kept < in.
-        let tools_stat = stats.sections.iter().find(|s| s.section == ContextSection::Tools);
+        let tools_stat = stats
+            .sections
+            .iter()
+            .find(|s| s.section == ContextSection::Tools);
         if let Some(t) = tools_stat {
             assert!(
                 t.tokens_kept <= t.tokens_in,
@@ -726,7 +826,11 @@ mod tests {
 
         // The prompt (UserPrompt) is higher priority than Tools; it must
         // have been kept in full or absent (atomic) — not partially truncated.
-        if let Some(p) = stats.sections.iter().find(|s| s.section == ContextSection::UserPrompt) {
+        if let Some(p) = stats
+            .sections
+            .iter()
+            .find(|s| s.section == ContextSection::UserPrompt)
+        {
             assert!(
                 p.tokens_kept == p.tokens_in || p.tokens_kept == 0,
                 "prompt atomic: kept {} vs in {}",
@@ -779,7 +883,8 @@ mod tests {
         for i in 0..8 {
             conv.record_operator_turn(&format!("turn number {i} here"));
         }
-        let ep = EpisodeState::new("a", "turn number 7 here", &engine).with_conversation(Some(&conv));
+        let ep =
+            EpisodeState::new("a", "turn number 7 here", &engine).with_conversation(Some(&conv));
         let out = crate::agent::context::PassiveManager::with_tail(2)
             .assemble(&ep, &TokenBudget::default(), &HeuristicTokenCounter)
             .expect("assemble");
@@ -805,6 +910,10 @@ mod tests {
             .expect("assemble");
         let stats = CompactingManager.stats(&out, &budget);
         assert_eq!(stats.compacted, Some(0), "no history drops ⇒ compacted=0");
-        assert_eq!(stats.compaction_ratio, Some(1.0), "no compaction ⇒ ratio=1.0");
+        assert_eq!(
+            stats.compaction_ratio,
+            Some(1.0),
+            "no compaction ⇒ ratio=1.0"
+        );
     }
 }

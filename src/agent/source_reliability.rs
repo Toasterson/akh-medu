@@ -230,8 +230,7 @@ impl BetaDistribution {
 
     /// Confidence in the estimate (how many observations).
     pub fn confidence(&self) -> f32 {
-        (self.alpha + self.beta - 2.0).max(0.0)
-            / (1.0 + self.alpha + self.beta - 2.0)
+        (self.alpha + self.beta - 2.0).max(0.0) / (1.0 + self.alpha + self.beta - 2.0)
     }
 
     /// Update with an observation.
@@ -349,11 +348,7 @@ impl SourceReliabilityManager {
     ///
     /// When a claim from a source is verified as true or false, update
     /// the competence and integrity dimensions.
-    pub fn verify_claim(
-        &mut self,
-        source_id: SymbolId,
-        claim_was_true: bool,
-    ) {
+    pub fn verify_claim(&mut self, source_id: SymbolId, claim_was_true: bool) {
         let trust = self.get_or_create(source_id);
         // Competence: was the source accurate?
         trust.update(TrustDimension::Competence, claim_was_true, 1.0);
@@ -481,7 +476,10 @@ mod tests {
 
     #[test]
     fn beta_expected_value() {
-        let b = BetaDistribution { alpha: 8.0, beta: 2.0 };
+        let b = BetaDistribution {
+            alpha: 8.0,
+            beta: 2.0,
+        };
         assert!((b.expected() - 0.8).abs() < f32::EPSILON);
     }
 

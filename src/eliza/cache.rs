@@ -123,6 +123,9 @@ mod tests {
             },
         );
         assert!(cache.get("sage").is_none(), "should be expired");
-        assert!(cache.get_stale("sage").is_some(), "stale fallback available");
+        assert!(
+            cache.get_stale("sage").is_some(),
+            "stale fallback available"
+        );
     }
 }

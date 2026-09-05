@@ -58,19 +58,16 @@ impl Tool for EntitySchemaTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "entity_schema".into(),
-            description:
-                "Return an entity's type hierarchy (is-a values), outgoing and incoming \
+            description: "Return an entity's type hierarchy (is-a values), outgoing and incoming \
                  relation types, and a provenance summary (asserted vs. derived counts). \
                  An entity with no is-a returns an empty types array — detecting \
                  incomplete identity is a stated use."
-                    .into(),
-            parameters: vec![
-                ToolParam {
-                    name: "entity".into(),
-                    description: "Entity name or ID to inspect.".into(),
-                    required: true,
-                },
-            ],
+                .into(),
+            parameters: vec![ToolParam {
+                name: "entity".into(),
+                description: "Entity name or ID to inspect.".into(),
+                required: true,
+            }],
         }
     }
 
@@ -114,10 +111,7 @@ impl Tool for EntitySchemaTool {
             } else {
                 let pred_label = engine.resolve_label(t.predicate);
                 let obj_label = engine.resolve_label(t.object);
-                outgoing
-                    .entry(pred_label)
-                    .or_default()
-                    .push(obj_label);
+                outgoing.entry(pred_label).or_default().push(obj_label);
             }
             if t.provenance_id.is_some() {
                 derived += 1;
@@ -136,10 +130,7 @@ impl Tool for EntitySchemaTool {
             } else {
                 let pred_label = engine.resolve_label(t.predicate);
                 let subj_label = engine.resolve_label(t.subject);
-                incoming
-                    .entry(pred_label)
-                    .or_default()
-                    .push(subj_label);
+                incoming.entry(pred_label).or_default().push(subj_label);
             }
             if t.provenance_id.is_some() {
                 derived += 1;
@@ -153,21 +144,11 @@ impl Tool for EntitySchemaTool {
         let types_json: Vec<&str> = types.iter().map(|s| s.as_str()).collect();
         let out_json: serde_json::Value = outgoing
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                )
-            })
+            .map(|(k, v)| (k.clone(), v.iter().map(|s| s.as_str()).collect::<Vec<_>>()))
             .collect();
         let in_json: serde_json::Value = incoming
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                )
-            })
+            .map(|(k, v)| (k.clone(), v.iter().map(|s| s.as_str()).collect::<Vec<_>>()))
             .collect();
 
         let result = serde_json::json!({
@@ -190,7 +171,10 @@ impl Tool for EntitySchemaTool {
         );
 
         Ok(ToolOutput::ok_with_symbols(
-            format!("{summary}\n{}", serde_json::to_string_pretty(&result).unwrap_or_default()),
+            format!(
+                "{summary}\n{}",
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            ),
             vec![entity_id],
         ))
     }
@@ -198,10 +182,9 @@ impl Tool for EntitySchemaTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "entity_schema".into(),
-            description:
-                "Return an entity's type hierarchy, outgoing/incoming relations, and \
+            description: "Return an entity's type hierarchy, outgoing/incoming relations, and \
                  provenance summary."
-                    .into(),
+                .into(),
             parameters: vec![ToolParamSchema::required(
                 "entity",
                 "Entity name or ID to inspect.",
@@ -229,10 +212,9 @@ impl Tool for EntityTypesTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "entity_types".into(),
-            description:
-                "List every distinct entity type (the values of is-a relations) with \
+            description: "List every distinct entity type (the values of is-a relations) with \
                  counts of how many entities have that type."
-                    .into(),
+                .into(),
             parameters: vec![],
         }
     }
@@ -248,8 +230,7 @@ impl Tool for EntityTypesTool {
         };
 
         // Count distinct objects of is-a triples.
-        let mut counts: std::collections::BTreeMap<String, u64> =
-            std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
         let mut total_typed_entities = 0u64;
 
         for t in engine.all_triples() {
@@ -291,8 +272,7 @@ impl Tool for EntityTypesTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "entity_types".into(),
-            description:
-                "List every distinct entity type (is-a objects) with counts.".into(),
+            description: "List every distinct entity type (is-a objects) with counts.".into(),
             parameters: vec![],
             danger: DangerInfo {
                 level: DangerLevel::Safe,
@@ -316,11 +296,10 @@ impl Tool for EntityTypeFilterTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "entity_type_filter".into(),
-            description:
-                "List all entities of a given type (is-a == type), paginated, with \
+            description: "List all entities of a given type (is-a == type), paginated, with \
                  core attributes (label, created_at). Pass page=0 and page_size=N; \
                  the response includes total, page, page_size, and has_more."
-                    .into(),
+                .into(),
             parameters: vec![
                 ToolParam {
                     name: "type".into(),
@@ -393,10 +372,8 @@ impl Tool for EntityTypeFilterTool {
 
         // Build a lookup of SymbolMeta for created_at.
         let symbols_meta = engine.dump_symbols();
-        let meta_lookup: std::collections::HashMap<_, _> = symbols_meta
-            .iter()
-            .map(|m| (m.id, m.clone()))
-            .collect();
+        let meta_lookup: std::collections::HashMap<_, _> =
+            symbols_meta.iter().map(|m| (m.id, m.clone())).collect();
 
         let entities_json: Vec<serde_json::Value> = page_entities
             .iter()
@@ -432,7 +409,10 @@ impl Tool for EntityTypeFilterTool {
         let mut involved = page_entities;
         involved.push(type_id);
         Ok(ToolOutput::ok_with_symbols(
-            format!("{summary}\n{}", serde_json::to_string_pretty(&result).unwrap_or_default()),
+            format!(
+                "{summary}\n{}",
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            ),
             involved,
         ))
     }
@@ -440,9 +420,8 @@ impl Tool for EntityTypeFilterTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "entity_type_filter".into(),
-            description:
-                "Paginated list of all entities of a given type with core attributes."
-                    .into(),
+            description: "Paginated list of all entities of a given type with core attributes."
+                .into(),
             parameters: vec![
                 ToolParamSchema::required("type", "Entity type to filter by (is-a object)."),
                 ToolParamSchema::optional("page", "Zero-indexed page number (default: 0)."),
@@ -499,10 +478,7 @@ mod tests {
         add_triple(&e, "OpenClaw", "hosts", "Tecton");
 
         let out = EntitySchemaTool
-            .execute(
-                &e,
-                ToolInput::new().with_param("entity", "Tecton"),
-            )
+            .execute(&e, ToolInput::new().with_param("entity", "Tecton"))
             .unwrap();
 
         assert!(out.success);
@@ -523,10 +499,7 @@ mod tests {
         add_triple(&e, "Tecton", "runs-on", "MacMini");
 
         let out = EntitySchemaTool
-            .execute(
-                &e,
-                ToolInput::new().with_param("entity", "MacMini"),
-            )
+            .execute(&e, ToolInput::new().with_param("entity", "MacMini"))
             .unwrap();
 
         assert!(out.success);
@@ -539,10 +512,7 @@ mod tests {
         let e = engine();
 
         let out = EntitySchemaTool
-            .execute(
-                &e,
-                ToolInput::new().with_param("entity", "Nonexistent"),
-            )
+            .execute(&e, ToolInput::new().with_param("entity", "Nonexistent"))
             .unwrap();
 
         assert!(out.success);
@@ -640,10 +610,7 @@ mod tests {
         add_triple(&e, "Tecton", "is-a", "DigitalArchitect");
 
         let out = EntityTypeFilterTool
-            .execute(
-                &e,
-                ToolInput::new().with_param("type", "NonexistentType"),
-            )
+            .execute(&e, ToolInput::new().with_param("type", "NonexistentType"))
             .unwrap();
 
         assert!(out.success);
@@ -682,8 +649,14 @@ mod tests {
         registry.register(Box::new(EntityTypesTool));
         registry.register(Box::new(EntityTypeFilterTool));
 
-        assert!(registry.get("entity_schema").is_some(), "entity_schema not registered");
-        assert!(registry.get("entity_types").is_some(), "entity_types not registered");
+        assert!(
+            registry.get("entity_schema").is_some(),
+            "entity_schema not registered"
+        );
+        assert!(
+            registry.get("entity_types").is_some(),
+            "entity_types not registered"
+        );
         assert!(
             registry.get("entity_type_filter").is_some(),
             "entity_type_filter not registered"

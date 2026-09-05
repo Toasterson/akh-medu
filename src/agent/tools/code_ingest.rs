@@ -304,14 +304,7 @@ fn ingest_file(
     if let Some(doc) = extract_inner_doc_comments(&syntax.attrs) {
         let truncated = truncate(&doc, 256);
         if let Ok(doc_sym) = engine.resolve_or_create_entity(&truncated) {
-            add_triple(
-                engine,
-                module_sym,
-                preds.has_doc,
-                doc_sym,
-                1.0,
-                compartment,
-            )?;
+            add_triple(engine, module_sym, preds.has_doc, doc_sym, 1.0, compartment)?;
         }
     }
 
@@ -978,9 +971,7 @@ fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIde
                         .to_string_lossy()
                         .to_string()
                 });
-            let name = override_name
-                .map(|s| s.to_string())
-                .unwrap_or(auto_name);
+            let name = override_name.map(|s| s.to_string()).unwrap_or(auto_name);
             let mt_label = format!("mt:repo:{name}");
             let root_path = current.to_string_lossy().to_string();
             return Some(RepoIdentity {
@@ -997,14 +988,12 @@ fn detect_repository(path: &Path, override_name: Option<&str>) -> Option<RepoIde
 
     // No .git found — fall back to directory name.
     let dir = start;
-    let name = override_name
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            dir.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string()
-        });
+    let name = override_name.map(|s| s.to_string()).unwrap_or_else(|| {
+        dir.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    });
     let mt_label = format!("mt:repo:{name}");
     let root_path = dir.to_string_lossy().to_string();
     Some(RepoIdentity {
@@ -1027,7 +1016,8 @@ fn parse_git_remote(git_dir: &Path) -> Option<String> {
             in_origin = trimmed == r#"[remote "origin"]"#;
             continue;
         }
-        if in_origin && trimmed.starts_with("url")
+        if in_origin
+            && trimmed.starts_with("url")
             && let Some((_key, val)) = trimmed.split_once('=')
         {
             return Some(val.trim().to_string());

@@ -119,7 +119,9 @@ impl Default for ModelManagerConfig {
     }
 }
 
-fn default_ttl() -> u64 { 300 }
+fn default_ttl() -> u64 {
+    300
+}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -148,7 +150,9 @@ pub enum ModelManagerError {
     )]
     NoBackendAvailable { agent_id: String },
 
-    #[error("fallback API has no key — set AKH_EXTRACTION_API_KEY or configure fallback_api.api_key")]
+    #[error(
+        "fallback API has no key — set AKH_EXTRACTION_API_KEY or configure fallback_api.api_key"
+    )]
     #[diagnostic(
         code(akh::model_manager::no_api_key),
         help(
@@ -163,7 +167,11 @@ pub enum ModelManagerError {
         code(akh::model_manager::fallback_request_failed),
         help("Verify the fallback_api base_url, api_key, and model name in ModelManagerConfig.")
     )]
-    FallbackRequestFailed { url: String, status: u16, body: String },
+    FallbackRequestFailed {
+        url: String,
+        status: u16,
+        body: String,
+    },
 
     #[error("failed to parse fallback API response: {reason}")]
     #[diagnostic(
@@ -218,7 +226,8 @@ impl UsageLedger {
     /// Record one model turn's token counts.
     fn record(&self, prompt: u64, completion: u64) {
         self.prompt_tokens.fetch_add(prompt, Ordering::Relaxed);
-        self.completion_tokens.fetch_add(completion, Ordering::Relaxed);
+        self.completion_tokens
+            .fetch_add(completion, Ordering::Relaxed);
         self.turns.fetch_add(1, Ordering::Relaxed);
         self.last_context_tokens
             .store(prompt + completion, Ordering::Relaxed);
@@ -408,11 +417,12 @@ impl AgentModelManager {
     pub fn generate(&self, agent_id: &str, user_prompt: &str) -> ModelManagerResult<String> {
         let system_prompt = {
             let mut agents = self.agents.lock().expect("model manager lock poisoned");
-            let entry = agents
-                .get_mut(agent_id)
-                .ok_or_else(|| ModelManagerError::AgentNotLoaded {
-                    agent_id: agent_id.into(),
-                })?;
+            let entry =
+                agents
+                    .get_mut(agent_id)
+                    .ok_or_else(|| ModelManagerError::AgentNotLoaded {
+                        agent_id: agent_id.into(),
+                    })?;
             entry.last_used = Instant::now();
             entry.system_prompt.clone()
         };
@@ -665,8 +675,13 @@ impl AgentModelManager {
         system_prompt: &str,
         user_prompt: &str,
     ) -> ModelManagerResult<String> {
-        let api_key = api_cfg.resolve_api_key().ok_or(ModelManagerError::NoApiKey)?;
-        let url = format!("{}/chat/completions", api_cfg.base_url.trim_end_matches('/'));
+        let api_key = api_cfg
+            .resolve_api_key()
+            .ok_or(ModelManagerError::NoApiKey)?;
+        let url = format!(
+            "{}/chat/completions",
+            api_cfg.base_url.trim_end_matches('/')
+        );
 
         let body = serde_json::json!({
             "model": api_cfg.model,
@@ -697,9 +712,11 @@ impl AgentModelManager {
             })?;
 
         let resp_body: serde_json::Value =
-            response.into_json().map_err(|e| ModelManagerError::FallbackParseFailed {
-                reason: format!("JSON decode failed: {e}"),
-            })?;
+            response
+                .into_json()
+                .map_err(|e| ModelManagerError::FallbackParseFailed {
+                    reason: format!("JSON decode failed: {e}"),
+                })?;
 
         tracing::debug!(agent_id, backend = "fallback_api", "inference succeeded");
 
@@ -892,10 +909,7 @@ fn generate_tool_operations_section(
 
         section.push_str(&format!(
             "- **{}** {} — {} (Danger: {})\n",
-            manifest.name,
-            danger_emoji,
-            manifest.description,
-            manifest.danger.level
+            manifest.name, danger_emoji, manifest.description, manifest.danger.level
         ));
     }
 
@@ -1064,7 +1078,11 @@ mod tests {
     fn thoth_psyche() -> Psyche {
         let mut p = Psyche::default();
         p.persona.name = "Thoth".into();
-        p.persona.traits = vec!["analytical".into(), "knowledgeable".into(), "investigative".into()];
+        p.persona.traits = vec![
+            "analytical".into(),
+            "knowledgeable".into(),
+            "investigative".into(),
+        ];
         p.persona.tone = vec!["scholarly".into(), "methodical".into()];
         p.archetypes.sage = 0.95;
         p.archetypes.healer = 0.2;
@@ -1104,9 +1122,13 @@ mod tests {
 
     #[test]
     fn tecton_and_thoth_produce_different_prompts() {
-        let tecton = build_system_prompt("t1", "Tecton", Some(&tecton_psyche()), PromptMode::Standard);
+        let tecton =
+            build_system_prompt("t1", "Tecton", Some(&tecton_psyche()), PromptMode::Standard);
         let thoth = build_system_prompt("t2", "Thoth", Some(&thoth_psyche()), PromptMode::Standard);
-        assert_ne!(tecton, thoth, "different psyches must produce different prompts");
+        assert_ne!(
+            tecton, thoth,
+            "different psyches must produce different prompts"
+        );
     }
 
     // ── PromptMode tests ────────────────────────────────────────────────
@@ -1208,7 +1230,10 @@ mod tests {
             prompt.starts_with("You are Thoth (id: t1)"),
             "psyche-derived identity leads the assembly, got: {prompt:?}"
         );
-        assert!(prompt.contains("archetype"), "psyche framing survives when explicit is set");
+        assert!(
+            prompt.contains("archetype"),
+            "psyche framing survives when explicit is set"
+        );
         assert!(
             prompt.contains("# Operator Instructions"),
             "operator section is clearly delimited"
@@ -1219,10 +1244,22 @@ mod tests {
         let psyche_at = prompt.find("archetype").unwrap();
         let operator_at = prompt.find(explicit).unwrap();
         let tools_at = prompt.find("Available Tools").unwrap();
-        assert!(psyche_at < operator_at, "psyche body precedes the operator section");
-        assert!(operator_at < tools_at, "operator section precedes the tool section");
-        assert!(prompt.contains("Available Tools"), "tool section is appended");
-        assert!(prompt.contains("Operating Conventions"), "conventions are appended");
+        assert!(
+            psyche_at < operator_at,
+            "psyche body precedes the operator section"
+        );
+        assert!(
+            operator_at < tools_at,
+            "operator section precedes the tool section"
+        );
+        assert!(
+            prompt.contains("Available Tools"),
+            "tool section is appended"
+        );
+        assert!(
+            prompt.contains("Operating Conventions"),
+            "conventions are appended"
+        );
     }
 
     #[test]
@@ -1232,7 +1269,12 @@ mod tests {
         // absent, the assembly must be EXACTLY `psyche_body + tool_section +
         // conventions`, with no operator section inserted at all.
         let assembled = assemble_system_prompt(
-            "t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard, &[],
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            None,
+            PromptMode::Standard,
+            &[],
         );
         let expected = format!(
             "{}\n\n{}\n\n{}",
@@ -1246,13 +1288,25 @@ mod tests {
 
     #[test]
     fn assemble_falls_back_to_psyche_when_no_explicit() {
-        let assembled =
-            assemble_system_prompt("t1", "Thoth", Some(&thoth_psyche()), None, PromptMode::Standard, &[]);
+        let assembled = assemble_system_prompt(
+            "t1",
+            "Thoth",
+            Some(&thoth_psyche()),
+            None,
+            PromptMode::Standard,
+            &[],
+        );
         // Now composed, not equal to psyche_prompt alone
         assert!(assembled.contains("Thoth"), "contains agent name");
         assert!(assembled.contains("archetype"), "psyche framing present");
-        assert!(assembled.contains("Available Tools"), "tool section appended");
-        assert!(assembled.contains("Operating Conventions"), "conventions appended");
+        assert!(
+            assembled.contains("Available Tools"),
+            "tool section appended"
+        );
+        assert!(
+            assembled.contains("Operating Conventions"),
+            "conventions appended"
+        );
     }
 
     #[test]
@@ -1296,7 +1350,10 @@ mod tests {
             prompt.contains("# Operator Instructions\n\nYou are a pinned akh."),
             "explicit prompt composes as a delimited operator section"
         );
-        assert!(prompt.contains("Available Tools"), "tool section is composed");
+        assert!(
+            prompt.contains("Available Tools"),
+            "tool section is composed"
+        );
     }
 
     #[test]

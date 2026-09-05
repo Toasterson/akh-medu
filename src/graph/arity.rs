@@ -180,11 +180,7 @@ impl ConstraintRegistry {
     ///
     /// Returns a list of violations (empty = no violations).
     /// The `engine` is needed to check `is-a` chains for type membership.
-    pub fn check_triple(
-        &self,
-        triple: &Triple,
-        engine: &Engine,
-    ) -> Vec<ConstraintViolation> {
+    pub fn check_triple(&self, triple: &Triple, engine: &Engine) -> Vec<ConstraintViolation> {
         let mut violations = Vec::new();
 
         let Some(constraint) = self.constraints.get(&triple.predicate) else {
@@ -228,11 +224,7 @@ impl ConstraintRegistry {
     }
 
     /// Check a triple and return a diagnostic error if violations are found.
-    pub fn check_triple_or_err(
-        &self,
-        triple: &Triple,
-        engine: &Engine,
-    ) -> ArityResult<()> {
+    pub fn check_triple_or_err(&self, triple: &Triple, engine: &Engine) -> ArityResult<()> {
         let violations = self.check_triple(triple, engine);
         if let Some(v) = violations.first() {
             match v {
@@ -358,7 +350,11 @@ mod tests {
             .add_triple(&Triple::new(alice.id, preds.is_a, person))
             .unwrap();
         engine
-            .add_triple(&Triple::new(france.id, preds.is_a, engine.lookup_symbol("Country").unwrap()))
+            .add_triple(&Triple::new(
+                france.id,
+                preds.is_a,
+                engine.lookup_symbol("Country").unwrap(),
+            ))
             .unwrap();
 
         (engine, preds)
@@ -468,15 +464,11 @@ mod tests {
         let france = engine.lookup_symbol("France").unwrap();
         let alice = engine.lookup_symbol("Alice").unwrap();
 
-        let unconstrained = engine
-            .create_symbol(SymbolKind::Relation, "knows")
-            .unwrap();
+        let unconstrained = engine.create_symbol(SymbolKind::Relation, "knows").unwrap();
 
         let registry = ConstraintRegistry::new();
-        let violations = registry.check_triple(
-            &Triple::new(france, unconstrained.id, alice),
-            &engine,
-        );
+        let violations =
+            registry.check_triple(&Triple::new(france, unconstrained.id, alice), &engine);
         assert!(violations.is_empty());
     }
 
@@ -511,12 +503,7 @@ mod tests {
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
 
-        reg.declare(
-            SymbolId::new(1).unwrap(),
-            2,
-            None,
-            None,
-        );
+        reg.declare(SymbolId::new(1).unwrap(), 2, None, None);
         assert!(!reg.is_empty());
         assert_eq!(reg.len(), 1);
     }

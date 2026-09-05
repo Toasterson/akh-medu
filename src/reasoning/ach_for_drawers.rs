@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{
-    AchAnalysis, ConsistencyRating, BeliefInterval, MassFunction, SourceReliability,
+    AchAnalysis, BeliefInterval, ConsistencyRating, MassFunction, SourceReliability,
 };
 use crate::engine::Engine;
 
@@ -188,10 +188,7 @@ pub fn analyze_drawer_conflict(
         };
         let e_idx_t = ach.evidence.len();
         ach.add_evidence(
-            format!(
-                "Temporal: drawer {} is {} day(s) newer",
-                newer_id, days
-            ),
+            format!("Temporal: drawer {} is {} day(s) newer", newer_id, days),
             SourceReliability::CompletelyReliable,
             None,
         );
@@ -211,8 +208,16 @@ pub fn analyze_drawer_conflict(
     let belief_a = belief_interval_for_hypothesis(&ach, 0);
     let belief_b = belief_interval_for_hypothesis(&ach, 1);
 
-    let score_a = ach.hypotheses.first().map(|h| h.inconsistency_score).unwrap_or(0.0);
-    let score_b = ach.hypotheses.get(1).map(|h| h.inconsistency_score).unwrap_or(0.0);
+    let score_a = ach
+        .hypotheses
+        .first()
+        .map(|h| h.inconsistency_score)
+        .unwrap_or(0.0);
+    let score_b = ach
+        .hypotheses
+        .get(1)
+        .map(|h| h.inconsistency_score)
+        .unwrap_or(0.0);
     let rank_a = ach.ranking.iter().position(|&(j, _)| j == 0).unwrap_or(0) + 1;
     let rank_b = ach.ranking.iter().position(|&(j, _)| j == 1).unwrap_or(1) + 1;
 
@@ -516,12 +521,18 @@ mod tests {
         let bi_a = &result.side_a.belief;
         let bi_b = &result.side_b.belief;
 
-        assert!(bi_a.belief >= 0.0 && bi_a.belief <= 1.0, "belief_a out of range");
+        assert!(
+            bi_a.belief >= 0.0 && bi_a.belief <= 1.0,
+            "belief_a out of range"
+        );
         assert!(
             bi_a.plausibility >= bi_a.belief,
             "plausibility_a < belief_a"
         );
-        assert!(bi_b.belief >= 0.0 && bi_b.belief <= 1.0, "belief_b out of range");
+        assert!(
+            bi_b.belief >= 0.0 && bi_b.belief <= 1.0,
+            "belief_b out of range"
+        );
         assert!(
             bi_b.plausibility >= bi_b.belief,
             "plausibility_b < belief_b"

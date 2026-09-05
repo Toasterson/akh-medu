@@ -96,9 +96,7 @@ impl Project {
     /// Whether the project's budget is more than 80% consumed.
     pub fn budget_warning(&self) -> bool {
         match self.cycle_budget {
-            Some(budget) if budget > 0 => {
-                self.cycles_consumed as f32 / budget as f32 > 0.8
-            }
+            Some(budget) if budget > 0 => self.cycles_consumed as f32 / budget as f32 > 0.8,
             _ => false,
         }
     }
@@ -424,11 +422,7 @@ pub fn add_goal_to_project(
     goal_id: SymbolId,
     predicates: &ProjectPredicates,
 ) -> AgentResult<()> {
-    engine.add_triple(&Triple::new(
-        project.id,
-        predicates.contains_goal,
-        goal_id,
-    ))?;
+    engine.add_triple(&Triple::new(project.id, predicates.contains_goal, goal_id))?;
     if !project.goals.contains(&goal_id) {
         project.goals.push(goal_id);
     }
@@ -446,9 +440,9 @@ pub fn project_progress(project: &Project, goals: &[Goal]) -> f32 {
         .goals
         .iter()
         .filter(|gid| {
-            goals
-                .iter()
-                .any(|g| g.symbol_id == **gid && matches!(g.status, super::goal::GoalStatus::Completed))
+            goals.iter().any(|g| {
+                g.symbol_id == **gid && matches!(g.status, super::goal::GoalStatus::Completed)
+            })
         })
         .count();
     completed as f32 / project.goals.len() as f32
@@ -688,7 +682,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
             Goal {
                 symbol_id: sym(2),
@@ -706,7 +700,7 @@ mod tests {
                 priority_rationale: None,
                 justification: None,
                 reformulated_from: None,
-            estimated_effort: None,
+                estimated_effort: None,
             },
         ];
 
@@ -929,7 +923,10 @@ mod tests {
         let preds = ProjectPredicates::init(&engine).unwrap();
         let agent_preds = AgentPredicates::init(&engine).unwrap();
 
-        let domains = Some(vec!["github.com".to_string(), "docs.rust-lang.org".to_string()]);
+        let domains = Some(vec![
+            "github.com".to_string(),
+            "docs.rust-lang.org".to_string(),
+        ]);
         let project = create_project(
             &engine,
             "arch-project",

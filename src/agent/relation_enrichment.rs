@@ -722,9 +722,7 @@ mod tests {
     fn max_relations_cap_respected() {
         let engine = test_engine();
         for i in 0..50u32 {
-            engine
-                .resolve_or_create_entity(&format!("e:{i}"))
-                .unwrap();
+            engine.resolve_or_create_entity(&format!("e:{i}")).unwrap();
         }
         let config = RelationEnrichmentConfig {
             max_relations_per_run: 5,
@@ -743,14 +741,18 @@ mod tests {
         let engine = test_engine();
         // Add a predicate that's never used in any triple.
         engine.resolve_or_create_entity("dog").unwrap();
-        engine.resolve_or_create_relation("unused-predicate").unwrap();
+        engine
+            .resolve_or_create_relation("unused-predicate")
+            .unwrap();
         let config = RelationEnrichmentConfig {
             min_predicate_usage: 1,
             ..Default::default()
         };
         let report = assess_ratio(&engine, &config);
         assert!(
-            report.under_represented.contains(&"unused-predicate".to_string()),
+            report
+                .under_represented
+                .contains(&"unused-predicate".to_string()),
             "unused predicates should appear in under_represented"
         );
     }

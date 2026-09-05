@@ -33,11 +33,7 @@ impl ConvergenceVerifier {
         if state.focus_deltas.len() < self.window as usize {
             return None;
         }
-        let recent = state
-            .focus_deltas
-            .iter()
-            .rev()
-            .take(self.window as usize);
+        let recent = state.focus_deltas.iter().rev().take(self.window as usize);
         let mut max_delta = 0.0f32;
         for &d in recent {
             if d >= self.delta_threshold {
@@ -67,8 +63,7 @@ impl ThoughtVerifier for ConvergenceVerifier {
         if n == 0 {
             return Ok(VerifierVerdict::neutral());
         }
-        let mean: f32 =
-            state.focus_deltas.iter().rev().take(n).sum::<f32>() / n as f32;
+        let mean: f32 = state.focus_deltas.iter().rev().take(n).sum::<f32>() / n as f32;
         Ok(VerifierVerdict {
             score: (1.0 - mean).clamp(0.0, 1.0) * 0.8, // never full marks while unstable
             sufficient: false,

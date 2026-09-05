@@ -168,7 +168,13 @@ impl InferEngine {
                         for &spec_pred in hierarchy.specializations_of(triple.predicate) {
                             let spec_triples = self.knowledge_graph.triples_from(sym);
                             for st in spec_triples {
-                                if st.predicate == spec_pred && !triples.iter().any(|t| t.subject == st.subject && t.predicate == st.predicate && t.object == st.object) {
+                                if st.predicate == spec_pred
+                                    && !triples.iter().any(|t| {
+                                        t.subject == st.subject
+                                            && t.predicate == st.predicate
+                                            && t.object == st.object
+                                    })
+                                {
                                     triples.push(st);
                                 }
                             }
@@ -186,10 +192,15 @@ impl InferEngine {
                             for t in incoming {
                                 if t.predicate == inv_pred {
                                     // Flip: t is (?, inv_pred, sym) → treat as (sym, pred, ?)
-                                    let mut flipped = crate::graph::Triple::new(sym, *pred, t.subject);
+                                    let mut flipped =
+                                        crate::graph::Triple::new(sym, *pred, t.subject);
                                     flipped.confidence = t.confidence;
                                     flipped.timestamp = t.timestamp;
-                                    if !triples.iter().any(|existing| existing.subject == flipped.subject && existing.predicate == flipped.predicate && existing.object == flipped.object) {
+                                    if !triples.iter().any(|existing| {
+                                        existing.subject == flipped.subject
+                                            && existing.predicate == flipped.predicate
+                                            && existing.object == flipped.object
+                                    }) {
                                         triples.push(flipped);
                                     }
                                 }
@@ -271,7 +282,8 @@ impl InferEngine {
                                         .with_confidence(combined)
                                         .with_depth(depth + 1),
                                     );
-                                    let sr_vec = self.item_memory.get_or_create(&self.ops, sr.symbol_id);
+                                    let sr_vec =
+                                        self.item_memory.get_or_create(&self.ops, sr.symbol_id);
                                     new_vecs.push(sr_vec);
                                 }
                             }
@@ -868,9 +880,11 @@ mod tests {
         }
 
         // bio_mother generalizes to parent_rel
-        kg.insert_triple(&Triple::new(bio_mother, generalizes, parent_rel)).unwrap();
+        kg.insert_triple(&Triple::new(bio_mother, generalizes, parent_rel))
+            .unwrap();
         // bio_mother(dog, mother_dog)
-        kg.insert_triple(&Triple::new(dog, bio_mother, mother_dog)).unwrap();
+        kg.insert_triple(&Triple::new(dog, bio_mother, mother_dog))
+            .unwrap();
 
         // Build hierarchy with those predicates
         let _hierarchy = PredicateHierarchy::new();
@@ -883,9 +897,14 @@ mod tests {
         let query = InferenceQuery::default()
             .with_seeds(vec![dog])
             .with_max_depth(1);
-        let result = engine.infer_with_phase9(&query, &rules, &phase9_empty).unwrap();
+        let result = engine
+            .infer_with_phase9(&query, &rules, &phase9_empty)
+            .unwrap();
         let syms: Vec<SymbolId> = result.activations.iter().map(|(s, _)| *s).collect();
-        assert!(syms.contains(&mother_dog), "Should find mother_dog via bio_mother edge");
+        assert!(
+            syms.contains(&mother_dog),
+            "Should find mother_dog via bio_mother edge"
+        );
     }
 
     #[test]
@@ -925,7 +944,9 @@ mod tests {
             .with_seeds(vec![a])
             .with_max_depth(1)
             .with_min_confidence(0.0);
-        let result = engine.infer_with_phase9(&query, &rules, &phase9_ctx).unwrap();
+        let result = engine
+            .infer_with_phase9(&query, &rules, &phase9_ctx)
+            .unwrap();
 
         // With ephemeral TTL=100s and query at +200s, confidence should be 0
         let b_activation = result.activations.iter().find(|(s, _)| *s == b);
@@ -971,7 +992,9 @@ mod tests {
             .with_seeds(vec![a])
             .with_max_depth(1)
             .with_min_confidence(0.0);
-        let result = engine.infer_with_phase9(&query, &rules, &phase9_ctx).unwrap();
+        let result = engine
+            .infer_with_phase9(&query, &rules, &phase9_ctx)
+            .unwrap();
 
         let b_activation = result.activations.iter().find(|(s, _)| *s == b);
         assert!(

@@ -148,7 +148,10 @@ pub enum ResponseStrategy {
     /// Moderate belief, limited evidence — hedge.
     HedgedStatement { reason: String },
     /// Low confidence — be honest about limits.
-    UncertaintyAdmission { confidence: f32, what_is_missing: String },
+    UncertaintyAdmission {
+        confidence: f32,
+        what_is_missing: String,
+    },
     /// Conflicting sources — present both sides.
     EvidenceWeighing { conflict: f32 },
     /// No triples found — optionally offer to learn.
@@ -156,13 +159,23 @@ pub enum ResponseStrategy {
 
     // ── Conversational strategies ───────────────────────────────────
     /// Ambiguous query — ask for more information.
-    ClarificationRequest { ambiguity: String, options: Vec<String> },
+    ClarificationRequest {
+        ambiguity: String,
+        options: Vec<String>,
+    },
     /// A related interesting topic is available — invite exploration.
-    ExplorationPrompt { related_topic: String, connection: String },
+    ExplorationPrompt {
+        related_topic: String,
+        connection: String,
+    },
     /// Counter-evidence exists — push back.
     Challenge { reasoning: String },
     /// Can't answer X but know about adjacent Y.
-    Redirect { from_topic: String, to_topic: String, reason: String },
+    Redirect {
+        from_topic: String,
+        to_topic: String,
+        reason: String,
+    },
     /// Recognised frustration/confusion — acknowledge it.
     Empathy { recognized_state: String },
 
@@ -170,7 +183,10 @@ pub enum ResponseStrategy {
     /// Discovered a new connection while answering.
     SelfReflection { new_connection: String },
     /// Be explicit about the certainty level.
-    ConfidenceCalibration { level: ConfidenceLevel, summary: String },
+    ConfidenceCalibration {
+        level: ConfidenceLevel,
+        summary: String,
+    },
     /// Show the derivation chain (provenance-to-prose).
     ReasoningTrace { steps: Vec<SymbolId> },
 }
@@ -561,9 +577,7 @@ impl StrategySelector {
                 s
             }
             ResponseStrategy::Explanation { .. } => {
-                let mut s = self.sage * 0.3
-                    + o.conscientiousness * 0.2
-                    + ctx.confidence * 0.15;
+                let mut s = self.sage * 0.3 + o.conscientiousness * 0.2 + ctx.confidence * 0.15;
                 if ctx.answer_triples > 3 {
                     s += 0.2;
                 }
@@ -651,8 +665,7 @@ impl StrategySelector {
                 s
             }
             ResponseStrategy::Challenge { .. } => {
-                if ctx.evidence_conflict > 0.3
-                    && ctx.discourse_mode == DiscourseMode::Argumentative
+                if ctx.evidence_conflict > 0.3 && ctx.discourse_mode == DiscourseMode::Argumentative
                 {
                     0.3 + (1.0 - o.agreeableness) * 0.35 + ctx.evidence_conflict * 0.25
                 } else if ctx.evidence_conflict > 0.5 {
@@ -727,10 +740,7 @@ pub struct SelectedContent {
 /// concise answers take the strongest facts; explanations keep derived
 /// facts; evidence weighing partitions into pro/con; interaction-only
 /// strategies (clarification, knowledge gap, empathy) carry no triples.
-pub fn select_content(
-    strategy: &ResponseStrategy,
-    all: &[GroundedTriple],
-) -> SelectedContent {
+pub fn select_content(strategy: &ResponseStrategy, all: &[GroundedTriple]) -> SelectedContent {
     let mut sorted: Vec<GroundedTriple> = all.to_vec();
     // Deterministic: confidence descending, then label ascending.
     sorted.sort_by(|a, b| {
@@ -910,9 +920,9 @@ impl ShadowFilter {
     /// The softer alternative for an inhibited strategy.
     fn softer_alternative(strategy: &ResponseStrategy) -> ResponseStrategy {
         match strategy {
-            ResponseStrategy::Challenge { .. } => ResponseStrategy::EvidenceWeighing {
-                conflict: 0.5,
-            },
+            ResponseStrategy::Challenge { .. } => {
+                ResponseStrategy::EvidenceWeighing { conflict: 0.5 }
+            }
             _ => ResponseStrategy::HedgedStatement {
                 reason: "a shadow pattern advised caution".to_string(),
             },
@@ -1118,8 +1128,10 @@ mod tests {
             gt("is-a", "reptile", 0.3),
             gt("has-a", "fur", 0.9),
         ];
-        let content =
-            select_content(&ResponseStrategy::EvidenceWeighing { conflict: 0.6 }, &triples);
+        let content = select_content(
+            &ResponseStrategy::EvidenceWeighing { conflict: 0.6 },
+            &triples,
+        );
         assert_eq!(content.primary.len(), 2);
         assert_eq!(content.contrast.len(), 1);
         assert_eq!(content.contrast[0].object_label, "reptile");
@@ -1217,9 +1229,18 @@ mod tests {
 
     #[test]
     fn confidence_level_bands() {
-        assert_eq!(ConfidenceLevel::from_confidence(0.1), ConfidenceLevel::VeryLow);
-        assert_eq!(ConfidenceLevel::from_confidence(0.5), ConfidenceLevel::Moderate);
-        assert_eq!(ConfidenceLevel::from_confidence(0.95), ConfidenceLevel::VeryHigh);
+        assert_eq!(
+            ConfidenceLevel::from_confidence(0.1),
+            ConfidenceLevel::VeryLow
+        );
+        assert_eq!(
+            ConfidenceLevel::from_confidence(0.5),
+            ConfidenceLevel::Moderate
+        );
+        assert_eq!(
+            ConfidenceLevel::from_confidence(0.95),
+            ConfidenceLevel::VeryHigh
+        );
         assert_eq!(ConfidenceLevel::Moderate.as_label(), "moderate");
     }
 

@@ -51,10 +51,9 @@ impl ThoughtVerifier for ContradictionVerifier {
             .find(|t| t.predicate == self.preds.relation)
             .map(|t| t.object);
 
-        let (Some(relation), Some(hypothesis)) = (
-            relation,
-            state.top_hypothesis().and_then(|h| h.symbol),
-        ) else {
+        let (Some(relation), Some(hypothesis)) =
+            (relation, state.top_hypothesis().and_then(|h| h.symbol))
+        else {
             return Ok(VerifierVerdict {
                 score: 1.0,
                 sufficient: false,

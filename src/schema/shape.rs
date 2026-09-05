@@ -164,7 +164,10 @@ pub fn effective_properties(
 ) -> SchemaResult<EffectivePropertySet> {
     let type_name = engine.resolve_label(type_symbol);
     let chain_syms = type_chain(engine, type_symbol)?;
-    let chain: Vec<String> = chain_syms.iter().map(|s| engine.resolve_label(*s)).collect();
+    let chain: Vec<String> = chain_syms
+        .iter()
+        .map(|s| engine.resolve_label(*s))
+        .collect();
 
     let property_pred = engine.resolve_symbol(PRED_PROPERTY).ok();
     let required_pred = engine.resolve_symbol(PRED_REQUIRED).ok();
@@ -351,7 +354,10 @@ mod tests {
         let person = engine.resolve_symbol("Person").unwrap();
         let effective = effective_properties(&engine, person).unwrap();
 
-        assert_eq!(effective.chain, vec!["Person".to_string(), "Thing".to_string()]);
+        assert_eq!(
+            effective.chain,
+            vec!["Person".to_string(), "Thing".to_string()]
+        );
         // Own property: direct.
         let email = effective.get("email").unwrap();
         assert!(email.direct);
@@ -373,7 +379,11 @@ mod tests {
 
         assert_eq!(
             effective.chain,
-            vec!["Employee".to_string(), "Person".to_string(), "Thing".to_string()]
+            vec![
+                "Employee".to_string(),
+                "Person".to_string(),
+                "Thing".to_string()
+            ]
         );
         assert!(effective.contains("employer")); // own
         assert!(effective.contains("email")); // 1-hop inherited
@@ -421,7 +431,10 @@ mod tests {
 
         let person = engine.resolve_symbol("Person").unwrap();
         let effective = effective_properties(&engine, person).unwrap();
-        assert_eq!(effective.chain, vec!["Person".to_string(), "Thing".to_string()]);
+        assert_eq!(
+            effective.chain,
+            vec!["Person".to_string(), "Thing".to_string()]
+        );
         assert!(effective.contains("email"));
         let name = effective.get("name").unwrap();
         assert_eq!(name.declared_on, "Thing");
@@ -469,11 +482,17 @@ mod tests {
         let violation = check_value_shape(email, &FrontmatterValue::Number(42.0));
         assert!(matches!(
             violation,
-            Some(ShapeViolation::TypeMismatch { expected: ValueType::Text, got: ValueType::Number, .. })
+            Some(ShapeViolation::TypeMismatch {
+                expected: ValueType::Text,
+                got: ValueType::Number,
+                ..
+            })
         ));
 
         // A matching Text value is clean.
-        assert!(check_value_shape(email, &FrontmatterValue::Text("jane@example.org".into())).is_none());
+        assert!(
+            check_value_shape(email, &FrontmatterValue::Text("jane@example.org".into())).is_none()
+        );
     }
 
     #[test]
@@ -490,7 +509,13 @@ mod tests {
         // Employee is already declared in THREE_LEVEL, but re-derive Person's
         // view explicitly to prove it is unchanged by Employee existing.
         let after = effective_properties(&engine, person).unwrap();
-        assert_eq!(before.properties.keys().collect::<Vec<_>>(), after.properties.keys().collect::<Vec<_>>());
-        assert!(!after.contains("employer"), "Employee's own property must not leak onto Person");
+        assert_eq!(
+            before.properties.keys().collect::<Vec<_>>(),
+            after.properties.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !after.contains("employer"),
+            "Employee's own property must not leak onto Person"
+        );
     }
 }

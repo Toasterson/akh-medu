@@ -29,17 +29,14 @@ use super::parser::ParsedEmail;
 
 // ── Regex patterns ──────────────────────────────────────────────────────
 
-static RE_DATE_ISO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?)\b").unwrap()
-});
+static RE_DATE_ISO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?)\b").unwrap());
 
-static RE_DATE_US: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{1,2}/\d{1,2}/\d{4})\b").unwrap()
-});
+static RE_DATE_US: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{1,2}/\d{1,2}/\d{4})\b").unwrap());
 
-static RE_DATE_EU: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{1,2}\.\d{2}\.\d{4})\b").unwrap()
-});
+static RE_DATE_EU: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{1,2}\.\d{2}\.\d{4})\b").unwrap());
 
 static RE_DATE_WRITTEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -48,29 +45,23 @@ static RE_DATE_WRITTEN: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-static RE_TRACKING_UPS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(1Z[A-Z0-9]{16})\b").unwrap()
-});
+static RE_TRACKING_UPS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(1Z[A-Z0-9]{16})\b").unwrap());
 
-static RE_TRACKING_FEDEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(\d{12,22})\b").unwrap()
-});
+static RE_TRACKING_FEDEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(\d{12,22})\b").unwrap());
 
-static RE_TRACKING_USPS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(9[2-5]\d{18,20})\b").unwrap()
-});
+static RE_TRACKING_USPS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(9[2-5]\d{18,20})\b").unwrap());
 
-static RE_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"')\]]+"#).unwrap()
-});
+static RE_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"https?://[^\s<>"')\]]+"#).unwrap());
 
 static RE_PHONE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:\+\d{1,3}\s?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap()
 });
 
-static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap()
-});
+static RE_EMAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").unwrap());
 
 /// FedEx context keywords used to gate false-positive FedEx tracking numbers.
 const FEDEX_CONTEXT_KEYWORDS: &[&str] = &[
@@ -284,7 +275,7 @@ const URGENCY_KEYWORDS: &[&str] = &[
     "inmediatamente",
     "عاجل",
     "فوري",
-    "urgent",     // French same as English
+    "urgent", // French same as English
     "immédiat",
     "immédiatement",
 ];
@@ -299,59 +290,175 @@ struct TemporalPattern {
 
 const TEMPORAL_PATTERNS: &[TemporalPattern] = &[
     // English
-    TemporalPattern { keyword: "tomorrow", canonical: "temporal:tomorrow", language: Language::English },
-    TemporalPattern { keyword: "today", canonical: "temporal:today", language: Language::English },
-    TemporalPattern { keyword: "tonight", canonical: "temporal:tonight", language: Language::English },
-    TemporalPattern { keyword: "this weekend", canonical: "temporal:this-weekend", language: Language::English },
-    TemporalPattern { keyword: "next week", canonical: "temporal:next-week", language: Language::English },
-    TemporalPattern { keyword: "next monday", canonical: "temporal:next-monday", language: Language::English },
-    TemporalPattern { keyword: "next tuesday", canonical: "temporal:next-tuesday", language: Language::English },
-    TemporalPattern { keyword: "next wednesday", canonical: "temporal:next-wednesday", language: Language::English },
-    TemporalPattern { keyword: "next thursday", canonical: "temporal:next-thursday", language: Language::English },
-    TemporalPattern { keyword: "next friday", canonical: "temporal:next-friday", language: Language::English },
-    TemporalPattern { keyword: "next saturday", canonical: "temporal:next-saturday", language: Language::English },
-    TemporalPattern { keyword: "next sunday", canonical: "temporal:next-sunday", language: Language::English },
-    TemporalPattern { keyword: "next month", canonical: "temporal:next-month", language: Language::English },
+    TemporalPattern {
+        keyword: "tomorrow",
+        canonical: "temporal:tomorrow",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "today",
+        canonical: "temporal:today",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "tonight",
+        canonical: "temporal:tonight",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "this weekend",
+        canonical: "temporal:this-weekend",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next week",
+        canonical: "temporal:next-week",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next monday",
+        canonical: "temporal:next-monday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next tuesday",
+        canonical: "temporal:next-tuesday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next wednesday",
+        canonical: "temporal:next-wednesday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next thursday",
+        canonical: "temporal:next-thursday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next friday",
+        canonical: "temporal:next-friday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next saturday",
+        canonical: "temporal:next-saturday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next sunday",
+        canonical: "temporal:next-sunday",
+        language: Language::English,
+    },
+    TemporalPattern {
+        keyword: "next month",
+        canonical: "temporal:next-month",
+        language: Language::English,
+    },
     // Russian
-    TemporalPattern { keyword: "завтра", canonical: "temporal:tomorrow", language: Language::Russian },
-    TemporalPattern { keyword: "послезавтра", canonical: "temporal:day-after-tomorrow", language: Language::Russian },
-    TemporalPattern { keyword: "сегодня", canonical: "temporal:today", language: Language::Russian },
-    TemporalPattern { keyword: "на следующей неделе", canonical: "temporal:next-week", language: Language::Russian },
+    TemporalPattern {
+        keyword: "завтра",
+        canonical: "temporal:tomorrow",
+        language: Language::Russian,
+    },
+    TemporalPattern {
+        keyword: "послезавтра",
+        canonical: "temporal:day-after-tomorrow",
+        language: Language::Russian,
+    },
+    TemporalPattern {
+        keyword: "сегодня",
+        canonical: "temporal:today",
+        language: Language::Russian,
+    },
+    TemporalPattern {
+        keyword: "на следующей неделе",
+        canonical: "temporal:next-week",
+        language: Language::Russian,
+    },
     // French
-    TemporalPattern { keyword: "demain", canonical: "temporal:tomorrow", language: Language::French },
-    TemporalPattern { keyword: "après-demain", canonical: "temporal:day-after-tomorrow", language: Language::French },
-    TemporalPattern { keyword: "aujourd'hui", canonical: "temporal:today", language: Language::French },
-    TemporalPattern { keyword: "la semaine prochaine", canonical: "temporal:next-week", language: Language::French },
+    TemporalPattern {
+        keyword: "demain",
+        canonical: "temporal:tomorrow",
+        language: Language::French,
+    },
+    TemporalPattern {
+        keyword: "après-demain",
+        canonical: "temporal:day-after-tomorrow",
+        language: Language::French,
+    },
+    TemporalPattern {
+        keyword: "aujourd'hui",
+        canonical: "temporal:today",
+        language: Language::French,
+    },
+    TemporalPattern {
+        keyword: "la semaine prochaine",
+        canonical: "temporal:next-week",
+        language: Language::French,
+    },
     // Spanish
-    TemporalPattern { keyword: "mañana", canonical: "temporal:tomorrow", language: Language::Spanish },
-    TemporalPattern { keyword: "pasado mañana", canonical: "temporal:day-after-tomorrow", language: Language::Spanish },
-    TemporalPattern { keyword: "hoy", canonical: "temporal:today", language: Language::Spanish },
-    TemporalPattern { keyword: "la próxima semana", canonical: "temporal:next-week", language: Language::Spanish },
+    TemporalPattern {
+        keyword: "mañana",
+        canonical: "temporal:tomorrow",
+        language: Language::Spanish,
+    },
+    TemporalPattern {
+        keyword: "pasado mañana",
+        canonical: "temporal:day-after-tomorrow",
+        language: Language::Spanish,
+    },
+    TemporalPattern {
+        keyword: "hoy",
+        canonical: "temporal:today",
+        language: Language::Spanish,
+    },
+    TemporalPattern {
+        keyword: "la próxima semana",
+        canonical: "temporal:next-week",
+        language: Language::Spanish,
+    },
     // Arabic
-    TemporalPattern { keyword: "غداً", canonical: "temporal:tomorrow", language: Language::Arabic },
-    TemporalPattern { keyword: "غدا", canonical: "temporal:tomorrow", language: Language::Arabic },
-    TemporalPattern { keyword: "بعد غد", canonical: "temporal:day-after-tomorrow", language: Language::Arabic },
-    TemporalPattern { keyword: "اليوم", canonical: "temporal:today", language: Language::Arabic },
-    TemporalPattern { keyword: "الأسبوع القادم", canonical: "temporal:next-week", language: Language::Arabic },
+    TemporalPattern {
+        keyword: "غداً",
+        canonical: "temporal:tomorrow",
+        language: Language::Arabic,
+    },
+    TemporalPattern {
+        keyword: "غدا",
+        canonical: "temporal:tomorrow",
+        language: Language::Arabic,
+    },
+    TemporalPattern {
+        keyword: "بعد غد",
+        canonical: "temporal:day-after-tomorrow",
+        language: Language::Arabic,
+    },
+    TemporalPattern {
+        keyword: "اليوم",
+        canonical: "temporal:today",
+        language: Language::Arabic,
+    },
+    TemporalPattern {
+        keyword: "الأسبوع القادم",
+        canonical: "temporal:next-week",
+        language: Language::Arabic,
+    },
 ];
 
 // ── "in N days/weeks" regex patterns ────────────────────────────────────
 
-static RE_IN_N_DAYS_EN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bin\s+(\d{1,3})\s+(days?|weeks?)\b").unwrap()
-});
+static RE_IN_N_DAYS_EN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bin\s+(\d{1,3})\s+(days?|weeks?)\b").unwrap());
 
-static RE_IN_N_DAYS_FR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bdans\s+(\d{1,3})\s+(jours?|semaines?)\b").unwrap()
-});
+static RE_IN_N_DAYS_FR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bdans\s+(\d{1,3})\s+(jours?|semaines?)\b").unwrap());
 
-static RE_IN_N_DAYS_ES: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\ben\s+(\d{1,3})\s+(días?|semanas?)\b").unwrap()
-});
+static RE_IN_N_DAYS_ES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\ben\s+(\d{1,3})\s+(días?|semanas?)\b").unwrap());
 
-static RE_IN_N_DAYS_RU: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bчерез\s+(\d{1,3})\s+(дн(?:ей|я)|недел[ьюи])\b").unwrap()
-});
+static RE_IN_N_DAYS_RU: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bчерез\s+(\d{1,3})\s+(дн(?:ей|я)|недел[ьюи])\b").unwrap());
 
 // ── Action item patterns ────────────────────────────────────────────────
 
@@ -361,67 +468,103 @@ struct ActionPattern {
     base_confidence: f32,
 }
 
-static RE_ACTION_EN_PLEASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bplease\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_EN_PLEASE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bplease\s+(.{5,80})").unwrap());
 
-static RE_ACTION_EN_COULD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bcould you\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_EN_COULD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bcould you\s+(.{5,80})").unwrap());
 
-static RE_ACTION_EN_NEED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bneed to\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_EN_NEED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bneed to\s+(.{5,80})").unwrap());
 
-static RE_ACTION_EN_TODO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bTODO:?\s*(.{3,80})").unwrap()
-});
+static RE_ACTION_EN_TODO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bTODO:?\s*(.{3,80})").unwrap());
 
-static RE_ACTION_FR_SVP: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bs'il vous plaît\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_FR_SVP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bs'il vous plaît\s+(.{5,80})").unwrap());
 
-static RE_ACTION_FR_VEUILLEZ: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bveuillez\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_FR_VEUILLEZ: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bveuillez\s+(.{5,80})").unwrap());
 
-static RE_ACTION_ES_POR_FAVOR: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bpor favor\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_ES_POR_FAVOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bpor favor\s+(.{5,80})").unwrap());
 
-static RE_ACTION_ES_NECESITO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bnecesito\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_ES_NECESITO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bnecesito\s+(.{5,80})").unwrap());
 
-static RE_ACTION_RU_POZH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bпожалуйста\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_RU_POZH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bпожалуйста\s+(.{5,80})").unwrap());
 
-static RE_ACTION_RU_NUZHNO: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bнужно\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_RU_NUZHNO: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bнужно\s+(.{5,80})").unwrap());
 
-static RE_ACTION_AR_PLEASE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:من فضلك|يرجى)\s+(.{5,80})").unwrap()
-});
+static RE_ACTION_AR_PLEASE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:من فضلك|يرجى)\s+(.{5,80})").unwrap());
 
-static RE_ACTION_DEADLINE_EN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:deadline|due|by)\s+(.{5,60})").unwrap()
-});
+static RE_ACTION_DEADLINE_EN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:deadline|due|by)\s+(.{5,60})").unwrap());
 
 const ACTION_PATTERNS: &[ActionPattern] = &[
-    ActionPattern { regex: &RE_ACTION_EN_PLEASE, language: Language::English, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_EN_COULD, language: Language::English, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_EN_NEED, language: Language::English, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_EN_TODO, language: Language::English, base_confidence: 0.8 },
-    ActionPattern { regex: &RE_ACTION_FR_SVP, language: Language::French, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_FR_VEUILLEZ, language: Language::French, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_ES_POR_FAVOR, language: Language::Spanish, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_ES_NECESITO, language: Language::Spanish, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_RU_POZH, language: Language::Russian, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_RU_NUZHNO, language: Language::Russian, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_AR_PLEASE, language: Language::Arabic, base_confidence: 0.7 },
-    ActionPattern { regex: &RE_ACTION_DEADLINE_EN, language: Language::English, base_confidence: 0.6 },
+    ActionPattern {
+        regex: &RE_ACTION_EN_PLEASE,
+        language: Language::English,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_EN_COULD,
+        language: Language::English,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_EN_NEED,
+        language: Language::English,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_EN_TODO,
+        language: Language::English,
+        base_confidence: 0.8,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_FR_SVP,
+        language: Language::French,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_FR_VEUILLEZ,
+        language: Language::French,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_ES_POR_FAVOR,
+        language: Language::Spanish,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_ES_NECESITO,
+        language: Language::Spanish,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_RU_POZH,
+        language: Language::Russian,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_RU_NUZHNO,
+        language: Language::Russian,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_AR_PLEASE,
+        language: Language::Arabic,
+        base_confidence: 0.7,
+    },
+    ActionPattern {
+        regex: &RE_ACTION_DEADLINE_EN,
+        language: Language::English,
+        base_confidence: 0.6,
+    },
 ];
 
 // ── Regex-based extractors ──────────────────────────────────────────────
@@ -536,9 +679,7 @@ fn extract_tracking_regex(text: &str, source: SourceField) -> Vec<ExtractedItem>
         let end = lower.floor_char_boundary(end);
         let window = &lower[start..end];
 
-        let has_context = FEDEX_CONTEXT_KEYWORDS
-            .iter()
-            .any(|kw| window.contains(kw));
+        let has_context = FEDEX_CONTEXT_KEYWORDS.iter().any(|kw| window.contains(kw));
 
         let confidence = if has_context { 0.9 } else { 0.5 };
 
@@ -822,10 +963,7 @@ pub fn extract_all(email: &ParsedEmail) -> ExtractionResult {
     }
 
     // Reasoning summary
-    let kinds_summary: Vec<String> = counts
-        .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect();
+    let kinds_summary: Vec<String> = counts.iter().map(|(k, v)| format!("{k}: {v}")).collect();
     let lang_str = detected_language
         .map(|l| l.to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -1073,29 +1211,23 @@ mod tests {
 
     #[test]
     fn extract_relative_date_english() {
-        let items = extract_temporal_via_grammar(
-            "Let's meet tomorrow at noon",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_temporal_via_grammar("Let's meet tomorrow at noon", SourceField::BodyText);
         assert!(items.iter().any(|i| i.normalized == "temporal:tomorrow"));
     }
 
     #[test]
     fn extract_relative_date_russian() {
-        let items = extract_temporal_via_grammar(
-            "Встретимся завтра в офисе",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_temporal_via_grammar("Встретимся завтра в офисе", SourceField::BodyText);
         assert!(items.iter().any(|i| i.normalized == "temporal:tomorrow"));
         assert!(items.iter().any(|i| i.language == Some(Language::Russian)));
     }
 
     #[test]
     fn extract_relative_date_french() {
-        let items = extract_temporal_via_grammar(
-            "Le rendez-vous est demain",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_temporal_via_grammar("Le rendez-vous est demain", SourceField::BodyText);
         assert!(items.iter().any(|i| i.normalized == "temporal:tomorrow"));
         assert!(items.iter().any(|i| i.language == Some(Language::French)));
     }
@@ -1111,22 +1243,15 @@ mod tests {
 
     #[test]
     fn extract_relative_date_arabic() {
-        let items = extract_temporal_via_grammar(
-            "الاجتماع غداً في المكتب",
-            SourceField::BodyText,
-        );
+        let items = extract_temporal_via_grammar("الاجتماع غداً في المكتب", SourceField::BodyText);
         assert!(items.iter().any(|i| i.normalized == "temporal:tomorrow"));
     }
 
     #[test]
     fn extract_in_n_days() {
-        let items = extract_temporal_via_grammar(
-            "The report is due in 3 days",
-            SourceField::BodyText,
-        );
-        assert!(items
-            .iter()
-            .any(|i| i.normalized == "temporal:in-3-days"));
+        let items =
+            extract_temporal_via_grammar("The report is due in 3 days", SourceField::BodyText);
+        assert!(items.iter().any(|i| i.normalized == "temporal:in-3-days"));
     }
 
     // ── Tracking number extraction ──────────────────────────────────
@@ -1148,7 +1273,11 @@ mod tests {
             "USPS tracking number: 92748901234567890123",
             SourceField::BodyText,
         );
-        assert!(items.iter().any(|i| i.normalized.starts_with("tracking:usps:")));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.normalized.starts_with("tracking:usps:"))
+        );
     }
 
     #[test]
@@ -1169,10 +1298,8 @@ mod tests {
     #[test]
     fn no_false_positive_numbers() {
         // A 12-digit number without shipping context should have low confidence
-        let items = extract_tracking_regex(
-            "The account balance is 123456789012",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_tracking_regex("The account balance is 123456789012", SourceField::BodyText);
         let fedex_items: Vec<_> = items
             .iter()
             .filter(|i| i.normalized.starts_with("tracking:fedex:"))
@@ -1202,10 +1329,7 @@ mod tests {
 
     #[test]
     fn extract_phone_us() {
-        let items = extract_phones_regex(
-            "Call us at (555) 123-4567",
-            SourceField::BodyText,
-        );
+        let items = extract_phones_regex("Call us at (555) 123-4567", SourceField::BodyText);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, ExtractedItemKind::PhoneNumber);
         assert_eq!(items[0].normalized, "5551234567");
@@ -1213,10 +1337,7 @@ mod tests {
 
     #[test]
     fn extract_phone_international() {
-        let items = extract_phones_regex(
-            "Reach me at +1 555-123-4567",
-            SourceField::BodyText,
-        );
+        let items = extract_phones_regex("Reach me at +1 555-123-4567", SourceField::BodyText);
         assert_eq!(items.len(), 1);
         assert!(items[0].normalized.starts_with("+1"));
     }
@@ -1230,19 +1351,15 @@ mod tests {
             SourceField::BodyText,
         );
         assert_eq!(items.len(), 2);
-        assert!(items
-            .iter()
-            .any(|i| i.normalized == "alice@example.com"));
+        assert!(items.iter().any(|i| i.normalized == "alice@example.com"));
     }
 
     // ── Action item extraction ──────────────────────────────────────
 
     #[test]
     fn extract_action_items_english() {
-        let items = extract_actions_via_grammar(
-            "Please send the report by Friday",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_actions_via_grammar("Please send the report by Friday", SourceField::BodyText);
         assert!(!items.is_empty());
         assert_eq!(items[0].kind, ExtractedItemKind::ActionItem);
     }
@@ -1259,19 +1376,15 @@ mod tests {
 
     #[test]
     fn extract_action_items_deadline() {
-        let items = extract_actions_via_grammar(
-            "The deadline is next Friday",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_actions_via_grammar("The deadline is next Friday", SourceField::BodyText);
         assert!(!items.is_empty());
     }
 
     #[test]
     fn extract_action_items_urgency_boost() {
-        let items = extract_actions_via_grammar(
-            "Please send the report urgently",
-            SourceField::BodyText,
-        );
+        let items =
+            extract_actions_via_grammar("Please send the report urgently", SourceField::BodyText);
         assert!(!items.is_empty());
         // Urgency should boost confidence above base 0.7
         assert!(items[0].confidence > 0.7);
@@ -1289,10 +1402,18 @@ mod tests {
         );
         let result = extract_all(&email);
 
-        assert!(result.items.len() >= 4, "expected >=4 items, got {}", result.items.len());
+        assert!(
+            result.items.len() >= 4,
+            "expected >=4 items, got {}",
+            result.items.len()
+        );
         assert!(result.counts.contains_key(&ExtractedItemKind::Date));
         assert!(result.counts.contains_key(&ExtractedItemKind::Url));
-        assert!(result.counts.contains_key(&ExtractedItemKind::TrackingNumber));
+        assert!(
+            result
+                .counts
+                .contains_key(&ExtractedItemKind::TrackingNumber)
+        );
         assert!(result.counts.contains_key(&ExtractedItemKind::PhoneNumber));
     }
 
@@ -1361,8 +1482,7 @@ mod tests {
     fn store_extractions_creates_scoped_triples() {
         let engine = test_engine();
         let predicates = ExtractionPredicates::init(&engine).unwrap();
-        let scope =
-            ensure_extraction_scope(&engine, "me@gmail.com", "sender@example.com").unwrap();
+        let scope = ensure_extraction_scope(&engine, "me@gmail.com", "sender@example.com").unwrap();
 
         let email_sym = engine.resolve_or_create_entity("test-email").unwrap();
 
@@ -1386,7 +1506,8 @@ mod tests {
             detected_language: None,
         };
 
-        let created = store_extractions(&engine, email_sym, &mut result, &predicates, &scope).unwrap();
+        let created =
+            store_extractions(&engine, email_sym, &mut result, &predicates, &scope).unwrap();
         assert_eq!(created.len(), 1);
         // Item should now have symbol_id assigned
         assert!(result.items[0].symbol_id.is_some());
@@ -1435,7 +1556,11 @@ mod tests {
 
         let goals = action_items_to_goals(&items, &email, email_sym);
         assert_eq!(goals.len(), 1);
-        assert!(goals[0].description.contains("Action from sender@example.com"));
+        assert!(
+            goals[0]
+                .description
+                .contains("Action from sender@example.com")
+        );
         assert_eq!(goals[0].priority, 5); // No urgency
     }
 
@@ -1501,7 +1626,10 @@ mod tests {
     fn display_traits() {
         assert_eq!(ExtractedItemKind::Date.to_string(), "Date");
         assert_eq!(ExtractedItemKind::RelativeDate.to_string(), "RelativeDate");
-        assert_eq!(ExtractedItemKind::TrackingNumber.to_string(), "TrackingNumber");
+        assert_eq!(
+            ExtractedItemKind::TrackingNumber.to_string(),
+            "TrackingNumber"
+        );
         assert_eq!(ExtractedItemKind::Url.to_string(), "Url");
         assert_eq!(ExtractedItemKind::PhoneNumber.to_string(), "PhoneNumber");
         assert_eq!(ExtractedItemKind::ActionItem.to_string(), "ActionItem");

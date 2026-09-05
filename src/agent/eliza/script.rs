@@ -142,16 +142,21 @@ impl Script {
     /// - [`ScriptError::EmptyRules`] — a keyword has no rules.
     /// - [`ScriptError::EmptyReassembly`] — a rule has an empty reassembly list.
     pub fn from_toml(source: &str) -> ScriptResult<Self> {
-        let mut script: Script = toml::from_str(source)
-            .map_err(|e| ScriptError::TomlParse { message: e.to_string() })?;
+        let mut script: Script = toml::from_str(source).map_err(|e| ScriptError::TomlParse {
+            message: e.to_string(),
+        })?;
 
         for kw in &script.keywords {
             if kw.rules.is_empty() {
-                return Err(ScriptError::EmptyRules { key: kw.key.clone() });
+                return Err(ScriptError::EmptyRules {
+                    key: kw.key.clone(),
+                });
             }
             for rule in &kw.rules {
                 if rule.reassembly.is_empty() {
-                    return Err(ScriptError::EmptyReassembly { key: kw.key.clone() });
+                    return Err(ScriptError::EmptyReassembly {
+                        key: kw.key.clone(),
+                    });
                 }
             }
         }
@@ -320,7 +325,10 @@ reassembly = ["r"]
 "#;
         // No fallback field — should get default responses.
         let script = Script::from_toml(toml).expect("should parse");
-        assert!(!script.fallback.is_empty(), "default fallback should be injected");
+        assert!(
+            !script.fallback.is_empty(),
+            "default fallback should be injected"
+        );
     }
 
     #[test]

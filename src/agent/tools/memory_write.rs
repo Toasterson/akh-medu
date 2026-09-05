@@ -7,8 +7,8 @@
 //! by [`crate::agent::memory::index_cycle_episode`], so both `recall_episodes`
 //! and `recall_recent_episodes` find them.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::agent::agent::AgentPredicates;
@@ -76,7 +76,8 @@ impl Tool for MemoryWriteTool {
                 },
                 ToolParam {
                     name: "facts".into(),
-                    description: "Array of {subject, predicate, object, confidence?} triples.".into(),
+                    description: "Array of {subject, predicate, object, confidence?} triples."
+                        .into(),
                     required: false,
                 },
                 ToolParam {
@@ -100,7 +101,8 @@ impl Tool for MemoryWriteTool {
                 },
                 ToolParam {
                     name: "timestamp".into(),
-                    description: "Optional unix timestamp for deterministic episode identity.".into(),
+                    description: "Optional unix timestamp for deterministic episode identity."
+                        .into(),
                     required: false,
                 },
             ],
@@ -147,13 +149,12 @@ impl Tool for MemoryWriteTool {
         )];
 
         // Tags (caller tags + a source tag for queryability).
-        for tag in tags.iter().chain(std::iter::once(&format!("source:{source}"))) {
+        for tag in tags
+            .iter()
+            .chain(std::iter::once(&format!("source:{source}")))
+        {
             let tag_sym = engine.resolve_or_create_entity(&format!("tag:{tag}"))?;
-            triples.push(Triple::new(
-                episode_id,
-                self.predicates.has_tag,
-                tag_sym,
-            ));
+            triples.push(Triple::new(episode_id, self.predicates.has_tag, tag_sym));
         }
 
         // Facts — assert each triple and link the episode to the subject so
@@ -209,7 +210,10 @@ impl Tool for MemoryWriteTool {
                           replacement for raw-text journal ingestion in an LLM session."
                 .into(),
             parameters: vec![
-                ToolParamSchema::required("summary", "One-sentence summary of what happened / was learned."),
+                ToolParamSchema::required(
+                    "summary",
+                    "One-sentence summary of what happened / was learned.",
+                ),
                 ToolParamSchema::optional_schema(
                     "facts",
                     "Facts distilled from the source.",
@@ -308,10 +312,20 @@ fn parse_facts(input: &ToolInput) -> AgentResult<Vec<Fact>> {
 fn slug(s: &str) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_matches('-');
-    let collapsed: String = trimmed.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+    let collapsed: String = trimmed
+        .split('-')
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
     if collapsed.len() > 48 {
         collapsed[collapsed.len() - 48..].to_string()
     } else if collapsed.is_empty() {

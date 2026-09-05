@@ -230,11 +230,7 @@ fn is_constructive(chain: &[ProvenanceRecord]) -> bool {
 }
 
 /// Score a provenance chain on all meta-rule dimensions.
-fn score_chain(
-    chain: &[ProvenanceRecord],
-    type_depth: Option<usize>,
-    now: u64,
-) -> MetaRuleScores {
+fn score_chain(chain: &[ProvenanceRecord], type_depth: Option<usize>, now: u64) -> MetaRuleScores {
     let monotonic = chain.iter().all(|r| is_monotonic_derivation(&r.kind));
 
     // Average confidence across the chain.
@@ -255,7 +251,9 @@ fn score_chain(
     let depth_score = 1.0 / (1.0 + max_depth as f64);
 
     // Specificity: from type depth (deeper in is-a = more specific).
-    let specificity = type_depth.map(|d| d as f64 / (1.0 + d as f64)).unwrap_or(0.5);
+    let specificity = type_depth
+        .map(|d| d as f64 / (1.0 + d as f64))
+        .unwrap_or(0.5);
 
     let constructive = if is_constructive(chain) { 1.0 } else { 0.5 };
 
@@ -281,11 +279,7 @@ fn score_chain(
 /// 3. For conflicting candidates, build con arguments against each other
 /// 4. Score all arguments via meta-rules
 /// 5. Produce a verdict with the winning answer
-pub fn argue(
-    engine: &Engine,
-    subject: SymbolId,
-    predicate: SymbolId,
-) -> AkhResult<ArgumentSet> {
+pub fn argue(engine: &Engine, subject: SymbolId, predicate: SymbolId) -> AkhResult<ArgumentSet> {
     argue_with_rules(engine, subject, predicate, &MetaRule::default_order())
 }
 
@@ -350,7 +344,9 @@ pub fn argue_with_rules(
                     // The existence of a competing answer is a con argument.
                     let other_args = candidates.get(&other)?;
                     let best_other = other_args.iter().max_by(|a, b| {
-                        a.strength.partial_cmp(&b.strength).unwrap_or(std::cmp::Ordering::Equal)
+                        a.strength
+                            .partial_cmp(&b.strength)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })?;
 
                     // Con strength is derived from the competing answer's pro strength,
@@ -404,15 +400,17 @@ fn build_provenance_chain(engine: &Engine, triple: &Triple) -> Vec<ProvenanceRec
     }
 
     // Fallback: create a synthetic provenance record from the triple.
-    vec![ProvenanceRecord::new(
-        triple.object,
-        DerivationKind::GraphEdge {
-            from: triple.subject,
-            predicate: triple.predicate,
-        },
-    )
-    .with_confidence(triple.confidence)
-    .with_sources(vec![triple.subject, triple.predicate])]
+    vec![
+        ProvenanceRecord::new(
+            triple.object,
+            DerivationKind::GraphEdge {
+                from: triple.subject,
+                predicate: triple.predicate,
+            },
+        )
+        .with_confidence(triple.confidence)
+        .with_sources(vec![triple.subject, triple.predicate]),
+    ]
 }
 
 /// Compute type depth for specificity scoring.
@@ -468,12 +466,19 @@ fn compute_verdict(
     // Sort by net strength (descending).
     candidate_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let (winner_sym, winner_net, mut winner_pro, mut winner_con) =
-        candidate_scores.remove(0);
+    let (winner_sym, winner_net, mut winner_pro, mut winner_con) = candidate_scores.remove(0);
 
     // Sort pro/con by strength descending.
-    winner_pro.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
-    winner_con.sort_by(|a, b| b.strength.partial_cmp(&a.strength).unwrap_or(std::cmp::Ordering::Equal));
+    winner_pro.sort_by(|a, b| {
+        b.strength
+            .partial_cmp(&a.strength)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    winner_con.sort_by(|a, b| {
+        b.strength
+            .partial_cmp(&a.strength)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Determine the decisive meta-rule (first rule that separates winner from runner-up).
     let decisive = if candidate_scores.is_empty() {
@@ -525,11 +530,19 @@ fn find_decisive_rule(
     let winner_best = winner_args
         .iter()
         .filter(|a| a.polarity == Polarity::Pro)
-        .max_by(|a, b| a.strength.partial_cmp(&b.strength).unwrap_or(std::cmp::Ordering::Equal));
+        .max_by(|a, b| {
+            a.strength
+                .partial_cmp(&b.strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     let runner_best = runner_up_args
         .iter()
         .filter(|a| a.polarity == Polarity::Pro)
-        .max_by(|a, b| a.strength.partial_cmp(&b.strength).unwrap_or(std::cmp::Ordering::Equal));
+        .max_by(|a, b| {
+            a.strength
+                .partial_cmp(&b.strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
     let (winner, runner) = match (winner_best, runner_best) {
         (Some(w), Some(r)) => (w, r),
@@ -543,9 +556,10 @@ fn find_decisive_rule(
             MetaRule::Recency => (winner.scores.recency, runner.scores.recency),
             MetaRule::Depth => (winner.scores.depth, runner.scores.depth),
             MetaRule::SourceQuality => (winner.scores.source_quality, runner.scores.source_quality),
-            MetaRule::Constructiveness => {
-                (winner.scores.constructiveness, runner.scores.constructiveness)
-            }
+            MetaRule::Constructiveness => (
+                winner.scores.constructiveness,
+                runner.scores.constructiveness,
+            ),
         };
 
         // If there's a meaningful difference (>5%), this rule is decisive.
@@ -630,18 +644,12 @@ mod tests {
     #[test]
     fn monotonic_chain_scores_higher_monotonicity() {
         let chain_mono = vec![
-            ProvenanceRecord::new(
-                SymbolId::new(1).unwrap(),
-                DerivationKind::Extracted,
-            )
-            .with_confidence(0.9),
+            ProvenanceRecord::new(SymbolId::new(1).unwrap(), DerivationKind::Extracted)
+                .with_confidence(0.9),
         ];
         let chain_default = vec![
-            ProvenanceRecord::new(
-                SymbolId::new(2).unwrap(),
-                DerivationKind::Reasoned,
-            )
-            .with_confidence(0.9),
+            ProvenanceRecord::new(SymbolId::new(2).unwrap(), DerivationKind::Reasoned)
+                .with_confidence(0.9),
         ];
 
         let now = std::time::SystemTime::now()
@@ -727,8 +735,12 @@ mod tests {
         let fly = sym(&engine, SymbolKind::Entity, "Fly");
         let swim = sym(&engine, SymbolKind::Entity, "Swim");
 
-        engine.add_triple(&Triple::new(tweety, can, fly).with_confidence(0.8)).unwrap();
-        engine.add_triple(&Triple::new(tweety, can, swim).with_confidence(0.6)).unwrap();
+        engine
+            .add_triple(&Triple::new(tweety, can, fly).with_confidence(0.8))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(tweety, can, swim).with_confidence(0.6))
+            .unwrap();
 
         let result = argue(&engine, tweety, can).unwrap();
 
@@ -739,7 +751,10 @@ mod tests {
             let has_pro = args.iter().any(|a| a.polarity == Polarity::Pro);
             let has_con = args.iter().any(|a| a.polarity == Polarity::Con);
             assert!(has_pro, "Each candidate should have pro arguments");
-            assert!(has_con, "Each candidate should have con arguments (from competing candidate)");
+            assert!(
+                has_con,
+                "Each candidate should have con arguments (from competing candidate)"
+            );
         }
 
         // Verdict should pick the higher-confidence answer.
@@ -755,13 +770,21 @@ mod tests {
         let yes = sym(&engine, SymbolKind::Entity, "Yes");
         let no = sym(&engine, SymbolKind::Entity, "No");
 
-        engine.add_triple(&Triple::new(bird, flies, yes).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(bird, flies, no).with_confidence(0.3)).unwrap();
+        engine
+            .add_triple(&Triple::new(bird, flies, yes).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(bird, flies, no).with_confidence(0.3))
+            .unwrap();
 
         let result = argue(&engine, bird, flies).unwrap();
 
         let verdict = &result.verdict;
-        assert_eq!(verdict.answer, Some(yes), "Higher confidence 'Yes' should win");
+        assert_eq!(
+            verdict.answer,
+            Some(yes),
+            "Higher confidence 'Yes' should win"
+        );
     }
 
     #[test]
@@ -814,7 +837,11 @@ mod tests {
 
         for (_, args) in &result.candidates {
             for arg in args {
-                assert!(arg.strength > 0.0, "Argument strength should be positive, got {}", arg.strength);
+                assert!(
+                    arg.strength > 0.0,
+                    "Argument strength should be positive, got {}",
+                    arg.strength
+                );
             }
         }
     }
@@ -854,11 +881,8 @@ mod tests {
         ];
         // Reasoned is not constructive.
         let chain_non_constructive = vec![
-            ProvenanceRecord::new(
-                SymbolId::new(1).unwrap(),
-                DerivationKind::Reasoned,
-            )
-            .with_confidence(0.9),
+            ProvenanceRecord::new(SymbolId::new(1).unwrap(), DerivationKind::Reasoned)
+                .with_confidence(0.9),
         ];
 
         let scores_c = score_chain(&chain_constructive, None, now);

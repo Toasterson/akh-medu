@@ -175,10 +175,9 @@ pub struct SchemaPackSource {
 
 /// Parse and validate a portable schema-pack source (JSON front-end).
 pub fn parse_source(text: &str) -> SchemaResult<SchemaPackSource> {
-    let source: SchemaPackSource =
-        serde_json::from_str(text).map_err(|e| SchemaError::Parse {
-            message: e.to_string(),
-        })?;
+    let source: SchemaPackSource = serde_json::from_str(text).map_err(|e| SchemaError::Parse {
+        message: e.to_string(),
+    })?;
     validate(&source)?;
     Ok(source)
 }
@@ -239,8 +238,7 @@ pub fn validate(source: &SchemaPackSource) -> SchemaResult<()> {
     }
 
     // --- supertype resolvability (declared anywhere in pack, or assumed) ---
-    let known_types: std::collections::HashSet<&str> =
-        declared.union(&assumed).copied().collect();
+    let known_types: std::collections::HashSet<&str> = declared.union(&assumed).copied().collect();
     for t in &source.types {
         if let Some(ref sup) = t.is_a
             && !known_types.contains(sup.as_str())

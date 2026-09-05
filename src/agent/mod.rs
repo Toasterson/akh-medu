@@ -8,63 +8,59 @@
 //! - **OODA loop** (Observe → Orient → Decide → Act cycle)
 //! - **Consolidation** (deliberate reasoning about what to remember)
 
+pub mod ach;
 #[allow(clippy::module_inception)]
 pub mod active_inference;
 pub mod affect;
 pub mod agent;
-pub mod ach;
+pub mod agentic_chat;
+#[cfg(feature = "daemon")]
+pub mod board_reactor;
 pub mod calendar;
 pub mod causal;
 pub mod channel;
-pub mod counterfactual;
-pub mod agentic_chat;
-pub mod chat_backend;
-pub mod openai_backend;
-pub mod organ;
-pub mod event_calculus;
 pub mod channel_message;
 pub mod chat;
+pub mod chat_backend;
+pub mod chunking;
+pub mod cli_tool;
+pub mod communicative;
+pub mod compaction;
+pub mod completion_controller;
+pub mod constraint_check;
 pub mod contact;
 pub mod contact_calendar;
 pub mod contact_memory;
 pub mod contact_rel;
 pub mod contact_style;
-pub mod communicative;
-pub mod constraint_check;
 pub mod context;
-pub mod conversation;
-pub mod credibility;
-pub mod chunking;
-pub mod compaction;
-pub mod completion_controller;
-pub mod dialogue;
-pub mod cli_tool;
 pub mod continuous_learning;
+pub mod contract_drift;
+pub mod conversation;
+pub mod counterfactual;
+pub mod credibility;
 pub mod curiosity;
-pub mod explain;
-pub mod delegation;
-pub mod eliza;
 #[cfg(feature = "daemon")]
 pub mod daemon;
-#[cfg(feature = "daemon")]
-pub mod board_reactor;
 pub mod decomposition;
+pub mod delegation;
+pub mod dialogue;
 pub mod djehuty;
 pub mod drives;
+pub mod eliza;
 pub mod epistemic;
 pub mod error;
+pub mod event_calculus;
 pub mod evidence;
+pub mod explain;
 pub mod game_theory;
 pub mod goal;
-pub mod hygiene;
-pub mod interlocutor;
-pub mod operator_channel;
-#[cfg(feature = "oxifed")]
-pub mod oxifed;
 pub mod goal_generation;
 #[cfg(feature = "postgres")]
 pub mod harvest;
+pub mod hygiene;
 pub mod idle;
+pub mod interlocutor;
 pub mod journal_ingest;
 pub mod librarian;
 pub mod library_learn;
@@ -74,13 +70,17 @@ pub mod memory;
 pub mod memory_sync;
 pub mod metacognition;
 pub mod model_manager;
-pub mod promotion;
 pub mod multi_agent;
 pub mod nlp;
-pub mod ooda;
 pub mod ollama;
+pub mod ooda;
+pub mod openai_backend;
 pub mod openclaw;
+pub mod operator_channel;
+pub mod organ;
 pub mod output;
+#[cfg(feature = "oxifed")]
+pub mod oxifed;
 pub mod permission;
 pub mod pim;
 pub mod plan;
@@ -88,10 +88,11 @@ pub mod plan_monitor;
 pub mod preference;
 pub mod priority_reasoning;
 pub mod project;
-pub mod reflect;
-pub mod relation_enrichment;
+pub mod promotion;
 #[cfg(feature = "daemon")]
 pub mod reactor;
+pub mod reflect;
+pub mod relation_enrichment;
 pub mod resource;
 pub mod response_strategy;
 pub mod semantic_enrichment;
@@ -102,63 +103,108 @@ pub mod synthesize;
 pub mod synthesize_abs;
 pub mod tasks;
 pub mod temporal_experience;
-#[cfg(feature = "daemon")]
-pub mod training_monitor;
 pub mod text_extract;
 pub mod tool;
-pub mod trajectory;
 pub mod tool_execution_tracker;
 pub mod tool_graph;
 pub mod tool_manifest;
 pub mod tool_semantics;
 pub mod tools;
-pub mod vsa_decide;
+#[cfg(feature = "daemon")]
+pub mod training_monitor;
+pub mod trajectory;
 pub mod trigger;
+pub mod vsa_decide;
 pub mod vsa_rl;
-pub mod watch;
 #[cfg(feature = "wasm-tools")]
 pub mod wasm_runtime;
+pub mod watch;
 
+pub use ach::{AchAnalysis, AchEvidence, AchHypothesis, ConsistencyRating};
+pub use active_inference::{
+    ActiveInferenceConfig, ActiveInferenceEngine, FreeEnergy, GenerativeModel, Policy,
+    PolicySelectionResult, PrecisionWeights, PredictionError,
+};
+pub use affect::{
+    AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState, SomaticMarker,
+    SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
+};
 pub use agent::{Agent, AgentConfig, AgentPredicates, ExecToolWiring};
-pub use channel::{ChannelCapabilities, ChannelError, ChannelKind, ChannelRegistry, ChannelResult, CommChannel};
+pub use calendar::{
+    AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
+    CalendarResult, CalendarRoleVectors,
+};
+pub use causal::{
+    ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
+    CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
+};
+pub use channel::{
+    ChannelCapabilities, ChannelError, ChannelKind, ChannelRegistry, ChannelResult, CommChannel,
+};
 pub use channel_message::{
     ConstraintCheckStatus, InboundMessage, InterlocutorId, MessageContent, OutboundMessage,
     ResponseContent,
 };
 pub use chat::{Conversation, Participant, ParticipantSource, discover_ssh_fingerprint};
+pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
+pub use communicative::{
+    ComposedResponse, classify_query_type, compose_grounded, context_from_grounded,
+};
 pub use constraint_check::{
     CheckOutcome, CommunicationBudget, ConstraintChecker, ConstraintConfig, ConstraintViolation,
     ConstraintWarning, EmissionDecision, SensitivityLevel, emission_decision,
 };
-pub use conversation::{ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker};
+pub use contact::{Contact, ContactError, ContactManager, ContactPredicates, ContactResult};
+pub use contact_calendar::{CalendarContactPredicates, ContactCalendar};
+pub use contact_memory::PersonMemoryIndex;
+pub use contact_rel::{
+    Relationship, RelationshipGraph, RelationshipKind, RelationshipPredicates, SocialCircle,
+};
+pub use contact_style::{
+    CommunicationStyle, StyleManager, StyleObservation, StylePredicates, score_formality,
+    score_verbosity,
+};
+pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunResult};
+pub use conversation::ConversationalResponse;
+pub use conversation::{
+    ConversationState, ConversationTurn, GroundedResponse, GroundedTriple, ResponseDetail, Speaker,
+};
+pub use counterfactual::{
+    CfResult, CounterfactualError, CounterfactualQuery, CounterfactualResult, PredictionRecord,
+    PredictionTracker, counterfactual_query,
+};
 pub use credibility::{
     CredibilityAnalysis, CredibilityAnalyzer, CredibilityRecommendation, CredibilitySignals,
     DeceptionIndicators, detect_manipulation_markers,
 };
-pub use interlocutor::{InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry, InterlocutorError, InterlocutorResult, interest_overlap};
-pub use multi_agent::{
-    AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
-    MultiAgentResult, TokenRegistry, initial_trust_for_agent, should_promote_trust,
-};
-#[cfg(feature = "oxifed")]
-pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
+pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
 #[cfg(feature = "daemon")]
 pub use daemon::{AgentDaemon, DaemonConfig};
-#[cfg(feature = "postgres")]
-pub use harvest::{HarvestMetrics, harvest_daily_log, mint_turn_episode};
 pub use decomposition::{
-    DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge, MethodRegistry,
-    TaskNode, TaskNodeKind, TaskTree,
+    DecompositionMethod, DecompositionOutput, DecompositionStrategy, DependencyEdge,
+    MethodRegistry, TaskNode, TaskNodeKind, TaskTree,
 };
-pub use eliza::{ElizaEngine, Keyword as ElizaKeyword, Rule as ElizaRule, Script as ElizaScript, ScriptError as ElizaScriptError};
+pub use dialogue::{DialogueManager, DialoguePredicates};
+pub use djehuty::{
+    DjehutyAgentId, DjehutyCheckpoint, DjehutyClient, DjehutyConfig, DjehutyError,
+    DjehutyMessageContent, DjehutyMessageId, DjehutyMessageView, DjehutyPage, DjehutyResult,
+    DjehutyRetention, DjehutyRetryPolicy, DjehutyThreadView, board_note,
+};
 pub use drives::{DriveKind, DriveSystem};
+pub use eliza::{
+    ElizaEngine, Keyword as ElizaKeyword, Rule as ElizaRule, Script as ElizaScript,
+    ScriptError as ElizaScriptError,
+};
 pub use epistemic::{
-    CommunicationStrategy, EpistemicError, EpistemicEvent, EpistemicModality,
-    EpistemicProfile, EpistemicProposition, EpistemicResult, EpistemicStateManager,
-    EpistemicUpdateResult, InformationAdvantage, PropositionRef, StrategicAssessment,
-    ToMEngine, ToMLevel, ToMModel,
+    CommunicationStrategy, EpistemicError, EpistemicEvent, EpistemicModality, EpistemicProfile,
+    EpistemicProposition, EpistemicResult, EpistemicStateManager, EpistemicUpdateResult,
+    InformationAdvantage, PropositionRef, StrategicAssessment, ToMEngine, ToMLevel, ToMModel,
 };
 pub use error::{AgentError, AgentResult};
+pub use event_calculus::{
+    Event, EventCalculusEngine, EventCalculusError, EventCalculusPredicates, EventCalculusResult,
+    Fluent, FluentHistoryEntry, SimulationResult, StateProjection,
+};
 pub use evidence::{
     BeliefInterval, ClaimAssessment, ClaimVerdict, ConflictAlert, ConflictRecommendation,
     EvidenceError, EvidenceFusionConfig, EvidenceItem, EvidenceManager, EvidenceResult,
@@ -169,69 +215,57 @@ pub use explain::{
     derivation_kind_prose, execute_query, explain_changes, explain_confidence, explain_entity,
     explain_known, render_derivation_prose, render_derivation_tree,
 };
-pub use operator_channel::{InboundHandle, OperatorChannel};
 pub use game_theory::{
     CheapTalkAnalysis, Coalition, GameType, InteractionGame, LevelKModel, PayoffFactors,
     PlanImpact, PredictedResponse, SignalType, SignalingAnalysis, SignalingResponse,
-    SocialDynamics, SocialEnvironment, SocialOutcome, Strategy,
-    analyze_cheap_talk, analyze_signal, classify_game, detect_dynamics, find_nash_equilibria,
-    is_prisoners_dilemma, recommend_strategy, should_cooperate,
+    SocialDynamics, SocialEnvironment, SocialOutcome, Strategy, analyze_cheap_talk, analyze_signal,
+    classify_game, detect_dynamics, find_nash_equilibria, is_prisoners_dilemma, recommend_strategy,
+    should_cooperate,
 };
 pub use goal::{Goal, GoalJustification, GoalSource, GoalStatus};
-pub use hygiene::{HygieneConfig, HygieneResult, run_hygiene_pass};
-pub use metacognition::{CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl};
 pub use goal_generation::{GoalGenerationConfig, GoalGenerationResult, GoalProposal};
+#[cfg(feature = "postgres")]
+pub use harvest::{HarvestMetrics, harvest_daily_log, mint_turn_episode};
+pub use hygiene::{HygieneConfig, HygieneResult, run_hygiene_pass};
 pub use idle::{IdleScheduler, IdleTaskResult};
+pub use interlocutor::{
+    InterlocutorError, InterlocutorPredicates, InterlocutorProfile, InterlocutorRegistry,
+    InterlocutorResult, interest_overlap,
+};
 pub use library_learn::{LibraryLearner, LibraryLearningResult};
+pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
 pub use memory::{
     ConsolidationConfig, ConsolidationResult, EpisodicEntry, SessionSummary, WorkingMemory,
     WorkingMemoryEntry, WorkingMemoryKind,
 };
-pub use conversation::ConversationalResponse;
-pub use dialogue::{DialogueManager, DialoguePredicates};
+pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
+pub use metacognition::{
+    CompetenceModel, FailureIndex, GoalEvaluation, MetacognitionConfig, MetacognitiveControl,
+};
+pub use model_manager::{
+    AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult, PromptMode,
+    build_system_prompt, detect_prompt_mode,
+};
+pub use multi_agent::{
+    AgentProtocolMessage, CapabilityScope, CapabilityToken, InterlocutorKind, MultiAgentError,
+    MultiAgentResult, TokenRegistry, initial_trust_for_agent, should_promote_trust,
+};
 #[allow(deprecated)]
-pub use nlp::{ConversationalKind, QuestionWord, UserIntent, classify_conversational, classify_intent};
+pub use nlp::{
+    ConversationalKind, QuestionWord, UserIntent, classify_conversational, classify_intent,
+};
+pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
 pub use ooda::{
     ActionResult, Decision, DecisionImpasse, GoalProgress, ImpasseKind, Observation,
     OodaCycleResult, Orientation,
 };
-pub use affect::{
-    AffectiveState, AffectiveSystem, Appraisal, AppraisalTrigger, MoodState,
-    SomaticMarker, SomaticMarkerRegistry, emotional_salience, mood_congruence_bias,
+pub use openclaw::{OpenClawConfig, OpenClawError};
+pub use operator_channel::{InboundHandle, OperatorChannel};
+pub use output::{
+    CandleFormatError, CandleFormatResult, CandleFormatter, FormatOutput, FormatSource,
 };
-pub use active_inference::{
-    ActiveInferenceConfig, ActiveInferenceEngine, FreeEnergy, GenerativeModel,
-    Policy, PolicySelectionResult, PrecisionWeights, PredictionError,
-};
-pub use ach::{AchAnalysis, AchEvidence, AchHypothesis, ConsistencyRating};
-pub use calendar::{
-    AllenRelation, CalendarError, CalendarEvent, CalendarManager, CalendarPredicates,
-    CalendarResult, CalendarRoleVectors,
-};
-pub use contact::{
-    Contact, ContactError, ContactManager, ContactPredicates, ContactResult,
-};
-pub use contact_rel::{
-    Relationship, RelationshipGraph, RelationshipKind, RelationshipPredicates, SocialCircle,
-};
-pub use contact_calendar::{CalendarContactPredicates, ContactCalendar};
-pub use contact_memory::PersonMemoryIndex;
-pub use contact_style::{
-    CommunicationStyle, StyleManager, StyleObservation, StylePredicates, score_formality,
-    score_verbosity,
-};
-pub use causal::{
-    ActionSchema, CausalEffect, CausalError, CausalManager, CausalPattern, CausalPredicates,
-    CausalRelation, CausalResult, CausalRoleVectors, EffectKind, PatternElement, StateTransition,
-};
-pub use counterfactual::{
-    CfResult, CounterfactualError, CounterfactualQuery, CounterfactualResult,
-    PredictionRecord, PredictionTracker, counterfactual_query,
-};
-pub use event_calculus::{
-    Event, EventCalculusEngine, EventCalculusError, EventCalculusPredicates,
-    EventCalculusResult, Fluent, FluentHistoryEntry, SimulationResult, StateProjection,
-};
+#[cfg(feature = "oxifed")]
+pub use oxifed::{OxifedChannel, OxifedConfig, OxifedError, OxifedInboundHandle, OxifedResult};
 pub use pim::{
     DependencyEdge as PimDependencyEdge, EisenhowerQuadrant, EnergyLevel, GtdReviewResult,
     GtdState, ParaCategory, PimContext, PimError, PimManager, PimMetadata, PimPredicates,
@@ -245,58 +279,38 @@ pub use preference::{
 };
 pub use priority_reasoning::{Audience, PriorityArgument, PriorityVerdict, Value};
 pub use project::{Agenda, Project, ProjectAssignment, ProjectPredicates, ProjectStatus};
-pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
-pub use chunking::{ChunkingConfig, GeneralizedStep, LearnedMethod, MethodIndex};
-pub use continuous_learning::{ContinuousLearningConfig, ContinuousLearningRunResult};
-pub use curiosity::{CuriosityReport, CuriosityTarget, DirectedCuriosityConfig};
-pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
-pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
-pub use mcts::{MctsConfig, MctsNode, MctsPlanner, MctsReflection, MctsResult, prune_tree};
-pub use model_manager::{
-    AgentModelManager, ModelManagerConfig, ModelManagerError, ModelManagerResult,
-    PromptMode, build_system_prompt, detect_prompt_mode,
-};
-pub use ollama::{OllamaClient, OllamaConfig, OllamaError, OllamaResult};
-pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
-pub use source_reliability::{
-    AdmiraltyRating, BetaDistribution, InformationCredibility, ReliabilityError,
-    ReliabilityResult, SourceReliability, SourceReliabilityManager, TrustDimension, TrustModel,
-};
-pub use state_value::{
-    AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
-};
-pub use output::{CandleFormatError, CandleFormatResult, CandleFormatter, FormatOutput, FormatSource};
-pub use vsa_rl::{RlSignal, VsaRlConfig};
-pub use synthesize::NarrativeSummary;
-pub use temporal_experience::TemporalExperience;
-pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
-pub use tool_execution_tracker::{ToolExecutionTracker, ToolCallGuard};
-pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
-pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
-pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
-pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
 #[cfg(feature = "daemon")]
 pub use reactor::{
     MisfirePolicy, ReactorAction, ReactorClaim, ReactorEvent, ReactorSchedule, ReactorState,
     ReactorStore, RetryPolicy, ScheduleRule,
 };
-pub use watch::{
-    Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
-    WorldSnapshot,
-};
-pub use memory_sync::{MemorySyncConfig, MemorySyncResult};
-pub use communicative::{
-    ComposedResponse, classify_query_type, compose_grounded, context_from_grounded,
-};
+pub use reflect::{Adjustment, ReflectionConfig, ReflectionResult};
+pub use resource::{EffortCase, EffortEstimate, EffortIndex, ImprovementHistory, ResourceReport};
 pub use response_strategy::{
     ConfidenceLevel, QueryType, ResponseStrategy, SelectedContent, Sentiment, ShadowFilter,
     ShadowFilterResult, StrategyCategory, StrategyChoice, StrategyContext, StrategySelector,
     StrategySelectorConfig, select_content,
 };
+pub use semantic_enrichment::{EnrichmentResult, SemanticPredicates};
+pub use sleep::{ConsolidationPhase, SleepConfig, SleepCycle, SleepMetrics};
+pub use source_reliability::{
+    AdmiraltyRating, BetaDistribution, InformationCredibility, ReliabilityError, ReliabilityResult,
+    SourceReliability, SourceReliabilityManager, TrustDimension, TrustModel,
+};
+pub use state_value::{
+    AgentState, Reward, StateRoleVectors, ValueFunction, encode_state, encode_state_with_vsa,
+};
+pub use synthesize::NarrativeSummary;
+pub use temporal_experience::TemporalExperience;
+pub use tool::{Tool, ToolInput, ToolOutput, ToolRegistry, ToolSignature};
+pub use tool_execution_tracker::{ToolCallGuard, ToolExecutionTracker};
+pub use tool_graph::{ToolGraphPredicates, ToolGraphRegistrar};
+pub use tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
 pub use trajectory::{DiscourseMode, DiscourseTrajectory, TurnRecord, classify_mode};
-pub use openclaw::{OpenClawConfig, OpenClawError};
-pub use djehuty::{
-    DjehutyAgentId, DjehutyCheckpoint, DjehutyClient, DjehutyConfig, DjehutyError,
-    DjehutyMessageContent, DjehutyMessageId, DjehutyMessageView, DjehutyPage, DjehutyResult,
-    DjehutyRetention, DjehutyRetryPolicy, DjehutyThreadView, board_note,
+pub use trigger::{Trigger, TriggerAction, TriggerCondition, TriggerStore};
+pub use vsa_decide::{DecideMode, VsaDecideConfig, VsaDecideDiagnostics};
+pub use vsa_rl::{RlSignal, VsaRlConfig};
+pub use watch::{
+    Discrepancy, Expectation, TriplePattern, Watch, WatchAction, WatchCondition, WatchFiring,
+    WorldSnapshot,
 };

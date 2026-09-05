@@ -102,11 +102,10 @@ impl MmapStore {
                     message: "invalid mmap file header — is this an akh-medu data file?".into(),
                 });
             }
-            let version = u32::from_le_bytes(mmap[8..12].try_into().map_err(|_| {
-                StoreError::Mmap {
+            let version =
+                u32::from_le_bytes(mmap[8..12].try_into().map_err(|_| StoreError::Mmap {
                     message: "mmap header truncated: cannot read 4-byte version field".into(),
-                }
-            })?);
+                })?);
             if version != HEADER_VERSION {
                 return Err(StoreError::Mmap {
                     message: format!("mmap file version {version} != expected {HEADER_VERSION}"),
@@ -116,20 +115,22 @@ impl MmapStore {
             let mut index = HashMap::new();
             let mut pos = HEADER_SIZE;
             while pos + 12 <= actual_len {
-                let id_bytes: [u8; 8] = mmap[pos..pos + 8].try_into().map_err(|_| {
-                    StoreError::Mmap {
-                        message: "mmap entry truncated: cannot read 8-byte id".into(),
-                    }
-                })?;
+                let id_bytes: [u8; 8] =
+                    mmap[pos..pos + 8]
+                        .try_into()
+                        .map_err(|_| StoreError::Mmap {
+                            message: "mmap entry truncated: cannot read 8-byte id".into(),
+                        })?;
                 let raw_id = u64::from_le_bytes(id_bytes);
                 if raw_id == 0 {
                     break; // End of entries (uninitialized region)
                 }
-                let len_bytes: [u8; 4] = mmap[pos + 8..pos + 12].try_into().map_err(|_| {
-                    StoreError::Mmap {
-                        message: "mmap entry truncated: cannot read 4-byte length".into(),
-                    }
-                })?;
+                let len_bytes: [u8; 4] =
+                    mmap[pos + 8..pos + 12]
+                        .try_into()
+                        .map_err(|_| StoreError::Mmap {
+                            message: "mmap entry truncated: cannot read 4-byte length".into(),
+                        })?;
                 let data_len = u32::from_le_bytes(len_bytes) as usize;
                 if pos + 12 + data_len > actual_len {
                     break; // Truncated entry
@@ -284,7 +285,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("trunc.mmap"), b"AKHMMAP\0\x01").unwrap();
         let result = MmapStore::open_or_create(dir.path(), "trunc");
-        assert!(result.is_err(), "expected truncated file to error, not panic");
+        assert!(
+            result.is_err(),
+            "expected truncated file to error, not panic"
+        );
     }
 
     #[test]

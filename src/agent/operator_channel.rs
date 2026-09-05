@@ -10,9 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::message::MessageSink;
 
 use super::channel::{ChannelCapabilities, ChannelKind, ChannelResult, CommChannel};
-use super::channel_message::{
-    InboundMessage, InterlocutorId, MessageContent, OutboundMessage,
-};
+use super::channel_message::{InboundMessage, InterlocutorId, MessageContent, OutboundMessage};
 
 // ── InboundHandle ────────────────────────────────────────────────────────
 
@@ -138,10 +136,7 @@ impl std::fmt::Debug for OperatorChannel {
         f.debug_struct("OperatorChannel")
             .field("id", &self.id)
             .field("operator_id", &self.operator_id)
-            .field(
-                "pending_inbound",
-                &self.inbound.lock().unwrap().len(),
-            )
+            .field("pending_inbound", &self.inbound.lock().unwrap().len())
             .finish()
     }
 }

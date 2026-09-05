@@ -180,8 +180,16 @@ mod tests {
         // exactly; History gets 0. Drop KG by shrinking the budget instead:
         let granted = alloc.allocate_keep_first(60, &want, &[ContextSection::KnowledgeGraph]);
         assert_eq!(granted[&ContextSection::UserPrompt], 20);
-        assert_eq!(granted[&ContextSection::KnowledgeGraph], 0, "atomic KG didn't fit → dropped whole");
-        assert_eq!(granted[&ContextSection::History], 40, "divisible history takes the remainder");
+        assert_eq!(
+            granted[&ContextSection::KnowledgeGraph],
+            0,
+            "atomic KG didn't fit → dropped whole"
+        );
+        assert_eq!(
+            granted[&ContextSection::History],
+            40,
+            "divisible history takes the remainder"
+        );
         let total: usize = granted.values().sum();
         assert!(total <= 60);
     }

@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::error::ContextResult;
 use super::types::{
-    AssembledContext, ContextSection, ContextWindowStats, DroppedSpan, DropReason, EpisodeState,
+    AssembledContext, ContextSection, ContextWindowStats, DropReason, DroppedSpan, EpisodeState,
     SectionStats, StrategyId, TokenBudget, TurnOutcome,
 };
 
@@ -162,15 +162,14 @@ pub(crate) fn default_stats(
         let inp = kept + dropped;
         let drop_reason = reason_counts
             .get(&s)
-            .and_then(|map| {
-                map.iter()
-                    .max_by_key(|(_, c)| **c)
-                    .map(|(r, _)| *r)
-            })
+            .and_then(|map| map.iter().max_by_key(|(_, c)| **c).map(|(r, _)| *r))
             .map(|dominant| {
                 // Tie-break by declaration order: among reasons with the same
                 // count, the lowest `reason_rank` wins.
-                let max_count = reason_counts.get(&s).and_then(|m| m.get(&dominant).copied()).unwrap_or(0);
+                let max_count = reason_counts
+                    .get(&s)
+                    .and_then(|m| m.get(&dominant).copied())
+                    .unwrap_or(0);
                 reason_counts
                     .get(&s)
                     .into_iter()
@@ -253,7 +252,10 @@ impl ContextManager for PassThroughManager {
         //   vec![json!({"role": "user", "content": user_prompt})]
         let messages = vec![json!({"role": "user", "content": episode.user_prompt})];
         let mut section_tokens = BTreeMap::new();
-        section_tokens.insert(ContextSection::UserPrompt, counter.count(episode.user_prompt));
+        section_tokens.insert(
+            ContextSection::UserPrompt,
+            counter.count(episode.user_prompt),
+        );
         Ok(AssembledContext {
             messages,
             // Byte-identical to the legacy path: every tool passes through unchanged.
@@ -328,7 +330,10 @@ mod tests {
         assert_eq!(kept, prompt_tokens, "kept == input tokens");
         assert_eq!(stats.available, budget.available());
         // No drops ⇒ budget_pressure is kept/available, not 1.0.
-        assert!((stats.budget_pressure - (prompt_tokens as f32 / budget.available() as f32)).abs() < 0.001);
+        assert!(
+            (stats.budget_pressure - (prompt_tokens as f32 / budget.available() as f32)).abs()
+                < 0.001
+        );
         assert_eq!(stats.safety_violations, 0);
         // PassThroughManager is the default impl (no extras).
         assert!(stats.compacted.is_none());
@@ -354,12 +359,8 @@ mod tests {
         // through the with_reason constructor.
         let d = DroppedSpan::new(ContextSection::History, "old turn", None);
         assert_eq!(d.reason, DropReason::Budget);
-        let d2 = DroppedSpan::with_reason(
-            ContextSection::History,
-            "older turn",
-            None,
-            DropReason::Age,
-        );
+        let d2 =
+            DroppedSpan::with_reason(ContextSection::History, "older turn", None, DropReason::Age);
         assert_eq!(d2.reason, DropReason::Age);
         assert_eq!(DropReason::Age.as_str(), "age");
     }

@@ -16,9 +16,9 @@ use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::DerivationKind;
 use crate::symbol::SymbolId;
+use crate::vsa::HyperVec;
 use crate::vsa::encode::encode_token;
 use crate::vsa::ops::VsaOps;
-use crate::vsa::HyperVec;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Error
@@ -180,11 +180,7 @@ impl PatternElement {
 
     /// Check whether this element matches a concrete SymbolId,
     /// potentially adding a binding.
-    pub fn matches(
-        &self,
-        actual: SymbolId,
-        bindings: &mut HashMap<String, SymbolId>,
-    ) -> bool {
+    pub fn matches(&self, actual: SymbolId, bindings: &mut HashMap<String, SymbolId>) -> bool {
         match self {
             Self::Concrete(id) => *id == actual,
             Self::Variable(name) => {
@@ -316,10 +312,7 @@ impl ActionSchema {
     }
 
     /// Predict the state transition from applying this action.
-    pub fn predict_effects(
-        &self,
-        triples: &[Triple],
-    ) -> CausalResult<StateTransition> {
+    pub fn predict_effects(&self, triples: &[Triple]) -> CausalResult<StateTransition> {
         let mut bindings = HashMap::new();
         for p in &self.preconditions {
             p.matches_any(triples, &mut bindings);
@@ -458,12 +451,13 @@ impl CausalManager {
             .map_err(|e| CausalError::Engine(Box::new(e.into())))?;
         match data {
             Some(bytes) if !bytes.is_empty() => {
-                let mut mgr: Self =
-                    bincode::deserialize(&bytes).map_err(|e| CausalError::Engine(Box::new(
-                        crate::error::AkhError::Store(crate::error::StoreError::Serialization {
+                let mut mgr: Self = bincode::deserialize(&bytes).map_err(|e| {
+                    CausalError::Engine(Box::new(crate::error::AkhError::Store(
+                        crate::error::StoreError::Serialization {
                             message: format!("causal manager deserialize: {e}"),
-                        }),
-                    )))?;
+                        },
+                    )))
+                })?;
                 mgr.ensure_init(engine)?;
                 Ok(mgr)
             }
@@ -690,11 +684,7 @@ impl CausalManager {
 
     /// Verify a prediction against the actual state after execution.
     /// Returns true if the prediction was accurate.
-    pub fn verify_prediction(
-        &self,
-        transition: &StateTransition,
-        engine: &Engine,
-    ) -> bool {
+    pub fn verify_prediction(&self, transition: &StateTransition, engine: &Engine) -> bool {
         let triples = engine.all_triples();
 
         // Check assertions: were the predicted triples actually added?
@@ -715,11 +705,7 @@ impl CausalManager {
     }
 
     /// Update a schema's statistics after observing an outcome.
-    pub fn update_schema_from_outcome(
-        &mut self,
-        action_name: &str,
-        success: bool,
-    ) {
+    pub fn update_schema_from_outcome(&mut self, action_name: &str, success: bool) {
         if let Some(schema) = self.schemas.get_mut(action_name) {
             schema.execution_count += 1;
             // Exponential moving average for success rate.
@@ -734,12 +720,7 @@ impl CausalManager {
     /// Compute the causal strength between cause and effect entities.
     ///
     /// Looks for direct causal links and transitive chains (depth 2).
-    pub fn causal_strength(
-        &self,
-        cause: SymbolId,
-        effect: SymbolId,
-        engine: &Engine,
-    ) -> f32 {
+    pub fn causal_strength(&self, cause: SymbolId, effect: SymbolId, engine: &Engine) -> f32 {
         let preds = match &self.predicates {
             Some(p) => p,
             None => return 0.0,
@@ -760,8 +741,7 @@ impl CausalManager {
                 let intermediate_triples = engine.triples_from(t1.object);
                 for t2 in &intermediate_triples {
                     if t2.object == effect && t2.predicate == preds.causes {
-                        let transitive =
-                            t1.confidence * t2.confidence * 0.8;
+                        let transitive = t1.confidence * t2.confidence * 0.8;
                         best = best.max(transitive);
                     }
                 }

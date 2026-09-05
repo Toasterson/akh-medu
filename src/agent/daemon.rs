@@ -45,7 +45,12 @@ fn now_secs() -> u64 {
 /// Best-effort: engine errors are logged at WARN and swallowed — this is
 /// background bookkeeping, not worth failing an otherwise-successful
 /// curation pass over.
-fn assert_singleton_fact(engine: &crate::engine::Engine, subject: &str, predicate: &str, value: &str) {
+fn assert_singleton_fact(
+    engine: &crate::engine::Engine,
+    subject: &str,
+    predicate: &str,
+    value: &str,
+) {
     let s = match engine.resolve_or_create_entity(subject) {
         Ok(id) => id,
         Err(e) => {
@@ -262,15 +267,15 @@ impl Default for DaemonConfig {
             trigger_evaluation_interval: Duration::from_secs(15),
             reactor_evaluation_interval: Duration::from_secs(5),
             knowledge_extraction_interval: Duration::from_secs(2700), // 45 min
-            bridge_training_interval: Duration::from_secs(7200), // 2 hours
-            openclaw_sync_interval: Duration::from_secs(86400), // 24 hours
+            bridge_training_interval: Duration::from_secs(7200),      // 2 hours
+            openclaw_sync_interval: Duration::from_secs(86400),       // 24 hours
             knowledge_elicitation_interval: Duration::from_secs(1800), // 30 min
-            kg_compaction_interval: Duration::from_secs(1800), // 30 min
+            kg_compaction_interval: Duration::from_secs(1800),        // 30 min
             delegation_interval: Duration::from_secs(10),
             relation_enrichment_interval: Duration::from_secs(3600), // 60 min
-            librarian_interval: Duration::from_secs(86400), // 24 hours
-            seshat_curation_interval: Duration::from_secs(21600), // 6 hours
-            heka_curation_interval: Duration::from_secs(86400), // 24 hours
+            librarian_interval: Duration::from_secs(86400),          // 24 hours
+            seshat_curation_interval: Duration::from_secs(21600),    // 6 hours
+            heka_curation_interval: Duration::from_secs(86400),      // 24 hours
             max_cycles: 0,
         }
     }
@@ -990,10 +995,11 @@ impl AgentDaemon {
         // Lock released — HTTP handlers can proceed.
 
         // Phase 2: Expensive computation (no lock held).
-        let goal_symbols_snapshot: Vec<crate::symbol::SymbolId> = super::goal::active_goals(&goals_snapshot)
-            .iter()
-            .map(|g| g.symbol_id)
-            .collect();
+        let goal_symbols_snapshot: Vec<crate::symbol::SymbolId> =
+            super::goal::active_goals(&goals_snapshot)
+                .iter()
+                .map(|g| g.symbol_id)
+                .collect();
         let curiosity_proposals = super::curiosity::compute_directed_curiosity(
             &engine,
             &curiosity_config,
@@ -1195,7 +1201,14 @@ impl AgentDaemon {
         // wiring covers the turn-WAL half of slice 4 only; a caller with a
         // note catalog can call `run_librarian_pass_over_wal` directly with
         // its own `notes` slice.
-        match super::librarian::run_librarian_pass_over_wal(db, &engine, &model, *akh_id, &[], &config) {
+        match super::librarian::run_librarian_pass_over_wal(
+            db,
+            &engine,
+            &model,
+            *akh_id,
+            &[],
+            &config,
+        ) {
             Ok(report) => {
                 if report.typed_triples_asserted > 0 || report.frontier_triples_asserted > 0 {
                     if let Ok(agent) = self.agent.read() {
@@ -1428,10 +1441,7 @@ impl AgentDaemon {
         if unembedded > 0 {
             // WARN once per backlog episode, not every tick — nothing can
             // embed these until the Phase 42 service layer lands.
-            if !self
-                .heka_warned_unembedded
-                .swap(true, Ordering::Relaxed)
-            {
+            if !self.heka_warned_unembedded.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
                     unembedded_chunks = unembedded,
                     "daemon: heka has unembedded chunks, but no Phase 42 service exists yet \
@@ -1439,8 +1449,7 @@ impl AgentDaemon {
                 );
             }
         } else {
-            self.heka_warned_unembedded
-                .store(false, Ordering::Relaxed);
+            self.heka_warned_unembedded.store(false, Ordering::Relaxed);
         }
 
         if let Ok(agent) = self.agent.read() {
@@ -1449,11 +1458,7 @@ impl AgentDaemon {
                  (surveillance only — v1)",
             )));
         }
-        tracing::info!(
-            unembedded,
-            untagged,
-            "daemon: heka curation pass complete",
-        );
+        tracing::info!(unembedded, untagged, "daemon: heka curation pass complete",);
     }
 
     fn run_trigger_evaluation(&mut self) {
@@ -1572,8 +1577,10 @@ impl AgentDaemon {
                     .map(|event| format!("event:{}:{}", event.source, event.id))
                     .unwrap_or_else(|| "time".into())
             );
-            let requires_start_audit =
-                !matches!(&claim.schedule.action, ReactorAction::TrainingMonitor { .. });
+            let requires_start_audit = !matches!(
+                &claim.schedule.action,
+                ReactorAction::TrainingMonitor { .. }
+            );
             if requires_start_audit
                 && let Err(error) = index_system_episode(
                     &engine,
@@ -1612,15 +1619,13 @@ impl AgentDaemon {
                         {
                             return Ok((cached, true));
                         }
-                        let reply = super::board_reactor::run_tool_free_turn(
-                            &guard, agent_id, prompt,
-                        )?;
+                        let reply =
+                            super::board_reactor::run_tool_free_turn(&guard, agent_id, prompt)?;
                         let excerpt: String = reply.chars().take(240).collect();
                         let summary = format!(
                             "tool-free LLM action completed through configured backend: {excerpt}"
                         );
-                        ReactorStore::new(&engine)
-                            .cache_llm_result(&claim.run_id, &summary)?;
+                        ReactorStore::new(&engine).cache_llm_result(&claim.run_id, &summary)?;
                         return Ok((summary, true));
                     }
                     match guard.run_agentic_turn_with_conversation_state(
@@ -2302,7 +2307,11 @@ impl AgentDaemon {
     /// overwritten, so learned success rates are preserved.
     fn bootstrap_causal_schemas(&mut self) {
         let mut agent = self.agent.write().unwrap();
-        let signatures = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list();
+        let signatures = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list();
         if signatures.is_empty() {
             return;
         }
@@ -2418,7 +2427,14 @@ impl AgentDaemon {
                 let tuples: Vec<(String, String, String, f32)> = structured
                     .triples
                     .iter()
-                    .map(|t| (t.subject.clone(), t.predicate.clone(), t.object.clone(), t.confidence))
+                    .map(|t| {
+                        (
+                            t.subject.clone(),
+                            t.predicate.clone(),
+                            t.object.clone(),
+                            t.confidence,
+                        )
+                    })
                     .collect();
                 if let Err(e) = engine.ingest_label_triples(&tuples) {
                     tracing::debug!(error = %e, "delegation: failed to assert triples");
@@ -2426,9 +2442,10 @@ impl AgentDaemon {
                 // Store delegation provenance.
                 // Use the delegation ID as a synthetic SymbolId (must be non-zero).
                 // If delegation ID happens to be 0, resolve a placeholder entity.
-                let sym_id = crate::symbol::SymbolId::new(outcome.id.0.max(1))
-                    .unwrap_or_else(|| {
-                        engine.resolve_or_create_entity("delegation:placeholder")
+                let sym_id =
+                    crate::symbol::SymbolId::new(outcome.id.0.max(1)).unwrap_or_else(|| {
+                        engine
+                            .resolve_or_create_entity("delegation:placeholder")
                             .unwrap_or_else(|_| {
                                 // Last resort: use id=1 which is always valid.
                                 crate::symbol::SymbolId::new(1).unwrap()
@@ -2452,7 +2469,8 @@ impl AgentDaemon {
                     // Add summary to working memory if non-empty.
                     if !structured.summary.is_empty() {
                         agent.sink().emit(&AkhMessage::system(format!(
-                            "[daemon:delegation] {target_label}: {}", structured.summary
+                            "[daemon:delegation] {target_label}: {}",
+                            structured.summary
                         )));
                     }
                 }
@@ -2490,10 +2508,7 @@ fn guess_domain(seeds: &[String]) -> Option<String> {
         return None;
     }
     // Collect all words from all seed labels.
-    let all_words: Vec<&str> = seeds
-        .iter()
-        .flat_map(|s| s.split_whitespace())
-        .collect();
+    let all_words: Vec<&str> = seeds.iter().flat_map(|s| s.split_whitespace()).collect();
     // Find the word that appears in the most seeds.
     let mut freq: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for w in &all_words {
@@ -2534,10 +2549,7 @@ mod tests {
             config.knowledge_extraction_interval,
             Duration::from_secs(2700)
         );
-        assert_eq!(
-            config.openclaw_sync_interval,
-            Duration::from_secs(86400)
-        );
+        assert_eq!(config.openclaw_sync_interval, Duration::from_secs(86400));
         assert_eq!(
             config.knowledge_elicitation_interval,
             Duration::from_secs(1800)
@@ -2547,10 +2559,7 @@ mod tests {
             Duration::from_secs(3600)
         );
         assert_eq!(config.librarian_interval, Duration::from_secs(86400));
-        assert_eq!(
-            config.seshat_curation_interval,
-            Duration::from_secs(21600)
-        );
+        assert_eq!(config.seshat_curation_interval, Duration::from_secs(21600));
         assert_eq!(config.heka_curation_interval, Duration::from_secs(86400));
         assert_eq!(config.max_cycles, 0);
     }
@@ -2576,8 +2585,8 @@ mod tests {
             ..Default::default()
         })
         .expect("engine");
-        let agent = Agent::new(Arc::new(engine), crate::agent::AgentConfig::default())
-            .expect("agent");
+        let agent =
+            Agent::new(Arc::new(engine), crate::agent::AgentConfig::default()).expect("agent");
         Arc::new(RwLock::new(agent))
     }
 
@@ -2730,7 +2739,8 @@ mod tests {
         assert_eq!(backend.0.load(Ordering::SeqCst), 1);
         let agent = shared.read().unwrap();
         assert_eq!(
-            agent.engine
+            agent
+                .engine
                 .store()
                 .scan_prefix(b"reactor:llm-result:")
                 .unwrap()
@@ -2744,13 +2754,18 @@ mod tests {
                 .state
                 .completed
         );
-        let episodes = crate::agent::memory::recall_recent_episodes(
-            &agent.engine,
-            agent.predicates(),
-            10,
-        )
-        .unwrap();
-        assert!(episodes.iter().any(|episode| episode.summary.contains("started")));
-        assert!(episodes.iter().any(|episode| episode.summary.contains("succeeded")));
+        let episodes =
+            crate::agent::memory::recall_recent_episodes(&agent.engine, agent.predicates(), 10)
+                .unwrap();
+        assert!(
+            episodes
+                .iter()
+                .any(|episode| episode.summary.contains("started"))
+        );
+        assert!(
+            episodes
+                .iter()
+                .any(|episode| episode.summary.contains("succeeded"))
+        );
     }
 }

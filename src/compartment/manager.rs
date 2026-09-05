@@ -108,10 +108,7 @@ impl CompartmentManager {
             })?;
 
         let mut count = 0;
-        let mut compartments = self
-            .compartments
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut compartments = self.compartments.write().unwrap_or_else(|e| e.into_inner());
 
         for entry in entries {
             let entry = entry.map_err(|e| CompartmentError::Io {
@@ -191,10 +188,7 @@ impl CompartmentManager {
             *self.psyche.write().unwrap_or_else(|e| e.into_inner()) = Some(psyche);
         }
 
-        let mut compartments = self
-            .compartments
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut compartments = self.compartments.write().unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -299,10 +293,7 @@ impl CompartmentManager {
 
     /// Unload a compartment's triples from the knowledge graph.
     pub fn unload(&self, id: &str, engine: &crate::engine::Engine) -> CompartmentResult<()> {
-        let mut compartments = self
-            .compartments
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut compartments = self.compartments.write().unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -332,10 +323,7 @@ impl CompartmentManager {
 
     /// Mark a loaded compartment as Active (influencing OODA loop).
     pub fn activate(&self, id: &str) -> CompartmentResult<()> {
-        let mut compartments = self
-            .compartments
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut compartments = self.compartments.write().unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -349,10 +337,7 @@ impl CompartmentManager {
 
     /// Mark an active compartment as merely Loaded (no longer influencing OODA).
     pub fn deactivate(&self, id: &str) -> CompartmentResult<()> {
-        let mut compartments = self
-            .compartments
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut compartments = self.compartments.write().unwrap_or_else(|e| e.into_inner());
         let compartment = compartments
             .get_mut(id)
             .ok_or_else(|| CompartmentError::NotFound { id: id.into() })?;
@@ -365,10 +350,7 @@ impl CompartmentManager {
 
     /// List all active compartment manifests.
     pub fn active_compartments(&self) -> Vec<CompartmentManifest> {
-        let compartments = self
-            .compartments
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let compartments = self.compartments.read().unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.state == CompartmentState::Active)
@@ -378,19 +360,13 @@ impl CompartmentManager {
 
     /// Get the manifest for a specific compartment.
     pub fn get(&self, id: &str) -> Option<CompartmentManifest> {
-        let compartments = self
-            .compartments
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let compartments = self.compartments.read().unwrap_or_else(|e| e.into_inner());
         compartments.get(id).map(|c| c.manifest.clone())
     }
 
     /// List compartments of a specific kind.
     pub fn compartments_by_kind(&self, kind: CompartmentKind) -> Vec<CompartmentManifest> {
-        let compartments = self
-            .compartments
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let compartments = self.compartments.read().unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .filter(|c| c.manifest.kind == kind)
@@ -486,10 +462,7 @@ impl CompartmentManager {
 
     /// List the IDs of all discovered but not-yet-loaded (Dormant) compartments.
     pub fn dormant_ids(&self) -> Vec<String> {
-        let compartments = self
-            .compartments
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let compartments = self.compartments.read().unwrap_or_else(|e| e.into_inner());
         compartments
             .iter()
             .filter(|(_, c)| c.state == CompartmentState::Dormant)
@@ -499,10 +472,7 @@ impl CompartmentManager {
 
     /// List all discovered compartments with their current state.
     pub fn all_compartments(&self) -> Vec<(CompartmentManifest, CompartmentState, usize)> {
-        let compartments = self
-            .compartments
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let compartments = self.compartments.read().unwrap_or_else(|e| e.into_inner());
         compartments
             .values()
             .map(|c| (c.manifest.clone(), c.state, c.triple_count))
@@ -730,7 +700,9 @@ mod tests {
     fn create_compartment_duplicate_returns_error() {
         let (_tmp, mgr) = tmp_manager();
         mgr.create_compartment(workspace_manifest("alpha")).unwrap();
-        let err = mgr.create_compartment(workspace_manifest("alpha")).unwrap_err();
+        let err = mgr
+            .create_compartment(workspace_manifest("alpha"))
+            .unwrap_err();
         assert!(matches!(err, super::CompartmentError::AlreadyExists { .. }));
     }
 
@@ -738,8 +710,10 @@ mod tests {
     fn compartments_by_parent_filters_correctly() {
         let (_tmp, mgr) = tmp_manager();
         mgr.create_compartment(workspace_manifest("root")).unwrap();
-        mgr.create_compartment(child_manifest("child-a", "root")).unwrap();
-        mgr.create_compartment(child_manifest("child-b", "root")).unwrap();
+        mgr.create_compartment(child_manifest("child-a", "root"))
+            .unwrap();
+        mgr.create_compartment(child_manifest("child-b", "root"))
+            .unwrap();
         mgr.create_compartment(workspace_manifest("other")).unwrap();
 
         let children = mgr.compartments_by_parent("root");
@@ -796,12 +770,13 @@ tags = []
         .unwrap();
         manager.load("retained", &engine).unwrap();
         let subject = engine.resolve_or_create_entity("retained-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("retained-predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("retained-predicate")
+            .unwrap();
         let object = engine.resolve_or_create_entity("retained-object").unwrap();
         engine
             .add_triple(
-                &Triple::new(subject, predicate, object)
-                    .with_compartment("retained".into()),
+                &Triple::new(subject, predicate, object).with_compartment("retained".into()),
             )
             .unwrap();
 

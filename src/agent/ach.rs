@@ -154,12 +154,7 @@ impl AchAnalysis {
     }
 
     /// Set a consistency rating in the matrix.
-    pub fn rate(
-        &mut self,
-        evidence_idx: usize,
-        hypothesis_idx: usize,
-        rating: ConsistencyRating,
-    ) {
+    pub fn rate(&mut self, evidence_idx: usize, hypothesis_idx: usize, rating: ConsistencyRating) {
         if let Some(row) = self.matrix.get_mut(evidence_idx) {
             if let Some(cell) = row.get_mut(hypothesis_idx) {
                 *cell = rating;
@@ -205,8 +200,8 @@ impl AchAnalysis {
             if let Some(row) = self.matrix.get(i) {
                 let weights: Vec<f32> = row.iter().map(|r| r.inconsistency_weight()).collect();
                 let mean = weights.iter().sum::<f32>() / weights.len() as f32;
-                let variance = weights.iter().map(|w| (w - mean).powi(2)).sum::<f32>()
-                    / weights.len() as f32;
+                let variance =
+                    weights.iter().map(|w| (w - mean).powi(2)).sum::<f32>() / weights.len() as f32;
                 ev.diagnosticity = variance.sqrt(); // std dev as diagnosticity measure
             }
         }
@@ -323,9 +318,21 @@ mod tests {
         a.add_hypothesis("Software bug", None);
         a.add_hypothesis("Operator error", None);
 
-        a.add_evidence("Error logs show OOM", SourceReliability::UsuallyReliable, None);
-        a.add_evidence("Hardware diagnostics clean", SourceReliability::CompletelyReliable, None);
-        a.add_evidence("Recent code deploy", SourceReliability::FairlyReliable, None);
+        a.add_evidence(
+            "Error logs show OOM",
+            SourceReliability::UsuallyReliable,
+            None,
+        );
+        a.add_evidence(
+            "Hardware diagnostics clean",
+            SourceReliability::CompletelyReliable,
+            None,
+        );
+        a.add_evidence(
+            "Recent code deploy",
+            SourceReliability::FairlyReliable,
+            None,
+        );
         a
     }
 
@@ -341,7 +348,10 @@ mod tests {
     #[test]
     fn consistency_rating_weights() {
         assert_eq!(ConsistencyRating::Consistent.inconsistency_weight(), 0.0);
-        assert_eq!(ConsistencyRating::StronglyInconsistent.inconsistency_weight(), 2.0);
+        assert_eq!(
+            ConsistencyRating::StronglyInconsistent.inconsistency_weight(),
+            2.0
+        );
         assert_eq!(ConsistencyRating::NotApplicable.inconsistency_weight(), 0.0);
     }
 
@@ -351,18 +361,18 @@ mod tests {
 
         // E0 (OOM) → consistent with software bug, inconsistent with hardware
         a.rate(0, 0, ConsistencyRating::WeaklyInconsistent); // hardware
-        a.rate(0, 1, ConsistencyRating::Consistent);          // software
-        a.rate(0, 2, ConsistencyRating::Neutral);              // operator
+        a.rate(0, 1, ConsistencyRating::Consistent); // software
+        a.rate(0, 2, ConsistencyRating::Neutral); // operator
 
         // E1 (hardware clean) → strongly inconsistent with hardware
         a.rate(1, 0, ConsistencyRating::StronglyInconsistent); // hardware
-        a.rate(1, 1, ConsistencyRating::Neutral);              // software
-        a.rate(1, 2, ConsistencyRating::Neutral);              // operator
+        a.rate(1, 1, ConsistencyRating::Neutral); // software
+        a.rate(1, 2, ConsistencyRating::Neutral); // operator
 
         // E2 (recent deploy) → consistent with software bug
-        a.rate(2, 0, ConsistencyRating::Neutral);              // hardware
-        a.rate(2, 1, ConsistencyRating::Consistent);           // software
-        a.rate(2, 2, ConsistencyRating::WeaklyInconsistent);   // operator
+        a.rate(2, 0, ConsistencyRating::Neutral); // hardware
+        a.rate(2, 1, ConsistencyRating::Consistent); // software
+        a.rate(2, 2, ConsistencyRating::WeaklyInconsistent); // operator
 
         a.evaluate();
 
@@ -417,7 +427,10 @@ mod tests {
         a.evaluate();
 
         let gaps = a.information_gaps();
-        assert!(!gaps.is_empty(), "should detect indistinguishable hypotheses");
+        assert!(
+            !gaps.is_empty(),
+            "should detect indistinguishable hypotheses"
+        );
     }
 
     #[test]

@@ -145,8 +145,17 @@ fn is_curiosity_target_worthy(label: &str) -> bool {
     let lower = trimmed.to_lowercase();
     // Agent-internal artifact prefixes — not domain concepts.
     const INTERNAL_PREFIXES: &[&str] = &[
-        "episode:", "tool:", "goal:", "criteria:", "expand:", "desc:",
-        "rate:", "sym:", "para:", "doc:", "wm:",
+        "episode:",
+        "tool:",
+        "goal:",
+        "criteria:",
+        "expand:",
+        "desc:",
+        "rate:",
+        "sym:",
+        "para:",
+        "doc:",
+        "wm:",
     ];
     if INTERNAL_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         return false;
@@ -233,7 +242,10 @@ pub fn discover_curiosity_targets(
     }
 
     // Compute the average outgoing relation count across candidates.
-    let total_outgoing: usize = entity_ids.iter().map(|&id| engine.triples_from(id).len()).sum();
+    let total_outgoing: usize = entity_ids
+        .iter()
+        .map(|&id| engine.triples_from(id).len())
+        .sum();
     let avg_relations = (total_outgoing / entity_ids.len()).max(1);
 
     let mut targets: Vec<CuriosityTarget> = entity_ids
@@ -391,7 +403,10 @@ mod tests {
             at_peak > above_peak,
             "peak={at_peak} should exceed above={above_peak}"
         );
-        assert!(at_peak > 0.9, "peak score should be near 1.0, got {at_peak}");
+        assert!(
+            at_peak > 0.9,
+            "peak score should be near 1.0, got {at_peak}"
+        );
     }
 
     #[test]
@@ -461,12 +476,20 @@ mod tests {
         let obj3 = engine.resolve_or_create_entity("obj3").unwrap();
 
         // Well connected: 3 outgoing.
-        engine.add_triple(&crate::graph::Triple::new(well_connected, rel, obj1)).unwrap();
-        engine.add_triple(&crate::graph::Triple::new(well_connected, rel, obj2)).unwrap();
-        engine.add_triple(&crate::graph::Triple::new(well_connected, rel, obj3)).unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(well_connected, rel, obj1))
+            .unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(well_connected, rel, obj2))
+            .unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(well_connected, rel, obj3))
+            .unwrap();
 
         // Sparse: 1 outgoing.
-        engine.add_triple(&crate::graph::Triple::new(sparse, rel, obj1)).unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(sparse, rel, obj1))
+            .unwrap();
 
         let config = DirectedCuriosityConfig {
             max_targets: 10,
@@ -491,11 +514,15 @@ mod tests {
         let _episode = engine.resolve_or_create_entity("episode:42").unwrap();
         let _tool = engine.resolve_or_create_entity("tool:WebSearch").unwrap();
         let _goal = engine.resolve_or_create_entity("goal:learn_rust").unwrap();
-        let domain = engine.resolve_or_create_entity("ConceptualFramework").unwrap();
+        let domain = engine
+            .resolve_or_create_entity("ConceptualFramework")
+            .unwrap();
 
         let rel = engine.resolve_or_create_relation("test:rel").unwrap();
         let obj = engine.resolve_or_create_entity("obj").unwrap();
-        engine.add_triple(&crate::graph::Triple::new(domain, rel, obj)).unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(domain, rel, obj))
+            .unwrap();
 
         let config = DirectedCuriosityConfig::default();
         let targets = discover_curiosity_targets(&engine, &config, &[]).unwrap();
@@ -504,7 +531,9 @@ mod tests {
         for t in &targets {
             let label = engine.resolve_label(t.concept);
             assert!(
-                !label.starts_with("episode:") && !label.starts_with("tool:") && !label.starts_with("goal:"),
+                !label.starts_with("episode:")
+                    && !label.starts_with("tool:")
+                    && !label.starts_with("goal:"),
                 "internal entity '{label}' appeared as a curiosity target"
             );
         }
@@ -521,8 +550,12 @@ mod tests {
 
         let rel = engine.resolve_or_create_relation("related").unwrap();
         let obj = engine.resolve_or_create_entity("shared_obj").unwrap();
-        engine.add_triple(&crate::graph::Triple::new(goal_root, rel, connected)).unwrap();
-        engine.add_triple(&crate::graph::Triple::new(connected, rel, obj)).unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(goal_root, rel, connected))
+            .unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(connected, rel, obj))
+            .unwrap();
         // unrelated has no connection to goal_root
 
         let config = DirectedCuriosityConfig::default();
@@ -568,7 +601,11 @@ mod tests {
         ];
 
         let proposals = generate_curiosity_proposals(&targets, &engine).unwrap();
-        assert_eq!(proposals.len(), 1, "Only proximal targets should produce proposals");
+        assert_eq!(
+            proposals.len(),
+            1,
+            "Only proximal targets should produce proposals"
+        );
         assert!(proposals[0].description.contains("proximal_concept"));
     }
 
@@ -591,7 +628,9 @@ mod tests {
         let concept = engine.resolve_or_create_entity("HomeCluster").unwrap();
         let rel = engine.resolve_or_create_relation("related").unwrap();
         let obj = engine.resolve_or_create_entity("obj").unwrap();
-        engine.add_triple(&crate::graph::Triple::new(concept, rel, obj)).unwrap();
+        engine
+            .add_triple(&crate::graph::Triple::new(concept, rel, obj))
+            .unwrap();
 
         let config = DirectedCuriosityConfig {
             proximal_low: 0.0,

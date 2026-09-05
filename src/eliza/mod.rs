@@ -74,7 +74,7 @@ pub mod seshat;
 pub use engine::ElizaEngine;
 pub use error::{ElizaError, ElizaResult};
 pub use kg_template::{
-    EntityRef, ElizaSession, FactQuery, FactQueryKind, Template, format_facts, query_with_timeout,
+    ElizaSession, EntityRef, FactQuery, FactQueryKind, Template, format_facts, query_with_timeout,
     triple_to_nl,
 };
 pub use script::Script;

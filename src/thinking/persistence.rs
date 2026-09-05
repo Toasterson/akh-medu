@@ -87,7 +87,11 @@ impl ThoughtPersistence for InMemoryThoughtPersistence {
         let trace = traces.get_mut(&id.0).ok_or(ThinkingError::Persistence {
             message: format!("flush_step for unknown thought {id}"),
         })?;
-        debug_assert_eq!(trace.steps.len() as u32, step_idx, "step indices contiguous");
+        debug_assert_eq!(
+            trace.steps.len() as u32,
+            step_idx,
+            "step indices contiguous"
+        );
         trace.steps.push(step.clone());
         Ok(())
     }

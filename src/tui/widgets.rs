@@ -121,19 +121,13 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             Span::raw(question.clone()),
         ]),
         AkhMessage::AuditLog {
-            id,
-            kind,
-            summary,
-            ..
+            id, kind, summary, ..
         } => Line::from(vec![
             Span::styled(
                 format!("[audit:{kind}] "),
                 Style::default().fg(Color::Magenta),
             ),
-            Span::styled(
-                format!("#{id} "),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("#{id} "), Style::default().fg(Color::DarkGray)),
             Span::raw(summary.clone()),
         ]),
         AkhMessage::ToolCallStarted {
@@ -152,10 +146,7 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             };
             let mut spans = vec![
                 Span::styled(format!("[{kind:?}] "), Style::default().fg(kind_color)),
-                Span::styled(
-                    format!("{tool_id} "),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("{tool_id} "), Style::default().fg(Color::DarkGray)),
                 Span::raw(title.clone()),
             ];
             if !locations.is_empty() {
@@ -172,21 +163,11 @@ pub fn message_to_line(msg: &AkhMessage) -> Line<'static> {
             output,
             diff,
         } => {
-            let status_color = if *success {
-                Color::Green
-            } else {
-                Color::Red
-            };
+            let status_color = if *success { Color::Green } else { Color::Red };
             let status = if *success { "ok" } else { "failed" };
             let mut spans = vec![
-                Span::styled(
-                    format!("[{status}] "),
-                    Style::default().fg(status_color),
-                ),
-                Span::styled(
-                    format!("{tool_id} "),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("[{status}] "), Style::default().fg(status_color)),
+                Span::styled(format!("{tool_id} "), Style::default().fg(Color::DarkGray)),
             ];
             if let Some(out) = output {
                 spans.push(Span::raw(out.clone()));
@@ -229,15 +210,14 @@ pub fn render(frame: &mut Frame, tui: &AkhTui) {
     // host it without crowding the chat.
     const SIDEBAR_W: u16 = 34;
     const MIN_W_FOR_SIDEBAR: u16 = 96;
-    let (messages_area, sidebar_area) =
-        if tui.show_sidebar && body_area.width >= MIN_W_FOR_SIDEBAR {
-            let [m, s] =
-                Layout::horizontal([Constraint::Fill(1), Constraint::Length(SIDEBAR_W)])
-                    .areas(body_area);
-            (m, Some(s))
-        } else {
-            (body_area, None)
-        };
+    let (messages_area, sidebar_area) = if tui.show_sidebar && body_area.width >= MIN_W_FOR_SIDEBAR
+    {
+        let [m, s] = Layout::horizontal([Constraint::Fill(1), Constraint::Length(SIDEBAR_W)])
+            .areas(body_area);
+        (m, Some(s))
+    } else {
+        (body_area, None)
+    };
 
     render_header(frame, header_area, tui);
     render_messages(frame, messages_area, tui);
@@ -260,7 +240,10 @@ pub fn render(frame: &mut Frame, tui: &AkhTui) {
 /// name until the first prompt), and a compact key-hint legend.
 #[cfg(feature = "acp")]
 fn render_header(frame: &mut Frame, area: Rect, tui: &AkhTui) {
-    let title = tui.session_title.as_deref().unwrap_or(tui.workspace.as_str());
+    let title = tui
+        .session_title
+        .as_deref()
+        .unwrap_or(tui.workspace.as_str());
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             " akh-medu ",
@@ -385,16 +368,22 @@ fn render_footer(frame: &mut Frame, area: Rect, tui: &AkhTui) {
 /// fall back while engine-derived skills stay live.
 #[cfg(feature = "acp")]
 fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
-    let [ctx_area, goals_area, reasoning_area, mind_area, evidence_area, caps_area] =
-        Layout::vertical([
-            Constraint::Length(4),  // Context
-            Constraint::Fill(1),    // Goals (flexes with the terminal)
-            Constraint::Length(5),  // Reasoning
-            Constraint::Length(4),  // Mind
-            Constraint::Length(5),  // Evidence
-            Constraint::Length(5),  // Capabilities
-        ])
-        .areas(area);
+    let [
+        ctx_area,
+        goals_area,
+        reasoning_area,
+        mind_area,
+        evidence_area,
+        caps_area,
+    ] = Layout::vertical([
+        Constraint::Length(4), // Context
+        Constraint::Fill(1),   // Goals (flexes with the terminal)
+        Constraint::Length(5), // Reasoning
+        Constraint::Length(4), // Mind
+        Constraint::Length(5), // Evidence
+        Constraint::Length(5), // Capabilities
+    ])
+    .areas(area);
 
     let dim = Style::default().fg(Color::DarkGray);
     let snap = tui.snapshot.as_ref();
@@ -506,7 +495,10 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
             let active = s.active_project.as_deref().unwrap_or("—");
             vec![
                 Line::from(Span::styled(kg_line, dim)),
-                Line::from(Span::styled(format!("active: {}", truncate(active, 22)), dim)),
+                Line::from(Span::styled(
+                    format!("active: {}", truncate(active, 22)),
+                    dim,
+                )),
             ]
         }
         None => vec![Line::from(Span::styled("· connecting ·", dim))],
@@ -520,8 +512,10 @@ fn render_sidebar(frame: &mut Frame, area: Rect, tui: &AkhTui) {
     let evidence_lines: Vec<Line> = match snap {
         Some(s) => match &s.evidence {
             Some(e) => {
-                let mut lines =
-                    vec![Line::from(Span::styled(format!("{} claims", e.claims), dim))];
+                let mut lines = vec![Line::from(Span::styled(
+                    format!("{} claims", e.claims),
+                    dim,
+                ))];
                 for c in e.uncertain.iter().take(2) {
                     let pct = |v: f32| (v * 100.0).round() as u32;
                     lines.push(Line::from(vec![
@@ -720,7 +714,9 @@ pub fn render_command_palette(frame: &mut Frame, palette: &CommandPalette) {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("/{:<8}", c.name),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!(" {}", c.desc), Style::default().fg(Color::Gray)),
                 ]))

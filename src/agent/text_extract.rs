@@ -50,9 +50,7 @@ pub(crate) type ExtractedTriple = (String, String, String, f32);
 /// - "X is made of Y" → (X, composed-of, Y)
 pub(crate) fn extract_triples(sentence: &str) -> Vec<ExtractedTriple> {
     let mut results = Vec::new();
-    let s = sentence
-        .trim()
-        .trim_end_matches(['.', '!', '?']);
+    let s = sentence.trim().trim_end_matches(['.', '!', '?']);
 
     // Normalize whitespace.
     let words: Vec<&str> = s.split_whitespace().collect();
@@ -446,8 +444,11 @@ mod tests {
     #[test]
     fn text_tool_execute() {
         let engine = test_engine();
-        let (n, _symbols) =
-            ingest_text(&engine, "Dogs are mammals. Paris is located in France.", 100);
+        let (n, _symbols) = ingest_text(
+            &engine,
+            "Dogs are mammals. Paris is located in France.",
+            100,
+        );
         assert_eq!(n, 2);
     }
 }

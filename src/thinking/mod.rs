@@ -53,8 +53,7 @@ pub use error::{ThinkingError, ThinkingResult};
 pub use loop_runner::{SchedulerChoice, ThinkingConfig, ThinkingLoop};
 pub use persistence::{InMemoryThoughtPersistence, NullThoughtPersistence, ThoughtPersistence};
 pub use scheduler::{
-    GoalShape, GoalShapeScheduler, PrimitiveKind, RoundRobinScheduler, Scheduler,
-    WeightedScheduler,
+    GoalShape, GoalShapeScheduler, PrimitiveKind, RoundRobinScheduler, Scheduler, WeightedScheduler,
 };
 pub use state::{
     Conclusion, HaltReason, Hypothesis, ThoughtId, ThoughtOrigin, ThoughtState, ThoughtStep,
@@ -165,7 +164,9 @@ mod tests {
         }
 
         let goal = engine.resolve_or_create_entity("query:capital").unwrap();
-        engine.add_triple(&Triple::new(goal, preds.seeks, s)).unwrap();
+        engine
+            .add_triple(&Triple::new(goal, preds.seeks, s))
+            .unwrap();
         engine
             .add_triple(&Triple::new(goal, preds.relation, r))
             .unwrap();
@@ -179,9 +180,7 @@ mod tests {
     fn deliberate_answers_factual_query() {
         let engine = test_engine();
         let (goal, expected) = factual_goal(&engine);
-        let conclusion = engine
-            .deliberate(goal, ThinkingBudget::steps(60))
-            .unwrap();
+        let conclusion = engine.deliberate(goal, ThinkingBudget::steps(60)).unwrap();
         assert_eq!(
             conclusion.answer_symbol,
             Some(expected),
@@ -282,9 +281,7 @@ mod tests {
             .add_triple(&Triple::new(goal, preds.answer_type, target_type))
             .unwrap();
 
-        let conclusion = engine
-            .deliberate(goal, ThinkingBudget::steps(100))
-            .unwrap();
+        let conclusion = engine.deliberate(goal, ThinkingBudget::steps(100)).unwrap();
         assert_eq!(
             conclusion.answer_symbol,
             Some(nodes[3]),
@@ -349,9 +346,15 @@ mod tests {
         mem.rebuild_hnsw();
 
         let goal = engine.resolve_or_create_entity("query:king-queen").unwrap();
-        engine.add_triple(&Triple::new(goal, preds.analogy_a, a)).unwrap();
-        engine.add_triple(&Triple::new(goal, preds.analogy_b, b)).unwrap();
-        engine.add_triple(&Triple::new(goal, preds.analogy_c, c)).unwrap();
+        engine
+            .add_triple(&Triple::new(goal, preds.analogy_a, a))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(goal, preds.analogy_b, b))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(goal, preds.analogy_c, c))
+            .unwrap();
 
         let conclusion = engine.deliberate(goal, ThinkingBudget::steps(40)).unwrap();
         assert_eq!(

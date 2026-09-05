@@ -280,9 +280,7 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
-            ),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
         )
         .unwrap();
         fs::write(root.join("src/lib.rs"), source).unwrap();
@@ -413,14 +411,9 @@ mod tests {
         )
         .unwrap();
 
-        let output = run_diagnostics_pipeline(
-            root.to_str().unwrap(),
-            "check",
-            120,
-            false,
-            Some("main"),
-        )
-        .unwrap();
+        let output =
+            run_diagnostics_pipeline(root.to_str().unwrap(), "check", 120, false, Some("main"))
+                .unwrap();
 
         // The warning should appear as task work (not baseline context)
         assert!(
@@ -482,12 +475,8 @@ mod tests {
     #[test]
     fn truncate_enforces_64kb_cap() {
         let big = "x".repeat(100 * 1024);
-        let truncated =
-            super::super::compile_feedback::truncate_text(&big, 64 * 1024);
-        assert!(
-            truncated.len() < big.len(),
-            "truncate must reduce size"
-        );
+        let truncated = super::super::compile_feedback::truncate_text(&big, 64 * 1024);
+        assert!(truncated.len() < big.len(), "truncate must reduce size");
         assert!(
             truncated.ends_with("... [truncated]"),
             "truncated text must end with marker; got: {} bytes",

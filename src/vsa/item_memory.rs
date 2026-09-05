@@ -503,7 +503,10 @@ mod tests {
         // two entries for it (old random + new grounded).
         let results = mem.search(&new_vec, 5).unwrap();
         let count = results.iter().filter(|r| r.symbol_id == sym).count();
-        assert_eq!(count, 1, "Symbol should appear exactly once after re-grounding");
+        assert_eq!(
+            count, 1,
+            "Symbol should appear exactly once after re-grounding"
+        );
 
         // The one result for sym should be the LATEST vector (sim = 1.0)
         let sym_sim = results
@@ -569,8 +572,8 @@ mod tests {
         for i in 1..=20u64 {
             mem.get_or_create(&ops, SymbolId::new(i).unwrap());
         }
-        let path = std::env::temp_dir()
-            .join(format!("akh_hnsw_cache_test_{}.bin", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("akh_hnsw_cache_test_{}.bin", std::process::id()));
         mem.dump_to_disk(&path).unwrap();
 
         // Same fingerprint → loads, vectors + HNSW search reconstructed.
@@ -578,10 +581,17 @@ mod tests {
             .expect("cache should load with matching fingerprint");
         assert_eq!(loaded.len(), 20);
         let sym = SymbolId::new(7).unwrap();
-        assert_eq!(loaded.get(sym), mem.get(sym), "vectors survive the round-trip");
+        assert_eq!(
+            loaded.get(sym),
+            mem.get(sym),
+            "vectors survive the round-trip"
+        );
         let q = loaded.get(sym).unwrap();
         let hits = loaded.search(&q, 3).unwrap();
-        assert!(hits.iter().any(|r| r.symbol_id == sym), "HNSW rebuilt from cache");
+        assert!(
+            hits.iter().any(|r| r.symbol_id == sym),
+            "HNSW rebuilt from cache"
+        );
 
         // Mismatched dimension → None (caller rebuilds from facts).
         assert!(

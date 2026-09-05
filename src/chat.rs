@@ -13,15 +13,17 @@
 use std::sync::Arc;
 
 use crate::agent::Agent;
+use crate::agent::conversation::Speaker;
 use crate::agent::eliza::{ElizaRouter, ElizaRouting, FallbackReason};
 use crate::agent::nlp::QuestionWord;
 #[allow(deprecated)]
-use crate::agent::{classify_intent, UserIntent};
-use crate::agent::conversation::Speaker;
+use crate::agent::{UserIntent, classify_intent};
 use crate::engine::Engine;
 use crate::grammar::abs::AbsTree;
 use crate::grammar::concrete::ParseContext;
-use crate::grammar::discourse::{QueryFocus, build_discourse_response, classify_focus_with_modal, resolve_discourse};
+use crate::grammar::discourse::{
+    QueryFocus, build_discourse_response, classify_focus_with_modal, resolve_discourse,
+};
 use crate::grammar::lexer::Lexicon;
 use crate::graph::Triple;
 use crate::infer::InferenceQuery;
@@ -64,7 +66,9 @@ impl Default for ChatProcessorConfig {
 
 /// Communicative pipeline default: on, unless `AKH_COMM_INTEL=0`.
 fn communicative_default() -> bool {
-    std::env::var("AKH_COMM_INTEL").map(|v| v != "0").unwrap_or(true)
+    std::env::var("AKH_COMM_INTEL")
+        .map(|v| v != "0")
+        .unwrap_or(true)
 }
 
 // ── SessionContext ──────────────────────────────────────────────────────
@@ -214,16 +218,16 @@ impl ChatProcessor {
         }
 
         // ── NLU pipeline (all other input) ──────────────────────────
-        let parse_ctx = ParseContext::with_engine(
-            engine.registry(),
-            engine.ops(),
-            engine.item_memory(),
-        );
+        let parse_ctx =
+            ParseContext::with_engine(engine.registry(), engine.ops(), engine.item_memory());
 
         // Build KG context for LLM tiers (gracefully absent when KG is empty).
         let kg_context = build_kg_context(engine, trimmed, &mut ctx.kg_cache);
 
-        match self.nlu_pipeline.parse_with_context(trimmed, &parse_ctx, kg_context.as_deref()) {
+        match self
+            .nlu_pipeline
+            .parse_with_context(trimmed, &parse_ctx, kg_context.as_deref())
+        {
             Ok(nlu_result) => {
                 // Record turn in dialogue manager (no resolved entities at parse time;
                 // entity resolution happens downstream in dispatch handlers).
@@ -316,7 +320,8 @@ impl ChatProcessor {
             }
             AbsTree::GoalRequest { description } => {
                 if self.config.create_goal {
-                    let desc = description.label()
+                    let desc = description
+                        .label()
                         .map(String::from)
                         .unwrap_or_else(|| description.collect_labels().join(" "));
                     self.handle_set_goal(&mut msgs, agent, engine, &desc, &grammar);
@@ -364,7 +369,8 @@ impl ChatProcessor {
             // ── Query-like trees (entity refs, etc.) ────────────────
             _ => {
                 // Extract a subject label from the tree for query handling.
-                let subject = tree.label()
+                let subject = tree
+                    .label()
                     .map(String::from)
                     .unwrap_or_else(|| tree.collect_labels().join(" "));
                 if subject.is_empty() {
@@ -377,13 +383,7 @@ impl ChatProcessor {
                     );
                 } else {
                     self.handle_query_from_tree(
-                        ctx,
-                        &mut msgs,
-                        agent,
-                        engine,
-                        &subject,
-                        raw_input,
-                        &grammar,
+                        ctx, &mut msgs, agent, engine, &subject, raw_input, &grammar,
                     );
                 }
             }
@@ -413,7 +413,13 @@ impl ChatProcessor {
         // Small LLMs often ignore the system prompt and produce generic greetings.
         let text = self
             .nlu_pipeline
-            .generate_dialogue_with_kg("greeting", &name, &traits, active_topic.as_deref(), kg_ctx.as_deref())
+            .generate_dialogue_with_kg(
+                "greeting",
+                &name,
+                &traits,
+                active_topic.as_deref(),
+                kg_ctx.as_deref(),
+            )
             .filter(|t| t.to_lowercase().contains(&name.to_lowercase()))
             .unwrap_or_else(|| {
                 agent
@@ -478,16 +484,16 @@ impl ChatProcessor {
             }
             None => {
                 // Active topic exists in KG — resolve and re-query at Full detail.
-                let topic_id = agent.dialogue_manager().query_active_topic(engine)
+                let topic_id = agent
+                    .dialogue_manager()
+                    .query_active_topic(engine)
                     .or_else(|| agent.conversation_state().topic());
                 if let Some(tid) = topic_id {
                     let label = engine.resolve_label(tid);
                     if let Some(gr) =
                         crate::agent::conversation::ground_query(&label, engine, grammar)
                     {
-                        let rendered = gr.render(
-                            crate::agent::conversation::ResponseDetail::Full,
-                        );
+                        let rendered = gr.render(crate::agent::conversation::ResponseDetail::Full);
                         msgs.push(AkhMessage::narrative(&rendered, grammar));
                         agent.conversation_state().record_agent_turn(&rendered);
                     }
@@ -563,7 +569,11 @@ impl ChatProcessor {
             }
             "pim" | "cal" | "pref" | "causal" => {
                 let sub = args.first().map(|s| s.as_str()).unwrap_or("");
-                let rest = if args.len() > 1 { args[1..].join(" ") } else { String::new() };
+                let rest = if args.len() > 1 {
+                    args[1..].join(" ")
+                } else {
+                    String::new()
+                };
                 msgs.push(AkhMessage::system(format!(
                     "{command} commands are available via the CLI: akh {command} {sub} {rest}",
                 )));
@@ -573,7 +583,11 @@ impl ChatProcessor {
                 if sub == "status" {
                     Self::handle_awaken_status(msgs, engine);
                 } else {
-                    let rest = if args.len() > 1 { args[1..].join(" ") } else { String::new() };
+                    let rest = if args.len() > 1 {
+                        args[1..].join(" ")
+                    } else {
+                        String::new()
+                    };
                     msgs.push(AkhMessage::system(format!(
                         "Awaken commands are available via the CLI: akh awaken {sub} {rest}",
                     )));
@@ -788,11 +802,8 @@ impl ChatProcessor {
             // and rendering — one wiring point for all chat surfaces.
             let (gr, shadow_journal) =
                 self.apply_communicative(ctx, gr, subject, original_input, agent, engine);
-            let (out_msg, decision) = agent.check_and_wrap_grounded(
-                &gr,
-                "operator",
-                crate::agent::ChannelKind::Operator,
-            );
+            let (out_msg, decision) =
+                agent.check_and_wrap_grounded(&gr, "operator", crate::agent::ChannelKind::Operator);
             if decision == crate::agent::constraint_check::EmissionDecision::Emit {
                 let detail = agent.conversation_state().response_detail;
                 let rendered = gr.render(detail);
@@ -1030,13 +1041,8 @@ impl ChatProcessor {
         let sentiment = Sentiment::from_valence(agent.affective_system.current_affect().valence);
 
         let query_type = classify_query_type(original_input, subject);
-        let comm_ctx = context_from_grounded(
-            &gr,
-            subject,
-            query_type,
-            &ctx.trajectory,
-            Some(sentiment),
-        );
+        let comm_ctx =
+            context_from_grounded(&gr, subject, query_type, &ctx.trajectory, Some(sentiment));
         let composed = compose_grounded(&gr, subject, &psyche, &comm_ctx);
 
         tracing::debug!(
@@ -1089,7 +1095,9 @@ impl ChatProcessor {
     fn detect_capability_signal(input: &str, lexicon: &Lexicon) -> bool {
         let lower = input.trim().to_lowercase();
         // Check if any word in the input is a capability modal.
-        lower.split_whitespace().any(|w| lexicon.is_capability_modal(w))
+        lower
+            .split_whitespace()
+            .any(|w| lexicon.is_capability_modal(w))
     }
 
     // ── KG-based query decomposition ──────────────────────────────────
@@ -1136,9 +1144,9 @@ impl ChatProcessor {
 
         // Primary entity selection.
         let primary_idx = match unknown.len() {
-            1 => unknown[0],                   // single unknown → it's the primary
-            0 => tokens.len() - 1,             // all known → head-final
-            _ => *unknown.last().unwrap(),      // multiple unknowns → head-final among unknowns
+            1 => unknown[0],               // single unknown → it's the primary
+            0 => tokens.len() - 1,         // all known → head-final
+            _ => *unknown.last().unwrap(), // multiple unknowns → head-final among unknowns
         };
 
         let primary_label = &tokens[primary_idx];
@@ -1289,9 +1297,7 @@ impl ChatProcessor {
                     }
                 },
                 Err(_) => {
-                    msgs.push(AkhMessage::system(format!(
-                        "Symbol \"{name}\" not found."
-                    )));
+                    msgs.push(AkhMessage::system(format!("Symbol \"{name}\" not found.")));
                 }
             }
         } else {
@@ -1301,11 +1307,8 @@ impl ChatProcessor {
                     "No triples in knowledge graph.".to_string(),
                 ));
             } else {
-                let rendered = crate::glyph::render::render_to_terminal(
-                    engine,
-                    &triples,
-                    &render_config,
-                );
+                let rendered =
+                    crate::glyph::render::render_to_terminal(engine, &triples, &render_config);
                 msgs.push(AkhMessage::system(rendered));
             }
         }
@@ -1394,9 +1397,9 @@ impl ChatProcessor {
         );
 
         // Try LLM generation with persona + KG context.
-        if let Some(text) = self
-            .nlu_pipeline
-            .generate_open_ended(original_input, &name, &traits, kg_context_opt)
+        if let Some(text) =
+            self.nlu_pipeline
+                .generate_open_ended(original_input, &name, &traits, kg_context_opt)
         {
             if !text.trim().is_empty() {
                 agent.conversation_state().record_agent_turn(&text);
@@ -1424,17 +1427,19 @@ impl ChatProcessor {
     fn collect_kg_context_for_input(&self, input: &str, engine: &Arc<Engine>) -> Vec<String> {
         let mut facts = Vec::new();
         let stop_words = [
-            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-            "to", "of", "for", "in", "on", "at", "by", "with", "from", "into",
-            "and", "or", "but", "if", "then", "that", "this", "it", "me", "you",
-            "we", "they", "he", "she", "what", "which", "who", "write", "about",
-            "tell", "please", "create", "make", "compose", "imagine", "poem",
+            "a", "an", "the", "is", "are", "was", "were", "be", "been", "being", "to", "of", "for",
+            "in", "on", "at", "by", "with", "from", "into", "and", "or", "but", "if", "then",
+            "that", "this", "it", "me", "you", "we", "they", "he", "she", "what", "which", "who",
+            "write", "about", "tell", "please", "create", "make", "compose", "imagine", "poem",
             "story", "essay", "blog", "joke",
         ];
 
         let seen_tokens: std::collections::HashSet<String> = input
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .filter(|w| !w.is_empty() && !stop_words.contains(&w.as_str()))
             .collect();
 
@@ -1460,12 +1465,7 @@ impl ChatProcessor {
     // ── Shared helpers ──────────────────────────────────────────────
 
     /// Ingest text as a fact using the pattern-based text extractor.
-    fn ingest_as_fact(
-        &self,
-        text: &str,
-        engine: &Engine,
-        tool_label: &str,
-    ) -> Vec<AkhMessage> {
+    fn ingest_as_fact(&self, text: &str, engine: &Engine, tool_label: &str) -> Vec<AkhMessage> {
         let (n, _symbols) = crate::agent::text_extract::ingest_text(engine, text, 100);
         let msg = format!("Text ingest: extracted {n} triple(s).");
         vec![AkhMessage::tool_result(tool_label, true, &msg)]
@@ -1590,7 +1590,10 @@ impl ChatProcessor {
             .map(|p| (p.persona.name.clone(), p.persona.traits.clone()))
             .unwrap_or_else(|| {
                 // Default Psyche name is "Scholar" — "Akh" is the species, not the name.
-                ("Scholar".to_string(), vec!["precise".to_string(), "curious".to_string()])
+                (
+                    "Scholar".to_string(),
+                    vec!["precise".to_string(), "curious".to_string()],
+                )
             })
     }
 
@@ -1619,7 +1622,9 @@ impl ChatProcessor {
                         "Not that I know of — I don't have anything linking {subject} to {object}."
                     )
                 } else {
-                    format!("I don't know about {subject} yet, so I can't say whether it {aux} {object}.")
+                    format!(
+                        "I don't know about {subject} yet, so I can't say whether it {aux} {object}."
+                    )
                 }
             }
         };
@@ -1673,9 +1678,7 @@ impl ChatProcessor {
                 if s.is_empty() || p.is_empty() || o.is_empty() {
                     return 0;
                 }
-                match crate::agent::text_extract::ingest_extracted(
-                    engine, s, p, o, confidence,
-                ) {
+                match crate::agent::text_extract::ingest_extracted(engine, s, p, o, confidence) {
                     Ok(_) => 1,
                     Err(e) => {
                         tracing::warn!(error = %e, "assert_abstree: triple insert failed");
@@ -1684,14 +1687,18 @@ impl ChatProcessor {
                 }
             }
             // Conjunctions assert each conjunct; disjunctions are ambiguous to assert.
-            AbsTree::Conjunction { items, is_and: true } => items
+            AbsTree::Conjunction {
+                items,
+                is_and: true,
+            } => items
                 .iter()
                 .map(|i| Self::assert_abstree_triples(i, engine, confidence))
                 .sum(),
             // Modifier wrappers: descend, honoring an explicit confidence.
-            AbsTree::WithConfidence { inner, confidence: c } => {
-                Self::assert_abstree_triples(inner, engine, *c)
-            }
+            AbsTree::WithConfidence {
+                inner,
+                confidence: c,
+            } => Self::assert_abstree_triples(inner, engine, *c),
             AbsTree::WithProvenance { inner, .. }
             | AbsTree::Modal { inner, .. }
             | AbsTree::Temporal { inner, .. } => {
@@ -1739,9 +1746,9 @@ impl ChatProcessor {
         // Channel-aware: surface the boundary LLM's reasoning (`thought`) as a
         // collapsible trace distinct from the answer, rather than dropping it
         // (ADR 069).
-        if let Some(stream) =
-            self.nlu_pipeline
-                .verbalize_channels(question, facts, &name, &traits)
+        if let Some(stream) = self
+            .nlu_pipeline
+            .verbalize_channels(question, facts, &name, &traits)
         {
             let answer = stream.answer();
             if !answer.trim().is_empty() {
@@ -1895,8 +1902,8 @@ enum PolarVerdict {
 
 /// Auxiliaries that open a yes/no question.
 const POLAR_AUX: &[&str] = &[
-    "is", "are", "was", "were", "am", "do", "does", "did", "can", "could",
-    "will", "would", "shall", "should", "has", "have", "had",
+    "is", "are", "was", "were", "am", "do", "does", "did", "can", "could", "will", "would",
+    "shall", "should", "has", "have", "had",
 ];
 
 /// Prepositions that act as the relation in an "X <prep> Y" polar question.
@@ -2012,8 +2019,7 @@ fn polar_verdict(engine: &Engine, subject: &str, object: &str) -> PolarVerdict {
                 let pred = engine.resolve_label(t.predicate).to_lowercase();
                 let obj_label = engine.resolve_label(t.object).to_lowercase();
                 if obj_variants.contains(&obj_label) {
-                    if pred.contains("not") || pred.contains("negat") || pred.contains("opposite")
-                    {
+                    if pred.contains("not") || pred.contains("negat") || pred.contains("opposite") {
                         found_negation = true;
                     } else {
                         return PolarVerdict::Yes { direct: depth == 0 };
@@ -2153,12 +2159,10 @@ fn humanize_list(items: &[String]) -> String {
 /// chain, but "consists"/"this" don't accidentally match); longer relational
 /// predicates are matched as substrings.
 fn is_transitive_pred(pred: &str) -> bool {
-    const EXACT: &[&str] = &[
-        "is", "isa", "are", "be", "in", "at", "on", "was", "were",
-    ];
+    const EXACT: &[&str] = &["is", "isa", "are", "be", "in", "at", "on", "was", "were"];
     const CONTAINS: &[&str] = &[
-        "is-a", "is a", "type", "kind", "subclass", "child-of", "instance",
-        "member", "part-of", "part of", "located", "within", "inside", "subset",
+        "is-a", "is a", "type", "kind", "subclass", "child-of", "instance", "member", "part-of",
+        "part of", "located", "within", "inside", "subset",
     ];
     EXACT.contains(&pred) || CONTAINS.iter().any(|p| pred.contains(p))
 }

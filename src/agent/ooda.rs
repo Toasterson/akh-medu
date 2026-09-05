@@ -173,10 +173,7 @@ pub fn run_ooda_cycle_with_mode(
     // Contaminants (CI runners, ForgejoActions, Stor01 …) re-emerge across
     // cleanup sessions because infer_rules fires every cycle; this guard
     // removes them unconditionally so they cannot accumulate.
-    let contaminants_purged = agent
-        .engine
-        .purge_contaminated_inferences()
-        .unwrap_or(0);
+    let contaminants_purged = agent.engine.purge_contaminated_inferences().unwrap_or(0);
     if contaminants_purged > 0 {
         tracing::warn!(
             cycle,
@@ -249,27 +246,22 @@ fn observe(agent: &mut Agent, cycle: u64) -> AgentResult<Observation> {
     // run a just-in-time information retrieval query and push ambient suggestions to WM.
     let mut jitir_summary = String::new();
     if agent.preference_manager.profile.interaction_count > 0
-        && let Ok(jitir) = agent.preference_manager.jitir_query(
-            &agent.working_memory,
-            &agent.goals,
-            &agent.engine,
-        )
+        && let Ok(jitir) =
+            agent
+                .preference_manager
+                .jitir_query(&agent.working_memory, &agent.goals, &agent.engine)
     {
-            let total = jitir.direct_matches.len() + jitir.serendipity_matches.len();
-            if total > 0 {
-                let labels: Vec<&str> = jitir
-                    .direct_matches
-                    .iter()
-                    .chain(jitir.serendipity_matches.iter())
-                    .take(3)
-                    .map(|s| s.label.as_str())
-                    .collect();
-                jitir_summary = format!(
-                    " | JITIR: {} suggestions ({})",
-                    total,
-                    labels.join(", ")
-                );
-            }
+        let total = jitir.direct_matches.len() + jitir.serendipity_matches.len();
+        if total > 0 {
+            let labels: Vec<&str> = jitir
+                .direct_matches
+                .iter()
+                .chain(jitir.serendipity_matches.iter())
+                .take(3)
+                .map(|s| s.label.as_str())
+                .collect();
+            jitir_summary = format!(" | JITIR: {} suggestions ({})", total, labels.join(", "));
+        }
     }
 
     // Push observation to WM.
@@ -479,7 +471,10 @@ fn decide(
                 &agent.engine,
                 &agent.working_memory,
                 agent.psyche.as_ref(),
-                &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
+                &*agent
+                    .tool_registry
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
                 &config,
             );
             tracing::debug!(
@@ -490,7 +485,12 @@ fn decide(
                 tools_scored = outcome.diagnostics.tools_scored,
                 "VSA-native decide",
             );
-            (outcome.tool_name, outcome.tool_input, outcome.reasoning, outcome.impasse)
+            (
+                outcome.tool_name,
+                outcome.tool_input,
+                outcome.reasoning,
+                outcome.impasse,
+            )
         }
         DecideMode::LlmDriven => select_tool(
             top_goal,
@@ -499,7 +499,10 @@ fn decide(
             &agent.engine,
             &agent.working_memory,
             agent.psyche.as_ref(),
-            &*agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
+            &*agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
             Some(&agent.affective_system),
         ),
     };
@@ -742,14 +745,11 @@ fn synthesize_triple(
         .collect();
 
     // Only use inference symbols that are not metadata and not already connected.
-    let novel_inference = orientation
-        .inferences
-        .iter()
-        .find(|(sym, _)| {
-            !connected.contains(sym)
-                && *sym != goal.symbol_id
-                && !is_metadata_label(&engine.resolve_label(*sym))
-        })?;
+    let novel_inference = orientation.inferences.iter().find(|(sym, _)| {
+        !connected.contains(sym)
+            && *sym != goal.symbol_id
+            && !is_metadata_label(&engine.resolve_label(*sym))
+    })?;
 
     // Prefer non-metadata predicates so the synthesized triple is meaningful.
     let predicate = orientation
@@ -913,10 +913,7 @@ fn select_tool(
                 .relevant_knowledge
                 .iter()
                 .flat_map(|t| [t.object, t.subject])
-                .find(|&s| {
-                    s != goal.symbol_id
-                        && !is_metadata_label(&engine.resolve_label(s))
-                })
+                .find(|&s| s != goal.symbol_id && !is_metadata_label(&engine.resolve_label(s)))
                 .or_else(|| {
                     // Fallback to inferences if no clean knowledge triple available.
                     orientation
@@ -924,8 +921,7 @@ fn select_tool(
                         .iter()
                         .map(|(sym, _)| *sym)
                         .find(|&s| {
-                            s != goal.symbol_id
-                                && !is_metadata_label(&engine.resolve_label(s))
+                            s != goal.symbol_id && !is_metadata_label(&engine.resolve_label(s))
                         })
                 });
             if let Some(best) = best_sym {
@@ -1288,8 +1284,7 @@ fn select_tool(
                         }
                     };
 
-                    let semantic_score =
-                        ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
+                    let semantic_score = ops.similarity(&goal_vec, &profile_vec).unwrap_or(0.5);
                     if semantic_score <= 0.55 {
                         continue;
                     }
@@ -1307,9 +1302,11 @@ fn select_tool(
                                     .iter()
                                     .find_map(|(sym, _)| {
                                         let label = engine.resolve_label(*sym);
-                                        if orientation.relevant_knowledge.iter().any(|t| {
-                                            t.subject == *sym || t.object == *sym
-                                        }) {
+                                        if orientation
+                                            .relevant_knowledge
+                                            .iter()
+                                            .any(|t| t.subject == *sym || t.object == *sym)
+                                        {
                                             Some(label.to_lowercase())
                                         } else {
                                             None
@@ -1488,7 +1485,12 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
             "tool={} input={:?}",
             decision.chosen_tool, decision.tool_input
         );
-        if let Some(manifest) = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).manifest(&decision.chosen_tool) {
+        if let Some(manifest) = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .manifest(&decision.chosen_tool)
+        {
             // Structured veto check using manifest.
             if let Some(veto) = psyche.check_veto(&manifest, &action_desc) {
                 // Clone veto data before releasing the immutable borrow.
@@ -1564,11 +1566,15 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
 
     // Tool errors should NOT be fatal to the OODA loop — convert them into a
     // failed ToolOutput so the agent can adapt (retry, switch tools, etc.).
-    let tool_output = match agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).execute(
-        &decision.chosen_tool,
-        decision.tool_input.clone(),
-        &agent.engine,
-    ) {
+    let tool_output = match agent
+        .tool_registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .execute(
+            &decision.chosen_tool,
+            decision.tool_input.clone(),
+            &agent.engine,
+        ) {
         Ok(output) => output,
         Err(e) => ToolOutput {
             result: format!("{e}"),
@@ -1667,7 +1673,9 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
         let ts = cycle;
         let appraisal = match &goal_progress {
             GoalProgress::Completed => Appraisal {
-                trigger: AppraisalTrigger::GoalCompleted { goal_id: decision.goal_id },
+                trigger: AppraisalTrigger::GoalCompleted {
+                    goal_id: decision.goal_id,
+                },
                 relevance: 0.9,
                 novelty: 0.2,
                 valence: 0.8,
@@ -1675,7 +1683,9 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                 timestamp: ts,
             },
             GoalProgress::Failed { .. } => Appraisal {
-                trigger: AppraisalTrigger::GoalFailed { goal_id: decision.goal_id },
+                trigger: AppraisalTrigger::GoalFailed {
+                    goal_id: decision.goal_id,
+                },
                 relevance: 0.8,
                 novelty: 0.4,
                 valence: -0.7,
@@ -1699,7 +1709,9 @@ fn act(agent: &mut Agent, decision: &Decision, cycle: u64) -> AgentResult<Action
                 timestamp: ts,
             },
             GoalProgress::NoChange => Appraisal {
-                trigger: AppraisalTrigger::Novelty { entity: decision.goal_id },
+                trigger: AppraisalTrigger::Novelty {
+                    entity: decision.goal_id,
+                },
                 relevance: 0.2,
                 novelty: 0.3,
                 valence: 0.0,
@@ -2301,14 +2313,20 @@ mod tests {
 
     #[test]
     fn detect_impasse_none_for_clear_winner() {
-        let candidates = vec![make_candidate("kg_query", 0.8), make_candidate("reason", 0.3)];
+        let candidates = vec![
+            make_candidate("kg_query", 0.8),
+            make_candidate("reason", 0.3),
+        ];
         let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
         assert!(impasse.is_none());
     }
 
     #[test]
     fn detect_impasse_all_below_threshold() {
-        let candidates = vec![make_candidate("kg_query", 0.10), make_candidate("reason", 0.05)];
+        let candidates = vec![
+            make_candidate("kg_query", 0.10),
+            make_candidate("reason", 0.05),
+        ];
         let impasse = detect_impasse(&candidates, SymbolId::new(1).unwrap());
         assert!(impasse.is_some());
         let imp = impasse.unwrap();

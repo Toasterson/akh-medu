@@ -272,8 +272,7 @@ impl ActiveInferenceEngine {
         goal_relevant_assertions: usize,
     ) -> f32 {
         // Net positive effect toward goals.
-        let net = goal_relevant_assertions as f32
-            + action_effects_assertions as f32 * 0.1
+        let net = goal_relevant_assertions as f32 + action_effects_assertions as f32 * 0.1
             - action_effects_retractions as f32 * 0.2;
         net.max(-1.0).min(1.0)
     }
@@ -281,11 +280,7 @@ impl ActiveInferenceEngine {
     /// Compute epistemic value of an action (expected uncertainty reduction).
     ///
     /// Higher = more information gain.
-    pub fn epistemic_value(
-        &self,
-        uncertain_claims_resolved: usize,
-        total_uncertain: usize,
-    ) -> f32 {
+    pub fn epistemic_value(&self, uncertain_claims_resolved: usize, total_uncertain: usize) -> f32 {
         if total_uncertain == 0 {
             return 0.0;
         }
@@ -295,13 +290,9 @@ impl ActiveInferenceEngine {
     /// Compute expected free energy for a candidate action.
     ///
     /// EFE = -(w_p * pragmatic + w_e * epistemic). Lower EFE = better action.
-    pub fn expected_free_energy(
-        &self,
-        pragmatic: f32,
-        epistemic: f32,
-    ) -> FreeEnergy {
-        let efe = -(self.config.pragmatic_weight * pragmatic
-            + self.config.epistemic_weight * epistemic);
+    pub fn expected_free_energy(&self, pragmatic: f32, epistemic: f32) -> FreeEnergy {
+        let efe =
+            -(self.config.pragmatic_weight * pragmatic + self.config.epistemic_weight * epistemic);
 
         FreeEnergy {
             pragmatic_value: pragmatic,
@@ -333,9 +324,17 @@ impl ActiveInferenceEngine {
         let temp = self.config.temperature / self.precision.model_precision.max(0.1);
 
         // Compute softmax probabilities over negative EFE.
-        let efes: Vec<f32> = policies.iter().map(|p| -p.efe.expected_free_energy).collect();
+        let efes: Vec<f32> = policies
+            .iter()
+            .map(|p| -p.efe.expected_free_energy)
+            .collect();
         let max_efe = efes.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let exp_sum: f32 = efes.iter().map(|&e| ((e - max_efe) / temp).exp()).collect::<Vec<f32>>().iter().sum();
+        let exp_sum: f32 = efes
+            .iter()
+            .map(|&e| ((e - max_efe) / temp).exp())
+            .collect::<Vec<f32>>()
+            .iter()
+            .sum();
 
         for (i, policy) in policies.iter_mut().enumerate() {
             policy.selection_probability = ((efes[i] - max_efe) / temp).exp() / exp_sum;
@@ -368,8 +367,8 @@ impl ActiveInferenceEngine {
 
     /// Persist to durable store.
     pub fn persist(&self, engine: &crate::engine::Engine) -> Result<(), String> {
-        let bytes = bincode::serialize(self)
-            .map_err(|e| format!("serialize active inference: {e}"))?;
+        let bytes =
+            bincode::serialize(self).map_err(|e| format!("serialize active inference: {e}"))?;
         engine
             .store()
             .put_meta(b"agent:active_inference", &bytes)
@@ -503,7 +502,8 @@ mod tests {
         assert!(
             engine.precision.model_precision > before_low,
             "low error should increase precision: {} vs {}",
-            engine.precision.model_precision, before_low
+            engine.precision.model_precision,
+            before_low
         );
 
         // High error → precision should decrease.
@@ -520,7 +520,8 @@ mod tests {
         assert!(
             engine.precision.model_precision < before_high,
             "high error should decrease precision: {} vs {}",
-            engine.precision.model_precision, before_high
+            engine.precision.model_precision,
+            before_high
         );
     }
 
@@ -537,7 +538,10 @@ mod tests {
     fn pragmatic_value_away_from_goal() {
         let engine = ActiveInferenceEngine::default();
         let pv = engine.pragmatic_value(0, 5, 0);
-        assert!(pv < 0.0, "retractions without progress → negative pragmatic");
+        assert!(
+            pv < 0.0,
+            "retractions without progress → negative pragmatic"
+        );
     }
 
     #[test]
@@ -631,7 +635,11 @@ mod tests {
         let error = engine.run_cycle(&model, &actual);
 
         assert_eq!(engine.cycle_count, 1);
-        assert!(engine.cumulative_surprise > 0.0, "surprise={}", engine.cumulative_surprise);
+        assert!(
+            engine.cumulative_surprise > 0.0,
+            "surprise={}",
+            engine.cumulative_surprise
+        );
         assert!(error.false_negatives.len() == 1); // (4,5,6) unexpected
     }
 

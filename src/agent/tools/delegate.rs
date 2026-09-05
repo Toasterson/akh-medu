@@ -18,9 +18,9 @@ use crate::agent::tool_manifest::{
 use crate::engine::Engine;
 
 #[cfg(feature = "delegation")]
-use std::sync::{Arc, Mutex};
-#[cfg(feature = "delegation")]
 use crate::agent::delegation::DelegationTask;
+#[cfg(feature = "delegation")]
+use std::sync::{Arc, Mutex};
 
 /// Delegate a task to an external worker (Claude Code subprocess or peer).
 pub struct DelegateTool {
@@ -49,11 +49,10 @@ impl Tool for DelegateTool {
     fn signature(&self) -> ToolSignature {
         ToolSignature {
             name: "delegate".into(),
-            description:
-                "Delegate a task to an external Claude Code process or peer agent. \
+            description: "Delegate a task to an external Claude Code process or peer agent. \
                  The task will be executed asynchronously and results flow back \
                  through the delegation manager."
-                    .into(),
+                .into(),
             parameters: vec![
                 ToolParam {
                     name: "task".into(),
@@ -62,10 +61,9 @@ impl Tool for DelegateTool {
                 },
                 ToolParam {
                     name: "target".into(),
-                    description:
-                        "Target hint: 'local' for Claude Code subprocess (default), \
+                    description: "Target hint: 'local' for Claude Code subprocess (default), \
                          'remote' for cloud trigger, 'peer' for another akh-medu instance."
-                            .into(),
+                        .into(),
                     required: false,
                 },
             ],
@@ -106,26 +104,17 @@ impl Tool for DelegateTool {
     fn manifest(&self) -> ToolManifest {
         ToolManifest {
             name: "delegate".into(),
-            description:
-                "Delegate a task to an external Claude Code process or peer agent."
-                    .into(),
+            description: "Delegate a task to an external Claude Code process or peer agent.".into(),
             parameters: vec![
                 ToolParamSchema::required("task", "Description of the task to delegate"),
-                ToolParamSchema::optional(
-                    "target",
-                    "Target hint: 'local', 'remote', or 'peer'",
-                ),
+                ToolParamSchema::optional("target", "Target hint: 'local', 'remote', or 'peer'"),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Dangerous,
-                capabilities: HashSet::from([
-                    Capability::ProcessExec,
-                    Capability::Network,
-                ]),
-                description:
-                    "Spawns an external Claude Code process that can read/write files \
+                capabilities: HashSet::from([Capability::ProcessExec, Capability::Network]),
+                description: "Spawns an external Claude Code process that can read/write files \
                      and query the knowledge graph."
-                        .into(),
+                    .into(),
                 shadow_triggers: vec![
                     "delegate".into(),
                     "external".into(),

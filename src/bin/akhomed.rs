@@ -10,7 +10,6 @@
 //!
 //! See `docs/ai/decisions/061-acp-only-retire-legacy-surfaces.md`.
 
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::Duration;
@@ -19,9 +18,9 @@ use miette::Diagnostic;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-use akh_medu::agent::trigger::TriggerStore;
 use akh_medu::agent::model_manager::AgentModelManager;
 use akh_medu::agent::ollama::{OllamaClient, VALID_THINK_LEVELS};
+use akh_medu::agent::trigger::TriggerStore;
 use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::akh_config::AkhConfig;
 use akh_medu::client::DaemonStatus;
@@ -162,7 +161,10 @@ fn quarantine_local_redb(
             break candidate;
         }
         attempt = attempt.checked_add(1).ok_or_else(|| {
-            format!("too many quarantined redb images under {}", kg_dir.display())
+            format!(
+                "too many quarantined redb images under {}",
+                kg_dir.display()
+            )
         })?;
     };
     std::fs::rename(&redb, &backup).map_err(|error| {
@@ -367,9 +369,7 @@ struct HeldResidency {
 /// agent mutex. (Formerly shared with the inbound MCP server's `McpState`;
 /// after ADR-061 P8.5 only `ServerState` uses it.)
 type PsycheSnapshotMap = Arc<
-    RwLock<
-        HashMap<String, Arc<std::sync::RwLock<Option<akh_medu::compartment::psyche::Psyche>>>>,
-    >,
+    RwLock<HashMap<String, Arc<std::sync::RwLock<Option<akh_medu::compartment::psyche::Psyche>>>>>,
 >;
 
 /// Pause control for a single workspace daemon. The daemon clones `paused` /
@@ -725,12 +725,7 @@ impl ServerState {
 
                 let ws_paths = self.paths.workspace(&name);
                 let hydrated = self
-                    .quarantine_then_hydrate_authoritative(
-                        &name,
-                        &ws_paths,
-                        residency_epoch,
-                        true,
-                    )
+                    .quarantine_then_hydrate_authoritative(&name, &ws_paths, residency_epoch, true)
                     .await;
                 drop(publication_guard);
                 drop(engine_load_guard);
@@ -746,8 +741,12 @@ impl ServerState {
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&name);
                         match self.get_agent(&name).await {
-                            Ok(_) => tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect"),
-                            Err(error) => tracing::error!(workspace = %name, %error, "durable reconnect hydrate succeeded but runtime resume failed"),
+                            Ok(_) => {
+                                tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect")
+                            }
+                            Err(error) => {
+                                tracing::error!(workspace = %name, %error, "durable reconnect hydrate succeeded but runtime resume failed")
+                            }
                         }
                     }
                     Ok(None) => unreachable!("authoritative reconnect requires a complete image"),
@@ -863,10 +862,10 @@ impl ServerState {
             tracing::warn!(workspace = %name, "turn body reader already installed; skipping");
         }
 
-        self.wal_flushers.write().await.insert(
-            name.to_string(),
-            start_wal_flusher(Arc::clone(&log)),
-        );
+        self.wal_flushers
+            .write()
+            .await
+            .insert(name.to_string(), start_wal_flusher(Arc::clone(&log)));
         tracing::info!(workspace = %name, %akh_id, "mutation WAL enabled (Postgres backing store)");
 
         // Phase 38c: periodic snapshot of the akh's relational state. `0` means
@@ -1038,9 +1037,9 @@ impl ServerState {
         residency_epoch: i64,
         require_complete: bool,
     ) -> Result<Option<(usize, usize)>, String> {
-        let pool = self
-            .pg_pool()
-            .ok_or_else(|| "no Postgres backing store configured (no [postgres] section)".to_string())?;
+        let pool = self.pg_pool().ok_or_else(|| {
+            "no Postgres backing store configured (no [postgres] section)".to_string()
+        })?;
         let akh_id = akh_medu::wal::akh_id_for(name);
         let state = akhomed_store::snapshots::load_akh_state(&pool, akh_id)
             .await
@@ -1080,12 +1079,8 @@ impl ServerState {
         let symbols = engine.all_symbols().len();
         drop(engine);
 
-        if let Err(error) = akhomed_store::touch_last_seen(
-            &pool,
-            akh_id,
-            akhomed_store::chrono::Utc::now(),
-        )
-        .await
+        if let Err(error) =
+            akhomed_store::touch_last_seen(&pool, akh_id, akhomed_store::chrono::Utc::now()).await
         {
             tracing::warn!(workspace = %name, error = %error, "could not update last_seen after authoritative hydrate");
         }
@@ -1148,12 +1143,7 @@ impl ServerState {
             }
         };
         let hydrated = self
-            .quarantine_then_hydrate_authoritative(
-                name,
-                ws_paths,
-                residency_epoch,
-                false,
-            )
+            .quarantine_then_hydrate_authoritative(name, ws_paths, residency_epoch, false)
             .await?;
         if let Some((triples, symbols)) = hydrated {
             tracing::info!(workspace = %name, triples, symbols, "hydrated workspace from Postgres on open");
@@ -1204,12 +1194,7 @@ impl ServerState {
 
         let ws_paths = self.paths.workspace(name);
         let (triples, symbols) = self
-            .quarantine_then_hydrate_authoritative(
-                name,
-                &ws_paths,
-                residency_epoch,
-                true,
-            )
+            .quarantine_then_hydrate_authoritative(name, &ws_paths, residency_epoch, true)
             .await?
             .expect("require_complete returns a hydration result");
         self.hydrated_wakes
@@ -1279,12 +1264,16 @@ impl ServerState {
         let Some(opts) = self.akh_lock_pool_options().await else {
             return Ok(0);
         };
-        let session = Arc::new(akhomed_store::StablePgSession::connect(&opts).await.map_err(|e| {
-            format!(
-                "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
+        let session = Arc::new(
+            akhomed_store::StablePgSession::connect(&opts)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "could not open the akh advisory-lock connection for \"{name}\" ({e}); \
                  refusing to {op} to avoid split-brain. Check the Postgres backing store."
-            )
-        })?);
+                    )
+                })?,
+        );
 
         match session.try_acquire_akh_lock(akh_id).await {
             Ok(true) => {
@@ -1302,10 +1291,7 @@ impl ServerState {
                     ));
                 }
                 let workspace_id = akh_medu::wal::workspace_id_for(name);
-                let epoch = match session
-                    .claim_akh_residency(akh_id, workspace_id)
-                    .await
-                {
+                let epoch = match session.claim_akh_residency(akh_id, workspace_id).await {
                     Ok(epoch) => epoch,
                     Err(error) => {
                         let _ = session.release_akh_lock(akh_id).await;
@@ -1315,13 +1301,7 @@ impl ServerState {
                         ));
                     }
                 };
-                held.insert(
-                    name.to_string(),
-                    HeldResidency {
-                        session,
-                        epoch,
-                    },
-                );
+                held.insert(name.to_string(), HeldResidency { session, epoch });
                 Ok(epoch)
             }
             Ok(false) => Err(format!(
@@ -1346,9 +1326,7 @@ impl ServerState {
             .get(name)
             .map(|residency| residency.epoch)
             .ok_or_else(|| {
-                format!(
-                    "workspace \"{name}\" has no held residency fence; refusing durable write"
-                )
+                format!("workspace \"{name}\" has no held residency fence; refusing durable write")
             })
     }
 
@@ -1900,16 +1878,14 @@ impl ServerState {
     /// work-item 4: the `get_graph_schema`-style digest). Does not require
     /// Postgres (unlike `schema/admit|list|install`) — it introspects
     /// whatever the workspace's already-loaded engine has installed.
-    async fn schema_digest(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    async fn schema_digest(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "missing required param: workspace".to_string())?;
         let engine = self.get_engine(ws).await?;
-        let digest = akh_medu::schema::digest(&engine).map_err(|e| format!("digest failed: {e}"))?;
+        let digest =
+            akh_medu::schema::digest(&engine).map_err(|e| format!("digest failed: {e}"))?;
         serde_json::to_value(&digest).map_err(|e| format!("digest serialization failed: {e}"))
     }
 
@@ -2018,10 +1994,7 @@ impl ServerState {
     }
 
     /// `_akh/goal/create` — create a goal with explicit criteria.
-    async fn goal_create(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    async fn goal_create(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
             .and_then(serde_json::Value::as_str)
@@ -2090,10 +2063,18 @@ impl ServerState {
             {
                 use akh_medu::graph::Triple;
                 engine
-                    .add_triple(&Triple::new(parent_sym, predicates.child_goal, goal.symbol_id))
+                    .add_triple(&Triple::new(
+                        parent_sym,
+                        predicates.child_goal,
+                        goal.symbol_id,
+                    ))
                     .map_err(|e| format!("failed to wire parent->child goal relation: {e}"))?;
                 engine
-                    .add_triple(&Triple::new(goal.symbol_id, predicates.parent_goal, parent_sym))
+                    .add_triple(&Triple::new(
+                        goal.symbol_id,
+                        predicates.parent_goal,
+                        parent_sym,
+                    ))
                     .map_err(|e| format!("failed to wire child->parent goal relation: {e}"))?;
                 goal.parent = Some(parent_sym);
             }
@@ -2109,10 +2090,7 @@ impl ServerState {
     }
 
     /// `_akh/goal/update` — update a goal's text, criteria, priority, or status.
-    async fn goal_update(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    async fn goal_update(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
             .and_then(serde_json::Value::as_str)
@@ -2132,7 +2110,9 @@ impl ServerState {
             .get("priority")
             .and_then(|v| v.as_u64())
             .map(|p| p as u8);
-        let criteria_text = params.get("criteria_text").and_then(serde_json::Value::as_str);
+        let criteria_text = params
+            .get("criteria_text")
+            .and_then(serde_json::Value::as_str);
         let status = params.get("status").and_then(serde_json::Value::as_str);
         // goal_text updates the description via a has_description KG triple.
         let goal_text = params.get("goal_text").and_then(serde_json::Value::as_str);
@@ -2207,10 +2187,7 @@ impl ServerState {
     }
 
     /// `_akh/goal/cancel` — soft-delete a goal (status = cancelled).
-    async fn goal_cancel(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    async fn goal_cancel(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
             .and_then(serde_json::Value::as_str)
@@ -2337,7 +2314,10 @@ impl ServerState {
                     .map_err(|e| format!("goal_id {id_str} resolution failed: {e}"))?;
                 if let Some(goal) = goals.iter_mut().find(|g| g.symbol_id == goal_sym) {
                     akh_medu::agent::goal::update_goal_priority(
-                        &engine, goal, priority, &predicates,
+                        &engine,
+                        goal,
+                        priority,
+                        &predicates,
                     )
                     .map_err(|e| format!("priority update failed: {e}"))?;
                     updated += 1;
@@ -2351,10 +2331,7 @@ impl ServerState {
     }
 
     /// `_akh/goal/list` — list all goals with status, timestamps, and parent chain.
-    async fn goal_list(
-        &self,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    async fn goal_list(&self, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         let ws = params
             .get("workspace")
             .and_then(serde_json::Value::as_str)
@@ -2368,14 +2345,20 @@ impl ServerState {
         // use the same source of truth).
         let entries: Vec<serde_json::Value> = if let Some(agent) = self.resident_agent(ws).await {
             let a = agent.read().unwrap_or_else(|e| e.into_inner());
-            a.goals().iter().map(|g| Self::goal_to_json(&engine, g)).collect()
+            a.goals()
+                .iter()
+                .map(|g| Self::goal_to_json(&engine, g))
+                .collect()
         } else {
             let predicates = akh_medu::agent::agent::AgentPredicates::init(&engine)
                 .map_err(|e| format!("predicate init failed: {e}"))?;
 
             let goals = akh_medu::agent::goal::restore_goals(&engine, &predicates)
                 .map_err(|e| format!("goal restore failed: {e}"))?;
-            goals.iter().map(|g| Self::goal_to_json(&engine, g)).collect()
+            goals
+                .iter()
+                .map(|g| Self::goal_to_json(&engine, g))
+                .collect()
         };
         Ok(serde_json::json!({
             "goals": entries,
@@ -2408,7 +2391,9 @@ impl ServerState {
             let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
             for name in names {
                 match self.snapshot_workspace(&name).await {
-                    Ok(()) => tracing::info!(workspace = %name, "final snapshot written on shutdown"),
+                    Ok(()) => {
+                        tracing::info!(workspace = %name, "final snapshot written on shutdown")
+                    }
                     Err(e) => {
                         tracing::warn!(workspace = %name, error = %e, "final snapshot on shutdown failed")
                     }
@@ -2510,12 +2495,8 @@ impl ServerState {
         // restarted). Must run before `Engine::new` opens the redb below —
         // that's the file hydration populates.
         let residency_epoch = if self.pg_pool().is_some() {
-            self.acquire_akh_lock_or_refuse(
-                name,
-                akh_medu::wal::akh_id_for(name),
-                "open",
-            )
-            .await?
+            self.acquire_akh_lock_or_refuse(name, akh_medu::wal::akh_id_for(name), "open")
+                .await?
         } else {
             0
         };
@@ -2544,8 +2525,8 @@ impl ServerState {
             ..Default::default()
         };
 
-        let engine = Engine::new(config)
-            .map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
+        let engine =
+            Engine::new(config).map_err(|e| format!("failed to open workspace \"{name}\": {e}"))?;
 
         // Wire audit broadcast sender so WS clients receive live entries.
         if let Some(ledger) = engine.audit_ledger() {
@@ -2810,9 +2791,9 @@ impl ServerState {
         // discovery tool, scoped to this akh's id (= the workspace name). Off by
         // default, so normal akhs never see it.
         if akh_config.openclaw_import {
-            agent.register_tool(Box::new(
-                akh_medu::agent::tools::OpenClawDiscoverTool::new(name),
-            ));
+            agent.register_tool(Box::new(akh_medu::agent::tools::OpenClawDiscoverTool::new(
+                name,
+            )));
             tracing::info!(workspace = %name, "OpenClaw self-import surface enabled");
         }
 
@@ -2836,10 +2817,11 @@ impl ServerState {
                          Answer grounded in your knowledge graph; call tools when useful."
                             .to_string()
                     });
-                    let backend = std::sync::Arc::new(akh_medu::agent::chat_backend::CandleChatBackend::new(
-                        std::sync::Arc::new(std::sync::Mutex::new(cb)),
-                        system_prompt,
-                    ));
+                    let backend =
+                        std::sync::Arc::new(akh_medu::agent::chat_backend::CandleChatBackend::new(
+                            std::sync::Arc::new(std::sync::Mutex::new(cb)),
+                            system_prompt,
+                        ));
                     agent.set_chat_backend(backend);
                     tracing::info!(
                         workspace = %name, backend = "candle", spec_decode = akh_config.spec_decode,
@@ -2882,6 +2864,37 @@ impl ServerState {
             Err(e) => return Err(format!("workspace {name}: {e}")),
         }
 
+        // ADR 081 write-side completion: every workspace gets its own durable,
+        // append-only note history. The model-facing writer is intentionally
+        // source-backed (citations are required); ordinary conversation still
+        // enters memory through structural turn capture, not a generic
+        // `take_note` decision. Context assembly sees only blanked frontmatter.
+        let note_store = Arc::new(
+            akh_medu::library::PersistentNoteCatalog::open(self.paths.workspace(name).notes_dir)
+                .map_err(|e| format!("workspace {name}: open durable note catalog: {e}"))?,
+        );
+        agent.set_note_catalog(note_store.clone());
+        agent.register_tool(Box::new(akh_medu::agent::tools::StudyNoteAppendTool::new(
+            note_store.clone(),
+        )));
+        agent.register_tool(Box::new(akh_medu::agent::tools::StudyNoteReviseTool::new(
+            note_store.clone(),
+        )));
+        agent.register_tool(Box::new(akh_medu::agent::tools::StudyNoteListTool::new(
+            note_store.clone(),
+        )));
+        agent.register_tool(Box::new(akh_medu::agent::tools::StudyNoteReadTool::new(
+            note_store.clone(),
+        )));
+        // Reading a body back is part of the same learning contract as writing
+        // it. Keep this bounded, read-only page-in available to every context
+        // strategy: compacting/passive BabyLLMs must be able to use the exact
+        // `archival_search` contract they were trained against without gaining
+        // the privileged core-memory mutation tools reserved for `virtual`.
+        agent.register_tool(Box::new(
+            akh_medu::agent::tools::ArchivalSearchTool::with_notes(note_store.clone()),
+        ));
+
         // Phase 44b/c/h/i (extended ADR 081 slice 7): assemble each turn through
         // a curating context manager, guarded by `SafetyEnforced` so eviction can
         // never drop a safety-pinned span. `AKH_CONTEXT_STRATEGY` selects the
@@ -2891,15 +2904,17 @@ impl ServerState {
         //                budget-driven section + tool degradation (44b/c/d/e/g);
         //   passive    — lean context; the longer thread is carried by background
         //                consolidation + recall, not verbatim history (44h);
-        //   virtual    — MemGPT tiers (core/recall/archival) + the self-edit tools
-        //                core_memory_append/replace, archival_search, query_graph
-        //                (44i; the latter two extended in ADR 081 slice 7).
+        //   virtual    — MemGPT tiers (core/recall/archival) + the privileged
+        //                core_memory_append/replace and query_graph tools
+        //                (44i; query_graph extended in ADR 081 slice 7).
+        // `archival_search` is a bounded read-only learning-loop tool available
+        // under every strategy; it is not a core-memory self-edit capability.
         // The lib default stays pass-through (tests / embedded).
         //
         // This `virtual`-strategy branch is also today's **tier-gating
         // mechanism** (ADR 081 slice 7 decision 4): small/append-only models run
-        // `compacting`/`passive` and get no self-edit tools at all; only capable
-        // models selected onto `virtual` get the self-edit + archival/query tools.
+        // `compacting`/`passive` and get no core-memory self-edit tools; only
+        // capable models selected onto `virtual` get those tools + query_graph.
         {
             use akh_medu::agent::context::{
                 CompactingManager, ContextManager, PassThroughManager, PassiveManager,
@@ -2929,11 +2944,6 @@ impl ServerState {
                     agent.register_tool(Box::new(
                         akh_medu::agent::tools::CoreMemoryReplaceTool::new(name),
                     ));
-                    // No persistent note store is wired to the daemon yet (`Note`
-                    // shipped as a carrier type only — ADR 081 work-item P1), so
-                    // archival_search stays KG-only here; `ArchivalSearchTool::with_notes`
-                    // is ready for whichever slice adds a durable note catalog.
-                    agent.register_tool(Box::new(akh_medu::agent::tools::ArchivalSearchTool::new()));
                     agent.register_tool(Box::new(akh_medu::agent::tools::QueryGraphTool));
                     Box::new(SafetyEnforced::new(VirtualContextManager::default()))
                 }
@@ -2954,6 +2964,53 @@ impl ServerState {
             agent.set_context_manager(manager.into());
         }
 
+        // Tool-native BabyLLM backing. Attach only after durable note and
+        // context-strategy tools are registered so the first prepare_turn sees
+        // the complete per-akh catalog. Session-pushed MCP tools are added by
+        // the ACP bridge later and are deliberately treated as live contract
+        // evolution by GrugChatBackend. An explicitly selected local model is
+        // fail-loud: falling back to Ollama would answer with different weights
+        // and make both exams and operational provenance dishonest.
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Grug {
+            #[cfg(feature = "grug-backend")]
+            {
+                let bundle = akh_config
+                    .to_grug_model_path(&self.paths.models_dir())
+                    .map_err(|error| format!("workspace {name}: {error}"))?
+                    .expect("Grug backing returns a bundle path");
+                let load_path = bundle.clone();
+                let operator_prompt = akh_config.system_prompt.clone();
+                let contract_drift_dir =
+                    self.paths.workspace(name).root.join("model-contract-drift");
+                let backend = tokio::task::spawn_blocking(move || {
+                    akh_medu::agent::chat_backend::GrugChatBackend::load(load_path)
+                        .and_then(|backend| backend.with_contract_drift_dir(contract_drift_dir))
+                        .map(|backend| backend.with_operator_prompt(operator_prompt))
+                })
+                .await
+                .map_err(|error| format!("workspace {name}: Grug loader panicked: {error}"))?
+                .map_err(|error| format!("workspace {name}: {error}"))?;
+                tracing::info!(
+                    workspace = %name,
+                    backend = "grug",
+                    bundle = %bundle.display(),
+                    checkpoint_step = backend.checkpoint_step(),
+                    contract = %backend.contract_hash(),
+                    parameters = backend.parameter_count(),
+                    multimodal = backend.is_multimodal(),
+                    "verified BabyLLM chat backing attached"
+                );
+                agent.set_chat_backend(std::sync::Arc::new(backend));
+            }
+            #[cfg(not(feature = "grug-backend"))]
+            {
+                return Err(format!(
+                    "workspace {name}: akh.toml selects backend=\"grug\" but akhomed was \
+                     built without --features grug-backend; refusing to fall back to another model"
+                ));
+            }
+        }
+
         // ADR 091: per-akh transcript-capture opt-out (default on). The
         // `AKH_TRANSCRIPT_CAPTURE` env override is applied at the emit site
         // (`agentic_chat::Agent::transcript_capture_enabled`), not here — this
@@ -2966,7 +3023,9 @@ impl ServerState {
         let shared = Arc::new(StdRwLock::new(agent));
         let mut agents = self.agents.write().await;
         // Another request may have raced us — keep the first one.
-        let entry = agents.entry(name.to_string()).or_insert(Arc::clone(&shared));
+        let entry = agents
+            .entry(name.to_string())
+            .or_insert(Arc::clone(&shared));
         let result = Arc::clone(entry);
         drop(agents);
 
@@ -3012,11 +3071,7 @@ impl ServerState {
 
         // Slow path: create pipeline (loads models from disk).
         let data_dir = engine.config().data_dir.clone();
-        let ranker_bytes = engine
-            .store()
-            .get_meta(b"nlu_ranker_state")
-            .ok()
-            .flatten();
+        let ranker_bytes = engine.store().get_meta(b"nlu_ranker_state").ok().flatten();
 
         let pipeline = tokio::task::spawn_blocking(move || {
             let data_dir_ref = data_dir.as_deref();
@@ -3144,7 +3199,10 @@ impl ServerState {
         };
 
         let st = status.lock().await.clone();
-        self.daemons.write().await.insert(ws_name.to_string(), daemon);
+        self.daemons
+            .write()
+            .await
+            .insert(ws_name.to_string(), daemon);
         Ok(st)
     }
 
@@ -3383,7 +3441,9 @@ impl akh_medu::acp::ServerControl for ServerState {
                         engine
                             .assign_role(role)
                             .map_err(|e| format!("assign_role failed: {e}"))?;
-                        engine.persist().map_err(|e| format!("persist failed: {e}"))?;
+                        engine
+                            .persist()
+                            .map_err(|e| format!("persist failed: {e}"))?;
                     }
                     Ok(serde_json::json!({ "name": name, "created": true }))
                 }
@@ -3427,9 +3487,7 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .get("max_cycles")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0) as usize;
-                    let st = self
-                        .spawn_workspace_daemon(ws, max_cycles)
-                        .await?;
+                    let st = self.spawn_workspace_daemon(ws, max_cycles).await?;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
                 "daemon/stop" => {
@@ -3574,16 +3632,14 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string);
                     if model.is_none() && effort_raw.is_none() {
-                        return Err(
-                            "model/set requires at least one of: model, effort".to_string()
-                        );
+                        return Err("model/set requires at least one of: model, effort".to_string());
                     }
 
                     // (a) Load the akh config (fall back to name-only defaults
                     //     so a missing/broken akh.toml still applies the change).
                     let config_path = self.paths.workspace_config_file(&ws);
-                    let mut cfg = AkhConfig::load(&config_path)
-                        .unwrap_or_else(|_| AkhConfig::with_name(&ws));
+                    let mut cfg =
+                        AkhConfig::load(&config_path).unwrap_or_else(|_| AkhConfig::with_name(&ws));
 
                     // (b) Apply the requested fields.
                     if let Some(m) = &model {
@@ -3815,8 +3871,12 @@ async fn start_acp_server(
     paths: &AkhPaths,
     fallback_ws: &str,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
-) -> (Option<String>, Option<String>, Vec<tokio::task::JoinHandle<()>>) {
-    use akh_medu::acp::{serve_tcp_loop, serve_unix_loop, AkhAcpAgent, SharedSecretAuth};
+) -> (
+    Option<String>,
+    Option<String>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
+    use akh_medu::acp::{AkhAcpAgent, SharedSecretAuth, serve_tcp_loop, serve_unix_loop};
     use std::path::PathBuf;
 
     let ws = acp_cfg
@@ -3975,9 +4035,7 @@ const PG_STARTUP_ATTEMPTS: u32 = 5;
 /// boot-time network race. On exhaustion returns `None` (local-only); the
 /// caller is expected to spawn [`ServerState::spawn_pg_reconnector`] so the
 /// daemon recovers without a restart (ADR 077).
-async fn init_postgres(
-    config: &AkhomedConfig,
-) -> Option<Arc<akhomed_store::DatabaseConnection>> {
+async fn init_postgres(config: &AkhomedConfig) -> Option<Arc<akhomed_store::DatabaseConnection>> {
     let Some((opts, migrate)) = pg_pool_options(config) else {
         tracing::warn!(
             "[postgres] not configured — running in legacy local-only mode \
@@ -4048,7 +4106,11 @@ fn raise_nofile_limit() {
             return;
         }
         if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
-            tracing::info!(from = soft_before, to = lim.rlim_cur, "raised RLIMIT_NOFILE soft limit");
+            tracing::info!(
+                from = soft_before,
+                to = lim.rlim_cur,
+                "raised RLIMIT_NOFILE soft limit"
+            );
         } else {
             tracing::warn!(
                 soft = soft_before,
@@ -4193,10 +4255,7 @@ async fn main() {
 
     let state = Arc::new(ServerState::new(paths.clone(), config, pg_pool));
 
-    tracing::info!(
-        postgres = state.pg_pool().is_some(),
-        "akhomed initialized"
-    );
+    tracing::info!(postgres = state.pg_pool().is_some(), "akhomed initialized");
 
     // ADR 077: if we started local-only but a [postgres] section is configured,
     // keep trying to connect in the background and re-enable durability without
@@ -4251,7 +4310,11 @@ async fn main() {
                         .map(|c| c.autonomy.clone())
                         .unwrap_or_default();
                     let pause_handle = DaemonPauseHandle::new();
-                    state.daemon_pauses.write().await.insert(ws_name.clone(), pause_handle.clone());
+                    state
+                        .daemon_pauses
+                        .write()
+                        .await
+                        .insert(ws_name.clone(), pause_handle.clone());
                     let task_handle = pause_handle.clone();
                     let pool = state.pg_pool();
                     let global_cfg = state.config.read().await;
@@ -4320,7 +4383,10 @@ async fn main() {
         let cfg_file = paths.workspace_config_file(&acp_ws);
         if !paths.workspace(&acp_ws).exists() {
             let wsm = WorkspaceManager::new(paths.clone());
-            let existing = cfg_file.exists().then(|| AkhConfig::load(&cfg_file).ok()).flatten();
+            let existing = cfg_file
+                .exists()
+                .then(|| AkhConfig::load(&cfg_file).ok())
+                .flatten();
             let ws_cfg = existing
                 .as_ref()
                 .map(|c| c.workspace.clone())
@@ -4379,9 +4445,8 @@ async fn main() {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},
@@ -4553,10 +4618,17 @@ mod control_plane_tests {
             .await
             .unwrap();
         let live = first.get_engine(&workspace).await.unwrap();
-        let subject = live.resolve_or_create_entity("authoritative-subject").unwrap();
-        let predicate = live.resolve_or_create_relation("authoritative-predicate").unwrap();
-        let object = live.resolve_or_create_entity("authoritative-object").unwrap();
-        live.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        let subject = live
+            .resolve_or_create_entity("authoritative-subject")
+            .unwrap();
+        let predicate = live
+            .resolve_or_create_relation("authoritative-predicate")
+            .unwrap();
+        let object = live
+            .resolve_or_create_entity("authoritative-object")
+            .unwrap();
+        live.add_triple(&Triple::new(subject, predicate, object))
+            .unwrap();
         first.snapshot_workspace(&workspace).await.unwrap();
         first.evict_workspace(&workspace).await.unwrap();
         drop(live);
@@ -4582,8 +4654,12 @@ mod control_plane_tests {
                     authoritative_object,
                 )
                 .unwrap();
-            let stale_subject = stale.resolve_or_create_entity("stale-only-subject").unwrap();
-            let stale_predicate = stale.resolve_or_create_relation("stale-only-predicate").unwrap();
+            let stale_subject = stale
+                .resolve_or_create_entity("stale-only-subject")
+                .unwrap();
+            let stale_predicate = stale
+                .resolve_or_create_relation("stale-only-predicate")
+                .unwrap();
             let stale_object = stale.resolve_or_create_entity("stale-only-object").unwrap();
             stale
                 .add_triple(&Triple::new(stale_subject, stale_predicate, stale_object))
@@ -4596,11 +4672,7 @@ mod control_plane_tests {
         let restored_subject = restored.lookup_symbol("authoritative-subject").unwrap();
         let restored_predicate = restored.lookup_symbol("authoritative-predicate").unwrap();
         let restored_object = restored.lookup_symbol("authoritative-object").unwrap();
-        assert!(restored.has_triple(
-            restored_subject,
-            restored_predicate,
-            restored_object
-        ));
+        assert!(restored.has_triple(restored_subject, restored_predicate, restored_object));
         assert!(restored.lookup_symbol("stale-only-subject").is_err());
         assert!(
             std::fs::read_dir(&kg_dir).unwrap().any(|entry| entry
@@ -4653,10 +4725,17 @@ mod control_plane_tests {
             .await
             .unwrap();
         let live = first.get_engine(&workspace).await.unwrap();
-        let subject = live.resolve_or_create_entity("wake-authoritative-subject").unwrap();
-        let predicate = live.resolve_or_create_relation("wake-authoritative-predicate").unwrap();
-        let object = live.resolve_or_create_entity("wake-authoritative-object").unwrap();
-        live.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        let subject = live
+            .resolve_or_create_entity("wake-authoritative-subject")
+            .unwrap();
+        let predicate = live
+            .resolve_or_create_relation("wake-authoritative-predicate")
+            .unwrap();
+        let object = live
+            .resolve_or_create_entity("wake-authoritative-object")
+            .unwrap();
+        live.add_triple(&Triple::new(subject, predicate, object))
+            .unwrap();
         first.snapshot_workspace(&workspace).await.unwrap();
         first.evict_workspace(&workspace).await.unwrap();
         drop(live);
@@ -4671,8 +4750,12 @@ mod control_plane_tests {
                 ..Default::default()
             })
             .unwrap();
-            let stale_subject = stale.resolve_or_create_entity("wake-stale-subject").unwrap();
-            let stale_predicate = stale.resolve_or_create_relation("wake-stale-predicate").unwrap();
+            let stale_subject = stale
+                .resolve_or_create_entity("wake-stale-subject")
+                .unwrap();
+            let stale_predicate = stale
+                .resolve_or_create_relation("wake-stale-predicate")
+                .unwrap();
             let stale_object = stale.resolve_or_create_entity("wake-stale-object").unwrap();
             stale
                 .add_triple(&Triple::new(stale_subject, stale_predicate, stale_object))
@@ -4695,8 +4778,12 @@ mod control_plane_tests {
             .unwrap();
         let restored = second.get_engine(&workspace).await.unwrap();
         assert!(restored.lookup_symbol("wake-stale-subject").is_err());
-        let restored_subject = restored.lookup_symbol("wake-authoritative-subject").unwrap();
-        let restored_predicate = restored.lookup_symbol("wake-authoritative-predicate").unwrap();
+        let restored_subject = restored
+            .lookup_symbol("wake-authoritative-subject")
+            .unwrap();
+        let restored_predicate = restored
+            .lookup_symbol("wake-authoritative-predicate")
+            .unwrap();
         let restored_object = restored.lookup_symbol("wake-authoritative-object").unwrap();
         assert!(restored.has_triple(restored_subject, restored_predicate, restored_object));
         for key in [
@@ -4705,7 +4792,10 @@ mod control_plane_tests {
             b"agent:psyche".as_slice(),
             b"agent:stale-extra".as_slice(),
         ] {
-            assert_ne!(restored.store().get_meta(key).unwrap().as_deref(), Some(sentinel));
+            assert_ne!(
+                restored.store().get_meta(key).unwrap().as_deref(),
+                Some(sentinel)
+            );
         }
 
         let quarantine = std::fs::read_dir(&kg_dir)
@@ -4719,11 +4809,7 @@ mod control_plane_tests {
             })
             .expect("control wake must preserve the stale local image as quarantine");
         let quarantine_copy = tempfile::tempdir().unwrap();
-        std::fs::copy(
-            quarantine,
-            quarantine_copy.path().join("akh-medu.redb"),
-        )
-        .unwrap();
+        std::fs::copy(quarantine, quarantine_copy.path().join("akh-medu.redb")).unwrap();
         let quarantined = Engine::new(EngineConfig {
             dimension: Dimension::DEFAULT,
             data_dir: Some(quarantine_copy.path().to_path_buf()),
@@ -4737,7 +4823,10 @@ mod control_plane_tests {
             b"agent:psyche".as_slice(),
             b"agent:stale-extra".as_slice(),
         ] {
-            assert_eq!(quarantined.store().get_meta(key).unwrap().as_deref(), Some(sentinel));
+            assert_eq!(
+                quarantined.store().get_meta(key).unwrap().as_deref(),
+                Some(sentinel)
+            );
         }
         second.evict_workspace(&workspace).await.unwrap();
     }
@@ -4806,9 +4895,13 @@ mod control_plane_tests {
         assert!(terminated);
 
         let subject = engine.resolve_or_create_entity("pending-subject").unwrap();
-        let predicate = engine.resolve_or_create_relation("pending-predicate").unwrap();
+        let predicate = engine
+            .resolve_or_create_relation("pending-predicate")
+            .unwrap();
         let object = engine.resolve_or_create_entity("pending-object").unwrap();
-        engine.add_triple(&Triple::new(subject, predicate, object)).unwrap();
+        engine
+            .add_triple(&Triple::new(subject, predicate, object))
+            .unwrap();
         let error = state
             .evict_workspace(&workspace)
             .await
@@ -4824,7 +4917,9 @@ mod control_plane_tests {
                 .contains(&workspace)
         );
         let flushers = state.wal_flushers.read().await;
-        let flusher = flushers.get(&workspace).expect("failed drain must retain the log");
+        let flusher = flushers
+            .get(&workspace)
+            .expect("failed drain must retain the log");
         assert!(flusher.log.pending() > 0);
     }
 
@@ -4858,7 +4953,10 @@ mod control_plane_tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert!(names.contains(&"alpha"), "created workspace missing: {list}");
+        assert!(
+            names.contains(&"alpha"),
+            "created workspace missing: {list}"
+        );
 
         // delete it.
         let deleted = state
@@ -4887,7 +4985,10 @@ mod control_plane_tests {
             .dispatch("_akh/config/get", &json!({}))
             .await
             .expect("get ok");
-        assert!(got["config"].is_object(), "config should be an object: {got}");
+        assert!(
+            got["config"].is_object(),
+            "config should be an object: {got}"
+        );
 
         // set with a mutated config → persisted + reflected on get.
         let cfg = AkhomedConfig {
@@ -5235,7 +5336,11 @@ mod control_plane_tests {
                 "concurrent first-loads must share one engine",
             );
         }
-        assert_eq!(state.workspaces.read().await.len(), 1, "exactly one engine cached");
+        assert_eq!(
+            state.workspaces.read().await.len(),
+            1,
+            "exactly one engine cached"
+        );
     }
 
     #[tokio::test]
@@ -5276,7 +5381,10 @@ mod control_plane_tests {
             tokio::spawn(async move { state.evict_workspace("publishing").await })
         };
         tokio::task::yield_now().await;
-        assert!(!evicting.is_finished(), "eviction bypassed publication guard");
+        assert!(
+            !evicting.is_finished(),
+            "eviction bypassed publication guard"
+        );
         assert!(
             state.agents.read().await.contains_key("publishing"),
             "eviction must not drop an agent while its snapshot owns the publication guard"
@@ -5313,8 +5421,48 @@ mod control_plane_tests {
                 "concurrent first-loads must share one agent",
             );
         }
-        assert_eq!(state.agents.read().await.len(), 1, "exactly one agent cached");
-        assert_eq!(state.workspaces.read().await.len(), 1, "and exactly one engine");
+        assert_eq!(
+            state.agents.read().await.len(),
+            1,
+            "exactly one agent cached"
+        );
+        assert_eq!(
+            state.workspaces.read().await.len(),
+            1,
+            "and exactly one engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_small_model_can_read_notes_without_core_memory_privileges() {
+        let (_tmp, state) = temp_state();
+        state
+            .dispatch("_akh/workspace/create", &json!({ "name": "baby-notes" }))
+            .await
+            .expect("create");
+
+        let agent = state.get_agent("baby-notes").await.expect("load agent");
+        let manifests = agent
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .list_tool_manifests();
+        let names: std::collections::BTreeSet<&str> = manifests
+            .iter()
+            .map(|manifest| manifest.name.as_str())
+            .collect();
+
+        assert!(names.contains("study_note_append"));
+        assert!(names.contains("study_note_revise"));
+        assert!(names.contains("study_note_list"));
+        assert!(names.contains("study_note_read"));
+        assert!(!names.contains("study_note_catalog"));
+        assert!(
+            names.contains("archival_search"),
+            "the default compacting BabyLLM must be able to retrieve note bodies"
+        );
+        assert!(!names.contains("core_memory_append"));
+        assert!(!names.contains("core_memory_replace"));
+        assert!(!names.contains("query_graph"));
     }
 
     // ── Goal CRUD tests (PR #286 follow-up) ───────────────────────────────
@@ -5414,8 +5562,7 @@ mod control_plane_tests {
             .await
             .expect("update goal_text ok");
         assert_eq!(
-            updated["description"],
-            "investigate Tecton's full architecture",
+            updated["description"], "investigate Tecton's full architecture",
             "description should reflect the goal_text update after re-read from KG",
         );
 
@@ -5491,7 +5638,11 @@ mod control_plane_tests {
         // Force a resident Agent for this workspace BEFORE any goal call.
         let agent = state.get_agent(&ws).await.expect("get_agent");
         assert!(
-            agent.read().unwrap_or_else(|e| e.into_inner()).goals().is_empty(),
+            agent
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .goals()
+                .is_empty(),
             "sanity: freshly-constructed agent starts with no goals",
         );
 
@@ -5521,14 +5672,21 @@ mod control_plane_tests {
         // this is what the running OODA loop actually sees.
         let a = agent.read().unwrap_or_else(|e| e.into_inner());
         let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
-        let g = a.goals().iter().find(|g| g.symbol_id == sym).unwrap_or_else(|| {
-            panic!(
-                "goal {goal_id} must be visible on the resident agent after create — \
+        let g = a
+            .goals()
+            .iter()
+            .find(|g| g.symbol_id == sym)
+            .unwrap_or_else(|| {
+                panic!(
+                    "goal {goal_id} must be visible on the resident agent after create — \
                  handlers must route writes through get_agent, not only get_engine"
-            )
-        });
+                )
+            });
         assert!(
-            matches!(g.status, akh_medu::agent::goal::GoalStatus::Cancelled { .. }),
+            matches!(
+                g.status,
+                akh_medu::agent::goal::GoalStatus::Cancelled { .. }
+            ),
             "resident agent's goal must reflect the cancel, got {:?}",
             g.status,
         );
@@ -5569,7 +5727,9 @@ mod control_plane_tests {
             .await
             .expect("child create ok");
         assert!(
-            child["parent_goal"].as_str().unwrap_or_default()
+            child["parent_goal"]
+                .as_str()
+                .unwrap_or_default()
                 .starts_with("goal:"),
             "child should have a parent_goal label, got {child}",
         );
@@ -5780,7 +5940,11 @@ mod control_plane_tests {
 
         let a = agent.read().unwrap_or_else(|e| e.into_inner());
         let sym = akh_medu::symbol::SymbolId::new(goal_id).expect("valid symbol id");
-        let g = a.goals().iter().find(|g| g.symbol_id == sym).expect("goal present");
+        let g = a
+            .goals()
+            .iter()
+            .find(|g| g.symbol_id == sym)
+            .expect("goal present");
         assert!(
             matches!(g.status, akh_medu::agent::goal::GoalStatus::Active),
             "a rejected status update must not mutate the resident agent's goal, got {:?}",

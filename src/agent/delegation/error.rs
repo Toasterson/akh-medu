@@ -54,7 +54,10 @@ pub enum DelegationError {
              or break the task into smaller subtasks"
         )
     )]
-    Timeout { timeout_secs: u64, delegation_id: u64 },
+    Timeout {
+        timeout_secs: u64,
+        delegation_id: u64,
+    },
 
     #[error("worker process failed with exit code {exit_code}")]
     #[diagnostic(

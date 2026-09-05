@@ -87,9 +87,8 @@ impl ArgumentationCache {
     ///
     /// Called when a triple involving this symbol is added, removed, or modified.
     pub fn invalidate_for_symbol(&mut self, symbol: SymbolId) {
-        self.entries.retain(|key, _| {
-            key.subject != symbol && key.predicate != symbol
-        });
+        self.entries
+            .retain(|key, _| key.subject != symbol && key.predicate != symbol);
     }
 
     /// Invalidate a specific (subject, predicate) entry.
@@ -135,10 +134,7 @@ pub fn query_with_argumentation(
 ) -> AkhResult<Vec<(Triple, f64)>> {
     // Check cache first
     if let Some(cached) = cache.get(subject, predicate) {
-        return Ok(triples_from_argument_set(
-            engine,
-            &cached.argument_set,
-        ));
+        return Ok(triples_from_argument_set(engine, &cached.argument_set));
     }
 
     // Compute fresh argumentation
@@ -162,18 +158,14 @@ pub fn query_with_argumentation_rules(
     cache: &mut ArgumentationCache,
 ) -> AkhResult<Vec<(Triple, f64)>> {
     // Always compute fresh for custom rules (don't cache)
-    let arg_set =
-        crate::argumentation::argue_with_rules(engine, subject, predicate, meta_rules)?;
+    let arg_set = crate::argumentation::argue_with_rules(engine, subject, predicate, meta_rules)?;
     let results = triples_from_argument_set(engine, &arg_set);
     cache.put(arg_set);
     Ok(results)
 }
 
 /// Extract triples with their argumentation-derived confidence from an ArgumentSet.
-fn triples_from_argument_set(
-    engine: &Engine,
-    arg_set: &ArgumentSet,
-) -> Vec<(Triple, f64)> {
+fn triples_from_argument_set(engine: &Engine, arg_set: &ArgumentSet) -> Vec<(Triple, f64)> {
     let kg = engine.knowledge_graph();
     let mut results = Vec::new();
 
@@ -343,17 +335,14 @@ mod tests {
     fn query_with_argumentation_basic() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
         let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
-        let is_a = engine
-            .create_symbol(SymbolKind::Relation, "is-a")
-            .unwrap();
+        let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
         let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
         engine
             .add_triple(&Triple::new(sun.id, is_a.id, star.id))
             .unwrap();
 
         let mut cache = ArgumentationCache::new();
-        let results =
-            query_with_argumentation(&engine, sun.id, is_a.id, &mut cache).unwrap();
+        let results = query_with_argumentation(&engine, sun.id, is_a.id, &mut cache).unwrap();
 
         // Should have at least the winning triple
         assert!(!results.is_empty());

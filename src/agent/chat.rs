@@ -149,7 +149,11 @@ impl Conversation {
     }
 
     /// Create a new conversation with a session ID and optional participant.
-    pub fn with_session(max_turns: usize, session_id: String, participant: Option<Participant>) -> Self {
+    pub fn with_session(
+        max_turns: usize,
+        session_id: String,
+        participant: Option<Participant>,
+    ) -> Self {
         Self {
             turns: Vec::new(),
             max_turns,

@@ -65,14 +65,18 @@ mod tests {
 
     #[test]
     fn loads_bundled_dataset() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("data/bench/prompt_to_plan/dataset.toml");
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("data/bench/prompt_to_plan/dataset.toml");
         let dataset = load_dataset(&path).expect("dataset should parse cleanly");
         assert!(!dataset.is_empty(), "dataset must have at least one prompt");
         for p in &dataset.prompts {
             assert!(!p.id.is_empty());
             assert!(!p.prompt.is_empty());
-            assert!(!p.acceptance.is_empty(), "prompt '{}' has no predicates", p.id);
+            assert!(
+                !p.acceptance.is_empty(),
+                "prompt '{}' has no predicates",
+                p.id
+            );
         }
     }
 }

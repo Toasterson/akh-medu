@@ -15,7 +15,10 @@
 //! This module is only available with `--features oxifed`.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -527,15 +530,12 @@ impl OxifedChannel {
     /// Must be called from an async context (inside a tokio runtime).
     /// Returns the channel and a join handle for the consumer task.
     #[cfg(feature = "oxifed")]
-    pub async fn connect(
-        config: OxifedConfig,
-    ) -> OxifedResult<Self> {
-        use lapin::{Connection, ConnectionProperties, options::*, types::FieldTable};
+    pub async fn connect(config: OxifedConfig) -> OxifedResult<Self> {
         use futures_util::StreamExt;
+        use lapin::{Connection, ConnectionProperties, options::*, types::FieldTable};
 
         let channel_id = format!("oxifed:{}", config.actor_username);
-        let inbox: Arc<Mutex<VecDeque<InboundMessage>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
+        let inbox: Arc<Mutex<VecDeque<InboundMessage>>> = Arc::new(Mutex::new(VecDeque::new()));
         let connected = Arc::new(AtomicBool::new(false));
 
         // Connect to AMQP.
@@ -546,18 +546,20 @@ impl OxifedChannel {
             })?;
 
         // Consumer channel.
-        let consumer_ch = conn.create_channel().await.map_err(|e| {
-            OxifedError::AmqpConnect {
+        let consumer_ch = conn
+            .create_channel()
+            .await
+            .map_err(|e| OxifedError::AmqpConnect {
                 message: format!("consumer channel: {e}"),
-            }
-        })?;
+            })?;
 
         // Publisher channel with confirms.
-        let publisher_ch = conn.create_channel().await.map_err(|e| {
-            OxifedError::AmqpConnect {
+        let publisher_ch = conn
+            .create_channel()
+            .await
+            .map_err(|e| OxifedError::AmqpConnect {
                 message: format!("publisher channel: {e}"),
-            }
-        })?;
+            })?;
         publisher_ch
             .confirm_select(ConfirmSelectOptions::default())
             .await
@@ -629,9 +631,7 @@ impl OxifedChannel {
                 match delivery {
                     Ok(delivery) => {
                         // Try to parse the message.
-                        if let Ok(msg) =
-                            serde_json::from_slice::<OxifedMessage>(&delivery.data)
-                        {
+                        if let Ok(msg) = serde_json::from_slice::<OxifedMessage>(&delivery.data) {
                             let inbound = match &msg {
                                 OxifedMessage::IncomingObjectMessage(obj) => {
                                     incoming_object_to_inbound(obj, &channel_id_clone)
@@ -650,9 +650,7 @@ impl OxifedChannel {
                         }
 
                         // Acknowledge regardless (don't requeue unparseable messages).
-                        let _ = delivery
-                            .ack(BasicAckOptions::default())
-                            .await;
+                        let _ = delivery.ack(BasicAckOptions::default()).await;
                     }
                     Err(e) => {
                         tracing::warn!("AMQP delivery error: {e}");
@@ -670,7 +668,6 @@ impl OxifedChannel {
         tokio::spawn(async move {
             // Block on receiving from the sync mpsc channel.
             while let Ok(payload) = tokio::task::block_in_place(|| outbox_rx.recv()) {
-
                 let result = publisher_ch
                     .basic_publish(
                         &payload.exchange,
@@ -783,7 +780,10 @@ impl std::fmt::Debug for OxifedChannel {
             .field("domain", &self.config.domain)
             .field("actor", &self.config.actor_username)
             .field("connected", &self.connected.load(Ordering::SeqCst))
-            .field("inbox_len", &self.inbox.lock().map(|q| q.len()).unwrap_or(0))
+            .field(
+                "inbox_len",
+                &self.inbox.lock().map(|q| q.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -954,10 +954,7 @@ mod tests {
         match &msg.content {
             MessageContent::Command { name, args } => {
                 assert_eq!(name, "follow");
-                assert_eq!(
-                    args.as_deref(),
-                    Some("https://example.com/users/akh")
-                );
+                assert_eq!(args.as_deref(), Some("https://example.com/users/akh"));
             }
             _ => panic!("expected Command"),
         }

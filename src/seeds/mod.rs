@@ -277,8 +277,7 @@ fn is_seed_applied(engine: &Engine, seed_id: &str) -> bool {
         triples.iter().any(|t| {
             let pred_label = engine.resolve_label(t.predicate);
             let obj_label = engine.resolve_label(t.object);
-            pred_label == SEED_APPLIED_PREDICATE
-                && obj_label.eq_ignore_ascii_case(seed_id)
+            pred_label == SEED_APPLIED_PREDICATE && obj_label.eq_ignore_ascii_case(seed_id)
         })
     } else {
         false
@@ -479,8 +478,14 @@ mod tests {
         };
 
         let report = apply_seed_pack(&pack, &engine).unwrap();
-        assert_eq!(report.triples_applied, 1, "only the clean triple should be applied");
-        assert_eq!(report.contaminants_rejected, 2, "ForgejoActions and Stor01 must be rejected");
+        assert_eq!(
+            report.triples_applied, 1,
+            "only the clean triple should be applied"
+        );
+        assert_eq!(
+            report.contaminants_rejected, 2,
+            "ForgejoActions and Stor01 must be rejected"
+        );
 
         // The clean triple must be in the KG.
         let tecton = engine.resolve_symbol("Tecton").unwrap();
@@ -551,7 +556,10 @@ mod tests {
         let reg = SeedRegistry::bundled();
         let report = reg.apply("tecton", &engine).unwrap();
         assert!(!report.already_applied);
-        assert!(report.triples_applied > 0, "Expected Tecton triples to be applied");
+        assert!(
+            report.triples_applied > 0,
+            "Expected Tecton triples to be applied"
+        );
 
         // Tecton symbol must exist.
         assert!(engine.resolve_symbol("Tecton").is_ok());
@@ -569,19 +577,27 @@ mod tests {
             })
             .collect();
 
-        let has = |pred: &str, obj: &str| {
-            pred_obj_pairs
-                .iter()
-                .any(|(p, o)| p == pred && o == obj)
-        };
+        let has = |pred: &str, obj: &str| pred_obj_pairs.iter().any(|(p, o)| p == pred && o == obj);
 
-        assert!(has("is-a", "DigitalArchitect"), "Tecton --is-a--> DigitalArchitect");
+        assert!(
+            has("is-a", "DigitalArchitect"),
+            "Tecton --is-a--> DigitalArchitect"
+        );
         assert!(has("inspired-by", "Ptah"), "Tecton --inspired-by--> Ptah");
         assert!(has("has-role", "Creator"), "Tecton --has-role--> Creator");
-        assert!(has("has-role", "Architect"), "Tecton --has-role--> Architect");
-        assert!(has("operates-on", "cluster"), "Tecton --operates-on--> cluster");
+        assert!(
+            has("has-role", "Architect"),
+            "Tecton --has-role--> Architect"
+        );
+        assert!(
+            has("operates-on", "cluster"),
+            "Tecton --operates-on--> cluster"
+        );
         assert!(has("runs-on", "MacMini"), "Tecton --runs-on--> MacMini");
-        assert!(has("runs-on", "Hephaistos"), "Tecton --runs-on--> Hephaistos");
+        assert!(
+            has("runs-on", "Hephaistos"),
+            "Tecton --runs-on--> Hephaistos"
+        );
         assert!(has("created-by", "Toasty"), "Tecton --created-by--> Toasty");
         assert!(has("part-of", "Ennead"), "Tecton --part-of--> Ennead");
 
@@ -589,14 +605,22 @@ mod tests {
         let toasty_id = engine.resolve_symbol("Toasty").unwrap();
         let toasty_triples = engine.triples_from(toasty_id);
         assert!(
-            toasty_triples.iter().any(|t| engine.resolve_label(t.predicate) == "is-a"
-                && engine.resolve_label(t.object) == "person"),
+            toasty_triples
+                .iter()
+                .any(|t| engine.resolve_label(t.predicate) == "is-a"
+                    && engine.resolve_label(t.object) == "person"),
             "Toasty --is-a--> person"
         );
 
         // Verify the seed-applied tracking triple was recorded.
-        assert!(engine.resolve_symbol("akh-medu").is_ok(), "akh-medu entity must exist after seed application");
-        assert!(is_seed_applied_public(&engine, "tecton"), "is_seed_applied must be true after first apply");
+        assert!(
+            engine.resolve_symbol("akh-medu").is_ok(),
+            "akh-medu entity must exist after seed application"
+        );
+        assert!(
+            is_seed_applied_public(&engine, "tecton"),
+            "is_seed_applied must be true after first apply"
+        );
 
         // Idempotency.
         let report2 = reg.apply("tecton", &engine).unwrap();

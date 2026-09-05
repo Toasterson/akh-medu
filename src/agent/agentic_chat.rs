@@ -320,6 +320,14 @@ struct ToolCallOutcome {
     trace: Value,
 }
 
+/// Successful tool evidence available to a *later* model round. Results stay
+/// turn-local and are never copied into the compact WAL trace.
+#[derive(Debug, Clone)]
+struct ToolEvidence {
+    tool: String,
+    result: String,
+}
+
 impl Agent {
     /// Run one LLM-driven agentic turn, **streaming** its narration to `sink`.
     ///
@@ -397,6 +405,33 @@ impl Agent {
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
     ) -> Option<AgenticTurnOutcome> {
+        self.run_agentic_turn_with_conversation_state_and_images(
+            engine,
+            agent_id,
+            user_prompt,
+            &[],
+            sink,
+            cancel,
+            is_autonomous_dispatch,
+            conversation_state,
+        )
+    }
+
+    /// Image-aware form used by ACP. Images are grounded once through the
+    /// selected backend and inserted as untrusted evidence before the tool
+    /// loop; ordinary callers retain the text-only API above.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_agentic_turn_with_conversation_state_and_images(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        prompt_images: &[super::chat_backend::ChatPromptImage],
+        sink: &dyn MessageSink,
+        cancel: &std::sync::atomic::AtomicBool,
+        is_autonomous_dispatch: bool,
+        conversation_state: &std::sync::Mutex<ConversationState>,
+    ) -> Option<AgenticTurnOutcome> {
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
         // manager. Either way the loop is backend-agnostic. `None` ⇒ no usable
@@ -434,6 +469,13 @@ impl Agent {
             .list_advertised_manifests();
         let manifest_refs: Vec<&super::tool_manifest::ToolManifest> = manifests.iter().collect();
         let prepared_chat = backend.prepare_turn(agent_id, self.psyche.as_ref(), &manifest_refs);
+        let visual_evidence = match backend.ground_prompt_images(prompt_images) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                sink.emit(&AkhMessage::error("image_prompt", error.to_string()));
+                return Some(AgenticTurnOutcome::Refused);
+            }
+        };
 
         let reg = self.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
         let mut tools = ollama_tool_catalog(&*reg);
@@ -458,12 +500,18 @@ impl Agent {
         // cost of a several-thousand-token catalog and small models degenerating
         // past ~14 tools — the model sees the K tools most likely to matter, and
         // permission gating still applies at dispatch.
+        let mut retrieval_scoping_active = false;
         if let Some(k) = std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             && k < tools.len()
         {
-            tracing::debug!(k, from = tools.len(), "retrieval-scoping tool catalog (AKH_AGENT_TOOL_RETRIEVAL)");
+            retrieval_scoping_active = true;
+            tracing::debug!(
+                k,
+                from = tools.len(),
+                "retrieval-scoping tool catalog (AKH_AGENT_TOOL_RETRIEVAL)"
+            );
             tools = super::organ::retrieve_scoped(&tools, user_prompt, k, Some(engine));
         } else if let Some(cap) = std::env::var("AKH_AGENT_MAX_TOOLS")
             .ok()
@@ -472,21 +520,36 @@ impl Agent {
         {
             // Legacy blind cap (AKH_AGENT_MAX_TOOLS): kept for A/B comparison
             // against retrieval scoping. `0` runs the akh tool-free (pure chat).
-            tracing::debug!(cap, from = tools.len(), "capping tool catalog (AKH_AGENT_MAX_TOOLS)");
+            tracing::debug!(
+                cap,
+                from = tools.len(),
+                "capping tool catalog (AKH_AGENT_MAX_TOOLS)"
+            );
             tools.truncate(cap);
+        } else if let Some(k) = backend.preferred_tool_count()
+            && k < tools.len()
+        {
+            retrieval_scoping_active = true;
+            tracing::debug!(
+                k,
+                from = tools.len(),
+                backend = backend.label(),
+                "retrieval-scoping tool catalog for model's learned operating regime"
+            );
+            tools = super::organ::retrieve_scoped(&tools, user_prompt, k, Some(engine));
         }
         // Contract gates are host post-conditions, so retrieval scoping may
         // not hide the very tools needed to satisfy them.
         if let Some(controller) = &completion_controller {
-            let missing = pin_required_tools(
-                &mut tools,
-                &full_catalog,
-                &controller.required_tools(),
-            );
+            let missing =
+                pin_required_tools(&mut tools, &full_catalog, &controller.required_tools());
             if !missing.is_empty() {
                 sink.emit(&AkhMessage::error(
                     "completion_contract_unavailable_tools",
-                    format!("controlled turn requires unavailable tools: {}", missing.join(", ")),
+                    format!(
+                        "controlled turn requires unavailable tools: {}",
+                        missing.join(", ")
+                    ),
                 ));
                 return Some(AgenticTurnOutcome::Refused);
             }
@@ -499,8 +562,12 @@ impl Agent {
         // lock the same way `last_context_stats` is, so a busy turn does not
         // block a sidebar poll.
         {
-            let deferred_groups =
-                compute_deferred_groups(&full_catalog, &tools, &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()));
+            let deferred_groups = compute_deferred_groups(
+                &full_catalog,
+                &tools,
+                &*self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()),
+                retrieval_scoping_active,
+            );
             if let Ok(mut slot) = self.last_deferred_tools.lock() {
                 *slot = deferred_groups;
             }
@@ -521,13 +588,14 @@ impl Agent {
         // the manager only budgets + renders these sections. (44e session seeding
         // rides `with_context`'s seed slot — populated when a session summary
         // exists; the windows are large so all sections fit in practice.)
-        let kg_context = if std::env::var("AKH_KG_DELTA").map(|v| v == "1").unwrap_or(false) {
+        let kg_context = if std::env::var("AKH_KG_DELTA")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             // 44d delta refresh: inject only facts not already shown this session
             // (the activation frontier that moved), trusting retained history to
             // hold the rest. Opt-in; the default re-sends the full relevant block.
-            let mut conv_guard = conversation_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut conv_guard = conversation_state.lock().unwrap_or_else(|e| e.into_inner());
             let seen = conv_guard.kg_seen_mut();
             crate::nlu::kg_context::build_kg_context_delta(engine, user_prompt, seen)
         } else {
@@ -538,11 +606,36 @@ impl Agent {
         // 44e: a one-line continuity seed (the conversation's opening ask), so the
         // thread survives history trimming. None on the first turn.
         let session_seed = {
-            let conv_guard = conversation_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let conv_guard = conversation_state.lock().unwrap_or_else(|e| e.into_inner());
             Self::session_seed_from(&conv_guard)
         };
+
+        // ADR 081 tiering: only body-blanked frontmatter is admitted to
+        // resident context. The durable catalog returns newest heads first;
+        // bound the recall tier and separately pin explicitly-active notes.
+        let mut recent_notes = self
+            .note_catalog
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|catalog| catalog.frontmatter_only())
+            .unwrap_or_default();
+        recent_notes.truncate(8);
+        let active_notes: Vec<crate::library::Note> = recent_notes
+            .iter()
+            .filter(|note| {
+                matches!(
+                    note.frontmatter.get("active"),
+                    Some(crate::library::FrontmatterValue::Checkbox(true))
+                ) || matches!(
+                    note.frontmatter.get("status"),
+                    Some(crate::library::FrontmatterValue::Text(status))
+                        if status.eq_ignore_ascii_case("active")
+                )
+            })
+            .take(4)
+            .cloned()
+            .collect();
 
         // Phase 44a (ADR 065): assemble the working context through the akh's
         // `ContextManager` instead of building the prompt ad hoc. The default
@@ -552,8 +645,8 @@ impl Agent {
         // to this base across rounds, exactly as before.
         let (mut conversation, tools): (Vec<Value>, Vec<Value>) = {
             use super::context::{
-                ContextManager, EpisodeState, HeuristicTokenCounter, PassThroughManager,
-                TokenBudget, TokenCounter, DEFAULT_RESERVED_OUTPUT,
+                ContextManager, DEFAULT_RESERVED_OUTPUT, EpisodeState, HeuristicTokenCounter,
+                PassThroughManager, TokenBudget, TokenCounter,
             };
             static PASS_THROUGH: PassThroughManager = PassThroughManager;
             let counter = HeuristicTokenCounter;
@@ -565,16 +658,17 @@ impl Agent {
                 Some(window) => TokenBudget::new(window, DEFAULT_RESERVED_OUTPUT),
                 None => TokenBudget::default(),
             };
-            let conv_guard = conversation_state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let conv_guard = conversation_state.lock().unwrap_or_else(|e| e.into_inner());
             let episode = EpisodeState::new(agent_id, user_prompt, engine)
                 .with_conversation(Some(&*conv_guard))
                 .with_context(kg_context.as_deref(), &recalled, session_seed.as_deref())
-                .with_tools(&tools);
-            let cm_guard = self.context_manager.lock().unwrap_or_else(|e| e.into_inner());
-            let manager: &dyn ContextManager =
-                cm_guard.as_deref().unwrap_or(&PASS_THROUGH);
+                .with_tools(&tools)
+                .with_notes(&active_notes, &recent_notes);
+            let cm_guard = self
+                .context_manager
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let manager: &dyn ContextManager = cm_guard.as_deref().unwrap_or(&PASS_THROUGH);
             match manager.assemble(&episode, &budget, &counter) {
                 Ok(assembled) => {
                     // Phase 44m (ADR 065 D12): cache the normalized stats
@@ -599,7 +693,10 @@ impl Agent {
                         error = %e,
                         "context assembly failed; using single-turn fallback"
                     );
-                    (vec![json!({"role": "user", "content": user_prompt})], tools.clone())
+                    (
+                        vec![json!({"role": "user", "content": user_prompt})],
+                        tools.clone(),
+                    )
                 }
             }
         };
@@ -619,18 +716,42 @@ impl Agent {
         if let Some(controller) = &completion_controller {
             insert_system_before_last_user(&mut conversation, controller.system_context());
         }
+        if let Some(evidence) = visual_evidence.as_ref() {
+            insert_system_before_last_user(&mut conversation, evidence.clone());
+            let retained = conversation_state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .append_to_latest_operator_turn(evidence);
+            if !retained {
+                sink.emit(&AkhMessage::error(
+                    "image_prompt",
+                    "could not retain native OCR evidence in this session",
+                ));
+                return Some(AgenticTurnOutcome::Refused);
+            }
+        }
 
         // Compact tool trace for the ADR 091 turn-capture hook: {tool, ok} per
         // call, accumulated across every round of this turn (not just the
         // final one) — never raw arguments/results, so a chatty tool loop
         // doesn't bloat the WAL payload.
         let mut tool_trace: Vec<Value> = Vec::new();
+        // Full results are retained only for this turn's provenance gate. A
+        // study-note write may cite a successful evidence result from a prior
+        // model round, never another parallel call emitted in the same round.
+        let mut tool_evidence: Vec<ToolEvidence> = Vec::new();
 
         // Registry membership snapshot for the ADR 089 M2 repair gate below: an
         // emitted name outside this set is a guaranteed `unknown tool` failure,
         // which is exactly (and only) when the organ's repair pass may fire.
-        let known_tools: std::collections::HashSet<String> =
-            self.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
+        let known_tools: std::collections::HashSet<String> = self
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
 
         // Govern the tool loop with a frontier-style budget — a model-scaled
         // iteration backstop + wall-clock cap + repeat-loop detection — instead of
@@ -668,7 +789,8 @@ impl Agent {
             let mut last_keepalive = Instant::now();
             const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
             // Track prompt size and get request sequence number before the backend call.
-            let prompt_chars: usize = conversation.iter()
+            let prompt_chars: usize = conversation
+                .iter()
                 .filter_map(|m| m.get("content").and_then(serde_json::Value::as_str))
                 .map(|s| s.len())
                 .sum();
@@ -763,7 +885,11 @@ impl Agent {
                     agent_id,
                     answer_len = answer.len(),
                     rounds = budget.rounds_so_far(),
-                    mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
+                    mode = if is_autonomous_dispatch {
+                        "dispatch"
+                    } else {
+                        "interactive"
+                    },
                     "no tool calls: evaluating completion"
                 );
 
@@ -817,8 +943,10 @@ impl Agent {
                     // operations? Check tool_trace for file_io/edit/shell_exec (ok
                     // = true).
                     let has_mutating_calls = tool_trace.iter().any(|entry| {
-                        if let (Some(tool), Some(ok)) = (entry.get("tool").and_then(|v| v.as_str()),
-                                                          entry.get("ok").and_then(|v| v.as_bool())) {
+                        if let (Some(tool), Some(ok)) = (
+                            entry.get("tool").and_then(|v| v.as_str()),
+                            entry.get("ok").and_then(|v| v.as_bool()),
+                        ) {
                             ok && matches!(tool, "file_io" | "edit" | "shell_exec")
                         } else {
                             false
@@ -887,7 +1015,11 @@ impl Agent {
                     agent_id,
                     answer_len = answer.len(),
                     rounds = budget.rounds_so_far(),
-                    mode = if is_autonomous_dispatch { "dispatch" } else { "interactive" },
+                    mode = if is_autonomous_dispatch {
+                        "dispatch"
+                    } else {
+                        "interactive"
+                    },
                     "completion check → returning: turn complete with answer"
                 );
                 conversation_state
@@ -930,9 +1062,16 @@ impl Agent {
 
             // Execute each requested tool; the call (args) and its result form one
             // collapsible step the TUI folds under "▸ N steps".
+            let evidence_before_round = tool_evidence.len();
             for tc in &turn.tool_calls {
-                let outcome =
-                    self.execute_tool_call(engine, tc, &known_tools, &full_catalog, user_prompt);
+                let outcome = self.execute_tool_call(
+                    engine,
+                    tc,
+                    &known_tools,
+                    &full_catalog,
+                    user_prompt,
+                    &tool_evidence[..evidence_before_round],
+                );
                 sink.emit(&AkhMessage::tool_result(
                     outcome.exec_name.clone(),
                     outcome.success,
@@ -944,6 +1083,12 @@ impl Agent {
                     ),
                 ));
                 tool_trace.push(outcome.trace);
+                if outcome.success && evidence_tool(&outcome.exec_name) {
+                    tool_evidence.push(ToolEvidence {
+                        tool: outcome.exec_name.clone(),
+                        result: outcome.result.clone(),
+                    });
+                }
                 if let Some(controller) = &mut completion_controller {
                     controller.observe(&outcome.exec_name, &outcome.exec_args, outcome.success);
                 }
@@ -1034,6 +1179,7 @@ impl Agent {
         known_tools: &std::collections::HashSet<String>,
         full_catalog: &[Value],
         user_prompt: &str,
+        prior_evidence: &[ToolEvidence],
     ) -> ToolCallOutcome {
         // M2: repair a name the registry doesn't recognize against the
         // offered catalog. Never touches a name it already knows.
@@ -1052,14 +1198,38 @@ impl Agent {
 
         // Task B (opt-in): ground argument values before the first execute
         // attempt, after any M2 name repair.
-        let b_pre = super::organ::ground_call_values(&exec_name, &exec_args, user_prompt, full_catalog);
+        let b_pre =
+            super::organ::ground_call_values(&exec_name, &exec_args, user_prompt, full_catalog);
         if let Some(g) = &b_pre {
             exec_args = g.arguments.clone();
+        }
+
+        // A study note changes durable memory. Its citation-shaped fields are
+        // not proof on their own: bind every claimed source/locator/quote to a
+        // successful evidence-bearing tool result the model actually observed
+        // in an earlier round. Calls emitted in parallel with retrieval see the
+        // pre-round slice and therefore fail closed.
+        if study_note_write_tool(&exec_name)
+            && let Err(message) = verify_study_note_evidence(&exec_args, prior_evidence)
+        {
+            return ToolCallOutcome {
+                exec_name: exec_name.clone(),
+                exec_args,
+                success: false,
+                result: format!("tool error: {exec_name} evidence gate: {message}"),
+                note_prefix: "[evidence gate] ".into(),
+                trace: json!({
+                    "tool": exec_name,
+                    "ok": false,
+                    "evidence_verified": false
+                }),
+            };
         }
 
         let input = tool_input_from_args(&exec_args);
         let mut param_repaired = false;
         let mut a_note: Option<String> = None;
+        let mut study_note_evidence_verified = study_note_write_tool(&exec_name).then_some(true);
         // Clone the internally synchronized registry before dispatch. The
         // outer Agent slot stays available while a permission prompt or remote
         // MCP request blocks, and the same stable handle covers a repair retry.
@@ -1085,26 +1255,47 @@ impl Agent {
                     Some(repaired) => {
                         let mut retry_args = repaired.arguments;
                         let mut retry_note = repaired.note;
-                        if let Some(g) =
-                            super::organ::ground_call_values(&exec_name, &retry_args, user_prompt, full_catalog)
-                        {
+                        if let Some(g) = super::organ::ground_call_values(
+                            &exec_name,
+                            &retry_args,
+                            user_prompt,
+                            full_catalog,
+                        ) {
                             retry_args = g.arguments;
                             retry_note = format!("{retry_note}; {}", g.note);
                         }
-                        let retry_input = tool_input_from_args(&retry_args);
-                        match registry.execute(&exec_name, retry_input, engine) {
-                            Ok(o) => {
-                                tracing::info!(
-                                    tool = %exec_name,
-                                    note = %retry_note,
-                                    "ADR 089 task A: retried tool call after param repair"
-                                );
-                                exec_args = retry_args;
-                                param_repaired = true;
-                                a_note = Some(retry_note);
-                                (o.success, o.result)
+                        let retry_evidence_error = if study_note_write_tool(&exec_name) {
+                            verify_study_note_evidence(&retry_args, prior_evidence).err()
+                        } else {
+                            None
+                        };
+                        if let Some(message) = retry_evidence_error {
+                            exec_args = retry_args;
+                            param_repaired = true;
+                            a_note = Some(retry_note);
+                            study_note_evidence_verified = Some(false);
+                            (
+                                false,
+                                format!(
+                                    "tool error: {exec_name} evidence gate after argument repair: {message}"
+                                ),
+                            )
+                        } else {
+                            let retry_input = tool_input_from_args(&retry_args);
+                            match registry.execute(&exec_name, retry_input, engine) {
+                                Ok(o) => {
+                                    tracing::info!(
+                                        tool = %exec_name,
+                                        note = %retry_note,
+                                        "ADR 089 task A: retried tool call after param repair"
+                                    );
+                                    exec_args = retry_args;
+                                    param_repaired = true;
+                                    a_note = Some(retry_note);
+                                    (o.success, o.result)
+                                }
+                                Err(e2) => (false, format!("tool error: {e2}")),
                             }
-                            Err(e2) => (false, format!("tool error: {e2}")),
                         }
                     }
                     None => (false, format!("tool error: {e}")),
@@ -1124,6 +1315,9 @@ impl Agent {
         }
 
         let mut trace = json!({"tool": exec_name.clone(), "ok": success});
+        if let Some(verified) = study_note_evidence_verified {
+            trace["evidence_verified"] = json!(verified);
+        }
         if m2.is_some() {
             trace["repaired_from"] = json!(tc.name.clone());
         }
@@ -1178,7 +1372,8 @@ impl Agent {
         let mut used_fallback = false;
         let mut last_keepalive = Instant::now();
         // Track the forced-answer prompt size and get request sequence number.
-        let prompt_chars: usize = conversation.iter()
+        let prompt_chars: usize = conversation
+            .iter()
             .filter_map(|m| m.get("content").and_then(serde_json::Value::as_str))
             .map(|s| s.len())
             .sum();
@@ -1213,7 +1408,10 @@ impl Agent {
             ) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!(agent_id, "forced-answer streaming failed ({e}); non-streaming");
+                    tracing::warn!(
+                        agent_id,
+                        "forced-answer streaming failed ({e}); non-streaming"
+                    );
                     // Make the fallback observable (same fix as the normal round).
                     sink.emit(&AkhMessage::system(format!(
                         "streaming failed ({backend_label}), continuing non-streaming",
@@ -1375,11 +1573,7 @@ fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
 
 /// Re-add manifests named by a completion contract after catalog retrieval or
 /// capping. A contract is not satisfiable if its evidence producers are hidden.
-fn pin_required_tools(
-    selected: &mut Vec<Value>,
-    full: &[Value],
-    required: &[&str],
-) -> Vec<String> {
+fn pin_required_tools(selected: &mut Vec<Value>, full: &[Value], required: &[&str]) -> Vec<String> {
     let mut offered: std::collections::HashSet<String> = selected
         .iter()
         .filter_map(|tool| tool["function"]["name"].as_str().map(String::from))
@@ -1428,6 +1622,7 @@ fn compute_deferred_groups(
     full_catalog: &[Value],
     offered: &[Value],
     registry: &super::tool::ToolRegistry,
+    retrieval_scoping_active: bool,
 ) -> Vec<super::context::DeferredToolGroup> {
     use super::context::{DeferredReason, DeferredToolGroup};
     use super::tool_manifest::ToolSource;
@@ -1441,12 +1636,7 @@ fn compute_deferred_groups(
     // Reason: which env var was active at the call site? (Both can't be
     // active — the call site is if/else.) Neither active ⇒ no deferred set,
     // but the caller still calls us; return empty.
-    let reason = if std::env::var("AKH_AGENT_TOOL_RETRIEVAL")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map(|k| k < full_catalog.len())
-        .unwrap_or(false)
-    {
+    let reason = if retrieval_scoping_active {
         DeferredReason::RetrievalScoped
     } else if std::env::var("AKH_AGENT_MAX_TOOLS")
         .ok()
@@ -1541,6 +1731,249 @@ fn tool_input_from_args(args: &Value) -> ToolInput {
     }
 }
 
+/// Tools whose successful result can support a durable study-note citation.
+/// Keep this list narrow: task/status output that merely repeats a model value
+/// must never launder that value into "retrieved evidence".
+fn evidence_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "archival_search" | "study_note_read" | "web_search" | "http_fetch"
+    ) || name.ends_with("__seshat_search")
+}
+
+fn study_note_write_tool(name: &str) -> bool {
+    matches!(name, "study_note_append" | "study_note_revise")
+}
+
+/// Bind every study-note citation to one earlier successful retrieval result.
+/// A single result must contain the claim's source id and locator; when the
+/// model supplies a quote, that quote must occur in the retrieved content too.
+fn verify_study_note_evidence(
+    arguments: &Value,
+    prior_evidence: &[ToolEvidence],
+) -> Result<(), String> {
+    let citations = arguments
+        .get("citations")
+        .and_then(Value::as_array)
+        .filter(|citations| !citations.is_empty())
+        .ok_or_else(|| "citations must be a non-empty array".to_string())?;
+
+    for (index, citation) in citations.iter().enumerate() {
+        let source_id = citation
+            .get("source_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("citation {index} has no source_id"))?;
+        let locator = citation
+            .get("locator")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("citation {index} has no locator"))?;
+        let quote = citation
+            .get("quote")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("citation {index} has no supporting quote"))?;
+
+        let supported = prior_evidence.iter().any(|evidence| {
+            evidence_tool(&evidence.tool) && evidence_supports(evidence, source_id, locator, quote)
+        });
+        if !supported {
+            return Err(format!(
+                "citation {index} is not supported by one earlier retrieval result; retrieve the source passage, observe its locator, then retry in a later round"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn evidence_supports(evidence: &ToolEvidence, source_id: &str, locator: &str, quote: &str) -> bool {
+    match serde_json::from_str::<Value>(&evidence.result) {
+        Ok(value) => structured_evidence_supports(&value, source_id, locator, quote),
+        Err(_) => plain_text_evidence_supports(evidence, source_id, locator, quote),
+    }
+}
+
+/// Preserve the note boundaries emitted by `ArchivalSearchTool`. Its response
+/// is intentionally human-readable rather than JSON, but each `### ...
+/// (note:...)` block is still a distinct provenance scope. KG text before the
+/// `Notes:` section is evaluated separately from every returned note.
+fn plain_text_evidence_supports(
+    evidence: &ToolEvidence,
+    source_id: &str,
+    locator: &str,
+    quote: &str,
+) -> bool {
+    let scopes = if evidence.tool == "archival_search" {
+        archival_evidence_scopes(&evidence.result)
+    } else {
+        vec![evidence.result.clone()]
+    };
+    scopes.iter().any(|scope| {
+        evidence_scope_supports(&[normalize_evidence(scope)], source_id, locator, quote)
+    })
+}
+
+fn archival_evidence_scopes(result: &str) -> Vec<String> {
+    let result = result.replace("\r\n", "\n");
+    let Some(notes_offset) = result.find("Notes:\n") else {
+        return vec![result];
+    };
+
+    let mut scopes = Vec::new();
+    let (prefix, notes) = result.split_at(notes_offset);
+    if !prefix.trim().is_empty() {
+        scopes.push(prefix.to_string());
+    }
+
+    let mut current = String::new();
+    for line in notes.lines() {
+        if is_archival_note_heading(line) {
+            if !current.trim().is_empty() {
+                scopes.push(std::mem::take(&mut current));
+            }
+            current.push_str(line);
+            current.push('\n');
+        } else if !current.is_empty() {
+            current.push_str(line);
+            current.push('\n');
+        }
+    }
+    if !current.trim().is_empty() {
+        scopes.push(current);
+    }
+
+    if scopes.is_empty() {
+        scopes.push(result);
+    }
+    scopes
+}
+
+fn is_archival_note_heading(line: &str) -> bool {
+    let Some((_, marker)) = line.rsplit_once(" (note:") else {
+        return false;
+    };
+    let Some(note_id) = marker.strip_suffix(')') else {
+        return false;
+    };
+    line.starts_with("### ")
+        && note_id.strip_prefix("note-").is_some_and(|suffix| {
+            suffix.len() == 32 && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+}
+
+/// Treat each returned search hit as its own provenance scope. A source ID in
+/// one hit must never combine with a locator or quote from a sibling hit.
+fn structured_evidence_supports(
+    value: &Value,
+    source_id: &str,
+    locator: &str,
+    quote: &str,
+) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| structured_evidence_supports(value, source_id, locator, quote)),
+        Value::Object(values) => {
+            let mut saw_envelope = false;
+            for key in ["results", "items", "documents", "matches", "chunks", "data"] {
+                if let Some(nested) = values.get(key) {
+                    match nested {
+                        Value::Array(items) => {
+                            saw_envelope = true;
+                            if items.iter().any(|item| {
+                                structured_evidence_supports(item, source_id, locator, quote)
+                            }) {
+                                return true;
+                            }
+                        }
+                        Value::Object(_) => {
+                            saw_envelope = true;
+                            if structured_evidence_supports(nested, source_id, locator, quote) {
+                                return true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if saw_envelope {
+                return false;
+            }
+            let mut content = Vec::new();
+            collect_evidence_scalars(value, &mut content);
+            evidence_scope_supports(&content, source_id, locator, quote)
+        }
+        _ => {
+            let mut content = Vec::new();
+            collect_evidence_scalars(value, &mut content);
+            evidence_scope_supports(&content, source_id, locator, quote)
+        }
+    }
+}
+
+fn evidence_scope_supports(
+    content: &[String],
+    source_id: &str,
+    locator: &str,
+    quote: &str,
+) -> bool {
+    contains_bounded_evidence(content, source_id)
+        && contains_bounded_evidence(content, locator)
+        && contains_evidence(content, quote)
+}
+
+fn collect_evidence_scalars(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::String(value) => output.push(normalize_evidence(value)),
+        Value::Number(value) => output.push(value.to_string()),
+        Value::Array(values) => {
+            for value in values {
+                collect_evidence_scalars(value, output);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_evidence_scalars(value, output);
+            }
+        }
+        Value::Null | Value::Bool(_) => {}
+    }
+}
+
+fn contains_evidence(haystacks: &[String], needle: &str) -> bool {
+    let needle = normalize_evidence(needle);
+    !needle.is_empty() && haystacks.iter().any(|value| value.contains(&needle))
+}
+
+fn contains_bounded_evidence(haystacks: &[String], needle: &str) -> bool {
+    let needle = normalize_evidence(needle);
+    if needle.is_empty() {
+        return false;
+    }
+    haystacks.iter().any(|value| {
+        value.match_indices(&needle).any(|(start, matched)| {
+            let end = start + matched.len();
+            let before = value[..start].chars().next_back();
+            let after = value[end..].chars().next();
+            before.is_none_or(|ch| !evidence_identifier_char(ch))
+                && after.is_none_or(|ch| !evidence_identifier_char(ch))
+        })
+    })
+}
+
+fn evidence_identifier_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/' | '\\')
+}
+
+fn normalize_evidence(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Compact one-line preview of a tool call's arguments for the narration line.
 fn preview_args(args: &Value) -> String {
     let s = args.to_string();
@@ -1627,12 +2060,444 @@ mod tests {
         (name.to_string(), json!({ "q": args }))
     }
 
+    #[test]
+    fn study_note_evidence_gate_requires_an_earlier_matching_retrieval() {
+        assert!(study_note_write_tool("study_note_append"));
+        assert!(study_note_write_tool("study_note_revise"));
+        assert!(!study_note_write_tool("memory_write"));
+        assert!(evidence_tool("study_note_read"));
+        assert!(!evidence_tool("study_note_list"));
+        assert!(!evidence_tool("study_note_catalog"));
+        let arguments = json!({
+            "body": "The keph index is QZ-731.",
+            "citations": [{
+                "source_id": "book:alpha",
+                "locator": "chapter 3",
+                "quote": "The keph index is QZ-731."
+            }]
+        });
+        assert!(verify_study_note_evidence(&arguments, &[]).is_err());
+
+        let retrieved = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!([{
+                "document_id": "book:alpha",
+                "heading": "chapter 3",
+                "text": "The keph index is QZ-731."
+            }])
+            .to_string(),
+        };
+        assert!(verify_study_note_evidence(&arguments, &[retrieved.clone()]).is_ok());
+
+        let mut invented_quote = arguments.clone();
+        invented_quote["citations"][0]["quote"] = json!("The keph index is XX-999.");
+        assert!(verify_study_note_evidence(&invented_quote, &[retrieved.clone()]).is_err());
+
+        let source_prefix_collision = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!([{
+                "document_id": "book:alpha-2",
+                "heading": "chapter 3",
+                "text": "The keph index is QZ-731."
+            }])
+            .to_string(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[source_prefix_collision]).is_err(),
+            "a longer sibling source id must not satisfy the cited identity"
+        );
+
+        let split_across_hits = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!([
+                {
+                    "document_id": "book:alpha",
+                    "heading": "chapter 3",
+                    "text": "This hit does not contain the cited claim."
+                },
+                {
+                    "document_id": "book:beta",
+                    "heading": "chapter 9",
+                    "text": "The keph index is QZ-731."
+                }
+            ])
+            .to_string(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[split_across_hits]).is_err(),
+            "source, locator, and quote must co-occur in one returned hit"
+        );
+
+        let split_across_nested_hits = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!({
+                "data": {
+                    "results": [
+                        {
+                            "document_id": "book:alpha",
+                            "heading": "chapter 3",
+                            "text": "This hit does not contain the cited claim."
+                        },
+                        {
+                            "document_id": "book:beta",
+                            "heading": "chapter 9",
+                            "text": "The keph index is QZ-731."
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[split_across_nested_hits]).is_err(),
+            "nested result envelopes must preserve per-hit provenance boundaries"
+        );
+
+        let later_matching_envelope = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!({
+                "results": [{
+                    "document_id": "book:beta",
+                    "heading": "chapter 9",
+                    "text": "An unrelated result."
+                }],
+                "data": [{
+                    "document_id": "book:alpha",
+                    "heading": "chapter 3",
+                    "text": "The keph index is QZ-731."
+                }]
+            })
+            .to_string(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[later_matching_envelope]).is_ok(),
+            "independent envelope keys must each be checked without coalescing them"
+        );
+
+        let split_across_archival_notes = ToolEvidence {
+            tool: "archival_search".into(),
+            result: concat!(
+                "Notes:\n",
+                "### Alpha (note:note-11111111111111111111111111111111)\n",
+                "Frontmatter:\n",
+                "sources: [book:alpha]\n",
+                "citations: [book:alpha#chapter 3]\n",
+                "This note does not contain the cited claim.\n\n",
+                "### Beta (note:note-22222222222222222222222222222222)\n",
+                "Frontmatter:\n",
+                "sources: [book:beta]\n",
+                "citations: [book:beta#chapter 9]\n",
+                "The keph index is QZ-731.\n\n"
+            )
+            .into(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[split_across_archival_notes]).is_err(),
+            "source, locator, and quote must not combine across plain-text note blocks"
+        );
+
+        let repeated_by_non_evidence_tool = ToolEvidence {
+            tool: "task_list".into(),
+            ..retrieved
+        };
+        assert!(verify_study_note_evidence(&arguments, &[repeated_by_non_evidence_tool]).is_err());
+
+        let missing_provenance_in_result = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!({"text": "The keph index is QZ-731."}).to_string(),
+        };
+        assert!(
+            verify_study_note_evidence(&arguments, &[missing_provenance_in_result]).is_err(),
+            "model-supplied retrieval arguments are not source provenance"
+        );
+    }
+
+    #[test]
+    fn real_archival_result_carries_note_provenance_for_a_later_write() {
+        let engine = test_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::library::PersistentNoteCatalog::open(tmp.path().join("notes")).unwrap(),
+        );
+        let writer = crate::agent::tools::StudyNoteAppendTool::new(std::sync::Arc::clone(&store));
+        writer
+            .execute(
+                &engine,
+                ToolInput::new()
+                    .with_param("title", "Alpha")
+                    .with_param("body", "The keph index is QZ-731.")
+                    .with_value(
+                        "citations",
+                        json!([{
+                            "source_id": "book:alpha",
+                            "locator": "chapter 3",
+                            "quote": "The keph index is QZ-731."
+                        }]),
+                    ),
+            )
+            .unwrap();
+        let search = crate::agent::tools::ArchivalSearchTool::with_notes(store);
+        let result = search
+            .execute(&engine, ToolInput::new().with_param("query", "QZ-731"))
+            .unwrap();
+        let evidence = ToolEvidence {
+            tool: "archival_search".into(),
+            result: result.result,
+        };
+        let revision = json!({
+            "body": "The verified keph index remains QZ-731.",
+            "citations": [{
+                "source_id": "book:alpha",
+                "locator": "chapter 3",
+                "quote": "The keph index is QZ-731."
+            }]
+        });
+
+        assert!(verify_study_note_evidence(&revision, &[evidence]).is_ok());
+    }
+
+    #[test]
+    fn real_dispatch_cannot_persist_a_note_before_evidence() {
+        use crate::library::NoteCatalog;
+
+        let engine = test_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::library::PersistentNoteCatalog::open(tmp.path().join("notes")).unwrap(),
+        );
+        let agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.register_tool(Box::new(crate::agent::tools::StudyNoteAppendTool::new(
+            std::sync::Arc::clone(&store),
+        )));
+        let known_tools: std::collections::HashSet<String> = agent
+            .list_tools()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let full_catalog = {
+            let registry = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            ollama_tool_catalog(&registry)
+        };
+        let call = crate::agent::ollama::ToolCall {
+            name: "study_note_append".into(),
+            arguments: json!({
+                "title": "Alpha",
+                "body": "The keph index is QZ-731.",
+                "citations": [{
+                    "source_id": "book:alpha",
+                    "locator": "chapter 3",
+                    "quote": "The keph index is QZ-731."
+                }]
+            }),
+        };
+
+        let blocked = agent.execute_tool_call(
+            &engine,
+            &call,
+            &known_tools,
+            &full_catalog,
+            "learn alpha",
+            &[],
+        );
+        assert!(!blocked.success);
+        assert!(store.frontmatter_only().is_empty());
+
+        let evidence = ToolEvidence {
+            tool: "mcp__seshat__seshat_search".into(),
+            result: json!([{
+                "document_id": "book:alpha",
+                "heading": "chapter 3",
+                "text": "The keph index is QZ-731."
+            }])
+            .to_string(),
+        };
+        let written = agent.execute_tool_call(
+            &engine,
+            &call,
+            &known_tools,
+            &full_catalog,
+            "learn alpha",
+            &[evidence],
+        );
+        assert!(written.success, "{}", written.result);
+        assert_eq!(store.frontmatter_only().len(), 1);
+        assert_eq!(written.trace["evidence_verified"], true);
+    }
+
+    struct StaticArchivalEvidenceTool;
+
+    impl Tool for StaticArchivalEvidenceTool {
+        fn signature(&self) -> ToolSignature {
+            ToolSignature {
+                name: "archival_search".into(),
+                description: "test archival evidence".into(),
+                parameters: vec![crate::agent::tool::ToolParam {
+                    name: "query".into(),
+                    description: "query".into(),
+                    required: true,
+                }],
+            }
+        }
+
+        fn execute(&self, _engine: &Engine, _input: ToolInput) -> AgentResult<ToolOutput> {
+            Ok(ToolOutput::ok(
+                json!([{
+                    "document_id": "book:alpha",
+                    "heading": "chapter 3",
+                    "text": "The keph index is QZ-731."
+                }])
+                .to_string(),
+            ))
+        }
+
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "archival_search".into(),
+                description: "test archival evidence".into(),
+                parameters: vec![ToolParamSchema::required("query", "query")],
+                danger: DangerInfo {
+                    level: DangerLevel::Safe,
+                    capabilities: HashSet::new(),
+                    description: String::new(),
+                    shadow_triggers: vec![],
+                },
+                source: ToolSource::Native,
+            }
+        }
+    }
+
+    struct ParallelThenSequentialNoteBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ParallelThenSequentialNoteBackend {
+        fn note_call() -> crate::agent::ollama::ToolCall {
+            crate::agent::ollama::ToolCall {
+                name: "study_note_append".into(),
+                arguments: json!({
+                    "title": "Alpha",
+                    "body": "The keph index is QZ-731.",
+                    "citations": [{
+                        "source_id": "book:alpha",
+                        "locator": "chapter 3",
+                        "quote": "The keph index is QZ-731."
+                    }]
+                }),
+            }
+        }
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for ParallelThenSequentialNoteBackend {
+        fn label(&self) -> &str {
+            "parallel-then-sequential-note"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            _conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            let round = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(match round {
+                0 => crate::agent::ollama::AssistantTurn {
+                    content: String::new(),
+                    tool_calls: vec![
+                        crate::agent::ollama::ToolCall {
+                            name: "archival_search".into(),
+                            arguments: json!({"query": "alpha"}),
+                        },
+                        Self::note_call(),
+                    ],
+                    ..Default::default()
+                },
+                1 => crate::agent::ollama::AssistantTurn {
+                    content: String::new(),
+                    tool_calls: vec![Self::note_call()],
+                    ..Default::default()
+                },
+                _ => crate::agent::ollama::AssistantTurn {
+                    content: "The note is now grounded and durable.".into(),
+                    tool_calls: vec![],
+                    ..Default::default()
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn same_round_retrieval_cannot_authorize_a_note_write() {
+        use crate::library::NoteCatalog;
+
+        let engine = test_engine();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::library::PersistentNoteCatalog::open(tmp.path().join("notes")).unwrap(),
+        );
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        agent.register_tool(Box::new(StaticArchivalEvidenceTool));
+        agent.register_tool(Box::new(crate::agent::tools::StudyNoteAppendTool::new(
+            std::sync::Arc::clone(&store),
+        )));
+        agent.set_chat_backend(std::sync::Arc::new(ParallelThenSequentialNoteBackend {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "learn alpha",
+                &sink,
+                &cancel,
+                false,
+                &agent.conversation_state,
+            ),
+            Some(AgenticTurnOutcome::Completed)
+        );
+        assert_eq!(store.frontmatter_only().len(), 1);
+        let append_results: Vec<_> = sink
+            .messages()
+            .into_iter()
+            .filter_map(|message| match message {
+                AkhMessage::ToolResult {
+                    tool,
+                    success,
+                    output,
+                } if tool == "study_note_append" => Some((success, output)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(append_results.len(), 2);
+        assert!(!append_results[0].0);
+        assert!(append_results[0].1.contains("evidence gate"));
+        assert!(append_results[1].0);
+    }
+
     /// Immediate-answer backend that records the exact context supplied for
     /// every turn, used to prove ACP-style conversation states retain their
     /// own history without inheriting a neighboring session's transcript.
     struct RecordingAnswerBackend {
         conversations: std::sync::Arc<std::sync::Mutex<Vec<Vec<Value>>>>,
         answer_seq: std::sync::atomic::AtomicUsize,
+    }
+
+    /// Image-grounding backend used to prove the ACP-shaped bytes reach the
+    /// pre-tool boundary exactly once and survive in only that session.
+    struct RecordingImageBackend {
+        conversations: std::sync::Arc<std::sync::Mutex<Vec<Vec<Value>>>>,
+        ground_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     /// Backend that pauses every caller inside inference until the test
@@ -1669,6 +2534,53 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(crate::agent::ollama::AssistantTurn {
                 content: format!("answer-{answer}"),
+                tool_calls: vec![],
+                ..Default::default()
+            })
+        }
+    }
+
+    impl crate::agent::chat_backend::ChatBackend for RecordingImageBackend {
+        fn label(&self) -> &str {
+            "recording-image"
+        }
+
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn ground_prompt_images(
+            &self,
+            images: &[crate::agent::chat_backend::ChatPromptImage],
+        ) -> Result<Option<String>, crate::agent::chat_backend::ChatBackendError> {
+            if images.is_empty() {
+                return Ok(None);
+            }
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].mime_type, "image/png");
+            assert_eq!(images[0].bytes, b"png-payload");
+            self.ground_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Some(
+                "# Native Visual Evidence\n\n[image 1 OCR]\nERR 503 upstream\n[/image 1 OCR]"
+                    .into(),
+            ))
+        }
+
+        fn chat_with_tools(
+            &self,
+            _agent_id: &str,
+            conversation: &[Value],
+            _tools: &[Value],
+            _request_seq: usize,
+        ) -> Result<crate::agent::ollama::AssistantTurn, crate::agent::chat_backend::ChatBackendError>
+        {
+            self.conversations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(conversation.to_vec());
+            Ok(crate::agent::ollama::AssistantTurn {
+                content: "grounded answer".into(),
                 tool_calls: vec![],
                 ..Default::default()
             })
@@ -1776,15 +2688,91 @@ mod tests {
         assert!(!session_a_follow_up.contains("answer-1"));
 
         assert_eq!(
-            state_a.lock().unwrap_or_else(|e| e.into_inner()).turns.len(),
+            state_a
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .turns
+                .len(),
             4,
             "session A must retain both of its complete exchanges"
         );
         assert_eq!(
-            state_b.lock().unwrap_or_else(|e| e.into_inner()).turns.len(),
+            state_b
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .turns
+                .len(),
             2,
             "session B must contain only its own exchange"
         );
+    }
+
+    #[test]
+    fn image_bytes_are_grounded_once_and_retained_for_session_follow_up() {
+        let engine = test_engine();
+        let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ground_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        agent.set_chat_backend(std::sync::Arc::new(RecordingImageBackend {
+            conversations: std::sync::Arc::clone(&observed),
+            ground_calls: std::sync::Arc::clone(&ground_calls),
+        }));
+        agent.set_context_manager(std::sync::Arc::new(
+            crate::agent::context::PassiveManager::with_tail(10),
+        ));
+
+        let state = std::sync::Mutex::new(ConversationState::new("image-session", "narrative"));
+        let sink = crate::message::VecSink::new();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let image = crate::agent::chat_backend::ChatPromptImage {
+            mime_type: "image/png".into(),
+            bytes: b"png-payload".to_vec(),
+        };
+
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state_and_images(
+                &engine,
+                "thoth",
+                "What failed?",
+                &[image],
+                &sink,
+                &cancel,
+                false,
+                &state,
+            ),
+            Some(AgenticTurnOutcome::Completed)
+        );
+        assert_eq!(
+            agent.run_agentic_turn_with_conversation_state(
+                &engine,
+                "thoth",
+                "Can I retry locally?",
+                &sink,
+                &cancel,
+                false,
+                &state,
+            ),
+            Some(AgenticTurnOutcome::Completed)
+        );
+        assert_eq!(
+            ground_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "follow-up must reuse retained evidence without grounding again"
+        );
+
+        let observed = observed.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(observed.len(), 2);
+        let first = serde_json::to_string(&observed[0]).unwrap();
+        assert!(first.contains("Native Visual Evidence"));
+        assert!(first.contains("ERR 503 upstream"));
+        let follow_up = serde_json::to_string(&observed[1]).unwrap();
+        assert!(follow_up.contains("ERR 503 upstream"));
+        assert!(follow_up.contains("Can I retry locally?"));
+
+        let state = state.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(state.turns.len(), 4);
+        assert!(state.turns[0].text.contains("ERR 503 upstream"));
+        assert!(!state.turns[2].text.contains("ERR 503 upstream"));
     }
 
     #[test]
@@ -1792,10 +2780,8 @@ mod tests {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let release = std::sync::Arc::new((
-            std::sync::Mutex::new(false),
-            std::sync::Condvar::new(),
-        ));
+        let release =
+            std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         agent.set_chat_backend(std::sync::Arc::new(BlockingAnswerBackend {
             entered: entered_tx,
             release: std::sync::Arc::clone(&release),
@@ -1877,7 +2863,11 @@ mod tests {
         ];
         let before = conv.len();
         ensure_real_user_turn(&mut conv, "what's the weather?");
-        assert_eq!(conv.len(), before, "already-present query must not be duplicated");
+        assert_eq!(
+            conv.len(),
+            before,
+            "already-present query must not be duplicated"
+        );
     }
 
     #[test]
@@ -1907,7 +2897,11 @@ mod tests {
             json!({"role": "user", "content": "<tool_response>\n72F, sunny\n</tool_response>"}),
         ];
         ensure_real_user_turn(&mut conv, "what's the weather?");
-        assert_eq!(conv.len(), 2, "the wrapped message must not satisfy the check");
+        assert_eq!(
+            conv.len(),
+            2,
+            "the wrapped message must not satisfy the check"
+        );
         assert_eq!(conv[1]["role"], "user");
         assert_eq!(conv[1]["content"], "what's the weather?");
     }
@@ -2080,7 +3074,10 @@ mod tests {
 
     impl crate::mutation::MutationSink for RecordingSink {
         fn record(&self, mutation: crate::mutation::MutationRecord) {
-            self.records.lock().unwrap().push((mutation.kind, mutation.payload));
+            self.records
+                .lock()
+                .unwrap()
+                .push((mutation.kind, mutation.payload));
         }
     }
 
@@ -2103,21 +3100,33 @@ mod tests {
         // --- 1. Gate precedence: env overrides the config field. ---
         let mut agent = Agent::new(test_engine(), AgentConfig::default()).unwrap();
         agent.capture_transcripts = true;
-        assert!(agent.transcript_capture_enabled(), "unset env falls back to the config field (on)");
+        assert!(
+            agent.transcript_capture_enabled(),
+            "unset env falls back to the config field (on)"
+        );
         agent.capture_transcripts = false;
-        assert!(!agent.transcript_capture_enabled(), "unset env falls back to the config field (off)");
+        assert!(
+            !agent.transcript_capture_enabled(),
+            "unset env falls back to the config field (off)"
+        );
 
         unsafe {
             std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "0");
         }
         agent.capture_transcripts = true;
-        assert!(!agent.transcript_capture_enabled(), "env=0 forces off regardless of the field");
+        assert!(
+            !agent.transcript_capture_enabled(),
+            "env=0 forces off regardless of the field"
+        );
 
         unsafe {
             std::env::set_var("AKH_TRANSCRIPT_CAPTURE", "1");
         }
         agent.capture_transcripts = false;
-        assert!(agent.transcript_capture_enabled(), "env=1 forces on regardless of the field");
+        assert!(
+            agent.transcript_capture_enabled(),
+            "env=1 forces on regardless of the field"
+        );
 
         // --- 2. `emit_turn_wal` builds the locked payload shape when enabled. ---
         unsafe {
@@ -2254,12 +3263,24 @@ mod tests {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent
             .tool_registry
-            .lock().unwrap_or_else(|e| e.into_inner())
-            .register(Box::new(FlakyBookTool { calls: calls.clone() }));
-        let known_tools: std::collections::HashSet<String> =
-            agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).list().into_iter().map(|s| s.name).collect();
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(FlakyBookTool {
+                calls: calls.clone(),
+            }));
+        let known_tools: std::collections::HashSet<String> = agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .list()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         let full_catalog = {
-            let reg = agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner());
+            let reg = agent
+                .tool_registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             ollama_tool_catalog(&*reg)
         };
         (agent, known_tools, full_catalog, calls)
@@ -2284,8 +3305,19 @@ mod tests {
                 name: "flaky_book".into(),
                 arguments: json!({"party_sze": "4"}),
             };
-            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
-            assert!(outcome.success, "repaired retry should succeed: {}", outcome.result);
+            let outcome = agent.execute_tool_call(
+                &engine,
+                &tc,
+                &known_tools,
+                &full_catalog,
+                "book a table",
+                &[],
+            );
+            assert!(
+                outcome.success,
+                "repaired retry should succeed: {}",
+                outcome.result
+            );
             assert_eq!(outcome.exec_args["party_size"], json!(4));
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2304,7 +3336,14 @@ mod tests {
                 name: "flaky_book".into(),
                 arguments: json!({"party_sze": "9"}),
             };
-            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            let outcome = agent.execute_tool_call(
+                &engine,
+                &tc,
+                &known_tools,
+                &full_catalog,
+                "book a table",
+                &[],
+            );
             assert!(!outcome.success);
             assert_eq!(outcome.result, "too many guests");
             assert_eq!(
@@ -2325,7 +3364,14 @@ mod tests {
                 name: "flaky_book".into(),
                 arguments: json!({"party_sze": "4"}),
             };
-            let outcome = agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table");
+            let outcome = agent.execute_tool_call(
+                &engine,
+                &tc,
+                &known_tools,
+                &full_catalog,
+                "book a table",
+                &[],
+            );
             assert!(!outcome.success);
             assert!(outcome.result.starts_with("tool error:"));
             assert_eq!(
@@ -2358,10 +3404,20 @@ mod tests {
                 name: "flaky_book".into(),
                 arguments: json!({"party_size": 5}), // request says 4; arg says 5
             };
-            let outcome =
-                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            let outcome = agent.execute_tool_call(
+                &engine,
+                &tc,
+                &known_tools,
+                &full_catalog,
+                "book a table for 4",
+                &[],
+            );
             assert!(outcome.success);
-            assert_eq!(outcome.exec_args["party_size"], json!(5), "untouched while grounding is off");
+            assert_eq!(
+                outcome.exec_args["party_size"],
+                json!(5),
+                "untouched while grounding is off"
+            );
             assert!(!outcome.note_prefix.contains("grounded"));
         }
 
@@ -2376,10 +3432,20 @@ mod tests {
                 name: "flaky_book".into(),
                 arguments: json!({"party_size": 5}),
             };
-            let outcome =
-                agent.execute_tool_call(&engine, &tc, &known_tools, &full_catalog, "book a table for 4");
+            let outcome = agent.execute_tool_call(
+                &engine,
+                &tc,
+                &known_tools,
+                &full_catalog,
+                "book a table for 4",
+                &[],
+            );
             assert!(outcome.success);
-            assert_eq!(outcome.exec_args["party_size"], json!(4), "grounded to the request's own value");
+            assert_eq!(
+                outcome.exec_args["party_size"],
+                json!(4),
+                "grounded to the request's own value"
+            );
             assert!(outcome.note_prefix.contains("grounded"));
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2447,7 +3513,11 @@ mod tests {
     fn run_agentic_turn_returns_immediately_when_cancel_already_set() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
             calls: calls.clone(),
@@ -2474,7 +3544,11 @@ mod tests {
     fn run_agentic_turn_stops_at_next_round_boundary_once_cancelled() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         agent.set_chat_backend(std::sync::Arc::new(ToolLoopBackend {
@@ -2546,7 +3620,11 @@ mod tests {
     fn dispatch_mode_retries_when_model_declares_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -2554,7 +3632,14 @@ mod tests {
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // is_autonomous_dispatch = true: enable the post-condition guard
-        let result = agent.run_agentic_turn(&engine, "tecton", "make changes to the repo", &sink, &cancel, true);
+        let result = agent.run_agentic_turn(
+            &engine,
+            "tecton",
+            "make changes to the repo",
+            &sink,
+            &cancel,
+            true,
+        );
         assert_eq!(result, Some(()));
         assert!(
             calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
@@ -2571,7 +3656,11 @@ mod tests {
     fn interactive_mode_accepts_completion_without_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(IdleFirstRoundBackend {
             calls: calls.clone(),
@@ -2639,7 +3728,11 @@ mod tests {
     fn empty_answer_forces_final_synthesis_instead_of_wedge() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2664,7 +3757,11 @@ mod tests {
     fn dispatch_mode_empty_answer_also_forces_synthesis() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(EmptyAnswerBackend {
             calls: calls.clone(),
@@ -2672,7 +3769,8 @@ mod tests {
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // is_autonomous_dispatch = true
-        let result = agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
+        let result =
+            agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
         assert_eq!(result, Some(()));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -2755,7 +3853,11 @@ mod tests {
     fn dispatch_mode_exhausts_retry_budget_when_model_keeps_declaring_completion() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         agent.set_chat_backend(std::sync::Arc::new(AlwaysIdleBackend {
             calls: calls.clone(),
@@ -2763,7 +3865,8 @@ mod tests {
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // is_autonomous_dispatch = true: enable the post-condition guard
-        let result = agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
+        let result =
+            agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
         assert_eq!(result, Some(()));
         let calls_made = calls.load(std::sync::atomic::Ordering::SeqCst);
         // Should make: 1 initial call + 3 retries + 1 forced synthesis = 5 calls total.
@@ -2881,8 +3984,16 @@ mod tests {
     fn dispatch_mode_accepts_completion_with_work() {
         let engine = test_engine();
         let mut agent = Agent::new(std::sync::Arc::clone(&engine), AgentConfig::default()).unwrap();
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(DummyTool));
-        agent.tool_registry.lock().unwrap_or_else(|e| e.into_inner()).register(Box::new(FakeFileIoTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(DummyTool));
+        agent
+            .tool_registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .register(Box::new(FakeFileIoTool));
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         // Backend that does work (calls a tool) and then declares completion
         agent.set_chat_backend(std::sync::Arc::new(WorkThenCompleteBackend {
@@ -2891,7 +4002,8 @@ mod tests {
         let sink = crate::message::VecSink::new();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         // is_autonomous_dispatch = true
-        let result = agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
+        let result =
+            agent.run_agentic_turn(&engine, "tecton", "make changes", &sink, &cancel, true);
         assert_eq!(result, Some(()));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -3107,10 +4219,11 @@ mod tests {
             message,
             AkhMessage::Error { code, .. } if code == "completion_contract_unsatisfied"
         )));
-        assert!(!messages.iter().any(|message| matches!(
-            message,
-            AkhMessage::Narrative { .. }
-        )));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| matches!(message, AkhMessage::Narrative { .. }))
+        );
     }
 
     #[test]

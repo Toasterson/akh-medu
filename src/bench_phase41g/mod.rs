@@ -11,7 +11,9 @@ pub mod pattern_b;
 pub mod pipeline;
 
 pub use dataset::{Dataset, DatasetError, load_dataset};
-pub use metrics::{AgreementRecord, MetricsSummary, emit_agreement_csv, emit_csv, emit_plot_script};
+pub use metrics::{
+    AgreementRecord, MetricsSummary, emit_agreement_csv, emit_csv, emit_plot_script,
+};
 pub use pattern_b::{PatternBClient, PatternBConfig, PatternBResult};
 pub use pipeline::{BenchResult, HaltReason, PipelineConfig, run_pipeline};
 

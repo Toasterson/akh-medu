@@ -58,11 +58,8 @@ impl TripleVerbalizer {
         let abstree_json = serde_json::to_string(&abstree).unwrap_or_default();
 
         // Generate template variations.
-        let templates = self.template_variations(
-            &triple.subject,
-            &triple.predicate,
-            &triple.object,
-        );
+        let templates =
+            self.template_variations(&triple.subject, &triple.predicate, &triple.object);
 
         for (i, text) in templates.into_iter().enumerate() {
             if i >= self.max_variations {
@@ -103,12 +100,7 @@ impl TripleVerbalizer {
     }
 
     /// Generate template variations for a subject-predicate-object triple.
-    fn template_variations(
-        &self,
-        subject: &str,
-        predicate: &str,
-        object: &str,
-    ) -> Vec<String> {
+    fn template_variations(&self, subject: &str, predicate: &str, object: &str) -> Vec<String> {
         let pred_lower = predicate.to_lowercase();
         let mut variations = Vec::with_capacity(self.max_variations);
 
@@ -303,7 +295,10 @@ mod tests {
         assert_eq!(stats.input_triples, 1);
         assert!(stats.positive_pairs > 0);
         assert!(stats.negative_pairs > 0);
-        assert_eq!(stats.total_pairs, stats.positive_pairs + stats.negative_pairs);
+        assert_eq!(
+            stats.total_pairs,
+            stats.positive_pairs + stats.negative_pairs
+        );
     }
 
     #[test]
@@ -313,7 +308,11 @@ mod tests {
         let pairs = verbalizer.verbalize(&triple);
         for pair in &pairs {
             let parsed: Result<AbsTree, _> = serde_json::from_str(&pair.abstree_json);
-            assert!(parsed.is_ok(), "invalid AbsTree JSON: {}", pair.abstree_json);
+            assert!(
+                parsed.is_ok(),
+                "invalid AbsTree JSON: {}",
+                pair.abstree_json
+            );
         }
     }
 }

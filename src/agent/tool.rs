@@ -481,7 +481,10 @@ impl ToolRegistry {
             unadv.insert(name.clone());
         }
         drop(unadv);
-        self.manifests.lock().unwrap().insert(name.clone(), manifest);
+        self.manifests
+            .lock()
+            .unwrap()
+            .insert(name.clone(), manifest);
         self.tools.lock().unwrap().insert(name, Arc::from(tool));
     }
 
@@ -495,9 +498,9 @@ impl ToolRegistry {
 
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        if let Some(tool) = self.with_session_state(|state| {
-            state.and_then(|state| state.tools.get(name).cloned())
-        }) {
+        if let Some(tool) =
+            self.with_session_state(|state| state.and_then(|state| state.tools.get(name).cloned()))
+        {
             return Some(tool);
         }
         self.tools.lock().unwrap().get(name).cloned()
@@ -505,9 +508,9 @@ impl ToolRegistry {
 
     /// Get a tool's manifest by name.
     pub fn manifest(&self, name: &str) -> Option<ToolManifest> {
-        if let Some(manifest) = self.with_session_state(|state| {
-            state.and_then(|state| state.manifests.get(name).cloned())
-        }) {
+        if let Some(manifest) = self
+            .with_session_state(|state| state.and_then(|state| state.manifests.get(name).cloned()))
+        {
             return Some(manifest);
         }
         self.manifests.lock().unwrap().get(name).cloned()
@@ -622,8 +625,7 @@ impl ToolRegistry {
                     let summary = truncate_summary(&format!("{:?}", input.params), 200);
                     let session_asker =
                         self.with_session_state(|state| state.map(|state| state.asker.clone()));
-                    let asker = session_asker
-                        .unwrap_or_else(|| self.asker.lock().unwrap().clone());
+                    let asker = session_asker.unwrap_or_else(|| self.asker.lock().unwrap().clone());
                     let approved = asker
                         .as_ref()
                         .map(|asker| asker.ask(&manifest, &summary))
@@ -640,8 +642,7 @@ impl ToolRegistry {
         // Start tracking this tool execution for ACP ToolCall events.
         let session_tracker =
             self.with_session_state(|state| state.map(|state| state.tracker.clone()));
-        let tracker = session_tracker
-            .unwrap_or_else(|| self.tracker.lock().unwrap().clone());
+        let tracker = session_tracker.unwrap_or_else(|| self.tracker.lock().unwrap().clone());
         let guard = tracker.as_ref().map(|tracker| {
             let title = build_tool_title(name, &input);
             let locations = extract_tool_locations(name, &input);
@@ -718,7 +719,10 @@ impl Default for ToolRegistry {
 impl std::fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRegistry")
-            .field("tools", &self.tools.lock().unwrap().keys().collect::<Vec<_>>())
+            .field(
+                "tools",
+                &self.tools.lock().unwrap().keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -744,9 +748,10 @@ fn truncate_summary(s: &str, max_len: usize) -> String {
 /// Build a concise title for a tool execution (for ToolCall events).
 fn build_tool_title(tool_name: &str, input: &ToolInput) -> String {
     match tool_name {
-        "shell_exec" => {
-            input.get("command").map(|c| truncate_summary(c, 80)).unwrap_or_else(|| "shell".to_string())
-        }
+        "shell_exec" => input
+            .get("command")
+            .map(|c| truncate_summary(c, 80))
+            .unwrap_or_else(|| "shell".to_string()),
         "file_io" => {
             let path = input.get("path").unwrap_or("?");
             let op = input.get("operation").unwrap_or("?");
@@ -760,17 +765,21 @@ fn build_tool_title(tool_name: &str, input: &ToolInput) -> String {
             let url = input.get("url").unwrap_or("?");
             format!("fetch {url}")
         }
-        "seshat_search" | "search_library" => {
-            input.get("query").map(|q| truncate_summary(q, 80)).unwrap_or_else(|| "search".to_string())
-        }
-        "kg_query" | "query_symbols" => {
-            input.get("pattern").or_else(|| input.get("query"))
-                .map(|q| truncate_summary(q, 80))
-                .unwrap_or_else(|| "query".to_string())
-        }
+        "seshat_search" | "search_library" => input
+            .get("query")
+            .map(|q| truncate_summary(q, 80))
+            .unwrap_or_else(|| "search".to_string()),
+        "kg_query" | "query_symbols" => input
+            .get("pattern")
+            .or_else(|| input.get("query"))
+            .map(|q| truncate_summary(q, 80))
+            .unwrap_or_else(|| "query".to_string()),
         _ => {
             // Generic fallback: show first param value or just the tool name.
-            input.params.values().next()
+            input
+                .params
+                .values()
+                .next()
                 .and_then(|v| v.as_str())
                 .map(|s| truncate_summary(s, 80))
                 .unwrap_or_else(|| tool_name.to_string())
@@ -881,14 +890,21 @@ mod tests {
         reg.set_permission_mode(PermissionMode::Plan);
         let out = reg.execute("w", ToolInput::new(), &engine).unwrap();
         assert!(!out.success, "plan mode should deny the write tool");
-        assert!(out.result.contains("permission denied"), "result: {}", out.result);
+        assert!(
+            out.result.contains("permission denied"),
+            "result: {}",
+            out.result
+        );
 
         // would_ask (ADR 089 task A retry gate): a side-effecting tool under
         // Standard mode would stop at an Ask prompt — the repair-retry must
         // skip it rather than re-prompt for one logical call. Under Bypass
         // (and for unknown names) it never asks.
         reg.set_permission_mode(PermissionMode::Standard);
-        assert!(reg.would_ask("w"), "Standard mode should Ask for a side-effecting tool");
+        assert!(
+            reg.would_ask("w"),
+            "Standard mode should Ask for a side-effecting tool"
+        );
         reg.set_permission_mode(PermissionMode::Bypass);
         assert!(!reg.would_ask("w"), "Bypass mode never asks");
         assert!(!reg.would_ask("no_such_tool"), "unknown names never ask");

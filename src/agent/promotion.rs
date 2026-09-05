@@ -352,7 +352,10 @@ fn store_proposal(
         PRED_PROPOSAL_DISTINCT_SUBJECTS,
         &candidate.distinct_subjects.to_string(),
     )?;
-    assert_str(PRED_PROPOSAL_VALUE_TYPE, candidate.value_type.entity_label())?;
+    assert_str(
+        PRED_PROPOSAL_VALUE_TYPE,
+        candidate.value_type.entity_label(),
+    )?;
     if let Some(t) = &advice.proposed_type {
         assert_str(PRED_PROPOSAL_TYPE, t)?;
     }
@@ -421,10 +424,12 @@ fn read_proposal(
         .and_then(|l| ValueType::from_entity_label(&l))
         .unwrap_or(ValueType::Text);
     let proposed_type = single_object_label(engine, proposal, PRED_PROPOSAL_TYPE)?;
-    let proposed_property_name = single_object_label(engine, proposal, PRED_PROPOSAL_PROPERTY_NAME)?
-        .unwrap_or_else(|| predicate.to_string());
+    let proposed_property_name =
+        single_object_label(engine, proposal, PRED_PROPOSAL_PROPERTY_NAME)?
+            .unwrap_or_else(|| predicate.to_string());
     let alias_of = single_object_label(engine, proposal, PRED_PROPOSAL_ALIAS_OF)?;
-    let rationale = single_object_label(engine, proposal, PRED_PROPOSAL_RATIONALE)?.unwrap_or_default();
+    let rationale =
+        single_object_label(engine, proposal, PRED_PROPOSAL_RATIONALE)?.unwrap_or_default();
     let model = single_object_label(engine, proposal, PRED_PROPOSAL_MODEL)?.unwrap_or_default();
 
     Ok(PromotionProposal {
@@ -467,10 +472,7 @@ pub fn list_pending_proposals(engine: &Engine) -> AgentResult<Vec<PromotionPropo
     Ok(proposals)
 }
 
-fn require_pending(
-    engine: &Engine,
-    predicate: &str,
-) -> AgentResult<(SymbolId, PromotionProposal)> {
+fn require_pending(engine: &Engine, predicate: &str) -> AgentResult<(SymbolId, PromotionProposal)> {
     let Some(proposal) = get_proposal(engine, predicate)? else {
         return Err(AgentError::PromotionNotFound {
             predicate: predicate.to_string(),
@@ -497,11 +499,7 @@ fn mark_status(engine: &Engine, proposal: SymbolId, status_obj: &str) -> AgentRe
 /// ([`run_promotion_pass`] skips any predicate with an existing proposal,
 /// confirmed or rejected). Errors if no proposal exists, or it already left
 /// `pending`.
-pub fn reject_proposal(
-    engine: &Engine,
-    predicate: &str,
-    reason: Option<&str>,
-) -> AgentResult<()> {
+pub fn reject_proposal(engine: &Engine, predicate: &str, reason: Option<&str>) -> AgentResult<()> {
     let (proposal, _) = require_pending(engine, predicate)?;
     if let Some(reason) = reason
         && !reason.trim().is_empty()
@@ -583,7 +581,9 @@ pub fn run_promotion_pass(
                 report.proposals_created += 1;
             }
             Err(e) => {
-                report.failed.push((candidate.predicate.clone(), e.to_string()));
+                report
+                    .failed
+                    .push((candidate.predicate.clone(), e.to_string()));
             }
         }
     }
@@ -901,11 +901,7 @@ mod tests {
     #[test]
     fn consistent_numeric_shape_is_detected() {
         let (_dir, engine) = test_engine();
-        assert_frontier_triples(
-            &engine,
-            "score",
-            &[("A", "1"), ("B", "2"), ("C", "3")],
-        );
+        assert_frontier_triples(&engine, "score", &[("A", "1"), ("B", "2"), ("C", "3")]);
         let candidates = promotion_candidates(&engine, &PromotionThresholds::default());
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].value_type, ValueType::Number);
@@ -919,8 +915,12 @@ mod tests {
             .unwrap();
         for i in 0..5 {
             let s = engine.resolve_or_create_entity(&format!("s{i}")).unwrap();
-            let o = engine.resolve_or_create_entity("SomeUninstalledType").unwrap();
-            engine.add_triple(&Triple::new(s, frontier_is_a, o)).unwrap();
+            let o = engine
+                .resolve_or_create_entity("SomeUninstalledType")
+                .unwrap();
+            engine
+                .add_triple(&Triple::new(s, frontier_is_a, o))
+                .unwrap();
         }
         assert!(promotion_candidates(&engine, &PromotionThresholds::default()).is_empty());
     }
@@ -932,8 +932,7 @@ mod tests {
         assert_frontier_triples(&engine, "rare", &[("A", "x")]); // 1 subject, default min 3
 
         let model = crate::agent::librarian::FakeLibrarianModel::new();
-        let report =
-            run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
+        let report = run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
         assert_eq!(report.candidates_considered, 0);
         assert_eq!(report.proposals_created, 0);
         assert!(list_pending_proposals(&engine).unwrap().is_empty());
@@ -961,8 +960,7 @@ mod tests {
             },
         );
 
-        let report =
-            run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
+        let report = run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
         assert_eq!(report.proposals_created, 1);
         assert_eq!(report.already_proposed_skipped, 0);
 
@@ -995,8 +993,7 @@ mod tests {
         let first = run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
         assert_eq!(first.proposals_created, 1);
 
-        let second =
-            run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
+        let second = run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
         assert_eq!(second.proposals_created, 0);
         assert_eq!(second.already_proposed_skipped, 1);
         assert_eq!(list_pending_proposals(&engine).unwrap().len(), 1);
@@ -1023,8 +1020,7 @@ mod tests {
 
         // No proposal was stored, so a healthy model retries it successfully.
         let healthy = crate::agent::librarian::FakeLibrarianModel::new();
-        let retry =
-            run_promotion_pass(&engine, &healthy, &PromotionThresholds::default()).unwrap();
+        let retry = run_promotion_pass(&engine, &healthy, &PromotionThresholds::default()).unwrap();
         assert_eq!(retry.proposals_created, 1);
     }
 
@@ -1049,8 +1045,7 @@ mod tests {
 
         // Even with fresh recurring evidence, a re-run must not re-propose.
         assert_frontier_triples(&engine, "favoriteColor", &[("Cid", "green")]);
-        let report =
-            run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
+        let report = run_promotion_pass(&engine, &model, &PromotionThresholds::default()).unwrap();
         assert_eq!(report.proposals_created, 0);
         assert_eq!(report.already_proposed_skipped, 1);
     }
@@ -1217,7 +1212,10 @@ mod tests {
         let PromotionOutcome::Promoted { supertype, .. } = outcome else {
             panic!("expected a Promoted outcome");
         };
-        assert!(supertype.is_none(), "hallucinated supertype must not be trusted");
+        assert!(
+            supertype.is_none(),
+            "hallucinated supertype must not be trusted"
+        );
     }
 
     #[test]
@@ -1243,7 +1241,13 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            promote_proposal(&engine, &registry, "favoriteColor", "toasty", importer(&engine)),
+            promote_proposal(
+                &engine,
+                &registry,
+                "favoriteColor",
+                "toasty",
+                importer(&engine)
+            ),
             Err(AgentError::PromotionNotPending { .. })
         ));
     }
@@ -1253,7 +1257,13 @@ mod tests {
         let (_dir, engine) = test_engine();
         let registry = InMemoryRegistry::default();
         assert!(matches!(
-            promote_proposal(&engine, &registry, "neverProposed", "toasty", importer(&engine)),
+            promote_proposal(
+                &engine,
+                &registry,
+                "neverProposed",
+                "toasty",
+                importer(&engine)
+            ),
             Err(AgentError::PromotionNotFound { .. })
         ));
     }
@@ -1267,7 +1277,11 @@ mod tests {
         assert_frontier_triples(
             &engine,
             "mailAddress",
-            &[("Jane", "jane@example.org"), ("Bob", "bob@example.org"), ("Amy", "amy@x.org")],
+            &[
+                ("Jane", "jane@example.org"),
+                ("Bob", "bob@example.org"),
+                ("Amy", "amy@x.org"),
+            ],
         );
         let model = crate::agent::librarian::FakeLibrarianModel::new().with_proposal(
             "mailAddress",

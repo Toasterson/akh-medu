@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::engine::Engine;
 use crate::graph::Triple;
 use crate::provenance::{DerivationKind, ProvenanceRecord};
-use crate::symbol::{SymbolKind, SymbolId};
+use crate::symbol::{SymbolId, SymbolKind};
 
 use super::error::AgentResult;
 
@@ -363,8 +363,13 @@ fn redirect_triples(engine: &Engine, old_sym: SymbolId, new_sym: SymbolId) {
     // Redirect outgoing triples.
     let outgoing = engine.triples_from(old_sym);
     for triple in &outgoing {
-        if let Err(e) = engine.add_triple(&Triple::new(new_sym, triple.predicate, triple.object).with_confidence(triple.confidence)) {
-            tracing::warn!("sleep merge: failed to add redirected outgoing triple ({old_sym} -> {new_sym}): {e}");
+        if let Err(e) = engine.add_triple(
+            &Triple::new(new_sym, triple.predicate, triple.object)
+                .with_confidence(triple.confidence),
+        ) {
+            tracing::warn!(
+                "sleep merge: failed to add redirected outgoing triple ({old_sym} -> {new_sym}): {e}"
+            );
         }
         if let Err(e) = engine.remove_triple(triple.subject, triple.predicate, triple.object) {
             tracing::warn!("sleep merge: failed to remove old outgoing triple from {old_sym}: {e}");
@@ -374,8 +379,13 @@ fn redirect_triples(engine: &Engine, old_sym: SymbolId, new_sym: SymbolId) {
     // Redirect incoming triples.
     let incoming = engine.triples_to(old_sym);
     for triple in &incoming {
-        if let Err(e) = engine.add_triple(&Triple::new(triple.subject, triple.predicate, new_sym).with_confidence(triple.confidence)) {
-            tracing::warn!("sleep merge: failed to add redirected incoming triple ({old_sym} -> {new_sym}): {e}");
+        if let Err(e) = engine.add_triple(
+            &Triple::new(triple.subject, triple.predicate, new_sym)
+                .with_confidence(triple.confidence),
+        ) {
+            tracing::warn!(
+                "sleep merge: failed to add redirected incoming triple ({old_sym} -> {new_sym}): {e}"
+            );
         }
         if let Err(e) = engine.remove_triple(triple.subject, triple.predicate, triple.object) {
             tracing::warn!("sleep merge: failed to remove old incoming triple to {old_sym}: {e}");
@@ -442,8 +452,12 @@ fn run_dream_phase(engine: &Engine, config: &SleepConfig) -> AgentResult<usize> 
                         .resolve_or_create_relation("dream:related_to")
                         .unwrap_or_else(|_| SymbolId::new(1).unwrap());
 
-                    if let Err(e) = engine.add_triple(&Triple::new(start, predicate, end).with_confidence(0.3)) {
-                        tracing::debug!("dream phase: failed to add speculative triple ({start} -> {end}): {e}");
+                    if let Err(e) =
+                        engine.add_triple(&Triple::new(start, predicate, end).with_confidence(0.3))
+                    {
+                        tracing::debug!(
+                            "dream phase: failed to add speculative triple ({start} -> {end}): {e}"
+                        );
                     }
 
                     // Record provenance.
@@ -459,7 +473,9 @@ fn run_dream_phase(engine: &Engine, config: &SleepConfig) -> AgentResult<usize> 
                         .with_sources(vec![start, end])
                         .with_confidence(0.3),
                     ) {
-                        tracing::debug!("dream phase: failed to store provenance for speculative connection: {e}");
+                        tracing::debug!(
+                            "dream phase: failed to store provenance for speculative connection: {e}"
+                        );
                     }
 
                     found += 1;
@@ -729,8 +745,12 @@ mod tests {
         let other = engine.resolve_or_create_entity("other_entity").unwrap();
         let rel = engine.resolve_or_create_relation("test:rel").unwrap();
 
-        engine.add_triple(&Triple::new(old, rel, other).with_confidence(0.9)).unwrap();
-        engine.add_triple(&Triple::new(other, rel, old).with_confidence(0.8)).unwrap();
+        engine
+            .add_triple(&Triple::new(old, rel, other).with_confidence(0.9))
+            .unwrap();
+        engine
+            .add_triple(&Triple::new(other, rel, old).with_confidence(0.8))
+            .unwrap();
 
         redirect_triples(&engine, old, new);
 

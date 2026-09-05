@@ -60,10 +60,11 @@ use tracing::Instrument;
 use agent_client_protocol::schema::{
     AgentCapabilities, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    McpCapabilities, Meta, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-    ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+    McpCapabilities, Meta, NewSessionRequest, NewSessionResponse, PromptCapabilities,
+    PromptRequest, PromptResponse, ProtocolVersion, SessionId, SessionNotification, SessionUpdate,
+    StopReason, TextContent,
 };
-use agent_client_protocol::util::{json_cast, MatchDispatch};
+use agent_client_protocol::util::{MatchDispatch, json_cast};
 use agent_client_protocol::{
     ActiveSession, Agent as AcpRole, ByteStreams, Client, ConnectTo, ConnectionTo, Dispatch,
     JsonRpcMessage, JsonRpcRequest, JsonRpcResponse, Responder, UntypedMessage,
@@ -74,11 +75,11 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::watch;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::agent::conversation::ConversationState;
 use crate::agent::Agent;
+use crate::agent::conversation::ConversationState;
 use crate::agent::{GoalStatus, PlanStatus, StepStatus};
 use crate::bootstrap::identity::{
-    ritual_of_awakening, CharacterKnowledge, CultureOrigin, IdentityError,
+    CharacterKnowledge, CultureOrigin, IdentityError, ritual_of_awakening,
 };
 use crate::bootstrap::purpose::{DreyfusLevel, EntityType, PurposeModel};
 use crate::chat::{ChatProcessor, SessionContext};
@@ -88,19 +89,16 @@ use crate::message::{AkhMessage, MessageSink};
 pub mod control;
 pub mod mcp_bridge;
 pub use control::{
-    is_control_method, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
-    ServerControl, WorkspaceHandles, CONTROL_METHODS,
+    CONTROL_METHODS, ControlFuture, EngineHandle, ResolveEngineFuture, ResolveFuture,
+    ServerControl, WorkspaceHandles, is_control_method,
 };
 
 type SessionConversation = Arc<Mutex<ConversationState>>;
-type SessionConversationMap =
-    Arc<Mutex<std::collections::HashMap<String, SessionConversation>>>;
+type SessionConversationMap = Arc<Mutex<std::collections::HashMap<String, SessionConversation>>>;
 type SessionContextHandle = Arc<Mutex<SessionContext>>;
 type SessionContextMap = Arc<Mutex<std::collections::HashMap<String, SessionContextHandle>>>;
-type SessionMcpToolCache =
-    Arc<Mutex<Option<Vec<mcp_bridge::DiscoveredServerTools>>>>;
-type SessionMcpToolCacheMap =
-    Arc<Mutex<std::collections::HashMap<String, SessionMcpToolCache>>>;
+type SessionMcpToolCache = Arc<Mutex<Option<Vec<mcp_bridge::DiscoveredServerTools>>>>;
+type SessionMcpToolCacheMap = Arc<Mutex<std::collections::HashMap<String, SessionMcpToolCache>>>;
 
 /// ACP initialize metadata key carrying the standard bearer value.
 pub const AUTH_META_KEY: &str = "authorization";
@@ -193,8 +191,7 @@ fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
     let width = expected.len().max(candidate.len());
     for index in 0..width {
         difference |= usize::from(
-            expected.get(index).copied().unwrap_or(0)
-                ^ candidate.get(index).copied().unwrap_or(0),
+            expected.get(index).copied().unwrap_or(0) ^ candidate.get(index).copied().unwrap_or(0),
         );
     }
     difference == 0
@@ -249,7 +246,9 @@ pub enum AcpError {
     #[error("failed to accept ACP connection on {path}: {source}")]
     #[diagnostic(
         code(akh::acp::accept),
-        help("The listener is bound but the accept() syscall failed. Check the socket is still valid.")
+        help(
+            "The listener is bound but the accept() syscall failed. Check the socket is still valid."
+        )
     )]
     Accept {
         /// The socket path being served.
@@ -314,7 +313,9 @@ pub enum AcpError {
     #[error("ACP prompt worker failed: {message}")]
     #[diagnostic(
         code(akh::acp::worker),
-        help("spawn_blocking returned a JoinError — the synchronous chat turn panicked. Check the logs.")
+        help(
+            "spawn_blocking returned a JoinError — the synchronous chat turn panicked. Check the logs."
+        )
     )]
     Worker {
         /// Description of the join failure.
@@ -395,7 +396,10 @@ fn remote_help_text(data: &serde_json::Value) -> String {
         parts.push(format!("Remote diagnostic code: {code}."));
     }
     if let Some(causes) = data.get("causes").and_then(serde_json::Value::as_array) {
-        let chain: Vec<&str> = causes.iter().filter_map(serde_json::Value::as_str).collect();
+        let chain: Vec<&str> = causes
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect();
         if !chain.is_empty() {
             parts.push(format!("Caused by: {}.", chain.join(" -> ")));
         }
@@ -490,7 +494,8 @@ pub struct AkhAcpAgent {
     /// `NewSessionRequest.mcp_servers`; each `session/prompt` connects to them,
     /// discovers their tools, and registers namespaced proxies for that turn
     /// (see [`mcp_bridge`]).
-    session_mcp: Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::SessionMcpServerCfg>>>>,
+    session_mcp:
+        Arc<Mutex<std::collections::HashMap<String, Vec<mcp_bridge::SessionMcpServerCfg>>>>,
     /// Session → discovered MCP tool descriptors, populated on the first
     /// successful `session/prompt` discovery pass and never invalidated
     /// (session-lifetime cache). Every prompt after the first rebuilds proxy
@@ -506,7 +511,8 @@ pub struct AkhAcpAgent {
     /// session with no turn in flight (already finished, or never started)
     /// is a no-op, matching the ACP spec's "cancellation is a courtesy, not
     /// a guarantee" contract.
-    session_cancels: Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    session_cancels:
+        Arc<Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     /// Chat session → the client's real working directory, recorded at
     /// `session/new` from `req.cwd` when it is an absolute path other than
     /// the `akh-ws:<name>` workspace sentinel (see [`is_workspace_sentinel`]).
@@ -594,7 +600,9 @@ pub struct AkhAcpAgent {
     /// spuriously rejected as busy. Tracking each turn's own start and
     /// checking only the oldest still-in-flight one ties the guard to an
     /// actual stuck turn instead of to wall-clock streak length.
-    active_turns: Arc<Mutex<std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>>>,
+    active_turns: Arc<
+        Mutex<std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>>,
+    >,
 }
 
 /// Default prompt-turn idle watchdog (seconds). Generous: a healthy turn
@@ -722,11 +730,7 @@ impl AkhAcpAgent {
     /// [`ChatProcessor`] so this module stays decoupled from how a workspace is
     /// seeded (tests seed in-memory; a real daemon would open a persistent
     /// store).
-    pub fn new(
-        engine: Arc<Engine>,
-        agent: Arc<RwLock<Agent>>,
-        processor: ChatProcessor,
-    ) -> Self {
+    pub fn new(engine: Arc<Engine>, agent: Arc<RwLock<Agent>>, processor: ChatProcessor) -> Self {
         Self {
             engine: Some(engine),
             agent: Some(agent),
@@ -833,7 +837,15 @@ impl AkhAcpAgent {
     async fn resolve_handles(
         &self,
         workspace: &str,
-    ) -> Result<(Arc<Engine>, Arc<RwLock<Agent>>, Arc<Mutex<ChatProcessor>>, bool), String> {
+    ) -> Result<
+        (
+            Arc<Engine>,
+            Arc<RwLock<Agent>>,
+            Arc<Mutex<ChatProcessor>>,
+            bool,
+        ),
+        String,
+    > {
         if let Some(ctrl) = &self.control {
             match ctrl.resolve(workspace).await {
                 Ok(h) => return Ok((h.engine, h.agent, h.processor, h.require_pushed_mcp)),
@@ -847,7 +859,9 @@ impl AkhAcpAgent {
         }
         match (&self.engine, &self.agent, &self.processor) {
             (Some(e), Some(a), Some(p)) => Ok((Arc::clone(e), Arc::clone(a), Arc::clone(p), false)),
-            _ => Err("no workspace handles available (no engine held and no control backend)".into()),
+            _ => {
+                Err("no workspace handles available (no engine held and no control backend)".into())
+            }
         }
     }
 
@@ -858,10 +872,7 @@ impl AkhAcpAgent {
     /// only need engine-derivable data (symbol/triple counts, KG queries,
     /// skills, health). Falls back to the held engine when no control backend
     /// is wired (same pattern as `resolve_handles`).
-    async fn resolve_engine_only_handles(
-        &self,
-        workspace: &str,
-    ) -> Result<Arc<Engine>, String> {
+    async fn resolve_engine_only_handles(&self, workspace: &str) -> Result<Arc<Engine>, String> {
         if let Some(ctrl) = &self.control {
             match ctrl.resolve_engine_only(workspace).await {
                 Ok(h) => return Ok(h.engine),
@@ -1049,10 +1060,7 @@ impl AkhAcpAgent {
     /// Validate and exclusively check out one session for a prompt turn.
     /// Unknown/evicted ids fail closed; they never fall back to the default
     /// workspace or recreate transcript state outside the bounded registry.
-    fn begin_session_turn(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionTurnLease, SessionAccessError> {
+    fn begin_session_turn(&self, session_id: &str) -> Result<SessionTurnLease, SessionAccessError> {
         let mut order = self.session_order.lock().unwrap_or_else(|e| e.into_inner());
         let Some(pos) = order.iter().position(|tracked| tracked == session_id) else {
             return Err(SessionAccessError::Unknown);
@@ -1165,7 +1173,11 @@ impl AkhAcpAgent {
     /// caller **must** call [`Self::end_turn`] exactly once when it learns
     /// the turn is over (success, resolve failure, or watchdog stall —
     /// whichever comes first on that request's path).
-    fn begin_turn(&self, ws: &str, deadline: std::time::Duration) -> Result<(), std::time::Duration> {
+    fn begin_turn(
+        &self,
+        ws: &str,
+        deadline: std::time::Duration,
+    ) -> Result<(), std::time::Duration> {
         let mut active = self.active_turns.lock().unwrap_or_else(|e| e.into_inner());
         let queue = active.entry(ws.to_string()).or_default();
         if let Some(oldest) = queue.front() {
@@ -1251,6 +1263,7 @@ impl AkhAcpAgent {
         session_conversation: SessionConversation,
         agent_id: String,
         text: String,
+        prompt_images: Vec<crate::agent::chat_backend::ChatPromptImage>,
         asker: Option<Arc<dyn crate::agent::permission::PermissionAsker>>,
         session_id: String,
         mcp_cfgs: Vec<mcp_bridge::SessionMcpServerCfg>,
@@ -1309,9 +1322,11 @@ impl AkhAcpAgent {
             // a `Weak`; the strong ref we keep here is what keeps the channel
             // open while the turn runs, and what drops (closing the channel)
             // when the worker returns.
-            let tracker = Arc::new(crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
-                Arc::clone(&sink) as Arc<dyn crate::message::MessageSink>,
-            ));
+            let tracker = Arc::new(
+                crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
+                    Arc::clone(&sink) as Arc<dyn crate::message::MessageSink>
+                ),
+            );
             // Install a thread-confined registry overlay. Session MCP proxies,
             // permission callbacks, and tracker callbacks never enter the
             // workspace-global registry, so concurrent sessions cannot see or
@@ -1375,9 +1390,8 @@ impl AkhAcpAgent {
                         } else {
                             mcp_bridge::discover_session_tools(&mcp_cfgs, &*sink)
                         };
-                        *mcp_tool_cache
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()) = Some(discovered.clone());
+                        *mcp_tool_cache.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(discovered.clone());
                         discovered
                     }
                 };
@@ -1395,14 +1409,19 @@ impl AkhAcpAgent {
             // per-turn property, threaded from the caller, not a process-wide flag).
             tracing::info!(
                 agent_id,
-                mode = if is_dispatch { "dispatch" } else { "interactive" },
+                mode = if is_dispatch {
+                    "dispatch"
+                } else {
+                    "interactive"
+                },
                 source = mode_source,
                 "turn mode resolved"
             );
-            let agentic_outcome = agent_r.run_agentic_turn_with_conversation_state(
+            let agentic_outcome = agent_r.run_agentic_turn_with_conversation_state_and_images(
                 &engine,
                 &agent_id,
                 &text,
+                &prompt_images,
                 &*sink,
                 &cancel,
                 is_dispatch,
@@ -1431,9 +1450,7 @@ impl AkhAcpAgent {
                 // updates. It was allocated at `session/new` and checked out
                 // before this worker started, so an unknown/evicted session
                 // can never recreate context outside the bounded registry.
-                let mut ctx = session_context
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut ctx = session_context.lock().unwrap_or_else(|e| e.into_inner());
                 let out = processor_g2.process_input(&mut ctx, &text, &mut agent_w, &engine);
                 sink.emit_batch(&out);
             }
@@ -1620,7 +1637,8 @@ impl LastStepTracker {
         let kind = StepKind::from_message(msg) as u8;
         self.kind.store(kind, std::sync::atomic::Ordering::Relaxed);
         let ms = now.duration_since(start).as_millis().min(u64::MAX as u128) as u64;
-        self.since_start_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
+        self.since_start_ms
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Snapshot the last step kind + its age relative to `now`.
@@ -1629,7 +1647,11 @@ impl LastStepTracker {
     /// where `step_arrival` is the millis-since-turn-start stored by
     /// [`Self::observe`]. For the `None` sentinel (no step observed yet),
     /// age is the whole turn so far (`now - start`).
-    fn snapshot(&self, start: std::time::Instant, now: std::time::Instant) -> (StepKind, std::time::Duration) {
+    fn snapshot(
+        &self,
+        start: std::time::Instant,
+        now: std::time::Instant,
+    ) -> (StepKind, std::time::Duration) {
         let kind_u8 = self.kind.load(std::sync::atomic::Ordering::Relaxed);
         let kind = match kind_u8 {
             0 => StepKind::None,
@@ -1643,7 +1665,9 @@ impl LastStepTracker {
             8 => StepKind::Error,
             _ => StepKind::Other,
         };
-        let ms = self.since_start_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let ms = self
+            .since_start_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
         if ms == u64::MAX {
             // No step observed yet: age is the whole turn so far.
             return (kind, now.duration_since(start));
@@ -1715,7 +1739,9 @@ impl MessageSink for AcpSink {
 fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
     let chunk = |text: String| ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
     match msg {
-        AkhMessage::Fact { text, confidence, .. } => {
+        AkhMessage::Fact {
+            text, confidence, ..
+        } => {
             let body = match confidence {
                 Some(c) => format!("{text} (confidence {c:.2})"),
                 None => text.clone(),
@@ -1724,7 +1750,11 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         }
         AkhMessage::Narrative { text, .. } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
         AkhMessage::System { text } => SessionUpdate::AgentMessageChunk(chunk(text.clone())),
-        AkhMessage::ToolResult { tool, success, output } => {
+        AkhMessage::ToolResult {
+            tool,
+            success,
+            output,
+        } => {
             // Kept as a thought chunk (not folded into the ToolCall* mapping
             // above), but this IS genuine, confirmed duplication, not a
             // hypothetical: `Agent::run_agentic_turn`
@@ -1756,7 +1786,9 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
             let status = if *success { "ok" } else { "failed" };
             SessionUpdate::AgentThoughtChunk(chunk(format!("[{tool}:{status}] {output}\n")))
         }
-        AkhMessage::Prompt { question } => SessionUpdate::AgentMessageChunk(chunk(question.clone())),
+        AkhMessage::Prompt { question } => {
+            SessionUpdate::AgentMessageChunk(chunk(question.clone()))
+        }
         AkhMessage::Error { code, message, .. } => {
             SessionUpdate::AgentMessageChunk(chunk(format!("error[{code}]: {message}")))
         }
@@ -1767,10 +1799,15 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
             };
             SessionUpdate::AgentThoughtChunk(chunk(body))
         }
-        AkhMessage::Gap { entity, description } => {
-            SessionUpdate::AgentThoughtChunk(chunk(format!("gap: {entity} — {description}")))
-        }
-        AkhMessage::GoalProgress { goal, status, detail } => {
+        AkhMessage::Gap {
+            entity,
+            description,
+        } => SessionUpdate::AgentThoughtChunk(chunk(format!("gap: {entity} — {description}"))),
+        AkhMessage::GoalProgress {
+            goal,
+            status,
+            detail,
+        } => {
             let body = match detail {
                 Some(d) => format!("goal {goal} [{status}]: {d}"),
                 None => format!("goal {goal} [{status}]"),
@@ -1780,7 +1817,12 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
         AkhMessage::AuditLog { kind, summary, .. } => {
             SessionUpdate::AgentThoughtChunk(chunk(format!("audit[{kind}]: {summary}")))
         }
-        AkhMessage::ToolCallStarted { tool_id, kind, title, locations } => {
+        AkhMessage::ToolCallStarted {
+            tool_id,
+            kind,
+            title,
+            locations,
+        } => {
             use agent_client_protocol::schema::{
                 ToolCall, ToolCallLocation, ToolCallStatus, ToolKind as AcpToolKind,
             };
@@ -1806,11 +1848,20 @@ fn to_session_update(msg: &AkhMessage) -> SessionUpdate {
                     .locations(acp_locations),
             )
         }
-        AkhMessage::ToolCallCompleted { tool_id, success, output, diff } => {
+        AkhMessage::ToolCallCompleted {
+            tool_id,
+            success,
+            output,
+            diff,
+        } => {
             use agent_client_protocol::schema::{
                 Content, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
             };
-            let status = if *success { ToolCallStatus::Completed } else { ToolCallStatus::Failed };
+            let status = if *success {
+                ToolCallStatus::Completed
+            } else {
+                ToolCallStatus::Failed
+            };
             let mut content = Vec::new();
             if let Some(out) = output {
                 content.push(ToolCallContent::Content(Content::new(ContentBlock::Text(
@@ -1973,7 +2024,10 @@ impl AcpAppError {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            map.insert("message".to_string(), serde_json::json!(format!("{ctx}: {msg}")));
+            map.insert(
+                "message".to_string(),
+                serde_json::json!(format!("{ctx}: {msg}")),
+            );
         }
         self
     }
@@ -2085,12 +2139,30 @@ fn dispatch_akh(
         "meta/capabilities" => {
             // Per-workspace data-plane (always present).
             let mut groups = vec![
-                "meta", "workspace", "symbols", "triples", "query", "memory", "infer",
-                "permission", "goals", "tools", "skills", "projects", "status", "usage",
-                "reasoning", "evidence",
+                "meta",
+                "workspace",
+                "symbols",
+                "triples",
+                "query",
+                "memory",
+                "infer",
+                "permission",
+                "goals",
+                "tools",
+                "skills",
+                "projects",
+                "status",
+                "usage",
+                "reasoning",
+                "evidence",
                 // Phase 29 capability-exposure groups (plan
                 // docs/ai/plans/2026-03-26-phase29-capability-exposure.md, ADR 039).
-                "microtheory", "psyche", "argue", "explain", "trust", "provenance",
+                "microtheory",
+                "psyche",
+                "argue",
+                "explain",
+                "trust",
+                "provenance",
                 // ADR 081 Slice 9 — schema-coverage report.
                 "schema",
                 // Identity — client-driven Ritual of Awakening (re-exposed as an
@@ -2250,7 +2322,9 @@ fn dispatch_akh(
                 _ => engine.resolve_or_create_entity(label),
             }
             .map_err(|e| diag_err(e, "create failed"))?;
-            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
+            engine
+                .persist()
+                .map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "id": id.get(),
                 "label": engine.resolve_label(id),
@@ -2283,7 +2357,9 @@ fn dispatch_akh(
                     confidence,
                 )])
                 .map_err(|e| diag_err(e, "ingest failed"))?;
-            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
+            engine
+                .persist()
+                .map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "subject": subject,
                 "predicate": predicate,
@@ -2332,7 +2408,9 @@ fn dispatch_akh(
             let result = engine
                 .remove_triple(s, p, o)
                 .map_err(|e| diag_err(e, "remove failed"))?;
-            engine.persist().map_err(|e| diag_err(e, "persist failed"))?;
+            engine
+                .persist()
+                .map_err(|e| diag_err(e, "persist failed"))?;
             Ok(serde_json::json!({
                 "subject": subject,
                 "predicate": predicate,
@@ -2361,7 +2439,9 @@ fn dispatch_akh(
                 .get("purpose")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| AcpAppError::msg("missing required param: purpose"))?;
-            let entity_type_opt = params.get("entity_type").and_then(serde_json::Value::as_str);
+            let entity_type_opt = params
+                .get("entity_type")
+                .and_then(serde_json::Value::as_str);
             let culture_opt = params.get("culture").and_then(serde_json::Value::as_str);
             let domains = params
                 .get("domains")
@@ -2390,7 +2470,10 @@ fn dispatch_akh(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let force = params.get("force").and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let force = params
+                .get("force")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
 
             /// Parse a wire `entity_type` token. Unlike a `.unwrap_or(Unknown)`
             /// fallback, an unrecognized token is a hard error — silently
@@ -2441,7 +2524,10 @@ fn dispatch_akh(
                 archetypes,
             };
             let purpose = PurposeModel {
-                domain: domains.first().cloned().unwrap_or_else(|| "general".to_string()),
+                domain: domains
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "general".to_string()),
                 competence_level: DreyfusLevel::Expert,
                 seed_concepts: domains,
                 description: purpose_text.to_string(),
@@ -2474,9 +2560,9 @@ fn dispatch_akh(
                         "provenance_records": result.provenance_ids.len(),
                     }))
                 }
-                Err(IdentityError::AlreadyAwakened) => {
-                    Err(AcpAppError::msg("already awakened; pass force=true to re-awaken"))
-                }
+                Err(IdentityError::AlreadyAwakened) => Err(AcpAppError::msg(
+                    "already awakened; pass force=true to re-awaken",
+                )),
                 Err(e) => Err(diag_err(e, "awaken failed")),
             }
         }
@@ -2553,14 +2639,21 @@ fn dispatch_akh(
                     .map_err(|e| diag_err(e, "recall failed"))?;
                 (eps, "recent")
             } else {
-                let eps =
-                    crate::agent::memory::recall_episodes(engine, &query_ids, &predicates, top_k, None)
-                        .map_err(|e| diag_err(e, "recall failed"))?;
+                let eps = crate::agent::memory::recall_episodes(
+                    engine,
+                    &query_ids,
+                    &predicates,
+                    top_k,
+                    None,
+                )
+                .map_err(|e| diag_err(e, "recall failed"))?;
                 (eps, "matched")
             };
 
-            let episodes_json: Vec<serde_json::Value> =
-                episodes.iter().map(|ep| episode_to_json(engine, ep)).collect();
+            let episodes_json: Vec<serde_json::Value> = episodes
+                .iter()
+                .map(|ep| episode_to_json(engine, ep))
+                .collect();
 
             Ok(serde_json::json!({
                 "mode": mode,
@@ -2984,7 +3077,9 @@ fn dispatch_akh(
                 let subject = params
                     .get("subject")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| AcpAppError::msg("missing required param: subject (or question)"))?;
+                    .ok_or_else(|| {
+                        AcpAppError::msg("missing required param: subject (or question)")
+                    })?;
                 let max_depth = params
                     .get("max_depth")
                     .and_then(serde_json::Value::as_u64)
@@ -3156,10 +3251,8 @@ fn provenance_filter_json(
     // edges or the primary provenance ledger.
     let kind_tags = provenance_filter_kind_tags(&derived_by);
     let predicate_is_missing = requested_predicate.is_some() && predicate_id.is_none();
-    let mut provenance_by_id = std::collections::HashMap::<
-        u64,
-        crate::provenance::ProvenanceRecord,
-    >::new();
+    let mut provenance_by_id =
+        std::collections::HashMap::<u64, crate::provenance::ProvenanceRecord>::new();
     let graph_triples = if predicate_is_missing {
         Vec::new()
     } else if let Some(predicate) = predicate_id {
@@ -3199,9 +3292,8 @@ fn provenance_filter_json(
         if provenance_by_id.contains_key(&raw_id) {
             continue;
         }
-        let id = crate::provenance::ProvenanceId::new(raw_id).ok_or_else(|| {
-            AcpAppError::msg("graph triple carries reserved zero provenance ID")
-        })?;
+        let id = crate::provenance::ProvenanceId::new(raw_id)
+            .ok_or_else(|| AcpAppError::msg("graph triple carries reserved zero provenance ID"))?;
         let record = engine
             .get_provenance(id)
             .map_err(|e| diag_err(e, format!("dangling provenance link {raw_id}")))?;
@@ -3406,8 +3498,9 @@ fn provenance_source_bucket(kind: &crate::provenance::DerivationKind) -> &'stati
         DerivationKind::RuleInference { .. } => "infer_rules",
         DerivationKind::Seed => "user_asserted",
         DerivationKind::CompartmentLoaded { .. } => "seed_pack",
-        DerivationKind::AgentDecision { .. }
-        | DerivationKind::AgentConsolidation { .. } => "agent_learned",
+        DerivationKind::AgentDecision { .. } | DerivationKind::AgentConsolidation { .. } => {
+            "agent_learned"
+        }
         other => other.kind_name(),
     }
 }
@@ -3427,43 +3520,44 @@ fn derivation_chain_edges(
 
     let mut rows = Vec::new();
     let mut seen_triples = std::collections::BTreeSet::new();
-    let mut push_live = |subject: crate::symbol::SymbolId,
-                         object: crate::symbol::SymbolId,
-                         preferred_predicate: Option<crate::symbol::SymbolId>| {
-        if rows.len() >= 64 {
-            return;
-        }
-        let mut candidates = engine
-            .triples_from(subject)
-            .into_iter()
-            .filter(|triple| {
-                triple.object == object
-                    && preferred_predicate.is_none_or(|predicate| triple.predicate == predicate)
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| {
-            engine
-                .resolve_label(left.predicate)
-                .cmp(&engine.resolve_label(right.predicate))
-                .then_with(|| left.predicate.get().cmp(&right.predicate.get()))
-                .then_with(|| right.confidence.total_cmp(&left.confidence))
-                .then_with(|| left.timestamp.cmp(&right.timestamp))
-        });
-        if let Some(triple) = candidates.first()
-            && seen_triples.insert((
-                triple.subject.get(),
-                triple.predicate.get(),
-                triple.object.get(),
-            ))
-        {
-            rows.push(serde_json::json!([
-                engine.resolve_label(triple.subject),
-                engine.resolve_label(triple.predicate),
-                engine.resolve_label(triple.object),
-                triple.confidence,
-            ]));
-        }
-    };
+    let mut push_live =
+        |subject: crate::symbol::SymbolId,
+         object: crate::symbol::SymbolId,
+         preferred_predicate: Option<crate::symbol::SymbolId>| {
+            if rows.len() >= 64 {
+                return;
+            }
+            let mut candidates = engine
+                .triples_from(subject)
+                .into_iter()
+                .filter(|triple| {
+                    triple.object == object
+                        && preferred_predicate.is_none_or(|predicate| triple.predicate == predicate)
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                engine
+                    .resolve_label(left.predicate)
+                    .cmp(&engine.resolve_label(right.predicate))
+                    .then_with(|| left.predicate.get().cmp(&right.predicate.get()))
+                    .then_with(|| right.confidence.total_cmp(&left.confidence))
+                    .then_with(|| left.timestamp.cmp(&right.timestamp))
+            });
+            if let Some(triple) = candidates.first()
+                && seen_triples.insert((
+                    triple.subject.get(),
+                    triple.predicate.get(),
+                    triple.object.get(),
+                ))
+            {
+                rows.push(serde_json::json!([
+                    engine.resolve_label(triple.subject),
+                    engine.resolve_label(triple.predicate),
+                    engine.resolve_label(triple.object),
+                    triple.confidence,
+                ]));
+            }
+        };
 
     match &record.kind {
         DerivationKind::GraphEdge { from, predicate } => {
@@ -3478,11 +3572,9 @@ fn derivation_chain_edges(
             push_live(*subject, record.derived_id, Some(*predicate));
         }
         DerivationKind::RuleInference { antecedents, .. } => {
-            let versioned = antecedents
-                .first()
-                .is_some_and(|marker| {
-                    marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
-                });
+            let versioned = antecedents.first().is_some_and(|marker| {
+                marker.get() == crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+            });
             if versioned {
                 // A malformed versioned payload is corrupt, not a legacy
                 // symbol walk.  Fail closed rather than interpreting shifted
@@ -3741,12 +3833,16 @@ fn dispatch_akh_agent(
                 .get("top_k")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(10) as usize;
-            let project = |entries: Vec<(u64, f32, crate::agent::source_reliability::SourceReliability)>| {
+            let project = |entries: Vec<(
+                u64,
+                f32,
+                crate::agent::source_reliability::SourceReliability,
+            )>| {
                 entries
                     .into_iter()
                     .filter_map(|(raw, trust, rating)| {
-                        let label = crate::symbol::SymbolId::new(raw)
-                            .map(|id| engine.resolve_label(id))?;
+                        let label =
+                            crate::symbol::SymbolId::new(raw).map(|id| engine.resolve_label(id))?;
                         Some(serde_json::json!({
                             "source": label,
                             "trust": trust,
@@ -3964,21 +4060,29 @@ fn context_block_from_stats(
     };
 
     let mut rows = vec![
-        row("history", "Messages", messages_tokens, vec!["history", "user_prompt", "recalled_episodes"]),
+        row(
+            "history",
+            "Messages",
+            messages_tokens,
+            vec!["history", "user_prompt", "recalled_episodes"],
+        ),
         row("tools", "System tools", tools_tokens, vec!["tools"]),
         row("system", "System prompt", system_tokens, vec!["system"]),
         row("schema", "Graph schema", schema_tokens, vec!["schema"]),
         row("kg", "Knowledge graph", kg_tokens, vec!["kg"]),
-        row("notes", "Memory files", notes_tokens, vec!["active_notes", "recent_notes"]),
+        row(
+            "notes",
+            "Memory files",
+            notes_tokens,
+            vec!["active_notes", "recent_notes"],
+        ),
         // `free` is a first-class row, not a remainder.
         row("free", "Free space", free, vec![]),
     ];
 
     // Drop rows with zero tokens (they'd clutter the bar). Keep `free` even
     // at zero so the panel always shows the available space row.
-    rows.retain(|r| {
-        r["tokens"].as_u64().map(|t| t > 0).unwrap_or(true) || r["id"] == "free"
-    });
+    rows.retain(|r| r["tokens"].as_u64().map(|t| t > 0).unwrap_or(true) || r["id"] == "free");
 
     // Dropped spans: per-section evicted tokens with reason and span count.
     let dropped: Vec<serde_json::Value> = s
@@ -4091,9 +4195,7 @@ fn evidence_json(engine: &Engine, agent: &Agent) -> serde_json::Value {
 ///
 /// [`Psyche`]: crate::compartment::psyche::Psyche
 fn psyche_json(p: &crate::compartment::psyche::Psyche) -> serde_json::Value {
-    let pattern = |sp: &crate::compartment::psyche::ShadowPattern| {
-        serde_json::json!({ "name": sp.name, "severity": sp.severity, "explanation": sp.explanation })
-    };
+    let pattern = |sp: &crate::compartment::psyche::ShadowPattern| serde_json::json!({ "name": sp.name, "severity": sp.severity, "explanation": sp.explanation });
     serde_json::json!({
         "persona": {
             "name": p.persona.name,
@@ -4202,7 +4304,10 @@ fn skills_json(engine: &Engine) -> Vec<serde_json::Value> {
 /// The active goal's plan (if any) projected to JSON for the sidebar: the goal
 /// description, plan strategy/status, and each step's tool + status + rationale.
 fn active_plan_json(agent: &Agent) -> Option<serde_json::Value> {
-    let active = agent.goals().iter().find(|g| g.status == GoalStatus::Active)?;
+    let active = agent
+        .goals()
+        .iter()
+        .find(|g| g.status == GoalStatus::Active)?;
     let plan = agent.plan_for_goal(active.symbol_id)?;
     let steps: Vec<_> = plan
         .steps
@@ -4489,9 +4594,7 @@ fn permission_mode_str(mode: crate::agent::permission::PermissionMode) -> &'stat
     }
 }
 
-fn build_connection(
-    me: AkhAcpAgent,
-) -> impl agent_client_protocol::ConnectTo<Client> {
+fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Client> {
     AcpRole
         .builder()
         .name("akh-medu-acp")
@@ -4560,6 +4663,10 @@ fn build_connection(
                             .agent_capabilities(
                                 AgentCapabilities::default()
                                     .load_session(true)
+                                    .prompt_capabilities(
+                                        PromptCapabilities::new()
+                                            .image(cfg!(feature = "grug-backend")),
+                                    )
                                     .mcp_capabilities(McpCapabilities::new().http(true)),
                             )
                             .agent_info(agent_client_protocol::schema::Implementation::new(
@@ -4746,7 +4853,15 @@ fn build_connection(
                         cx_for_spawn.spawn(async move {
                         let session_id = req.session_id.clone();
                         let session_key = session_id.to_string();
-                        let text = concat_prompt(&req.prompt);
+                        let prompt = match decode_prompt(&req.prompt) {
+                            Ok(prompt) => prompt,
+                            Err(error) => {
+                                return responder.respond_with_error(
+                                    agent_client_protocol::Error::invalid_params().data(error),
+                                );
+                            }
+                        };
+                        let text = prompt.text;
 
                         // Atomically validate, touch, and exclusively check out
                         // the session. Unknown/evicted ids fail closed instead
@@ -4912,6 +5027,7 @@ fn build_connection(
                             session_conversation,
                             ws.clone(),
                             text,
+                            prompt.images,
                             Some(asker),
                             session_id.to_string(),
                             mcp_cfgs,
@@ -5801,18 +5917,76 @@ fn resolve_session_cwd_for_turn(
     }
 }
 
-/// Concatenate the text content of a prompt's content blocks.
-///
-/// Non-text blocks (images, audio, resources) are ignored in the spike.
-fn concat_prompt(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+const MAX_PROMPT_IMAGES: usize = 4;
+const MAX_PROMPT_IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const MAX_PROMPT_IMAGE_BYTES_TOTAL: usize = 48 * 1024 * 1024;
+
+#[derive(Debug)]
+struct DecodedPrompt {
+    text: String,
+    images: Vec<crate::agent::chat_backend::ChatPromptImage>,
+}
+
+/// Decode ACP prompt blocks at the transport boundary. Images are bounded
+/// before and after base64 decoding and never written to disk. Unsupported
+/// image formats fail closed instead of being silently discarded.
+fn decode_prompt(blocks: &[ContentBlock]) -> Result<DecodedPrompt, String> {
+    use base64::Engine as _;
+
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    let mut decoded_total = 0usize;
+    for block in blocks {
+        match block {
+            ContentBlock::Text(content) => text.push(content.text.as_str()),
+            ContentBlock::Image(content) => {
+                if images.len() == MAX_PROMPT_IMAGES {
+                    return Err(format!(
+                        "prompt contains more than {MAX_PROMPT_IMAGES} images"
+                    ));
+                }
+                if !content.mime_type.trim().eq_ignore_ascii_case("image/png") {
+                    return Err(format!(
+                        "unsupported image MIME type {:?}; native OCR accepts image/png",
+                        content.mime_type
+                    ));
+                }
+                // Base64 expands three bytes into four characters. Check the
+                // encoded payload first so hostile input cannot force a large
+                // temporary allocation merely to discover it is oversized.
+                let maximum_encoded = MAX_PROMPT_IMAGE_BYTES.div_ceil(3) * 4 + 4;
+                if content.data.is_empty() || content.data.len() > maximum_encoded {
+                    return Err(format!(
+                        "image payload is empty or exceeds {MAX_PROMPT_IMAGE_BYTES} decoded bytes"
+                    ));
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(content.data.as_bytes())
+                    .map_err(|error| format!("image payload is not valid base64: {error}"))?;
+                if bytes.is_empty() || bytes.len() > MAX_PROMPT_IMAGE_BYTES {
+                    return Err(format!(
+                        "image payload is empty or exceeds {MAX_PROMPT_IMAGE_BYTES} decoded bytes"
+                    ));
+                }
+                decoded_total = decoded_total.saturating_add(bytes.len());
+                if decoded_total > MAX_PROMPT_IMAGE_BYTES_TOTAL {
+                    return Err(format!(
+                        "combined image payload exceeds {MAX_PROMPT_IMAGE_BYTES_TOTAL} bytes"
+                    ));
+                }
+                images.push(crate::agent::chat_backend::ChatPromptImage {
+                    mime_type: "image/png".into(),
+                    bytes,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut text = text.join(" ");
+    if text.trim().is_empty() && !images.is_empty() {
+        text = "Read the text in the attached image and use it to answer.".into();
+    }
+    Ok(DecodedPrompt { text, images })
 }
 
 /// Monotonic-ish suffix for session ids within a process.
@@ -6102,11 +6276,7 @@ where
             cx.send_request(client_initialize_request())
                 .block_task()
                 .await?;
-            let session = cx
-                .build_session(cwd)
-                .block_task()
-                .start_session()
-                .await?;
+            let session = cx.build_session(cwd).block_task().start_session().await?;
             f(session, cx).await
         })
         .await
@@ -6245,7 +6415,11 @@ where
 /// Send one `_akh/*` data-plane request over `transport` and return its JSON
 /// result. Connects, `initialize`s, sends the request, and disconnects — the
 /// one-shot shape that fits stateless CLI data commands (no chat session).
-async fn ext_request<T>(transport: T, method: &str, params: serde_json::Value) -> AcpResult<serde_json::Value>
+async fn ext_request<T>(
+    transport: T,
+    method: &str,
+    params: serde_json::Value,
+) -> AcpResult<serde_json::Value>
 where
     T: ConnectTo<Client> + 'static,
 {
@@ -6319,8 +6493,10 @@ async fn headless_loop(
     let mut stderr = tokio::io::stderr();
     let _ = stderr
         .write_all(
-            format!("Connected to akh '{label}' over ACP. Type a message; Ctrl-D or /quit to exit.\n")
-                .as_bytes(),
+            format!(
+                "Connected to akh '{label}' over ACP. Type a message; Ctrl-D or /quit to exit.\n"
+            )
+            .as_bytes(),
         )
         .await;
     let _ = stderr.flush().await;
@@ -6392,8 +6568,44 @@ mod tests {
     use crate::engine::EngineConfig;
     use crate::nlu::NluPipeline;
     use crate::vsa::Dimension;
-    use agent_client_protocol::schema::{InitializeRequest, ProtocolVersion};
     use agent_client_protocol::Client;
+    use agent_client_protocol::schema::{ImageContent, InitializeRequest, ProtocolVersion};
+
+    #[test]
+    fn prompt_decoder_preserves_text_and_decodes_bounded_png_payloads() {
+        use base64::Engine as _;
+
+        let raw = b"not-yet-decoded-png";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let prompt = decode_prompt(&[
+            ContentBlock::Text(TextContent::new("please read this")),
+            ContentBlock::Image(ImageContent::new(encoded, "image/png")),
+        ])
+        .unwrap();
+        assert_eq!(prompt.text, "please read this");
+        assert_eq!(prompt.images.len(), 1);
+        assert_eq!(prompt.images[0].bytes, raw);
+        assert_eq!(prompt.images[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn prompt_decoder_rejects_non_png_and_invalid_base64() {
+        let jpeg = decode_prompt(&[ContentBlock::Image(ImageContent::new("AA==", "image/jpeg"))]);
+        assert!(jpeg.unwrap_err().contains("image/png"));
+
+        let invalid = decode_prompt(&[ContentBlock::Image(ImageContent::new(
+            "not base64!",
+            "image/png",
+        ))]);
+        assert!(invalid.unwrap_err().contains("valid base64"));
+    }
+
+    #[test]
+    fn image_only_prompt_gets_an_explicit_ocr_instruction() {
+        let prompt =
+            decode_prompt(&[ContentBlock::Image(ImageContent::new("AA==", "image/png"))]).unwrap();
+        assert!(prompt.text.contains("attached image"));
+    }
 
     // ── StepKind / LastStepTracker (work item "Turns die quietly" defect 1) ──
 
@@ -6402,18 +6614,93 @@ mod tests {
         // Every AkhMessage variant maps to a non-`None` step kind, so the
         // stall log line always names *something* the turn was doing.
         let cases: Vec<(AkhMessage, StepKind)> = vec![
-            (AkhMessage::Fact { text: "x".into(), confidence: None, provenance: None }, StepKind::Fact),
-            (AkhMessage::Reasoning { step: "s".into(), expression: None }, StepKind::Reasoning),
-            (AkhMessage::Gap { entity: "e".into(), description: "d".into() }, StepKind::Other),
-            (AkhMessage::ToolResult { tool: "t".into(), success: true, output: "o".into() }, StepKind::ToolResult),
-            (AkhMessage::Narrative { text: "n".into(), grammar: "g".into() }, StepKind::Narrative),
+            (
+                AkhMessage::Fact {
+                    text: "x".into(),
+                    confidence: None,
+                    provenance: None,
+                },
+                StepKind::Fact,
+            ),
+            (
+                AkhMessage::Reasoning {
+                    step: "s".into(),
+                    expression: None,
+                },
+                StepKind::Reasoning,
+            ),
+            (
+                AkhMessage::Gap {
+                    entity: "e".into(),
+                    description: "d".into(),
+                },
+                StepKind::Other,
+            ),
+            (
+                AkhMessage::ToolResult {
+                    tool: "t".into(),
+                    success: true,
+                    output: "o".into(),
+                },
+                StepKind::ToolResult,
+            ),
+            (
+                AkhMessage::Narrative {
+                    text: "n".into(),
+                    grammar: "g".into(),
+                },
+                StepKind::Narrative,
+            ),
             (AkhMessage::System { text: "s".into() }, StepKind::System),
-            (AkhMessage::Error { code: "c".into(), message: "m".into(), help: None }, StepKind::Error),
-            (AkhMessage::GoalProgress { goal: "g".into(), status: "s".into(), detail: None }, StepKind::Other),
-            (AkhMessage::Prompt { question: "q".into() }, StepKind::Other),
-            (AkhMessage::AuditLog { id: 1, kind: "k".into(), summary: "s".into(), timestamp: 0 }, StepKind::Other),
-            (AkhMessage::ToolCallStarted { tool_id: "t".into(), kind: crate::message::ToolKind::Execute, title: "x".into(), locations: vec![] }, StepKind::ToolCallStarted),
-            (AkhMessage::ToolCallCompleted { tool_id: "t".into(), success: true, output: None, diff: None }, StepKind::ToolCallCompleted),
+            (
+                AkhMessage::Error {
+                    code: "c".into(),
+                    message: "m".into(),
+                    help: None,
+                },
+                StepKind::Error,
+            ),
+            (
+                AkhMessage::GoalProgress {
+                    goal: "g".into(),
+                    status: "s".into(),
+                    detail: None,
+                },
+                StepKind::Other,
+            ),
+            (
+                AkhMessage::Prompt {
+                    question: "q".into(),
+                },
+                StepKind::Other,
+            ),
+            (
+                AkhMessage::AuditLog {
+                    id: 1,
+                    kind: "k".into(),
+                    summary: "s".into(),
+                    timestamp: 0,
+                },
+                StepKind::Other,
+            ),
+            (
+                AkhMessage::ToolCallStarted {
+                    tool_id: "t".into(),
+                    kind: crate::message::ToolKind::Execute,
+                    title: "x".into(),
+                    locations: vec![],
+                },
+                StepKind::ToolCallStarted,
+            ),
+            (
+                AkhMessage::ToolCallCompleted {
+                    tool_id: "t".into(),
+                    success: true,
+                    output: None,
+                    diff: None,
+                },
+                StepKind::ToolCallCompleted,
+            ),
         ];
         for (msg, expected) in cases {
             assert_eq!(
@@ -6458,12 +6745,18 @@ mod tests {
         let later = start + std::time::Duration::from_millis(300);
         let (kind, age) = tracker.snapshot(start, later);
         assert_eq!(kind, StepKind::ToolCallStarted);
-        assert_eq!(age.as_millis(), 250, "age should be (snapshot - step arrival)");
+        assert_eq!(
+            age.as_millis(),
+            250,
+            "age should be (snapshot - step arrival)"
+        );
 
         // A later message overwrites the tracker.
         let even_later = start + std::time::Duration::from_millis(400);
         tracker.observe(
-            &AkhMessage::System { text: "skip".into() },
+            &AkhMessage::System {
+                text: "skip".into(),
+            },
             start,
             even_later,
         );
@@ -6599,9 +6892,7 @@ mod tests {
         let part_of = engine.resolve_or_create_relation("part-of").unwrap();
         let lab = engine.resolve_or_create_entity("Lab").unwrap();
         engine
-            .add_triple(
-                &crate::graph::Triple::new(stor, part_of, lab).with_confidence(0.75),
-            )
+            .add_triple(&crate::graph::Triple::new(stor, part_of, lab).with_confidence(0.75))
             .unwrap();
 
         let response = dispatch_akh(
@@ -6757,14 +7048,8 @@ mod tests {
             ),
         ] {
             engine.reset_provenance_filter_scan_counters();
-            let response = dispatch_akh(
-                &engine,
-                "default",
-                false,
-                "_akh/provenance/filter",
-                &params,
-            )
-            .unwrap();
+            let response =
+                dispatch_akh(&engine, "default", false, "_akh/provenance/filter", &params).unwrap();
             assert_eq!(response["total_matching"], 1, "{name} response");
             assert_eq!(
                 engine.provenance_filter_full_scan_counts(),
@@ -6817,9 +7102,7 @@ mod tests {
             .unwrap()
             .iter()
             .find(|row| {
-                row["subject"] == "Dog"
-                    && row["predicate"] == "is-a"
-                    && row["object"] == "Animal"
+                row["subject"] == "Dog" && row["predicate"] == "is-a" && row["object"] == "Animal"
             })
             .expect("production inferred triple in audit response");
         assert_eq!(row["derived_by"], "infer_rules");
@@ -6882,9 +7165,8 @@ tags = []
             r#"[{"subject":"PackSeed","predicate":"belongs-to","object":"AuditPack","confidence":0.88}]"#,
         )
         .unwrap();
-        let manager = crate::compartment::CompartmentManager::new(
-            compartment_root.path().to_path_buf(),
-        );
+        let manager =
+            crate::compartment::CompartmentManager::new(compartment_root.path().to_path_buf());
         assert_eq!(manager.discover().unwrap(), 1);
         manager.load("audit-pack", &engine).unwrap();
 
@@ -6911,20 +7193,20 @@ tags = []
         };
 
         let asserted = rows_for("user_asserted");
-        assert!(asserted["triples"].as_array().unwrap().iter().any(|row| {
-            row["subject"] == "UserAssertion" && row["provenance_kind"] == "seed"
-        }));
+        assert!(
+            asserted["triples"].as_array().unwrap().iter().any(|row| {
+                row["subject"] == "UserAssertion" && row["provenance_kind"] == "seed"
+            })
+        );
 
         let learned = rows_for("agent_learned");
         assert!(learned["triples"].as_array().unwrap().iter().any(|row| {
-            row["subject"] == "cycle_episode:183"
-                && row["provenance_kind"] == "agent_consolidation"
+            row["subject"] == "cycle_episode:183" && row["provenance_kind"] == "agent_consolidation"
         }));
 
         let packed = rows_for("seed_pack");
         assert!(packed["triples"].as_array().unwrap().iter().any(|row| {
-            row["subject"] == "PackSeed"
-                && row["provenance_kind"] == "compartment_loaded"
+            row["subject"] == "PackSeed" && row["provenance_kind"] == "compartment_loaded"
         }));
 
         let inferred = rows_for("infer_rules");
@@ -6940,7 +7222,9 @@ tags = []
     fn provenance_chain_rejects_malformed_versioned_rule_support() {
         let (engine, _agent) = engine_and_agent();
         let subject = engine.resolve_or_create_entity("SupportSubject").unwrap();
-        let support_predicate = engine.resolve_or_create_relation("support-predicate").unwrap();
+        let support_predicate = engine
+            .resolve_or_create_relation("support-predicate")
+            .unwrap();
         let legacy_predicate = engine.resolve_or_create_relation("legacy-hop").unwrap();
         let derived = engine.resolve_or_create_entity("DerivedObject").unwrap();
         engine
@@ -6975,27 +7259,22 @@ tags = []
     #[test]
     fn provenance_chain_v2_exposes_support_but_not_the_conclusion_header() {
         let (engine, _agent) = engine_and_agent();
-        let conclusion_subject = engine.resolve_or_create_entity("ConclusionSubject").unwrap();
+        let conclusion_subject = engine
+            .resolve_or_create_entity("ConclusionSubject")
+            .unwrap();
         let conclusion_predicate = engine.resolve_or_create_relation("concludes").unwrap();
         let conclusion_object = engine.resolve_or_create_entity("ConclusionObject").unwrap();
         let support_subject = engine.resolve_or_create_entity("SupportSubject").unwrap();
         let support_predicate = engine.resolve_or_create_relation("supports").unwrap();
         let support_object = engine.resolve_or_create_entity("SupportObject").unwrap();
-        let conclusion = crate::graph::Triple::new(
-            conclusion_subject,
-            conclusion_predicate,
-            conclusion_object,
-        )
-        .with_confidence(0.9);
+        let conclusion =
+            crate::graph::Triple::new(conclusion_subject, conclusion_predicate, conclusion_object)
+                .with_confidence(0.9);
         engine.add_triple(&conclusion).unwrap();
         engine
             .add_triple(
-                &crate::graph::Triple::new(
-                    support_subject,
-                    support_predicate,
-                    support_object,
-                )
-                .with_confidence(0.8),
+                &crate::graph::Triple::new(support_subject, support_predicate, support_object)
+                    .with_confidence(0.8),
             )
             .unwrap();
 
@@ -7008,10 +7287,8 @@ tags = []
                         crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL,
                     )
                     .unwrap(),
-                    crate::symbol::SymbolId::new(
-                        crate::provenance::RULE_APPLICATION_V2_SENTINEL,
-                    )
-                    .unwrap(),
+                    crate::symbol::SymbolId::new(crate::provenance::RULE_APPLICATION_V2_SENTINEL)
+                        .unwrap(),
                     conclusion_subject,
                     conclusion_predicate,
                     conclusion_object,
@@ -7028,11 +7305,8 @@ tags = []
         assert_eq!(chain[0][2], "SupportObject");
         assert!((chain[0][3].as_f64().unwrap() - 0.8).abs() < 1e-6);
 
-        let unrelated = crate::graph::Triple::new(
-            conclusion_subject,
-            conclusion_predicate,
-            support_object,
-        );
+        let unrelated =
+            crate::graph::Triple::new(conclusion_subject, conclusion_predicate, support_object);
         assert!(
             derivation_chain_edges(&engine, &unrelated, &record).is_empty(),
             "V2 support must not explain a different audited conclusion"
@@ -7142,7 +7416,7 @@ tags = []
         let sink = Arc::new(crate::message::VecSink::new());
         let tracker = Arc::new(
             crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
-                Arc::clone(&sink) as Arc<dyn MessageSink>,
+                Arc::clone(&sink) as Arc<dyn MessageSink>
             ),
         );
         (SessionToolGuard::new(agent, None, tracker), sink)
@@ -7313,9 +7587,10 @@ tags = []
                 let agent = agent.read().unwrap_or_else(|e| e.into_inner());
                 let sink = Arc::new(crate::message::VecSink::new());
                 let tracker = Arc::new(
-                    crate::agent::tool_execution_tracker::ToolExecutionTracker::new(
-                        Arc::clone(&sink) as Arc<dyn MessageSink>,
-                    ),
+                    crate::agent::tool_execution_tracker::ToolExecutionTracker::new(Arc::clone(
+                        &sink,
+                    )
+                        as Arc<dyn MessageSink>),
                 );
                 let mut scope = SessionToolGuard::new(
                     &agent,
@@ -7363,8 +7638,16 @@ tags = []
         assert_eq!(output_b.result, "session-b");
         assert_eq!(calls_a.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(calls_b.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(messages_a.len(), 2, "session A gets only its tracker events");
-        assert_eq!(messages_b.len(), 2, "session B gets only its tracker events");
+        assert_eq!(
+            messages_a.len(),
+            2,
+            "session A gets only its tracker events"
+        );
+        assert_eq!(
+            messages_b.len(),
+            2,
+            "session B gets only its tracker events"
+        );
         assert!(
             global_sink.messages().is_empty(),
             "session executions must not emit through the global tracker"
@@ -7434,7 +7717,10 @@ tags = []
         }
 
         assert_eq!(
-            me.session_order.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            me.session_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
             MAX_TRACKED_SESSIONS,
             "session_order must stay capped, not grow unbounded"
         );
@@ -7496,8 +7782,14 @@ tags = []
             )
         };
 
-        assert!(Arc::ptr_eq(&a, &a_again), "one ACP session must reuse its neural state");
-        assert!(!Arc::ptr_eq(&a, &b), "different ACP sessions must not share neural state");
+        assert!(
+            Arc::ptr_eq(&a, &a_again),
+            "one ACP session must reuse its neural state"
+        );
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "different ACP sessions must not share neural state"
+        );
 
         let _a_guard = a.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
@@ -7644,8 +7936,7 @@ tags = []
         }
         let lease = me.begin_session_turn(&survivor).expect("survivor checkout");
         assert_eq!(
-            lease.workspace,
-            "survivor-workspace",
+            lease.workspace, "survivor-workspace",
             "the checked-out session retains its workspace binding"
         );
         assert!(matches!(
@@ -7751,13 +8042,12 @@ tags = []
 
         // Simulate session/new with an Anima worktree path
         let req = NewSessionRequest::new(&PathBuf::from(
-            "/var/lib/anima-runner/worktrees/019fcf5b-9789-7bd0-9776-3e7977800403"
+            "/var/lib/anima-runner/worktrees/019fcf5b-9789-7bd0-9776-3e7977800403",
         ));
 
         // The detection logic from session/new
         let is_dispatch = if let Some(cwd_str) = req.cwd.to_str() {
-            cwd_str.starts_with("/var/lib/anima-runner/worktrees/")
-                && cwd_str.len() > 33
+            cwd_str.starts_with("/var/lib/anima-runner/worktrees/") && cwd_str.len() > 33
         } else {
             false
         } || std::env::var("AKH_DISPATCH_MODE")
@@ -7807,8 +8097,7 @@ tags = []
 
         // The detection logic from session/new
         let is_dispatch = if let Some(cwd_str) = req.cwd.to_str() {
-            cwd_str.starts_with("/var/lib/anima-runner/worktrees/")
-                && cwd_str.len() > 33
+            cwd_str.starts_with("/var/lib/anima-runner/worktrees/") && cwd_str.len() > 33
         } else {
             false
         } || std::env::var("AKH_DISPATCH_MODE")
@@ -8000,9 +8289,15 @@ tags = []
     fn agent_read_status_snapshot_is_fresh_when_idle() {
         let (engine, agent) = engine_and_agent();
 
-        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
-            .expect("status is an agent-read method")
-            .expect("ok");
+        let v = dispatch_akh_agent(
+            &engine,
+            &agent,
+            "default",
+            "_akh/status",
+            &serde_json::json!({}),
+        )
+        .expect("status is an agent-read method")
+        .expect("ok");
         assert_eq!(v["stale"], serde_json::json!(false));
         // All sidebar arrays are present (possibly empty) for a fresh agent.
         assert!(v["goals"].is_array());
@@ -8025,9 +8320,15 @@ tags = []
 
         // Simulate a turn holding the agent write lock; try_read must not block.
         let _busy = agent.write().expect("hold the agent write lock");
-        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/status", &serde_json::json!({}))
-            .unwrap()
-            .unwrap();
+        let v = dispatch_akh_agent(
+            &engine,
+            &agent,
+            "default",
+            "_akh/status",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(v["stale"], serde_json::json!(true));
         // Agent-derived fields are empty under contention…
         assert_eq!(v["goals"], serde_json::json!([]));
@@ -8042,12 +8343,24 @@ tags = []
         let (engine, agent) = engine_and_agent();
         // Engine-only / unknown methods fall through (None) to dispatch_akh.
         assert!(
-            dispatch_akh_agent(&engine, &agent, "default", "_akh/health", &serde_json::json!({}))
-                .is_none()
+            dispatch_akh_agent(
+                &engine,
+                &agent,
+                "default",
+                "_akh/health",
+                &serde_json::json!({})
+            )
+            .is_none()
         );
         assert!(
-            dispatch_akh_agent(&engine, &agent, "default", "_akh/skills", &serde_json::json!({}))
-                .is_none()
+            dispatch_akh_agent(
+                &engine,
+                &agent,
+                "default",
+                "_akh/skills",
+                &serde_json::json!({})
+            )
+            .is_none()
         );
     }
 
@@ -8089,9 +8402,15 @@ tags = []
             };
             *a.last_context_stats.lock().unwrap() = Some(stats);
         }
-        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
-            .unwrap()
-            .unwrap();
+        let v = dispatch_akh_agent(
+            &engine,
+            &agent,
+            "default",
+            "_akh/usage",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .unwrap();
         let ctx = &v["context"];
         assert_eq!(ctx["window_total"], 10_000);
         let window_total = ctx["window_total"].as_u64().unwrap() as usize;
@@ -8113,9 +8432,15 @@ tags = []
         // Acceptance #5: a busy agent write lock returns stale=true and never blocks.
         let (engine, agent) = engine_and_agent();
         let _busy = agent.write().expect("hold the agent write lock");
-        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
-            .unwrap()
-            .unwrap();
+        let v = dispatch_akh_agent(
+            &engine,
+            &agent,
+            "default",
+            "_akh/usage",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(v["stale"], serde_json::json!(true));
         // The context block is null when the agent lock is busy (no prior
         // cache readable without the agent struct). The panel falls back to
@@ -8138,9 +8463,15 @@ tags = []
                 reason: DeferredReason::RetrievalScoped,
             }];
         }
-        let v = dispatch_akh_agent(&engine, &agent, "default", "_akh/usage", &serde_json::json!({}))
-            .unwrap()
-            .unwrap();
+        let v = dispatch_akh_agent(
+            &engine,
+            &agent,
+            "default",
+            "_akh/usage",
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .unwrap();
         let deferred = v["deferred"].as_array().unwrap();
         assert_eq!(deferred.len(), 1);
         let row = &deferred[0];
@@ -8164,9 +8495,8 @@ tags = []
         let me = workspace();
         let server_agent = me.clone();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let server = tokio::spawn(async move {
-            serve_unix_loop(server_agent, listener, shutdown_rx).await
-        });
+        let server =
+            tokio::spawn(async move { serve_unix_loop(server_agent, listener, shutdown_rx).await });
 
         let first_stream = connect_with_retry(&sock).await;
         let (first_read, first_write) = first_stream.into_split();
@@ -8251,10 +8581,7 @@ tags = []
             .get(&session_key)
             .cloned()
             .expect("loaded conversation remains registered");
-        assert!(Arc::ptr_eq(
-            &original_conversation,
-            &resumed_conversation
-        ));
+        assert!(Arc::ptr_eq(&original_conversation, &resumed_conversation));
         assert_eq!(
             resumed_conversation
                 .lock()
@@ -8299,25 +8626,26 @@ tags = []
         let (read_half, write_half) = stream.into_split();
         let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
 
-        let client_lifecycle = Client
-            .builder()
-            .name("akh-acp-test-client")
-            .connect_with(transport, async move |cx| {
-                // 1) initialize
-                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
+        let client_lifecycle =
+            Client
+                .builder()
+                .name("akh-acp-test-client")
+                .connect_with(transport, async move |cx| {
+                    // 1) initialize
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
 
-                // 2) session/new + 3) session/prompt, reading the turn to a string.
-                cx.build_session_cwd()?
-                    .block_task()
-                    .run_until(async move |mut session| {
-                        session.send_prompt("What is the Sun?")?;
-                        let text = session.read_to_string().await?;
-                        Ok(text)
-                    })
-                    .await
-            });
+                    // 2) session/new + 3) session/prompt, reading the turn to a string.
+                    cx.build_session_cwd()?
+                        .block_task()
+                        .run_until(async move |mut session| {
+                            session.send_prompt("What is the Sun?")?;
+                            let text = session.read_to_string().await?;
+                            Ok(text)
+                        })
+                        .await
+                });
 
         // Hard bound: a transport/protocol deadlock must fail fast, never hang.
         let answer: String = tokio::time::timeout(
@@ -8498,20 +8826,22 @@ tags = []
         let thread_a = std::thread::spawn(move || {
             let _guard = agent_a.read().unwrap_or_else(|e| e.into_inner());
             tx_a.send(()).expect("A: signal that the read lock is held");
-            rx_b.recv_timeout(std::time::Duration::from_secs(10)).expect(
-                "A: never heard from B — B could not also take the read lock \
+            rx_b.recv_timeout(std::time::Duration::from_secs(10))
+                .expect(
+                    "A: never heard from B — B could not also take the read lock \
                  while A held it, meaning agent.read() is not truly shared",
-            );
+                );
         });
 
         let agent_b = Arc::clone(&agent);
         let thread_b = std::thread::spawn(move || {
             let _guard = agent_b.read().unwrap_or_else(|e| e.into_inner());
             tx_b.send(()).expect("B: signal that the read lock is held");
-            rx_a.recv_timeout(std::time::Duration::from_secs(10)).expect(
-                "B: never heard from A — A could not also take the read lock \
+            rx_a.recv_timeout(std::time::Duration::from_secs(10))
+                .expect(
+                    "B: never heard from A — A could not also take the read lock \
                  while B held it, meaning agent.read() is not truly shared",
-            );
+                );
         });
 
         thread_a.join().expect("thread A must not panic");
@@ -8622,7 +8952,8 @@ tags = []
 
         let listener = UnixListener::bind(&sock).expect("bind unix");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let loop_task = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+        let loop_task =
+            tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         let stream_a = connect_with_retry(&sock).await;
         let stream_b = connect_with_retry(&sock).await;
@@ -8981,21 +9312,22 @@ tags = []
     async fn unix_client_prompt(stream: UnixStream, prompt: &'static str) -> String {
         let (read_half, write_half) = stream.into_split();
         let transport = ByteStreams::new(write_half.compat_write(), read_half.compat());
-        let lifecycle = Client
-            .builder()
-            .name("akh-acp-test-client")
-            .connect_with(transport, async move |cx| {
-                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
-                cx.build_session_cwd()?
-                    .block_task()
-                    .run_until(async move |mut session| {
-                        session.send_prompt(prompt)?;
-                        session.read_to_string().await
-                    })
-                    .await
-            });
+        let lifecycle =
+            Client
+                .builder()
+                .name("akh-acp-test-client")
+                .connect_with(transport, async move |cx| {
+                    cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task()
+                        .await?;
+                    cx.build_session_cwd()?
+                        .block_task()
+                        .run_until(async move |mut session| {
+                            session.send_prompt(prompt)?;
+                            session.read_to_string().await
+                        })
+                        .await
+                });
         tokio::time::timeout(std::time::Duration::from_secs(60), lifecycle)
             .await
             .expect("unix client lifecycle timed out (transport/protocol deadlock)")
@@ -9155,7 +9487,13 @@ tags = []
         .expect("ext caps over tcp timed out")
         .expect("ext caps over tcp ok");
         assert_eq!(caps["protocol"], "acp");
-        assert!(caps["methods"].as_array().unwrap().iter().any(|m| m == "_akh/health"));
+        assert!(
+            caps["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m == "_akh/health")
+        );
 
         // An unknown method is a clean error over TCP too — no hang/panic.
         let unknown = tokio::time::timeout(
@@ -9180,13 +9518,20 @@ tags = []
         let me = workspace();
         let listener = UnixListener::bind(&sock).expect("bind unix");
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let loop_task = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+        let loop_task =
+            tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         // Two clients, served sequentially against the same loop + shared agent.
         let a = unix_client_prompt(connect_with_retry(&sock).await, "What is the Sun?").await;
-        assert!(!a.trim().is_empty(), "first connection got empty answer: {a:?}");
+        assert!(
+            !a.trim().is_empty(),
+            "first connection got empty answer: {a:?}"
+        );
         let b = unix_client_prompt(connect_with_retry(&sock).await, "What is the Sun?").await;
-        assert!(!b.trim().is_empty(), "second connection got empty answer: {b:?}");
+        assert!(
+            !b.trim().is_empty(),
+            "second connection got empty answer: {b:?}"
+        );
 
         // Signal shutdown; the loop must return Ok promptly.
         shutdown_tx.send(true).expect("send shutdown");
@@ -9305,13 +9650,18 @@ tags = []
 
         let (a, b) = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            chat_over_unix(&sock, "akh-acp-test-client", "akh-medu", async move |mut session, _cx| {
-                session.send_prompt("What is the Sun?")?;
-                let a = session.read_to_string().await?;
-                session.send_prompt("What is the Sun?")?;
-                let b = session.read_to_string().await?;
-                Ok::<(String, String), agent_client_protocol::Error>((a, b))
-            }),
+            chat_over_unix(
+                &sock,
+                "akh-acp-test-client",
+                "akh-medu",
+                async move |mut session, _cx| {
+                    session.send_prompt("What is the Sun?")?;
+                    let a = session.read_to_string().await?;
+                    session.send_prompt("What is the Sun?")?;
+                    let b = session.read_to_string().await?;
+                    Ok::<(String, String), agent_client_protocol::Error>((a, b))
+                },
+            ),
         )
         .await
         .expect("client timed out (transport/protocol deadlock)")
@@ -9345,7 +9695,10 @@ tags = []
         .expect("ext health timed out")
         .expect("ext health ok");
         assert_eq!(health["status"], "ok");
-        assert!(health["triples"].as_u64().unwrap() >= 1, "expected seeded triples: {health}");
+        assert!(
+            health["triples"].as_u64().unwrap() >= 1,
+            "expected seeded triples: {health}"
+        );
 
         // _akh/meta/capabilities → advertises the data-plane.
         let caps = tokio::time::timeout(
@@ -9356,7 +9709,13 @@ tags = []
         .expect("ext caps timed out")
         .expect("ext caps ok");
         assert_eq!(caps["protocol"], "acp");
-        assert!(caps["methods"].as_array().unwrap().iter().any(|m| m == "_akh/health"));
+        assert!(
+            caps["methods"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m == "_akh/health")
+        );
 
         // An unknown method is a clean error, not a hang or panic.
         let unknown = tokio::time::timeout(
@@ -9399,13 +9758,20 @@ tags = []
         // workspace/status
         let st = call("_akh/workspace/status", serde_json::json!({})).await;
         assert_eq!(st["workspace"], "default");
-        assert!(st["symbols"].as_u64().unwrap() >= 3, "Sun/Star/is-a ⇒ ≥3 symbols: {st}");
+        assert!(
+            st["symbols"].as_u64().unwrap() >= 3,
+            "Sun/Star/is-a ⇒ ≥3 symbols: {st}"
+        );
 
         // symbols/list — the engine also registers many built-in symbols, so
         // request all of them (count == returned) to be sure the seeded "Sun"
         // is in the set. (A bounded `limit` returns an arbitrary subset, by
         // design — that is what `symbols/list` does.)
-        let syms = call("_akh/symbols/list", serde_json::json!({ "limit": 1_000_000 })).await;
+        let syms = call(
+            "_akh/symbols/list",
+            serde_json::json!({ "limit": 1_000_000 }),
+        )
+        .await;
         assert_eq!(
             syms["count"], syms["returned"],
             "limit was meant to return every symbol: {syms}"
@@ -9492,9 +9858,16 @@ tags = []
         );
 
         // create a symbol.
-        let created = call("_akh/symbols/create", serde_json::json!({ "label": "Mars" })).await;
+        let created = call(
+            "_akh/symbols/create",
+            serde_json::json!({ "label": "Mars" }),
+        )
+        .await;
         assert_eq!(created["label"], "Mars");
-        assert!(created["id"].as_u64().is_some(), "symbol id expected: {created}");
+        assert!(
+            created["id"].as_u64().is_some(),
+            "symbol id expected: {created}"
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
@@ -9517,7 +9890,12 @@ tags = []
         })
         .expect("persistent engine");
         engine
-            .ingest_label_triples(&[("Sun".to_string(), "is-a".to_string(), "Star".to_string(), 1.0)])
+            .ingest_label_triples(&[(
+                "Sun".to_string(),
+                "is-a".to_string(),
+                "Star".to_string(),
+                1.0,
+            )])
             .expect("seed");
         engine.persist().expect("persist");
         let engine = Arc::new(engine);
@@ -9593,7 +9971,11 @@ tags = []
         // No query → recency fallback returns the seeded episode.
         let recent = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            ext_request_unix(&sock, "_akh/memory/recall", serde_json::json!({ "top_k": 5 })),
+            ext_request_unix(
+                &sock,
+                "_akh/memory/recall",
+                serde_json::json!({ "top_k": 5 }),
+            ),
         )
         .await
         .expect("recall timed out")
@@ -9608,7 +9990,9 @@ tags = []
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["summary"].as_str().is_some_and(|s| s.contains("memory_recall"))),
+                .any(|e| e["summary"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("memory_recall"))),
             "seeded episode summary missing: {recent}"
         );
 
@@ -9624,7 +10008,10 @@ tags = []
         .await
         .expect("recall timed out")
         .expect("recall ok");
-        assert_eq!(typo["mode"], "recent", "unresolved query falls back to recency");
+        assert_eq!(
+            typo["mode"], "recent",
+            "unresolved query falls back to recency"
+        );
         assert!(
             typo["unresolved"]
                 .as_array()
@@ -9735,7 +10122,11 @@ tags = []
         // Unknown mode → clean error (not a silent no-op).
         let bad = tokio::time::timeout(
             std::time::Duration::from_secs(60),
-            ext_request_unix(&sock, "_akh/permission/mode", serde_json::json!({ "mode": "nope" })),
+            ext_request_unix(
+                &sock,
+                "_akh/permission/mode",
+                serde_json::json!({ "mode": "nope" }),
+            ),
         )
         .await
         .expect("timed out");
@@ -9765,11 +10156,7 @@ tags = []
     }
 
     /// One bounded `ext_request_unix` that must succeed.
-    async fn ext_ok(
-        sock: &Path,
-        method: &str,
-        params: serde_json::Value,
-    ) -> serde_json::Value {
+    async fn ext_ok(sock: &Path, method: &str, params: serde_json::Value) -> serde_json::Value {
         tokio::time::timeout(
             std::time::Duration::from_secs(60),
             ext_request_unix(sock, method, params),
@@ -9818,9 +10205,18 @@ tags = []
             "_akh/evidence/assess",
             "_akh/trust",
         ] {
-            assert!(methods.iter().any(|v| v == m), "capabilities missing {m}: {caps}");
+            assert!(
+                methods.iter().any(|v| v == m),
+                "capabilities missing {m}: {caps}"
+            );
         }
-        assert!(caps["groups"].as_array().unwrap().iter().any(|g| g == "microtheory"));
+        assert!(
+            caps["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|g| g == "microtheory")
+        );
 
         // create → Dormant.
         let created = ext_ok(
@@ -9870,20 +10266,34 @@ tags = []
         assert_eq!(deact["state"], "Dormant");
 
         // duplicate create + unknown-id inspect are clean errors.
-        assert!(ext_err(&sock, "_akh/microtheory/create", serde_json::json!({ "id": "cooking" }))
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/microtheory/create",
+                serde_json::json!({ "id": "cooking" })
+            )
             .await
-            .is_err());
-        assert!(ext_err(&sock, "_akh/microtheory/inspect", serde_json::json!({ "id": "nope" }))
+            .is_err()
+        );
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/microtheory/inspect",
+                serde_json::json!({ "id": "nope" })
+            )
             .await
-            .is_err());
+            .is_err()
+        );
         // bad kind is a clean error too.
-        assert!(ext_err(
-            &sock,
-            "_akh/microtheory/create",
-            serde_json::json!({ "id": "x", "kind": "galaxy" })
-        )
-        .await
-        .is_err());
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/microtheory/create",
+                serde_json::json!({ "id": "x", "kind": "galaxy" })
+            )
+            .await
+            .is_err()
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
@@ -9934,8 +10344,12 @@ tags = []
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         // activate: Cold → Hot, its triples land in the KG.
-        let act = ext_ok(&sock, "_akh/skills/activate", serde_json::json!({ "id": "astronomy" }))
-            .await;
+        let act = ext_ok(
+            &sock,
+            "_akh/skills/activate",
+            serde_json::json!({ "id": "astronomy" }),
+        )
+        .await;
         assert_eq!(act["id"], "astronomy");
         assert!(
             act["triples_loaded"].as_u64().unwrap() >= 1,
@@ -9943,32 +10357,59 @@ tags = []
         );
 
         // the loaded triple is visible through the ordinary data-plane.
-        let from = ext_ok(&sock, "_akh/triples/from", serde_json::json!({ "symbol": "Sol" })).await;
+        let from = ext_ok(
+            &sock,
+            "_akh/triples/from",
+            serde_json::json!({ "symbol": "Sol" }),
+        )
+        .await;
         assert!(
-            from["triples"].as_array().unwrap().iter().any(|t| t["object"] == "Star"),
+            from["triples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["object"] == "Star"),
             "skill triple not visible: {from}"
         );
 
         // list + inspect report the Hot skill.
         let list = ext_ok(&sock, "_akh/skills", serde_json::json!({})).await;
         assert!(
-            list["skills"].as_array().unwrap().iter().any(|s| s["id"] == "astronomy"),
+            list["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == "astronomy"),
             "skill missing from list: {list}"
         );
-        let ins = ext_ok(&sock, "_akh/skills/inspect", serde_json::json!({ "id": "astronomy" }))
-            .await;
+        let ins = ext_ok(
+            &sock,
+            "_akh/skills/inspect",
+            serde_json::json!({ "id": "astronomy" }),
+        )
+        .await;
         assert_eq!(ins["name"], "Astronomy Pack");
         assert_eq!(ins["state"], "Hot");
 
         // deactivate: Hot → Cold.
-        let de = ext_ok(&sock, "_akh/skills/deactivate", serde_json::json!({ "id": "astronomy" }))
-            .await;
+        let de = ext_ok(
+            &sock,
+            "_akh/skills/deactivate",
+            serde_json::json!({ "id": "astronomy" }),
+        )
+        .await;
         assert_eq!(de["state"], "Cold");
 
         // unknown skill → clean error.
-        assert!(ext_err(&sock, "_akh/skills/activate", serde_json::json!({ "id": "nope" }))
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/skills/activate",
+                serde_json::json!({ "id": "nope" })
+            )
             .await
-            .is_err());
+            .is_err()
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
@@ -9993,9 +10434,13 @@ tags = []
         assert_eq!(show["stale"], serde_json::json!(false));
         assert_eq!(show["psyche"], serde_json::Value::Null);
         assert!(
-            ext_err(&bare_sock, "_akh/psyche/archetypes", serde_json::json!({ "sage": 0.9 }))
-                .await
-                .is_err(),
+            ext_err(
+                &bare_sock,
+                "_akh/psyche/archetypes",
+                serde_json::json!({ "sage": 0.9 })
+            )
+            .await
+            .is_err(),
             "tuning without a psyche must error"
         );
         bare_tx.send(true).expect("send shutdown");
@@ -10015,7 +10460,10 @@ tags = []
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         let show = ext_ok(&sock, "_akh/psyche", serde_json::json!({})).await;
-        assert!(show["psyche"]["persona"]["name"].is_string(), "psyche read: {show}");
+        assert!(
+            show["psyche"]["persona"]["name"].is_string(),
+            "psyche read: {show}"
+        );
         assert!(show["psyche"]["archetypes"]["sage"].is_number());
         assert!(show["psyche"]["dominant_archetype"].is_string());
 
@@ -10045,9 +10493,13 @@ tags = []
 
         // A non-numeric weight is a clean error.
         assert!(
-            ext_err(&sock, "_akh/psyche/archetypes", serde_json::json!({ "sage": "high" }))
-                .await
-                .is_err()
+            ext_err(
+                &sock,
+                "_akh/psyche/archetypes",
+                serde_json::json!({ "sage": "high" })
+            )
+            .await
+            .is_err()
         );
 
         shutdown_tx.send(true).expect("send shutdown");
@@ -10072,22 +10524,32 @@ tags = []
         )
         .await;
         assert_eq!(v["subject"], "Sun");
-        assert!(v["candidates"].as_u64().unwrap() >= 1, "expected ≥1 candidate: {v}");
-        assert_eq!(v["verdict"]["answer"], "Star", "verdict should name Star: {v}");
+        assert!(
+            v["candidates"].as_u64().unwrap() >= 1,
+            "expected ≥1 candidate: {v}"
+        );
+        assert_eq!(
+            v["verdict"]["answer"], "Star",
+            "verdict should name Star: {v}"
+        );
         assert!(v["verdict"]["reasoning"].is_string());
         assert!(v["verdict"]["pro"].is_array());
 
         // missing predicate + unknown subject → clean errors.
-        assert!(ext_err(&sock, "_akh/argue", serde_json::json!({ "subject": "Sun" }))
+        assert!(
+            ext_err(&sock, "_akh/argue", serde_json::json!({ "subject": "Sun" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/argue",
+                serde_json::json!({ "subject": "NoSuchThing", "predicate": "is-a" })
+            )
             .await
-            .is_err());
-        assert!(ext_err(
-            &sock,
-            "_akh/argue",
-            serde_json::json!({ "subject": "NoSuchThing", "predicate": "is-a" })
-        )
-        .await
-        .is_err());
+            .is_err()
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
@@ -10118,7 +10580,12 @@ tags = []
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
         // entity form: prose + structured derivation tree.
-        let ex = ext_ok(&sock, "_akh/explain", serde_json::json!({ "subject": "Sun" })).await;
+        let ex = ext_ok(
+            &sock,
+            "_akh/explain",
+            serde_json::json!({ "subject": "Sun" }),
+        )
+        .await;
         assert!(
             ex["prose"].as_str().unwrap().contains("Sun"),
             "explanation prose should mention the subject: {ex}"
@@ -10133,28 +10600,54 @@ tags = []
             serde_json::json!({ "question": "what do you know about Sun?" }),
         )
         .await;
-        assert!(!q["prose"].as_str().unwrap().is_empty(), "question prose empty: {q}");
+        assert!(
+            !q["prose"].as_str().unwrap().is_empty(),
+            "question prose empty: {q}"
+        );
 
         // provenance records for the seeded symbol.
-        let prov = ext_ok(&sock, "_akh/provenance", serde_json::json!({ "symbol": "Sun" })).await;
+        let prov = ext_ok(
+            &sock,
+            "_akh/provenance",
+            serde_json::json!({ "symbol": "Sun" }),
+        )
+        .await;
         assert_eq!(prov["symbol"], "Sun");
         assert!(prov["records"].is_array());
 
         // unknown entity / unparseable question / missing params → clean errors.
-        assert!(ext_err(&sock, "_akh/explain", serde_json::json!({ "subject": "NoSuchThing" }))
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/explain",
+                serde_json::json!({ "subject": "NoSuchThing" })
+            )
             .await
-            .is_err());
-        assert!(ext_err(
-            &sock,
-            "_akh/explain",
-            serde_json::json!({ "question": "gibberish with no pattern" })
-        )
-        .await
-        .is_err());
-        assert!(ext_err(&sock, "_akh/explain", serde_json::json!({})).await.is_err());
-        assert!(ext_err(&sock, "_akh/provenance", serde_json::json!({ "symbol": "NoSuchThing" }))
+            .is_err()
+        );
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/explain",
+                serde_json::json!({ "question": "gibberish with no pattern" })
+            )
             .await
-            .is_err());
+            .is_err()
+        );
+        assert!(
+            ext_err(&sock, "_akh/explain", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/provenance",
+                serde_json::json!({ "symbol": "NoSuchThing" })
+            )
+            .await
+            .is_err()
+        );
 
         shutdown_tx.send(true).expect("send shutdown");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(30), server).await;
@@ -10173,19 +10666,37 @@ tags = []
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let server = tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
 
-        let a = ext_ok(&sock, "_akh/evidence/assess", serde_json::json!({ "claim": "Sun" })).await;
+        let a = ext_ok(
+            &sock,
+            "_akh/evidence/assess",
+            serde_json::json!({ "claim": "Sun" }),
+        )
+        .await;
         assert_eq!(a["stale"], serde_json::json!(false));
         let assessment = &a["assessment"];
         assert_eq!(assessment["claim"], "Sun");
-        assert!(assessment["verdict"].is_string(), "verdict label expected: {a}");
+        assert!(
+            assessment["verdict"].is_string(),
+            "verdict label expected: {a}"
+        );
         assert!(assessment["belief"].is_number());
         assert!(assessment["plausibility"].is_number());
 
         // unknown claim / missing param → clean errors.
-        assert!(ext_err(&sock, "_akh/evidence/assess", serde_json::json!({ "claim": "NoSuchThing" }))
+        assert!(
+            ext_err(
+                &sock,
+                "_akh/evidence/assess",
+                serde_json::json!({ "claim": "NoSuchThing" })
+            )
             .await
-            .is_err());
-        assert!(ext_err(&sock, "_akh/evidence/assess", serde_json::json!({})).await.is_err());
+            .is_err()
+        );
+        assert!(
+            ext_err(&sock, "_akh/evidence/assess", serde_json::json!({}))
+                .await
+                .is_err()
+        );
 
         // trust leaderboard: both directions present (empty for a fresh agent).
         let t = ext_ok(&sock, "_akh/trust", serde_json::json!({ "top_k": 5 })).await;
@@ -10233,10 +10744,9 @@ tags = []
         let asker = Arc::new(AcpPermissionAsker { tx });
 
         let a = asker.clone();
-        let approved_edit =
-            tokio::task::spawn_blocking(move || a.ask(&manifest("edit"), "path=x"))
-                .await
-                .unwrap();
+        let approved_edit = tokio::task::spawn_blocking(move || a.ask(&manifest("edit"), "path=x"))
+            .await
+            .unwrap();
         let a = asker.clone();
         let approved_shell =
             tokio::task::spawn_blocking(move || a.ask(&manifest("shell_exec"), "cmd=y"))
@@ -10298,7 +10808,10 @@ tags = []
                 assert_eq!(tc.tool_call_id.to_string(), "exec_1");
                 assert_eq!(tc.title, "ls /tmp");
                 assert_eq!(tc.kind, agent_client_protocol::schema::ToolKind::Execute);
-                assert_eq!(tc.status, agent_client_protocol::schema::ToolCallStatus::InProgress);
+                assert_eq!(
+                    tc.status,
+                    agent_client_protocol::schema::ToolCallStatus::InProgress
+                );
                 assert_eq!(tc.locations.len(), 1);
                 assert_eq!(tc.locations[0].path, std::path::PathBuf::from("/tmp"));
             }
@@ -10354,7 +10867,11 @@ tags = []
                     Some(agent_client_protocol::schema::ToolCallStatus::Completed)
                 );
                 let content = u.fields.content.expect("content set");
-                assert_eq!(content.len(), 2, "expected output + diff as two content blocks");
+                assert_eq!(
+                    content.len(),
+                    2,
+                    "expected output + diff as two content blocks"
+                );
             }
             other => panic!("expected SessionUpdate::ToolCallUpdate, got {other:?}"),
         }
@@ -10375,7 +10892,11 @@ tags = []
                     u.fields.status,
                     Some(agent_client_protocol::schema::ToolCallStatus::Failed)
                 );
-                assert_eq!(u.fields.content.expect("content set").len(), 1, "output only, no diff");
+                assert_eq!(
+                    u.fields.content.expect("content set").len(),
+                    1,
+                    "output only, no diff"
+                );
             }
             other => panic!("expected SessionUpdate::ToolCallUpdate, got {other:?}"),
         }
@@ -10402,7 +10923,10 @@ tags = []
     #[test]
     fn resolve_session_workspace_prefers_meta_over_cwd() {
         let mut meta = serde_json::Map::new();
-        meta.insert("akh/workspace".to_string(), serde_json::Value::from("from-meta"));
+        meta.insert(
+            "akh/workspace".to_string(),
+            serde_json::Value::from("from-meta"),
+        );
         let cwd = Path::new("akh-ws:from-cwd");
         assert_eq!(
             resolve_session_workspace(Some(&meta), cwd),
@@ -10415,10 +10939,16 @@ tags = []
     #[test]
     fn resolve_session_workspace_falls_back_to_cwd_sentinel() {
         let cwd = Path::new("akh-ws:from-cwd");
-        assert_eq!(resolve_session_workspace(None, cwd), Some("from-cwd".to_string()));
+        assert_eq!(
+            resolve_session_workspace(None, cwd),
+            Some("from-cwd".to_string())
+        );
 
         let mut meta = serde_json::Map::new();
-        meta.insert("some/other/key".to_string(), serde_json::Value::from("irrelevant"));
+        meta.insert(
+            "some/other/key".to_string(),
+            serde_json::Value::from("irrelevant"),
+        );
         assert_eq!(
             resolve_session_workspace(Some(&meta), cwd),
             Some("from-cwd".to_string())
@@ -10465,7 +10995,9 @@ tags = []
     #[test]
     fn is_workspace_sentinel_detects_the_akh_ws_prefix() {
         assert!(is_workspace_sentinel(Path::new("akh-ws:ptah")));
-        assert!(!is_workspace_sentinel(Path::new("/home/toasty/ws/akh-medu")));
+        assert!(!is_workspace_sentinel(Path::new(
+            "/home/toasty/ws/akh-medu"
+        )));
         assert!(!is_workspace_sentinel(Path::new("relative/not/absolute")));
     }
 
@@ -10488,7 +11020,10 @@ tags = []
 
         let err = clamp_session_cwd(boundary_dir.path(), outside_dir.path())
             .expect_err("a path outside the boundary must be rejected");
-        assert!(err.contains("outside"), "error should explain containment: {err}");
+        assert!(
+            err.contains("outside"),
+            "error should explain containment: {err}"
+        );
     }
 
     #[test]
@@ -10681,9 +11216,12 @@ tags = []
         assert_eq!(list["workspaces"][0], "alpha");
 
         // control-plane: params flow through the router to the backend.
-        let created = call("_akh/workspace/create", serde_json::json!({ "name": "gamma" }))
-            .await
-            .expect("create ok");
+        let created = call(
+            "_akh/workspace/create",
+            serde_json::json!({ "name": "gamma" }),
+        )
+        .await
+        .expect("create ok");
         assert_eq!(created["name"], "gamma");
         assert_eq!(created["created"], true);
 
@@ -10739,7 +11277,10 @@ tags = []
         )
         .await
         .expect("request timed out");
-        assert!(err.is_err(), "control method must error with no backend: {err:?}");
+        assert!(
+            err.is_err(),
+            "control method must error with no backend: {err:?}"
+        );
 
         // capabilities omit the control surface.
         let caps = tokio::time::timeout(

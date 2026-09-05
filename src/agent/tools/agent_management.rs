@@ -19,9 +19,8 @@ use std::collections::HashSet;
 
 /// Discover the akhomed base URL, returning an error output if unavailable.
 fn discover_base_url() -> Result<String, ToolOutput> {
-    let paths = crate::paths::AkhPaths::resolve().map_err(|e| {
-        ToolOutput::err(format!("Cannot resolve akh paths: {e}"))
-    })?;
+    let paths = crate::paths::AkhPaths::resolve()
+        .map_err(|e| ToolOutput::err(format!("Cannot resolve akh paths: {e}")))?;
     match crate::client::discover_server(&paths) {
         Some(info) => Ok(info.base_url()),
         None => Err(ToolOutput::err(
@@ -82,9 +81,7 @@ impl Tool for AgentListTool {
                 let body = resp.into_string().unwrap_or_default();
                 Ok(ToolOutput::err(format!("HTTP {code}: {body}")))
             }
-            Err(ureq::Error::Transport(t)) => {
-                Ok(ToolOutput::err(format!("Transport error: {t}")))
-            }
+            Err(ureq::Error::Transport(t)) => Ok(ToolOutput::err(format!("Transport error: {t}"))),
         }
     }
 
@@ -262,8 +259,7 @@ impl Tool for AgentMessageTool {
         ToolSignature {
             name: "agent_message".into(),
             description:
-                "Send a message to another agent workspace by ingesting triples into its KG."
-                    .into(),
+                "Send a message to another agent workspace by ingesting triples into its KG.".into(),
             parameters: vec![
                 ToolParam {
                     name: "workspace".into(),
@@ -332,9 +328,7 @@ impl Tool for AgentMessageTool {
                     "HTTP {code} delivering message to \"{workspace}\": {body}"
                 )))
             }
-            Err(ureq::Error::Transport(t)) => {
-                Ok(ToolOutput::err(format!("Transport error: {t}")))
-            }
+            Err(ureq::Error::Transport(t)) => Ok(ToolOutput::err(format!("Transport error: {t}"))),
         }
     }
 
@@ -413,9 +407,7 @@ impl Tool for AgentRetireTool {
                     "HTTP {code} retiring workspace \"{workspace}\": {body}"
                 )))
             }
-            Err(ureq::Error::Transport(t)) => {
-                Ok(ToolOutput::err(format!("Transport error: {t}")))
-            }
+            Err(ureq::Error::Transport(t)) => Ok(ToolOutput::err(format!("Transport error: {t}"))),
         }
     }
 

@@ -47,7 +47,9 @@ pub enum CandleFormatError {
     #[error("Candle NL generation failed: {reason}")]
     #[diagnostic(
         code(akh::agent::output::generation_failed),
-        help("Check tracing output for details. The formatter will fall back to template rendering.")
+        help(
+            "Check tracing output for details. The formatter will fall back to template rendering."
+        )
     )]
     GenerationFailed { reason: String },
 }
@@ -354,10 +356,9 @@ fn describe_pipeline_data(data: &PipelineData) -> String {
             ir.activations.len(),
             ir.activations.first().map(|(_, s)| *s).unwrap_or(0.0)
         ),
-        PipelineData::Reasoning(rr) => format!(
-            "simplified to '{}' (cost {})",
-            rr.simplified_expr, rr.cost
-        ),
+        PipelineData::Reasoning(rr) => {
+            format!("simplified to '{}' (cost {})", rr.simplified_expr, rr.cost)
+        }
     }
 }
 
@@ -392,7 +393,9 @@ fn fallback_format(input: &FormatInput<'_>) -> String {
 fn pipeline_data_summary(data: &PipelineData) -> Option<String> {
     match data {
         PipelineData::Seeds(s) if !s.is_empty() => Some(format!("{} seed symbols.", s.len())),
-        PipelineData::Triples(t) if !t.is_empty() => Some(format!("{} triples retrieved.", t.len())),
+        PipelineData::Triples(t) if !t.is_empty() => {
+            Some(format!("{} triples retrieved.", t.len()))
+        }
         PipelineData::Traversal(tr) if !tr.triples.is_empty() => Some(format!(
             "Traversed {} nodes ({} triples).",
             tr.visited.len(),
@@ -439,7 +442,8 @@ mod tests {
 
     #[test]
     fn try_load_nonexistent_returns_fallback_only() {
-        let f = CandleFormatter::try_load(&PathBuf::from("/tmp/akh-nonexistent-candle-format-test"));
+        let f =
+            CandleFormatter::try_load(&PathBuf::from("/tmp/akh-nonexistent-candle-format-test"));
         assert!(!f.is_available());
     }
 
@@ -491,7 +495,10 @@ mod tests {
     fn try_format_without_backend_errors() {
         let f = CandleFormatter::new();
         let result = f.try_format(FormatInput::Text("test"));
-        assert!(matches!(result, Err(CandleFormatError::BackendNotAvailable)));
+        assert!(matches!(
+            result,
+            Err(CandleFormatError::BackendNotAvailable)
+        ));
     }
 
     #[test]
@@ -502,18 +509,22 @@ mod tests {
         let sym = SymbolId::new(1).unwrap();
         assert!(describe_pipeline_data(&PipelineData::Seeds(vec![sym])).contains('1'));
         assert!(describe_pipeline_data(&PipelineData::Triples(vec![])).contains('0'));
-        assert!(describe_pipeline_data(&PipelineData::Inference(InferenceResult {
-            activations: vec![(sym, 0.9)],
-            pattern: None,
-            provenance: vec![],
-        }))
-        .contains("activation"));
-        assert!(describe_pipeline_data(&PipelineData::Reasoning(ReasoningResult {
-            simplified_expr: "x".into(),
-            cost: 1,
-            saturated: false,
-        }))
-        .contains('x'));
+        assert!(
+            describe_pipeline_data(&PipelineData::Inference(InferenceResult {
+                activations: vec![(sym, 0.9)],
+                pattern: None,
+                provenance: vec![],
+            }))
+            .contains("activation")
+        );
+        assert!(
+            describe_pipeline_data(&PipelineData::Reasoning(ReasoningResult {
+                simplified_expr: "x".into(),
+                cost: 1,
+                saturated: false,
+            }))
+            .contains('x')
+        );
     }
 
     #[test]

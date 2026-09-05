@@ -49,7 +49,11 @@ pub enum McpError {
         code(akh::mcp::rpc_error),
         help("The remote MCP server returned a JSON-RPC error. Check the server logs.")
     )]
-    Rpc { server: String, code: i64, message: String },
+    Rpc {
+        server: String,
+        code: i64,
+        message: String,
+    },
 
     #[error("failed to parse MCP response from \"{server}\": {message}")]
     #[diagnostic(
@@ -63,7 +67,11 @@ pub enum McpError {
         code(akh::mcp::tool_error),
         help("Check the tool arguments and the remote server logs for details.")
     )]
-    ToolError { server: String, tool: String, message: String },
+    ToolError {
+        server: String,
+        tool: String,
+        message: String,
+    },
 }
 
 // ── Server configuration ─────────────────────────────────────────────────────
@@ -189,7 +197,9 @@ impl McpClient {
             .servers
             .get(server_name)
             .cloned()
-            .ok_or_else(|| McpError::ServerNotFound { server: server_name.into() })?;
+            .ok_or_else(|| McpError::ServerNotFound {
+                server: server_name.into(),
+            })?;
 
         let tools = Self::fetch_tools(server_name, &config)?;
 
@@ -200,7 +210,10 @@ impl McpClient {
             .cache
             .insert(
                 server_name.to_string(),
-                CacheEntry { tools: tools.clone(), fetched_at: Instant::now() },
+                CacheEntry {
+                    tools: tools.clone(),
+                    fetched_at: Instant::now(),
+                },
             );
 
         Ok(tools)
@@ -215,7 +228,9 @@ impl McpClient {
             .servers
             .get(server_name)
             .cloned()
-            .ok_or_else(|| McpError::ServerNotFound { server: server_name.into() })?;
+            .ok_or_else(|| McpError::ServerNotFound {
+                server: server_name.into(),
+            })?;
 
         let tools = Self::fetch_tools(server_name, &config)?;
 
@@ -225,7 +240,10 @@ impl McpClient {
             .cache
             .insert(
                 server_name.to_string(),
-                CacheEntry { tools: tools.clone(), fetched_at: Instant::now() },
+                CacheEntry {
+                    tools: tools.clone(),
+                    fetched_at: Instant::now(),
+                },
             );
 
         Ok(tools)
@@ -248,7 +266,9 @@ impl McpClient {
             .servers
             .get(server_name)
             .cloned()
-            .ok_or_else(|| McpError::ServerNotFound { server: server_name.into() })?;
+            .ok_or_else(|| McpError::ServerNotFound {
+                server: server_name.into(),
+            })?;
 
         Self::call_remote_tool(server_name, tool_name, args, &config)
     }
@@ -284,7 +304,9 @@ impl McpClient {
     ) -> Result<Value, McpError> {
         let agent = ureq::AgentBuilder::new().timeout(config.timeout).build();
 
-        let req = agent.post(&config.url).set("Content-Type", "application/json");
+        let req = agent
+            .post(&config.url)
+            .set("Content-Type", "application/json");
         let req = match &config.auth_token {
             Some(token) => req.set("Authorization", &format!("Bearer {token}")),
             None => req,
@@ -312,7 +334,10 @@ impl McpClient {
             return Err(McpError::Rpc {
                 server: server_name.into(),
                 code: err["code"].as_i64().unwrap_or(-1),
-                message: err["message"].as_str().unwrap_or("unknown error").to_string(),
+                message: err["message"]
+                    .as_str()
+                    .unwrap_or("unknown error")
+                    .to_string(),
             });
         }
 
@@ -323,7 +348,11 @@ impl McpClient {
         server_name: &str,
         config: &McpServerConfig,
     ) -> Result<Vec<ToolSignature>, McpError> {
-        let body = Self::send_rpc(server_name, config, json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}))?;
+        let body = Self::send_rpc(
+            server_name,
+            config,
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
+        )?;
 
         let tools_arr = body
             .get("result")
@@ -364,7 +393,11 @@ impl McpClient {
             }
         }
 
-        ToolSignature { name, description, parameters }
+        ToolSignature {
+            name,
+            description,
+            parameters,
+        }
     }
 
     fn call_remote_tool(
@@ -544,8 +577,8 @@ impl Tool for McpCallTool {
                 },
                 ToolParam {
                     name: "args".into(),
-                    description: "JSON object of arguments to pass to the remote tool (default: {})."
-                        .into(),
+                    description:
+                        "JSON object of arguments to pass to the remote tool (default: {}).".into(),
                     required: false,
                 },
             ],
@@ -564,13 +597,13 @@ impl Tool for McpCallTool {
             None => json!({}),
         };
 
-        let result = self
-            .client
-            .call_tool(server, tool, args)
-            .map_err(|e| AgentError::ToolExecution {
-                tool_name: "mcp_call".into(),
-                message: e.to_string(),
-            })?;
+        let result =
+            self.client
+                .call_tool(server, tool, args)
+                .map_err(|e| AgentError::ToolExecution {
+                    tool_name: "mcp_call".into(),
+                    message: e.to_string(),
+                })?;
 
         // Extract text items from the MCP content array, fall back to raw JSON.
         let text = result["content"]
@@ -847,7 +880,10 @@ mod tests {
     fn discover_tools_parses_response() {
         let (url, _handle) = spawn_mock(vec![tools_list_response()]);
         let client = McpClient::empty();
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let tools = client.discover_tools("test").unwrap();
         assert_eq!(tools.len(), 2);
@@ -860,7 +896,10 @@ mod tests {
         // Only one mock response; a second discover_tools call must use cache.
         let (url, _handle) = spawn_mock(vec![tools_list_response()]);
         let client = McpClient::new(HashMap::new(), Duration::from_secs(300));
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let tools1 = client.discover_tools("test").unwrap();
         // Second call would fail if it tried to connect (no second response).
@@ -871,12 +910,14 @@ mod tests {
     #[test]
     fn discover_tools_refreshes_after_expiry() {
         // Two responses because the cache expires between the two calls.
-        let (url, _handle) =
-            spawn_mock(vec![tools_list_response(), tools_list_response()]);
+        let (url, _handle) = spawn_mock(vec![tools_list_response(), tools_list_response()]);
 
         // 1 ms TTL ensures the second call re-fetches.
         let client = McpClient::new(HashMap::new(), Duration::from_millis(1));
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let _first = client.discover_tools("test").unwrap();
         std::thread::sleep(Duration::from_millis(5));
@@ -887,10 +928,12 @@ mod tests {
     #[test]
     fn force_refresh_bypasses_cache() {
         // Two responses; the second is served when refresh() is called explicitly.
-        let (url, _handle) =
-            spawn_mock(vec![tools_list_response(), tools_list_response()]);
+        let (url, _handle) = spawn_mock(vec![tools_list_response(), tools_list_response()]);
         let client = McpClient::new(HashMap::new(), Duration::from_secs(300));
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let _first = client.discover_tools("test").unwrap();
         let refreshed = client.refresh("test").unwrap();
@@ -901,9 +944,14 @@ mod tests {
     fn call_tool_returns_text_content() {
         let (url, _handle) = spawn_mock(vec![tool_call_ok("42 results found")]);
         let client = McpClient::empty();
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
-        let result = client.call_tool("test", "search", json!({"query": "reasoning"})).unwrap();
+        let result = client
+            .call_tool("test", "search", json!({"query": "reasoning"}))
+            .unwrap();
         let text = result["content"][0]["text"].as_str().unwrap();
         assert_eq!(text, "42 results found");
     }
@@ -920,7 +968,10 @@ mod tests {
         });
         let (url, _handle) = spawn_mock(vec![resp]);
         let client = McpClient::empty();
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let err = client.call_tool("test", "search", json!({})).unwrap_err();
         assert!(matches!(err, McpError::ToolError { .. }));
@@ -931,7 +982,10 @@ mod tests {
     fn json_rpc_error_response_returns_rpc_error() {
         let (url, _handle) = spawn_mock(vec![rpc_error(-32601, "Method not found")]);
         let client = McpClient::empty();
-        client.add_server("test", McpServerConfig::new(url).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "test",
+            McpServerConfig::new(url).with_timeout(Duration::from_secs(5)),
+        );
 
         let err = client.discover_tools("test").unwrap_err();
         assert!(matches!(err, McpError::Rpc { code: -32601, .. }));
@@ -956,8 +1010,14 @@ mod tests {
         })]);
 
         let client = McpClient::empty();
-        client.add_server("seshat", McpServerConfig::new(url_a).with_timeout(Duration::from_secs(5)));
-        client.add_server("anima", McpServerConfig::new(url_b).with_timeout(Duration::from_secs(5)));
+        client.add_server(
+            "seshat",
+            McpServerConfig::new(url_a).with_timeout(Duration::from_secs(5)),
+        );
+        client.add_server(
+            "anima",
+            McpServerConfig::new(url_b).with_timeout(Duration::from_secs(5)),
+        );
 
         let all = client.merged_registry();
         assert_eq!(all.len(), 2);
@@ -973,8 +1033,16 @@ mod tests {
         let tool = McpDiscoverTool::new(client);
         let sig = tool.signature();
         assert_eq!(sig.name, "mcp_discover");
-        assert!(sig.parameters.iter().any(|p| p.name == "server" && p.required));
-        assert!(sig.parameters.iter().any(|p| p.name == "force_refresh" && !p.required));
+        assert!(
+            sig.parameters
+                .iter()
+                .any(|p| p.name == "server" && p.required)
+        );
+        assert!(
+            sig.parameters
+                .iter()
+                .any(|p| p.name == "force_refresh" && !p.required)
+        );
     }
 
     #[test]
@@ -983,9 +1051,21 @@ mod tests {
         let tool = McpCallTool::new(client);
         let sig = tool.signature();
         assert_eq!(sig.name, "mcp_call");
-        assert!(sig.parameters.iter().any(|p| p.name == "server" && p.required));
-        assert!(sig.parameters.iter().any(|p| p.name == "tool" && p.required));
-        assert!(sig.parameters.iter().any(|p| p.name == "args" && !p.required));
+        assert!(
+            sig.parameters
+                .iter()
+                .any(|p| p.name == "server" && p.required)
+        );
+        assert!(
+            sig.parameters
+                .iter()
+                .any(|p| p.name == "tool" && p.required)
+        );
+        assert!(
+            sig.parameters
+                .iter()
+                .any(|p| p.name == "args" && !p.required)
+        );
     }
 
     #[test]

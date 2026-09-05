@@ -64,12 +64,12 @@ impl Tool for WriteArticleTool {
         let body = input.require("body", "write_article")?;
 
         let author = if let Some(author_label) = input.get("author") {
-            engine
-                .resolve_or_create_entity(author_label)
-                .map_err(|e| AgentError::ToolExecution {
+            engine.resolve_or_create_entity(author_label).map_err(|e| {
+                AgentError::ToolExecution {
                     tool_name: "write_article".into(),
                     message: format!("author entity: {e}"),
-                })?
+                }
+            })?
         } else {
             engine
                 .resolve_or_create_entity("akh:self")
@@ -329,9 +329,7 @@ impl Tool for RespondToArticleTool {
             })?;
 
         Ok(ToolOutput::ok_with_symbols(
-            format!(
-                "Response article \"{title}\" created (responds to \"{responds_to_title}\")."
-            ),
+            format!("Response article \"{title}\" created (responds to \"{responds_to_title}\")."),
             vec![article_id, parent_id, author],
         ))
     }
@@ -343,7 +341,10 @@ impl Tool for RespondToArticleTool {
             parameters: vec![
                 ToolParamSchema::required("title", "Title of the new response article."),
                 ToolParamSchema::required("body", "Markdown body of the response."),
-                ToolParamSchema::required("responds_to", "Title of the article being responded to."),
+                ToolParamSchema::required(
+                    "responds_to",
+                    "Title of the article being responded to.",
+                ),
                 ToolParamSchema::optional("author", "Author entity label."),
             ],
             danger: DangerInfo {
@@ -410,7 +411,10 @@ impl Tool for SearchWikiTool {
             .join("\n");
 
         Ok(ToolOutput::ok_with_symbols(
-            format!("Found {} article(s) matching \"{query}\":\n{listing}", hits.len()),
+            format!(
+                "Found {} article(s) matching \"{query}\":\n{listing}",
+                hits.len()
+            ),
             symbols,
         ))
     }
@@ -458,7 +462,8 @@ fn auto_detect_blocks(body: &str) -> Vec<BlockRef> {
                     reasoning: String::new(),
                 },
             })
-        } else if trimmed.starts_with("```example") || trimmed.starts_with("```rust")
+        } else if trimmed.starts_with("```example")
+            || trimmed.starts_with("```rust")
             || trimmed.starts_with("```python")
         {
             Some(BlockType::Example)
@@ -530,7 +535,10 @@ mod tests {
         let out = tool
             .execute(
                 &eng,
-                input(&[("title", "Rust Basics"), ("body", "# Rust\n\nA systems language.")]),
+                input(&[
+                    ("title", "Rust Basics"),
+                    ("body", "# Rust\n\nA systems language."),
+                ]),
             )
             .unwrap();
         assert!(out.success);
@@ -543,11 +551,8 @@ mod tests {
         let (eng, _dir) = persistent_engine();
         let tool = WriteArticleTool;
         // Create first.
-        tool.execute(
-            &eng,
-            input(&[("title", "Update Me"), ("body", "v1")]),
-        )
-        .unwrap();
+        tool.execute(&eng, input(&[("title", "Update Me"), ("body", "v1")]))
+            .unwrap();
         // Update — article now exists in persisted store.
         let out = tool
             .execute(&eng, input(&[("title", "Update Me"), ("body", "v2")]))
@@ -564,10 +569,7 @@ mod tests {
             .execute(&eng, input(&[("title", "Source"), ("body", "src body")]))
             .unwrap();
         write
-            .execute(
-                &eng,
-                input(&[("title", "Citing"), ("body", "cites src")]),
-            )
+            .execute(&eng, input(&[("title", "Citing"), ("body", "cites src")]))
             .unwrap();
         let cite = CiteArticleTool;
         let out = cite
@@ -582,7 +584,10 @@ mod tests {
         let (eng, _dir) = persistent_engine();
         let write = WriteArticleTool;
         write
-            .execute(&eng, input(&[("title", "Original"), ("body", "original body")]))
+            .execute(
+                &eng,
+                input(&[("title", "Original"), ("body", "original body")]),
+            )
             .unwrap();
         let respond = RespondToArticleTool;
         let out = respond
@@ -620,7 +625,10 @@ mod tests {
         let (eng, _dir) = persistent_engine();
         let write = WriteArticleTool;
         write
-            .execute(&eng, input(&[("title", "Rust"), ("body", "systems language")]))
+            .execute(
+                &eng,
+                input(&[("title", "Rust"), ("body", "systems language")]),
+            )
             .unwrap();
         write
             .execute(

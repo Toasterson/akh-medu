@@ -63,8 +63,14 @@ pub fn classify_mode(input: &str, previous: DiscourseMode) -> DiscourseMode {
 
     // Argumentative signals take priority — disagreement is a strong signal.
     const ARGUMENT_MARKERS: [&str; 8] = [
-        "no,", "that's wrong", "thats wrong", "i disagree", "not true",
-        "you're wrong", "youre wrong", "actually,",
+        "no,",
+        "that's wrong",
+        "thats wrong",
+        "i disagree",
+        "not true",
+        "you're wrong",
+        "youre wrong",
+        "actually,",
     ];
     if ARGUMENT_MARKERS.iter().any(|m| lower.contains(m)) || lower.starts_with("but ") {
         return DiscourseMode::Argumentative;
@@ -72,7 +78,14 @@ pub fn classify_mode(input: &str, previous: DiscourseMode) -> DiscourseMode {
 
     // Social: greetings, thanks, farewells.
     const SOCIAL_MARKERS: [&str; 8] = [
-        "hello", "hi ", "hey", "thanks", "thank you", "goodbye", "bye", "good morning",
+        "hello",
+        "hi ",
+        "hey",
+        "thanks",
+        "thank you",
+        "goodbye",
+        "bye",
+        "good morning",
     ];
     if SOCIAL_MARKERS.iter().any(|m| lower.starts_with(m)) || lower == "hi" {
         return DiscourseMode::Social;
@@ -80,7 +93,12 @@ pub fn classify_mode(input: &str, previous: DiscourseMode) -> DiscourseMode {
 
     // Exploratory: open-ended continuation prompts.
     const EXPLORE_MARKERS: [&str; 6] = [
-        "tell me more", "what about", "what else", "interesting", "go on", "and then",
+        "tell me more",
+        "what about",
+        "what else",
+        "interesting",
+        "go on",
+        "and then",
     ];
     if EXPLORE_MARKERS.iter().any(|m| lower.contains(m)) {
         return DiscourseMode::Exploratory;
@@ -96,7 +114,14 @@ pub fn classify_mode(input: &str, previous: DiscourseMode) -> DiscourseMode {
 
     // Directive: imperative verbs.
     const DIRECTIVE_STARTS: [&str; 8] = [
-        "find ", "do ", "run ", "create ", "make ", "set ", "add ", "investigate ",
+        "find ",
+        "do ",
+        "run ",
+        "create ",
+        "make ",
+        "set ",
+        "add ",
+        "investigate ",
     ];
     if DIRECTIVE_STARTS.iter().any(|d| lower.starts_with(d)) {
         return DiscourseMode::Directive;
@@ -176,12 +201,7 @@ impl DiscourseTrajectory {
 
     /// Record a response turn: which topic was answered and which strategy
     /// was used. Call after the response is composed.
-    pub fn record_turn(
-        &mut self,
-        topic: Option<&str>,
-        topic_id: Option<SymbolId>,
-        strategy: &str,
-    ) {
+    pub fn record_turn(&mut self, topic: Option<&str>, topic_id: Option<SymbolId>, strategy: &str) {
         let normalised = topic.map(|t| t.trim().to_lowercase());
         if let Some(ref t) = normalised {
             *self.repetition_count.entry(t.clone()).or_insert(0) += 1;
@@ -295,7 +315,10 @@ mod tests {
     #[test]
     fn mode_argumentative_from_disagreement() {
         assert_eq!(
-            classify_mode("No, that's wrong — dogs are not reptiles", DiscourseMode::Interrogative),
+            classify_mode(
+                "No, that's wrong — dogs are not reptiles",
+                DiscourseMode::Interrogative
+            ),
             DiscourseMode::Argumentative
         );
         assert_eq!(
@@ -306,8 +329,14 @@ mod tests {
 
     #[test]
     fn mode_social_from_greeting() {
-        assert_eq!(classify_mode("hello there", DiscourseMode::Interrogative), DiscourseMode::Social);
-        assert_eq!(classify_mode("thanks!", DiscourseMode::Interrogative), DiscourseMode::Social);
+        assert_eq!(
+            classify_mode("hello there", DiscourseMode::Interrogative),
+            DiscourseMode::Social
+        );
+        assert_eq!(
+            classify_mode("thanks!", DiscourseMode::Interrogative),
+            DiscourseMode::Social
+        );
     }
 
     #[test]
@@ -367,7 +396,10 @@ mod tests {
         tr.observe_input("ok");
         tr.observe_input("hm");
         tr.observe_input("k");
-        assert!(tr.user_engagement() < engaged, "engagement should drop with terse inputs");
+        assert!(
+            tr.user_engagement() < engaged,
+            "engagement should drop with terse inputs"
+        );
     }
 
     #[test]

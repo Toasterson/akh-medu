@@ -379,7 +379,9 @@ fn evaluate_condition(
             // We can't cheaply identify which triples were removed without
             // a full diff, so we check if the pattern no longer matches anything.
             let all_triples = engine.all_triples();
-            let still_exists = all_triples.iter().any(|t| matches_pattern(pattern, t, engine));
+            let still_exists = all_triples
+                .iter()
+                .any(|t| matches_pattern(pattern, t, engine));
             if !still_exists {
                 Some(format!(
                     "No triples match pattern after removal (count {} → {})",

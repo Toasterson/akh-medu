@@ -224,7 +224,10 @@ mod tests {
         let alloc = AtomicSymbolAllocator::starting_from(u64::MAX);
         assert!(alloc.next_id().is_err());
         assert!(alloc.next_id().is_err(), "exhaustion must remain sticky");
-        assert!(alloc.next_id().is_err(), "allocator must never wrap to ID 1");
+        assert!(
+            alloc.next_id().is_err(),
+            "allocator must never wrap to ID 1"
+        );
     }
 
     #[test]
