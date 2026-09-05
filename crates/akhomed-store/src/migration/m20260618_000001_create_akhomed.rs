@@ -122,7 +122,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Akh::Id).uuid().not_null().primary_key())
                     .col(ColumnDef::new(Akh::Name).text().not_null())
                     .col(ColumnDef::new(Akh::HomeHost).text())
-                    .col(ColumnDef::new(Akh::AwakenedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(Akh::AwakenedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Akh::LastSeen).timestamp_with_time_zone())
                     .to_owned(),
             )
@@ -165,7 +169,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Facts::Object).big_integer().not_null())
                     .col(ColumnDef::new(Facts::AkhId).uuid().not_null())
                     .col(ColumnDef::new(Facts::Confidence).float().not_null())
-                    .col(ColumnDef::new(Facts::AssertedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(Facts::AssertedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Facts::RetractedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(Facts::ProvenanceId).big_integer())
                     .col(ColumnDef::new(Facts::Compartment).text())
@@ -196,12 +204,22 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(MutationLog::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(MutationLog::Seq).big_integer().not_null().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(MutationLog::Seq)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(MutationLog::AkhId).uuid().not_null())
                     .col(ColumnDef::new(MutationLog::WorkspaceId).uuid().not_null())
                     .col(ColumnDef::new(MutationLog::Kind).text().not_null())
                     .col(ColumnDef::new(MutationLog::Payload).json().not_null())
-                    .col(ColumnDef::new(MutationLog::AppliedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(MutationLog::AppliedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -222,16 +240,41 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(AkhState::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(AkhState::AkhId).uuid().not_null().primary_key())
+                    .col(
+                        ColumnDef::new(AkhState::AkhId)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(AkhState::Watermark).big_integer().not_null())
-                    .col(ColumnDef::new(AkhState::AllocatorNext).big_integer().not_null())
-                    .col(ColumnDef::new(AkhState::CycleCount).big_integer().not_null())
-                    .col(ColumnDef::new(AkhState::SessionStartCycle).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(AkhState::AllocatorNext)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AkhState::CycleCount)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AkhState::SessionStartCycle)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AkhState::SleepPhase).text().not_null())
-                    .col(ColumnDef::new(AkhState::LastSleepCycle).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(AkhState::LastSleepCycle)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AkhState::Psyche).json())
                     .col(ColumnDef::new(AkhState::Extra).json())
-                    .col(ColumnDef::new(AkhState::UpdatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(AkhState::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -241,13 +284,23 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Provenance::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Provenance::ProvenanceId).big_integer().not_null().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(Provenance::ProvenanceId)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Provenance::AkhId).uuid().not_null())
                     .col(ColumnDef::new(Provenance::WorkspaceId).uuid().not_null())
                     .col(ColumnDef::new(Provenance::Subject).big_integer().not_null())
                     .col(ColumnDef::new(Provenance::Derivation).json().not_null())
                     .col(ColumnDef::new(Provenance::Confidence).float().not_null())
-                    .col(ColumnDef::new(Provenance::CreatedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(Provenance::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -259,9 +312,21 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(ProvenanceInput::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(ProvenanceInput::ProvenanceId).big_integer().not_null())
-                    .col(ColumnDef::new(ProvenanceInput::Position).integer().not_null())
-                    .col(ColumnDef::new(ProvenanceInput::InputSymbolId).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(ProvenanceInput::ProvenanceId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProvenanceInput::Position)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProvenanceInput::InputSymbolId)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .primary_key(
                         Index::create()
                             .col(ProvenanceInput::ProvenanceId)
@@ -286,10 +351,20 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Episodes::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(Episodes::EpisodeId).big_integer().not_null().auto_increment().primary_key())
+                    .col(
+                        ColumnDef::new(Episodes::EpisodeId)
+                            .big_integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
                     .col(ColumnDef::new(Episodes::AkhId).uuid().not_null())
                     .col(ColumnDef::new(Episodes::WorkspaceId).uuid().not_null())
-                    .col(ColumnDef::new(Episodes::StartedAt).timestamp_with_time_zone().not_null())
+                    .col(
+                        ColumnDef::new(Episodes::StartedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Episodes::EndedAt).timestamp_with_time_zone())
                     .col(ColumnDef::new(Episodes::Payload).json().not_null())
                     .to_owned(),
@@ -310,7 +385,9 @@ impl MigrationTrait for Migration {
             Symbols::Table.into_table_ref(),
             Akh::Table.into_table_ref(),
         ] {
-            manager.drop_table(Table::drop().table(table).if_exists().to_owned()).await?;
+            manager
+                .drop_table(Table::drop().table(table).if_exists().to_owned())
+                .await?;
         }
         Ok(())
     }

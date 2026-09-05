@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use sea_orm::sqlx::postgres::PgConnection;
 use sea_orm::sqlx::{Connection, Row};
+use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -77,18 +77,20 @@ impl StablePgSession {
         if state.locked_akh.is_some() {
             return Ok(false);
         }
-        let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
-            message: "stable PostgreSQL residency session is closed".into(),
-        })?;
-        let locked: bool = sea_orm::sqlx::query(
-            "SELECT pg_try_advisory_lock(hashtext($1)) AS locked",
-        )
-        .bind(format!("akh:{akh_id}"))
-        .fetch_one(connection)
-        .await
-        .map_err(query_error)?
-        .try_get("locked")
-        .map_err(query_error)?;
+        let connection = state
+            .connection
+            .as_mut()
+            .ok_or_else(|| StoreError::Conflict {
+                message: "stable PostgreSQL residency session is closed".into(),
+            })?;
+        let locked: bool =
+            sea_orm::sqlx::query("SELECT pg_try_advisory_lock(hashtext($1)) AS locked")
+                .bind(format!("akh:{akh_id}"))
+                .fetch_one(connection)
+                .await
+                .map_err(query_error)?
+                .try_get("locked")
+                .map_err(query_error)?;
         if locked {
             state.locked_akh = Some(akh_id);
         }
@@ -103,11 +105,7 @@ impl StablePgSession {
     /// an epoch after the session advisory lock has disappeared. In
     /// particular, this must never be implemented through a connection pool:
     /// the pooled transaction would not be protected by this session's lock.
-    pub async fn claim_akh_residency(
-        &self,
-        akh_id: Uuid,
-        workspace_id: Uuid,
-    ) -> StoreResult<i64> {
+    pub async fn claim_akh_residency(&self, akh_id: Uuid, workspace_id: Uuid) -> StoreResult<i64> {
         let mut state = self.state.lock().await;
         if state.locked_akh != Some(akh_id) {
             return Err(StoreError::Conflict {
@@ -116,19 +114,20 @@ impl StablePgSession {
                 ),
             });
         }
-        let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
-            message: format!(
-                "cannot claim residency for akh {akh_id}: pinned PostgreSQL session is closed"
-            ),
-        })?;
+        let connection = state
+            .connection
+            .as_mut()
+            .ok_or_else(|| StoreError::Conflict {
+                message: format!(
+                    "cannot claim residency for akh {akh_id}: pinned PostgreSQL session is closed"
+                ),
+            })?;
         let mut transaction = connection.begin().await.map_err(query_error)?;
-        sea_orm::sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        )
-        .bind(format!("snapshot:{workspace_id}"))
-        .execute(&mut *transaction)
-        .await
-        .map_err(query_error)?;
+        sea_orm::sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("snapshot:{workspace_id}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(query_error)?;
 
         let current: Option<i64> = sea_orm::sqlx::query_scalar(
             "SELECT residency_epoch FROM akhomed_akh WHERE id = $1 FOR UPDATE",
@@ -146,14 +145,12 @@ impl StablePgSession {
         let next = current.checked_add(1).ok_or_else(|| StoreError::Conflict {
             message: format!("residency epoch exhausted for akh {akh_id}"),
         })?;
-        sea_orm::sqlx::query(
-            "UPDATE akhomed_akh SET residency_epoch = $2 WHERE id = $1",
-        )
-        .bind(akh_id)
-        .bind(next)
-        .execute(&mut *transaction)
-        .await
-        .map_err(query_error)?;
+        sea_orm::sqlx::query("UPDATE akhomed_akh SET residency_epoch = $2 WHERE id = $1")
+            .bind(akh_id)
+            .bind(next)
+            .execute(&mut *transaction)
+            .await
+            .map_err(query_error)?;
         transaction.commit().await.map_err(query_error)?;
         Ok(next)
     }
@@ -162,9 +159,12 @@ impl StablePgSession {
     /// The query runs on the same pinned connection that owns the lock.
     pub async fn backend_process_id(&self) -> StoreResult<i32> {
         let mut state = self.state.lock().await;
-        let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
-            message: "stable PostgreSQL residency session is closed".into(),
-        })?;
+        let connection = state
+            .connection
+            .as_mut()
+            .ok_or_else(|| StoreError::Conflict {
+                message: "stable PostgreSQL residency session is closed".into(),
+            })?;
         sea_orm::sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(connection)
             .await
@@ -184,9 +184,7 @@ impl StablePgSession {
         let Some(connection) = state.connection.as_mut() else {
             return Ok(false);
         };
-        let result = sea_orm::sqlx::query(
-            "SELECT pg_advisory_unlock(hashtext($1)) AS unlocked",
-        )
+        let result = sea_orm::sqlx::query("SELECT pg_advisory_unlock(hashtext($1)) AS unlocked")
             .bind(format!("akh:{akh_id}"))
             .fetch_one(connection)
             .await

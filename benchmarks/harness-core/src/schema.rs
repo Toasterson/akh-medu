@@ -414,7 +414,9 @@ pub enum TaskOutcome {
     Pass,
     Fail,
     /// Stopped early by a per-run budget cap (tokens/requests/wall-clock).
-    Aborted { reason: String },
+    Aborted {
+        reason: String,
+    },
 }
 
 impl TaskOutcome {

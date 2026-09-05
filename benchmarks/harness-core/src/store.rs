@@ -39,10 +39,16 @@ pub fn write_run(results_root: &Path, record: &RunRecord) -> HarnessResult<PathB
 
     let run_path = dir.join(RUN_FILE);
     let mut body = String::new();
-    body.push_str(&to_json_line("RunLine::Header", &RunLine::Header(record.header.clone()))?);
+    body.push_str(&to_json_line(
+        "RunLine::Header",
+        &RunLine::Header(record.header.clone()),
+    )?);
     body.push('\n');
     for task in &record.tasks {
-        body.push_str(&to_json_line("RunLine::Task", &RunLine::Task(task.clone()))?);
+        body.push_str(&to_json_line(
+            "RunLine::Task",
+            &RunLine::Task(task.clone()),
+        )?);
         body.push('\n');
     }
     body.push_str(&to_json_line(
@@ -56,9 +62,11 @@ pub fn write_run(results_root: &Path, record: &RunRecord) -> HarnessResult<PathB
     })?;
 
     let summary_path = dir.join(SUMMARY_FILE);
-    fs::write(&summary_path, render_summary_markdown(record)).map_err(|source| HarnessError::Io {
-        path: summary_path,
-        source,
+    fs::write(&summary_path, render_summary_markdown(record)).map_err(|source| {
+        HarnessError::Io {
+            path: summary_path,
+            source,
+        }
     })?;
 
     Ok(dir)
@@ -71,7 +79,9 @@ pub fn write_run(results_root: &Path, record: &RunRecord) -> HarnessResult<PathB
 pub fn read_run(dir: &Path) -> HarnessResult<RunRecord> {
     let run_path = dir.join(RUN_FILE);
     if !run_path.is_file() {
-        return Err(HarnessError::MissingRunFile { path: dir.to_path_buf() });
+        return Err(HarnessError::MissingRunFile {
+            path: dir.to_path_buf(),
+        });
     }
     let content = fs::read_to_string(&run_path).map_err(|source| HarnessError::Io {
         path: run_path.clone(),
@@ -93,7 +103,9 @@ pub fn read_run(dir: &Path) -> HarnessResult<RunRecord> {
         match parsed {
             RunLine::Header(h) => {
                 if header.is_some() {
-                    return Err(HarnessError::DuplicateHeader { path: run_path.clone() });
+                    return Err(HarnessError::DuplicateHeader {
+                        path: run_path.clone(),
+                    });
                 }
                 header = Some(h);
             }
@@ -104,7 +116,9 @@ pub fn read_run(dir: &Path) -> HarnessResult<RunRecord> {
         }
     }
 
-    let header = header.ok_or_else(|| HarnessError::MissingHeader { path: run_path.clone() })?;
+    let header = header.ok_or_else(|| HarnessError::MissingHeader {
+        path: run_path.clone(),
+    })?;
     Ok(RunRecord { header, tasks })
 }
 
@@ -188,19 +202,37 @@ pub fn render_summary_markdown(record: &RunRecord) -> String {
     );
     out.push('\n');
 
-    let _ = writeln!(out, "- **Harness git SHA**: `{}`", record.header.harness_git_sha);
-    let _ = writeln!(out, "- **Task-set hash**: `{}`", record.header.task_set_hash);
+    let _ = writeln!(
+        out,
+        "- **Harness git SHA**: `{}`",
+        record.header.harness_git_sha
+    );
+    let _ = writeln!(
+        out,
+        "- **Task-set hash**: `{}`",
+        record.header.task_set_hash
+    );
     match &record.header.model.backing {
         crate::schema::ModelBacking::Cloud { provider_tag } => {
             let _ = writeln!(out, "- **Model backing**: cloud (`{provider_tag}`)");
         }
-        crate::schema::ModelBacking::LocalGguf { file_name, file_hash } => {
-            let _ = writeln!(out, "- **Model backing**: local GGUF `{file_name}` (`{file_hash}`)", file_hash = file_hash.as_str());
+        crate::schema::ModelBacking::LocalGguf {
+            file_name,
+            file_hash,
+        } => {
+            let _ = writeln!(
+                out,
+                "- **Model backing**: local GGUF `{file_name}` (`{file_hash}`)",
+                file_hash = file_hash.as_str()
+            );
         }
     }
     match &record.header.grading {
         crate::schema::GradingMode::Autonomous => {
-            let _ = writeln!(out, "- **Grading**: autonomous (deterministic `verify.sh` only, no LLM judge)");
+            let _ = writeln!(
+                out,
+                "- **Grading**: autonomous (deterministic `verify.sh` only, no LLM judge)"
+            );
         }
         crate::schema::GradingMode::Advisory(judge) => {
             let _ = writeln!(
@@ -257,8 +289,14 @@ pub fn render_summary_markdown(record: &RunRecord) -> String {
             outcome,
             t.score,
             t.wall_time.0,
-            t.usage.tokens_used.map(|v| v.to_string()).unwrap_or_default(),
-            t.usage.requests_used.map(|v| v.to_string()).unwrap_or_default(),
+            t.usage
+                .tokens_used
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            t.usage
+                .requests_used
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             t.notes.as_deref().unwrap_or(""),
         );
     }
@@ -269,11 +307,11 @@ pub fn render_summary_markdown(record: &RunRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{
-        GradingMode, HostTier, ModelBacking, ModelIdentity, ResourceUsage, TaskId, TaskOutcome, TaskSetHash,
-        WallTimeSecs,
-    };
     use crate::schema::{Blake3Hex, GitSha};
+    use crate::schema::{
+        GradingMode, HostTier, ModelBacking, ModelIdentity, ResourceUsage, TaskId, TaskOutcome,
+        TaskSetHash, WallTimeSecs,
+    };
 
     fn sample_record(harness: &str, model: &str, day: &str) -> RunRecord {
         RunRecord::new(
@@ -354,8 +392,14 @@ mod tests {
         let latest = latest_per_pair(&[older.clone(), newer.clone(), other_model.clone()]);
 
         assert_eq!(latest.len(), 2);
-        let key = (HarnessId::new("demo").unwrap(), ModelTag::new("deepseek").unwrap());
-        assert_eq!(latest.get(&key).unwrap().header.timestamp, newer.header.timestamp);
+        let key = (
+            HarnessId::new("demo").unwrap(),
+            ModelTag::new("deepseek").unwrap(),
+        );
+        assert_eq!(
+            latest.get(&key).unwrap().header.timestamp,
+            newer.header.timestamp
+        );
     }
 
     #[test]

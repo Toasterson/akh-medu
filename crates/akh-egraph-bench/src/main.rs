@@ -110,7 +110,9 @@ fn main() -> Result<()> {
         if !out.status.success() {
             return Err(miette!(
                 code = "phase40::cell_failed",
-                help = format!("re-run the failing cell directly: akh-egraph-bench cell --spec '{spec_json}'"),
+                help = format!(
+                    "re-run the failing cell directly: akh-egraph-bench cell --spec '{spec_json}'"
+                ),
                 "cell {} failed with {}: {}",
                 spec_json,
                 out.status,
@@ -192,7 +194,11 @@ fn build_grid(what: What, quick: bool, seed: u64) -> Vec<CellSpec> {
         }
         // Generous-limit sweep: what full saturation would cost without the
         // engine's guard rails (the number the ADR thresholds compare).
-        let generous_sizes: &[usize] = if quick { &[1_000] } else { &[1_000, 10_000, 100_000] };
+        let generous_sizes: &[usize] = if quick {
+            &[1_000]
+        } else {
+            &[1_000, 10_000, 100_000]
+        };
         for &n_facts in generous_sizes {
             grid.push(CellSpec::Egraph {
                 n_facts,
@@ -224,7 +230,11 @@ fn build_grid(what: What, quick: bool, seed: u64) -> Vec<CellSpec> {
     }
 
     if matches!(what, What::Hnsw | What::Both) {
-        let sizes: &[usize] = if quick { &[1_000] } else { &[1_000, 10_000, 100_000] };
+        let sizes: &[usize] = if quick {
+            &[1_000]
+        } else {
+            &[1_000, 10_000, 100_000]
+        };
         for &n_items in sizes {
             grid.push(CellSpec::Hnsw { n_items, reps: 3 });
         }
@@ -332,7 +342,9 @@ fn render_tables(results: &[CellResult]) -> String {
         s.push('\n');
     }
     if !fork_rows.is_empty() {
-        s.push_str("### Q2 fork workload (clone + perturb + re-run, medium rules, prod limits)\n\n");
+        s.push_str(
+            "### Q2 fork workload (clone + perturb + re-run, medium rules, prod limits)\n\n",
+        );
         s.push_str(
             "| n_facts | forks | base sat ms | fork p50 ms | fork max ms | total ms | peak RSS MiB |\n",
         );

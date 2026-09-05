@@ -54,9 +54,17 @@ async fn recover_for_seed(url: &str, seed: u64) {
         })
         .unwrap(),
     );
-    let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap().id;
+    let is_a = engine
+        .create_symbol(SymbolKind::Relation, "is-a")
+        .unwrap()
+        .id;
     let ents: Vec<_> = (0..6)
-        .map(|i| engine.create_symbol(SymbolKind::Entity, &format!("E{i}")).unwrap().id)
+        .map(|i| {
+            engine
+                .create_symbol(SymbolKind::Entity, &format!("E{i}"))
+                .unwrap()
+                .id
+        })
         .collect();
 
     // Seed a small pre-snapshot triple set among the test entities.
@@ -112,7 +120,9 @@ async fn recover_for_seed(url: &str, seed: u64) {
             model.remove(&key);
         }
     }
-    append_mutations(&db, akh_id, workspace_id, &tail).await.unwrap();
+    append_mutations(&db, akh_id, workspace_id, &tail)
+        .await
+        .unwrap();
 
     // --- "Kill" the source (drop the engine) and wake on a fresh dir ---
     drop(agent);

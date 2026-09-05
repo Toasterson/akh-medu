@@ -19,10 +19,10 @@ pub mod error;
 pub mod ingest;
 pub mod mcp;
 pub mod migration;
-pub mod query;
-pub mod scripts;
 /// Phase 38i: OTLP tracing skeleton for seshd.
 pub mod observability;
+pub mod query;
+pub mod scripts;
 
 pub use config::SeshatConfig;
 pub use error::{SeshatError, SeshatResult};

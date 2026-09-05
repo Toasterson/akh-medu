@@ -15,9 +15,7 @@ use akh_medu::agent::{Agent, AgentConfig};
 use akh_medu::chat::{ChatProcessor, SessionContext};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::grammar::style_transform::{CommunicationRegister, apply_register};
-use akh_medu::grammar::{
-    AbsTree, AggregationConfig, GrammarRegistry, aggregate_statements,
-};
+use akh_medu::grammar::{AbsTree, AggregationConfig, GrammarRegistry, aggregate_statements};
 use akh_medu::graph::Triple;
 use akh_medu::message::AkhMessage;
 use akh_medu::nlu::NluPipeline;
@@ -85,7 +83,10 @@ fn aggregated_through_terse_grammar() {
     let registry = GrammarRegistry::new();
     let aggregated = aggregate_statements(&dog_facts(), &AggregationConfig::default());
     let prose = registry.linearize("terse", &aggregated[0]).unwrap();
-    assert_eq!(prose, "dog → {is-a → mammal; has-a → fur, tail; lives-in → forests}");
+    assert_eq!(
+        prose,
+        "dog → {is-a → mammal; has-a → fur, tail; lives-in → forests}"
+    );
 }
 
 #[test]
@@ -270,7 +271,10 @@ fn grounded_chat_path_aggregation_composes_with_communicative() {
     // Aggregation (33a) runs before the communicative pipeline (34); the
     // styled output must still contain grounded, aggregated content.
     let out = chat_response("What is a dog?", true);
-    assert!(!out.is_empty(), "communicative grounded query produced no narrative");
+    assert!(
+        !out.is_empty(),
+        "communicative grounded query produced no narrative"
+    );
     assert!(
         out.to_lowercase().contains("mammal"),
         "grounded content missing from styled output: {out}"

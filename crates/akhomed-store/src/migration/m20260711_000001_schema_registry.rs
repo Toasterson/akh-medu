@@ -49,7 +49,11 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(SchemaRegistry::Scope).text().not_null())
                     .col(ColumnDef::new(SchemaRegistry::SourceUrl).text())
                     .col(ColumnDef::new(SchemaRegistry::Checksum).text().not_null())
-                    .col(ColumnDef::new(SchemaRegistry::ConfirmedBy).text().not_null())
+                    .col(
+                        ColumnDef::new(SchemaRegistry::ConfirmedBy)
+                            .text()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(SchemaRegistry::Blob).binary().not_null())
                     .col(
                         ColumnDef::new(SchemaRegistry::CreatedAt)

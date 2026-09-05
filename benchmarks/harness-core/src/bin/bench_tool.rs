@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use harness_core::hash::{TaskFile, hash_task_set, hash_task_set_dir};
 use harness_core::schema::{
-    GitSha, GradingMode, HarnessId, HostTier, JudgeInfo, ModelBacking, ModelIdentity, ModelTag, ResourceUsage,
-    RunRecord, TaskId, TaskOutcome, TaskResult, TaskSetHash, WallTimeSecs,
+    GitSha, GradingMode, HarnessId, HostTier, JudgeInfo, ModelBacking, ModelIdentity, ModelTag,
+    ResourceUsage, RunRecord, TaskId, TaskOutcome, TaskResult, TaskSetHash, WallTimeSecs,
 };
 use harness_core::{leaderboard, site, store};
 use miette::{Context, IntoDiagnostic, Result, miette};
@@ -175,9 +175,19 @@ fn synthetic_unit(seed: u64, index: usize, salt: &str) -> f64 {
     (v as f64) / ((1u64 << 53) as f64)
 }
 
-fn record_synthetic(harness: &str, model: &str, results_dir: &PathBuf, seed: u64, n_tasks: usize) -> Result<()> {
-    let harness_id = HarnessId::new(harness).into_diagnostic().wrap_err("invalid --harness slug")?;
-    let model_tag = ModelTag::new(model).into_diagnostic().wrap_err("invalid --model slug")?;
+fn record_synthetic(
+    harness: &str,
+    model: &str,
+    results_dir: &PathBuf,
+    seed: u64,
+    n_tasks: usize,
+) -> Result<()> {
+    let harness_id = HarnessId::new(harness)
+        .into_diagnostic()
+        .wrap_err("invalid --harness slug")?;
+    let model_tag = ModelTag::new(model)
+        .into_diagnostic()
+        .wrap_err("invalid --model slug")?;
 
     let task_files: Vec<TaskFile> = (0..n_tasks.max(1))
         .map(|i| TaskFile {
@@ -277,17 +287,29 @@ fn record_run(
     host_tier: &str,
     repo_dir: Option<&std::path::Path>,
 ) -> Result<()> {
-    let harness_id = HarnessId::new(harness).into_diagnostic().wrap_err("invalid --harness slug")?;
-    let model_tag = ModelTag::new(model).into_diagnostic().wrap_err("invalid --model slug")?;
+    let harness_id = HarnessId::new(harness)
+        .into_diagnostic()
+        .wrap_err("invalid --harness slug")?;
+    let model_tag = ModelTag::new(model)
+        .into_diagnostic()
+        .wrap_err("invalid --model slug")?;
 
     let raw_json = std::fs::read_to_string(tasks_json)
         .into_diagnostic()
         .wrap_err_with(|| format!("reading {}", tasks_json.display()))?;
     let raw_rows: Vec<RawTaskRow> = serde_json::from_str(&raw_json)
         .into_diagnostic()
-        .wrap_err_with(|| format!("parsing {} as a JSON array of task rows", tasks_json.display()))?;
+        .wrap_err_with(|| {
+            format!(
+                "parsing {} as a JSON array of task rows",
+                tasks_json.display()
+            )
+        })?;
     if raw_rows.is_empty() {
-        return Err(miette!("{} contains zero task rows — nothing to record", tasks_json.display()));
+        return Err(miette!(
+            "{} contains zero task rows — nothing to record",
+            tasks_json.display()
+        ));
     }
 
     let mut tasks = Vec::with_capacity(raw_rows.len());
@@ -296,7 +318,10 @@ fn record_run(
             "pass" => TaskOutcome::Pass,
             "fail" => TaskOutcome::Fail,
             "aborted" => TaskOutcome::Aborted {
-                reason: row.abort_reason.clone().unwrap_or_else(|| "unspecified".to_string()),
+                reason: row
+                    .abort_reason
+                    .clone()
+                    .unwrap_or_else(|| "unspecified".to_string()),
             },
             other => {
                 return Err(miette!(
@@ -336,8 +361,8 @@ fn record_run(
     let grading_mode = match grading {
         "autonomous" => GradingMode::Autonomous,
         "advisory" => {
-            let judge_model = judge_model
-                .ok_or_else(|| miette!("--grading advisory requires --judge-model"))?;
+            let judge_model =
+                judge_model.ok_or_else(|| miette!("--grading advisory requires --judge-model"))?;
             let judge_tag = ModelTag::new(judge_model)
                 .into_diagnostic()
                 .wrap_err("invalid --judge-model slug")?;
@@ -346,7 +371,12 @@ fn record_run(
                 rotation_seed,
             })
         }
-        other => return Err(miette!("unknown --grading {:?} (expected autonomous|advisory)", other)),
+        other => {
+            return Err(miette!(
+                "unknown --grading {:?} (expected autonomous|advisory)",
+                other
+            ));
+        }
     };
 
     let host_tier = match host_tier {
@@ -403,7 +433,11 @@ fn run_leaderboard(results_dir: &PathBuf, out: &PathBuf) -> Result<()> {
     std::fs::write(out, &md)
         .into_diagnostic()
         .wrap_err_with(|| format!("writing {}", out.display()))?;
-    println!("wrote leaderboard ({} pair(s)) to {}", latest.len(), out.display());
+    println!(
+        "wrote leaderboard ({} pair(s)) to {}",
+        latest.len(),
+        out.display()
+    );
     Ok(())
 }
 

@@ -3,9 +3,9 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use akh_medu::simd;
+use akh_medu::vsa::Dimension;
 use akh_medu::vsa::neural_bridge::{LinearProjection, NeuralVsaBridge};
 use akh_medu::vsa::polar_quant;
-use akh_medu::vsa::Dimension;
 
 // ---------------------------------------------------------------------------
 // SIMD kernel benchmarks
@@ -31,26 +31,24 @@ fn bench_hamming_kernel(c: &mut Criterion) {
     let a = vec![0xAA_u8; len];
     let b = vec![0x55_u8; len];
 
-    c.bench_function(
-        &format!("hamming_10k_{}", kernel.isa_level()),
-        |bench| {
-            bench.iter(|| black_box(kernel.hamming_distance(black_box(&a), black_box(&b))))
-        },
-    );
+    c.bench_function(&format!("hamming_10k_{}", kernel.isa_level()), |bench| {
+        bench.iter(|| black_box(kernel.hamming_distance(black_box(&a), black_box(&b))))
+    });
 }
 
 fn bench_cosine_kernel(c: &mut Criterion) {
     let kernel = simd::best_kernel();
     let len = 10_000;
-    let a: Vec<i8> = (0..len).map(|i| ((i % 127) as i8).wrapping_sub(64)).collect();
-    let b: Vec<i8> = (0..len).map(|i| ((i * 3 % 127) as i8).wrapping_sub(64)).collect();
+    let a: Vec<i8> = (0..len)
+        .map(|i| ((i % 127) as i8).wrapping_sub(64))
+        .collect();
+    let b: Vec<i8> = (0..len)
+        .map(|i| ((i * 3 % 127) as i8).wrapping_sub(64))
+        .collect();
 
-    c.bench_function(
-        &format!("cosine_i8_10k_{}", kernel.isa_level()),
-        |bench| {
-            bench.iter(|| black_box(kernel.cosine_similarity_i8(black_box(&a), black_box(&b))))
-        },
-    );
+    c.bench_function(&format!("cosine_i8_10k_{}", kernel.isa_level()), |bench| {
+        bench.iter(|| black_box(kernel.cosine_similarity_i8(black_box(&a), black_box(&b))))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -148,11 +146,7 @@ criterion_group!(
     bench_cosine_kernel,
 );
 
-criterion_group!(
-    fwht_benches,
-    bench_fwht_1024,
-    bench_fwht_16384,
-);
+criterion_group!(fwht_benches, bench_fwht_1024, bench_fwht_16384,);
 
 criterion_group!(
     polar_quant_benches,
@@ -168,4 +162,9 @@ criterion_group!(
     bench_neural_bridge_confidence,
 );
 
-criterion_main!(simd_benches, fwht_benches, polar_quant_benches, neural_bridge_benches);
+criterion_main!(
+    simd_benches,
+    fwht_benches,
+    polar_quant_benches,
+    neural_bridge_benches
+);

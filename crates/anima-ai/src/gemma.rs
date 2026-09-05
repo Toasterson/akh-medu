@@ -116,7 +116,8 @@ impl SemanticCache {
 
     /// Drop all entries whose TTL has expired.
     pub fn evict_stale(&mut self) {
-        self.entries.retain(|_, e| e.inserted_at.elapsed() < self.ttl);
+        self.entries
+            .retain(|_, e| e.inserted_at.elapsed() < self.ttl);
     }
 
     /// Number of live (non-expired) entries.
@@ -168,10 +169,7 @@ impl GemmaHandler {
     }
 
     /// Create a handler backed by `backend` with the given Psyche persona tone.
-    pub fn with_backend(
-        backend: Box<dyn GemmaBackend>,
-        persona_tone: impl Into<String>,
-    ) -> Self {
+    pub fn with_backend(backend: Box<dyn GemmaBackend>, persona_tone: impl Into<String>) -> Self {
         Self {
             backend: Some(backend),
             cache: SemanticCache::default(),

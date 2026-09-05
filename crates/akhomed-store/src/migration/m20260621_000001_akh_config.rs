@@ -53,17 +53,37 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(AkhConfig::MaxMemoryMb).big_integer().not_null())
-                    .col(ColumnDef::new(AkhConfig::MaxSymbols).big_integer().not_null())
-                    .col(ColumnDef::new(AkhConfig::MaxTriples).big_integer().not_null())
-                    .col(ColumnDef::new(AkhConfig::SharedPartitions).text().not_null())
+                    .col(
+                        ColumnDef::new(AkhConfig::MaxMemoryMb)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AkhConfig::MaxSymbols)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AkhConfig::MaxTriples)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(AkhConfig::SharedPartitions)
+                            .text()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AkhConfig::Model).text().null())
                     .col(ColumnDef::new(AkhConfig::ReasoningEffort).text().null())
                     .col(ColumnDef::new(AkhConfig::SystemPrompt).text().null())
                     .col(ColumnDef::new(AkhConfig::IsMain).boolean().not_null())
                     .col(ColumnDef::new(AkhConfig::Backend).text().not_null())
                     .col(ColumnDef::new(AkhConfig::PathMode).text().not_null())
-                    .col(ColumnDef::new(AkhConfig::RelatedWorkspaces).text().not_null())
+                    .col(
+                        ColumnDef::new(AkhConfig::RelatedWorkspaces)
+                            .text()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(AkhConfig::OllamaEndpoint).text().not_null())
                     .col(ColumnDef::new(AkhConfig::Autonomy).text().not_null())
                     .col(ColumnDef::new(AkhConfig::Delegation).text().null())

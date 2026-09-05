@@ -75,7 +75,10 @@ fn main() {
         .with_port(port)
         .with_host_key_policy(HostKeyPolicy::InsecureAcceptAny)
         .with_connect_timeout(Duration::from_secs(15))
-        .with_roots(vec![PathBuf::from("/etc"), PathBuf::from("/tmp")], vec![PathBuf::from("/tmp")]);
+        .with_roots(
+            vec![PathBuf::from("/etc"), PathBuf::from("/tmp")],
+            vec![PathBuf::from("/tmp")],
+        );
 
     let backend = match RemoteBackend::connect(config) {
         Ok(b) => b,
@@ -100,13 +103,20 @@ fn main() {
     // exec: real illumos sysadmin commands over the SSH exec channel
     // -----------------------------------------------------------------
 
-    match backend.exec(ExecRequest::shell("svcs -H svc:/network/ssh", Duration::from_secs(10))) {
+    match backend.exec(ExecRequest::shell(
+        "svcs -H svc:/network/ssh",
+        Duration::from_secs(10),
+    )) {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let ok = out.success && stdout.contains("online");
             record("exec: svcs -H svc:/network/ssh (expect online)", ok, stdout);
         }
-        Err(e) => record("exec: svcs -H svc:/network/ssh", false, format!("error: {e}")),
+        Err(e) => record(
+            "exec: svcs -H svc:/network/ssh",
+            false,
+            format!("error: {e}"),
+        ),
     }
 
     match backend.exec(ExecRequest::shell("uname -s", Duration::from_secs(10))) {
@@ -139,7 +149,10 @@ fn main() {
         Err(e) => record("exec: man -k svcs", false, format!("error: {e}")),
     }
 
-    match backend.exec(ExecRequest::shell("man svcs 2>&1 | head -3", Duration::from_secs(10))) {
+    match backend.exec(ExecRequest::shell(
+        "man svcs 2>&1 | head -3",
+        Duration::from_secs(10),
+    )) {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let ok = out.success && stdout.to_uppercase().contains("SVCS");
@@ -162,7 +175,11 @@ fn main() {
                 format!("exit_code={}, success={}", out.exit_code, out.success),
             );
         }
-        Err(e) => record("exec error path: exit 42", false, format!("unexpected transport error: {e}")),
+        Err(e) => record(
+            "exec error path: exit 42",
+            false,
+            format!("unexpected transport error: {e}"),
+        ),
     }
 
     match backend.exec(ExecRequest::shell(
@@ -172,9 +189,17 @@ fn main() {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             let ok = !out.success && out.exit_code != 0;
-            record("exec error path: ls of missing path -> non-zero exit", ok, format!("exit_code={}, stderr={stderr}", out.exit_code));
+            record(
+                "exec error path: ls of missing path -> non-zero exit",
+                ok,
+                format!("exit_code={}, stderr={stderr}", out.exit_code),
+            );
         }
-        Err(e) => record("exec error path: ls missing path", false, format!("unexpected transport error: {e}")),
+        Err(e) => record(
+            "exec error path: ls missing path",
+            false,
+            format!("unexpected transport error: {e}"),
+        ),
     }
 
     // -----------------------------------------------------------------
@@ -189,8 +214,16 @@ fn main() {
     );
 
     match backend.write(probe_path, &payload) {
-        Ok(()) => record("file: write(/tmp/akh-probe-<pid>)", true, "write returned Ok".into()),
-        Err(e) => record("file: write(/tmp/akh-probe-<pid>)", false, format!("error: {e}")),
+        Ok(()) => record(
+            "file: write(/tmp/akh-probe-<pid>)",
+            true,
+            "write returned Ok".into(),
+        ),
+        Err(e) => record(
+            "file: write(/tmp/akh-probe-<pid>)",
+            false,
+            format!("error: {e}"),
+        ),
     }
 
     match backend.read_to_string(probe_path) {
@@ -202,14 +235,26 @@ fn main() {
                 format!("read {} bytes back", read_back.len()),
             );
         }
-        Err(e) => record("file: read_to_string round-trip", false, format!("error: {e}")),
+        Err(e) => record(
+            "file: read_to_string round-trip",
+            false,
+            format!("error: {e}"),
+        ),
     }
 
     let exists = backend.exists(probe_path);
-    record("file: exists(probe) == true", exists, format!("exists = {exists}"));
+    record(
+        "file: exists(probe) == true",
+        exists,
+        format!("exists = {exists}"),
+    );
 
     let is_symlink = backend.is_symlink(probe_path);
-    record("file: is_symlink(probe) == false", !is_symlink, format!("is_symlink = {is_symlink}"));
+    record(
+        "file: is_symlink(probe) == false",
+        !is_symlink,
+        format!("is_symlink = {is_symlink}"),
+    );
 
     match backend.file_size(probe_path) {
         Ok(size) => {
@@ -229,7 +274,11 @@ fn main() {
             record(
                 "file: read_dir(/etc) non-empty",
                 ok,
-                format!("{} entries, e.g. {:?}", entries.len(), entries.iter().take(3).collect::<Vec<_>>()),
+                format!(
+                    "{} entries, e.g. {:?}",
+                    entries.len(),
+                    entries.iter().take(3).collect::<Vec<_>>()
+                ),
             );
         }
         Err(e) => record("file: read_dir(/etc)", false, format!("error: {e}")),

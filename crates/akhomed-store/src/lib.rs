@@ -19,9 +19,9 @@ pub mod error;
 pub mod memberships;
 pub mod migration;
 pub mod mutations;
+mod pool;
 pub mod schema_registry;
 pub mod snapshots;
-mod pool;
 
 pub use error::{StoreError, StoreResult};
 pub use memberships::{
@@ -30,8 +30,8 @@ pub use memberships::{
 };
 pub use migration::Migrator;
 pub use mutations::{
-    MutationRow, TurnRow, append_mutations, append_mutations_fenced, ensure_akh,
-    load_turn_by_seq, load_turns_since,
+    MutationRow, TurnRow, append_mutations, append_mutations_fenced, ensure_akh, load_turn_by_seq,
+    load_turns_since,
 };
 pub use pool::{PoolOptions, StablePgSession, connect};
 pub use schema_registry::{

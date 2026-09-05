@@ -21,13 +21,9 @@ use akh_medu::snapshot::{
     write_snapshot,
 };
 use akh_medu::symbol::SymbolKind;
-use akhomed_store::sea_orm::{
-    self, ConnectionTrait, DbBackend, Statement, TransactionTrait,
-};
+use akhomed_store::sea_orm::{self, ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use akhomed_store::uuid::Uuid;
-use akhomed_store::{
-    MutationRow, append_mutations, connect, ensure_akh, run_migrations,
-};
+use akhomed_store::{MutationRow, append_mutations, connect, ensure_akh, run_migrations};
 
 async fn count(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
     let row = db
@@ -91,7 +87,9 @@ async fn snapshot_populates_relational_tables() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -109,7 +107,9 @@ async fn snapshot_populates_relational_tables() {
     let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
-    engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+    engine
+        .add_triple(&Triple::new(sun.id, is_a.id, star.id))
+        .unwrap();
 
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
 
@@ -130,7 +130,9 @@ async fn snapshot_populates_relational_tables() {
     let expected_triples = engine.all_triples().len() as i64;
     let expected_symbols = engine.dump_symbols().len() as i64;
 
-    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .expect("snapshot");
 
     assert_eq!(
         count(&db, &format!("SELECT count(*)::bigint AS c FROM akhomed_facts WHERE workspace_id = '{workspace_id}'")).await,
@@ -138,23 +140,43 @@ async fn snapshot_populates_relational_tables() {
         "facts rows must equal live KG triple count",
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*)::bigint AS c FROM akhomed_symbols WHERE akh_id = '{akh_id}'")).await,
+        count(
+            &db,
+            &format!("SELECT count(*)::bigint AS c FROM akhomed_symbols WHERE akh_id = '{akh_id}'")
+        )
+        .await,
         expected_symbols,
         "symbols rows must equal registry size",
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*)::bigint AS c FROM akhomed_drives WHERE akh_id = '{akh_id}'")).await,
+        count(
+            &db,
+            &format!("SELECT count(*)::bigint AS c FROM akhomed_drives WHERE akh_id = '{akh_id}'")
+        )
+        .await,
         4,
         "four drive rows",
     );
     assert_eq!(
-        count(&db, &format!("SELECT count(*)::bigint AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'")).await,
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"
+            )
+        )
+        .await,
         1,
         "one akh_state row",
     );
     // WAL not truncated by the snapshot.
     assert_eq!(
-        count(&db, &format!("SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh_id}'")).await,
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh_id}'"
+            )
+        )
+        .await,
         1,
         "snapshot must not truncate the WAL",
     );
@@ -172,7 +194,9 @@ async fn wake_reconstructs_identical_akh() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -191,11 +215,15 @@ async fn wake_reconstructs_identical_akh() {
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
     let planet = engine.create_symbol(SymbolKind::Entity, "Planet").unwrap();
-    engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+    engine
+        .add_triple(&Triple::new(sun.id, is_a.id, star.id))
+        .unwrap();
 
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
     ensure_akh(&db, akh_id, "wake-test", None).await.unwrap();
-    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .expect("snapshot");
 
     let src_labels = label_set(&engine);
 
@@ -259,7 +287,11 @@ async fn wake_reconstructs_identical_akh() {
 
     // cycle_count is restored via the agent:* meta the wake rebuilt.
     let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
-    assert_eq!(woken_agent.cycle_count(), 42, "cycle_count must be restored");
+    assert_eq!(
+        woken_agent.cycle_count(),
+        42,
+        "cycle_count must be restored"
+    );
 }
 
 /// Regression for the capture/watermark race: the WAL lower bound is sampled
@@ -403,7 +435,9 @@ async fn wake_preserves_provenance_links_and_allocator_identity() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -519,7 +553,9 @@ async fn open_hydrates_cold_workspace_from_store() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -537,11 +573,17 @@ async fn open_hydrates_cold_workspace_from_store() {
     let sun = engine.create_symbol(SymbolKind::Entity, "Sun").unwrap();
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
     let star = engine.create_symbol(SymbolKind::Entity, "Star").unwrap();
-    engine.add_triple(&Triple::new(sun.id, is_a.id, star.id)).unwrap();
+    engine
+        .add_triple(&Triple::new(sun.id, is_a.id, star.id))
+        .unwrap();
 
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-    ensure_akh(&db, akh_id, "open-hydrate-test", None).await.unwrap();
-    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+    ensure_akh(&db, akh_id, "open-hydrate-test", None)
+        .await
+        .unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .expect("snapshot");
 
     let src_labels = label_set(&engine);
     let src_triples = triple_set(&engine);
@@ -596,7 +638,9 @@ async fn degraded_wake_succeeds_with_missing_table() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -611,13 +655,19 @@ async fn degraded_wake_succeeds_with_missing_table() {
         .unwrap(),
     );
     let a = engine.create_symbol(SymbolKind::Entity, "Maat").unwrap();
-    let rel = engine.create_symbol(SymbolKind::Relation, "embodies").unwrap();
+    let rel = engine
+        .create_symbol(SymbolKind::Relation, "embodies")
+        .unwrap();
     let b = engine.create_symbol(SymbolKind::Entity, "Order").unwrap();
     engine.add_triple(&Triple::new(a.id, rel.id, b.id)).unwrap();
 
     let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).expect("agent");
-    ensure_akh(&db, akh_id, "degraded-test", None).await.unwrap();
-    write_snapshot(&agent, akh_id, workspace_id, &db).await.expect("snapshot");
+    ensure_akh(&db, akh_id, "degraded-test", None)
+        .await
+        .unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .expect("snapshot");
 
     let src_labels = label_set(&engine);
     let src_triples = triple_set(&engine);
@@ -634,12 +684,24 @@ async fn degraded_wake_succeeds_with_missing_table() {
         .await
         .expect("degraded wake must still succeed");
 
-    assert_eq!(label_set(&woken), src_labels, "labels intact despite missing table");
-    assert_eq!(triple_set(&woken), src_triples, "KG intact despite missing table");
+    assert_eq!(
+        label_set(&woken),
+        src_labels,
+        "labels intact despite missing table"
+    );
+    assert_eq!(
+        triple_set(&woken),
+        src_triples,
+        "KG intact despite missing table"
+    );
 
     // Resume must still work; drives fall back to defaults (4 of them).
     let woken_agent = Agent::resume(Arc::clone(&woken), AgentConfig::default()).expect("resume");
-    assert_eq!(woken_agent.drives().drives.len(), 4, "drives default-rebuilt");
+    assert_eq!(
+        woken_agent.drives().drives.len(),
+        4,
+        "drives default-rebuilt"
+    );
 }
 
 /// Force newer and older captures to queue behind the same publication lock.
@@ -652,7 +714,9 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
         eprintln!("skipping: set AKH_TEST_PG_URL");
         return;
     };
-    let db = connect(&akhomed_store::PoolOptions::new(url)).await.unwrap();
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
     run_migrations(&db).await.unwrap();
 
     let akh_id = Uuid::new_v4();
@@ -669,11 +733,15 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
         })
         .unwrap(),
     );
-    let subject = engine.create_symbol(SymbolKind::Entity, "OverlapSubject").unwrap();
+    let subject = engine
+        .create_symbol(SymbolKind::Entity, "OverlapSubject")
+        .unwrap();
     let predicate = engine
         .create_symbol(SymbolKind::Relation, "overlap-predicate")
         .unwrap();
-    let object = engine.create_symbol(SymbolKind::Entity, "OverlapObject").unwrap();
+    let object = engine
+        .create_symbol(SymbolKind::Entity, "OverlapObject")
+        .unwrap();
     engine
         .add_triple(&Triple::new(subject.id, predicate.id, object.id))
         .unwrap();
@@ -693,8 +761,7 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
     let old_watermark = akhomed_store::snapshots::current_watermark(&db, akh_id)
         .await
         .unwrap();
-    let old = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, old_watermark)
-        .unwrap();
+    let old = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, old_watermark).unwrap();
 
     engine
         .remove_triple(subject.id, predicate.id, object.id)
@@ -718,8 +785,7 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
         .await
         .unwrap();
     assert!(new_watermark > old_watermark);
-    let new = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, new_watermark)
-        .unwrap();
+    let new = capture_snapshot_at_watermark(&agent, akh_id, workspace_id, new_watermark).unwrap();
 
     let blocker = db.begin().await.unwrap();
     blocker
@@ -741,7 +807,10 @@ async fn overlapping_snapshot_publishers_reject_stale_retraction_image() {
     wait_for_advisory_waiters(&db, baseline_waiters + 2).await;
     blocker.commit().await.unwrap();
 
-    newer.await.unwrap().expect("newer snapshot publishes first");
+    newer
+        .await
+        .unwrap()
+        .expect("newer snapshot publishes first");
     let stale = older
         .await
         .unwrap()
@@ -788,11 +857,15 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
         .unwrap();
 
     let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
-    let subject = engine.create_symbol(SymbolKind::Entity, "FenceSubject").unwrap();
+    let subject = engine
+        .create_symbol(SymbolKind::Entity, "FenceSubject")
+        .unwrap();
     let predicate = engine
         .create_symbol(SymbolKind::Relation, "fence-predicate")
         .unwrap();
-    let object = engine.create_symbol(SymbolKind::Entity, "FenceObject").unwrap();
+    let object = engine
+        .create_symbol(SymbolKind::Entity, "FenceObject")
+        .unwrap();
     engine
         .add_triple(&Triple::new(subject.id, predicate.id, object.id))
         .unwrap();
@@ -801,43 +874,38 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
         .await
         .unwrap();
 
-    let old_session = akhomed_store::StablePgSession::connect(&opts).await.unwrap();
+    let old_session = akhomed_store::StablePgSession::connect(&opts)
+        .await
+        .unwrap();
     assert!(old_session.try_acquire_akh_lock(akh_id).await.unwrap());
     let old_epoch = old_session
         .claim_akh_residency(akh_id, workspace_id)
         .await
         .unwrap();
-    let stale = capture_snapshot_at_fence(
-        &agent,
-        akh_id,
-        workspace_id,
-        watermark,
-        old_epoch,
-    )
-    .unwrap();
+    let stale =
+        capture_snapshot_at_fence(&agent, akh_id, workspace_id, watermark, old_epoch).unwrap();
     engine
         .remove_triple(subject.id, predicate.id, object.id)
         .unwrap();
     assert!(old_session.release_akh_lock(akh_id).await.unwrap());
-    let new_session = akhomed_store::StablePgSession::connect(&opts).await.unwrap();
+    let new_session = akhomed_store::StablePgSession::connect(&opts)
+        .await
+        .unwrap();
     assert!(new_session.try_acquire_akh_lock(akh_id).await.unwrap());
     let new_epoch = new_session
         .claim_akh_residency(akh_id, workspace_id)
         .await
         .unwrap();
-    let current = capture_snapshot_at_fence(
-        &agent,
-        akh_id,
-        workspace_id,
-        watermark,
-        new_epoch,
-    )
-    .unwrap();
+    let current =
+        capture_snapshot_at_fence(&agent, akh_id, workspace_id, watermark, new_epoch).unwrap();
     persist_snapshot(current, &db).await.unwrap();
     let error = persist_snapshot(stale, &db)
         .await
         .expect_err("previous owner must be fenced at equal watermark");
-    assert!(error.to_string().contains("stale snapshot owner"), "{error}");
+    assert!(
+        error.to_string().contains("stale snapshot owner"),
+        "{error}"
+    );
     assert!(
         akhomed_store::snapshots::load_workspace_facts(&db, workspace_id)
             .await

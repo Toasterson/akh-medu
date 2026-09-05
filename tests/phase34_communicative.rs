@@ -150,7 +150,10 @@ fn same_query_three_psyches_three_beings() {
     //    taxonomic triples.
     assert!(
         matches!(
-            b.content.primary.first().map(|t| t.predicate_label.as_str()),
+            b.content
+                .primary
+                .first()
+                .map(|t| t.predicate_label.as_str()),
             Some("is-a") | Some("part-of") | Some("similar-to")
         ),
         "contextualization leads taxonomic"
@@ -225,8 +228,7 @@ fn chat_processor_carries_psyche_style_end_to_end() {
     // Archetype framing markers survive the whole pipeline (constraint
     // check + rendering).
     assert!(
-        sage_out.contains("Let me explain.")
-            || sage_out.contains("Does that clarify things?"),
+        sage_out.contains("Let me explain.") || sage_out.contains("Does that clarify things?"),
         "sage marker missing from wired output: {sage_out}"
     );
     assert!(
@@ -250,7 +252,12 @@ fn communicative_flag_off_restores_plain_grounding() {
     processor.set_create_goal(false);
     processor.set_communicative(false);
 
-    let msgs = processor.process_input(&mut SessionContext::new(), "What is a dog?", &mut agent, &engine);
+    let msgs = processor.process_input(
+        &mut SessionContext::new(),
+        "What is a dog?",
+        &mut agent,
+        &engine,
+    );
     let text: String = msgs
         .iter()
         .filter_map(|m| match m {

@@ -58,7 +58,7 @@ mod inner {
     use akh_medu::engine::{Engine, EngineConfig};
     use akh_medu::graph::Triple;
     use akh_medu::message::{AkhMessage, MessageSink};
-    use akh_medu::nlu::kg_context::{build_kg_context, KgContextCache};
+    use akh_medu::nlu::kg_context::{KgContextCache, build_kg_context};
     use akh_medu::symbol::SymbolKind;
 
     use clap::Parser;
@@ -79,8 +79,7 @@ mod inner {
     /// Absolute path (this worktree does not carry the gitignored key —
     /// `tests/vm/.keys/` is per-checkout-generated) to the exec1 root key
     /// staged on the box this example is meant to run from.
-    const DEFAULT_KEY_PATH: &str =
-        "/home/toasty/ws/agi/akh-medu/tests/vm/.keys/root_ed25519";
+    const DEFAULT_KEY_PATH: &str = "/home/toasty/ws/agi/akh-medu/tests/vm/.keys/root_ed25519";
 
     /// The VM image recipe exec1 was baked from (Phase 50 W1d) — hashed for
     /// `VmRecipeHash` so a run record names *which* guest image it targeted.
@@ -313,7 +312,8 @@ mod inner {
         head.chars()
             .map(|c| {
                 let c = c.to_ascii_lowercase();
-                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_' {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_'
+                {
                     c
                 } else {
                     '-'
@@ -324,12 +324,17 @@ mod inner {
 
     /// Parse `user@host:port` (the same shape `phase50_remote_exec1.rs` uses).
     fn parse_exec1_spec(spec: &str) -> Result<(String, String, u16), RunnerError> {
-        let (user, host_port) =
-            spec.split_once('@')
-                .ok_or_else(|| RunnerError::BadExec1Spec { value: spec.to_string() })?;
-        let (host, port_str) = host_port
-            .rsplit_once(':')
-            .ok_or_else(|| RunnerError::BadExec1Spec { value: spec.to_string() })?;
+        let (user, host_port) = spec
+            .split_once('@')
+            .ok_or_else(|| RunnerError::BadExec1Spec {
+                value: spec.to_string(),
+            })?;
+        let (host, port_str) =
+            host_port
+                .rsplit_once(':')
+                .ok_or_else(|| RunnerError::BadExec1Spec {
+                    value: spec.to_string(),
+                })?;
         let port: u16 = port_str.parse().map_err(|source| RunnerError::BadPort {
             value: port_str.to_string(),
             source,
@@ -346,7 +351,11 @@ mod inner {
         fn emit(&self, msg: &AkhMessage) {
             match msg {
                 AkhMessage::Reasoning { step, .. } => println!("    [think] {step}"),
-                AkhMessage::ToolResult { tool, success, output } => {
+                AkhMessage::ToolResult {
+                    tool,
+                    success,
+                    output,
+                } => {
                     let mark = if *success { "ok" } else { "FAIL" };
                     println!("    [tool {mark} {tool}] {}", output.replace('\n', " "));
                 }
@@ -396,7 +405,8 @@ mod inner {
     fn mentions_manpage_lookup(params_summary: &str, page: &str) -> bool {
         let lower = params_summary.to_ascii_lowercase();
         let page_lower = page.to_ascii_lowercase();
-        let has_lookup_verb = lower.contains("man ") || lower.contains("man\\\"") || lower.contains("apropos");
+        let has_lookup_verb =
+            lower.contains("man ") || lower.contains("man\\\"") || lower.contains("apropos");
         if !has_lookup_verb {
             return false;
         }
@@ -494,7 +504,8 @@ mod inner {
         timeout: Duration,
         use_compacting: bool,
     ) -> miette::Result<(bool, bool)> {
-        let mut agent = Agent::with_backend(Arc::clone(&engine), AgentConfig::default(), Some(backend))?;
+        let mut agent =
+            Agent::with_backend(Arc::clone(&engine), AgentConfig::default(), Some(backend))?;
         agent.set_chat_backend(Arc::new(OllamaChatBackend::new(Arc::clone(&mgr))));
         // Full-harness path: attach the Phase-44 curating manager so the
         // pre-seeded KG + recalled memory are injected into the prompt.
@@ -510,7 +521,14 @@ mod inner {
         let engine_for_thread = Arc::clone(&engine);
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::spawn(move || {
-            let outcome = agent.run_agentic_turn(&engine_for_thread, &agent_id, &prompt, &TraceSink, &cancel, true);
+            let outcome = agent.run_agentic_turn(
+                &engine_for_thread,
+                &agent_id,
+                &prompt,
+                &TraceSink,
+                &cancel,
+                true,
+            );
             let _ = tx.send(outcome.is_some());
         });
 
@@ -546,8 +564,22 @@ mod inner {
         println!("key          : {}", cli.key.display());
         println!("model        : {} (slug {model_slug})", cli.model);
         println!("tasks-dir    : {}", cli.tasks_dir.display());
-        println!("context      : {} ({})", cli.context_strategy, if use_compacting { "FULL HARNESS — KG/recall injected" } else { "baseline — KG/recall discarded" });
-        println!("kg-fixture   : {}", cli.kg_fixture.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".to_string()));
+        println!(
+            "context      : {} ({})",
+            cli.context_strategy,
+            if use_compacting {
+                "FULL HARNESS — KG/recall injected"
+            } else {
+                "baseline — KG/recall discarded"
+            }
+        );
+        println!(
+            "kg-fixture   : {}",
+            cli.kg_fixture
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string())
+        );
         println!("dry-run      : {}", cli.dry_run);
         println!();
 
@@ -595,11 +627,14 @@ mod inner {
             // validated `phase50_remote_exec1.rs` construction rather than
             // the blueprint's placeholder.
             .with_host_key_policy(HostKeyPolicy::InsecureAcceptAny)
-            .with_roots(vec![PathBuf::from("/")], vec![
-                PathBuf::from("/tmp"),
-                PathBuf::from("/opt"),
-                PathBuf::from("/var"),
-            ])
+            .with_roots(
+                vec![PathBuf::from("/")],
+                vec![
+                    PathBuf::from("/tmp"),
+                    PathBuf::from("/opt"),
+                    PathBuf::from("/var"),
+                ],
+            )
             .with_connect_timeout(Duration::from_secs(15));
         let backend: Arc<dyn Backend> = Arc::new(RemoteBackend::connect(config)?);
         println!("PASS  connected to exec1\n");
@@ -635,7 +670,9 @@ mod inner {
                 println!("    ABORT: {note}");
                 task_results.push(TaskResult::new(
                     TaskId::new(task_id.clone())?,
-                    TaskOutcome::Aborted { reason: note.clone() },
+                    TaskOutcome::Aborted {
+                        reason: note.clone(),
+                    },
                     0.0,
                     WallTimeSecs::from_duration(task_start.elapsed()),
                     ResourceUsage::none(),
@@ -651,7 +688,8 @@ mod inner {
             let mut drive_note: Option<String> = None;
 
             if !cli.dry_run {
-                let scratch = std::env::temp_dir().join(format!("akh-w3-{task_id}-{}", std::process::id()));
+                let scratch =
+                    std::env::temp_dir().join(format!("akh-w3-{task_id}-{}", std::process::id()));
                 let engine = Arc::new(Engine::new(EngineConfig {
                     data_dir: Some(scratch),
                     ..Default::default()
@@ -662,18 +700,26 @@ mod inner {
                 // proves grounding fired and on what).
                 if let Some(fixture_path) = &cli.kg_fixture {
                     let n = load_kg_fixture(&engine, fixture_path)?;
-                    println!("    [harness] seeded {n} KG facts from {}", fixture_path.display());
+                    println!(
+                        "    [harness] seeded {n} KG facts from {}",
+                        fixture_path.display()
+                    );
                     if use_compacting {
                         let mut cache = KgContextCache::new();
                         match build_kg_context(&engine, &prompt_md, &mut cache) {
                             Some(block) => {
                                 let lines: Vec<&str> = block.lines().collect();
-                                println!("    [harness] KG grounding fired — {} line(s) injected:", lines.len().saturating_sub(1));
+                                println!(
+                                    "    [harness] KG grounding fired — {} line(s) injected:",
+                                    lines.len().saturating_sub(1)
+                                );
                                 for line in lines.iter().filter(|l| l.starts_with("- ")) {
                                     println!("      {line}");
                                 }
                             }
-                            None => println!("    [harness] KG grounding produced NO block for this prompt (no keyword match)"),
+                            None => println!(
+                                "    [harness] KG grounding produced NO block for this prompt (no keyword match)"
+                            ),
                         }
                     }
                 }
@@ -708,7 +754,10 @@ mod inner {
                 if !completed_in_time {
                     drive_note = Some("turn exceeded timeout_secs — best-effort abort".to_string());
                 } else if !turn_ok {
-                    drive_note = Some("no usable chat backend (Ollama unreachable / model unavailable)".to_string());
+                    drive_note = Some(
+                        "no usable chat backend (Ollama unreachable / model unavailable)"
+                            .to_string(),
+                    );
                 }
                 manpage_note = Some(grade_manpages(&engine, &meta.expected_manpages));
             }
@@ -751,7 +800,8 @@ mod inner {
                 notes.push(n);
             }
             if cli.dry_run {
-                notes.push("dry-run: setup+verify plumbing exercised, model not driven".to_string());
+                notes
+                    .push("dry-run: setup+verify plumbing exercised, model not driven".to_string());
             }
 
             task_results.push(TaskResult::new(
@@ -777,7 +827,8 @@ mod inner {
             path: recipe_path.clone(),
             source,
         })?;
-        let recipe_hash = VmRecipeHash::from_blake3(Blake3Hex::from_hash(blake3::hash(&recipe_bytes)));
+        let recipe_hash =
+            VmRecipeHash::from_blake3(Blake3Hex::from_hash(blake3::hash(&recipe_bytes)));
 
         let record = RunRecord::new(
             chrono::Utc::now(),
@@ -800,7 +851,10 @@ mod inner {
 
         let dir = harness_core::store::write_run(&cli.results, &record)?;
         let summary = record.summary();
-        println!("\n=== SUMMARY: {}/{} passed, mean score {:.3} ===", summary.passed, summary.total_tasks, summary.mean_score);
+        println!(
+            "\n=== SUMMARY: {}/{} passed, mean score {:.3} ===",
+            summary.passed, summary.total_tasks, summary.mean_score
+        );
         println!("wrote {}", dir.display());
 
         Ok(())

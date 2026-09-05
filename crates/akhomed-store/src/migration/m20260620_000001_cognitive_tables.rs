@@ -48,7 +48,11 @@ impl MigrationTrait for Migration {
                     .col(col("last_triple_count").big_integer().not_null())
                     .col(col("last_symbol_count").big_integer().not_null())
                     .col(col("threshold").float().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("kind")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("kind")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -63,7 +67,11 @@ impl MigrationTrait for Migration {
                     .col(col("project_id").big_integer().not_null())
                     .col(col("priority").small_integer().not_null())
                     .col(col("is_active").boolean().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("project_id")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("project_id")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -103,7 +111,11 @@ impl MigrationTrait for Migration {
                     .col(col("last_progress_cycle").big_integer().not_null())
                     .col(col("source").text())
                     .col(col("detail").json())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("id")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("id")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -184,7 +196,11 @@ impl MigrationTrait for Migration {
                     .col(col("resolved").boolean().not_null())
                     .col(col("resolution_tool").text())
                     .col(col("vector").binary().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("seq")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("seq")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -203,7 +219,11 @@ impl MigrationTrait for Migration {
                     .col(col("succeeded").boolean().not_null())
                     .col(col("tool_usage").json().not_null())
                     .col(col("initial_coverage").integer().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("seq")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("seq")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -226,7 +246,11 @@ impl MigrationTrait for Migration {
                     .col(col("learned_at").big_integer().not_null())
                     .col(col("last_used").big_integer().not_null())
                     .col(col("source_goal_description").text().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("id")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("id")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -274,7 +298,11 @@ impl MigrationTrait for Migration {
                     .col(col("tool").text().not_null())
                     .col(col("successes").integer().not_null())
                     .col(col("attempts").integer().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("tool")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("tool")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -289,7 +317,11 @@ impl MigrationTrait for Migration {
                     .col(col("category").text().not_null())
                     .col(col("completed").integer().not_null())
                     .col(col("attempted").integer().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("category")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("category")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -304,7 +336,11 @@ impl MigrationTrait for Migration {
                     .col(col("seq").integer().not_null())
                     .col(col("predicted").float().not_null())
                     .col(col("actual").float().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("seq")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("seq")),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -323,7 +359,11 @@ impl MigrationTrait for Migration {
                     .col(col("dream_connections_found").integer().not_null())
                     .col(col("equivalences_discovered").integer().not_null())
                     .col(col("duration_cycles").big_integer().not_null())
-                    .primary_key(Index::create().col(Alias::new("akh_id")).col(Alias::new("cycle")))
+                    .primary_key(
+                        Index::create()
+                            .col(Alias::new("akh_id"))
+                            .col(Alias::new("cycle")),
+                    )
                     .to_owned(),
             )
             .await?;

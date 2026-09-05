@@ -14,9 +14,13 @@ fn main() {
             // Short greedy generation to judge coherence quickly. The backend
             // prepends the leading BOS for Gemma; Gemma 4 uses the `<|turn>` chat
             // format. Override with PROMPT / NTOK for ad-hoc testing.
-            let prompt = std::env::var("PROMPT")
-                .unwrap_or_else(|_| "<|turn>user\nName three colors.<turn|>\n<|turn>model\n".to_string());
-            let ntok: u32 = std::env::var("NTOK").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
+            let prompt = std::env::var("PROMPT").unwrap_or_else(|_| {
+                "<|turn>user\nName three colors.<turn|>\n<|turn>model\n".to_string()
+            });
+            let ntok: u32 = std::env::var("NTOK")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(32);
             eprintln!("--- generate ({ntok} tok) ---");
             match b.generate(&prompt, ntok) {
                 Ok(text) => eprintln!("OUT: {text:?}"),

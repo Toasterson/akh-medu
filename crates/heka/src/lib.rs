@@ -21,8 +21,8 @@
 //!
 //! See `migrations/20260427_000001_init.sql` for the full DDL.
 
-pub mod chunker;
 pub mod capture;
+pub mod chunker;
 pub mod config;
 #[cfg(feature = "embedding")]
 pub mod embed_worker;

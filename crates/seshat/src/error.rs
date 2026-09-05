@@ -21,7 +21,9 @@ pub enum SeshatError {
     #[error("migration error: {0}")]
     #[diagnostic(
         code(seshat::migration),
-        help("Ensure the database user has CREATE TABLE privileges and pgvector extension is available")
+        help(
+            "Ensure the database user has CREATE TABLE privileges and pgvector extension is available"
+        )
     )]
     Migration(String),
 
@@ -76,7 +78,9 @@ pub enum SeshatError {
     #[error("no chunks found matching query: {query}")]
     #[diagnostic(
         code(seshat::empty_search),
-        help("The corpus may not contain relevant content, or embeddings may still be processing. Check `seshat_status`.")
+        help(
+            "The corpus may not contain relevant content, or embeddings may still be processing. Check `seshat_status`."
+        )
     )]
     EmptySearch { query: String },
 

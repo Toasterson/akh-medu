@@ -26,7 +26,10 @@ fn escape_html(s: &str) -> String {
 /// `(harness, model)` pairs get a leaderboard row (see
 /// [`crate::store::latest_per_pair`]); `all_runs` supplies the full history
 /// used to draw each pair's trend chart.
-pub fn render_html_site(latest: &BTreeMap<(HarnessId, ModelTag), RunRecord>, all_runs: &[RunRecord]) -> String {
+pub fn render_html_site(
+    latest: &BTreeMap<(HarnessId, ModelTag), RunRecord>,
+    all_runs: &[RunRecord],
+) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n");
     out.push_str("<meta charset=\"utf-8\">\n");
@@ -79,8 +82,13 @@ fn render_leaderboard_table(out: &mut String, latest: &BTreeMap<(HarnessId, Mode
     for ((harness, model_tag), record) in latest {
         let summary = record.summary();
         let backing = match &record.header.model.backing {
-            ModelBacking::Cloud { provider_tag } => format!("cloud (<code>{}</code>)", escape_html(provider_tag)),
-            ModelBacking::LocalGguf { file_name, file_hash } => format!(
+            ModelBacking::Cloud { provider_tag } => {
+                format!("cloud (<code>{}</code>)", escape_html(provider_tag))
+            }
+            ModelBacking::LocalGguf {
+                file_name,
+                file_hash,
+            } => format!(
                 "local GGUF <code>{}</code> (<code>{}</code>)",
                 escape_html(file_name),
                 file_hash.short()
@@ -89,7 +97,10 @@ fn render_leaderboard_table(out: &mut String, latest: &BTreeMap<(HarnessId, Mode
         let grading = match &record.header.grading {
             GradingMode::Autonomous => "autonomous".to_string(),
             GradingMode::Advisory(judge) => {
-                format!("advisory (judge <code>{}</code>)", escape_html(judge.judge_model.as_str()))
+                format!(
+                    "advisory (judge <code>{}</code>)",
+                    escape_html(judge.judge_model.as_str())
+                )
             }
         };
         let host_tier = match &record.header.host_tier {
@@ -103,12 +114,24 @@ fn render_leaderboard_table(out: &mut String, latest: &BTreeMap<(HarnessId, Mode
         let _ = write!(out, "<td>{backing}</td>");
         let _ = write!(out, "<td>{grading}</td>");
         let _ = write!(out, "<td>{host_tier}</td>");
-        let _ = write!(out, "<td>{}</td>", record.header.timestamp.format("%Y-%m-%d"));
+        let _ = write!(
+            out,
+            "<td>{}</td>",
+            record.header.timestamp.format("%Y-%m-%d")
+        );
         let _ = write!(out, "<td>{}/{}</td>", summary.passed, summary.total_tasks);
         let _ = write!(out, "<td>{:.1}%</td>", summary.pass_rate * 100.0);
         let _ = write!(out, "<td>{:.3}</td>", summary.mean_score);
-        let _ = write!(out, "<td><code>{}</code></td>", record.header.task_set_hash.short());
-        let _ = write!(out, "<td><code>{}</code></td>", record.header.harness_git_sha.short());
+        let _ = write!(
+            out,
+            "<td><code>{}</code></td>",
+            record.header.task_set_hash.short()
+        );
+        let _ = write!(
+            out,
+            "<td><code>{}</code></td>",
+            record.header.harness_git_sha.short()
+        );
         out.push_str("</tr>\n");
     }
 
@@ -198,8 +221,16 @@ fn render_trend_svg(points: &[(DateTime<Utc>, f64)]) -> String {
         "<line x1=\"{pad}\" y1=\"{y_bot:.1}\" x2=\"{x_end:.1}\" y2=\"{y_bot:.1}\" style=\"stroke:var(--border)\" stroke-width=\"1\"/>",
         x_end = width - pad
     );
-    let _ = writeln!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">1.0</text>", y_top + 3.0);
-    let _ = writeln!(svg, "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">0.0</text>", y_bot + 3.0);
+    let _ = writeln!(
+        svg,
+        "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">1.0</text>",
+        y_top + 3.0
+    );
+    let _ = writeln!(
+        svg,
+        "<text x=\"2\" y=\"{:.1}\" font-size=\"9\" style=\"fill:var(--muted)\">0.0</text>",
+        y_bot + 3.0
+    );
 
     if n > 1 {
         let poly_points: String = points
@@ -299,8 +330,8 @@ th { background: rgba(127, 127, 127, 0.08); }
 mod tests {
     use super::*;
     use crate::schema::{
-        Blake3Hex, GitSha, GradingMode as GM, ModelIdentity, ResourceUsage, TaskId, TaskOutcome, TaskResult,
-        TaskSetHash, WallTimeSecs,
+        Blake3Hex, GitSha, GradingMode as GM, ModelIdentity, ResourceUsage, TaskId, TaskOutcome,
+        TaskResult, TaskSetHash, WallTimeSecs,
     };
 
     fn record(harness: &str, model: &str, day: &str, score: f64) -> RunRecord {
@@ -317,15 +348,17 @@ mod tests {
             },
             GM::Autonomous,
             HostTier::Host,
-            vec![TaskResult::new(
-                TaskId::new("t1").unwrap(),
-                TaskOutcome::Pass,
-                score,
-                WallTimeSecs(1.0),
-                ResourceUsage::none(),
-                None,
-            )
-            .unwrap()],
+            vec![
+                TaskResult::new(
+                    TaskId::new("t1").unwrap(),
+                    TaskOutcome::Pass,
+                    score,
+                    WallTimeSecs(1.0),
+                    ResourceUsage::none(),
+                    None,
+                )
+                .unwrap(),
+            ],
         )
     }
 
@@ -339,7 +372,10 @@ mod tests {
         let html = render_html_site(&latest, &all);
 
         for needle in ["http://", "https://", "src="] {
-            assert!(!html.contains(needle), "html unexpectedly contains {needle:?}");
+            assert!(
+                !html.contains(needle),
+                "html unexpectedly contains {needle:?}"
+            );
         }
         assert!(!html.contains("<script"));
         assert!(html.contains("<svg"));

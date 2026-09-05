@@ -21,7 +21,9 @@ async fn mutation_count(db: &sea_orm::DatabaseConnection, akh: Uuid) -> i64 {
     let row = db
         .query_one(Statement::from_string(
             DbBackend::Postgres,
-            format!("SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh}'"),
+            format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh}'"
+            ),
         ))
         .await
         .unwrap()
@@ -43,8 +45,12 @@ async fn ensure_akh_is_idempotent_and_append_writes_rows() {
     let workspace = Uuid::new_v4();
 
     // Idempotent ensure: two calls, no error, one row.
-    ensure_akh(&db, akh, "live-test-akh", Some("test-host")).await.unwrap();
-    ensure_akh(&db, akh, "live-test-akh", Some("test-host")).await.unwrap();
+    ensure_akh(&db, akh, "live-test-akh", Some("test-host"))
+        .await
+        .unwrap();
+    ensure_akh(&db, akh, "live-test-akh", Some("test-host"))
+        .await
+        .unwrap();
 
     assert_eq!(mutation_count(&db, akh).await, 0);
 
@@ -178,8 +184,12 @@ async fn membership_join_list_leave_roundtrip() {
 
     // Join is idempotent: two joins -> one row.
     let now = akhomed_store::chrono::Utc::now();
-    join_workspace(&db, workspace, akh, "member", now).await.unwrap();
-    join_workspace(&db, workspace, akh, "member", now).await.unwrap();
+    join_workspace(&db, workspace, akh, "member", now)
+        .await
+        .unwrap();
+    join_workspace(&db, workspace, akh, "member", now)
+        .await
+        .unwrap();
     let members = list_members(&db, workspace).await.unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].akh_id, akh);
@@ -213,9 +223,12 @@ async fn advisory_lock_acquire_release_and_heartbeat() {
 
     // First acquire succeeds; a second connection cannot take it.
     assert!(try_acquire_akh_lock(&db, akh).await.unwrap());
-    let other = connect(&PoolOptions { max_connections: 1, ..PoolOptions::new(url) })
-        .await
-        .expect("connect other");
+    let other = connect(&PoolOptions {
+        max_connections: 1,
+        ..PoolOptions::new(url)
+    })
+    .await
+    .expect("connect other");
     assert!(!try_acquire_akh_lock(&other, akh).await.unwrap());
 
     // Release on the holder, then the other connection can take it.
@@ -224,7 +237,9 @@ async fn advisory_lock_acquire_release_and_heartbeat() {
     assert!(release_akh_lock(&other, akh).await.unwrap());
 
     // Heartbeat updates last_seen without error.
-    touch_last_seen(&db, akh, akhomed_store::chrono::Utc::now()).await.unwrap();
+    touch_last_seen(&db, akh, akhomed_store::chrono::Utc::now())
+        .await
+        .unwrap();
 }
 
 /// Swap the database name in a `postgres://…/db?query` URL, preserving the query
@@ -256,10 +271,15 @@ async fn concurrent_locked_migrators_do_not_race() {
     };
 
     // Throwaway database carved off the same cluster.
-    let admin = connect(&PoolOptions::new(url.clone())).await.expect("admin connect");
+    let admin = connect(&PoolOptions::new(url.clone()))
+        .await
+        .expect("admin connect");
     let dbname = "akh_mig_race_test";
     let drop = format!("DROP DATABASE IF EXISTS {dbname} WITH (FORCE)");
-    admin.execute_unprepared(&drop).await.expect("drop pre-existing");
+    admin
+        .execute_unprepared(&drop)
+        .await
+        .expect("drop pre-existing");
     admin
         .execute_unprepared(&format!("CREATE DATABASE {dbname}"))
         .await
@@ -281,7 +301,10 @@ async fn concurrent_locked_migrators_do_not_race() {
     }
 
     // Cleanup (FORCE terminates the migrators' now-idle pooled connections).
-    admin.execute_unprepared(&drop).await.expect("drop throwaway db");
+    admin
+        .execute_unprepared(&drop)
+        .await
+        .expect("drop throwaway db");
 }
 
 /// ADR 091: a `kind='turn'` WAL row lands via `append_mutations` and is
@@ -298,7 +321,9 @@ async fn turn_rows_land_and_are_readable() {
 
     let akh = Uuid::new_v4();
     let workspace = Uuid::new_v4();
-    ensure_akh(&db, akh, "turn-row-test-akh", None).await.unwrap();
+    ensure_akh(&db, akh, "turn-row-test-akh", None)
+        .await
+        .unwrap();
 
     // Nothing captured yet.
     assert!(load_turns_since(&db, akh, 0, 100).await.unwrap().is_empty());
@@ -316,7 +341,10 @@ async fn turn_rows_land_and_are_readable() {
         kind: "turn".into(),
         payload: payload.clone(),
     }];
-    assert_eq!(append_mutations(&db, akh, workspace, &rows).await.unwrap(), 1);
+    assert_eq!(
+        append_mutations(&db, akh, workspace, &rows).await.unwrap(),
+        1
+    );
 
     let turns = load_turns_since(&db, akh, 0, 100).await.unwrap();
     assert_eq!(turns.len(), 1, "one turn row visible");
@@ -326,10 +354,20 @@ async fn turn_rows_land_and_are_readable() {
     assert_eq!(by_seq, Some(payload));
 
     // `after_seq` at-or-past the row's seq excludes it.
-    assert!(load_turns_since(&db, akh, turns[0].seq, 100).await.unwrap().is_empty());
+    assert!(
+        load_turns_since(&db, akh, turns[0].seq, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     // A non-`turn` seq (or one that doesn't exist) is `None`.
-    assert_eq!(load_turn_by_seq(&db, akh, turns[0].seq + 999_999).await.unwrap(), None);
+    assert_eq!(
+        load_turn_by_seq(&db, akh, turns[0].seq + 999_999)
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 /// ADR 091: the harvest watermark round-trips through get/set, and a full
@@ -346,7 +384,9 @@ async fn harvest_watermark_roundtrips_and_survives_state_upsert() {
     run_migrations(&db).await.expect("migrate");
 
     let akh = Uuid::new_v4();
-    ensure_akh(&db, akh, "watermark-test-akh", None).await.unwrap();
+    ensure_akh(&db, akh, "watermark-test-akh", None)
+        .await
+        .unwrap();
 
     // 0 with no akh_state row at all.
     assert_eq!(get_harvest_watermark(&db, akh).await.unwrap(), 0);
@@ -377,7 +417,9 @@ async fn harvest_watermark_roundtrips_and_survives_state_upsert() {
         librarian_watermark: 0,
         updated_at: akhomed_store::chrono::Utc::now(),
     };
-    akhomed_store::snapshots::upsert_akh_state(&db, stale_state).await.unwrap();
+    akhomed_store::snapshots::upsert_akh_state(&db, stale_state)
+        .await
+        .unwrap();
 
     assert_eq!(
         get_harvest_watermark(&db, akh).await.unwrap(),

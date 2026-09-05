@@ -53,7 +53,10 @@ pub fn hash_task_set_dir(dir: &Path) -> HarnessResult<TaskSetHash> {
     let mut files = Vec::new();
     for entry in WalkDir::new(dir).sort_by_file_name() {
         let entry = entry.map_err(|e| HarnessError::Io {
-            path: e.path().map(Path::to_path_buf).unwrap_or_else(|| dir.to_path_buf()),
+            path: e
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| dir.to_path_buf()),
             source: std::io::Error::other(e.to_string()),
         })?;
         if !entry.file_type().is_file() {

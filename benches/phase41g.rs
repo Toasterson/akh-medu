@@ -11,8 +11,7 @@ use std::path::Path;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use akh_medu::bench_phase41g::{
-    DATASET_PATH,
-    AcceptancePredicate, BenchPrompt, PromptCategory,
+    AcceptancePredicate, BenchPrompt, DATASET_PATH, PromptCategory,
     dataset::load_dataset,
     metrics::{AgreementRecord, MetricsSummary, emit_agreement_csv, emit_csv, emit_plot_script},
     pipeline::{PipelineConfig, run_pipeline},
@@ -40,8 +39,8 @@ fn canonical_prompt() -> BenchPrompt {
     BenchPrompt {
         id: "canonical_worked_example".into(),
         category: PromptCategory::CodeAdd,
-        prompt:
-            "Add a Rust struct Foo with proper error handling using miette and unit tests.".into(),
+        prompt: "Add a Rust struct Foo with proper error handling using miette and unit tests."
+            .into(),
         acceptance: vec![
             AcceptancePredicate::OutputContains {
                 pattern: "struct Foo".into(),
@@ -69,11 +68,23 @@ fn bench_stub_pipeline_1000(c: &mut Criterion) {
 
 fn bench_stub_pipeline_all_categories(c: &mut Criterion) {
     let prompts: Vec<BenchPrompt> = [
-        (PromptCategory::CodeAdd, "Add struct Foo with error handling."),
-        (PromptCategory::CodeEdit, "Change parse_config to use miette errors."),
+        (
+            PromptCategory::CodeAdd,
+            "Add struct Foo with error handling.",
+        ),
+        (
+            PromptCategory::CodeEdit,
+            "Change parse_config to use miette errors.",
+        ),
         (PromptCategory::Refactor, "Extract validate() from save()."),
-        (PromptCategory::DocWrite, "Write rustdoc for the storage module."),
-        (PromptCategory::Debug, "Fix index out of bounds in parse_headers."),
+        (
+            PromptCategory::DocWrite,
+            "Write rustdoc for the storage module.",
+        ),
+        (
+            PromptCategory::Debug,
+            "Fix index out of bounds in parse_headers.",
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -151,10 +162,7 @@ fn bench_agreement_matrix(c: &mut Criterion) {
 // Groups
 // ---------------------------------------------------------------------------
 
-criterion_group!(
-    dataset_benches,
-    bench_dataset_load,
-);
+criterion_group!(dataset_benches, bench_dataset_load,);
 
 criterion_group!(
     pipeline_benches,
@@ -163,10 +171,6 @@ criterion_group!(
     bench_stub_pipeline_all_categories,
 );
 
-criterion_group!(
-    metrics_benches,
-    bench_metrics_emit,
-    bench_agreement_matrix,
-);
+criterion_group!(metrics_benches, bench_metrics_emit, bench_agreement_matrix,);
 
 criterion_main!(dataset_benches, pipeline_benches, metrics_benches);

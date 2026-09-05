@@ -148,25 +148,25 @@ pub async fn append_mutations_fenced(
         });
     }
 
-    let connection = state.connection.as_mut().ok_or_else(|| StoreError::Conflict {
-        message: format!("refusing WAL append for akh {akh_id}: pinned session is closed"),
-    })?;
+    let connection = state
+        .connection
+        .as_mut()
+        .ok_or_else(|| StoreError::Conflict {
+            message: format!("refusing WAL append for akh {akh_id}: pinned session is closed"),
+        })?;
     let mut transaction = connection.begin().await.map_err(sqlx_query_error)?;
-    sea_orm::sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-    )
-    .bind(format!("snapshot:{workspace_id}"))
-    .execute(&mut *transaction)
-    .await
-    .map_err(sqlx_query_error)?;
+    sea_orm::sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("snapshot:{workspace_id}"))
+        .execute(&mut *transaction)
+        .await
+        .map_err(sqlx_query_error)?;
 
-    let current_epoch: Option<i64> = sea_orm::sqlx::query_scalar(
-        "SELECT residency_epoch FROM akhomed_akh WHERE id = $1",
-    )
-    .bind(akh_id)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(sqlx_query_error)?;
+    let current_epoch: Option<i64> =
+        sea_orm::sqlx::query_scalar("SELECT residency_epoch FROM akhomed_akh WHERE id = $1")
+            .bind(akh_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(sqlx_query_error)?;
     let Some(current_epoch) = current_epoch else {
         transaction.rollback().await.map_err(sqlx_query_error)?;
         return Err(StoreError::Conflict {

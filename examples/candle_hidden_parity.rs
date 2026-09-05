@@ -24,17 +24,29 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 #[cfg(feature = "candle-backend")]
 fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max)
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max)
 }
 
 #[cfg(feature = "candle-backend")]
 fn rel_l2(a: &[f32], b: &[f32]) -> f32 {
-    let num: f32 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt();
+    let num: f32 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt();
     let den: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     if den == 0.0 { 0.0 } else { num / den }
 }
@@ -49,7 +61,9 @@ fn extract(models: &std::path::Path, prompt: &str) -> Option<Vec<f32>> {
 #[cfg(feature = "candle-backend")]
 fn main() -> miette::Result<()> {
     use akh_medu::paths::AkhPaths;
-    let prompt = std::env::args().nth(1).unwrap_or_else(|| "The kingdom of Eldoria is vast.".into());
+    let prompt = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "The kingdom of Eldoria is vast.".into());
     let models = AkhPaths::resolve()?.models_dir();
 
     // Env is read at model load. Toggle around each load. (set_var/remove_var are `unsafe` in

@@ -25,7 +25,9 @@ pub enum HarnessError {
     )]
     InvalidSlug { field: &'static str, value: String },
 
-    #[error("`{field}` must be a lowercase hex string of exactly {expected_len} characters, got {value:?}")]
+    #[error(
+        "`{field}` must be a lowercase hex string of exactly {expected_len} characters, got {value:?}"
+    )]
     #[diagnostic(
         code(harness_core::invalid_hex),
         help(
@@ -40,7 +42,9 @@ pub enum HarnessError {
         expected_len: usize,
     },
 
-    #[error("`{field}` must be a lowercase hex string between 7 and 40 characters (a git SHA), got {value:?}")]
+    #[error(
+        "`{field}` must be a lowercase hex string between 7 and 40 characters (a git SHA), got {value:?}"
+    )]
     #[diagnostic(
         code(harness_core::invalid_git_sha),
         help(

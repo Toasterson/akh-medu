@@ -100,8 +100,7 @@ fn main() {
         "{:<10} {:<18} {:<18} RESPONSE",
         "PSYCHE", "STRATEGY", "COMPANION"
     );
-    println!("{}", "-".repeat
-        (110));
+    println!("{}", "-".repeat(110));
     let trajectory = DiscourseTrajectory::default();
     for p in &psyches {
         let ctx = context_from_grounded(&gr, "dog", QueryType::Factual, &trajectory, None);

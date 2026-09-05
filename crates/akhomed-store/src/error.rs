@@ -72,9 +72,7 @@ mod tests {
 
     #[test]
     fn db_error_display_includes_source() {
-        let inner = sea_orm::DbErr::Custom(
-            "unique constraint \"akhomed_snapshot_pkey\"".into(),
-        );
+        let inner = sea_orm::DbErr::Custom("unique constraint \"akhomed_snapshot_pkey\"".into());
         let err = StoreError::from(inner);
         let text = err.to_string();
         assert!(

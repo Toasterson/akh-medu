@@ -260,7 +260,10 @@ mod tests {
         let resp = handler.respond("What is the Ennead?", &kg);
         assert!(resp.is_some(), "expected a response");
         let text = resp.unwrap();
-        assert!(text.contains("Ennead"), "response should mention the entity");
+        assert!(
+            text.contains("Ennead"),
+            "response should mention the entity"
+        );
         assert!(
             text.contains("nine Egyptian deities"),
             "response should include the KG fact"

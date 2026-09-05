@@ -6,15 +6,19 @@
 
 use harness_core::hash::{TaskFile, hash_task_set};
 use harness_core::schema::{
-    GitSha, GradingMode, HarnessId, HostTier, JudgeInfo, ModelBacking, ModelIdentity, ModelTag, ResourceUsage,
-    RunRecord, TaskId, TaskOutcome, TaskResult, WallTimeSecs,
+    GitSha, GradingMode, HarnessId, HostTier, JudgeInfo, ModelBacking, ModelIdentity, ModelTag,
+    ResourceUsage, RunRecord, TaskId, TaskOutcome, TaskResult, WallTimeSecs,
 };
 use harness_core::{leaderboard, site, store};
 
 fn task(id: &str, pass: bool, score: f64) -> TaskResult {
     TaskResult::new(
         TaskId::new(id).unwrap(),
-        if pass { TaskOutcome::Pass } else { TaskOutcome::Fail },
+        if pass {
+            TaskOutcome::Pass
+        } else {
+            TaskOutcome::Fail
+        },
         score,
         WallTimeSecs(2.0),
         ResourceUsage {
@@ -104,8 +108,15 @@ fn synthetic_runs_flow_through_store_leaderboard_and_site() {
     assert_eq!(runs.len(), 4, "all four written runs should be found");
 
     let latest = store::latest_per_pair(&runs);
-    assert_eq!(latest.len(), 3, "one row per (harness, model) — deepseek collapses to its newer run");
-    let deepseek_key = (HarnessId::new("demo").unwrap(), ModelTag::new("deepseek").unwrap());
+    assert_eq!(
+        latest.len(),
+        3,
+        "one row per (harness, model) — deepseek collapses to its newer run"
+    );
+    let deepseek_key = (
+        HarnessId::new("demo").unwrap(),
+        ModelTag::new("deepseek").unwrap(),
+    );
     assert_eq!(
         latest.get(&deepseek_key).unwrap().header.timestamp,
         deepseek_new.header.timestamp,
@@ -114,13 +125,28 @@ fn synthetic_runs_flow_through_store_leaderboard_and_site() {
 
     // --- leaderboard markdown ---
     let md = leaderboard::render_leaderboard_markdown(&latest);
-    assert!(md.contains("| demo | deepseek |"), "leaderboard missing deepseek row:\n{md}");
-    assert!(md.contains("| demo | glm-5.2 |"), "leaderboard missing glm-5.2 row:\n{md}");
-    assert!(md.contains("| demo | qwen |"), "leaderboard missing qwen row:\n{md}");
+    assert!(
+        md.contains("| demo | deepseek |"),
+        "leaderboard missing deepseek row:\n{md}"
+    );
+    assert!(
+        md.contains("| demo | glm-5.2 |"),
+        "leaderboard missing glm-5.2 row:\n{md}"
+    );
+    assert!(
+        md.contains("| demo | qwen |"),
+        "leaderboard missing qwen row:\n{md}"
+    );
     // deepseek's newer run is 3/3 passed = 100.0%.
-    assert!(md.contains("100.0%"), "expected the newer all-pass deepseek run to show 100.0%:\n{md}");
+    assert!(
+        md.contains("100.0%"),
+        "expected the newer all-pass deepseek run to show 100.0%:\n{md}"
+    );
     // advisory grading on glm shows the rotation judge.
-    assert!(md.contains("advisory (judge `qwen`)"), "leaderboard missing advisory judge annotation:\n{md}");
+    assert!(
+        md.contains("advisory (judge `qwen`)"),
+        "leaderboard missing advisory judge annotation:\n{md}"
+    );
 
     println!("--- generated LEADERBOARD.md ---\n{md}");
 
@@ -129,13 +155,22 @@ fn synthetic_runs_flow_through_store_leaderboard_and_site() {
     for model in ["deepseek", "glm-5.2", "qwen"] {
         assert!(html.contains(model), "site missing model {model}");
     }
-    assert!(html.contains("<svg"), "site should contain at least one inline SVG trend chart");
-    assert!(html.contains("<table"), "site should contain the leaderboard table");
+    assert!(
+        html.contains("<svg"),
+        "site should contain at least one inline SVG trend chart"
+    );
+    assert!(
+        html.contains("<table"),
+        "site should contain the leaderboard table"
+    );
 
     // Zero external assets: no network-loaded resource of any kind, and no
     // script tags (this is a static, self-contained document).
     for needle in ["http://", "https://", "src=", "<script"] {
-        assert!(!html.contains(needle), "site unexpectedly references an external asset via {needle:?}");
+        assert!(
+            !html.contains(needle),
+            "site unexpectedly references an external asset via {needle:?}"
+        );
     }
 
     // Confirm it's at least well-formed enough to be real markup: doctype,
@@ -148,8 +183,14 @@ fn synthetic_runs_flow_through_store_leaderboard_and_site() {
     assert_eq!(html.matches("</head>").count(), 1);
     assert_eq!(html.matches("<body>").count(), 1);
     assert_eq!(html.matches("</body>").count(), 1);
-    assert_eq!(html.matches("<table>").count(), html.matches("</table>").count());
+    assert_eq!(
+        html.matches("<table>").count(),
+        html.matches("</table>").count()
+    );
     assert_eq!(html.matches("<svg").count(), html.matches("</svg>").count());
 
-    println!("site has zero external asset references ({} bytes)", html.len());
+    println!(
+        "site has zero external asset references ({} bytes)",
+        html.len()
+    );
 }

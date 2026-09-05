@@ -97,14 +97,7 @@ fn bench_vsa_native_decide(c: &mut Criterion) {
     c.bench_function("vsa_native_decide", |b| {
         b.iter(|| {
             black_box(vsa_native_decide(
-                &goal,
-                &obs,
-                &orient,
-                &engine,
-                &wm,
-                None,
-                &registry,
-                &config,
+                &goal, &obs, &orient, &engine, &wm, None, &registry, &config,
             ))
         })
     });
@@ -127,14 +120,7 @@ fn bench_vsa_native_decide_with_mcts(c: &mut Criterion) {
     c.bench_function("vsa_native_decide_with_mcts", |b| {
         b.iter(|| {
             black_box(vsa_native_decide(
-                &goal,
-                &obs,
-                &orient,
-                &engine,
-                &wm,
-                None,
-                &registry,
-                &config,
+                &goal, &obs, &orient, &engine, &wm, None, &registry, &config,
             ))
         })
     });
@@ -156,14 +142,7 @@ fn bench_vsa_native_decide_mcts_256(c: &mut Criterion) {
     c.bench_function("vsa_native_decide_mcts_256", |b| {
         b.iter(|| {
             black_box(vsa_native_decide(
-                &goal,
-                &obs,
-                &orient,
-                &engine,
-                &wm,
-                None,
-                &registry,
-                &config,
+                &goal, &obs, &orient, &engine, &wm, None, &registry, &config,
             ))
         })
     });
@@ -179,7 +158,10 @@ fn bench_vsa_native_decide_varied_goals(c: &mut Criterion) {
     let config = VsaDecideConfig::default();
 
     let goals = vec![
-        make_goal(&engine, "query the knowledge graph for entity relationships"),
+        make_goal(
+            &engine,
+            "query the knowledge graph for entity relationships",
+        ),
         make_goal(&engine, "apply symbolic reasoning to derive new facts"),
         make_goal(&engine, "find gaps in current knowledge coverage"),
         make_goal(&engine, "recall past experiences from episodic memory"),
@@ -192,14 +174,7 @@ fn bench_vsa_native_decide_varied_goals(c: &mut Criterion) {
             let goal = &goals[idx % goals.len()];
             idx += 1;
             black_box(vsa_native_decide(
-                goal,
-                &obs,
-                &orient,
-                &engine,
-                &wm,
-                None,
-                &registry,
-                &config,
+                goal, &obs, &orient, &engine, &wm, None, &registry, &config,
             ))
         })
     });

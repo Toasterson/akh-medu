@@ -53,10 +53,12 @@ pub async fn search_similar(
          LIMIT {top_k}"
     );
 
-    let results =
-        RetrievedChunk::find_by_statement(Statement::from_string(sea_orm::DatabaseBackend::Postgres, sql))
-            .all(db)
-            .await?;
+    let results = RetrievedChunk::find_by_statement(Statement::from_string(
+        sea_orm::DatabaseBackend::Postgres,
+        sql,
+    ))
+    .all(db)
+    .await?;
 
     Ok(results)
 }

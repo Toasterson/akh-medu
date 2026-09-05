@@ -21,7 +21,9 @@ async fn count(db: &sea_orm::DatabaseConnection, akh: Uuid) -> i64 {
     let row = db
         .query_one(Statement::from_string(
             DbBackend::Postgres,
-            format!("SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh}'"),
+            format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_mutation_log WHERE akh_id = '{akh}'"
+            ),
         ))
         .await
         .unwrap()
@@ -56,7 +58,9 @@ async fn record_then_flush_writes_rows() {
 
     let akh = Uuid::new_v4();
     let workspace = Uuid::new_v4();
-    akhomed_store::ensure_akh(&db, akh, "wal-live", None).await.unwrap();
+    akhomed_store::ensure_akh(&db, akh, "wal-live", None)
+        .await
+        .unwrap();
     let session = Arc::new(
         akhomed_store::StablePgSession::connect(&akhomed_store::PoolOptions::new(
             std::env::var("AKH_TEST_PG_URL").unwrap(),
@@ -65,9 +69,7 @@ async fn record_then_flush_writes_rows() {
         .unwrap(),
     );
     assert!(session.try_acquire_akh_lock(akh).await.unwrap());
-    let epoch = session.claim_akh_residency(akh, workspace)
-        .await
-        .unwrap();
+    let epoch = session.claim_akh_residency(akh, workspace).await.unwrap();
 
     let log = Arc::new(MutationLog::new(
         Arc::clone(&session),
@@ -115,7 +117,9 @@ async fn turn_mutation_flushes_with_turn_kind() {
 
     let akh = Uuid::new_v4();
     let workspace = Uuid::new_v4();
-    akhomed_store::ensure_akh(&db, akh, "wal-live-turn", None).await.unwrap();
+    akhomed_store::ensure_akh(&db, akh, "wal-live-turn", None)
+        .await
+        .unwrap();
     let session = Arc::new(
         akhomed_store::StablePgSession::connect(&akhomed_store::PoolOptions::new(
             std::env::var("AKH_TEST_PG_URL").unwrap(),
@@ -124,9 +128,7 @@ async fn turn_mutation_flushes_with_turn_kind() {
         .unwrap(),
     );
     assert!(session.try_acquire_akh_lock(akh).await.unwrap());
-    let epoch = session.claim_akh_residency(akh, workspace)
-        .await
-        .unwrap();
+    let epoch = session.claim_akh_residency(akh, workspace).await.unwrap();
 
     let log = Arc::new(MutationLog::new(
         Arc::clone(&session),
@@ -152,8 +154,14 @@ async fn turn_mutation_flushes_with_turn_kind() {
     assert_eq!(flushed, 1);
     assert_eq!(count(&db, akh).await, 1);
 
-    let turns = akhomed_store::load_turns_since(&db, akh, 0, 10).await.unwrap();
-    assert_eq!(turns.len(), 1, "the flushed row is visible as a kind='turn' row");
+    let turns = akhomed_store::load_turns_since(&db, akh, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        turns.len(),
+        1,
+        "the flushed row is visible as a kind='turn' row"
+    );
     assert_eq!(turns[0].payload, payload);
     assert!(session.release_akh_lock(akh).await.unwrap());
 }
@@ -174,14 +182,23 @@ async fn stale_owner_wal_is_rejected_after_independent_epoch_handoff() {
     akhomed_store::ensure_akh(&db, akh, "wal-fence-live", None)
         .await
         .unwrap();
-    let old_session = Arc::new(akhomed_store::StablePgSession::connect(&opts).await.unwrap());
-    let new_session = Arc::new(akhomed_store::StablePgSession::connect(&opts).await.unwrap());
+    let old_session = Arc::new(
+        akhomed_store::StablePgSession::connect(&opts)
+            .await
+            .unwrap(),
+    );
+    let new_session = Arc::new(
+        akhomed_store::StablePgSession::connect(&opts)
+            .await
+            .unwrap(),
+    );
     assert!(old_session.try_acquire_akh_lock(akh).await.unwrap());
     assert!(
         !new_session.try_acquire_akh_lock(akh).await.unwrap(),
         "a second physical session must not share the owner's advisory lock"
     );
-    let old_epoch = old_session.claim_akh_residency(akh, workspace)
+    let old_epoch = old_session
+        .claim_akh_residency(akh, workspace)
         .await
         .unwrap();
     let old_log = Arc::new(MutationLog::new(
@@ -198,7 +215,8 @@ async fn stale_owner_wal_is_rejected_after_independent_epoch_handoff() {
 
     assert!(old_session.release_akh_lock(akh).await.unwrap());
     assert!(new_session.try_acquire_akh_lock(akh).await.unwrap());
-    let new_epoch = new_session.claim_akh_residency(akh, workspace)
+    let new_epoch = new_session
+        .claim_akh_residency(akh, workspace)
         .await
         .unwrap();
     assert!(new_epoch > old_epoch);
@@ -249,7 +267,11 @@ async fn killed_pinned_backend_cannot_claim_epoch_append_wal_or_publish_snapshot
         .await
         .unwrap();
     let before = residency_epoch(&db, akh).await;
-    let session = Arc::new(akhomed_store::StablePgSession::connect(&opts).await.unwrap());
+    let session = Arc::new(
+        akhomed_store::StablePgSession::connect(&opts)
+            .await
+            .unwrap(),
+    );
     assert!(session.try_acquire_akh_lock(akh).await.unwrap());
     let backend_pid = session.backend_process_id().await.unwrap();
 
@@ -288,18 +310,14 @@ async fn killed_pinned_backend_cannot_claim_epoch_append_wal_or_publish_snapshot
 
     let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
     let agent = Agent::new(engine, AgentConfig::default()).unwrap();
-    let snapshot = capture_snapshot_at_fence(
-        &agent,
-        akh,
-        workspace,
-        0,
-        predicted_epoch,
-    )
-    .unwrap();
+    let snapshot = capture_snapshot_at_fence(&agent, akh, workspace, 0, predicted_epoch).unwrap();
     let error = persist_snapshot(snapshot, &db)
         .await
         .expect_err("the unclaimed epoch must not publish");
-    assert!(error.to_string().contains("stale snapshot owner"), "{error}");
+    assert!(
+        error.to_string().contains("stale snapshot owner"),
+        "{error}"
+    );
     assert!(
         akhomed_store::snapshots::load_akh_state(&db, akh)
             .await

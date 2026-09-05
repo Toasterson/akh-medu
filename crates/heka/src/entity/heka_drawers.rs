@@ -30,7 +30,6 @@ pub struct Model {
     pub metadata: Json,
 
     // --- Phase 42c: drawer ingest path columns ---
-
     /// SHA-256 hex digest of the drawer body. Used for idempotent re-ingest:
     /// the UNIQUE(akh_id, body_hash) index ensures re-capturing the same
     /// session produces no duplicate rows.

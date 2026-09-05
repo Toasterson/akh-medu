@@ -154,9 +154,8 @@ impl SeshatConfig {
         let content = std::fs::read_to_string(path).map_err(|e| {
             crate::SeshatError::Config(format!("cannot read {}: {e}", path.display()))
         })?;
-        let mut config: Self =
-            toml::from_str(&content)
-                .map_err(|e| crate::SeshatError::Config(format!("invalid TOML: {e}")))?;
+        let mut config: Self = toml::from_str(&content)
+            .map_err(|e| crate::SeshatError::Config(format!("invalid TOML: {e}")))?;
 
         // Allow DATABASE_URL env var to override the TOML value (useful for K8s secrets).
         if let Ok(url) = std::env::var("DATABASE_URL") {

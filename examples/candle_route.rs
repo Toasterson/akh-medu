@@ -20,7 +20,10 @@ fn main() -> miette::Result<()> {
     let mut backend = match CandleBackend::try_load(&models) {
         Some(b) => b,
         None => {
-            eprintln!("No Candle model found under {}/llm/. Place a .gguf + tokenizer.json.", models.display());
+            eprintln!(
+                "No Candle model found under {}/llm/. Place a .gguf + tokenizer.json.",
+                models.display()
+            );
             std::process::exit(1);
         }
     };
@@ -40,7 +43,12 @@ fn main() -> miette::Result<()> {
 
     println!("== Route 3: verbalize (grounded answer) ==");
     let facts = "Paris is the capital of France. France is in Europe.";
-    match backend.verbalize("What is the capital of France?", facts, "Akh", &["precise".into()]) {
+    match backend.verbalize(
+        "What is the capital of France?",
+        facts,
+        "Akh",
+        &["precise".into()],
+    ) {
         Ok(s) => println!("  ok: {s}\n"),
         Err(e) => println!("  ERR: {e}\n"),
     }

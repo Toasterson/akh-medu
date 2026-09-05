@@ -34,17 +34,16 @@ impl MigrationTrait for Migration {
             return Ok(());
         }
 
-        db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS timescaledb").await?;
+        db.execute_unprepared("CREATE EXTENSION IF NOT EXISTS timescaledb")
+            .await?;
         // TimescaleDB requires the partition column in every unique index, so the
         // primary key must include applied_at.
         db.execute_unprepared(
             "ALTER TABLE akhomed_mutation_log DROP CONSTRAINT IF EXISTS akhomed_mutation_log_pkey",
         )
         .await?;
-        db.execute_unprepared(
-            "ALTER TABLE akhomed_mutation_log ADD PRIMARY KEY (applied_at, seq)",
-        )
-        .await?;
+        db.execute_unprepared("ALTER TABLE akhomed_mutation_log ADD PRIMARY KEY (applied_at, seq)")
+            .await?;
         db.execute_unprepared(
             "SELECT create_hypertable('akhomed_mutation_log', 'applied_at', migrate_data => true)",
         )

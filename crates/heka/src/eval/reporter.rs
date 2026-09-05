@@ -128,12 +128,8 @@ impl Reporter {
 
         // ── Summary ──
         md.push_str("## Summary\n\n");
-        md.push_str(&format!(
-            "| Metric | Value |\n|---|---|\n"
-        ));
-        md.push_str(&format!(
-            "| Sessions | {} |\n", r.sessions
-        ));
+        md.push_str(&format!("| Metric | Value |\n|---|---|\n"));
+        md.push_str(&format!("| Sessions | {} |\n", r.sessions));
         md.push_str(&format!(
             "| Total Questions | {} |\n",
             r.metrics.total_questions
@@ -172,19 +168,19 @@ impl Reporter {
             }
         }
         md.push_str(&format!(
-            "| p50 Latency | {:.6}s |\n", r.metrics.p50_latency_secs
+            "| p50 Latency | {:.6}s |\n",
+            r.metrics.p50_latency_secs
         ));
         md.push_str(&format!(
-            "| p99 Latency | {:.6}s |\n", r.metrics.p99_latency_secs
+            "| p99 Latency | {:.6}s |\n",
+            r.metrics.p99_latency_secs
         ));
         md.push_str("\n");
 
         // ── Retrieval Parameters ──
         md.push_str("## Retrieval Parameters\n\n");
         let p = &r.metrics.retrieval_params;
-        md.push_str(&format!(
-            "| Parameter | Value |\n|---|---|\n"
-        ));
+        md.push_str(&format!("| Parameter | Value |\n|---|---|\n"));
         md.push_str(&format!("| Mode | {} |\n", p.mode));
         md.push_str(&format!("| Top-K | {} |\n", p.top_k));
         if let Some(explicit) = p.top_k_explicit {
@@ -200,9 +196,7 @@ impl Reporter {
 
         // ── Hardware ──
         md.push_str("## Hardware\n\n");
-        md.push_str(&format!(
-            "| Property | Value |\n|---|---|\n"
-        ));
+        md.push_str(&format!("| Property | Value |\n|---|---|\n"));
         md.push_str(&format!("| OS | {} |\n", r.hardware.os));
         md.push_str(&format!("| CPU | {} |\n", r.hardware.cpu_brand));
         md.push_str(&format!("| Cores | {} |\n", r.hardware.cpu_cores));
@@ -212,13 +206,8 @@ impl Reporter {
 
         // ── Models ──
         md.push_str("## Models\n\n");
-        md.push_str(&format!(
-            "| Component | Model |\n|---|---|\n"
-        ));
-        md.push_str(&format!(
-            "| Embedding | {} |\n",
-            r.models.embedding_model
-        ));
+        md.push_str(&format!("| Component | Model |\n|---|---|\n"));
+        md.push_str(&format!("| Embedding | {} |\n", r.models.embedding_model));
         if let Some(llm) = &r.models.llm_model {
             md.push_str(&format!("| LLM | {} |\n", llm));
         }

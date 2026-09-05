@@ -8,11 +8,11 @@
 //! identity. The advisory lock ([`try_acquire_akh_lock`]) is the 38g guard that
 //! keeps two hosts from waking/relocating the *same* Akh at once.
 
+use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ColumnTrait, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter,
     Statement,
 };
-use sea_orm::sea_query::OnConflict;
 use uuid::Uuid;
 
 use crate::entity::membership;

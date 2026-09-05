@@ -28,9 +28,13 @@ fn test_engine() -> Engine {
 fn seed_ennead(engine: &Engine) {
     let ennead = engine.create_symbol(SymbolKind::Entity, "Ennead").unwrap();
     let is_a = engine.create_symbol(SymbolKind::Relation, "is-a").unwrap();
-    let group = engine.create_symbol(SymbolKind::Entity, "group-of-deities").unwrap();
+    let group = engine
+        .create_symbol(SymbolKind::Entity, "group-of-deities")
+        .unwrap();
     let osiris = engine.create_symbol(SymbolKind::Entity, "Osiris").unwrap();
-    let member = engine.create_symbol(SymbolKind::Relation, "member-of").unwrap();
+    let member = engine
+        .create_symbol(SymbolKind::Relation, "member-of")
+        .unwrap();
 
     let _ = engine.add_triple(&Triple::new(ennead.id, is_a.id, group.id).with_confidence(0.98));
     let _ = engine.add_triple(&Triple::new(osiris.id, member.id, ennead.id).with_confidence(0.97));
@@ -172,7 +176,11 @@ fn eliza_routing_correctness_20_queries() {
             failed.push(format!(
                 "[FAIL] {}: expected {} but got {:?}",
                 case.label,
-                if case.expect_kg { "KgGrounded" } else { "LlmFallback" },
+                if case.expect_kg {
+                    "KgGrounded"
+                } else {
+                    "LlmFallback"
+                },
                 routing
             ));
         }
@@ -226,7 +234,10 @@ fn kg_response_latency_under_1ms() {
     // Ground the "Ennead" entity and linearize via grammar — should be sub-ms.
     let sym_id = std_engine.resolve_symbol("Ennead").unwrap();
     let triples = std_engine.triples_from(sym_id);
-    assert!(!triples.is_empty(), "Ennead triples must be non-empty after seeding");
+    assert!(
+        !triples.is_empty(),
+        "Ennead triples must be non-empty after seeding"
+    );
 
     // Build the registry once (one-time setup, not part of per-response cost),
     // then measure grammar linearization with best-of-N so the sub-ms assertion

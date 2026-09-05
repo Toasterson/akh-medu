@@ -42,7 +42,13 @@ struct VersionTrap {
     note: Option<String>,
 }
 
-const KNOWN_FAMILIES: &[&str] = &["smf", "manpage-discovery", "c-native-libs", "rust-illumos", "rbac"];
+const KNOWN_FAMILIES: &[&str] = &[
+    "smf",
+    "manpage-discovery",
+    "c-native-libs",
+    "rust-illumos",
+    "rbac",
+];
 const KNOWN_MODES: &[&str] = &["autonomous", "advisory"];
 const REQUIRED_FILES: &[&str] = &["meta.toml", "setup.sh", "prompt.md", "verify.sh"];
 
@@ -69,13 +75,21 @@ fn task_dirs() -> Vec<PathBuf> {
 #[test]
 fn every_task_has_all_four_required_files() {
     let dirs = task_dirs();
-    assert!(!dirs.is_empty(), "no task directories found under {}", tasks_dir().display());
+    assert!(
+        !dirs.is_empty(),
+        "no task directories found under {}",
+        tasks_dir().display()
+    );
 
     for dir in &dirs {
         let name = dir.file_name().unwrap().to_string_lossy();
         for required in REQUIRED_FILES {
             let path = dir.join(required);
-            assert!(path.is_file(), "task '{name}' is missing required file '{required}' ({})", path.display());
+            assert!(
+                path.is_file(),
+                "task '{name}' is missing required file '{required}' ({})",
+                path.display()
+            );
         }
     }
 }
@@ -87,10 +101,15 @@ fn every_meta_toml_parses_and_satisfies_invariants() {
     for dir in &dirs {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let meta_path = dir.join("meta.toml");
-        let raw = fs::read_to_string(&meta_path).unwrap_or_else(|e| panic!("failed to read {}: {e}", meta_path.display()));
-        let meta: TaskMeta = toml::from_str(&raw).unwrap_or_else(|e| panic!("failed to parse {}: {e}", meta_path.display()));
+        let raw = fs::read_to_string(&meta_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", meta_path.display()));
+        let meta: TaskMeta = toml::from_str(&raw)
+            .unwrap_or_else(|e| panic!("failed to parse {}: {e}", meta_path.display()));
 
-        assert_eq!(meta.id, name, "meta.toml 'id' must match the directory name for '{name}'");
+        assert_eq!(
+            meta.id, name,
+            "meta.toml 'id' must match the directory name for '{name}'"
+        );
 
         assert!(
             KNOWN_FAMILIES.contains(&meta.family.as_str()),
@@ -98,21 +117,36 @@ fn every_meta_toml_parses_and_satisfies_invariants() {
             meta.family
         );
 
-        assert!(!meta.description.trim().is_empty(), "task '{name}' has an empty description");
+        assert!(
+            !meta.description.trim().is_empty(),
+            "task '{name}' has an empty description"
+        );
 
-        assert!(meta.timeout_secs > 0, "task '{name}' has timeout_secs=0, must be positive");
+        assert!(
+            meta.timeout_secs > 0,
+            "task '{name}' has timeout_secs=0, must be positive"
+        );
 
         assert!(
             !meta.expected_manpages.is_empty(),
             "task '{name}' has an empty expected_manpages list -- every task must name at least one man page an akh should ground on"
         );
         for page in &meta.expected_manpages {
-            assert!(!page.trim().is_empty(), "task '{name}' has a blank entry in expected_manpages");
+            assert!(
+                !page.trim().is_empty(),
+                "task '{name}' has a blank entry in expected_manpages"
+            );
         }
 
-        assert!(!meta.mode.is_empty(), "task '{name}' has an empty mode list");
+        assert!(
+            !meta.mode.is_empty(),
+            "task '{name}' has an empty mode list"
+        );
         for m in &meta.mode {
-            assert!(KNOWN_MODES.contains(&m.as_str()), "task '{name}' has unknown mode '{m}' (expected one of {KNOWN_MODES:?})");
+            assert!(
+                KNOWN_MODES.contains(&m.as_str()),
+                "task '{name}' has unknown mode '{m}' (expected one of {KNOWN_MODES:?})"
+            );
         }
 
         if meta.version_trap.present {
@@ -123,7 +157,12 @@ fn every_meta_toml_parses_and_satisfies_invariants() {
             );
         } else {
             assert!(
-                meta.version_trap.note.as_deref().unwrap_or("").trim().is_empty(),
+                meta.version_trap
+                    .note
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty(),
                 "task '{name}' has version_trap.present = false but a non-empty note -- either flag it as a trap or drop the note"
             );
         }
@@ -133,7 +172,11 @@ fn every_meta_toml_parses_and_satisfies_invariants() {
 #[test]
 fn corpus_meets_the_adr_086_size_and_version_trap_bar() {
     let dirs = task_dirs();
-    assert!(dirs.len() >= 15, "ADR 086 §2 asks for ~15 tasks; found {}", dirs.len());
+    assert!(
+        dirs.len() >= 15,
+        "ADR 086 §2 asks for ~15 tasks; found {}",
+        dirs.len()
+    );
 
     let mut families_with_traps: BTreeSet<String> = BTreeSet::new();
     let mut trap_count = 0usize;
@@ -150,12 +193,19 @@ fn corpus_meets_the_adr_086_size_and_version_trap_bar() {
         }
     }
 
-    assert!(trap_count >= 3, "ADR 086 §2 asks for at least 3 version-trap tasks; found {trap_count}");
+    assert!(
+        trap_count >= 3,
+        "ADR 086 §2 asks for at least 3 version-trap tasks; found {trap_count}"
+    );
     assert!(
         families_with_traps.len() > 1,
         "version-traps should be distributed across more than one family (ADR 086 §2); all {trap_count} are in {families_with_traps:?}"
     );
-    assert_eq!(families_seen.len(), KNOWN_FAMILIES.len(), "expected every one of the 5 known families to have at least one task, found families: {families_seen:?}");
+    assert_eq!(
+        families_seen.len(),
+        KNOWN_FAMILIES.len(),
+        "expected every one of the 5 known families to have at least one task, found families: {families_seen:?}"
+    );
 }
 
 #[test]
@@ -165,12 +215,21 @@ fn task_set_hash_is_deterministic_across_repeated_calls() {
     // publish"): hashing the same directory twice must produce the same
     // hash, independent of filesystem iteration order.
     let dir = tasks_dir();
-    let first = hash_task_set_dir(&dir).expect("hash_task_set_dir should succeed on the real corpus");
-    let second = hash_task_set_dir(&dir).expect("hash_task_set_dir should succeed on the real corpus");
-    assert_eq!(first, second, "hashing the same task-set directory twice produced different hashes");
+    let first =
+        hash_task_set_dir(&dir).expect("hash_task_set_dir should succeed on the real corpus");
+    let second =
+        hash_task_set_dir(&dir).expect("hash_task_set_dir should succeed on the real corpus");
+    assert_eq!(
+        first, second,
+        "hashing the same task-set directory twice produced different hashes"
+    );
 
     // Sanity: the hash is a real, well-formed blake3 digest (not an empty
     // hasher over zero files, which would indicate task_dirs()/tasks_dir()
     // pointed at the wrong place).
-    assert_eq!(first.as_str().len(), 64, "task-set hash should be a 64-hex-char blake3 digest");
+    assert_eq!(
+        first.as_str().len(),
+        64,
+        "task-set hash should be a 64-hex-char blake3 digest"
+    );
 }

@@ -35,7 +35,10 @@ pub fn render_leaderboard_markdown(latest: &BTreeMap<(HarnessId, ModelTag), RunR
         let summary = record.summary();
         let backing = match &record.header.model.backing {
             ModelBacking::Cloud { provider_tag } => format!("cloud (`{provider_tag}`)"),
-            ModelBacking::LocalGguf { file_name, file_hash } => {
+            ModelBacking::LocalGguf {
+                file_name,
+                file_hash,
+            } => {
                 format!("local GGUF `{file_name}` (`{}`)", file_hash.short())
             }
         };
@@ -70,8 +73,8 @@ pub fn render_leaderboard_markdown(latest: &BTreeMap<(HarnessId, ModelTag), RunR
 mod tests {
     use super::*;
     use crate::schema::{
-        Blake3Hex, GitSha, GradingMode, ModelIdentity, ResourceUsage, TaskId, TaskOutcome, TaskResult, TaskSetHash,
-        WallTimeSecs,
+        Blake3Hex, GitSha, GradingMode, ModelIdentity, ResourceUsage, TaskId, TaskOutcome,
+        TaskResult, TaskSetHash, WallTimeSecs,
     };
 
     fn record(harness: &str, model: &str) -> RunRecord {
@@ -88,15 +91,17 @@ mod tests {
             },
             GradingMode::Autonomous,
             HostTier::Host,
-            vec![TaskResult::new(
-                TaskId::new("t1").unwrap(),
-                TaskOutcome::Pass,
-                1.0,
-                WallTimeSecs(1.0),
-                ResourceUsage::none(),
-                None,
-            )
-            .unwrap()],
+            vec![
+                TaskResult::new(
+                    TaskId::new("t1").unwrap(),
+                    TaskOutcome::Pass,
+                    1.0,
+                    WallTimeSecs(1.0),
+                    ResourceUsage::none(),
+                    None,
+                )
+                .unwrap(),
+            ],
         )
     }
 
@@ -112,10 +117,19 @@ mod tests {
         let r1 = record("demo", "deepseek");
         let r2 = record("demo", "glm");
         latest.insert(
-            (HarnessId::new("demo").unwrap(), ModelTag::new("deepseek").unwrap()),
+            (
+                HarnessId::new("demo").unwrap(),
+                ModelTag::new("deepseek").unwrap(),
+            ),
             r1,
         );
-        latest.insert((HarnessId::new("demo").unwrap(), ModelTag::new("glm").unwrap()), r2);
+        latest.insert(
+            (
+                HarnessId::new("demo").unwrap(),
+                ModelTag::new("glm").unwrap(),
+            ),
+            r2,
+        );
 
         let md = render_leaderboard_markdown(&latest);
         assert!(md.contains("| demo | deepseek |"));

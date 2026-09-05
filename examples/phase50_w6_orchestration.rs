@@ -210,7 +210,9 @@ mod inner {
         #[error("failed to parse {path} as TOML: {source}")]
         #[diagnostic(
             code(phase50_w6::meta_parse),
-            help("meta.toml must match the shape documented in benchmarks/illumos-orchestration/README.md.")
+            help(
+                "meta.toml must match the shape documented in benchmarks/illumos-orchestration/README.md."
+            )
         )]
         MetaParse {
             path: PathBuf,
@@ -218,7 +220,9 @@ mod inner {
             source: toml::de::Error,
         },
 
-        #[error("task {task_id:?} declares {declared} subtasks but meta.toml has {actual} [[subtask]] entries")]
+        #[error(
+            "task {task_id:?} declares {declared} subtasks but meta.toml has {actual} [[subtask]] entries"
+        )]
         #[diagnostic(code(phase50_w6::subtask_count_mismatch))]
         SubtaskCountMismatch {
             task_id: String,
@@ -237,7 +241,8 @@ mod inner {
     fn parse_meta(task_dir: &Path) -> Result<TaskMeta, RunnerError> {
         let path = task_dir.join("meta.toml");
         let text = read_file(&path)?;
-        let meta: TaskMeta = toml::from_str(&text).map_err(|source| RunnerError::MetaParse { path, source })?;
+        let meta: TaskMeta =
+            toml::from_str(&text).map_err(|source| RunnerError::MetaParse { path, source })?;
         if meta.subtask.len() != meta.subtasks {
             return Err(RunnerError::SubtaskCountMismatch {
                 task_id: meta.id.clone(),
@@ -253,7 +258,8 @@ mod inner {
         head.chars()
             .map(|c| {
                 let c = c.to_ascii_lowercase();
-                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_' {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_'
+                {
                     c
                 } else {
                     '-'
@@ -263,12 +269,17 @@ mod inner {
     }
 
     fn parse_exec1_spec(spec: &str) -> Result<(String, String, u16), RunnerError> {
-        let (user, host_port) =
-            spec.split_once('@')
-                .ok_or_else(|| RunnerError::BadExec1Spec { value: spec.to_string() })?;
-        let (host, port_str) = host_port
-            .rsplit_once(':')
-            .ok_or_else(|| RunnerError::BadExec1Spec { value: spec.to_string() })?;
+        let (user, host_port) = spec
+            .split_once('@')
+            .ok_or_else(|| RunnerError::BadExec1Spec {
+                value: spec.to_string(),
+            })?;
+        let (host, port_str) =
+            host_port
+                .rsplit_once(':')
+                .ok_or_else(|| RunnerError::BadExec1Spec {
+                    value: spec.to_string(),
+                })?;
         let port: u16 = port_str.parse().map_err(|source| RunnerError::BadPort {
             value: port_str.to_string(),
             source,
@@ -288,7 +299,9 @@ mod inner {
     }
     impl TraceSink {
         fn new(prefix: impl Into<String>) -> Self {
-            Self { prefix: prefix.into() }
+            Self {
+                prefix: prefix.into(),
+            }
         }
     }
     impl MessageSink for TraceSink {
@@ -296,9 +309,16 @@ mod inner {
             let p = &self.prefix;
             match msg {
                 AkhMessage::Reasoning { step, .. } => println!("    [{p}] [think] {step}"),
-                AkhMessage::ToolResult { tool, success, output } => {
+                AkhMessage::ToolResult {
+                    tool,
+                    success,
+                    output,
+                } => {
                     let mark = if *success { "ok" } else { "FAIL" };
-                    println!("    [{p}] [tool {mark} {tool}] {}", output.replace('\n', " "));
+                    println!(
+                        "    [{p}] [tool {mark} {tool}] {}",
+                        output.replace('\n', " ")
+                    );
                 }
                 AkhMessage::Narrative { text, .. } => println!("    [{p}] [answer] {text}"),
                 AkhMessage::Fact { text, .. } => println!("    [{p}] [fact] {text}"),
@@ -339,11 +359,14 @@ mod inner {
             // Lab/loopback posture (ADR 086 §1): exec1 is a disposable VM
             // reachable only via a localhost port-forward for this session.
             .with_host_key_policy(HostKeyPolicy::InsecureAcceptAny)
-            .with_roots(vec![PathBuf::from("/")], vec![
-                PathBuf::from("/tmp"),
-                PathBuf::from("/opt"),
-                PathBuf::from("/var"),
-            ])
+            .with_roots(
+                vec![PathBuf::from("/")],
+                vec![
+                    PathBuf::from("/tmp"),
+                    PathBuf::from("/opt"),
+                    PathBuf::from("/var"),
+                ],
+            )
             .with_connect_timeout(Duration::from_secs(15))
     }
 
@@ -385,7 +408,8 @@ mod inner {
         sink: Arc<dyn MessageSink>,
     ) -> miette::Result<TurnResult> {
         let start = Instant::now();
-        let mut agent = Agent::with_backend(Arc::clone(&engine), AgentConfig::default(), Some(backend))?;
+        let mut agent =
+            Agent::with_backend(Arc::clone(&engine), AgentConfig::default(), Some(backend))?;
         agent.set_chat_backend(Arc::new(OllamaChatBackend::new(Arc::clone(&mgr))));
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -394,7 +418,14 @@ mod inner {
         let engine_for_thread = Arc::clone(&engine);
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::spawn(move || {
-            let outcome = agent.run_agentic_turn(&engine_for_thread, &agent_id_owned, &prompt_owned, sink.as_ref(), &cancel, true);
+            let outcome = agent.run_agentic_turn(
+                &engine_for_thread,
+                &agent_id_owned,
+                &prompt_owned,
+                sink.as_ref(),
+                &cancel,
+                true,
+            );
             let _ = tx.send(outcome.is_some());
         });
 
@@ -408,7 +439,11 @@ mod inner {
                 (false, false)
             }
         };
-        Ok(TurnResult { completed_in_time, turn_ok, wall: start.elapsed() })
+        Ok(TurnResult {
+            completed_in_time,
+            turn_ok,
+            wall: start.elapsed(),
+        })
     }
 
     /// Dry-run stand-in for a worker turn: connects its own `RemoteBackend`
@@ -416,16 +451,26 @@ mod inner {
     /// minimal `ToolRegistry` wired to the shared audit ledger — exercising
     /// the same backend-connect + tool-invocation + audit-envelope path a
     /// real agentic turn would, with zero cloud calls.
-    fn dry_run_worker_exec(engine: &Engine, backend: Arc<dyn Backend>, worker_label: &str) -> miette::Result<()> {
+    fn dry_run_worker_exec(
+        engine: &Engine,
+        backend: Arc<dyn Backend>,
+        worker_label: &str,
+    ) -> miette::Result<()> {
         let mut registry = ToolRegistry::new();
         registry.register(Box::new(ShellExecTool::with_backend(Arc::clone(&backend))));
         if let Some(ledger) = engine.audit_ledger() {
             registry.set_audit_ledger(Arc::clone(ledger));
         }
-        let input = ToolInput::new()
-            .with_param("command", format!("echo dry-run-{worker_label} && svcs -a | head -1"));
+        let input = ToolInput::new().with_param(
+            "command",
+            format!("echo dry-run-{worker_label} && svcs -a | head -1"),
+        );
         let output = registry.execute("shell_exec", input, engine)?;
-        println!("    [w6:dry:{worker_label}] shell_exec success={} : {}", output.success, output.result.replace('\n', " "));
+        println!(
+            "    [w6:dry:{worker_label}] shell_exec success={} : {}",
+            output.success,
+            output.result.replace('\n', " ")
+        );
         Ok(())
     }
 
@@ -465,7 +510,10 @@ mod inner {
     /// correlation ids, then count how many of those commands (by
     /// `params_summary`) were issued by more than one distinct worker.
     /// Returns `(redundant_count, total_worker_commands)`.
-    fn redundant_command_ratio(engine: &Engine, worker_correlation_ids: &[String]) -> (usize, usize) {
+    fn redundant_command_ratio(
+        engine: &Engine,
+        worker_correlation_ids: &[String],
+    ) -> (usize, usize) {
         let Some(ledger) = engine.audit_ledger() else {
             return (0, 0);
         };
@@ -477,12 +525,20 @@ mod inner {
         let worker_ids: HashSet<&str> = worker_correlation_ids.iter().map(String::as_str).collect();
         let mut by_worker: HashMap<&str, Vec<&str>> = HashMap::new();
         for entry in &page.entries {
-            if let AuditKind::ToolInvocation { tool_name, params_summary, envelope, .. } = &entry.kind
+            if let AuditKind::ToolInvocation {
+                tool_name,
+                params_summary,
+                envelope,
+                ..
+            } = &entry.kind
                 && tool_name == "shell_exec"
                 && let Some(cid) = envelope.correlation_id.as_deref()
                 && worker_ids.contains(cid)
             {
-                by_worker.entry(cid).or_default().push(params_summary.as_str());
+                by_worker
+                    .entry(cid)
+                    .or_default()
+                    .push(params_summary.as_str());
             }
         }
 
@@ -537,7 +593,8 @@ mod inner {
         let meta = parse_meta(&task_dir)?;
         let workers = cli.workers.unwrap_or(meta.subtasks).max(1);
         let timeout = Duration::from_secs(meta.timeout_secs.max(1));
-        let per_turn_timeout = Duration::from_secs((meta.timeout_secs / (workers as u64 + 2)).max(60));
+        let per_turn_timeout =
+            Duration::from_secs((meta.timeout_secs / (workers as u64 + 2)).max(60));
 
         let setup_sh = read_file(&task_dir.join("setup.sh"))?;
         let prompt_md = read_file(&task_dir.join("prompt.md"))?;
@@ -547,7 +604,8 @@ mod inner {
         // One shared Engine (+ audit ledger) for every arm/worker, so every
         // command is queryable from one place, attributed by
         // ExecEnvelope.correlation_id (blueprint "Shared setup").
-        let scratch = std::env::temp_dir().join(format!("akh-w6-{}-{}", cli.task, std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("akh-w6-{}-{}", cli.task, std::process::id()));
         let engine = Arc::new(Engine::new(EngineConfig {
             data_dir: Some(scratch),
             ..Default::default()
@@ -558,7 +616,8 @@ mod inner {
         // One connection reused for setup.sh/verify.sh across both arms
         // (sequential, matching the W3 runner's "one connection per
         // session" posture for the plumbing calls).
-        let setup_backend: Arc<dyn Backend> = Arc::new(RemoteBackend::connect(base_config.clone())?);
+        let setup_backend: Arc<dyn Backend> =
+            Arc::new(RemoteBackend::connect(base_config.clone())?);
         println!("PASS  connected to exec1 (setup/verify connection)\n");
 
         let mm = ModelManagerConfig {
@@ -601,13 +660,16 @@ mod inner {
                 setup_stderr.lines().take(3).collect::<Vec<_>>().join(" / ")
             );
             println!("    ABORT: {note}");
-            control_outcome = TaskOutcome::Aborted { reason: note.clone() };
+            control_outcome = TaskOutcome::Aborted {
+                reason: note.clone(),
+            };
             control_score = 0.0;
             control_wall = control_start.elapsed();
             control_notes.push(note);
         } else {
             if !cli.dry_run {
-                let control_backend: Arc<dyn Backend> = Arc::new(RemoteBackend::connect(base_config.clone())?);
+                let control_backend: Arc<dyn Backend> =
+                    Arc::new(RemoteBackend::connect(base_config.clone())?);
                 let before = mgr.usage();
                 let result = drive_turn(
                     Arc::clone(&engine),
@@ -620,11 +682,18 @@ mod inner {
                 )?;
                 let after = mgr.usage();
                 control_usage = usage_delta(before, after);
-                println!("    [w6:control] turn wall={:.1}s", result.wall.as_secs_f64());
+                println!(
+                    "    [w6:control] turn wall={:.1}s",
+                    result.wall.as_secs_f64()
+                );
                 if !result.completed_in_time {
-                    control_notes.push("turn exceeded timeout_secs — best-effort abort".to_string());
+                    control_notes
+                        .push("turn exceeded timeout_secs — best-effort abort".to_string());
                 } else if !result.turn_ok {
-                    control_notes.push("no usable chat backend (Ollama unreachable / model unavailable)".to_string());
+                    control_notes.push(
+                        "no usable chat backend (Ollama unreachable / model unavailable)"
+                            .to_string(),
+                    );
                 }
             } else {
                 control_notes.push("dry-run: control turn not driven (no cloud call)".to_string());
@@ -646,7 +715,12 @@ mod inner {
             ));
 
             (control_outcome, control_score) = if cli.dry_run {
-                (TaskOutcome::Aborted { reason: "dry-run: model not driven".to_string() }, 0.0)
+                (
+                    TaskOutcome::Aborted {
+                        reason: "dry-run: model not driven".to_string(),
+                    },
+                    0.0,
+                )
             } else if verify_code == 0 {
                 (TaskOutcome::Pass, 1.0)
             } else {
@@ -696,7 +770,9 @@ mod inner {
                 control_wall,
                 control_usage,
                 control_notes,
-                TaskOutcome::Aborted { reason: note.clone() },
+                TaskOutcome::Aborted {
+                    reason: note.clone(),
+                },
                 0.0,
                 orch_wall,
                 ResourceUsage::none(),
@@ -706,13 +782,20 @@ mod inner {
         }
 
         // --- decompose ---
-        let (decompose_prompts, decompose_source_note): (Vec<(String, String)>, String) = if cli.dry_run {
+        let (decompose_prompts, decompose_source_note): (Vec<(String, String)>, String) = if cli
+            .dry_run
+        {
             (
-                meta.subtask.iter().map(|s| (s.id.clone(), s.prompt.clone())).collect(),
-                "dry-run: decomposition skipped (no cloud call), using meta.toml [[subtask]] list".to_string(),
+                meta.subtask
+                    .iter()
+                    .map(|s| (s.id.clone(), s.prompt.clone()))
+                    .collect(),
+                "dry-run: decomposition skipped (no cloud call), using meta.toml [[subtask]] list"
+                    .to_string(),
             )
         } else {
-            let decompose_backend: Arc<dyn Backend> = Arc::new(RemoteBackend::connect(base_config.clone())?);
+            let decompose_backend: Arc<dyn Backend> =
+                Arc::new(RemoteBackend::connect(base_config.clone())?);
             let decompose_prompt = format!("{prompt_md}{DECOMPOSE_SUFFIX}");
             let sink = Arc::new(VecSink::new());
             let before = mgr.usage();
@@ -728,7 +811,10 @@ mod inner {
             let after = mgr.usage();
             let decompose_usage = usage_delta(before, after);
             orch_usage = add_usage(orch_usage, decompose_usage);
-            println!("    [w6:decompose] turn wall={:.1}s", result.wall.as_secs_f64());
+            println!(
+                "    [w6:decompose] turn wall={:.1}s",
+                result.wall.as_secs_f64()
+            );
             orch_notes.push(format!(
                 "coordination tax: decompose {} tok / {} req",
                 decompose_usage.tokens_used.unwrap_or(0),
@@ -746,7 +832,10 @@ mod inner {
 
             if !result.completed_in_time || !result.turn_ok {
                 (
-                    meta.subtask.iter().map(|s| (s.id.clone(), s.prompt.clone())).collect(),
+                    meta.subtask
+                        .iter()
+                        .map(|s| (s.id.clone(), s.prompt.clone()))
+                        .collect(),
                     format!(
                         "decomposition: orchestrator turn did not complete usably (completed_in_time={}, turn_ok={}) — fell back to meta.toml [[subtask]] list",
                         result.completed_in_time, result.turn_ok
@@ -789,8 +878,15 @@ mod inner {
 
         let mut handles: Vec<std::thread::JoinHandle<miette::Result<()>>> = Vec::new();
         for (subtask_id, subtask_prompt) in decompose_prompts.into_iter().take(n) {
-            let worker_backend: Arc<dyn Backend> = Arc::new(RemoteBackend::connect(base_config.clone())?);
-            worker_correlation_ids.push(worker_backend.locus().correlation_id.clone().unwrap_or_default());
+            let worker_backend: Arc<dyn Backend> =
+                Arc::new(RemoteBackend::connect(base_config.clone())?);
+            worker_correlation_ids.push(
+                worker_backend
+                    .locus()
+                    .correlation_id
+                    .clone()
+                    .unwrap_or_default(),
+            );
 
             let engine_c = Arc::clone(&engine);
             let mgr_c = Arc::clone(&mgr);
@@ -812,9 +908,14 @@ mod inner {
                         timeout_c,
                         sink,
                     )?;
-                    println!("    [w6:{subtask_id}] worker turn wall={:.1}s", result.wall.as_secs_f64());
+                    println!(
+                        "    [w6:{subtask_id}] worker turn wall={:.1}s",
+                        result.wall.as_secs_f64()
+                    );
                     if !result.completed_in_time {
-                        println!("    [w6:{subtask_id}] worker turn exceeded per-turn timeout — best-effort abort");
+                        println!(
+                            "    [w6:{subtask_id}] worker turn exceeded per-turn timeout — best-effort abort"
+                        );
                     } else if !result.turn_ok {
                         println!("    [w6:{subtask_id}] worker turn had no usable chat backend");
                     }
@@ -852,8 +953,11 @@ mod inner {
         );
 
         // --- redundant-command ratio (from the shared ledger) ---
-        let (redundant, total_worker_cmds) = redundant_command_ratio(&engine, &worker_correlation_ids);
-        orch_notes.push(format!("redundant commands: {redundant}/{total_worker_cmds}"));
+        let (redundant, total_worker_cmds) =
+            redundant_command_ratio(&engine, &worker_correlation_ids);
+        orch_notes.push(format!(
+            "redundant commands: {redundant}/{total_worker_cmds}"
+        ));
 
         // --- composite verify ---
         let (verify_code, verify_stdout, _verify_stderr) = upload_and_run(
@@ -873,7 +977,12 @@ mod inner {
 
         let orch_wall = orch_start.elapsed();
         let (orch_outcome, orch_score) = if cli.dry_run {
-            (TaskOutcome::Aborted { reason: "dry-run: model not driven".to_string() }, 0.0)
+            (
+                TaskOutcome::Aborted {
+                    reason: "dry-run: model not driven".to_string(),
+                },
+                0.0,
+            )
         } else if verify_code == 0 && fanout_errors.is_empty() {
             (TaskOutcome::Pass, 1.0)
         } else {
@@ -971,7 +1080,8 @@ mod inner {
             path: recipe_path.clone(),
             source,
         })?;
-        let recipe_hash = VmRecipeHash::from_blake3(Blake3Hex::from_hash(blake3::hash(&recipe_bytes)));
+        let recipe_hash =
+            VmRecipeHash::from_blake3(Blake3Hex::from_hash(blake3::hash(&recipe_bytes)));
 
         let record = RunRecord::new(
             chrono::Utc::now(),

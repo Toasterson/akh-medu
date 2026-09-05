@@ -22,7 +22,7 @@
 
 #[cfg(feature = "acp")]
 fn main() -> miette::Result<()> {
-    use akh_medu::acp::{ext_request_tcp, serve_tcp_loop, AkhAcpAgent};
+    use akh_medu::acp::{AkhAcpAgent, ext_request_tcp, serve_tcp_loop};
     use akh_medu::agent::{Agent, AgentConfig};
     use akh_medu::chat::ChatProcessor;
     use akh_medu::engine::{Engine, EngineConfig};
@@ -111,7 +111,12 @@ fn main() -> miette::Result<()> {
             serde_json::json!({ "id": "cooking", "description": "my cooking knowledge" }),
         )
         .await;
-        call("microtheory list", "_akh/microtheory/list", serde_json::json!({})).await;
+        call(
+            "microtheory list",
+            "_akh/microtheory/list",
+            serde_json::json!({}),
+        )
+        .await;
         call(
             "microtheory inspect cooking",
             "_akh/microtheory/inspect",
@@ -199,7 +204,12 @@ fn main() -> miette::Result<()> {
         .await;
 
         println!("── 29i source trust ──");
-        call("trust --top 5", "_akh/trust", serde_json::json!({ "top_k": 5 })).await;
+        call(
+            "trust --top 5",
+            "_akh/trust",
+            serde_json::json!({ "top_k": 5 }),
+        )
+        .await;
 
         println!("listener stays up 60s — try: akh --remote {addr} acp microtheory list");
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;

@@ -126,16 +126,13 @@ async fn main() -> miette::Result<()> {
 
     // Mount MCP server on axum with streamable HTTP transport.
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let mcp_config = StreamableHttpServerConfig::default();
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(mcp_server.clone()),
-        session_manager,
-        mcp_config,
-    );
+    let mcp_service =
+        StreamableHttpService::new(move || Ok(mcp_server.clone()), session_manager, mcp_config);
 
     // Build script REST router (GET /scripts, GET /scripts/{name}, POST /scripts/{name}).
     let scripts_router = {

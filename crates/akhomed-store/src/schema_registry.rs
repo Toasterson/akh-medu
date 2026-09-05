@@ -80,9 +80,7 @@ pub async fn admit_pack(db: &DatabaseConnection, row: SchemaPackRow) -> StoreRes
         // A raced concurrent admit of the same (name, version) hits the
         // unique index after our pre-check above passed; surface it as the
         // same duplicate-admission conflict rather than a raw DB error.
-        Err(sea_orm::DbErr::Exec(ref e))
-            if e.to_string().to_lowercase().contains("unique") =>
-        {
+        Err(sea_orm::DbErr::Exec(ref e)) if e.to_string().to_lowercase().contains("unique") => {
             Err(StoreError::Conflict {
                 message: "schema pack admission raced a concurrent admit of the same \
                           (name, version); the other admit won"

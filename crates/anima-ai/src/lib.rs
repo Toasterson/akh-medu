@@ -168,7 +168,7 @@ impl AnimaAi {
                     text,
                     route_used: Route::Gemma,
                     context: ctx,
-                })
+                });
             }
             Err(GemmaError::CacheMiss | GemmaError::Unavailable) => {}
             Err(e) => return Err(AnimaError::Gemma(e)),
@@ -180,7 +180,7 @@ impl AnimaAi {
                     text,
                     route_used: Route::Gemma,
                     context: ctx,
-                })
+                });
             }
             Err(GemmaError::Unavailable) => {}
             Err(e) => return Err(AnimaError::Gemma(e)),
@@ -209,7 +209,7 @@ impl AnimaAi {
                     text,
                     route_used: Route::Hybrid,
                     context: ctx,
-                })
+                });
             }
             Err(GemmaError::Unavailable) => {}
             Err(e) => return Err(AnimaError::Gemma(e)),
@@ -284,10 +284,21 @@ mod tests {
         // even when the KG is empty, since it falls back to the pattern's response_template.
         let mut ai = AnimaAi::new(GemmaHandler::new_stub());
         let result = ai.process("What is the Ennead?", &NullKg);
-        assert!(result.is_ok(), "ELIZA should return a static template response");
+        assert!(
+            result.is_ok(),
+            "ELIZA should return a static template response"
+        );
         let resp = result.unwrap();
-        assert_eq!(resp.context.route, Route::Eliza, "selector should pick Eliza");
-        assert_eq!(resp.route_used, Route::Eliza, "response should come from ELIZA");
+        assert_eq!(
+            resp.context.route,
+            Route::Eliza,
+            "selector should pick Eliza"
+        );
+        assert_eq!(
+            resp.route_used,
+            Route::Eliza,
+            "response should come from ELIZA"
+        );
     }
 
     #[test]
@@ -330,8 +341,7 @@ mod tests {
 
     #[test]
     fn gemma_unavailable_falls_back_to_remote() {
-        let mut ai = AnimaAi::new(GemmaHandler::new_stub())
-            .with_remote(Box::new(EchoRemote));
+        let mut ai = AnimaAi::new(GemmaHandler::new_stub()).with_remote(Box::new(EchoRemote));
         let result = ai.process("Write a poem about the Ennead", &NullKg);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().route_used, Route::RemoteFallback);
@@ -341,7 +351,10 @@ mod tests {
     fn all_engines_unavailable_returns_error() {
         let mut ai = AnimaAi::new(GemmaHandler::new_stub());
         let result = ai.process("Write a poem about the Ennead", &NullKg);
-        assert!(matches!(result, Err(AnimaError::AllEnginesExhausted { .. })));
+        assert!(matches!(
+            result,
+            Err(AnimaError::AllEnginesExhausted { .. })
+        ));
     }
 
     #[test]
@@ -359,12 +372,10 @@ mod tests {
             }
             fn related(&self, subject: &str, limit: usize) -> Vec<(String, String)> {
                 if subject.eq_ignore_ascii_case("design problem") {
-                    vec![
-                        ("description".to_string(), "requires creativity".to_string()),
-                    ]
-                    .into_iter()
-                    .take(limit)
-                    .collect()
+                    vec![("description".to_string(), "requires creativity".to_string())]
+                        .into_iter()
+                        .take(limit)
+                        .collect()
                 } else {
                     vec![]
                 }

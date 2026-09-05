@@ -1345,12 +1345,7 @@ fn startup_goal_cap_prevents_accumulation() {
         let goals = agent.goals();
         let open_count = goals
             .iter()
-            .filter(|g| {
-                !matches!(
-                    g.status,
-                    GoalStatus::Completed | GoalStatus::Failed { .. }
-                )
-            })
+            .filter(|g| !matches!(g.status, GoalStatus::Completed | GoalStatus::Failed { .. }))
             .count();
 
         assert!(
@@ -3209,7 +3204,9 @@ fn purge_self_referential_triples_removes_existing() {
     engine.set_phase9_config(cfg.clone());
 
     let thing = engine.create_symbol(SymbolKind::Entity, "Thing").unwrap();
-    let rel = engine.create_symbol(SymbolKind::Relation, "part-of").unwrap();
+    let rel = engine
+        .create_symbol(SymbolKind::Relation, "part-of")
+        .unwrap();
 
     engine
         .add_triple(&Triple::new(thing.id, rel.id, thing.id))
@@ -3229,13 +3226,14 @@ fn purge_self_referential_triples_removes_existing() {
     engine.set_phase9_config(cfg);
 
     let purged = engine.purge_self_referential_triples().unwrap();
-    assert_eq!(purged, 1, "exactly one self-referential triple should be purged");
+    assert_eq!(
+        purged, 1,
+        "exactly one self-referential triple should be purged"
+    );
 
     let after = engine.all_triples();
     assert!(
-        !after
-            .iter()
-            .any(|t| t.subject == t.object),
+        !after.iter().any(|t| t.subject == t.object),
         "no self-referential triples should remain after purge"
     );
 }

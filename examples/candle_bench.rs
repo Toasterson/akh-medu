@@ -154,7 +154,14 @@ fn main() -> miette::Result<()> {
         let secs = t0.elapsed().as_secs_f32();
         println!();
         println!("=== Phase 47 production generate probe ===");
-        println!("spec decode        : {}", if spec_on { "ON (AKH_SPEC_DECODE=1)" } else { "off" });
+        println!(
+            "spec decode        : {}",
+            if spec_on {
+                "ON (AKH_SPEC_DECODE=1)"
+            } else {
+                "off"
+            }
+        );
         println!("wall (incl prefill): {secs:.3}s");
         println!("--- text ({} chars) ---", text.len());
         println!("{text}");
@@ -183,10 +190,17 @@ fn main() -> miette::Result<()> {
         println!();
         println!("=== Phase 47c greedy speculative decode (gemma4) ===");
         println!("prefix P           : {} tokens", s.position);
-        println!("plain / spec toks  : {} / {}", s.plain_tokens, s.spec_tokens);
+        println!(
+            "plain / spec toks  : {} / {}",
+            s.plain_tokens, s.spec_tokens
+        );
         println!(
             "tokens match (A/B) : {}",
-            if s.tokens_match { "YES (spec == plain)" } else { "NO — diverged" }
+            if s.tokens_match {
+                "YES (spec == plain)"
+            } else {
+                "NO — diverged"
+            }
         );
         println!(
             "acceptance         : {}/{} drafts = {:.0}%  ({:.2} tokens/forward)",
@@ -238,14 +252,21 @@ fn main() -> miette::Result<()> {
         println!();
         println!("=== Phase 46d-2d real per-token graph decode loop ===");
         println!("position (P)       : {} tokens", s.position);
-        println!("decoded            : {} / {} requested", s.decoded, s.requested_new);
+        println!(
+            "decoded            : {} / {} requested",
+            s.decoded, s.requested_new
+        );
         println!(
             "warm fwd allocs    : {} miss  (0 ⇒ forward is capturable)",
             s.capture_miss
         );
         println!(
             "tokens match (A/B) : {}",
-            if s.tokens_match { "YES (graph == eager)" } else { "NO — DIVERGED" }
+            if s.tokens_match {
+                "YES (graph == eager)"
+            } else {
+                "NO — DIVERGED"
+            }
         );
         println!("eager   (per token): {:.2} tok/s", s.eager_tok_s);
         println!("graph   (per token): {:.2} tok/s", s.graph_tok_s);
@@ -279,7 +300,11 @@ fn main() -> miette::Result<()> {
             println!("speedup            : {speedup:.2}x  (replay / eager)");
             println!(
                 "parity (replay≟fresh): argmax {} | max|Δlogits| {:.3e}",
-                if stats.argmax_matches { "MATCH" } else { "MISMATCH" },
+                if stats.argmax_matches {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                },
                 stats.max_abs_diff
             );
             println!(
@@ -370,11 +395,31 @@ fn main() -> miette::Result<()> {
             // matmul/elementwise use the whole-op-body window, so they INCLUDE the
             // host-enqueue idle gap and over-count. The category sum can exceed wall —
             // that gap reflects how launch/dispatch-bound (not compute-bound) decode is.
-            println!("matmul (attention)*: {:.3} s = {:.1}%", mm_ns as f64 / 1e9, pct(mm_ns));
-            println!("rms_norm (fused)   : {:.3} s = {:.1}%", norm_ns as f64 / 1e9, pct(norm_ns));
-            println!("reduce (softmax)   : {:.3} s = {:.1}%", red_ns as f64 / 1e9, pct(red_ns));
-            println!("elementwise*       : {:.3} s = {:.1}%", elt_ns as f64 / 1e9, pct(elt_ns));
-            println!("copy (KV-cat+strd) : {:.3} s = {:.1}%", cp_ns as f64 / 1e9, pct(cp_ns));
+            println!(
+                "matmul (attention)*: {:.3} s = {:.1}%",
+                mm_ns as f64 / 1e9,
+                pct(mm_ns)
+            );
+            println!(
+                "rms_norm (fused)   : {:.3} s = {:.1}%",
+                norm_ns as f64 / 1e9,
+                pct(norm_ns)
+            );
+            println!(
+                "reduce (softmax)   : {:.3} s = {:.1}%",
+                red_ns as f64 / 1e9,
+                pct(red_ns)
+            );
+            println!(
+                "elementwise*       : {:.3} s = {:.1}%",
+                elt_ns as f64 / 1e9,
+                pct(elt_ns)
+            );
+            println!(
+                "copy (KV-cat+strd) : {:.3} s = {:.1}%",
+                cp_ns as f64 / 1e9,
+                pct(cp_ns)
+            );
             let measured = (gemv_ns + mm_ns + elt_ns + cp_ns + norm_ns + red_ns) as f64 / 1e9;
             let ratio = 100.0 * measured / wall;
             println!(
@@ -397,7 +442,12 @@ fn main() -> miette::Result<()> {
         }
     }
     println!();
-    let sample: String = stats.text.chars().take(180).collect::<String>().replace('\n', " ");
+    let sample: String = stats
+        .text
+        .chars()
+        .take(180)
+        .collect::<String>()
+        .replace('\n', " ");
     println!("sample: {sample}");
     Ok(())
 }
@@ -429,7 +479,10 @@ fn pick_gguf(models: &std::path::Path) -> Option<std::path::PathBuf> {
             .collect();
         ggufs.sort();
         if let Some(h) = &hint {
-            if let Some(m) = ggufs.iter().find(|p| p.to_string_lossy().contains(h.as_str())) {
+            if let Some(m) = ggufs
+                .iter()
+                .find(|p| p.to_string_lossy().contains(h.as_str()))
+            {
                 return Some(m.clone());
             }
         }

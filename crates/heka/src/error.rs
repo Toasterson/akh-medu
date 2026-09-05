@@ -25,7 +25,9 @@ pub enum HekaError {
     #[error("migration error: {0}")]
     #[diagnostic(
         code(heka::migration),
-        help("Ensure the database user has CREATE TABLE privileges and the pgvector extension is available")
+        help(
+            "Ensure the database user has CREATE TABLE privileges and the pgvector extension is available"
+        )
     )]
     Migration(String),
 

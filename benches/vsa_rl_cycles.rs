@@ -10,8 +10,8 @@ use rand::SeedableRng;
 #[allow(unused_imports)]
 use rand::rngs::StdRng;
 
-use akh_medu::agent::vsa_rl::{VsaRlConfig, compute_and_apply, compute_rl_reward};
 use akh_medu::agent::tool::ToolOutput;
+use akh_medu::agent::vsa_rl::{VsaRlConfig, compute_and_apply, compute_rl_reward};
 use akh_medu::engine::{Engine, EngineConfig};
 use akh_medu::vsa::Dimension;
 
@@ -36,11 +36,19 @@ fn test_engine() -> Engine {
 }
 
 fn success_output() -> ToolOutput {
-    ToolOutput { result: "success".into(), success: true, symbols_involved: vec![] }
+    ToolOutput {
+        result: "success".into(),
+        success: true,
+        symbols_involved: vec![],
+    }
 }
 
 fn failure_output() -> ToolOutput {
-    ToolOutput { result: "failed".into(), success: false, symbols_involved: vec![] }
+    ToolOutput {
+        result: "failed".into(),
+        success: false,
+        symbols_involved: vec![],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -73,13 +81,7 @@ fn bench_full_rl_cycle(c: &mut Criterion) {
         b.iter(|| {
             cycle += 1;
             black_box(compute_and_apply(
-                &engine,
-                goal,
-                "kg_query",
-                &predicted,
-                &output,
-                &config,
-                cycle,
+                &engine, goal, "kg_query", &predicted, &output, &config, cycle,
             ))
         })
     });
@@ -101,18 +103,16 @@ fn verify_confidence_increases_for_success() {
     let predicted = ops.random(&mut rng);
     let outcome_sym = engine.resolve_or_create_entity("succ_outcome").unwrap();
     engine.item_memory().insert(outcome_sym, predicted.clone());
-    let output = ToolOutput { result: "ok".into(), success: true, symbols_involved: vec![outcome_sym] };
+    let output = ToolOutput {
+        result: "ok".into(),
+        success: true,
+        symbols_involved: vec![outcome_sym],
+    };
 
     let mut last_conf = 0.5_f32;
     for cycle in 1..=120 {
         if let Some(sig) = compute_and_apply(
-            &engine,
-            goal,
-            "kg_query",
-            &predicted,
-            &output,
-            &config,
-            cycle,
+            &engine, goal, "kg_query", &predicted, &output, &config, cycle,
         ) {
             last_conf = sig.new_confidence;
         }
@@ -135,7 +135,15 @@ fn verify_confidence_decreases_for_failure() {
     let predicted = ops.random(&mut rng);
     let good_output = success_output();
     for cycle in 1..=30 {
-        compute_and_apply(&engine, goal, "reason", &predicted, &good_output, &config, cycle);
+        compute_and_apply(
+            &engine,
+            goal,
+            "reason",
+            &predicted,
+            &good_output,
+            &config,
+            cycle,
+        );
     }
 
     // Now inject a consistently low-reward scenario.
@@ -144,14 +152,22 @@ fn verify_confidence_decreases_for_failure() {
     // No symbols_involved → encode_actual_outcome falls back to goal_id vector.
     let bad_output = failure_output();
 
-    let conf_before = akh_medu::agent::vsa_rl::learned_quality(&engine, goal, "reason")
-        .unwrap_or(0.5);
+    let conf_before =
+        akh_medu::agent::vsa_rl::learned_quality(&engine, goal, "reason").unwrap_or(0.5);
 
     for cycle in 31..=130 {
-        compute_and_apply(&engine, goal, "reason", &bad_predicted, &bad_output, &config, cycle);
+        compute_and_apply(
+            &engine,
+            goal,
+            "reason",
+            &bad_predicted,
+            &bad_output,
+            &config,
+            cycle,
+        );
     }
-    let conf_after = akh_medu::agent::vsa_rl::learned_quality(&engine, goal, "reason")
-        .unwrap_or(0.5);
+    let conf_after =
+        akh_medu::agent::vsa_rl::learned_quality(&engine, goal, "reason").unwrap_or(0.5);
 
     assert!(
         conf_after <= conf_before,
@@ -171,11 +187,25 @@ fn verify_tool_independence() {
     let bad = failure_output();
 
     // kg_query gets consistent high reward: register outcome matching predicted.
-    let outcome_sym = engine.resolve_or_create_entity("tool_indep_outcome").unwrap();
+    let outcome_sym = engine
+        .resolve_or_create_entity("tool_indep_outcome")
+        .unwrap();
     engine.item_memory().insert(outcome_sym, predicted.clone());
-    let good_with_sym = ToolOutput { result: "ok".into(), success: true, symbols_involved: vec![outcome_sym] };
+    let good_with_sym = ToolOutput {
+        result: "ok".into(),
+        success: true,
+        symbols_involved: vec![outcome_sym],
+    };
     for cycle in 1..=100 {
-        compute_and_apply(&engine, goal, "kg_query", &predicted, &good_with_sym, &config, cycle);
+        compute_and_apply(
+            &engine,
+            goal,
+            "kg_query",
+            &predicted,
+            &good_with_sym,
+            &config,
+            cycle,
+        );
     }
     // reason gets consistently low reward (no matching outcome symbol).
     let mut rng2 = rand::rngs::StdRng::seed_from_u64(77);

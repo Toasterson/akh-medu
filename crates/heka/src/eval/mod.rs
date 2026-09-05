@@ -17,8 +17,8 @@
 //! summaries capturing hardware, model versions, dataset hashes, exact retrieval
 //! parameters, and p50/p99 latency.
 
-pub mod longmemeval;
 pub mod locomo;
+pub mod longmemeval;
 pub mod reporter;
 
 use clap::Subcommand;
@@ -146,8 +146,14 @@ pub async fn run(cmd: &EvalCommand) -> miette::Result<()> {
             data_dir,
             output,
         } => {
-            locomo::run(top_k, *top_k_explicit, *sessions, data_dir.as_deref(), output.as_deref())
-                .await
+            locomo::run(
+                top_k,
+                *top_k_explicit,
+                *sessions,
+                data_dir.as_deref(),
+                output.as_deref(),
+            )
+            .await
         }
     }
 }

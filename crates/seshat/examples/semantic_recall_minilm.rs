@@ -24,8 +24,8 @@
 use std::path::PathBuf;
 
 use grug_data::{
-    embed_recall_at_k, retrieval_recall_at_k, semantic_recall_at_k, Dataset, DistractorConfig,
-    EmbedRetriever, Retriever, SemanticRetriever, SignalMode,
+    Dataset, DistractorConfig, EmbedRetriever, Retriever, SemanticRetriever, SignalMode,
+    embed_recall_at_k, retrieval_recall_at_k, semantic_recall_at_k,
 };
 use seshat::embedder::SentenceEmbedder;
 
@@ -44,7 +44,9 @@ fn embed_all(embedder: &mut SentenceEmbedder, texts: &[String]) -> Vec<Vec<f32>>
     let mut out = Vec::with_capacity(texts.len());
     for chunk in texts.chunks(64) {
         let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
-        let vecs = embedder.embed_batch(&refs).expect("embedding a chunk should not fail once the model is loaded");
+        let vecs = embedder
+            .embed_batch(&refs)
+            .expect("embedding a chunk should not fail once the model is loaded");
         out.extend(vecs);
     }
     out
@@ -61,13 +63,22 @@ fn main() {
             eprintln!("  {}/tokenizer.json", dir.display());
             eprintln!("\nProvision it (FLOSS, ~90 MB), e.g.:");
             eprintln!("  mkdir -p {}", dir.display());
-            eprintln!("  curl -L -o {}/model.onnx      https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx", dir.display());
-            eprintln!("  curl -L -o {}/tokenizer.json  https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json", dir.display());
+            eprintln!(
+                "  curl -L -o {}/model.onnx      https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx",
+                dir.display()
+            );
+            eprintln!(
+                "  curl -L -o {}/tokenizer.json  https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+                dir.display()
+            );
             eprintln!("\nThen re-run (or set AKH_MINILM_DIR to an existing copy).");
             std::process::exit(1);
         }
     };
-    println!("semantic_recall_minilm: embedder loaded from {}", dir.display());
+    println!(
+        "semantic_recall_minilm: embedder loaded from {}",
+        dir.display()
+    );
 
     let seed = 42u64;
     let n_tools = 1000usize;
@@ -76,15 +87,30 @@ fn main() {
     let n_pairs = 500usize;
 
     println!("seed={seed} n_tools={n_tools} k={k} n_pairs={n_pairs}\n");
-    println!("{:<8}  {:>12}  {:>12}  {:>14}", "tier", "lex@desc", "hdc@desc", "minilm@desc");
+    println!(
+        "{:<8}  {:>12}  {:>12}  {:>14}",
+        "tier", "lex@desc", "hdc@desc", "minilm@desc"
+    );
 
     let mut rows = Vec::new();
-    for (label, mode) in [("D0/name", SignalMode::Name), ("D1/desc", SignalMode::Description), ("D2/para", SignalMode::Paraphrase)] {
-        let dataset = Dataset::new_sized_signal(seed, n_tools, holdout_frac, DistractorConfig::easy_with_count(2), mode)
-            .expect("dataset splits cleanly");
+    for (label, mode) in [
+        ("D0/name", SignalMode::Name),
+        ("D1/desc", SignalMode::Description),
+        ("D2/para", SignalMode::Paraphrase),
+    ] {
+        let dataset = Dataset::new_sized_signal(
+            seed,
+            n_tools,
+            holdout_frac,
+            DistractorConfig::easy_with_count(2),
+            mode,
+        )
+        .expect("dataset splits cleanly");
         let registry = dataset.registry();
         let descriptions: Vec<String> = registry.iter().map(|t| t.description.clone()).collect();
-        let pairs = dataset.retrieval_recall_pairs(n_pairs).expect("recall pairs");
+        let pairs = dataset
+            .retrieval_recall_pairs(n_pairs)
+            .expect("recall pairs");
 
         // Surface references (identical to the P3d-1 matrix).
         let lex_desc = retrieval_recall_at_k(&Retriever::new_over(&descriptions), &pairs, k);
@@ -95,8 +121,10 @@ fn main() {
         let embed_r = EmbedRetriever::new(tool_vecs);
         let req_texts: Vec<String> = pairs.iter().map(|(r, _)| r.clone()).collect();
         let req_vecs = embed_all(&mut embedder, &req_texts);
-        let embed_pairs: Vec<(Vec<f32>, usize)> =
-            req_vecs.into_iter().zip(pairs.iter().map(|(_, i)| *i)).collect();
+        let embed_pairs: Vec<(Vec<f32>, usize)> = req_vecs
+            .into_iter()
+            .zip(pairs.iter().map(|(_, i)| *i))
+            .collect();
         let minilm_desc = embed_recall_at_k(&embed_r, &embed_pairs, k);
 
         println!("{label:<8}  {lex_desc:>12.3}  {hdc_desc:>12.3}  {minilm_desc:>14.3}");

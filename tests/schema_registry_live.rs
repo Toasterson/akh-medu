@@ -56,7 +56,10 @@ async fn admit_install_and_reinstall_the_seed_pack_over_postgres() {
     // Re-admitting the exact same (name, version) is rejected — the registry
     // gate ADR 081 decision 9 requires (rows are written exactly once).
     let dup = registry.admit(RegistryRow::from_pack(&pack, "someone-else").unwrap());
-    assert!(dup.is_err(), "duplicate (name, version) admission must be rejected");
+    assert!(
+        dup.is_err(),
+        "duplicate (name, version) admission must be rejected"
+    );
 
     // Fetch it back and decode.
     let fetched = registry
@@ -80,7 +83,10 @@ async fn admit_install_and_reinstall_the_seed_pack_over_postgres() {
     for ty in ["Thing", "Person", "Organization", "Akh", "Goal"] {
         assert!(engine.resolve_symbol(ty).is_ok(), "missing type {ty}");
     }
-    assert!(engine.resolve_symbol("worksFor").is_ok(), "missing relation worksFor");
+    assert!(
+        engine.resolve_symbol("worksFor").is_ok(),
+        "missing relation worksFor"
+    );
 
     // Reinstalling the exact same pack@version is an idempotent no-op
     // (`install::install_pack`'s already-installed guard).

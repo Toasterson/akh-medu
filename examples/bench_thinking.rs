@@ -39,7 +39,10 @@ fn main() -> miette::Result<()> {
         STEP_BUDGETS.to_vec()
     };
 
-    eprintln!("phase41f: building engine + task set (seed {})...", cfg.seed);
+    eprintln!(
+        "phase41f: building engine + task set (seed {})...",
+        cfg.seed
+    );
     let engine = build_engine().map_err(akh_medu::error::AkhError::from)?;
     let tasks = build_task_set(&engine, &cfg).map_err(akh_medu::error::AkhError::from)?;
     eprintln!(

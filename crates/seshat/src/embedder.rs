@@ -94,9 +94,8 @@ impl SentenceEmbedder {
         let shape = [batch_size, max_len];
 
         // Run inference.
-        let input_ids_tensor =
-            ort::value::Value::from_array(ndarray_owned(&input_ids, &shape))
-                .map_err(|e| SeshatError::Embedding(format!("tensor creation: {e}")))?;
+        let input_ids_tensor = ort::value::Value::from_array(ndarray_owned(&input_ids, &shape))
+            .map_err(|e| SeshatError::Embedding(format!("tensor creation: {e}")))?;
         let attention_mask_tensor =
             ort::value::Value::from_array(ndarray_owned(&attention_mask, &shape))
                 .map_err(|e| SeshatError::Embedding(format!("tensor creation: {e}")))?;
@@ -169,7 +168,8 @@ impl SentenceEmbedder {
 
 /// Helper: create an owned ndarray from a flat slice and shape.
 fn ndarray_owned(data: &[i64], shape: &[usize; 2]) -> ndarray::Array2<i64> {
-    ndarray::Array2::from_shape_vec(*shape, data.to_vec()).expect("shape mismatch in tensor creation")
+    ndarray::Array2::from_shape_vec(*shape, data.to_vec())
+        .expect("shape mismatch in tensor creation")
 }
 
 /// Resolve the model directory, downloading if necessary.

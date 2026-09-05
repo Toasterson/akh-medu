@@ -70,7 +70,8 @@ mod tests {
     fn hybrid_produces_response_when_gemma_available() {
         let eliza = ElizaHandler::new();
         let mut gemma = GemmaHandler::with_backend(Box::new(EchoBackend), "Scholar");
-        let result = HybridOrchestrator::respond("What is the Ennead?", &NullKg, &eliza, &mut gemma);
+        let result =
+            HybridOrchestrator::respond("What is the Ennead?", &NullKg, &eliza, &mut gemma);
         assert!(result.is_ok());
     }
 

@@ -88,11 +88,7 @@ pub async fn list_scripts(State(db): State<ScriptsState>) -> Response {
 pub async fn get_script(State(db): State<ScriptsState>, Path(name): Path<String>) -> Response {
     match get_script_inner(&db, &name).await {
         Ok(Some(script)) => (StatusCode::OK, Json(script)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            format!("script '{name}' not found"),
-        )
-            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, format!("script '{name}' not found")).into_response(),
         Err(e) => {
             tracing::error!("get_script({name}): {e}");
             (
@@ -233,7 +229,11 @@ async fn assemble_chunks(db: &DatabaseConnection, doc_id: Uuid) -> SeshatResult<
         .all(db)
         .await?;
 
-    Ok(chunks.into_iter().map(|c| c.text).collect::<Vec<_>>().join(""))
+    Ok(chunks
+        .into_iter()
+        .map(|c| c.text)
+        .collect::<Vec<_>>()
+        .join(""))
 }
 
 /// Delete a document together with its chunks and embeddings, all in one transaction.

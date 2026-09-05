@@ -10,9 +10,8 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection,
-    EntityTrait, IntoActiveModel, Iterable, QueryFilter, QueryOrder, QuerySelect, Statement,
-    TransactionTrait,
+    ActiveValue, ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
+    IntoActiveModel, Iterable, QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
 };
 use uuid::Uuid;
 
@@ -177,9 +176,7 @@ pub async fn publish_snapshot(
                 .await?;
             if !$rows.is_empty() {
                 crate::entity::$module::Entity::insert_many(
-                    $rows
-                        .into_iter()
-                        .map(IntoActiveModel::into_active_model),
+                    $rows.into_iter().map(IntoActiveModel::into_active_model),
                 )
                 .exec(&$transaction)
                 .await?;
@@ -257,23 +254,31 @@ pub async fn publish_snapshot(
         .exec(&transaction)
         .await?;
     for chunk in facts.chunks(ROWS_PER_CHUNK) {
-        fact::Entity::insert_many(chunk.iter().cloned().map(IntoActiveModel::into_active_model))
-            .on_conflict(
-                OnConflict::columns([
-                    fact::Column::WorkspaceId,
-                    fact::Column::Subject,
-                    fact::Column::Predicate,
-                    fact::Column::Object,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec(&transaction)
-            .await?;
+        fact::Entity::insert_many(
+            chunk
+                .iter()
+                .cloned()
+                .map(IntoActiveModel::into_active_model),
+        )
+        .on_conflict(
+            OnConflict::columns([
+                fact::Column::WorkspaceId,
+                fact::Column::Subject,
+                fact::Column::Predicate,
+                fact::Column::Object,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&transaction)
+        .await?;
     }
     for chunk in publication.provenance.chunks(ROWS_PER_CHUNK) {
         provenance_snapshot::Entity::insert_many(
-            chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+            chunk
+                .iter()
+                .cloned()
+                .map(IntoActiveModel::into_active_model),
         )
         .exec(&transaction)
         .await?;
@@ -290,8 +295,16 @@ pub async fn publish_snapshot(
     replace_akh_rows!(transaction, learned_method, publication.methods);
     replace_akh_rows!(transaction, learned_method_step, publication.method_steps);
     replace_akh_rows!(transaction, competence_tool, publication.competence_tools);
-    replace_akh_rows!(transaction, competence_category, publication.competence_categories);
-    replace_akh_rows!(transaction, competence_calibration, publication.competence_calibration);
+    replace_akh_rows!(
+        transaction,
+        competence_category,
+        publication.competence_categories
+    );
+    replace_akh_rows!(
+        transaction,
+        competence_calibration,
+        publication.competence_calibration
+    );
     replace_akh_rows!(transaction, sleep_metric, publication.sleep_metrics);
 
     use akh_state::Column;
@@ -356,7 +369,10 @@ pub async fn replace_workspace_facts(
         let chunk_size = chunk_size_for_columns(fact::Column::iter().count());
         for chunk in unique_rows.chunks(chunk_size) {
             fact::Entity::insert_many(
-                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(IntoActiveModel::into_active_model),
             )
             .on_conflict(
                 OnConflict::columns([
@@ -412,23 +428,31 @@ pub async fn replace_workspace_facts_and_provenance(
         .await?;
 
     for chunk in unique_rows.chunks(ROWS_PER_CHUNK) {
-        fact::Entity::insert_many(chunk.iter().cloned().map(IntoActiveModel::into_active_model))
-            .on_conflict(
-                OnConflict::columns([
-                    fact::Column::WorkspaceId,
-                    fact::Column::Subject,
-                    fact::Column::Predicate,
-                    fact::Column::Object,
-                ])
-                .do_nothing()
-                .to_owned(),
-            )
-            .exec(&txn)
-            .await?;
+        fact::Entity::insert_many(
+            chunk
+                .iter()
+                .cloned()
+                .map(IntoActiveModel::into_active_model),
+        )
+        .on_conflict(
+            OnConflict::columns([
+                fact::Column::WorkspaceId,
+                fact::Column::Subject,
+                fact::Column::Predicate,
+                fact::Column::Object,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&txn)
+        .await?;
     }
     for chunk in provenance_rows.chunks(ROWS_PER_CHUNK) {
         provenance_snapshot::Entity::insert_many(
-            chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+            chunk
+                .iter()
+                .cloned()
+                .map(IntoActiveModel::into_active_model),
         )
         .exec(&txn)
         .await?;
@@ -499,7 +523,10 @@ pub async fn replace_provenance_inputs(
         let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count());
         for chunk in unique_rows.chunks(chunk_size) {
             provenance_input::Entity::insert_many(
-                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(IntoActiveModel::into_active_model),
             )
             .on_conflict(
                 OnConflict::columns([
@@ -563,7 +590,10 @@ pub async fn replace_workspace_seed_packs(
         let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count());
         for chunk in unique_rows.chunks(chunk_size) {
             workspace_seed_pack::Entity::insert_many(
-                chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+                chunk
+                    .iter()
+                    .cloned()
+                    .map(IntoActiveModel::into_active_model),
             )
             .on_conflict(
                 OnConflict::columns([
@@ -652,7 +682,11 @@ pub async fn get_harvest_watermark(db: &DatabaseConnection, akh_id: Uuid) -> Sto
 /// yet, inserts a minimal default row carrying only this watermark; the next
 /// full snapshot upsert fills in the rest of the columns without touching this
 /// one (see the clobber-guard note on [`upsert_akh_state`]).
-pub async fn set_harvest_watermark(db: &DatabaseConnection, akh_id: Uuid, seq: i64) -> StoreResult<()> {
+pub async fn set_harvest_watermark(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    seq: i64,
+) -> StoreResult<()> {
     use akh_state::Column;
     let now = chrono::Utc::now();
     let existing = akh_state::Entity::find_by_id(akh_id).one(db).await?;
@@ -717,7 +751,11 @@ pub async fn get_librarian_watermark(db: &DatabaseConnection, akh_id: Uuid) -> S
 /// routes through [`upsert_akh_state`], mirroring [`set_harvest_watermark`]'s
 /// clobber-guard pattern exactly (see that function's doc). If no `akh_state`
 /// row exists yet, inserts a minimal default row carrying only this watermark.
-pub async fn set_librarian_watermark(db: &DatabaseConnection, akh_id: Uuid, seq: i64) -> StoreResult<()> {
+pub async fn set_librarian_watermark(
+    db: &DatabaseConnection,
+    akh_id: Uuid,
+    seq: i64,
+) -> StoreResult<()> {
     use akh_state::Column;
     let now = chrono::Utc::now();
     let existing = akh_state::Entity::find_by_id(akh_id).one(db).await?;

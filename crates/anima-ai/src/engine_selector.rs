@@ -142,10 +142,10 @@ impl EngineSelector {
 
         // Psyche fit: reflective keyword hits + soft first-person modal signals
         let psyche_hits = psyche_patterns().find_iter(input).count();
-        let fp_modal =
-            lower.contains("should i") || lower.contains("can you help") || lower.contains("how do i");
-        let psyche_fit =
-            ((psyche_hits as f32) * 0.5 + if fp_modal { 0.15 } else { 0.0 }).min(1.0);
+        let fp_modal = lower.contains("should i")
+            || lower.contains("can you help")
+            || lower.contains("how do i");
+        let psyche_fit = ((psyche_hits as f32) * 0.5 + if fp_modal { 0.15 } else { 0.0 }).min(1.0);
 
         let route = self.decide(kg_relevance, novelty_score, psyche_fit);
         SelectionContext {

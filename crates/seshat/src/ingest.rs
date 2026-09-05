@@ -107,8 +107,7 @@ pub async fn ingest_document(
     let chunks = chunk_paragraph_aware(&req.body, req.target_chunk_chars, &req.format);
     if chunks.is_empty() {
         return Err(SeshatError::Config(
-            "ingest: chunker produced zero chunks — is body non-empty whitespace only?"
-                .to_string(),
+            "ingest: chunker produced zero chunks — is body non-empty whitespace only?".to_string(),
         ));
     }
 
@@ -196,11 +195,7 @@ fn derive_slug(title: &str, id: &Uuid) -> String {
 /// only to decide whether to pull markdown-style headings off the front
 /// of paragraphs; passing `"markdown"` or `"md"` enables heading
 /// extraction, anything else treats the input as opaque prose.
-pub fn chunk_paragraph_aware(
-    body: &str,
-    target_chars: usize,
-    format: &str,
-) -> Vec<ChunkDraft> {
+pub fn chunk_paragraph_aware(body: &str, target_chars: usize, format: &str) -> Vec<ChunkDraft> {
     let target = target_chars.max(MIN_TARGET_CHARS);
     let is_markdown = matches!(format, "markdown" | "md");
 
@@ -321,7 +316,12 @@ fn split_leading_heading(para: &str) -> Option<(String, Option<String>)> {
     }
     match chars.next() {
         Some(c) if c.is_whitespace() => {
-            let heading = chars.as_str().trim().trim_end_matches('#').trim().to_string();
+            let heading = chars
+                .as_str()
+                .trim()
+                .trim_end_matches('#')
+                .trim()
+                .to_string();
             let rest: String = lines.collect::<Vec<_>>().join("\n");
             let rest = if rest.trim().is_empty() {
                 None
@@ -441,17 +441,25 @@ mod tests {
     #[test]
     fn splits_when_budget_exceeded() {
         let para = "Lorem ipsum dolor sit amet consectetur adipiscing elit.";
-        let body = std::iter::repeat(para).take(9).collect::<Vec<_>>().join("\n\n");
+        let body = std::iter::repeat(para)
+            .take(9)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let chunks = chunk_paragraph_aware(&body, 200, "text");
         assert!(chunks.len() >= 2);
         for c in &chunks {
-            assert!(c.text.chars().count() <= 200, "chunk {} chars", c.text.chars().count());
+            assert!(
+                c.text.chars().count() <= 200,
+                "chunk {} chars",
+                c.text.chars().count()
+            );
         }
     }
 
     #[test]
     fn extracts_markdown_heading_from_standalone_paragraph() {
-        let body = "# Introduction\n\nThis is the intro paragraph.\n\n## Next Section\n\nMore content.";
+        let body =
+            "# Introduction\n\nThis is the intro paragraph.\n\n## Next Section\n\nMore content.";
         let chunks = chunk_paragraph_aware(body, 1500, "markdown");
         assert_eq!(chunks.len(), 2, "got {:#?}", chunks);
         assert_eq!(chunks[0].heading.as_deref(), Some("Introduction"));
@@ -530,7 +538,10 @@ mod tests {
         // Fill enough paragraphs under one heading to force 2+ chunks.
         let body = format!(
             "# Topic\n\n{paras}",
-            paras = std::iter::repeat(para).take(8).collect::<Vec<_>>().join("\n\n")
+            paras = std::iter::repeat(para)
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("\n\n")
         );
         let chunks = chunk_paragraph_aware(&body, 200, "markdown");
         assert!(chunks.len() >= 2);

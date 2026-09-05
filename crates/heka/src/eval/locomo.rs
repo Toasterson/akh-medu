@@ -39,7 +39,13 @@ pub async fn run(
     let data_dir = data_dir.unwrap_or("eval_data/locomo");
     let output_dir = output.unwrap_or("eval_reports");
 
-    tracing::info!(top_k, ?top_k_explicit, sessions, data_dir, "starting LoCoMo");
+    tracing::info!(
+        top_k,
+        ?top_k_explicit,
+        sessions,
+        data_dir,
+        "starting LoCoMo"
+    );
 
     // Validate and resolve top-K strategy.
     let use_explicit = top_k_explicit.is_some();
@@ -95,12 +101,15 @@ pub async fn run(
     };
 
     // Aggregate metrics.
-    let metrics = aggregate_metrics(&all_results, RetrievalParams {
-        mode: "locomo".to_string(),
-        top_k: top_k.to_string(),
-        top_k_explicit,
-        auto_top_k_cap,
-    });
+    let metrics = aggregate_metrics(
+        &all_results,
+        RetrievalParams {
+            mode: "locomo".to_string(),
+            top_k: top_k.to_string(),
+            top_k_explicit,
+            auto_top_k_cap,
+        },
+    );
 
     tracing::info!(total_questions = metrics.total_questions, "LoCoMo complete");
 

@@ -13,7 +13,9 @@
 //! gemma4-12b.mmproj.gguf alongside.
 #[cfg(feature = "candle-backend")]
 fn main() {
-    use akh_medu::nlu::audio::{decode_wav_bytes_to_16k_mono, decode_wav_to_16k_mono, fetch_media_bytes};
+    use akh_medu::nlu::audio::{
+        decode_wav_bytes_to_16k_mono, decode_wav_to_16k_mono, fetch_media_bytes,
+    };
     use akh_medu::nlu::candle_backend::CandleBackend;
     use std::path::Path;
 

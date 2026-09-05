@@ -24,15 +24,46 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PaDocuments::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PaDocuments::Id).uuid().not_null().primary_key().default(Expr::cust("gen_random_uuid()")))
+                    .col(
+                        ColumnDef::new(PaDocuments::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key()
+                            .default(Expr::cust("gen_random_uuid()")),
+                    )
                     .col(ColumnDef::new(PaDocuments::Title).text().not_null())
-                    .col(ColumnDef::new(PaDocuments::Slug).text().not_null().unique_key())
+                    .col(
+                        ColumnDef::new(PaDocuments::Slug)
+                            .text()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(PaDocuments::SourcePath).text())
                     .col(ColumnDef::new(PaDocuments::Format).text().not_null())
-                    .col(ColumnDef::new(PaDocuments::Tags).json_binary().not_null().default(Expr::cust("'[]'::jsonb")))
-                    .col(ColumnDef::new(PaDocuments::Metadata).json_binary().not_null().default(Expr::cust("'{}'::jsonb")))
-                    .col(ColumnDef::new(PaDocuments::ChunkCount).integer().not_null().default(0))
-                    .col(ColumnDef::new(PaDocuments::IngestedAt).timestamp_with_time_zone().not_null().default(Expr::cust("now()")))
+                    .col(
+                        ColumnDef::new(PaDocuments::Tags)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::cust("'[]'::jsonb")),
+                    )
+                    .col(
+                        ColumnDef::new(PaDocuments::Metadata)
+                            .json_binary()
+                            .not_null()
+                            .default(Expr::cust("'{}'::jsonb")),
+                    )
+                    .col(
+                        ColumnDef::new(PaDocuments::ChunkCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(PaDocuments::IngestedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::cust("now()")),
+                    )
                     .col(ColumnDef::new(PaDocuments::IngestedBy).text())
                     .to_owned(),
             )
@@ -44,7 +75,13 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PaChunks::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PaChunks::Id).uuid().not_null().primary_key().default(Expr::cust("gen_random_uuid()")))
+                    .col(
+                        ColumnDef::new(PaChunks::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key()
+                            .default(Expr::cust("gen_random_uuid()")),
+                    )
                     .col(ColumnDef::new(PaChunks::DocumentId).uuid().not_null())
                     .col(ColumnDef::new(PaChunks::ChunkIndex).integer().not_null())
                     .col(ColumnDef::new(PaChunks::Text).text().not_null())
@@ -129,17 +166,66 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(PaMicrotheoryCache::Table)
                     .if_not_exists()
-                    .col(ColumnDef::new(PaMicrotheoryCache::Id).uuid().not_null().primary_key().default(Expr::cust("gen_random_uuid()")))
-                    .col(ColumnDef::new(PaMicrotheoryCache::QueryHash).text().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::QueryText).text().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::CompartmentId).text().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::TriplesJson).json_binary().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::ChunkIdsUsed).json_binary().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::ModelUsed).text().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::Confidence).float().not_null())
-                    .col(ColumnDef::new(PaMicrotheoryCache::CreatedAt).timestamp_with_time_zone().not_null().default(Expr::cust("now()")))
-                    .col(ColumnDef::new(PaMicrotheoryCache::AccessCount).integer().not_null().default(0))
-                    .col(ColumnDef::new(PaMicrotheoryCache::LastAccessedAt).timestamp_with_time_zone().not_null().default(Expr::cust("now()")))
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key()
+                            .default(Expr::cust("gen_random_uuid()")),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::QueryHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::QueryText)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::CompartmentId)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::TriplesJson)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::ChunkIdsUsed)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::ModelUsed)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::Confidence)
+                            .float()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::cust("now()")),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::AccessCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(PaMicrotheoryCache::LastAccessedAt)
+                            .timestamp_with_time_zone()
+                            .not_null()
+                            .default(Expr::cust("now()")),
+                    )
                     .to_owned(),
             )
             .await?;
