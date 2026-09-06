@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         help="validate-only log file (relative paths are resolved under --base)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="SFT batch size (4096-context runs need 4 on an 80GB A100)",
+    )
+    parser.add_argument(
         "--curriculum-dir",
         type=Path,
         default=Path("local-curricula-20260904"),
@@ -170,7 +176,11 @@ def validate_foundation(foundation: Path) -> dict[str, Any]:
 
 
 def knowledge_command(
-    binary: Path, curriculum_dir: Path, foundation: Path, artifacts: Path
+    binary: Path,
+    curriculum_dir: Path,
+    foundation: Path,
+    artifacts: Path,
+    batch_size: int = 8,
 ) -> list[str]:
     curriculum = curriculum_dir / "sft"
     paths = {
@@ -210,7 +220,7 @@ def knowledge_command(
         "--epochs",
         "1",
         "--batch-size",
-        "8",
+        str(batch_size),
         "--learning-rate",
         "0.0001",
         "--warmup-steps",
@@ -289,7 +299,11 @@ def main() -> int:
             },
         )
         command = knowledge_command(
-            binary, resolve_under(base, args.curriculum_dir), foundation, knowledge
+            binary,
+            resolve_under(base, args.curriculum_dir),
+            foundation,
+            knowledge,
+            args.batch_size,
         )
         run_logged(command + ["--validate-only"], resolve_under(base, args.validate_log))
 
