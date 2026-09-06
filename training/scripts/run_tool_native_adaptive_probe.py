@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         default=",".join(KNOWLEDGE_FAMILIES),
         help="comma-separated knowledge workflow families to probe",
     )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=128,
+        help="generation budget for probe evaluations (long note-writing targets need >=512)",
+    )
     args = parser.parse_args()
     if args.poll_seconds < 5 or args.maximum_wait_hours <= 0:
         parser.error("--poll-seconds must be >= 5 and --maximum-wait-hours positive")
@@ -169,6 +175,7 @@ def run_probe(
     post_foundation_json: Path,
     knowledge_families: tuple[str, ...],
 ) -> None:
+    max_new_tokens = int(args.max_new_tokens)
     workflow = binary(args.knowledge_workflow_binary)
     generate_tools = binary(args.tool_exam_generator_binary)
     eval_knowledge = binary(args.knowledge_eval_binary)
@@ -249,7 +256,7 @@ def run_probe(
                 "--predictions-out",
                 str(predictions),
                 "--max-new-tokens",
-                "128",
+                str(max_new_tokens),
             ],
             probe / "knowledge" / f"{stem}.evaluate.log",
         )
@@ -313,7 +320,7 @@ def run_probe(
             "--predictions-out",
             str(probe / "tools" / "all-tools.predictions.json"),
             "--max-new-tokens",
-            "128",
+            str(max_new_tokens),
         ],
         probe / "tools" / "evaluate.log",
     )
