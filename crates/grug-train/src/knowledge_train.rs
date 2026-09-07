@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use grug_data::{KnowledgeAction, KnowledgeSftRecord};
 
-use crate::error::GrugResult;
+use crate::error::{GrugError, GrugResult};
 use crate::foundation::FoundationLineage;
 use crate::generate::{GenerateConfig, generate_from_prompt_ids_cached};
 use crate::tokenizer::Vocab;
@@ -55,6 +55,16 @@ pub enum KnowledgeModelSize {
     /// [`TinyTransformerConfig::akh_tool_350m_8k`].
     #[serde(rename = "350m_8k")]
     Model350m8k,
+    /// ADR 104 D3 fallback recipe: `Small`'s exact non-context architecture
+    /// with Rope positional encoding at a 4096-token context -- the
+    /// foundation shape [`TinyTransformerConfig::akh_tool_small_rope4k`]
+    /// pretrains at (measured 2026-09-07 to fit an 80 GB A100 at batch 4
+    /// where `Small8k` pretraining at 8192 does not, even at batch 2). Meant
+    /// to be warm-started into `Small8k` for SFT via `train_knowledge
+    /// --foundation-bundle ... --extend-context`, not trained/served
+    /// directly at this context length in production.
+    #[serde(rename = "small_rope_4k")]
+    SmallRope4k,
 }
 
 impl KnowledgeModelSize {
@@ -64,6 +74,7 @@ impl KnowledgeModelSize {
             Self::Model350m => TinyTransformerConfig::akh_tool_350m(vocab_size),
             Self::Small8k => TinyTransformerConfig::akh_tool_small_8k(vocab_size),
             Self::Model350m8k => TinyTransformerConfig::akh_tool_350m_8k(vocab_size),
+            Self::SmallRope4k => TinyTransformerConfig::akh_tool_small_rope4k(vocab_size),
         }
     }
 }
@@ -75,6 +86,7 @@ impl fmt::Display for KnowledgeModelSize {
             Self::Model350m => "350m",
             Self::Small8k => "small_8k",
             Self::Model350m8k => "350m_8k",
+            Self::SmallRope4k => "small_rope_4k",
         })
     }
 }
@@ -88,8 +100,12 @@ impl FromStr for KnowledgeModelSize {
             "350m" | "model350m" | "tool-350m" => Ok(Self::Model350m),
             "small_8k" | "small-8k" | "small8k" => Ok(Self::Small8k),
             "350m_8k" | "350m-8k" | "model350m8k" | "tool-350m-8k" => Ok(Self::Model350m8k),
+            "small_rope_4k" | "small-rope-4k" | "smallrope4k" | "small_rope4k" => {
+                Ok(Self::SmallRope4k)
+            }
             other => Err(format!(
-                "unknown knowledge model size {other:?}; expected small, 350m, small_8k, or 350m_8k"
+                "unknown knowledge model size {other:?}; expected small, 350m, small_8k, \
+                 350m_8k, or small_rope_4k"
             )),
         }
     }
@@ -143,6 +159,134 @@ impl KnowledgeModelShape {
         .with_positional_encoding(self.positional_encoding)
         .with_attention_chunk(self.attention_chunk)
     }
+
+    /// Structural equality that tolerates a Rope `scale` drift (ADR 104 D3):
+    /// `scale` is a runtime NTK rescaling knob applied by
+    /// [`TinyTransformer::with_serving_length`] and by a context-extended
+    /// knowledge-SFT warm start (`train_knowledge --extend-context`, see
+    /// [`Self::context_extension_scale`]), not an architectural identity
+    /// field. Every other field -- including `max_seq_len` and, under
+    /// [`PositionalEncoding::Rope`], `theta` -- must match `canonical`
+    /// exactly.
+    pub fn matches_canonical_shape(&self, canonical: &Self) -> bool {
+        self.vocab_size == canonical.vocab_size
+            && self.d_model == canonical.d_model
+            && self.n_heads == canonical.n_heads
+            && self.n_layers == canonical.n_layers
+            && self.d_ff == canonical.d_ff
+            && self.max_seq_len == canonical.max_seq_len
+            && self.attention_chunk == canonical.attention_chunk
+            && match (self.positional_encoding, canonical.positional_encoding) {
+                (
+                    PositionalEncoding::Rope { theta: t1, .. },
+                    PositionalEncoding::Rope { theta: t2, .. },
+                ) => t1 == t2,
+                (a, b) => a == b,
+            }
+    }
+
+    /// Whether `self` (a verified foundation bundle's shape) can source a
+    /// context-extended knowledge-SFT warm start into `target`'s shape
+    /// (ADR 104 D3, `train_knowledge --extend-context`): every field must
+    /// match `target` exactly except `max_seq_len` (which must strictly
+    /// grow) and, under [`PositionalEncoding::Rope`], `scale`.
+    ///
+    /// On success, returns the effective NTK-style scale
+    /// [`TinyTransformer::with_serving_length`] should receive --
+    /// `target.max_seq_len / self.max_seq_len * self`'s trained `scale`,
+    /// the exact ratio documented on [`PositionalEncoding::Rope`].
+    ///
+    /// A `Learned` foundation is always rejected with
+    /// [`GrugError::LearnedPositionsCannotExtend`] (see that variant's
+    /// `help` text for why, and which Rope presets --
+    /// `akh_tool_small_rope4k`, `akh_tool_small_8k`, `akh_tool_350m_8k` --
+    /// to retrain with instead). Any other architectural mismatch is
+    /// [`GrugError::ContextExtensionShapeMismatch`].
+    pub fn context_extension_scale(&self, target: &Self) -> GrugResult<f64> {
+        let PositionalEncoding::Rope {
+            theta: foundation_theta,
+            scale: foundation_scale,
+        } = self.positional_encoding
+        else {
+            return Err(GrugError::LearnedPositionsCannotExtend {
+                trained: self.max_seq_len,
+                requested: target.max_seq_len,
+            });
+        };
+        if self.vocab_size != target.vocab_size {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "vocab_size differs: foundation={} target={}",
+                    self.vocab_size, target.vocab_size
+                ),
+            });
+        }
+        if self.d_model != target.d_model {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "d_model differs: foundation={} target={}",
+                    self.d_model, target.d_model
+                ),
+            });
+        }
+        if self.n_heads != target.n_heads {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "n_heads differs: foundation={} target={}",
+                    self.n_heads, target.n_heads
+                ),
+            });
+        }
+        if self.n_layers != target.n_layers {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "n_layers differs: foundation={} target={}",
+                    self.n_layers, target.n_layers
+                ),
+            });
+        }
+        if self.d_ff != target.d_ff {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "d_ff differs: foundation={} target={}",
+                    self.d_ff, target.d_ff
+                ),
+            });
+        }
+        if self.attention_chunk != target.attention_chunk {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "attention_chunk differs: foundation={:?} target={:?}",
+                    self.attention_chunk, target.attention_chunk
+                ),
+            });
+        }
+        let PositionalEncoding::Rope {
+            theta: target_theta,
+            ..
+        } = target.positional_encoding
+        else {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: "target shape does not use PositionalEncoding::Rope".into(),
+            });
+        };
+        if foundation_theta != target_theta {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "rope theta differs: foundation={foundation_theta} target={target_theta}"
+                ),
+            });
+        }
+        if self.max_seq_len == 0 || target.max_seq_len <= self.max_seq_len {
+            return Err(GrugError::ContextExtensionShapeMismatch {
+                reason: format!(
+                    "target max_seq_len {} must be strictly greater than the foundation's {}",
+                    target.max_seq_len, self.max_seq_len
+                ),
+            });
+        }
+        Ok((target.max_seq_len as f64 / self.max_seq_len as f64) * foundation_scale)
+    }
 }
 
 /// The small, atomic pointer Akh-Medu needs to load a trained knowledge model.
@@ -179,6 +323,17 @@ pub struct KnowledgeModelArtifact {
     /// embedding a machine-local bundle path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foundation: Option<FoundationLineage>,
+    /// Present when `foundation`'s weights were warm-started into a longer
+    /// context than they were trained at (ADR 104 D3, `train_knowledge
+    /// --extend-context`): the foundation's own `max_seq_len` before
+    /// extension. When set, `self.shape.positional_encoding`'s `scale`
+    /// carries the effective NTK-style rescaled value computed by
+    /// [`KnowledgeModelShape::context_extension_scale`], not the `model_size`
+    /// preset's own default `scale`. `#[serde(default)]` so artifacts
+    /// predating this field deserialize unchanged, defaulting to `None`
+    /// ("not context-extended").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_extended_from: Option<usize>,
     /// Present when this candidate reset Adam and adapted the weights of a
     /// previously certified active knowledge model to a new immutable corpus
     /// or tool contract. The parent is content-addressed rather than referred
@@ -211,11 +366,35 @@ impl KnowledgeModelArtifact {
         }
         let expected =
             KnowledgeModelShape::from_config(&self.model_size.config(self.shape.vocab_size));
-        if self.shape != expected {
+        if !self.shape.matches_canonical_shape(&expected) {
             return Err(format!(
                 "artifact shape {:?} does not match the canonical {} shape {:?}",
                 self.shape, self.model_size, expected
             ));
+        }
+        if let Some(extended_from) = self.context_extended_from {
+            if self.foundation.is_none() {
+                return Err(
+                    "context_extended_from requires a foundation lineage to extend from".into(),
+                );
+            }
+            if !matches!(
+                self.shape.positional_encoding,
+                PositionalEncoding::Rope { .. }
+            ) {
+                return Err(
+                    "context_extended_from requires PositionalEncoding::Rope on the extended \
+                     shape"
+                        .into(),
+                );
+            }
+            if extended_from == 0 || extended_from >= self.shape.max_seq_len {
+                return Err(format!(
+                    "context_extended_from {extended_from} must be less than the artifact's \
+                     max_seq_len {}",
+                    self.shape.max_seq_len
+                ));
+            }
         }
         if self.tokenizer_file.is_empty()
             || self.contracts_file.is_empty()
@@ -339,7 +518,7 @@ impl KnowledgeAdaptationLineage {
         }
         let expected =
             KnowledgeModelShape::from_config(&self.model_size.config(self.shape.vocab_size));
-        if self.shape != expected {
+        if !self.shape.matches_canonical_shape(&expected) {
             return Err("knowledge adaptation parent has a non-canonical shape".into());
         }
         Ok(())
@@ -405,7 +584,7 @@ impl KnowledgeSteeringLineage {
         }
         let expected =
             KnowledgeModelShape::from_config(&self.model_size.config(self.shape.vocab_size));
-        if self.shape != expected {
+        if !self.shape.matches_canonical_shape(&expected) {
             return Err("knowledge steering parent has a non-canonical shape".into());
         }
         Ok(())
@@ -1080,6 +1259,7 @@ mod tests {
             languages: BTreeSet::new(),
             stages: BTreeSet::new(),
             foundation: None,
+            context_extended_from: None,
             adapted_from: None,
             steered_from: None,
             certification: None,
@@ -1126,6 +1306,7 @@ mod tests {
                 languages: BTreeSet::from(["english".into()]),
                 sources: BTreeSet::from(["source@revision|license".into()]),
             }),
+            context_extended_from: None,
             adapted_from: None,
             steered_from: None,
             certification: None,
@@ -1319,6 +1500,7 @@ mod tests {
                 languages: BTreeSet::from(["en".into(), "de".into(), "fr".into()]),
                 sources: BTreeSet::from(["source@revision|license".into()]),
             }),
+            context_extended_from: None,
             adapted_from: None,
             steered_from: None,
             certification: Some(certification),
@@ -1428,6 +1610,175 @@ mod tests {
             PositionalEncoding::Learned
         );
         assert_eq!(artifact.shape.attention_chunk, None);
+        // (d) `context_extended_from` (ADR 104 D3) postdates this legacy
+        // artifact shape too -- it must default to `None`, not fail to
+        // deserialize.
+        assert_eq!(artifact.context_extended_from, None);
         assert_eq!(artifact.verify(), Ok(()));
+    }
+
+    // --- ADR 104 D3: `--extend-context` knowledge-SFT context extension ---
+
+    fn tiny_rope_shape(max_seq_len: usize, scale: f64) -> KnowledgeModelShape {
+        KnowledgeModelShape::from_config(
+            &TinyTransformerConfig::new(260, 16, 2, 2, 32, max_seq_len).with_positional_encoding(
+                PositionalEncoding::Rope {
+                    theta: 10_000.0,
+                    scale,
+                },
+            ),
+        )
+    }
+
+    /// (a) A Rope foundation shape @64 is a valid context extension into a
+    /// same-architecture target shape @128: only `max_seq_len` differs, so
+    /// `context_extension_scale` succeeds with the NTK ratio
+    /// `target/foundation * foundation_scale` (`128/64 * 1.0 = 2.0`) --
+    /// exactly what a `train_knowledge --foundation-bundle ...
+    /// --extend-context` run would record as `context_extended_from = 64`
+    /// with `shape.positional_encoding.scale = 2.0`. Weight identity itself
+    /// (that `with_serving_length` changes no `Param` tensor even under a
+    /// real NTK rescale) is asserted directly on `TinyTransformer` in
+    /// `transformer::tests::with_serving_length_leaves_every_learned_weight_bitwise_identical_under_ntk_rescale`,
+    /// since only that module can see the model's private fields.
+    #[test]
+    fn context_extension_scale_accepts_grown_max_seq_len_and_records_lineage() {
+        let foundation_shape = tiny_rope_shape(64, 1.0);
+        let target_shape = tiny_rope_shape(128, 1.0);
+
+        let effective_scale = foundation_shape
+            .context_extension_scale(&target_shape)
+            .expect("same architecture, grown max_seq_len, Rope on both sides");
+        assert_eq!(effective_scale, 2.0);
+
+        let mut extended_shape = target_shape.clone();
+        extended_shape.positional_encoding = PositionalEncoding::Rope {
+            theta: 10_000.0,
+            scale: effective_scale,
+        };
+
+        let artifact = KnowledgeModelArtifact {
+            schema_version: KNOWLEDGE_MODEL_ARTIFACT_SCHEMA_VERSION,
+            model_size: KnowledgeModelSize::SmallRope4k,
+            shape: extended_shape,
+            parameter_count: 1,
+            tokenizer_file: "tokenizer.json".into(),
+            tokenizer_hash: "blake3:tokenizer".into(),
+            contracts_file: "contracts.json".into(),
+            checkpoint_dir: "checkpoints/step_00000001".into(),
+            checkpoint_step: 1,
+            checkpoint_model_hash: "blake3:model".into(),
+            checkpoint_optimizer_hash: None,
+            contract_hash: "blake3:contract".into(),
+            training_corpus_hash: "blake3:corpus".into(),
+            training_records: 1,
+            eval_corpus_hash: None,
+            capability_families: BTreeSet::new(),
+            languages: BTreeSet::new(),
+            stages: BTreeSet::new(),
+            foundation: Some(FoundationLineage {
+                artifact_hash: "blake3:foundation-artifact".into(),
+                checkpoint_model_hash: "blake3:foundation-model".into(),
+                checkpoint_step: 999,
+                training_corpus_hash: "blake3:foundation-corpus".into(),
+                training_tokens_seen: 1_000_000,
+                tokenizer_hash: "blake3:tokenizer".into(),
+                languages: BTreeSet::from(["english".into()]),
+                sources: BTreeSet::from(["source@revision|license".into()]),
+            }),
+            context_extended_from: Some(foundation_shape.max_seq_len),
+            adapted_from: None,
+            steered_from: None,
+            certification: None,
+        };
+        // `matches_canonical_shape` tolerates exactly this -- the `scale`
+        // drift from context extension -- against the target's own
+        // canonical shape (`model_size` here is `SmallRope4k` purely as a
+        // valid placeholder; the real `train_knowledge` run stores the
+        // *target* `--model`'s canonical shape, checked directly below).
+        assert!(artifact.shape.matches_canonical_shape(&target_shape));
+        assert_eq!(artifact.context_extended_from, Some(64));
+        assert_eq!(
+            artifact.shape.positional_encoding,
+            PositionalEncoding::Rope {
+                theta: 10_000.0,
+                scale: 2.0
+            }
+        );
+    }
+
+    /// (b) A `Learned` foundation can never context-extend, regardless of
+    /// `max_seq_len`: it must fail with the typed
+    /// [`GrugError::LearnedPositionsCannotExtend`] diagnostic that names
+    /// both lengths, the same error `TinyTransformer::with_serving_length`
+    /// itself returns.
+    #[test]
+    fn context_extension_scale_rejects_learned_foundation() {
+        let foundation_shape =
+            KnowledgeModelShape::from_config(&TinyTransformerConfig::new(260, 16, 2, 2, 32, 64));
+        assert_eq!(
+            foundation_shape.positional_encoding,
+            PositionalEncoding::Learned
+        );
+        let target_shape =
+            KnowledgeModelShape::from_config(&TinyTransformerConfig::new(260, 16, 2, 2, 32, 128));
+
+        match foundation_shape.context_extension_scale(&target_shape) {
+            Err(GrugError::LearnedPositionsCannotExtend { trained, requested }) => {
+                assert_eq!(trained, 64);
+                assert_eq!(requested, 128);
+            }
+            other => panic!("expected LearnedPositionsCannotExtend, got {other:?}"),
+        }
+    }
+
+    /// (c) A Rope foundation with a different `d_model` (or any other
+    /// non-context architecture field) is never a valid context extension,
+    /// even though both sides use Rope -- `context_extension_scale` must
+    /// reject it with the typed [`GrugError::ContextExtensionShapeMismatch`]
+    /// diagnostic rather than silently computing a scale for an
+    /// incompatible architecture.
+    #[test]
+    fn context_extension_scale_rejects_non_context_shape_drift() {
+        let foundation_shape = tiny_rope_shape(64, 1.0);
+        let mut wrong_d_model = tiny_rope_shape(128, 1.0);
+        wrong_d_model.d_model *= 2;
+
+        assert!(matches!(
+            foundation_shape.context_extension_scale(&wrong_d_model),
+            Err(GrugError::ContextExtensionShapeMismatch { .. })
+        ));
+
+        // A target that is not strictly longer than the foundation is also
+        // rejected (context extension only grows, never shrinks or repeats).
+        let same_length = tiny_rope_shape(64, 1.0);
+        assert!(matches!(
+            foundation_shape.context_extension_scale(&same_length),
+            Err(GrugError::ContextExtensionShapeMismatch { .. })
+        ));
+    }
+
+    /// The coordinator's actual fallback recipe: a foundation pretrained at
+    /// [`TinyTransformerConfig::akh_tool_small_rope4k`]'s shape (4096, Rope)
+    /// is exactly an accepted context extension into
+    /// [`TinyTransformerConfig::akh_tool_small_8k`]'s shape (8192, Rope) --
+    /// they share every field except `max_seq_len`, so
+    /// `context_extension_scale` must succeed with `scale = 2.0` and
+    /// `context_extended_from = 4096`.
+    #[test]
+    fn small_rope4k_foundation_extends_into_small_8k_target() {
+        let vocab_size = 3_000;
+        let foundation_shape =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::SmallRope4k.config(vocab_size));
+        let target_shape =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::Small8k.config(vocab_size));
+
+        assert_eq!(foundation_shape.max_seq_len, 4096);
+        assert_eq!(target_shape.max_seq_len, 8192);
+
+        let effective_scale = foundation_shape
+            .context_extension_scale(&target_shape)
+            .expect("small_rope_4k -> small_8k is exactly the accepted context extension");
+        assert_eq!(effective_scale, 2.0);
     }
 }

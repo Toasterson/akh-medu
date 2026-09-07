@@ -271,11 +271,35 @@ pub enum GrugError {
             "Learned position embeddings are a fixed [max_seq_len, d_model] table with one \
              row per trained position -- there is no principled value to put in a new row for \
              an untrained position. Retrain (or continue training) this model with \
-             `PositionalEncoding::Rope` if you need to serve past its trained context length; \
-             `TinyTransformer::with_serving_length` only supports Rope models, since RoPE has \
-             no position table to resize -- it derives rotation angles from `theta`/`scale` at \
-             call time instead."
+             `PositionalEncoding::Rope` if you need to serve past its trained context length \
+             -- e.g. the `akh_tool_small_rope4k`, `akh_tool_small_8k`, or `akh_tool_350m_8k` \
+             presets on `TinyTransformerConfig`; `TinyTransformer::with_serving_length` (and \
+             the `--extend-context` knowledge-SFT warm start built on it) only supports Rope \
+             models, since RoPE has no position table to resize -- it derives rotation angles \
+             from `theta`/`scale` at call time instead."
         )
     )]
     LearnedPositionsCannotExtend { trained: usize, requested: usize },
+
+    /// [`crate::knowledge_train::KnowledgeModelShape::context_extension_scale`]
+    /// was asked to context-extend a foundation shape into a target SFT
+    /// shape (ADR 104 D3, `train_knowledge --extend-context`) that differs
+    /// in more than `max_seq_len`/`positional_encoding.scale`.
+    #[error(
+        "foundation bundle shape is not a valid context extension of the knowledge SFT target \
+         shape: {reason}"
+    )]
+    #[diagnostic(
+        code(grug_train::context_extension_shape_mismatch),
+        help(
+            "`--extend-context` only tolerates a foundation shape that differs from the SFT \
+             target in `max_seq_len` (which must strictly grow) and, under \
+             `PositionalEncoding::Rope`, `scale` -- every other field (vocab_size, d_model, \
+             n_heads, n_layers, d_ff, rope theta, attention_chunk) must match exactly. Either \
+             retrain the foundation at the SFT target's exact non-context architecture, or \
+             pick an SFT `--model` whose shape (other than context length) matches this \
+             foundation bundle."
+        )
+    )]
+    ContextExtensionShapeMismatch { reason: String },
 }

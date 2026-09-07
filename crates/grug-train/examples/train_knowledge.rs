@@ -40,7 +40,7 @@ use grug_train::knowledge_train::{
 };
 use grug_train::train::{init_training, to_eval_model, train_step_guarded};
 use grug_train::{
-    BpeTokenizer, FoundationLineage, GenerateConfig, VerifiedFoundationBundle,
+    BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding, VerifiedFoundationBundle,
     VerifiedKnowledgeBundle, build_knowledge_batch, checkpoint, validate_knowledge_steering_share,
     verify_active_knowledge_bundle, verify_candidate_knowledge_bundle, verify_foundation_bundle,
 };
@@ -163,6 +163,19 @@ struct Args {
     /// automatically included in the training mixture.
     #[arg(long)]
     steering_sibling_jsonl: Option<PathBuf>,
+
+    /// Allow `--foundation-bundle` to warm-start a longer-context SFT run
+    /// from a shorter Rope foundation (ADR 104 D3, e.g. an
+    /// `akh_tool_small_rope4k`-shaped 4096 foundation feeding an
+    /// `akh_tool_small_8k`-shaped 8192 SFT run). Only `max_seq_len` (which
+    /// must strictly grow) and, under `PositionalEncoding::Rope`, `scale`
+    /// may differ between the foundation and this run's `--model` shape --
+    /// every other architectural field must still match exactly. Off by
+    /// default: a foundation/SFT shape mismatch stays a hard error unless
+    /// this is explicitly set. See
+    /// `KnowledgeModelShape::context_extension_scale`.
+    #[arg(long, default_value_t = false)]
+    extend_context: bool,
 
     /// Validate contracts, canonical prompts, split isolation, tokenizer and
     /// sequence budgets without allocating or updating model weights.
@@ -411,14 +424,46 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let tokenizer = load_or_train_tokenizer(&args, &train_records, &tokenizer_path)?;
     let tokenizer_hash = fingerprint_artifact_file(&tokenizer_path)?;
     let model_config = args.model.config(tokenizer.vocab_size());
-    let shape = KnowledgeModelShape::from_config(&model_config);
+    let mut shape = KnowledgeModelShape::from_config(&model_config);
+    // ADR 104 D3 (`--extend-context`): a foundation whose shape differs from
+    // this run's target shape *only* in `max_seq_len`/Rope `scale` is not a
+    // hard error -- it is the intended "train short, fine-tune long"
+    // fallback (pretrain a Rope foundation at a shorter context, warm-start
+    // the tool SFT at a longer one). `context_extension_scale` enforces that
+    // every other architectural field still matches exactly.
+    let mut context_extended_from: Option<usize> = None;
+    let mut context_extension_scale: Option<f64> = None;
     if let Some(foundation) = &foundation {
-        if foundation.artifact().model_size != args.model
-            || foundation.artifact().shape != shape
-            || foundation.artifact().tokenizer_hash != tokenizer_hash
-        {
+        if foundation.artifact().tokenizer_hash != tokenizer_hash {
             return Err(invalid_data(
-                "foundation bundle model shape/tokenizer does not match this knowledge run",
+                "foundation bundle tokenizer does not match this knowledge run",
+            ));
+        }
+        if foundation.artifact().model_size == args.model && foundation.artifact().shape == shape {
+            // Exact match: unchanged pre-ADR-104-D3 behavior.
+        } else if args.extend_context {
+            let effective_scale = foundation
+                .artifact()
+                .shape
+                .context_extension_scale(&shape)?;
+            if let PositionalEncoding::Rope { theta, .. } = shape.positional_encoding {
+                shape.positional_encoding = PositionalEncoding::Rope {
+                    theta,
+                    scale: effective_scale,
+                };
+            }
+            context_extended_from = Some(foundation.artifact().shape.max_seq_len);
+            context_extension_scale = Some(effective_scale);
+            println!(
+                "train_knowledge: context-extending foundation max_seq_len {} -> {} (rope scale {effective_scale})",
+                foundation.artifact().shape.max_seq_len,
+                shape.max_seq_len
+            );
+        } else {
+            return Err(invalid_data(
+                "foundation bundle model shape does not match this knowledge run (pass \
+                 --extend-context to warm-start a longer-context SFT run from a shorter Rope \
+                 foundation)",
             ));
         }
     }
@@ -480,7 +525,9 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let (mut model, mut optimizer) = init_training::<B>(&model_config, &device);
     let parameter_count = model.num_params();
     let learning_rate = args.learning_rate.unwrap_or(match args.model {
-        KnowledgeModelSize::Small | KnowledgeModelSize::Small8k => 3e-4,
+        KnowledgeModelSize::Small
+        | KnowledgeModelSize::Small8k
+        | KnowledgeModelSize::SmallRope4k => 3e-4,
         KnowledgeModelSize::Model350m | KnowledgeModelSize::Model350m8k => 1e-4,
     });
     println!(
@@ -564,13 +611,39 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             parent.artifact().checkpoint_model_hash
         );
     } else if let Some(foundation) = &foundation {
-        model = foundation.load_model_only::<B>(&device)?;
-        println!(
-            "train_knowledge: warm-started foundation step {} model={} corpus={}",
-            foundation.artifact().checkpoint_step,
-            foundation.artifact().checkpoint_model_hash,
-            foundation.artifact().training_corpus_hash
-        );
+        let loaded = foundation.load_model_only::<B>(&device)?;
+        model = match context_extension_scale {
+            Some(effective_scale) => {
+                // The foundation's own shape (unmodified) always loads
+                // cleanly -- `load_model_only` is byte-for-byte the same
+                // call as the non-extended path. Re-serving at the SFT
+                // target's longer `max_seq_len` is then exactly
+                // `TinyTransformer::with_serving_length`'s job: it only
+                // rebuilds each layer's non-learned rotary-frequency table,
+                // never a `Param` tensor (see
+                // `transformer::tests::with_serving_length_leaves_every_learned_weight_bitwise_identical_under_ntk_rescale`).
+                let extended =
+                    loaded.with_serving_length(shape.max_seq_len, effective_scale, &device)?;
+                println!(
+                    "train_knowledge: warm-started foundation step {} model={} corpus={} context-extended {} -> {} (rope scale {effective_scale})",
+                    foundation.artifact().checkpoint_step,
+                    foundation.artifact().checkpoint_model_hash,
+                    foundation.artifact().training_corpus_hash,
+                    foundation.artifact().shape.max_seq_len,
+                    shape.max_seq_len,
+                );
+                extended
+            }
+            None => {
+                println!(
+                    "train_knowledge: warm-started foundation step {} model={} corpus={}",
+                    foundation.artifact().checkpoint_step,
+                    foundation.artifact().checkpoint_model_hash,
+                    foundation.artifact().training_corpus_hash
+                );
+                loaded
+            }
+        };
     } else if let Some(parent) = &adaptation {
         model = parent.load_model_only::<B>(&device)?;
         println!(
@@ -767,6 +840,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
                     languages: train_inventory.languages.clone(),
                     stages: train_inventory.stages.clone(),
                     foundation: foundation_lineage.clone(),
+                    context_extended_from,
                     adapted_from: adaptation_lineage.clone(),
                     steered_from: steering_lineage.clone(),
                     certification: None,

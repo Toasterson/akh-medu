@@ -373,7 +373,9 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let (mut model, mut optimizer) = init_training::<B>(&config, &device);
     let parameter_count = model.num_params();
     let learning_rate = args.learning_rate.unwrap_or(match args.model {
-        KnowledgeModelSize::Small | KnowledgeModelSize::Small8k => 3e-4,
+        KnowledgeModelSize::Small
+        | KnowledgeModelSize::Small8k
+        | KnowledgeModelSize::SmallRope4k => 3e-4,
         KnowledgeModelSize::Model350m | KnowledgeModelSize::Model350m8k => 5e-5,
     });
 

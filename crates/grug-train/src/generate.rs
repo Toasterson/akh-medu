@@ -665,6 +665,9 @@ mod tests {
     /// for the copy constraint to change.
     #[test]
     fn constrained_cached_generation_matches_the_plain_cached_path_with_no_copy_fields() {
+        // Seed the backend so the random model does not depend on how many
+        // other tests consumed the global RNG before this one ran.
+        <CpuBackend as burn::tensor::backend::Backend>::seed(&Default::default(), 7);
         let device = Default::default();
         let model_config =
             TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);

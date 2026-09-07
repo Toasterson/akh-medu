@@ -633,6 +633,29 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 1024, 16, 24, 4864, 4096)
     }
 
+    /// ADR 104 D3 fallback recipe ("train short, fine-tune long"): the exact
+    /// non-context architecture of [`Self::akh_tool_small`] (`d_model=512,
+    /// n_heads=8, n_layers=8, d_ff=2048`), but with Rope positional encoding
+    /// and 1024-row chunked attention at a 4096-token context instead of
+    /// [`Self::akh_tool_small_8k`]'s 8192. Measured 2026-09-07:
+    /// `akh_tool_small_8k` foundation *pretraining* at 8192 does not fit an
+    /// 80 GB A100 at batch 2 even with balanced checkpointing (autodiff
+    /// retains per-chunk attention activations), while this 4096 config fits
+    /// at batch 4. Pretrain a foundation with this preset, then warm-start
+    /// the tool SFT at 8192 via `train_knowledge --foundation-bundle ...
+    /// --extend-context`
+    /// ([`crate::knowledge_train::KnowledgeModelShape::context_extension_scale`]),
+    /// which re-bases the rotary frequency exactly as
+    /// [`TinyTransformer::with_serving_length`] would.
+    pub fn akh_tool_small_rope4k(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 512, 8, 8, 2048, 4096)
+            .with_positional_encoding(PositionalEncoding::Rope {
+                theta: 10_000.0,
+                scale: 1.0,
+            })
+            .with_attention_chunk(Some(1024))
+    }
+
     /// ADR 104 D3/D4: the `akh_tool_small` rung re-targeted at an 8192-token
     /// context. Rotary position encoding (no `[8192, 512]` learned position
     /// table) plus 1024-row query-chunked attention keep an 8x longer
@@ -1663,5 +1686,67 @@ mod tests {
         // exceeded the original max_seq_len now fits without panicking.
         let long_ids: Vec<i64> = (0..(trained + 10) as i64).map(|i| i % 260).collect();
         let _ = extended.forward(ids_tensor(&long_ids, &device));
+    }
+
+    /// Knowledge-SFT context extension (ADR 104 D3, `train_knowledge
+    /// --extend-context`) rebases the rope frequency with a real NTK
+    /// `scale != 1.0`, which changes the rotation applied at *every*
+    /// position (not just past the original bound) -- so, unlike
+    /// `with_serving_length_extends_rope_model_with_identical_weights`
+    /// above, comparing forward-pass logits cannot show weight identity
+    /// here (the logits are expected to differ). Instead this asserts
+    /// directly on the underlying `Param` tensors: `with_serving_length`
+    /// only replaces each layer's non-learned rotary-frequency table, so
+    /// every learned weight -- token embedding, one block's attention
+    /// projections and feed-forward, and the LM head -- must come out
+    /// bit-for-bit identical.
+    #[test]
+    fn with_serving_length_leaves_every_learned_weight_bitwise_identical_under_ntk_rescale() {
+        let device = Default::default();
+        let model = tiny_rope_config().init::<CpuBackend>(&device);
+        let trained = model.max_seq_len;
+
+        let before_token_embedding = tensor_to_vec(model.token_embedding.weight.val());
+        let before_lm_head_weight = tensor_to_vec(model.lm_head.weight.val());
+        let before_query_weight = tensor_to_vec(model.blocks[0].attention.query.weight.val());
+        let before_out_proj_weight = tensor_to_vec(model.blocks[0].attention.out_proj.weight.val());
+        let before_ff1_weight = tensor_to_vec(model.blocks[0].feed_forward.linear1.weight.val());
+        let before_ff2_weight = tensor_to_vec(model.blocks[0].feed_forward.linear2.weight.val());
+
+        let extended = model
+            .clone()
+            .with_serving_length(trained * 2, 2.0, &device)
+            .expect("rope model must accept a rescaled context extension");
+
+        assert_eq!(
+            tensor_to_vec(extended.token_embedding.weight.val()),
+            before_token_embedding,
+            "token embedding must be untouched by with_serving_length"
+        );
+        assert_eq!(
+            tensor_to_vec(extended.lm_head.weight.val()),
+            before_lm_head_weight,
+            "lm head weight must be untouched by with_serving_length"
+        );
+        assert_eq!(
+            tensor_to_vec(extended.blocks[0].attention.query.weight.val()),
+            before_query_weight,
+            "attention query projection must be untouched by with_serving_length"
+        );
+        assert_eq!(
+            tensor_to_vec(extended.blocks[0].attention.out_proj.weight.val()),
+            before_out_proj_weight,
+            "attention output projection must be untouched by with_serving_length"
+        );
+        assert_eq!(
+            tensor_to_vec(extended.blocks[0].feed_forward.linear1.weight.val()),
+            before_ff1_weight,
+            "feed-forward linear1 must be untouched by with_serving_length"
+        );
+        assert_eq!(
+            tensor_to_vec(extended.blocks[0].feed_forward.linear2.weight.val()),
+            before_ff2_weight,
+            "feed-forward linear2 must be untouched by with_serving_length"
+        );
     }
 }
