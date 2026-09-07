@@ -256,4 +256,26 @@ pub enum GrugError {
         )
     )]
     CheckpointReadFailed { path: String, message: String },
+
+    /// [`crate::transformer::TinyTransformer::with_serving_length`] was
+    /// called on a model using
+    /// [`crate::transformer::PositionalEncoding::Learned`].
+    #[error(
+        "cannot serve max_seq_len {requested} beyond the trained {trained}: this model uses \
+         learned absolute position embeddings, which have no way to represent an untrained \
+         position"
+    )]
+    #[diagnostic(
+        code(grug_train::learned_positions_cannot_extend),
+        help(
+            "Learned position embeddings are a fixed [max_seq_len, d_model] table with one \
+             row per trained position -- there is no principled value to put in a new row for \
+             an untrained position. Retrain (or continue training) this model with \
+             `PositionalEncoding::Rope` if you need to serve past its trained context length; \
+             `TinyTransformer::with_serving_length` only supports Rope models, since RoPE has \
+             no position table to resize -- it derives rotation angles from `theta`/`scale` at \
+             call time instead."
+        )
+    )]
+    LearnedPositionsCannotExtend { trained: usize, requested: usize },
 }

@@ -22,7 +22,10 @@ use crate::{BpeTokenizer, GrugError, TinyTransformer};
 pub const FOUNDATION_MODEL_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const FOUNDATION_MODEL_MANIFEST: &str = "foundation-model.json";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq`, not `Eq`: `shape` (`KnowledgeModelShape`) embeds ADR 104's
+// `PositionalEncoding::Rope { theta: f64, scale: f64 }`, and `f64` has no
+// total equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FoundationModelArtifact {
     pub schema_version: u32,
     pub model_size: KnowledgeModelSize,

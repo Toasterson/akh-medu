@@ -480,8 +480,8 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let (mut model, mut optimizer) = init_training::<B>(&model_config, &device);
     let parameter_count = model.num_params();
     let learning_rate = args.learning_rate.unwrap_or(match args.model {
-        KnowledgeModelSize::Small => 3e-4,
-        KnowledgeModelSize::Model350m => 1e-4,
+        KnowledgeModelSize::Small | KnowledgeModelSize::Small8k => 3e-4,
+        KnowledgeModelSize::Model350m | KnowledgeModelSize::Model350m8k => 1e-4,
     });
     println!(
         "train_knowledge: model={} params={} vocab={} context={} lr={learning_rate}",

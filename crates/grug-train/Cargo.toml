@@ -71,3 +71,13 @@ gpu = ["burn/rocm"]
 # See `GpuAutodiffBackend` + `gpu_device()` in `lib.rs`, which are defined for
 # whichever of the two is enabled, so example code is vendor-agnostic.
 cuda = ["burn/cuda"]
+
+# ADR 104 D3: opt-in gradient checkpointing (Burn's `BalancedCheckpointing`
+# strategy) for the foundation and knowledge-SFT trainers, trading forward
+# recomputation during `.backward()` for lower peak activation memory --
+# needed to train the 8192-context `_8k` presets (`transformer.rs`) on a
+# single GPU. OFF by default (`NoCheckpointing`, byte-identical to the
+# pre-ADR-104 training path): checkpointing adds a recompute cost with no
+# benefit at the shorter contexts most runs still use. See
+# `CpuAutodiffBackend`/`GpuAutodiffBackend` in `lib.rs`.
+grad_checkpointing = []

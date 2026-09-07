@@ -24,6 +24,7 @@ use crate::foundation::FoundationLineage;
 use crate::generate::{GenerateConfig, generate_from_prompt_ids_cached};
 use crate::tokenizer::Vocab;
 use crate::train::{Batch, Encoded};
+use crate::transformer::PositionalEncoding;
 use crate::transformer::TinyTransformer;
 use crate::transformer::TinyTransformerConfig;
 
@@ -45,6 +46,15 @@ pub enum KnowledgeModelSize {
     Small,
     #[serde(rename = "350m")]
     Model350m,
+    /// ADR 104 D3/D4: `Small` re-targeted at an 8192-token context via
+    /// rotary position encoding + chunked attention instead of a learned
+    /// position table. See [`TinyTransformerConfig::akh_tool_small_8k`].
+    #[serde(rename = "small_8k")]
+    Small8k,
+    /// ADR 104 D3/D4: `Model350m` re-targeted at an 8192-token context. See
+    /// [`TinyTransformerConfig::akh_tool_350m_8k`].
+    #[serde(rename = "350m_8k")]
+    Model350m8k,
 }
 
 impl KnowledgeModelSize {
@@ -52,6 +62,8 @@ impl KnowledgeModelSize {
         match self {
             Self::Small => TinyTransformerConfig::akh_tool_small(vocab_size),
             Self::Model350m => TinyTransformerConfig::akh_tool_350m(vocab_size),
+            Self::Small8k => TinyTransformerConfig::akh_tool_small_8k(vocab_size),
+            Self::Model350m8k => TinyTransformerConfig::akh_tool_350m_8k(vocab_size),
         }
     }
 }
@@ -61,6 +73,8 @@ impl fmt::Display for KnowledgeModelSize {
         formatter.write_str(match self {
             Self::Small => "small",
             Self::Model350m => "350m",
+            Self::Small8k => "small_8k",
+            Self::Model350m8k => "350m_8k",
         })
     }
 }
@@ -72,15 +86,24 @@ impl FromStr for KnowledgeModelSize {
         match value.trim().to_ascii_lowercase().as_str() {
             "small" => Ok(Self::Small),
             "350m" | "model350m" | "tool-350m" => Ok(Self::Model350m),
+            "small_8k" | "small-8k" | "small8k" => Ok(Self::Small8k),
+            "350m_8k" | "350m-8k" | "model350m8k" | "tool-350m-8k" => Ok(Self::Model350m8k),
             other => Err(format!(
-                "unknown knowledge model size {other:?}; expected small or 350m"
+                "unknown knowledge model size {other:?}; expected small, 350m, small_8k, or 350m_8k"
             )),
         }
     }
 }
 
 /// Serializable architecture fields needed to reconstruct a Burn checkpoint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `positional_encoding`/`attention_chunk` are ADR 104 D3/D4 additions;
+/// both are `#[serde(default)]` so every `shape` object in an existing
+/// `foundation-model.json`/knowledge-model artifact -- written before this
+/// field existed -- still deserializes, defaulting to
+/// [`PositionalEncoding::Learned`] / `None`, exactly reproducing the
+/// pre-ADR-104 model shape and behavior.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeModelShape {
     pub vocab_size: usize,
     pub d_model: usize,
@@ -88,6 +111,10 @@ pub struct KnowledgeModelShape {
     pub n_layers: usize,
     pub d_ff: usize,
     pub max_seq_len: usize,
+    #[serde(default)]
+    pub positional_encoding: PositionalEncoding,
+    #[serde(default)]
+    pub attention_chunk: Option<usize>,
 }
 
 impl KnowledgeModelShape {
@@ -99,6 +126,8 @@ impl KnowledgeModelShape {
             n_layers: config.n_layers,
             d_ff: config.d_ff,
             max_seq_len: config.max_seq_len,
+            positional_encoding: config.positional_encoding,
+            attention_chunk: config.attention_chunk,
         }
     }
 
@@ -111,6 +140,8 @@ impl KnowledgeModelShape {
             self.d_ff,
             self.max_seq_len,
         )
+        .with_positional_encoding(self.positional_encoding)
+        .with_attention_chunk(self.attention_chunk)
     }
 }
 
@@ -272,7 +303,9 @@ impl KnowledgeModelArtifact {
 /// Portable ancestry for a continual-learning SFT run. Only an
 /// exam-certified active parent may mint this record; the certification hash
 /// makes that fact independently visible without retaining a local path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq`, not `Eq`: `shape` embeds ADR 104's `PositionalEncoding::Rope
+// { theta: f64, scale: f64 }`, and `f64` has no total equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeAdaptationLineage {
     pub artifact_hash: String,
     pub checkpoint_model_hash: String,
@@ -314,7 +347,9 @@ impl KnowledgeAdaptationLineage {
 }
 
 /// Content-addressed evidence for one candidate-to-candidate adaptive segment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq`, not `Eq`: `shape` embeds ADR 104's `PositionalEncoding::Rope
+// { theta: f64, scale: f64 }`, and `f64` has no total equality.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeSteeringLineage {
     pub artifact_hash: String,
     pub checkpoint_model_hash: String,
@@ -1329,5 +1364,70 @@ mod tests {
         assert_eq!(score.parse_rate, 0.5);
         assert_eq!(score.action_exact_rate, 0.5);
         assert_eq!(score.target_exact_rate, 0.0);
+    }
+
+    // --- ADR 104 D3/D4: KnowledgeModelShape backward compatibility -----
+
+    /// (c) `positional_encoding`/`attention_chunk` are `#[serde(default)]`:
+    /// a `shape` object written before ADR 104 (with only the original six
+    /// fields) must still deserialize, defaulting to
+    /// `PositionalEncoding::Learned` / `None` -- exactly the canonical
+    /// shape `from_config` produces for a pre-ADR-104 preset, so an old
+    /// `shape` object round-trips to a value indistinguishable from what
+    /// the current code would have written for that same model.
+    #[test]
+    fn knowledge_model_shape_defaults_new_fields_when_absent() {
+        let legacy_json = r#"{
+            "vocab_size": 3000,
+            "d_model": 512,
+            "n_heads": 8,
+            "n_layers": 8,
+            "d_ff": 2048,
+            "max_seq_len": 4096
+        }"#;
+        let shape: KnowledgeModelShape = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(shape.positional_encoding, PositionalEncoding::Learned);
+        assert_eq!(shape.attention_chunk, None);
+        assert_eq!(
+            shape,
+            KnowledgeModelShape::from_config(&TinyTransformerConfig::akh_tool_small(3000))
+        );
+    }
+
+    /// (d) A full `KnowledgeModelArtifact` JSON document as written by code
+    /// predating ADR 104 (nested `shape` object without the new fields,
+    /// and without any of the artifact's own `#[serde(default)]` fields)
+    /// must still deserialize and pass `verify()`.
+    #[test]
+    fn legacy_knowledge_model_artifact_without_new_shape_fields_deserializes_and_verifies() {
+        let legacy_json = r#"{
+            "schema_version": 1,
+            "model_size": "small",
+            "shape": {
+                "vocab_size": 3000,
+                "d_model": 512,
+                "n_heads": 8,
+                "n_layers": 8,
+                "d_ff": 2048,
+                "max_seq_len": 4096
+            },
+            "parameter_count": 30000000,
+            "tokenizer_file": "tokenizer.json",
+            "tokenizer_hash": "blake3:aaaa",
+            "contracts_file": "contracts.json",
+            "checkpoint_dir": "checkpoint",
+            "checkpoint_step": 100,
+            "checkpoint_model_hash": "blake3:bbbb",
+            "contract_hash": "blake3:cccc",
+            "training_corpus_hash": "blake3:dddd",
+            "training_records": 10
+        }"#;
+        let artifact: KnowledgeModelArtifact = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(
+            artifact.shape.positional_encoding,
+            PositionalEncoding::Learned
+        );
+        assert_eq!(artifact.shape.attention_chunk, None);
+        assert_eq!(artifact.verify(), Ok(()));
     }
 }

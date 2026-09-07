@@ -7,9 +7,11 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
+use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use std::time::Instant;
 
 use burn::tensor::backend::AutodiffBackend;
@@ -38,6 +40,51 @@ use grug_train::CpuAutodiffBackend as ActiveBackend;
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 const TOKEN_CACHE_SCHEMA_VERSION: u32 = 1;
+
+/// `--bpe-pretokenizer` choice for a freshly-trained tokenizer (ADR 104 D2).
+/// Combined with `--bpe-min-hex-run` into a `grug_train::bpe::PreTokenization`
+/// at the `BpeTokenizer::train_with_pretokenization` call site; kept as its
+/// own CLI-facing type (rather than exposing `PreTokenization` directly to
+/// clap) since the two flags map onto one enum variant's payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BpePreTokenizerArg {
+    ByteLevel,
+    HexAware,
+}
+
+impl BpePreTokenizerArg {
+    fn into_pretokenization(self, min_hex_run: usize) -> grug_train::bpe::PreTokenization {
+        match self {
+            BpePreTokenizerArg::ByteLevel => grug_train::bpe::PreTokenization::ByteLevel,
+            BpePreTokenizerArg::HexAware => {
+                grug_train::bpe::PreTokenization::HexAwareByteLevel { min_hex_run }
+            }
+        }
+    }
+}
+
+impl fmt::Display for BpePreTokenizerArg {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            BpePreTokenizerArg::ByteLevel => "byte-level",
+            BpePreTokenizerArg::HexAware => "hex-aware",
+        })
+    }
+}
+
+impl FromStr for BpePreTokenizerArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "byte-level" | "byte_level" | "bytelevel" => Ok(Self::ByteLevel),
+            "hex-aware" | "hex_aware" | "hexaware" => Ok(Self::HexAware),
+            other => Err(format!(
+                "unknown --bpe-pretokenizer {other:?}; expected byte-level or hex-aware"
+            )),
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "train_foundation")]
@@ -73,6 +120,23 @@ struct Args {
 
     #[arg(long, default_value_t = 8_000)]
     bpe_vocab_size: usize,
+
+    /// Pre-tokenization scheme for a freshly-trained BPE tokenizer (ADR 104
+    /// D2). Ignored when `<artifacts-dir>/tokenizer.json` already exists --
+    /// an existing tokenizer's own saved JSON always governs. `hex-aware`
+    /// isolates long hex-character runs (see `--bpe-min-hex-run`) and
+    /// always splits decimal digits individually, so the model copies
+    /// identifiers/content hashes one character per token instead of
+    /// merging them inconsistently; `byte-level` keeps the original P1a
+    /// scheme for comparison runs.
+    #[arg(long, default_value_t = BpePreTokenizerArg::HexAware)]
+    bpe_pretokenizer: BpePreTokenizerArg,
+
+    /// Minimum contiguous hex-character run length that `--bpe-pretokenizer
+    /// hex-aware` isolates into one token per character. Ignored for
+    /// `--bpe-pretokenizer byte-level`.
+    #[arg(long, default_value_t = grug_train::bpe::DEFAULT_MIN_HEX_RUN)]
+    bpe_min_hex_run: usize,
 
     /// Deterministic reservoir used to train BPE without retaining a huge
     /// web corpus in memory.
@@ -133,10 +197,26 @@ struct TokenFile {
 struct TokenCacheManifest {
     schema_version: u32,
     tokenizer_hash: String,
+    /// Audit trail alongside `tokenizer_hash` for *why* two tokenizers with
+    /// different hashes differ (ADR 104 D2): `"byte-level"` or
+    /// `"hex-aware"`. Not itself load-bearing for cache validity --
+    /// `tokenizer_hash` already changes if the pre-tokenizer changes -- so
+    /// old caches predating this field default to `"byte-level"`, which is
+    /// what they were actually built with.
+    #[serde(default = "default_bpe_pretokenizer_label")]
+    bpe_pretokenizer: String,
+    /// Paired with `bpe_pretokenizer`; meaningless (and defaulted to 0) for
+    /// `"byte-level"` caches.
+    #[serde(default)]
+    bpe_min_hex_run: usize,
     training_corpus_hash: String,
     evaluation_corpus_hash: String,
     training: TokenFile,
     evaluation: TokenFile,
+}
+
+fn default_bpe_pretokenizer_label() -> String {
+    "byte-level".to_string()
 }
 
 #[derive(Serialize)]
@@ -148,6 +228,8 @@ struct RunDescriptor<'a> {
     shape: &'a KnowledgeModelShape,
     parameter_count: usize,
     tokenizer_hash: &'a str,
+    bpe_pretokenizer: String,
+    bpe_min_hex_run: usize,
     token_cache_hash: &'a str,
     steps: usize,
     batch_size: usize,
@@ -225,12 +307,19 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
                 tokenizer_path.display()
             )));
         }
+        let pretokenization = args
+            .bpe_pretokenizer
+            .into_pretokenization(args.bpe_min_hex_run);
         println!(
-            "train_foundation: training BPE ceiling={} from {}-record reservoir",
+            "train_foundation: training BPE ceiling={} pretokenizer={pretokenization} from {}-record reservoir",
             args.bpe_vocab_size,
             audit.tokenizer_sample.len()
         );
-        let tokenizer = BpeTokenizer::train(audit.tokenizer_sample, args.bpe_vocab_size)?;
+        let tokenizer = BpeTokenizer::train_with_pretokenization(
+            audit.tokenizer_sample,
+            args.bpe_vocab_size,
+            pretokenization,
+        )?;
         tokenizer.save(&tokenizer_path)?;
         tokenizer
     };
@@ -241,14 +330,19 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         &manifest,
         &tokenizer,
         &tokenizer_hash,
+        &args.bpe_pretokenizer.to_string(),
+        args.bpe_min_hex_run,
     )?;
     let token_cache_path = args.artifacts_dir.join("token-cache.json");
     let token_cache_hash = fingerprint_artifact_file(&token_cache_path)?;
     let shape = KnowledgeModelShape::from_config(&args.model.config(tokenizer.vocab_size()));
     println!(
-        "train_foundation: tokenizer={} vocab={} tokens train={} eval={} context={}",
+        "train_foundation: tokenizer={} vocab={} bpe_pretokenizer={} bpe_min_hex_run={} \
+         tokens train={} eval={} context={}",
         tokenizer_hash,
         tokenizer.vocab_size(),
+        args.bpe_pretokenizer,
+        args.bpe_min_hex_run,
         token_cache.training.tokens,
         token_cache.evaluation.tokens,
         shape.max_seq_len
@@ -279,8 +373,8 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let (mut model, mut optimizer) = init_training::<B>(&config, &device);
     let parameter_count = model.num_params();
     let learning_rate = args.learning_rate.unwrap_or(match args.model {
-        KnowledgeModelSize::Small => 3e-4,
-        KnowledgeModelSize::Model350m => 5e-5,
+        KnowledgeModelSize::Small | KnowledgeModelSize::Small8k => 3e-4,
+        KnowledgeModelSize::Model350m | KnowledgeModelSize::Model350m8k => 5e-5,
     });
 
     let mut start_step = 0usize;
@@ -326,6 +420,8 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             shape: &shape,
             parameter_count,
             tokenizer_hash: &tokenizer_hash,
+            bpe_pretokenizer: args.bpe_pretokenizer.to_string(),
+            bpe_min_hex_run: args.bpe_min_hex_run,
             token_cache_hash: &token_cache_hash,
             steps: args.steps,
             batch_size: args.batch_size,
@@ -511,6 +607,9 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     }
     if args.bpe_vocab_size < 260 {
         return Err(invalid_data("--bpe-vocab-size must be at least 260"));
+    }
+    if args.bpe_min_hex_run == 0 {
+        return Err(invalid_data("--bpe-min-hex-run must be at least 1"));
     }
     if args.learning_rate.is_some_and(|value| value <= 0.0)
         || !(0.0..=1.0).contains(&args.lr_min_ratio)
@@ -729,6 +828,8 @@ fn load_or_build_token_cache(
     manifest: &FoundationCorpusManifest,
     tokenizer: &BpeTokenizer,
     tokenizer_hash: &str,
+    bpe_pretokenizer: &str,
+    bpe_min_hex_run: usize,
 ) -> Result<TokenCacheManifest, Box<dyn Error>> {
     let cache_path = artifacts_dir.join("token-cache.json");
     if cache_path.exists() {
@@ -761,6 +862,8 @@ fn load_or_build_token_cache(
     let cache = TokenCacheManifest {
         schema_version: TOKEN_CACHE_SCHEMA_VERSION,
         tokenizer_hash: tokenizer_hash.into(),
+        bpe_pretokenizer: bpe_pretokenizer.into(),
+        bpe_min_hex_run,
         training_corpus_hash: manifest.training.fingerprint.clone(),
         evaluation_corpus_hash: manifest.evaluation.fingerprint.clone(),
         training,

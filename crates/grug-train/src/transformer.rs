@@ -31,10 +31,112 @@ use burn::module::Module;
 use burn::nn::attention::generate_autoregressive_mask;
 use burn::nn::{
     Embedding, EmbeddingConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
+    RotaryEncoding, RotaryEncodingConfig,
 };
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, Int, Tensor};
+
+use crate::error::{GrugError, GrugResult};
+
+/// Choice of positional encoding for [`TinyTransformer`] (ADR 104 D3).
+///
+/// `Learned` is the original (and default) behavior: an absolute, trainable
+/// [`Embedding`] with one row per position, sized to `max_seq_len`. It is
+/// simple and cheap at short context, but the table must be allocated at
+/// `max_seq_len` rows up front and has no way to represent an untrained
+/// position -- serving beyond the trained length is not possible without
+/// new learned parameters.
+///
+/// `Rope` (rotary position encoding, [`burn::nn::RotaryEncoding`]) rotates
+/// the query/key vectors per attention head as a function of their absolute
+/// position instead of adding a learned bias to the token embedding. It
+/// allocates no position table (the rotation angles are computed from
+/// `theta`), and -- because the rotation is a deterministic function of
+/// position, not a learned lookup -- a model trained with `Rope` can be
+/// re-instantiated for a larger `max_seq_len` with identical weights via
+/// [`TinyTransformer::with_serving_length`].
+///
+/// `scale` (Rope only) re-bases the rotation frequency for serving past the
+/// trained length: `theta_effective = theta * scale`. This is a
+/// **simplified NTK-style base-frequency adjustment**, not literal position
+/// interpolation (dividing position indices by `scale`) -- Burn's
+/// `RotaryEncoding::apply` indexes a precomputed frequency table by integer
+/// position, so fractional/interpolated positions are not directly
+/// expressible through its public API. Pass `scale = 1.0` to keep the
+/// trained frequency base unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PositionalEncoding {
+    Learned,
+    Rope { theta: f64, scale: f64 },
+}
+
+impl Default for PositionalEncoding {
+    /// Every artifact/config predating ADR 104 used learned absolute
+    /// positions; this default is what makes `#[serde(default)]` on a
+    /// `positional_encoding` field round-trip old JSON manifests unchanged.
+    fn default() -> Self {
+        Self::Learned
+    }
+}
+
+/// Builds the rotary-frequency table for one attention layer (one call per
+/// [`CausalSelfAttention`], since the table is cheap and this keeps every
+/// layer self-sufficient -- see [`TinyTransformer::with_serving_length`],
+/// which rebuilds it per-layer when re-serving at a larger `max_seq_len`).
+fn build_rotary<B: Backend>(
+    d_head: usize,
+    max_seq_len: usize,
+    theta: f64,
+    scale: f64,
+    device: &B::Device,
+) -> RotaryEncoding<B> {
+    let effective_theta = (theta * scale) as f32;
+    RotaryEncodingConfig::new(max_seq_len.max(1), d_head)
+        .with_theta(effective_theta)
+        .init(device)
+}
+
+/// Computes causal attention in query-row blocks of `chunk` rows at a time
+/// (ADR 104 D4), keeping peak materialized attention memory at
+/// `batch x heads x chunk x kv_len` instead of `batch x heads x query_len x
+/// kv_len`. This is an exact, not approximate, memory-blocking: softmax
+/// normalizes each query row independently of every other row, so grouping
+/// rows into blocks changes only the order operations run in, never the
+/// result (byte-for-byte, up to floating-point summation order).
+fn chunked_causal_attention<B: Backend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    v: Tensor<B, 4>,
+    causal_mask: Option<Tensor<B, 3, Bool>>,
+    scale: f64,
+    chunk: usize,
+) -> Tensor<B, 4> {
+    assert!(chunk > 0, "attention_chunk must be positive");
+    let [batch_size, n_heads, query_len, d_head] = q.dims();
+    let kv_len = k.dims()[2];
+    let mut blocks = Vec::with_capacity(query_len.div_ceil(chunk));
+    let mut start = 0usize;
+    while start < query_len {
+        let end = (start + chunk).min(query_len);
+        let q_block = q
+            .clone()
+            .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
+        let mut scores = q_block.matmul(k.clone().swap_dims(2, 3)) / scale;
+        if let Some(mask) = &causal_mask {
+            let mask_block = mask
+                .clone()
+                .slice([0..batch_size, start..end, 0..kv_len])
+                .unsqueeze_dim::<4>(1);
+            scores = scores.mask_fill(mask_block, f32::NEG_INFINITY);
+        }
+        let weights = softmax(scores, 3);
+        blocks.push(weights.matmul(v.clone()));
+        start = end;
+    }
+    Tensor::cat(blocks, 2)
+}
 
 /// The attention seam: anything that can turn `[batch, seq, d_model]` into
 /// an attended `[batch, seq, d_model]` under a causal mask.
@@ -60,10 +162,21 @@ pub trait Attention<B: Backend> {
 }
 
 /// Configuration for [`CausalSelfAttention`].
+///
+/// `positional_encoding`/`max_seq_len` size the optional rotary-frequency
+/// table (see [`PositionalEncoding`]); `attention_chunk` selects the
+/// memory-bounded attention path (see [`chunked_causal_attention`]). All
+/// three default so `CausalSelfAttentionConfig::new(d_model, n_heads)` keeps
+/// its original two-argument arity and byte-identical behavior.
 #[derive(Config, Debug)]
 pub struct CausalSelfAttentionConfig {
     pub d_model: usize,
     pub n_heads: usize,
+    #[config(default = "PositionalEncoding::Learned")]
+    pub positional_encoding: PositionalEncoding,
+    #[config(default = "1")]
+    pub max_seq_len: usize,
+    pub attention_chunk: Option<usize>,
 }
 
 impl CausalSelfAttentionConfig {
@@ -74,13 +187,26 @@ impl CausalSelfAttentionConfig {
             self.d_model,
             self.n_heads
         );
+        let d_head = self.d_model / self.n_heads;
+        let rotary = match self.positional_encoding {
+            PositionalEncoding::Learned => None,
+            PositionalEncoding::Rope { theta, scale } => Some(build_rotary::<B>(
+                d_head,
+                self.max_seq_len,
+                theta,
+                scale,
+                device,
+            )),
+        };
         CausalSelfAttention {
             query: LinearConfig::new(self.d_model, self.d_model).init(device),
             key: LinearConfig::new(self.d_model, self.d_model).init(device),
             value: LinearConfig::new(self.d_model, self.d_model).init(device),
             out_proj: LinearConfig::new(self.d_model, self.d_model).init(device),
             n_heads: self.n_heads,
-            d_head: self.d_model / self.n_heads,
+            d_head,
+            rotary,
+            attention_chunk: self.attention_chunk,
         }
     }
 }
@@ -88,6 +214,11 @@ impl CausalSelfAttentionConfig {
 /// Vanilla scaled-dot-product multi-head causal self-attention -- the only
 /// [`Attention`] implementation in the Spike-0 seam. See the module docs for
 /// why this is a deliberate, minimal seed and not a dead end.
+///
+/// `rotary` is `Some` under [`PositionalEncoding::Rope`] (applied to q/k
+/// per head before scoring) and `None` under `Learned`. `attention_chunk`
+/// selects [`chunked_causal_attention`] when set; `None` keeps the original
+/// single-shot score matrix.
 #[derive(Module, Debug)]
 pub struct CausalSelfAttention<B: Backend> {
     query: Linear<B>,
@@ -96,6 +227,8 @@ pub struct CausalSelfAttention<B: Backend> {
     out_proj: Linear<B>,
     n_heads: usize,
     d_head: usize,
+    rotary: Option<RotaryEncoding<B>>,
+    attention_chunk: Option<usize>,
 }
 
 /// Per-layer projected keys and values retained during autoregressive
@@ -122,20 +255,27 @@ impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
             t.reshape([batch_size, seq_len, n_heads, d_head])
                 .swap_dims(1, 2)
         };
-        let q = split_heads(q);
-        let k = split_heads(k);
+        let mut q = split_heads(q);
+        let mut k = split_heads(k);
         let v = split_heads(v);
 
-        // Scaled dot-product: [batch, n_heads, seq, seq]
+        if let Some(rotary) = &self.rotary {
+            q = rotary.apply(q, 0);
+            k = rotary.apply(k, 0);
+        }
+
         let scale = (d_head as f64).sqrt();
-        let scores = q.matmul(k.swap_dims(2, 3)) / scale;
-
-        // Broadcast the [batch, seq, seq] causal mask across the head dim.
-        let mask = causal_mask.unsqueeze_dim::<4>(1);
-        let scores = scores.mask_fill(mask, f32::NEG_INFINITY);
-
-        let weights = softmax(scores, 3);
-        let attended = weights.matmul(v); // [batch, n_heads, seq, d_head]
+        let attended = match self.attention_chunk {
+            Some(chunk) => chunked_causal_attention(q, k, v, Some(causal_mask), scale, chunk),
+            None => {
+                // Scaled dot-product: [batch, n_heads, seq, seq]
+                let scores = q.matmul(k.swap_dims(2, 3)) / scale;
+                // Broadcast the [batch, seq, seq] causal mask across the head dim.
+                let mask = causal_mask.unsqueeze_dim::<4>(1);
+                let scores = scores.mask_fill(mask, f32::NEG_INFINITY);
+                softmax(scores, 3).matmul(v) // [batch, n_heads, seq, d_head]
+            }
+        };
 
         let merged = attended
             .swap_dims(1, 2)
@@ -167,9 +307,21 @@ impl<B: Backend> CausalSelfAttention<B> {
                 .reshape([batch_size, query_len, n_heads, d_head])
                 .swap_dims(1, 2)
         };
-        let q = split_heads(q);
-        let new_key = split_heads(new_key);
+        let mut q = split_heads(q);
+        let mut new_key = split_heads(new_key);
         let new_value = split_heads(new_value);
+
+        // Rotary rotation must be applied to each of q/new_key at its own
+        // absolute position *before* concatenation with the cache: prior
+        // cached keys were already rotated (at their own position) when
+        // they were first computed, so re-rotating the concatenated tensor
+        // would double-rotate them. `existing_len` is exactly the absolute
+        // position the new token(s) start at.
+        let existing_len = cache.as_ref().map(|c| c.key.dims()[2]).unwrap_or(0);
+        if let Some(rotary) = &self.rotary {
+            q = rotary.apply(q, existing_len);
+            new_key = rotary.apply(new_key, existing_len);
+        }
 
         let (key, value) = match cache {
             Some(cache) => {
@@ -195,25 +347,36 @@ impl<B: Backend> CausalSelfAttention<B> {
         };
         let total_len = key.dims()[2];
         let scale = (d_head as f64).sqrt();
-        let scores = q.matmul(key.clone().swap_dims(2, 3)) / scale;
-        let scores = match causal_mask {
+        let causal_mask = match causal_mask {
             Some(mask) => {
                 assert_eq!(
                     mask.dims(),
                     [batch_size, query_len, total_len],
                     "cached attention mask shape differs from query/key lengths"
                 );
-                scores.mask_fill(mask.unsqueeze_dim::<4>(1), f32::NEG_INFINITY)
+                Some(mask)
             }
             None => {
                 assert_eq!(
                     query_len, 1,
                     "multi-token cached attention requires a causal mask"
                 );
-                scores
+                None
             }
         };
-        let attended = softmax(scores, 3).matmul(value.clone());
+        let attended = match self.attention_chunk {
+            Some(chunk) => {
+                chunked_causal_attention(q, key.clone(), value.clone(), causal_mask, scale, chunk)
+            }
+            None => {
+                let scores = q.matmul(key.clone().swap_dims(2, 3)) / scale;
+                let scores = match causal_mask {
+                    Some(mask) => scores.mask_fill(mask.unsqueeze_dim::<4>(1), f32::NEG_INFINITY),
+                    None => scores,
+                };
+                softmax(scores, 3).matmul(value.clone())
+            }
+        };
         let merged = attended
             .swap_dims(1, 2)
             .reshape([batch_size, query_len, d_model]);
@@ -221,6 +384,31 @@ impl<B: Backend> CausalSelfAttention<B> {
             self.out_proj.forward(merged),
             CausalSelfAttentionCache { key, value },
         )
+    }
+
+    /// Rebuilds this layer's rotary-frequency table for a larger
+    /// `max_seq_len` (ADR 104 D3, [`TinyTransformer::with_serving_length`]).
+    /// A no-op on the `Learned` seam (`self.rotary` stays `None`) --
+    /// callers are expected to have already rejected `Learned` models via
+    /// [`TinyTransformer::with_serving_length`]'s typed error, since a
+    /// learned position table has no principled way to extend at all.
+    fn resize_rotary(
+        mut self,
+        new_max_seq_len: usize,
+        theta: f64,
+        scale: f64,
+        device: &B::Device,
+    ) -> Self {
+        if self.rotary.is_some() {
+            self.rotary = Some(build_rotary::<B>(
+                self.d_head,
+                new_max_seq_len,
+                theta,
+                scale,
+                device,
+            ));
+        }
+        self
     }
 }
 
@@ -280,13 +468,22 @@ pub struct DecoderBlockConfig {
     pub d_model: usize,
     pub n_heads: usize,
     pub d_ff: usize,
+    #[config(default = "PositionalEncoding::Learned")]
+    pub positional_encoding: PositionalEncoding,
+    #[config(default = "1")]
+    pub max_seq_len: usize,
+    pub attention_chunk: Option<usize>,
 }
 
 impl DecoderBlockConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> DecoderBlock<B> {
         DecoderBlock {
             ln1: LayerNormConfig::new(self.d_model).init(device),
-            attention: CausalSelfAttentionConfig::new(self.d_model, self.n_heads).init(device),
+            attention: CausalSelfAttentionConfig::new(self.d_model, self.n_heads)
+                .with_positional_encoding(self.positional_encoding)
+                .with_max_seq_len(self.max_seq_len)
+                .with_attention_chunk(self.attention_chunk)
+                .init(device),
             ln2: LayerNormConfig::new(self.d_model).init(device),
             feed_forward: FeedForwardConfig::new(self.d_model, self.d_ff).init(device),
         }
@@ -318,9 +515,28 @@ impl<B: Backend> DecoderBlock<B> {
         let fed_forward = self.feed_forward.forward(self.ln2.forward(input.clone()));
         (input + fed_forward, DecoderBlockCache { attention })
     }
+
+    /// See [`CausalSelfAttention::resize_rotary`].
+    fn resize_rotary(
+        mut self,
+        new_max_seq_len: usize,
+        theta: f64,
+        scale: f64,
+        device: &B::Device,
+    ) -> Self {
+        self.attention = self
+            .attention
+            .resize_rotary(new_max_seq_len, theta, scale, device);
+        self
+    }
 }
 
 /// Configuration for [`TinyTransformer`].
+///
+/// `positional_encoding` (default [`PositionalEncoding::Learned`]) and
+/// `attention_chunk` (default `None`) are ADR 104 D3/D4 additions; both
+/// default so `TinyTransformerConfig::new` keeps its original six-argument
+/// arity and every existing call site is byte-identical in behavior.
 #[derive(Config, Debug)]
 pub struct TinyTransformerConfig {
     pub vocab_size: usize,
@@ -329,6 +545,13 @@ pub struct TinyTransformerConfig {
     pub n_layers: usize,
     pub d_ff: usize,
     pub max_seq_len: usize,
+    #[config(default = "PositionalEncoding::Learned")]
+    pub positional_encoding: PositionalEncoding,
+    /// Memory-bounded attention (ADR 104 D4): `Some(q_chunk)` computes
+    /// attention in query-row blocks of `q_chunk` rows instead of
+    /// materializing the full `[batch, heads, seq, seq]` score tensor. See
+    /// [`chunked_causal_attention`].
+    pub attention_chunk: Option<usize>,
 }
 
 impl TinyTransformerConfig {
@@ -410,14 +633,56 @@ impl TinyTransformerConfig {
         Self::new(vocab_size, 1024, 16, 24, 4864, 4096)
     }
 
+    /// ADR 104 D3/D4: the `akh_tool_small` rung re-targeted at an 8192-token
+    /// context. Rotary position encoding (no `[8192, 512]` learned position
+    /// table) plus 1024-row query-chunked attention keep an 8x longer
+    /// context trainable on the same GPU budget that `akh_tool_small`
+    /// (learned positions, exact attention) needed for 4096 -- see ADR 104
+    /// for the measured 4096@batch-8 OOM this preset is meant to clear.
+    pub fn akh_tool_small_8k(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 512, 8, 8, 2048, 8192)
+            .with_positional_encoding(PositionalEncoding::Rope {
+                theta: 10_000.0,
+                scale: 1.0,
+            })
+            .with_attention_chunk(Some(1024))
+    }
+
+    /// ADR 104 D3/D4: the `akh_tool_350m` rung re-targeted at an
+    /// 8192-token context. See [`Self::akh_tool_small_8k`].
+    pub fn akh_tool_350m_8k(vocab_size: usize) -> Self {
+        Self::new(vocab_size, 1024, 16, 24, 4864, 8192)
+            .with_positional_encoding(PositionalEncoding::Rope {
+                theta: 10_000.0,
+                scale: 1.0,
+            })
+            .with_attention_chunk(Some(1024))
+    }
+
     pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
-            .map(|_| DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff).init(device))
+            .map(|_| {
+                DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff)
+                    .with_positional_encoding(self.positional_encoding)
+                    .with_max_seq_len(self.max_seq_len)
+                    .with_attention_chunk(self.attention_chunk)
+                    .init(device)
+            })
             .collect();
+
+        let position_embedding = match self.positional_encoding {
+            PositionalEncoding::Learned => {
+                Some(EmbeddingConfig::new(self.max_seq_len, self.d_model).init(device))
+            }
+            // No position table under Rope: rotation happens inside each
+            // layer's attention instead of an additive embedding here.
+            PositionalEncoding::Rope { .. } => None,
+        };
 
         TinyTransformer {
             token_embedding: EmbeddingConfig::new(self.vocab_size, self.d_model).init(device),
-            position_embedding: EmbeddingConfig::new(self.max_seq_len, self.d_model).init(device),
+            position_embedding,
+            positional_encoding: self.positional_encoding,
             blocks,
             ln_final: LayerNormConfig::new(self.d_model).init(device),
             lm_head: LinearConfig::new(self.d_model, self.vocab_size).init(device),
@@ -429,15 +694,16 @@ impl TinyTransformerConfig {
 /// A tiny vanilla decoder-only transformer LM.
 ///
 /// `token_embedding + position_embedding -> N x DecoderBlock -> LayerNorm ->
-/// lm_head`. Positions use a learned [`Embedding`] (not the sinusoidal
-/// [`burn::nn::PositionalEncoding`]) purely so both embeddings share the
-/// same simple `Embedding` mechanics -- either is a fine choice at this
-/// scale, and the choice of learned-vs-sinusoidal has no bearing on the
-/// `Attention` seam.
+/// lm_head`. `position_embedding` is `Some` (a learned [`Embedding`]) under
+/// [`PositionalEncoding::Learned`] and `None` under
+/// [`PositionalEncoding::Rope`], where each layer's [`CausalSelfAttention`]
+/// rotates q/k per head instead -- see [`PositionalEncoding`] for why this
+/// choice is now explicit rather than a fixed learned table.
 #[derive(Module, Debug)]
 pub struct TinyTransformer<B: Backend> {
     token_embedding: Embedding<B>,
-    position_embedding: Embedding<B>,
+    position_embedding: Option<Embedding<B>>,
+    positional_encoding: PositionalEncoding,
     blocks: Vec<DecoderBlock<B>>,
     ln_final: LayerNorm<B>,
     lm_head: Linear<B>,
@@ -455,6 +721,25 @@ pub struct TinyTransformerCache<B: Backend> {
 }
 
 impl<B: Backend> TinyTransformer<B> {
+    /// The additive learned-position contribution for absolute positions
+    /// `start..start+len`, or `None` under [`PositionalEncoding::Rope`]
+    /// (rotation is applied inside attention instead of added to the token
+    /// embedding here). Centralizes the one piece of `hidden`/`prefill_cached`
+    /// /`decode_cached`/etc. that differs between the two encodings.
+    fn position_bias(
+        &self,
+        start: usize,
+        len: usize,
+        batch_size: usize,
+        device: &B::Device,
+    ) -> Option<Tensor<B, 3>> {
+        let position_embedding = self.position_embedding.as_ref()?;
+        let positions = Tensor::<B, 1, Int>::arange(start as i64..(start + len) as i64, device)
+            .unsqueeze::<2>()
+            .repeat_dim(0, batch_size);
+        Some(position_embedding.forward(positions))
+    }
+
     /// Forward pass: `input_ids` is `[batch_size, seq_len]` token ids,
     /// output is `[batch_size, seq_len, vocab_size]` logits.
     ///
@@ -480,10 +765,10 @@ impl<B: Backend> TinyTransformer<B> {
         );
         let device = input_ids.device();
         let tokens = self.token_embedding.forward(input_ids);
-        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, batch_size);
-        let mut hidden = tokens + self.position_embedding.forward(positions);
+        let mut hidden = match self.position_bias(0, seq_len, batch_size, &device) {
+            Some(bias) => tokens + bias,
+            None => tokens,
+        };
         let causal_mask = generate_autoregressive_mask::<B>(batch_size, seq_len, &device);
         let mut layers = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
@@ -536,11 +821,11 @@ impl<B: Backend> TinyTransformer<B> {
             self.max_seq_len
         );
         let device = prefix.device();
-        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, text_batch);
-        let mut hidden =
-            Tensor::cat(vec![prefix, tokens], 1) + self.position_embedding.forward(positions);
+        let combined = Tensor::cat(vec![prefix, tokens], 1);
+        let mut hidden = match self.position_bias(0, seq_len, text_batch, &device) {
+            Some(bias) => combined + bias,
+            None => combined,
+        };
         let causal_mask = generate_autoregressive_mask::<B>(text_batch, seq_len, &device);
         let mut layers = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
@@ -585,13 +870,10 @@ impl<B: Backend> TinyTransformer<B> {
         );
         let device = input_ids.device();
         let tokens = self.token_embedding.forward(input_ids);
-        let positions = Tensor::<B, 1, Int>::arange(
-            cache.next_position as i64..cache.next_position as i64 + 1,
-            &device,
-        )
-        .unsqueeze::<2>()
-        .repeat_dim(0, batch_size);
-        let mut hidden = tokens + self.position_embedding.forward(positions);
+        let mut hidden = match self.position_bias(cache.next_position, 1, batch_size, &device) {
+            Some(bias) => tokens + bias,
+            None => tokens,
+        };
         let mut layers = Vec::with_capacity(self.blocks.len());
         for (block, prior) in self.blocks.iter().zip(cache.layers) {
             let (next, updated) = block.forward_cached(hidden, None, Some(prior));
@@ -652,11 +934,10 @@ impl<B: Backend> TinyTransformer<B> {
         );
         let device = prefix.device();
         let tokens = Tensor::cat(vec![prefix, tokens], 1);
-        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, text_batch);
-        let positions = self.position_embedding.forward(positions);
-        let mut hidden = tokens + positions;
+        let mut hidden = match self.position_bias(0, seq_len, text_batch, &device) {
+            Some(bias) => tokens + bias,
+            None => tokens,
+        };
         let causal_mask = generate_autoregressive_mask::<B>(text_batch, seq_len, &device);
         for block in &self.blocks {
             hidden = block.forward(hidden, causal_mask.clone());
@@ -683,12 +964,10 @@ impl<B: Backend> TinyTransformer<B> {
 
         let tokens = self.token_embedding.forward(input_ids);
 
-        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, batch_size);
-        let positions = self.position_embedding.forward(positions);
-
-        let mut hidden = tokens + positions;
+        let mut hidden = match self.position_bias(0, seq_len, batch_size, &device) {
+            Some(bias) => tokens + bias,
+            None => tokens,
+        };
 
         let causal_mask = generate_autoregressive_mask::<B>(batch_size, seq_len, &device);
         for block in &self.blocks {
@@ -728,12 +1007,10 @@ impl<B: Backend> TinyTransformer<B> {
 
         let tokens = self.token_embedding.forward(input_ids);
 
-        let positions = Tensor::<B, 1, Int>::arange(0..seq_len as i64, &device)
-            .unsqueeze::<2>()
-            .repeat_dim(0, batch_size);
-        let positions = self.position_embedding.forward(positions);
-
-        let mut hidden = tokens + positions;
+        let mut hidden = match self.position_bias(0, seq_len, batch_size, &device) {
+            Some(bias) => tokens + bias,
+            None => tokens,
+        };
 
         let mut layers = Vec::with_capacity(self.blocks.len() + 1);
         layers.push(hidden.clone());
@@ -793,6 +1070,52 @@ impl<B: Backend> TinyTransformer<B> {
     {
         // Burn's `Module` trait exposes `num_params` directly.
         Module::num_params(self)
+    }
+
+    /// Re-instantiate this model to serve sequences longer than the trained
+    /// `max_seq_len`, with every learned weight (`Param` tensor) untouched
+    /// (ADR 104 D3).
+    ///
+    /// Only meaningful under [`PositionalEncoding::Rope`]: rotary rotation
+    /// angles are a deterministic function of `(position, theta, scale)`
+    /// recomputed fresh for any `max_seq_len`, so there is no learned table
+    /// to resize. [`PositionalEncoding::Learned`] models allocate exactly
+    /// `max_seq_len` rows of a *trained* [`Embedding`] and have no
+    /// principled value to place in an untrained row, so this returns
+    /// [`GrugError::LearnedPositionsCannotExtend`] for them rather than
+    /// silently truncating, repeating, or extrapolating positions.
+    ///
+    /// `scale` re-bases `theta` for serving well past the trained length
+    /// (`theta_effective = theta * scale`, the same simplified NTK-style
+    /// adjustment documented on [`PositionalEncoding::Rope`]); pass `1.0`
+    /// to keep the trained frequency base unchanged while only raising
+    /// `max_seq_len`.
+    pub fn with_serving_length(
+        mut self,
+        new_max_seq_len: usize,
+        scale: f64,
+        device: &B::Device,
+    ) -> GrugResult<Self> {
+        let PositionalEncoding::Rope { theta, .. } = self.positional_encoding else {
+            return Err(GrugError::LearnedPositionsCannotExtend {
+                trained: self.max_seq_len,
+                requested: new_max_seq_len,
+            });
+        };
+        assert!(
+            new_max_seq_len >= self.max_seq_len,
+            "with_serving_length only extends max_seq_len ({} -> {})",
+            self.max_seq_len,
+            new_max_seq_len
+        );
+        self.positional_encoding = PositionalEncoding::Rope { theta, scale };
+        self.blocks = self
+            .blocks
+            .into_iter()
+            .map(|block| block.resize_rotary(new_max_seq_len, theta, scale, device))
+            .collect();
+        self.max_seq_len = new_max_seq_len;
+        Ok(self)
     }
 }
 
@@ -1069,5 +1392,276 @@ mod tests {
             (25_000_000..=45_000_000).contains(&parameters),
             "unexpected compact tool model size: {parameters}"
         );
+    }
+
+    /// (a) `chunked_causal_attention` in isolation, single head: a
+    /// hand-specified `q`/`k`/`v` compared against the plain scaled-dot-
+    /// product computation with no model, RNG, or `Param` lazy-init
+    /// involved at all.
+    #[test]
+    fn chunked_causal_attention_matches_hand_computed_single_head() {
+        let device = Default::default();
+        // batch=1, heads=1, seq_len=3, d_head=2 -- fully hand-specifiable.
+        let q = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(vec![1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0], [1, 1, 3, 2]),
+            &device,
+        );
+        let k = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 0.0], [1, 1, 3, 2]),
+            &device,
+        );
+        let v = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(vec![1.0f32, 0.0, 0.0, 1.0, 2.0, 2.0], [1, 1, 3, 2]),
+            &device,
+        );
+        let mask = generate_autoregressive_mask::<CpuBackend>(1, 3, &device);
+        let scale = (2f64).sqrt();
+
+        let exact_scores = q.clone().matmul(k.clone().swap_dims(2, 3)) / scale;
+        let exact_scores =
+            exact_scores.mask_fill(mask.clone().unsqueeze_dim::<4>(1), f32::NEG_INFINITY);
+        let exact = softmax(exact_scores, 3).matmul(v.clone());
+
+        let chunked = chunked_causal_attention(q, k, v, Some(mask), scale, 1);
+        assert_close(
+            &tensor_to_vec(exact),
+            &tensor_to_vec(chunked),
+            1e-5,
+            "standalone chunked_causal_attention",
+        );
+    }
+
+    /// (a) Same as above, with two heads and every chunk size that divides
+    /// and does not divide `seq_len = 3` evenly.
+    #[test]
+    fn chunked_causal_attention_matches_hand_computed_two_heads() {
+        let device = Default::default();
+        let batch = 1usize;
+        let heads = 2usize;
+        let seq_len = 3usize;
+        let d_head = 2usize;
+        let n = batch * heads * seq_len * d_head;
+        let q_data: Vec<f32> = (0..n).map(|i| ((i * 3 + 1) % 7) as f32 * 0.3).collect();
+        let k_data: Vec<f32> = (0..n).map(|i| ((i * 5 + 2) % 7) as f32 * 0.2).collect();
+        let v_data: Vec<f32> = (0..n).map(|i| ((i * 2 + 3) % 7) as f32 * 0.1).collect();
+        let q = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(q_data, [batch, heads, seq_len, d_head]),
+            &device,
+        );
+        let k = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(k_data, [batch, heads, seq_len, d_head]),
+            &device,
+        );
+        let v = Tensor::<CpuBackend, 4>::from_data(
+            TensorData::new(v_data, [batch, heads, seq_len, d_head]),
+            &device,
+        );
+        let mask = generate_autoregressive_mask::<CpuBackend>(batch, seq_len, &device);
+        let scale = (d_head as f64).sqrt();
+
+        let exact_scores = q.clone().matmul(k.clone().swap_dims(2, 3)) / scale;
+        let exact_scores =
+            exact_scores.mask_fill(mask.clone().unsqueeze_dim::<4>(1), f32::NEG_INFINITY);
+        let exact = softmax(exact_scores, 3).matmul(v.clone());
+
+        for chunk in [1usize, 2, 3] {
+            let chunked = chunked_causal_attention(
+                q.clone(),
+                k.clone(),
+                v.clone(),
+                Some(mask.clone()),
+                scale,
+                chunk,
+            );
+            assert_close(
+                &tensor_to_vec(exact.clone()),
+                &tensor_to_vec(chunked),
+                1e-5,
+                &format!("two-head standalone chunked_causal_attention chunk={chunk}"),
+            );
+        }
+    }
+
+    // --- ADR 104 D3/D4: PositionalEncoding + attention_chunk -----------
+
+    fn tiny_rope_config() -> TinyTransformerConfig {
+        tiny_config().with_positional_encoding(PositionalEncoding::Rope {
+            theta: 10_000.0,
+            scale: 1.0,
+        })
+    }
+
+    fn ids_tensor<B: Backend>(ids: &[i64], device: &B::Device) -> Tensor<B, 2, Int> {
+        Tensor::<B, 2, Int>::from_data(TensorData::new(ids.to_vec(), [1, ids.len()]), device)
+    }
+
+    /// (a) Chunked attention (`attention_chunk = Some(chunk)`) must produce
+    /// bit-close-identical logits to the exact single-shot path for the
+    /// plain (non-cached) forward, across several sequence lengths and
+    /// chunk sizes -- including chunk sizes that do not evenly divide the
+    /// sequence length. Both models share identical weights (the chunked
+    /// model is a clone of the exact one with only `attention_chunk`
+    /// mutated on each layer), so any difference would be a bug in
+    /// `chunked_causal_attention`, not weight drift.
+    #[test]
+    fn chunked_attention_matches_exact_forward() {
+        let device = Default::default();
+        let exact = tiny_config().init::<CpuBackend>(&device);
+        for seq_len in [1usize, 3, 5, 8, 9] {
+            let ids: Vec<i64> = (0..seq_len as i64).map(|i| (i * 7) % 260).collect();
+            let input = ids_tensor(&ids, &device);
+            let expected = tensor_to_vec(exact.forward(input.clone()));
+            for chunk in [1usize, 2, 3, 4, 100] {
+                let mut chunked = exact.clone();
+                for block in chunked.blocks.iter_mut() {
+                    block.attention.attention_chunk = Some(chunk);
+                }
+                let actual = tensor_to_vec(chunked.forward(input.clone()));
+                assert_close(
+                    &actual,
+                    &expected,
+                    1e-5,
+                    &format!("chunked forward seq_len={seq_len} chunk={chunk}"),
+                );
+            }
+        }
+    }
+
+    /// (a) Same as above, for the cached prefill + step-by-step decode path.
+    #[test]
+    fn chunked_attention_matches_exact_prefill_and_decode() {
+        let device = Default::default();
+        let exact = tiny_config().init::<CpuBackend>(&device);
+        let ids = vec![3i64, 5, 7, 11, 13, 17, 19];
+        // Force every `Param`'s lazy initializer to materialize *before* any
+        // `.clone()` below. Burn's `Param<T>` defers random init until first
+        // access, and `Param::clone()` on a still-uninitialized param clones
+        // the *lazy initializer*, not a value -- so an unclone-then-forward
+        // model and its clone would each independently draw fresh random
+        // weights on first use and silently diverge. One forward pass here
+        // touches every parameter in the (2-layer) model, so every
+        // subsequent `.clone()` copies concrete, identical weight tensors.
+        let _ = exact.forward(ids_tensor(&ids, &device));
+        for chunk in [1usize, 2, 3, 4, 100] {
+            let mut chunked = exact.clone();
+            for block in chunked.blocks.iter_mut() {
+                block.attention.attention_chunk = Some(chunk);
+            }
+
+            let prefix = ids_tensor(&ids[..3], &device);
+            let (expected_prefill, mut expected_cache) = exact.prefill_cached(prefix.clone());
+            let (actual_prefill, mut actual_cache) = chunked.prefill_cached(prefix);
+            assert_close(
+                &tensor_to_vec(actual_prefill),
+                &tensor_to_vec(expected_prefill),
+                1e-5,
+                &format!("chunked prefill chunk={chunk}"),
+            );
+
+            for token in ids.iter().skip(3) {
+                let step = ids_tensor(&[*token], &device);
+                let (expected_step, next_expected) =
+                    exact.decode_cached(step.clone(), expected_cache);
+                let (actual_step, next_actual) = chunked.decode_cached(step, actual_cache);
+                expected_cache = next_expected;
+                actual_cache = next_actual;
+                assert_close(
+                    &tensor_to_vec(actual_step),
+                    &tensor_to_vec(expected_step),
+                    1e-5,
+                    &format!("chunked decode chunk={chunk}"),
+                );
+            }
+        }
+    }
+
+    /// (b) Rope parity: a full non-cached forward pass over positions
+    /// `0..L` must equal prefill (positions `0..prefix_len`) followed by
+    /// step-by-step cached decode (each step at its own absolute
+    /// position) -- mirroring `cached_prefill_and_decode_match_full_forward_logits`
+    /// but for `PositionalEncoding::Rope`, which threads an explicit
+    /// `existing_len` position offset through the cache instead of relying
+    /// on a position-embedding lookup.
+    #[test]
+    fn rope_cached_prefill_and_decode_match_full_forward_logits() {
+        let device = Default::default();
+        let model = tiny_rope_config().init::<CpuBackend>(&device);
+        let ids = vec![3i64, 5, 7, 11, 13];
+        let full = model.forward(ids_tensor(&ids, &device));
+
+        let (prefill, mut cache) = model.prefill_cached(ids_tensor(&ids[..3], &device));
+        assert_close(
+            &tensor_to_vec(prefill),
+            &tensor_to_vec(full.clone().slice([0..1, 0..3, 0..260])),
+            1e-4,
+            "rope cached prefill",
+        );
+
+        for (position, token) in ids.into_iter().enumerate().skip(3) {
+            let (step, next_cache) = model.decode_cached(ids_tensor(&[token], &device), cache);
+            cache = next_cache;
+            assert_close(
+                &tensor_to_vec(step),
+                &tensor_to_vec(full.clone().slice([0..1, position..position + 1, 0..260])),
+                1e-4,
+                "rope cached decode",
+            );
+        }
+    }
+
+    /// (e) `Learned` models have no principled way to serve past their
+    /// trained `max_seq_len` (there is no row to place in the position
+    /// table), so `with_serving_length` must refuse with a typed
+    /// diagnostic error rather than silently doing something wrong.
+    #[test]
+    fn with_serving_length_rejects_learned_positional_encoding() {
+        let device = Default::default();
+        let model = tiny_config().init::<CpuBackend>(&device);
+        let trained = model.max_seq_len;
+        let err = model
+            .with_serving_length(trained * 2, 1.0, &device)
+            .unwrap_err();
+        match err {
+            GrugError::LearnedPositionsCannotExtend {
+                trained: got_trained,
+                requested,
+            } => {
+                assert_eq!(got_trained, trained);
+                assert_eq!(requested, trained * 2);
+            }
+            other => panic!("expected LearnedPositionsCannotExtend, got {other:?}"),
+        }
+    }
+
+    /// (e) A `Rope` model can be re-instantiated at a larger `max_seq_len`
+    /// with byte-identical weights (RoPE has no position table to resize),
+    /// and logits at positions well within the original bound are
+    /// unchanged (`scale = 1.0` keeps the trained frequency base).
+    #[test]
+    fn with_serving_length_extends_rope_model_with_identical_weights() {
+        let device = Default::default();
+        let model = tiny_rope_config().init::<CpuBackend>(&device);
+        let trained = model.max_seq_len;
+        let ids = vec![3i64, 5, 7, 11, 13];
+        let input = ids_tensor(&ids, &device);
+        let before = tensor_to_vec(model.forward(input.clone()));
+
+        let extended = model
+            .clone()
+            .with_serving_length(trained * 2, 1.0, &device)
+            .expect("rope model must accept with_serving_length");
+        assert_eq!(extended.max_seq_len, trained * 2);
+        let after = tensor_to_vec(extended.forward(input));
+        assert_close(
+            &after,
+            &before,
+            1e-5,
+            "with_serving_length must not change logits at positions within the original bound",
+        );
+
+        // The bound is genuinely raised: a sequence that would have
+        // exceeded the original max_seq_len now fits without panicking.
+        let long_ids: Vec<i64> = (0..(trained + 10) as i64).map(|i| i % 260).collect();
+        let _ = extended.forward(ids_tensor(&long_ids, &device));
     }
 }

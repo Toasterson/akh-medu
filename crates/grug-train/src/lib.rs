@@ -100,7 +100,9 @@ pub use rule_train::{
 };
 pub use tokenizer::{ByteTokenizer, Vocab};
 pub use train::text_batch_loss;
-pub use transformer::{Attention, CausalSelfAttention, TinyTransformer, TinyTransformerConfig};
+pub use transformer::{
+    Attention, CausalSelfAttention, PositionalEncoding, TinyTransformer, TinyTransformerConfig,
+};
 pub use vision::{
     CompactConvVisionStem, CompactConvVisionStemConfig, CompactVisionTransformer,
     CompactVisionTransformerConfig, NativeVisionTransformer, NativeVisionTransformerConfig,
@@ -112,6 +114,8 @@ pub use vision::{
     train_vision_step, visual_token_budget,
 };
 
+#[cfg(feature = "grad_checkpointing")]
+use burn::backend::autodiff::checkpoint::strategy::BalancedCheckpointing;
 use burn::backend::{Autodiff, NdArray};
 
 /// The plain (non-differentiable) CPU inference backend: `burn-ndarray`.
@@ -126,7 +130,27 @@ pub type CpuBackend = NdArray<f32>;
 /// generic over `B: burn::tensor::backend::AutodiffBackend` can be trained
 /// with this backend; swap it for an opt-in GPU backend (CUDA/ROCm) without
 /// touching model code.
+///
+/// `Autodiff<B, C = NoCheckpointing>` also takes a `C: CheckpointStrategy`
+/// type parameter (ADR 104 D3): `NoCheckpointing` (the implicit default,
+/// used here unless the `grad_checkpointing` cargo feature is enabled)
+/// keeps every forward activation live for the backward pass, exactly the
+/// pre-ADR-104 behavior. Enabling `grad_checkpointing` switches this alias
+/// to `BalancedCheckpointing`, which discards and recomputes selected
+/// activations during `.backward()` to trade some recompute time for lower
+/// peak training memory -- needed to fit an 8192-context run's `[batch,
+/// heads, seq, seq]` attention activations (see `PositionalEncoding::Rope`
+/// / `attention_chunk` in `transformer.rs`) on a single GPU. Since every
+/// trainer in this crate (`train.rs`, `examples/train_foundation.rs`,
+/// `examples/train_knowledge.rs`) is generic over `B: AutodiffBackend`
+/// rather than naming `Autodiff<CpuBackend>`/`Autodiff<GpuBackend>`
+/// directly, flipping this one alias (and its GPU counterpart below) is
+/// the entire change needed to opt every trainer into checkpointing.
+#[cfg(not(feature = "grad_checkpointing"))]
 pub type CpuAutodiffBackend = Autodiff<CpuBackend>;
+/// See the non-`grad_checkpointing` variant above.
+#[cfg(feature = "grad_checkpointing")]
+pub type CpuAutodiffBackend = Autodiff<CpuBackend, BalancedCheckpointing>;
 
 /// The GPU inference backend, behind the opt-in `gpu` cargo feature: Burn's
 /// ROCm/HIP (CubeCL) backend, targeting this box's 7900 XTX (gfx1100).
@@ -141,9 +165,14 @@ pub type GpuBackend = burn::backend::Rocm<f32>;
 /// A pure type-alias swap for [`CpuAutodiffBackend`] -- every model in this
 /// crate is generic over `B: AutodiffBackend`, so training on ROCm requires
 /// no model-code changes, only using this alias (and a
-/// `burn::backend::rocm::RocmDevice`) instead of `CpuAutodiffBackend`.
-#[cfg(feature = "gpu")]
+/// `burn::backend::rocm::RocmDevice`) instead of `CpuAutodiffBackend`. See
+/// [`CpuAutodiffBackend`] for the `grad_checkpointing` feature this alias
+/// also honors.
+#[cfg(all(feature = "gpu", not(feature = "grad_checkpointing")))]
 pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
+/// See the non-`grad_checkpointing` variant above.
+#[cfg(all(feature = "gpu", feature = "grad_checkpointing"))]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
 
 /// The GPU inference backend under the `cuda` feature: Burn's CUDA (CubeCL)
 /// backend, for NVIDIA cloud training. Same forward+backward CubeCL
@@ -155,9 +184,18 @@ pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
 #[cfg(all(feature = "cuda", not(feature = "gpu")))]
 pub type GpuBackend = burn::backend::Cuda<f32>;
 
-/// The CUDA *training* backend: [`GpuBackend`] wrapped in `Autodiff`.
-#[cfg(all(feature = "cuda", not(feature = "gpu")))]
+/// The CUDA *training* backend: [`GpuBackend`] wrapped in `Autodiff`. See
+/// [`CpuAutodiffBackend`] for the `grad_checkpointing` feature this alias
+/// also honors.
+#[cfg(all(
+    feature = "cuda",
+    not(feature = "gpu"),
+    not(feature = "grad_checkpointing")
+))]
 pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
+/// See the non-`grad_checkpointing` variant above.
+#[cfg(all(feature = "cuda", not(feature = "gpu"), feature = "grad_checkpointing"))]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
 
 /// The default device for whichever GPU backend is enabled — the seam that
 /// keeps example/binary code **vendor-agnostic**: call `gpu_device()` instead
