@@ -32,11 +32,11 @@ the Phase 50 benchmark program instead of guessing.
 
 | WI | scope | status 2026-09-07 |
 |---|---|---|
-| `01a07a7e-6333-7ed2-b251-fb645d3aa3b3` P5.1 | D1 + D6: constrained decoder in `grug-data`/`grug-train`, wired into `KnowledgeModel`, `GrugChatBackend`, scorer, probe, sentinels, all-tool matrix | implementation dispatched (worktree) |
-| `01a07a7e-7ac6-7d63-9819-58f19f79cc22` P5.2 | D2: `PreTokenization` in `bpe.rs`, `train_foundation` flags, manifest fields | implementation dispatched |
-| `01a07a7e-9836-7e71-b914-fc1f1552a52c` P5.3 | D3: RoPE, chunked attention, checkpointing knob, 8k presets, shape/manifest compat | implementation dispatched |
-| `01a07a7e-b81d-7be3-9af4-6a852b0ba3a0` P5.4 | D5: loop LR flags (done), `knowledge.length_generalization` family (open) | flags implemented; family open |
-| `01a07a7e-de30-7963-92ee-7f164bb214b0` P5.5 | the 8k lane run + release gate + Phase 50 tiny-LLM entry | blocked on P5.1–P5.4 and on pod approval |
+| `01a07a7e-6333-7ed2-b251-fb645d3aa3b3` P5.1 | D1 + D6: constrained decoder in `grug-data`/`grug-train`, wired into `KnowledgeModel`, `GrugChatBackend`, scorer, probe, sentinels, all-tool matrix | landed (`ce31da65`, merged `eaf090c3`); `multimodal_runtime.rs` vision decoder still plain |
+| `01a07a7e-7ac6-7d63-9819-58f19f79cc22` P5.2 | D2: `PreTokenization` in `bpe.rs`, `train_foundation` flags, manifest fields | landed (`9abeb4fc` + flags in `1fc01b74`) |
+| `01a07a7e-9836-7e71-b914-fc1f1552a52c` P5.3 | D3: RoPE, chunked attention, checkpointing knob, 8k presets, shape/manifest compat | landed (`1fc01b74`); pod memory smoke + old-checkpoint load still owed |
+| `01a07a7e-b81d-7be3-9af4-6a852b0ba3a0` P5.4 | D5: loop LR flags, `knowledge.length_generalization` family | done (`7e11ddd4`, `37ece20d`) |
+| `01a07a7e-de30-7963-92ee-7f164bb214b0` P5.5 | the 8k lane run + release gate + Phase 50 tiny-LLM entry | blocked on pod approval (all code landed locally; push pending Forgejo) |
 
 ## Sequence
 
@@ -46,7 +46,9 @@ the Phase 50 benchmark program instead of guessing.
    schema-skew rule; `bootstrap-head.sh`).
 2. **Re-probe the 4096 checkpoint with D1** (pod restart needs approval;
    ≈1–2 h). Command shape:
-   `run_tool_native_adaptive_probe.py --bundle …/knowledge-model-small-v1 --max-new-tokens 640 --probe-dir adaptive-probe-constrained-v1`.
+   `run_tool_native_adaptive_probe.py --bundle …/knowledge-model-small-v1 --max-new-tokens 640 --probe-dir adaptive-probe-constrained-v1 --knowledge-families <the seven v2 families>`
+   (the eighth family's 8k/12k buckets cannot fit a 4096 checkpoint; the
+   generator is now `akh-knowledge-workflow-v3`, so exams are fresh either way).
    Outcome A: both hex-copy families join their siblings (≥0.78) → the
    weights already have the workflow; proceed to 3 for the window and
    tokenizer, and expect certification on the 8k lane. Outcome B: a family

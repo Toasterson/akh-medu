@@ -100,8 +100,9 @@ tokens), which D3 absorbs.
 ### D3. Rotary positions and memory-bounded attention; train at 8k
 
 `akh_tool_small_8k` and `akh_tool_350m_8k` replace the learned position
-table with RoPE (Burn `RotaryEncoding`, θ=10000, serving-time position
-interpolation `scale`) and compute attention in query blocks
+table with RoPE (Burn `RotaryEncoding`, θ=10000, serving-time `scale` applied
+as NTK-style base adjustment θ·scale, since Burn's rotary module indexes
+integer positions) and compute attention in query blocks
 (`attention_chunk`, default 1024) so materialized memory is
 `batch × heads × chunk × L` instead of `L²`. A Burn autodiff
 `BalancedCheckpointing` build knob trades recompute for activation memory.
