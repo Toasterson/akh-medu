@@ -34,7 +34,7 @@ the Phase 50 benchmark program instead of guessing.
 |---|---|---|
 | `01a07a7e-6333-7ed2-b251-fb645d3aa3b3` P5.1 | D1 + D6: constrained decoder in `grug-data`/`grug-train`, wired into `KnowledgeModel`, `GrugChatBackend`, scorer, probe, sentinels, all-tool matrix | landed (`ce31da65`, merged `eaf090c3`); `multimodal_runtime.rs` vision decoder still plain |
 | `01a07a7e-7ac6-7d63-9819-58f19f79cc22` P5.2 | D2: `PreTokenization` in `bpe.rs`, `train_foundation` flags, manifest fields | landed (`9abeb4fc` + flags in `1fc01b74`) |
-| `01a07a7e-9836-7e71-b914-fc1f1552a52c` P5.3 | D3: RoPE, chunked attention, checkpointing knob, 8k presets, shape/manifest compat | landed (`1fc01b74`); pod memory smoke + old-checkpoint load still owed |
+| `01a07a7e-9836-7e71-b914-fc1f1552a52c` P5.3 | D3: RoPE, chunked attention, checkpointing knob, 8k presets, shape/manifest compat | landed (`1fc01b74`); old-checkpoint load verified bitwise on CPU across commits; pod memory smoke still owed |
 | `01a07a7e-b81d-7be3-9af4-6a852b0ba3a0` P5.4 | D5: loop LR flags, `knowledge.length_generalization` family | done (`7e11ddd4`, `37ece20d`) |
 | `01a07a7e-de30-7963-92ee-7f164bb214b0` P5.5 | the 8k lane run + release gate + Phase 50 tiny-LLM entry | blocked on pod approval (all code landed locally; push pending Forgejo) |
 
@@ -95,3 +95,7 @@ the user's explicit approval.
 - If the `Gap` alternative is not representable in the grammar, abstention
   would silently vanish under the constraint; P5.1 has an explicit test for
   it.
+- Burn's `Option<T>::load_record` silently drops a `Learned` checkpoint's
+  embedding when the receiving model was built as `Rope` (no error). Matching
+  configs load bitwise-exact (verified 2026-09-07 across `9abeb4fc`→HEAD).
+  Follow-up WI filed to fail closed on encoding mismatch in `checkpoint.rs`.
