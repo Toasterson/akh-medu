@@ -10,6 +10,12 @@ ordinary epoch; ``stop`` preserves all state and performs no update.
 The loop never invokes a provider, changes an active-model pointer, or resumes
 after a controller stop. Every exam, decision, sibling and segment is retained
 under a new output directory for replay.
+
+Ordinary-epoch training may use scaled learning rates and optional warmup
+override: pass ``--ordinary-learning-rate-scale`` (0 < value <= 1.0, default
+1.0) and ``--ordinary-warmup-steps`` (int, default None = keep run.json value)
+to tune ordinary-window SFT hyperparameters independently. Effective values are
+recorded in each window's state JSON.
 """
 
 from __future__ import annotations
@@ -56,6 +62,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--maximum-wait-hours", type=float, default=18.0)
     parser.add_argument("--max-windows", type=int, default=8)
     parser.add_argument("--ordinary-epochs-per-window", type=int, default=1)
+    parser.add_argument(
+        "--ordinary-learning-rate-scale",
+        type=float,
+        default=1.0,
+        help="scale factor for learning rate during ordinary-window training (must be > 0 and <= 1.0)",
+    )
+    parser.add_argument(
+        "--ordinary-warmup-steps",
+        type=int,
+        default=None,
+        help="override warmup steps for ordinary-window training (default: use run.json value)",
+    )
     parser.add_argument("--frontier-samples", type=int, default=24)
     parser.add_argument("--knowledge-sentinel-samples", type=int, default=100)
     parser.add_argument("--tool-sentinel-samples", type=int, default=24)
@@ -86,6 +104,10 @@ def parse_args() -> argparse.Namespace:
     )
     if args.poll_seconds < 5 or any(value <= 0 for value in positive[1:]):
         parser.error("poll must be >=5 and all budgets/sample counts must be positive")
+    if args.ordinary_learning_rate_scale <= 0 or args.ordinary_learning_rate_scale > 1.0:
+        parser.error("--ordinary-learning-rate-scale must be > 0 and <= 1.0")
+    if args.ordinary_warmup_steps is not None and args.ordinary_warmup_steps < 0:
+        parser.error("--ordinary-warmup-steps must be non-negative")
     if (args.initial_bundle is None) != (args.initial_step is None):
         parser.error("--initial-bundle and --initial-step must be supplied together")
     families = tuple(
@@ -208,6 +230,8 @@ def launch_configuration(
         "maximum_wait_hours": args.maximum_wait_hours,
         "max_windows": args.max_windows,
         "ordinary_epochs_per_window": args.ordinary_epochs_per_window,
+        "ordinary_learning_rate_scale": args.ordinary_learning_rate_scale,
+        "ordinary_warmup_steps": args.ordinary_warmup_steps,
         "frontier_samples": args.frontier_samples,
         "knowledge_sentinel_samples": args.knowledge_sentinel_samples,
         "tool_sentinel_samples": args.tool_sentinel_samples,
@@ -938,20 +962,64 @@ def train_ordinary(
     bundle: Path,
     artifact: dict[str, Any],
     window: Path,
-) -> Path:
+) -> tuple[Path, float, int]:
     run = load_json(bundle / "run.json")
     sources = source_files(run, include_current_sibling=True)
-    command = common_training_command(
-        binaries["train"],
-        run,
-        sources,
-        bundle / "contracts.json",
-        bundle,
-        int(run["epochs"]) + args.ordinary_epochs_per_window,
+
+    # Apply ordinary-window learning rate scale and warmup override
+    effective_learning_rate = float(run["learning_rate"]) * args.ordinary_learning_rate_scale
+    effective_warmup_steps = (
+        args.ordinary_warmup_steps
+        if args.ordinary_warmup_steps is not None
+        else int(run["warmup_steps"])
     )
+
+    # Build command with effective values
+    command = [
+        binaries["train"],
+        "--contracts",
+        str(bundle / "contracts.json"),
+        "--train-jsonl",
+        str(sources["train"]),
+        "--artifacts-dir",
+        str(bundle),
+        "--model",
+        str(run["model_size"]),
+        "--epochs",
+        str(int(run["epochs"]) + args.ordinary_epochs_per_window),
+        "--batch-size",
+        str(run["batch_size"]),
+        "--learning-rate",
+        f"{effective_learning_rate:.8g}",
+        "--warmup-steps",
+        str(effective_warmup_steps),
+        "--bpe-vocab-size",
+        str(run["tokenizer_vocab_size"]),
+        "--eval-every",
+        str(run.get("eval_every", 1000)),
+        "--eval-samples",
+        str(run.get("eval_samples", 8)),
+        "--eval-max-new-tokens",
+        str(run.get("eval_max_new_tokens", 128)),
+        "--ckpt-every",
+        str(run.get("ckpt_every", 1000)),
+        "--loss-cap",
+        str(run["loss_cap"]),
+        "--grad-norm-cap",
+        str(run["grad_norm_cap"]),
+        "--seed",
+        str(run["seed"]),
+    ]
+    for path in sources["supplements"]:
+        command.extend(["--supplemental-jsonl", str(path)])
+    if sources["eval"] is not None:
+        command.extend(["--eval-jsonl", str(sources["eval"])])
+    for path in sources["eval_supplements"]:
+        command.extend(["--supplemental-eval-jsonl", str(path)])
+
     command.extend(["--resume", str(bundle / str(artifact["checkpoint_dir"]))])
     run_logged(command, window / "ordinary-training.log")
-    return bundle
+    return bundle, effective_learning_rate, effective_warmup_steps
 
 
 def train_steered_segment(
@@ -1091,6 +1159,9 @@ def main() -> int:
             stored_loop_config.setdefault(
                 "knowledge_families", list(KNOWLEDGE_FAMILIES)
             )
+            # Backfill legacy configs that don't have ordinary learning rate scale/warmup overrides.
+            stored_loop_config.setdefault("ordinary_learning_rate_scale", 1.0)
+            stored_loop_config.setdefault("ordinary_warmup_steps", None)
             knowledge_sentinels, tool_sentinel = load_sentinel_inventory(
                 output,
                 stored_loop_config.get("sentinels", {}),
@@ -1123,6 +1194,8 @@ def main() -> int:
                 "base_training_records": base_records,
                 "max_windows": args.max_windows,
                 "ordinary_epochs_per_window": args.ordinary_epochs_per_window,
+                "ordinary_learning_rate_scale": args.ordinary_learning_rate_scale,
+                "ordinary_warmup_steps": args.ordinary_warmup_steps,
                 "frontier_samples": args.frontier_samples,
                 "knowledge_sentinel_samples": args.knowledge_sentinel_samples,
                 "tool_sentinel_samples": args.tool_sentinel_samples,
@@ -1143,6 +1216,8 @@ def main() -> int:
             "base_training_records": base_records,
             "max_windows": args.max_windows,
             "ordinary_epochs_per_window": args.ordinary_epochs_per_window,
+            "ordinary_learning_rate_scale": args.ordinary_learning_rate_scale,
+            "ordinary_warmup_steps": args.ordinary_warmup_steps,
             "frontier_samples": args.frontier_samples,
             "knowledge_sentinel_samples": args.knowledge_sentinel_samples,
             "tool_sentinel_samples": args.tool_sentinel_samples,
@@ -1253,6 +1328,8 @@ def main() -> int:
 
             old_checkpoint = checkpoint(artifact)
             sibling_records = 0
+            ordinary_learning_rate = None
+            ordinary_warmup_steps = None
             if selected_frontier_steer(evaluated):
                 steering_plan = evaluated["next_plan"]
                 steering_frontier = window / "steering-source.exam.json"
@@ -1312,7 +1389,7 @@ def main() -> int:
                         "promotion_enabled": False,
                     },
                 )
-                next_bundle = train_ordinary(
+                next_bundle, ordinary_learning_rate, ordinary_warmup_steps = train_ordinary(
                     args, binaries, bundle, artifact, window
                 )
                 action = "continue"
@@ -1358,6 +1435,9 @@ def main() -> int:
                 "window_dir": str(window),
                 "promotion_attempted": False,
             }
+            if action == "continue" and ordinary_learning_rate is not None:
+                record["ordinary_learning_rate"] = ordinary_learning_rate
+                record["ordinary_warmup_steps"] = ordinary_warmup_steps
             append_window_record(ledger, record)
             atomic_json(status_path, {**record, "stage": "window_complete"})
             bundle = next_bundle
