@@ -229,3 +229,29 @@ D2 makes identifiers longer.
 - MemGPT (virtual context) — ADR 065 lineage
 - `training/results/tool-native-4k-lane-20260906-RESULT.md`,
   `training/results/p350m-RESULT.md`
+
+## Amendment 2026-09-07 (measured on the pod the same day)
+
+- **D3 as written does not fit.** `small_8k` at 8192 context saturates the
+  80 GB A100 at batch 2 with or without `BalancedCheckpointing` (autodiff
+  retains the per-chunk attention outputs; chunking bounds temporaries only).
+  Batch 1 fits (69 GB; 48 GB with checkpointing, identical loss curves) but
+  runs about four times slower per token than the 4096 run (≈39 h for the
+  819.2M-token budget). The lane therefore uses the standard train-short,
+  fine-tune-long recipe: foundation `akh_tool_small_rope4k` (same shape,
+  RoPE, chunk 1024, 4096 context, batch 4, ≈1.1 s/step, 50 GB) and tool SFT
+  at 8192 through `train_knowledge --model small_8k --extend-context`, which
+  loads the RoPE weights unchanged and sets the NTK scale to 2.0
+  (`context_extended_from` recorded in the artifact; commit `ff1ca7b7`).
+  The `length_generalization` sentinel measures the result at 2048/4096/5120.
+- **D1 measured, paired** (same weights = window-2 checkpoint 35207, same
+  immutable sentinels, plain vs constrained): `revise_from_new_edition`
+  12→76/100 (catastrophic 85→12), `note_navigation` 67→70 (16→1), all-tool
+  matrix 790→1006/1272 (catastrophic 435→179) after the array/object grammar
+  fix (`eae9e849`). The three families that did not move fail on copy errors
+  in string fields *without* a schema pattern (`source_id`, `source_path`,
+  a value inside `quote`/`body`), so D1 is extended with identifier
+  hard-copy and a bounded suffix-copy bias for all string values
+  (`939df6eb`); the third paired run measures it.
+- The generator version is `akh-knowledge-workflow-v3`; evaluators accept v2
+  sentinels so longitudinal comparison holds (`5da90cd0`).

@@ -36,7 +36,7 @@ the Phase 50 benchmark program instead of guessing.
 | `01a07a7e-7ac6-7d63-9819-58f19f79cc22` P5.2 | D2: `PreTokenization` in `bpe.rs`, `train_foundation` flags, manifest fields | landed (`9abeb4fc` + flags in `1fc01b74`) |
 | `01a07a7e-9836-7e71-b914-fc1f1552a52c` P5.3 | D3: RoPE, chunked attention, checkpointing knob, 8k presets, shape/manifest compat | landed (`1fc01b74`); old-checkpoint load verified bitwise on CPU across commits; pod memory smoke still owed |
 | `01a07a7e-b81d-7be3-9af4-6a852b0ba3a0` P5.4 | D5: loop LR flags, `knowledge.length_generalization` family | done (`7e11ddd4`, `37ece20d`) |
-| `01a07a7e-de30-7963-92ee-7f164bb214b0` P5.5 | the 8k lane run + release gate + Phase 50 tiny-LLM entry | blocked on pod approval (all code landed locally; push pending Forgejo) |
+| `01a07a7e-de30-7963-92ee-7f164bb214b0` P5.5 | the 8k lane run + release gate + Phase 50 tiny-LLM entry | RUNNING since 2026-09-07 14:09Z: `small_rope_4k` foundation (batch 4, ~15 h) → SFT `small_8k --extend-context` (batch 1) → probe/loop at 768 tokens, buckets 2048,4096,5120; drivers `/workspace/babyllm/launch-foundation-8k.sh`, `chain-8k.sh` |
 
 ## Sequence
 
@@ -56,8 +56,7 @@ the Phase 50 benchmark program instead of guessing.
    read the per-step closed-loop diffs before deciding between more
    curriculum difficulty and the `350m_8k` rung. Write the numbers into a
    results doc that names the decoder.
-3. **8k foundation** (`--model akh_tool_small_8k`, batch 2 × 50k steps,
-   hex-aware tokenizer). First a 200-step memory/throughput smoke with and
+3. **Foundation** — amended: `--model small_rope_4k`, batch 4 × 50k steps at 4096 (8192 does not fit; see ADR 104 amendment), hex-aware tokenizer; SFT extends to 8192 with `--extend-context`. First a 200-step memory/throughput smoke with and
    without `BalancedCheckpointing`; if 8192 does not fit at batch 2, open
    the sliding-window fallback WI before spending the run. Prune
    intermediate checkpoints as the run advances (150 GB volume).
