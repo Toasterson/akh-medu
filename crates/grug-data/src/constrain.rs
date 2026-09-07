@@ -90,32 +90,65 @@ type Viable = Vec<u16>;
 pub enum GrammarState {
     /// Matching the fixed [`PRE`] literal at byte offset `usize`.
     Pre(usize),
-    /// After `{` (or a closed value + `,`... no — see [`GrammarState::AfterComma`]):
-    /// at the start of the arguments body, where either a key (`"`) may open
-    /// or the object may close (`}`), carrying the currently-viable tools.
+    /// After `{`: at the start of the arguments body, where either a key
+    /// (`"`) may open or the object may close (`}`), carrying the
+    /// currently-viable tools. `seen` is always empty here (this is the very
+    /// first byte of the body, before any key has been typed) — kept as a
+    /// bare [`Viable`] rather than pairing it with an always-empty `seen` for
+    /// that reason; [`GrammarState::AfterComma`] is where `seen` starts
+    /// mattering.
     ArgsStart(Viable),
     /// Immediately after a `,` inside the arguments body: a key **must** open
-    /// (`"`), the object may not close here.
-    AfterComma(Viable),
+    /// (`"`), the object may not close here. `seen` is every top-level
+    /// parameter name (exact bytes) already emitted, across however many
+    /// still-viable tools declare it — see [`ToolCallGrammar::cands_for`] /
+    /// [`ToolCallGrammar::required_satisfied_top`] for how it gates
+    /// duplicate-key rejection and the `}` required-property check. This is
+    /// the top-level analogue of nested [`Frame::Object`]'s `seen`, but keyed
+    /// by name rather than by index into one fixed [`ObjectSchema`] — the
+    /// tool (hence which schema/indices apply) is not resolved until the
+    /// name at the very end, so tracking exact key bytes is what stays valid
+    /// across a shrinking multi-tool [`Viable`] set.
+    AfterComma { viable: Viable, seen: Vec<Vec<u8>> },
     /// Typing a parameter key: `cands` are the `(tool, param)` pairs whose
-    /// parameter name still matches the bytes typed so far, `pos` is how many
-    /// name bytes have been consumed.
-    Key { cands: Vec<(u16, u16)>, pos: usize },
+    /// parameter name still matches the bytes typed so far (already filtered
+    /// to exclude every name in `seen`, so a duplicate key has zero
+    /// candidates from its very first byte), `pos` is how many name bytes
+    /// have been consumed.
+    Key {
+        cands: Vec<(u16, u16)>,
+        pos: usize,
+        seen: Vec<Vec<u8>>,
+    },
     /// Consumed a key's closing `"`; expecting `:`. Carries the viable tools
-    /// narrowed to those having the just-completed key, and that key's exact
+    /// narrowed to those having the just-completed key, that key's exact
     /// name bytes (needed once `:` is consumed, to resolve the parameter's
-    /// declared schema — see [`ToolCallGrammar::resolve_structural_schema`]).
-    Colon { viable: Viable, param: Vec<u8> },
+    /// declared schema — see [`ToolCallGrammar::resolve_structural_schema`]),
+    /// and `seen` as of *before* this key (the key is only added to `seen`
+    /// once `:` is consumed, mirroring when nested [`Leaf::ObjectColon`]
+    /// pushes into its own `seen`).
+    Colon {
+        viable: Viable,
+        param: Vec<u8>,
+        seen: Vec<Vec<u8>>,
+    },
     /// Typing a JSON value governed by the just-completed key's declared
     /// schema (Phase 51 / ADR 104 D1 nested grammar): a recursive descent
     /// over `type: array`/`object`/scalar, bounded by [`MAX_VALUE_DEPTH`] and
-    /// [`MAX_ARRAY_ITEMS`]. `viable` is carried through unchanged so
-    /// completing the whole value (however deeply nested) lands back on
-    /// [`GrammarState::AfterValue`] with the same bookkeeping as a scalar
-    /// value always had.
-    Value { viable: Viable, parser: ValueParser },
-    /// After a value: expecting `,` (another entry) or `}` (close arguments).
-    AfterValue(Viable),
+    /// [`MAX_ARRAY_ITEMS`]. `viable` and `seen` (now including this key) are
+    /// carried through unchanged so completing the whole value (however
+    /// deeply nested) lands back on [`GrammarState::AfterValue`] with the
+    /// same bookkeeping a scalar value always had.
+    Value {
+        viable: Viable,
+        seen: Vec<Vec<u8>>,
+        parser: ValueParser,
+    },
+    /// After a value: expecting `,` (another entry, only if some declared
+    /// property of a still-viable tool remains unseen) or `}` (close
+    /// arguments, only once some still-viable tool's every `required`
+    /// property is in `seen`).
+    AfterValue { viable: Viable, seen: Vec<Vec<u8>> },
     /// Matching the fixed [`MID`] literal at byte offset `pos`, carrying the
     /// tools consistent with all emitted keys (the name must be one of them).
     Mid { viable: Viable, pos: usize },
@@ -762,6 +795,11 @@ pub struct ToolCallGrammar {
     /// decode-time value-copy constraints (Phase 51 / ADR 104 D1); the
     /// structural acceptor above never looks at this.
     param_schemas: Vec<Vec<Value>>,
+    /// Whether each parameter is declared `required`, aligned 1:1 with
+    /// `params[tool][param]`. Gates the top-level arguments object's `}` —
+    /// see [`Self::required_satisfied_top`] — the same way nested
+    /// [`ObjectSchema`]'s `required` field gates a nested object's `}`.
+    required: Vec<Vec<bool>>,
 }
 
 impl ToolCallGrammar {
@@ -795,10 +833,15 @@ impl ToolCallGrammar {
                     .collect()
             })
             .collect();
+        let required = tools
+            .iter()
+            .map(|t| t.params.iter().map(|p| p.required).collect())
+            .collect();
         Self {
             tool_names,
             params,
             param_schemas,
+            required,
         }
     }
 
@@ -811,6 +854,7 @@ impl ToolCallGrammar {
         let mut tool_names = Vec::with_capacity(tools.len());
         let mut params = Vec::with_capacity(tools.len());
         let mut param_schemas = Vec::with_capacity(tools.len());
+        let mut required = Vec::with_capacity(tools.len());
         for (index, definition) in tools.iter().enumerate() {
             let function =
                 definition
@@ -826,26 +870,35 @@ impl ToolCallGrammar {
                     index,
                     message: "tool function has no string name".into(),
                 })?;
-            let properties = function
-                .get("parameters")
+            let parameters = function.get("parameters");
+            let properties = parameters
                 .and_then(|schema| schema.get("properties"))
                 .and_then(Value::as_object);
+            let required_names: std::collections::BTreeSet<&str> = parameters
+                .and_then(|schema| schema.get("required"))
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
             let mut names = Vec::new();
             let mut schemas = Vec::new();
+            let mut tool_required = Vec::new();
             if let Some(properties) = properties {
                 for (name, schema) in properties {
                     names.push(name.clone().into_bytes());
                     schemas.push(schema.clone());
+                    tool_required.push(required_names.contains(name.as_str()));
                 }
             }
             tool_names.push(name.as_bytes().to_vec());
             params.push(names);
             param_schemas.push(schemas);
+            required.push(tool_required);
         }
         Ok(Self {
             tool_names,
             params,
             param_schemas,
+            required,
         })
     }
 
@@ -933,16 +986,49 @@ impl ToolCallGrammar {
         (0..self.tool_names.len() as u16).collect()
     }
 
-    /// The `(tool, param)` candidate list opening a fresh key under `viable`:
-    /// every parameter of every still-viable tool.
-    fn cands_for(&self, viable: &[u16]) -> Vec<(u16, u16)> {
+    /// The `(tool, param)` candidate list opening a fresh key under `viable`,
+    /// excluding any parameter whose exact name bytes are already in `seen`
+    /// — this is what makes a duplicate top-level key have zero legal
+    /// candidates from its very first byte (Phase 51 / ADR 104 D1 bug fix:
+    /// previously this had no `seen` filter at all, so `"tags"` could be
+    /// retyped indefinitely). `seen` is empty at the very start of the
+    /// arguments body ([`GrammarState::ArgsStart`]), so this degrades to
+    /// "every parameter of every still-viable tool" there exactly as before.
+    fn cands_for(&self, viable: &[u16], seen: &[Vec<u8>]) -> Vec<(u16, u16)> {
         let mut out = Vec::new();
         for &t in viable {
             for p in 0..self.params[t as usize].len() as u16 {
-                out.push((t, p));
+                let name = &self.params[t as usize][p as usize];
+                if !seen.iter().any(|s| s == name) {
+                    out.push((t, p));
+                }
             }
         }
         out
+    }
+
+    /// Does `tool` have every `required` parameter's exact name bytes present
+    /// in `seen`? The top-level analogue of nested [`required_satisfied`],
+    /// but by name (since the top-level acceptor tracks emitted keys by their
+    /// literal bytes, not by index into one fixed [`ObjectSchema`] — see
+    /// [`GrammarState::AfterComma`]'s doc comment for why).
+    fn required_satisfied_top(&self, tool: u16, seen: &[Vec<u8>]) -> bool {
+        (0..self.params[tool as usize].len() as u16)
+            .filter(|&p| self.required[tool as usize][p as usize])
+            .all(|p| {
+                let name = &self.params[tool as usize][p as usize];
+                seen.iter().any(|s| s == name)
+            })
+    }
+
+    /// Does *some* still-viable tool have all its required parameters in
+    /// `seen`? Gates the top-level arguments object's `}` — legal iff at
+    /// least one tool consistent with every key emitted so far could
+    /// legitimately be the call's tool (its required parameters are all
+    /// present), mirroring how [`Frame::Object`]'s `}` is gated by
+    /// [`required_satisfied`] one level down.
+    fn any_viable_required_satisfied(&self, viable: &[u16], seen: &[Vec<u8>]) -> bool {
+        viable.iter().any(|&t| self.required_satisfied_top(t, seen))
     }
 
     /// Advance the acceptor by one input byte, returning the successor state or
@@ -962,33 +1048,46 @@ impl ToolCallGrammar {
                 }
             }
             ArgsStart(v) => match byte {
+                // `seen` is empty here (the very first byte of the body), so
+                // this candidate list is every parameter of every offered
+                // tool, exactly as before the duplicate-key fix.
                 b'"' => Some(Key {
-                    cands: self.cands_for(v),
+                    cands: self.cands_for(v, &[]),
                     pos: 0,
+                    seen: Vec::new(),
                 }),
-                b'}' => Some(Mid {
+                // Closing an empty arguments object is only legal if some
+                // still-viable tool has no required parameters at all (e.g.
+                // a zero-parameter tool: `required_satisfied_top` is
+                // vacuously true over an empty parameter list).
+                b'}' if self.any_viable_required_satisfied(v, &[]) => Some(Mid {
                     viable: v.clone(),
                     pos: 0,
                 }),
                 _ => None,
             },
-            AfterComma(v) => {
+            AfterComma { viable, seen } => {
                 if byte == b'"' {
                     Some(Key {
-                        cands: self.cands_for(v),
+                        cands: self.cands_for(viable, seen),
                         pos: 0,
+                        seen: seen.clone(),
                     })
                 } else {
                     None
                 }
             }
-            Key { cands, pos } => {
+            Key { cands, pos, seen } => {
                 if byte == b'"' {
                     // Closing quote: keep only candidates whose name is fully
                     // typed, and narrow viable tools to their tools. Every
                     // surviving (tool, param) pair's name is byte-identical
                     // (that is exactly what "fully typed at this position"
                     // means), so any one of them gives the exact key bytes.
+                    // `cands` was already filtered against `seen` when this
+                    // `Key` state opened, so a name already in `seen` can
+                    // never reach here (Phase 51 / ADR 104 D1 bug fix: this
+                    // is what makes retyping an already-emitted key illegal).
                     let mut tools: Vec<u16> = Vec::new();
                     let mut param_name: Option<Vec<u8>> = None;
                     for (t, p) in cands {
@@ -1007,6 +1106,7 @@ impl ToolCallGrammar {
                         Some(Colon {
                             viable: tools,
                             param: param_name.unwrap_or_default(),
+                            seen: seen.clone(),
                         })
                     }
                 } else {
@@ -1023,15 +1123,23 @@ impl ToolCallGrammar {
                         Some(Key {
                             cands: nc,
                             pos: *pos + 1,
+                            seen: seen.clone(),
                         })
                     }
                 }
             }
-            Colon { viable, param } => {
+            Colon {
+                viable,
+                param,
+                seen,
+            } => {
                 if byte == b':' {
                     let schema = self.resolve_structural_schema(viable, param);
+                    let mut seen = seen.clone();
+                    seen.push(param.clone());
                     Some(Value {
                         viable: viable.clone(),
+                        seen,
                         parser: ValueParser {
                             stack: Vec::new(),
                             leaf: Leaf::Start(schema),
@@ -1041,22 +1149,57 @@ impl ToolCallGrammar {
                     None
                 }
             }
-            Value { viable, parser } => match step_value(parser, byte)? {
+            Value {
+                viable,
+                seen,
+                parser,
+            } => match step_value(parser, byte)? {
                 ValueOutcome::Continue(next) => Some(Value {
                     viable: viable.clone(),
+                    seen: seen.clone(),
                     parser: next,
                 }),
-                ValueOutcome::Done => Some(AfterValue(viable.clone())),
-                ValueOutcome::DoneComma => Some(AfterComma(viable.clone())),
-                ValueOutcome::DoneClose => Some(Mid {
+                ValueOutcome::Done => Some(AfterValue {
                     viable: viable.clone(),
-                    pos: 0,
+                    seen: seen.clone(),
                 }),
+                // A bare (number/boolean/null) value's own terminator *is*
+                // the arguments-body `,` — same "some unseen property
+                // remains" gate as `AfterValue`'s `,` arm below.
+                ValueOutcome::DoneComma if !self.cands_for(viable, seen).is_empty() => {
+                    Some(AfterComma {
+                        viable: viable.clone(),
+                        seen: seen.clone(),
+                    })
+                }
+                ValueOutcome::DoneComma => None,
+                // Same for the bare value's terminator being the arguments
+                // object's closing `}`: gated on required-property coverage.
+                ValueOutcome::DoneClose if self.any_viable_required_satisfied(viable, seen) => {
+                    Some(Mid {
+                        viable: viable.clone(),
+                        pos: 0,
+                    })
+                }
+                ValueOutcome::DoneClose => None,
             },
-            AfterValue(v) => match byte {
-                b',' => Some(AfterComma(v.clone())),
-                b'}' => Some(Mid {
-                    viable: v.clone(),
+            AfterValue { viable, seen } => match byte {
+                // Legal only if some still-viable tool has a declared
+                // parameter not yet in `seen` — otherwise a `,` could never
+                // be followed by a legal key, stranding generation with no
+                // further legal byte (Phase 51 / ADR 104 D1 bug fix: this is
+                // the check that used to be entirely absent at the top
+                // level, unlike the nested `Frame::Object` it mirrors).
+                b',' if !self.cands_for(viable, seen).is_empty() => Some(AfterComma {
+                    viable: viable.clone(),
+                    seen: seen.clone(),
+                }),
+                // Legal only once some still-viable tool's every `required`
+                // property is in `seen` (Phase 51 / ADR 104 D1 bug fix: this
+                // used to be unconditional, so `note_id` could be missing
+                // entirely when the call closed).
+                b'}' if self.any_viable_required_satisfied(viable, seen) => Some(Mid {
+                    viable: viable.clone(),
                     pos: 0,
                 }),
                 _ => None,
@@ -2694,12 +2837,15 @@ mod tests {
     /// mask, not the model, is what must keep the output well-formed.
     ///
     /// Substitution is skipped when `hint` itself wants a closing delimiter
-    /// (`}`/`]`): the top-level arguments object (like plain JSON-Schema
-    /// `additionalProperties` objects generally) does not bound *how many
-    /// times* a duplicate key may be re-typed, so an adversarial `,` is
-    /// always structurally legal there and would loop forever chasing a
-    /// close that never comes — a pre-existing property of the top-level
-    /// envelope, not the nested-value gap this grammar fixes.
+    /// (`}`/`]`): even now that the top-level arguments object rejects
+    /// duplicate keys and gates `}` on required-property coverage (Phase 51
+    /// / ADR 104 D1 bug fix — see [`ToolCallGrammar::cands_for`] /
+    /// [`ToolCallGrammar::any_viable_required_satisfied`]), an adversarial
+    /// `,` can still be *legally* substituted there whenever an optional
+    /// property remains unemitted, which would desync the driver from a
+    /// `hint` that intended to close at that exact byte; skipping keeps this
+    /// driver's contract simple ("`hint`'s own closes always close") rather
+    /// than making it reason about which closes are still substitutable.
     fn adversarial_drive(grammar: &ToolCallGrammar, hint: &str) -> String {
         let hint_bytes = hint.as_bytes();
         let mut state = grammar.start();
@@ -2795,6 +2941,229 @@ mod tests {
         let contracts = crate::tool_contract::ToolContractSnapshot::from_openai_tools(&tools).unwrap();
         let validation = contracts.validate_call(name, &arguments);
         assert!(validation.valid, "{:?}\n{out}", validation.issues);
+    }
+
+    // ── Top-level arguments-object key dedup + required gating ────────────
+    // (Phase 51 / ADR 104 D1 bug fix.) Reproduces the A100 checkpoint's
+    // observed failure on `study_note_revise`: the top-level `arguments`
+    // object had no `seen`-key tracking at all (unlike the nested
+    // `Frame::Object`/`ObjectSchema` machinery just above, which already got
+    // this right), so a key like `tags`/`title` could be retyped
+    // indefinitely, and `}` could close the object while a `required`
+    // property (`note_id`) was never emitted.
+
+    /// The real production `study_note_revise` contract (mirrors
+    /// `knowledge_workflow.rs`'s own tool-contract fixture): `note_id`,
+    /// `expected_revision`, `body`, `citations` required; `title`,
+    /// `challenge_id`, `language`, `tags`, `frontmatter` optional.
+    fn study_note_revise_tool() -> Value {
+        openai_tool(
+            "study_note_revise",
+            serde_json::json!({
+                "title": {"type": "string"},
+                "note_id": {"type": "string", "pattern": "^note-[0-9a-f]{32}$"},
+                "expected_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "body": {"type": "string"},
+                "citations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_id": {"type": "string"},
+                            "locator": {"type": "string"},
+                            "quote": {"type": "string"}
+                        },
+                        "required": ["source_id", "locator", "quote"],
+                        "additionalProperties": false
+                    }
+                },
+                "challenge_id": {"type": "string"},
+                "language": {"type": "string"},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "frontmatter": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            }),
+            &["note_id", "expected_revision", "body", "citations"],
+        )
+    }
+
+    /// (a) Once `tags` has been emitted at the top level, it must drop out of
+    /// the set of keys legal to open next -- while properties that have not
+    /// been emitted yet (`title`, `note_id`) must still be legal.
+    #[test]
+    fn top_level_key_state_excludes_already_emitted_property_and_keeps_others() {
+        let tools = vec![study_note_revise_tool()];
+        let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+        let prefix = br#"{"arguments":{"tags":["x"],""#;
+        let state = grammar
+            .advance(&grammar.start(), prefix)
+            .expect("legal prefix up to the next key's opening quote");
+        let GrammarState::Key { ref cands, .. } = state else {
+            panic!("expected Key state after opening a fresh key, got {state:?}");
+        };
+        let names: std::collections::BTreeSet<&str> = cands
+            .iter()
+            .map(|&(t, p)| grammar.param_name(t, p))
+            .collect();
+        assert!(
+            !names.contains("tags"),
+            "tags was already emitted and must not be re-typable: {names:?}"
+        );
+        assert!(
+            names.contains("title"),
+            "title has not been emitted yet and must stay legal: {names:?}"
+        );
+        assert!(
+            names.contains("note_id"),
+            "note_id has not been emitted yet and must stay legal: {names:?}"
+        );
+
+        // Driving the literal duplicate `"tags"` key bytes through the
+        // grammar must fail (it diverges from every remaining candidate
+        // partway through, since `tags` itself was filtered out).
+        assert_eq!(
+            grammar.advance(&state, br#""tags""#),
+            None,
+            "retyping an already-emitted top-level key must be illegal"
+        );
+    }
+
+    /// (b) `}` must be illegal while a `required` property (`note_id`) has
+    /// not been emitted, and legal once it has.
+    #[test]
+    fn top_level_close_requires_every_required_property_first() {
+        let tools = vec![study_note_revise_tool()];
+        let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+
+        let missing_note_id = br#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"expected_revision":"deadbeef"}"#;
+        let before_close = &missing_note_id[..missing_note_id.len() - 1];
+        let state = grammar
+            .advance(&grammar.start(), before_close)
+            .expect("legal prefix with three of four required properties present");
+        assert_eq!(
+            grammar.step(&state, b'}'),
+            None,
+            "`}}` must be illegal while required `note_id` has not been emitted"
+        );
+
+        let with_note_id = br#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"expected_revision":"deadbeef","note_id":"note-00000000000000000000000000000000"}"#;
+        let before_close = &with_note_id[..with_note_id.len() - 1];
+        let state = grammar
+            .advance(&grammar.start(), before_close)
+            .expect("legal prefix with every required property present");
+        assert!(
+            grammar.step(&state, b'}').is_some(),
+            "`}}` must be legal once every required property has been emitted"
+        );
+    }
+
+    /// (c) A tool with zero declared properties must still allow the empty
+    /// `{}` arguments object (required-property coverage is vacuously true
+    /// over an empty parameter list).
+    #[test]
+    fn zero_declared_properties_still_allows_empty_arguments_object() {
+        let tools = vec![openai_tool("ping", serde_json::json!({}), &[])];
+        let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+        let s = r#"{"arguments":{},"name":"ping"}"#;
+        assert_eq!(
+            grammar.advance(&grammar.start(), s.as_bytes()),
+            Some(GrammarState::End)
+        );
+    }
+
+    /// (d) The eae9e849 adversarial-argmax driver, run against
+    /// `study_note_revise`, must still land on a schema-valid call: no
+    /// `MissingRequired` (the `}}`-gating fix) and no duplicate top-level key
+    /// (the `seen`-tracking fix). `serde_json::Value` silently keeps only the
+    /// last of a duplicate key, so the duplicate check counts raw-text
+    /// occurrences of each declared property's `"<name>":` substring rather
+    /// than trusting a parsed map.
+    #[test]
+    fn adversarial_argmax_on_study_note_revise_has_no_missing_required_or_duplicate_keys() {
+        let tools = vec![study_note_revise_tool()];
+        let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+        let hex64 = "0123456789abcdef".repeat(4);
+        let hex32 = "0123456789abcdef0123456789abcdef";
+        let hint = format!(
+            r#"{{"arguments":{{"body":"the revised body","citations":[{{"locator":"p.9","quote":"an exact quote","source_id":"book-1"}}],"expected_revision":"{hex64}","note_id":"note-{hex32}","tags":["textbook","keph-index"],"title":"A Title"}},"name":"study_note_revise"}}"#
+        );
+
+        let out = adversarial_drive(&grammar, &hint);
+
+        for name in [
+            "title",
+            "note_id",
+            "expected_revision",
+            "body",
+            "citations",
+            "challenge_id",
+            "language",
+            "tags",
+            "frontmatter",
+        ] {
+            let needle = format!("\"{name}\":");
+            let count = out.matches(needle.as_str()).count();
+            assert!(
+                count <= 1,
+                "top-level key `{name}` appears {count} times in mask-forced output:\n{out}"
+            );
+        }
+
+        let value: Value = serde_json::from_str(&out)
+            .unwrap_or_else(|error| panic!("mask-forced output was not valid JSON: {error}\n{out}"));
+        let name = value["name"]
+            .as_str()
+            .expect("accepted call must carry a string tool name");
+        let arguments = value
+            .get("arguments")
+            .cloned()
+            .expect("accepted call must carry an arguments object");
+        let contracts = crate::tool_contract::ToolContractSnapshot::from_openai_tools(&tools)
+            .expect("the same tool definition must convert to a validator contract");
+        let validation = contracts.validate_call(name, &arguments);
+        assert!(
+            !validation
+                .issues
+                .iter()
+                .any(|issue| issue.kind == crate::tool_contract::SchemaIssueKind::MissingRequired),
+            "mask-forced call is missing a required property: {:?}\n{out}",
+            validation.issues
+        );
+        assert!(
+            validation.valid,
+            "mask-forced call failed schema validation: {:?}\n{out}",
+            validation.issues
+        );
+    }
+
+    /// Item 2: the outer envelope's fixed `,"name":"..."` / closing `}`
+    /// literal segments make a repeated `"arguments"` or `"name"` key
+    /// structurally unreachable -- there is no state the acceptor can be in
+    /// that offers a byte path back into either literal a second time. This
+    /// pins that down for both keys, and confirms the tool name stays
+    /// constrained to the offered set at that position.
+    #[test]
+    fn envelope_forbids_repeated_arguments_or_name_and_unoffered_names() {
+        let tools = vec![study_note_revise_tool()];
+        let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+
+        // A second `"arguments":{...}` where `"name"` was expected.
+        let repeated_arguments = br#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"expected_revision":"e","note_id":"n"},"arguments":{}}"#;
+        assert_eq!(grammar.advance(&grammar.start(), repeated_arguments), None);
+
+        // A second `"name"` after the first has already closed the call.
+        let repeated_name = br#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"expected_revision":"e","note_id":"n"},"name":"study_note_revise","name":"study_note_revise"}"#;
+        assert_eq!(grammar.advance(&grammar.start(), repeated_name), None);
+
+        // A name outside the offered set is still rejected in that position.
+        let unoffered_name = br#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"expected_revision":"e","note_id":"n"},"name":"delete_everything"}"#;
+        assert_eq!(grammar.advance(&grammar.start(), unoffered_name), None);
     }
 
     // ── General copy-from-context (Phase 51 / ADR 104 D2) ──────────────────
