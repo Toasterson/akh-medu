@@ -25,6 +25,21 @@ use crate::tool_contract::{SchemaIssue, ToolContractSnapshot};
 
 pub const KNOWLEDGE_WORKFLOW_SCHEMA_VERSION: u32 = 1;
 pub const KNOWLEDGE_WORKFLOW_GENERATOR_VERSION: &str = "akh-knowledge-workflow-v3";
+/// Generator versions whose exam/sentinel files this crate can still load and
+/// score. Immutable sentinels written by an older generator remain
+/// longitudinally comparable (ADR 102 §4); only *generation* is pinned to the
+/// current version. v2 → v3 appended the `length_generalization` scenario and
+/// changed seed→family assignment, which does not alter existing episodes.
+pub const KNOWLEDGE_WORKFLOW_COMPATIBLE_GENERATOR_VERSIONS: &[&str] = &[
+    "akh-knowledge-workflow-v2",
+    KNOWLEDGE_WORKFLOW_GENERATOR_VERSION,
+];
+
+/// True when an exam file's recorded generator version can be scored by this
+/// crate.
+pub fn knowledge_exam_generator_supported(version: &str) -> bool {
+    KNOWLEDGE_WORKFLOW_COMPATIBLE_GENERATOR_VERSIONS.contains(&version)
+}
 
 pub const ACQUIRE_FAMILY: &str = "knowledge.acquire_textbook";
 pub const RESTART_FAMILY: &str = "knowledge.recall_after_restart";

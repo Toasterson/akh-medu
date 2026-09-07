@@ -15,9 +15,9 @@ use clap::Parser;
 use grug_data::adaptive_exam::ADAPTIVE_EXAM_SCHEMA_VERSION;
 use grug_data::constrain::DecodeReport;
 use grug_data::{
-    CheckpointRef, ExamTier, KNOWLEDGE_WORKFLOW_GENERATOR_VERSION,
-    KNOWLEDGE_WORKFLOW_SCHEMA_VERSION, KnowledgeAction, KnowledgeEpisode, KnowledgeEvaluationMode,
-    KnowledgeExamEvidence, KnowledgeExamSet, KnowledgeToolBindings, score_knowledge_exam,
+    CheckpointRef, ExamTier, KNOWLEDGE_WORKFLOW_SCHEMA_VERSION, KnowledgeAction, KnowledgeEpisode,
+    KnowledgeEvaluationMode, KnowledgeExamEvidence, KnowledgeExamSet, KnowledgeToolBindings,
+    knowledge_exam_generator_supported, score_knowledge_exam,
 };
 #[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::{CpuBackend as ActiveBackend, CpuKnowledgeModel as ActiveKnowledgeModel};
@@ -223,7 +223,7 @@ fn validate_exam(
         .map_err(|_| invalid_data("checkpoint step does not fit the exam schema"))?;
     if exam.schema_version != KNOWLEDGE_WORKFLOW_SCHEMA_VERSION
         || exam.plan.schema_version != ADAPTIVE_EXAM_SCHEMA_VERSION
-        || exam.generator_version != KNOWLEDGE_WORKFLOW_GENERATOR_VERSION
+        || !knowledge_exam_generator_supported(&exam.generator_version)
         || exam.plan.generator_version.trim().is_empty()
     {
         return Err(invalid_data(
