@@ -15,6 +15,14 @@ use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
 use crate::transformer::TinyTransformer;
 
+/// Phase 51 / ADR 104 D2 bug fix: hard cap on how many times the soft
+/// suffix-copy bias (mechanism 2) may override the masked argmax within a
+/// single string value, regardless of how persistently the whole-value match
+/// keeps recommending an override -- a belt-and-suspenders bound alongside
+/// whole-value matching's own "never re-engages once diverged" guarantee
+/// (see [`grug_data::constrain::SuffixCopyIndex`]).
+const MAX_BIAS_OVERRIDES_PER_VALUE: u32 = 32;
+
 /// Generation options.
 #[derive(Debug, Clone, Copy)]
 pub struct GenerateConfig {
@@ -287,8 +295,17 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
     let mut identifier_copy_locks = 0u32;
     let mut identifier_copy_releases = 0u32;
     let mut copy_bias_overrides = 0u32;
+    // Rule from the Phase 51 / ADR 104 D2 bug fix: the soft suffix-copy bias
+    // may override the masked argmax at most this many times per *value* --
+    // reset whenever generation is not currently inside a string (see the
+    // reset check at the top of the loop below).
+    let mut value_bias_overrides = 0u32;
 
     for index in 0..config.max_new_tokens {
+        if state.active_string_content().is_none() {
+            value_bias_overrides = 0;
+        }
+
         let [_, seq_len, vocab_size] = logits.dims();
         let last_logits = logits
             .clone()
@@ -297,18 +314,44 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
 
         // Pass 1: the identifier lock (if engaged) is enforced strictly by
         // `state.advance` (Phase 51 / ADR 104 D2 mechanism 1 -- see
-        // `ConstrainedDecodeState::step_copy`). If that leaves no legal
-        // continuation at all, this is the documented deadlock case: force
-        // the lock released for the rest of the value and retry the same
-        // step (never emit an illegal byte, never hang).
-        let (mut mask, mut any_allowed) =
+        // `ConstrainedDecodeState::step_copy`). Two situations release it
+        // for the rest of the value rather than forcing the model to keep
+        // spelling out the identifier (Phase 51 / ADR 104 D2 bug fix, rule
+        // (c)): (i) the strict lock leaves no legal continuation at all (the
+        // original deadlock escape hatch), or (ii) the model's own
+        // lock-*unconstrained* preference (computed from the released mask)
+        // is for a byte the strict lock forbids -- forcing the masked argmax
+        // to complete the identifier anyway, rather than releasing, is what
+        // produced the measured runaway tag/array garbage.
+        let (locked_mask, locked_any) =
             build_copy_mask(&state, grammar, &copy, pieces, vocab_size, eos_id);
+        let mut mask = locked_mask.clone();
+        let mut any_allowed = locked_any;
         let mut active_state = state.clone();
-        if !any_allowed && state.identifier_lock_engaged() {
-            active_state = state.with_identifier_lock_released();
-            identifier_copy_releases += 1;
-            (mask, any_allowed) =
-                build_copy_mask(&active_state, grammar, &copy, pieces, vocab_size, eos_id);
+        if state.identifier_lock_engaged() {
+            let released_state = state.with_identifier_lock_released();
+            let (released_mask, released_any) =
+                build_copy_mask(&released_state, grammar, &copy, pieces, vocab_size, eos_id);
+            let release = if released_any {
+                let released_tensor = Tensor::<B, 1>::from_data(
+                    TensorData::new(released_mask.clone(), [vocab_size]),
+                    device,
+                );
+                let preferred_id = argmax(last_logits.clone() + released_tensor);
+                should_release_identifier_lock(&locked_mask, preferred_id)
+            } else {
+                // Even with the lock released nothing is legal (some other
+                // constraint, e.g. the D1 schema-pattern trie, is what is
+                // actually blocking): release anyway so the outer
+                // `!any_allowed` check below reports the true dead end.
+                true
+            };
+            if release {
+                active_state = released_state;
+                mask = released_mask;
+                any_allowed = released_any;
+                identifier_copy_releases += 1;
+            }
         }
         if !any_allowed {
             // Dead end -- should not happen (every reachable state has a
@@ -320,23 +363,31 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
         // near-argmax, already-legal token that continues a verbatim context
         // match over one that doesn't. Falls back to the exact pre-existing
         // tensor argmax path whenever not inside a string (the overwhelming
-        // majority of steps: structural bytes, keys, the tool name), so that
+        // majority of steps: structural bytes, keys, the tool name), or once
+        // this value has already hit its per-value override cap, so that
         // path stays byte-for-byte unchanged.
         let next_id = match (copy_bias_margin, active_state.active_string_content()) {
-            (Some(margin), Some(content)) => select_biased_next_id(
-                &last_logits,
-                &mask,
-                pieces,
-                &copy,
-                content,
-                margin,
-                &mut copy_bias_overrides,
-            )
-            .unwrap_or_else(|| {
-                let mask_tensor =
-                    Tensor::<B, 1>::from_data(TensorData::new(mask.clone(), [vocab_size]), device);
-                argmax(last_logits.clone() + mask_tensor)
-            }),
+            (Some(margin), Some(content))
+                if value_bias_overrides < MAX_BIAS_OVERRIDES_PER_VALUE =>
+            {
+                select_biased_next_id(
+                    &last_logits,
+                    &mask,
+                    pieces,
+                    &copy,
+                    content,
+                    margin,
+                    &mut copy_bias_overrides,
+                    &mut value_bias_overrides,
+                )
+                .unwrap_or_else(|| {
+                    let mask_tensor = Tensor::<B, 1>::from_data(
+                        TensorData::new(mask.clone(), [vocab_size]),
+                        device,
+                    );
+                    argmax(last_logits.clone() + mask_tensor)
+                })
+            }
             _ => {
                 let mask_tensor =
                     Tensor::<B, 1>::from_data(TensorData::new(mask, [vocab_size]), device);
@@ -421,13 +472,66 @@ fn build_copy_mask(
     (mask, any_allowed)
 }
 
+/// Phase 51 / ADR 104 D2 bug fix, rule (c): pure decision logic for
+/// proactively releasing the identifier hard-copy lock, decoupled from any
+/// tensor backend so it can be exercised directly in tests. `locked_mask` is
+/// what [`build_copy_mask`] produced *with* the lock still enforced;
+/// `preferred_id` is the model's own preference computed from the
+/// lock-*released* mask (i.e. what it would pick if the lock weren't
+/// constraining it, everything else -- structure, D1 -- held constant).
+///
+/// Releases whenever `preferred_id` is illegal under `locked_mask`, which
+/// covers both cases the task calls out: the strict lock leaving no legal
+/// continuation at all (`locked_mask` all `NEG_INFINITY`, so nothing can be
+/// legal under it), and the narrower case the strict lock still allows
+/// *something* but not what the model actually wants next -- forcing the
+/// masked argmax to complete the identifier anyway in that second case is
+/// what produced the measured runaway tag/array garbage (root cause: the
+/// lock is a nudge against dropped/doubled characters, not a mandate to
+/// emit the longest match).
+fn should_release_identifier_lock(locked_mask: &[f32], preferred_id: u32) -> bool {
+    !locked_mask
+        .get(preferred_id as usize)
+        .is_some_and(|v| v.is_finite())
+}
+
+/// How many trailing bytes of a value's own emitted content (not including
+/// the candidate byte) must match an earlier stretch of that same value for
+/// [`would_repeat_own_tail`] to refuse a bias override on the grounds that it
+/// would replay a transition the value already made once. Long enough to
+/// need a real recurring word/phrase boundary (e.g. `"index"` followed by
+/// `":"` once already), short enough to catch it before more than one extra
+/// cycle is emitted.
+const SELF_REPEAT_TAIL_LEN: usize = 5;
+
+/// Phase 51 / ADR 104 D2 bug fix: would appending `byte` to `content` begin
+/// literally repeating a transition this same value has already made? Scans
+/// `content` for an earlier (non-overlapping) occurrence of its own trailing
+/// [`SELF_REPEAT_TAIL_LEN`] bytes that was itself followed by `byte` -- if
+/// found, picking `byte` now would just replay that same continuation again,
+/// which is exactly the shape of the measured
+/// `": keph index: keph index-2: ..."` runaway. Always `false` for content
+/// too short to contain both a tail and an earlier occurrence of it.
+fn would_repeat_own_tail(content: &[u8], byte: u8) -> bool {
+    let tail_len = SELF_REPEAT_TAIL_LEN;
+    if content.len() < tail_len * 2 {
+        return false;
+    }
+    let tail = &content[content.len() - tail_len..];
+    (0..=content.len() - tail_len * 2)
+        .any(|start| content[start..start + tail_len] == *tail && content[start + tail_len] == byte)
+}
+
 /// Pull `logits` to a host `Vec<f32>` (the same `.into_data().to_vec()`
 /// idiom [`crate::vision`]'s decode loops already use) and run the D2
-/// mechanism-2 soft bias, incrementing `overrides` when it picks something
-/// other than the masked argmax. Returns `None` when the host extraction
-/// fails (a non-`f32` backend float element type) or there is no context
-/// suffix match at all, in which case the caller falls back to the exact
-/// pre-existing tensor argmax path.
+/// mechanism-2 soft bias, incrementing both `global_overrides` (whole-decode
+/// telemetry) and `value_overrides` (this value's own count, so the caller
+/// can enforce the per-value cap) when it picks something other than the
+/// masked argmax. Returns `None` when the host extraction fails (a non-`f32`
+/// backend float element type) or the whole value emitted so far has no
+/// verbatim occurrence in the context, in which case the caller falls back
+/// to the exact pre-existing tensor argmax path.
+#[allow(clippy::too_many_arguments)]
 fn select_biased_next_id<B: Backend>(
     last_logits: &Tensor<B, 1>,
     mask: &[f32],
@@ -435,16 +539,19 @@ fn select_biased_next_id<B: Backend>(
     copy: &CopyConstraints,
     content: &[u8],
     margin: f32,
-    overrides: &mut u32,
+    global_overrides: &mut u32,
+    value_overrides: &mut u32,
 ) -> Option<u32> {
     let continuations = copy.suffix.continuations(content)?;
     let host: Vec<f32> = last_logits.clone().into_data().to_vec().ok()?;
     if host.len() != mask.len() {
         return None;
     }
-    let (id, overridden) = select_next_token_with_copy_bias(&host, mask, pieces, &continuations, margin)?;
+    let (id, overridden) =
+        select_next_token_with_copy_bias(&host, mask, pieces, &continuations, content, margin)?;
     if overridden {
-        *overrides += 1;
+        *global_overrides += 1;
+        *value_overrides += 1;
     }
     Some(id)
 }
@@ -453,7 +560,9 @@ fn select_biased_next_id<B: Backend>(
 /// decoupled from any tensor backend so it can be exercised directly with
 /// scripted logits in tests. `logits` and `mask` are parallel arrays over the
 /// vocabulary (`mask[i]` is `0.0` for a legal continuation, exactly what
-/// [`build_copy_mask`] produces, `f32::NEG_INFINITY` otherwise). Returns
+/// [`build_copy_mask`] produces, `f32::NEG_INFINITY` otherwise). `content` is
+/// the value's own unescaped bytes emitted so far, used only for the
+/// self-repetition guard ([`would_repeat_own_tail`]). Returns
 /// `(chosen_id, overridden)`, where `overridden` is `true` iff the margin
 /// bias picked something other than the masked argmax; `None` only when no
 /// id is legal at all (should not happen -- the caller already checked
@@ -461,23 +570,35 @@ fn select_biased_next_id<B: Backend>(
 ///
 /// The bias never considers an illegal id (`legal` gates every candidate),
 /// so the structural grammar and any D1/D2 hard constraint always take
-/// precedence over this ranking choice.
+/// precedence over this ranking choice. It also never overrides the masked
+/// argmax's own preference to close the string (rule: once the model wants
+/// to stop, closing -- and, by the same principle, never forcing another
+/// array element -- is always allowed to stand); the same closing-preference
+/// rule for arrays/objects needs no code here, since neither this bias nor
+/// the D2 identifier lock ever apply to structural bytes outside a string in
+/// the first place.
 pub fn select_next_token_with_copy_bias(
     logits: &[f32],
     mask: &[f32],
     pieces: &[Option<Vec<u8>>],
     continuations: &std::collections::HashSet<u8>,
+    content: &[u8],
     margin: f32,
 ) -> Option<(u32, bool)> {
     let len = logits.len().min(mask.len());
     let legal = |id: usize| mask[id].is_finite();
     let score = |id: usize| logits[id] + mask[id];
+    let piece_bytes = |id: usize| pieces.get(id).and_then(|piece| piece.as_ref());
     let starts_with_continuation = |id: usize| {
-        pieces
-            .get(id)
-            .and_then(|piece| piece.as_ref())
+        piece_bytes(id)
             .and_then(|bytes| bytes.first())
             .is_some_and(|byte| continuations.contains(byte))
+    };
+    let is_closing_quote = |id: usize| piece_bytes(id).is_some_and(|bytes| bytes.as_slice() == b"\"");
+    let would_repeat = |id: usize| {
+        piece_bytes(id)
+            .and_then(|bytes| bytes.first())
+            .is_some_and(|&byte| would_repeat_own_tail(content, byte))
     };
 
     let mut best_id = None;
@@ -494,7 +615,9 @@ pub fn select_next_token_with_copy_bias(
     }
     let best_id = best_id?;
 
-    if starts_with_continuation(best_id) {
+    // The model's own top choice already continues the match, or already
+    // wants to close the value -- either way there is nothing to override.
+    if starts_with_continuation(best_id) || is_closing_quote(best_id) {
         return Some((best_id as u32, false));
     }
 
@@ -508,7 +631,10 @@ pub fn select_next_token_with_copy_bias(
         if s < best_score - margin {
             continue;
         }
-        if starts_with_continuation(id) && s > override_score {
+        if !starts_with_continuation(id) || would_repeat(id) {
+            continue;
+        }
+        if s > override_score {
             override_id = Some(id);
             override_score = s;
         }
@@ -948,7 +1074,7 @@ mod tests {
         let continuations = std::collections::HashSet::from(*b"9");
         let logits = vec![10.0, 7.0, 0.0]; // deficit for id1 is 3.0 <= 4.0
         let (id, overridden) =
-            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("some legal id must be selected");
         assert_eq!(id, 1, "the within-margin context-continuing token must win");
         assert!(overridden);
@@ -963,7 +1089,7 @@ mod tests {
         let continuations = std::collections::HashSet::from(*b"9");
         let logits = vec![10.0, 4.0, 0.0]; // deficit for id1 is 6.0 > 4.0
         let (id, overridden) =
-            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("some legal id must be selected");
         assert_eq!(id, 0, "a far-outside-margin alternative must not override argmax");
         assert!(!overridden);
@@ -979,7 +1105,7 @@ mod tests {
         let continuations = std::collections::HashSet::from(*b"9");
         let logits = vec![10.0, 0.0, 0.0];
         let (id, overridden) =
-            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("some legal id must be selected");
         assert_eq!(id, 0);
         assert!(!overridden);
@@ -997,7 +1123,7 @@ mod tests {
         let continuations = std::collections::HashSet::from(*b"9");
         let logits = vec![5.0, 100.0]; // id 1 would dominate if legality were ignored
         let (id, overridden) =
-            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("the one legal id must still be selected");
         assert_eq!(id, 0, "an illegal id must never be picked regardless of margin or logit");
         assert!(!overridden);
@@ -1011,8 +1137,177 @@ mod tests {
         let continuations = std::collections::HashSet::from(*b"9");
         let logits = vec![5.0, 100.0];
         assert_eq!(
-            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0),
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0),
             None
         );
+    }
+
+    /// (c) An original win that must still hold under whole-value matching:
+    /// `TV-926` is restored from a `TV-2`-preferring argmax once the whole
+    /// value emitted so far (`TV-9`) occurs verbatim in the context.
+    #[test]
+    fn whole_value_bias_restores_the_correct_digit_when_argmax_diverges() {
+        let context = "please cite TV-926 in the follow-up";
+        let index = grug_data::constrain::SuffixCopyIndex::build(context);
+        let content = b"TV-9"; // the value emitted so far
+        let continuations = index
+            .continuations(content)
+            .expect("TV-9 occurs verbatim in the context");
+        assert!(continuations.contains(&b'2'));
+
+        // id 0 = 'z' (argmax, would produce "TV-9z..." aka "TV-2" style
+        // corruption), id 1 = '2' (continues the verbatim match), id 2 = 'x'.
+        let pieces = byte_pieces(b"z2x");
+        let mask = vec![0.0, 0.0, 0.0];
+        let logits = vec![10.0, 7.0, 0.0]; // deficit for id1 is 3.0 <= 4.0
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, content, 4.0)
+                .expect("some legal id must be selected");
+        assert_eq!(id, 1, "the within-margin, whole-value-continuing digit must win");
+        assert!(overridden);
+    }
+
+    /// (b) Root cause 2's exact scenario: once a value has diverged from
+    /// every verbatim context occurrence, the whole-value index reports no
+    /// continuations at all, so a scripted argmax that would otherwise
+    /// prefer to keep extending the value (here, `':'`, restarting the
+    /// `": keph index"` cycle) is never overridden into -- there is nothing
+    /// left to bias towards, permanently, for the rest of this value.
+    #[test]
+    fn title_value_stops_biasing_once_it_diverges_from_every_context_occurrence() {
+        let context = "the note references Zorim-meru-74: keph index in passing";
+        let tools = vec![grug_data::ToolSchema::new("noop", "d", vec![])];
+        let grammar = grug_data::constrain::RuntimeCallGrammar::new(&tools);
+        let copy = CopyConstraints::build(grammar.inner(), context, true, Some(4.0));
+
+        let device = Default::default();
+        let pieces = byte_pieces(b":x");
+        let mask = vec![0.0, 0.0];
+        // A scripted argmax that strongly prefers ':' (id 0) within margin
+        // of 'x' (id 1) -- exactly what would restart the
+        // `": keph index"` cycle if the bias engaged.
+        let logits = Tensor::<CpuBackend, 1>::from_data(TensorData::new(vec![10.0f32, 9.0], [2]), &device);
+        let mut global_overrides = 0u32;
+        let mut value_overrides = 0u32;
+
+        // Still matching: the correct, complete title occurs verbatim in the
+        // context, so the bias is active.
+        let matching = b"Zorim-meru-74: keph index".as_slice();
+        assert!(
+            select_biased_next_id(
+                &logits,
+                &mask,
+                &pieces,
+                &copy,
+                matching,
+                4.0,
+                &mut global_overrides,
+                &mut value_overrides,
+            )
+            .is_some()
+        );
+
+        // One byte further than the real occurrence ever goes (a second
+        // colon, as in the measured runaway): the value is no longer a
+        // substring of the context anywhere, so the bias must be inactive
+        // (`None`) -- the real decode loop then falls back to the plain
+        // masked argmax rather than being steered into repeating.
+        let diverged = b"Zorim-meru-74: keph index: keph index".as_slice();
+        assert!(
+            select_biased_next_id(
+                &logits,
+                &mask,
+                &pieces,
+                &copy,
+                diverged,
+                4.0,
+                &mut global_overrides,
+                &mut value_overrides,
+            )
+            .is_none(),
+            "the bias must never re-engage once the value has diverged"
+        );
+    }
+
+    /// The bias must never override the masked argmax's own preference to
+    /// close the string, even if a legal, within-margin alternative would
+    /// have continued the context match.
+    #[test]
+    fn margin_bias_never_overrides_an_argmax_that_already_wants_to_close() {
+        // id 0 = '"' (argmax: the model wants to close), id 1 = '9'
+        // (continues a context match, close in logit, but must not win).
+        let pieces = byte_pieces(b"\"9");
+        let mask = vec![0.0, 0.0];
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![10.0, 9.0];
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
+                .expect("some legal id must be selected");
+        assert_eq!(id, 0, "an argmax that already wants to close must never be overridden");
+        assert!(!overridden);
+    }
+
+    /// The self-repetition guard: an override candidate that would replay a
+    /// transition the value already made once (here, `':'` after `"index"`,
+    /// having already happened earlier in `content`) must never be selected
+    /// even though it is legal, within margin, and continues the context
+    /// match -- the plain masked argmax must stand instead.
+    #[test]
+    fn margin_bias_refuses_an_override_that_would_repeat_the_values_own_tail() {
+        // `content` already shows "index:" once; typing "index" again and
+        // now considering ':' as a candidate would replay that transition.
+        let content = b"keph index: keph index";
+        assert!(would_repeat_own_tail(content, b':'));
+        assert!(!would_repeat_own_tail(content, b'!'));
+
+        let pieces = byte_pieces(b"z:x");
+        let mask = vec![0.0, 0.0, 0.0];
+        let continuations = std::collections::HashSet::from(*b":");
+        let logits = vec![10.0, 9.0, 0.0]; // ':' within margin of argmax 'z'
+        let (id, overridden) = select_next_token_with_copy_bias(
+            &logits,
+            &mask,
+            &pieces,
+            &continuations,
+            content,
+            4.0,
+        )
+        .expect("some legal id must be selected");
+        assert_eq!(id, 0, "a self-repeating override must be refused");
+        assert!(!overridden);
+    }
+
+    // ── Phase 51 / ADR 104 D2 bug fix, rule (c): proactive lock release ────
+
+    /// (d) The lock must release (and the release must be countable by the
+    /// caller) when the model's own lock-unconstrained preference would
+    /// leave every identifier candidate, even though the strict lock still
+    /// allows *something* (so this is not the total-deadlock case).
+    #[test]
+    fn identifier_lock_releases_when_the_unconstrained_argmax_would_leave_every_candidate() {
+        // Locked mask only allows id 0 (e.g. the digit continuing the
+        // identifier); the model's own unconstrained preference (computed
+        // from the released mask, simulated here as `preferred_id = 1`) is
+        // for a byte the strict lock forbids.
+        let locked_mask = vec![0.0, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        assert!(should_release_identifier_lock(&locked_mask, 1));
+    }
+
+    /// When the model's unconstrained preference already matches what the
+    /// strict lock allows, there is nothing to release.
+    #[test]
+    fn identifier_lock_does_not_release_when_the_unconstrained_argmax_already_matches() {
+        let locked_mask = vec![0.0, f32::NEG_INFINITY];
+        assert!(!should_release_identifier_lock(&locked_mask, 0));
+    }
+
+    /// The original escape hatch still holds: total deadlock under the
+    /// strict lock (nothing legal at all) always releases, regardless of
+    /// what the "preferred" id even is.
+    #[test]
+    fn identifier_lock_releases_on_total_deadlock() {
+        let locked_mask = vec![f32::NEG_INFINITY, f32::NEG_INFINITY];
+        assert!(should_release_identifier_lock(&locked_mask, 0));
+        assert!(should_release_identifier_lock(&locked_mask, 5));
     }
 }

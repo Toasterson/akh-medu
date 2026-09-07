@@ -1799,19 +1799,30 @@ impl RuntimeCallGrammar {
 // 1. [`IdentifierIndex`] -- a hard lock: once a string value's emitted bytes
 //    become an unambiguous prefix of a whitespace-free, digit/`:/_-.`-bearing
 //    substring of the context, only bytes preserving that prefix (or, at the
-//    closing `"`, completing it exactly) are legal. If no vocabulary token
-//    can preserve it (checked once per decode step, not per candidate --
-//    see [`ConstrainedDecodeState::identifier_lock_engaged`] and
-//    [`ConstrainedDecodeState::with_identifier_lock_released`]), the lock is
-//    released for the rest of that value rather than deadlocking generation.
-// 2. [`SuffixCopyIndex`] -- a soft bias: the longest suffix of a string
-//    value's emitted content that recurs in the context predicts what byte
-//    comes next (an LZ-style copy prediction); `grug-train`'s decode loop
-//    uses it to prefer an already-legal, near-argmax token that continues
-//    that match over one that doesn't. This is a *ranking* choice, not a
-//    legality one, so it has no presence in [`ConstrainedDecodeState::step`]
-//    -- only [`ConstrainedDecodeState::active_string_content`] exposes what
-//    it needs.
+//    closing `"`, completing it exactly, or completing a whole word/tag of
+//    the context that merely prefixes a longer identifier -- see rule (b) on
+//    [`IdentifierIndex::is_closable`]) are legal. The lock may only *engage*
+//    over content that itself already looks identifier-shaped (rule (a),
+//    [`looks_like_identifier`]) -- a plain word like `textbook` must never
+//    lock just because it happens to prefix a longer compound identifier
+//    elsewhere in the context. If no vocabulary token can preserve an
+//    engaged lock (checked once per decode step, not per candidate -- see
+//    [`ConstrainedDecodeState::identifier_lock_engaged`] and
+//    [`ConstrainedDecodeState::with_identifier_lock_released`]), or the
+//    model's own lock-unconstrained preference would leave the identifier
+//    entirely (rule (c), enforced by `grug-train`'s decode loop), the lock is
+//    released for the rest of that value rather than forcing the "longest
+//    match" completion.
+// 2. [`SuffixCopyIndex`] -- a soft bias over the **whole value** emitted so
+//    far (not a recurring short suffix -- see the struct docs for why that
+//    was root cause 2 of a runaway repetition bug): while the entire value
+//    typed so far occurs verbatim in the context, the bytes observed to
+//    follow those occurrences predict what byte comes next (an LZ-style copy
+//    prediction); `grug-train`'s decode loop uses it to prefer an
+//    already-legal, near-argmax token that continues that match over one
+//    that doesn't. This is a *ranking* choice, not a legality one, so it has
+//    no presence in [`ConstrainedDecodeState::step`] -- only
+//    [`ConstrainedDecodeState::active_string_content`] exposes what it needs.
 //
 // Both derive their working set from the *unescaped* value content (a JSON
 // `\"`/`\n`/`\\` escape is not what appears in the context, which is plain
@@ -1885,6 +1896,59 @@ fn identifier_tokens(context: &str) -> Vec<String> {
     tokens
 }
 
+/// A finer split of `context` than [`identifier_tokens`]: cuts on Unicode
+/// whitespace, the JSON structural delimiters, *and* the compound-identifier
+/// joiners `:` `/` `_` `-` `.`, keeping every non-empty piece regardless of
+/// shape or length. Used only for rule (b) of the Phase 51 / ADR 104 D2 bug
+/// fix -- [`IdentifierIndex::is_closable`]'s closing-permission check -- so a
+/// plain word like `textbook` is recognized as a complete, closable token of
+/// the context even though it is merely a *prefix* of one whole
+/// [`identifier_tokens`] token (`textbook:e89c...:edition-2`, which
+/// deliberately preserves those joiners so the compound identifier itself
+/// can still be copied whole).
+fn whole_word_tokens(context: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in context.chars() {
+        if c.is_whitespace()
+            || matches!(c, '"' | '{' | '}' | '[' | ']' | ',' | ':' | '/' | '_' | '-' | '.')
+        {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// Minimum content length before the identifier hard-copy lock may engage at
+/// all (Phase 51 / ADR 104 D2 mechanism 1): a handful of bytes is not enough
+/// to distinguish "coincidentally shares a prefix with some identifier" from
+/// "is actually typing that identifier".
+const MIN_IDENTIFIER_LOCK_LEN: usize = 4;
+
+/// Rule (a) of the Phase 51 / ADR 104 D2 bug fix: the identifier hard-copy
+/// lock may only engage over content that itself already looks like part of
+/// an identifier -- at least one ASCII digit, or one of the compound-
+/// identifier joiners `:` `/` `_` `-` `.`. A plain alphabetic word (e.g. the
+/// legitimate complete tag `textbook`) must never lock just because it
+/// happens to be a *prefix* of some longer identifier elsewhere in the
+/// context (`textbook:e89c...:edition-2`) -- forcing that word to keep
+/// typing out the whole unrelated identifier was root cause 1 of the
+/// runaway tag/array bug this rule fixes.
+fn looks_like_identifier(content: &[u8]) -> bool {
+    content
+        .iter()
+        .any(|&b| b.is_ascii_digit() || matches!(b, b':' | b'/' | b'_' | b'-' | b'.'))
+}
+
 /// The identifier-shaped substrings of one generation call's context,
 /// indexed once ([`identifier_tokens`]) for repeated prefix/exact-match
 /// queries during decoding (Phase 51 / ADR 104 D2 mechanism 1). Reuses
@@ -1894,12 +1958,16 @@ fn identifier_tokens(context: &str) -> Vec<String> {
 #[derive(Debug, Clone, Default)]
 pub struct IdentifierIndex {
     trie: CopyTrie,
+    /// Finer-grained whole-word tokens ([`whole_word_tokens`]) used only by
+    /// [`Self::is_closable`] (rule (b)).
+    whole_words: CopyTrie,
 }
 
 impl IdentifierIndex {
     pub fn build(context: &str) -> Self {
         Self {
             trie: CopyTrie::new(&identifier_tokens(context)),
+            whole_words: CopyTrie::new(&whole_word_tokens(context)),
         }
     }
 
@@ -1910,89 +1978,76 @@ impl IdentifierIndex {
     fn is_exact_match(&self, bytes: &[u8]) -> bool {
         self.trie.is_exact_match(bytes)
     }
+
+    /// Rule (b) of the Phase 51 / ADR 104 D2 bug fix: whether `bytes` may
+    /// legally close an identifier-locked string value. Legal either when
+    /// `bytes` is a full compound identifier ([`Self::is_exact_match`]), or
+    /// when it equals a whole delimiter/whitespace-bounded word of the
+    /// context ([`whole_word_tokens`]) -- so a complete word/tag that merely
+    /// happens to prefix a longer identifier (`textbook` prefixing
+    /// `textbook:e89c...:edition-2`) can still close instead of being forced
+    /// to keep typing out the rest of that unrelated identifier.
+    fn is_closable(&self, bytes: &[u8]) -> bool {
+        self.is_exact_match(bytes) || self.whole_words.is_exact_match(bytes)
+    }
 }
 
-/// Byte length of the hashed window [`SuffixCopyIndex`] indexes the context
-/// by. A fixed window means its byte value is *invariant* across every
-/// candidate suffix length being considered (they all end at the same
-/// position, `content`'s end), so one hash lookup finds every candidate
-/// occurrence regardless of how far it turns out to extend backward.
-const SUFFIX_WINDOW: usize = 8;
-
-/// Cap on how far a suffix match is extended backward, per the task spec.
-const MAX_SUFFIX_LEN: usize = 64;
-
-/// A hashed 8-byte-window index over one generation call's rendered context,
-/// built once ([`SuffixCopyIndex::build`]) and queried once per decode step
-/// (not per vocabulary token -- see the module docs' efficiency note) for
-/// the soft suffix-copy bias (Phase 51 / ADR 104 D2 mechanism 2).
+/// A byte-level index over one generation call's rendered context, built
+/// once ([`SuffixCopyIndex::build`]) and queried once per decode step (not
+/// per vocabulary token -- see the module docs' efficiency note) for the
+/// soft suffix-copy bias (Phase 51 / ADR 104 D2 mechanism 2).
+///
+/// Matches on the **whole value emitted so far**, not a recurring short
+/// suffix (Phase 51 / ADR 104 D2 bug fix, root cause 2): the original
+/// fixed-window suffix design re-engaged on *any* short phrase that happened
+/// to recur elsewhere in the context (e.g. "keph index" appearing once in
+/// retrieved evidence), which could steer the model into replaying that
+/// phrase indefinitely -- the measured `": keph index: keph index-2: ..."`
+/// runaway. Matching the whole value instead is self-limiting: `content`
+/// only grows one byte at a time, and a longer string can be a substring of
+/// the context only if every one of its prefixes already was one too. So
+/// once [`Self::continuations`] returns `None` for a given value (the value
+/// has diverged from every context occurrence), it is mathematically
+/// guaranteed to keep returning `None` for the rest of that same value --
+/// the bias never re-engages mid-value.
 #[derive(Debug, Clone, Default)]
 pub struct SuffixCopyIndex {
     context: Vec<u8>,
-    windows: HashMap<[u8; SUFFIX_WINDOW], Vec<usize>>,
 }
 
 impl SuffixCopyIndex {
     pub fn build(context: &str) -> Self {
-        let context = context.as_bytes().to_vec();
-        let mut windows: HashMap<[u8; SUFFIX_WINDOW], Vec<usize>> = HashMap::new();
-        if context.len() >= SUFFIX_WINDOW {
-            for start in 0..=context.len() - SUFFIX_WINDOW {
-                let mut key = [0u8; SUFFIX_WINDOW];
-                key.copy_from_slice(&context[start..start + SUFFIX_WINDOW]);
-                windows.entry(key).or_default().push(start);
-            }
+        Self {
+            context: context.as_bytes().to_vec(),
         }
-        Self { context, windows }
     }
 
     /// The bytes (mapped through [`json_escape_first_byte`]) observed to
-    /// follow the longest (>= [`SUFFIX_WINDOW`], capped at
-    /// [`MAX_SUFFIX_LEN`]) suffix of `content` (the value's *unescaped*
-    /// emitted bytes so far) that occurs anywhere in the context. `None`
-    /// when even the shortest (8-byte) window has no occurrence at all --
-    /// novel text, where the bias is inactive.
+    /// follow every verbatim occurrence, anywhere in the context, of the
+    /// *entire* value emitted so far (`content`, the value's *unescaped*
+    /// bytes). `None` when `content` is empty or occurs nowhere in the
+    /// context -- novel text (or a value that has diverged from every
+    /// context occurrence), where the bias is inactive for the remainder of
+    /// this value (see the struct docs for why that "off" is permanent).
     pub fn continuations(&self, content: &[u8]) -> Option<std::collections::HashSet<u8>> {
-        if content.len() < SUFFIX_WINDOW {
+        if content.is_empty() || content.len() > self.context.len() {
             return None;
         }
-        let cap = content.len().min(MAX_SUFFIX_LEN);
-        let mut key = [0u8; SUFFIX_WINDOW];
-        key.copy_from_slice(&content[content.len() - SUFFIX_WINDOW..]);
-        let positions = self.windows.get(&key)?;
-
-        let mut best_len = 0usize;
-        for &window_start in positions {
-            let end = window_start + SUFFIX_WINDOW;
-            let mut matched = SUFFIX_WINDOW;
-            while matched < cap && matched < end {
-                let context_index = end - matched - 1;
-                let content_index = content.len() - matched - 1;
-                if self.context[context_index] == content[content_index] {
-                    matched += 1;
-                } else {
-                    break;
-                }
-            }
-            best_len = best_len.max(matched);
-        }
-        if best_len < SUFFIX_WINDOW {
-            return None;
-        }
-
-        let needle = &content[content.len() - best_len..];
         let mut next_bytes = std::collections::HashSet::new();
-        for &window_start in positions {
-            let end = window_start + SUFFIX_WINDOW;
-            if end < best_len {
-                continue;
-            }
-            let start = end - best_len;
-            if self.context.get(start..end) == Some(needle)
-                && let Some(&next) = self.context.get(end)
-            {
+        let mut search_from = 0usize;
+        while search_from + content.len() <= self.context.len() {
+            let Some(offset) = self.context[search_from..]
+                .windows(content.len())
+                .position(|window| window == content)
+            else {
+                break;
+            };
+            let match_start = search_from + offset;
+            let match_end = match_start + content.len();
+            if let Some(&next) = self.context.get(match_end) {
                 next_bytes.insert(json_escape_first_byte(next));
             }
+            search_from = match_start + 1;
         }
         if next_bytes.is_empty() {
             None
@@ -2218,7 +2273,14 @@ impl ConstrainedDecodeState {
             if identifier_copy && !has_whitespace && !escaped {
                 match lock {
                     IdLock::Unlocked => {
-                        if content.len() >= 4 && identifiers.is_prefix_of_any(&content) {
+                        // Rule (a): only content that already looks
+                        // identifier-shaped may engage the lock -- a plain
+                        // word must never lock just because it prefixes some
+                        // unrelated identifier elsewhere in the context.
+                        if content.len() >= MIN_IDENTIFIER_LOCK_LEN
+                            && looks_like_identifier(&content)
+                            && identifiers.is_prefix_of_any(&content)
+                        {
                             lock = IdLock::Locked;
                         }
                     }
@@ -2249,7 +2311,7 @@ impl ConstrainedDecodeState {
                 lock: IdLock::Locked,
                 ..
             } = &self.copy
-            && !identifiers.is_exact_match(content)
+            && !identifiers.is_closable(content)
         {
             return None; // closing on an incomplete copy is illegal
         }
@@ -3269,17 +3331,39 @@ mod tests {
         let index = SuffixCopyIndex::build(context);
         let continuations = index
             .continuations(b"abc12345")
-            .expect("an 8-byte suffix present verbatim in the context must be found");
+            .expect("the whole value present verbatim in the context must be found");
         assert!(continuations.contains(&b'\\'));
         assert!(!continuations.contains(&b'"'));
     }
 
-    /// (c) Novel content with no occurrence anywhere in the context (not
-    /// even the 8-byte floor) leaves the suffix-copy bias inactive.
+    /// (c) Novel content with no occurrence anywhere in the context leaves
+    /// the suffix-copy bias inactive.
     #[test]
     fn suffix_copy_index_is_inactive_for_content_with_no_context_occurrence() {
         let index = SuffixCopyIndex::build("nothing relevant appears in this context at all");
         assert!(index.continuations(b"zzzzzzzzzzzz").is_none());
+    }
+
+    /// Phase 51 / ADR 104 D2 bug fix, root cause 2: whole-value matching
+    /// never re-engages once the value has diverged from every context
+    /// occurrence, even when a shorter phrase inside the diverged value
+    /// still recurs elsewhere in the context (the measured
+    /// `": keph index: keph index-2: ..."` runaway).
+    #[test]
+    fn suffix_copy_index_never_reengages_once_the_value_diverges() {
+        let context = "the guidance references keph index in section 2";
+        let index = SuffixCopyIndex::build(context);
+
+        // "keph index" alone recurs verbatim -- the bias is active for it.
+        assert!(index.continuations(b"keph index").is_some());
+
+        // But once the *whole value* has grown to include a continuation
+        // that never occurred in the context (a colon repeating the
+        // phrase), the whole value is no longer a substring anywhere, and
+        // the bias must report `None` -- permanently, for any further
+        // extension of this same value.
+        assert!(index.continuations(b"keph index: keph index").is_none());
+        assert!(index.continuations(b"keph index: keph index-2").is_none());
     }
 
     /// (e) A field with a declared `pattern` (D1) must never let D2's
@@ -3321,20 +3405,63 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
 
-        let prefix = "<tool_call>\n{\"arguments\":{\"source_id\":\"textbook";
+        // `textbook` alone is a plain word (no digit/`:/_-.`) and must never
+        // lock on its own (rule (a)) -- the prefix here continues past the
+        // `:` into the first hex digit, which is what actually makes the
+        // content identifier-shaped and engages the lock.
+        let prefix = "<tool_call>\n{\"arguments\":{\"source_id\":\"textbook:4";
         let state = ConstrainedDecodeState::start(&grammar)
             .advance(&grammar, &copy, prefix.as_bytes())
             .expect("a real identifier prefix must be legal");
         assert!(
             state.identifier_lock_engaged(),
-            "8 clean bytes matching the context identifier must have locked"
+            "identifier-shaped content matching the context identifier must have locked"
         );
 
-        // `z` is not the identifier's next byte (`:`) -- illegal while locked.
+        // `z` is not the identifier's next byte (`8`) -- illegal while locked.
         assert_eq!(state.step(&grammar, &copy, b'z'), None);
 
         let released = state.with_identifier_lock_released();
         assert!(!released.identifier_lock_engaged());
         assert!(released.step(&grammar, &copy, b'z').is_some());
+    }
+
+    /// Root cause 1's exact scenario: a legitimate plain-word tag (`textbook`)
+    /// happens to be a prefix of an unrelated compound identifier elsewhere
+    /// in the context (`textbook:e89c...:edition-2`) but must never lock --
+    /// rule (a) -- and must close normally once complete, even though it is
+    /// only a prefix of that longer identifier -- rule (b).
+    #[test]
+    fn plain_word_tag_that_prefixes_an_unrelated_identifier_stays_closable() {
+        let context = concat!(
+            "<tool_response>\n",
+            "{\"source_id\":\"textbook:e89c5074c30874cc:edition-2\",\"locator\":\"p.1\"}\n",
+            "</tool_response>"
+        );
+        let tools = vec![study_note_append_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        // Drive up to (and including) the closing quote of the first tag,
+        // "textbook" -- this must be legal despite the identifier sharing
+        // its first 8 bytes.
+        let up_to_tag_close = "<tool_call>\n{\"arguments\":{\"body\":\"b\",\"citations\":[{\"locator\":\"l\",\"quote\":\"q\",\"source_id\":\"s\"}],\"tags\":[\"textbook";
+        let state = advance_constrained(&grammar, &copy, up_to_tag_close)
+            .expect("typing the plain word tag must never lock");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "a plain alphabetic word must never engage the identifier lock"
+        );
+        let closed = state
+            .step(&grammar, &copy, b'"')
+            .expect("closing the complete tag must be legal even though it prefixes an unrelated identifier");
+
+        // The rest of the call (second tag, title) must decode normally,
+        // proving the array was never derailed by a stuck lock.
+        let rest = ",\"keph-index\"],\"title\":\"t\"},\"name\":\"study_note_append\"}\n</tool_call>";
+        let end = closed
+            .advance(&grammar, &copy, rest.as_bytes())
+            .expect("the rest of the call must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
     }
 }
