@@ -56,6 +56,23 @@ def parse_args() -> argparse.Namespace:
         help="SFT batch size (4096-context runs need 4 on an 80GB A100)",
     )
     parser.add_argument(
+        "--model",
+        default="small",
+        help="train_knowledge --model preset (default small; e.g. small_8k for the ADR 104 8192-context lane)",
+    )
+    parser.add_argument(
+        "--eval-max-new-tokens",
+        type=int,
+        default=128,
+        help="inline teacher-forced eval generation budget passed to train_knowledge (default 128)",
+    )
+    parser.add_argument(
+        "--train-arg",
+        action="append",
+        default=[],
+        help="extra argument appended verbatim to the train_knowledge command (repeatable; e.g. --train-arg --extend-context)",
+    )
+    parser.add_argument(
         "--curriculum-dir",
         type=Path,
         default=Path("local-curricula-20260904"),
@@ -181,6 +198,9 @@ def knowledge_command(
     foundation: Path,
     artifacts: Path,
     batch_size: int = 8,
+    model: str = "small",
+    eval_max_new_tokens: int = 128,
+    extra_train_args: tuple[str, ...] = (),
 ) -> list[str]:
     curriculum = curriculum_dir / "sft"
     paths = {
@@ -216,7 +236,7 @@ def knowledge_command(
         "--artifacts-dir",
         str(artifacts),
         "--model",
-        "small",
+        model,
         "--epochs",
         "1",
         "--batch-size",
@@ -232,9 +252,10 @@ def knowledge_command(
         "--eval-samples",
         "8",
         "--eval-max-new-tokens",
-        "128",
+        str(eval_max_new_tokens),
         "--ckpt-every",
         "1000",
+        *extra_train_args,
     ]
 
 
@@ -304,6 +325,9 @@ def main() -> int:
             foundation,
             knowledge,
             args.batch_size,
+            model=args.model,
+            eval_max_new_tokens=args.eval_max_new_tokens,
+            extra_train_args=tuple(args.train_arg),
         )
         run_logged(command + ["--validate-only"], resolve_under(base, args.validate_log))
 
