@@ -19,6 +19,19 @@
 //!   --tier frontier --run-id run-1 --seed 91 --difficulty 2 --samples 200 \
 //!   --checkpoint-step 100 --checkpoint-hash sha256:model
 //!
+//! `prepare`, `training`, `exam` and `sibling` all accept an optional
+//! `--length-buckets` flag (comma-separated target token counts, default
+//! 2048,4096,8192,12288) that scopes which distance buckets the
+//! `knowledge.length_generalization` family (ADR 104 D5(b)) probes. Pass a
+//! narrower list, e.g. `--length-buckets 2048,4096`, to probe only the
+//! buckets a smaller-context checkpoint can hold:
+//!
+//! cargo run -p grug-data --example knowledge_workflow -- exam \
+//!   --contracts contracts.json --family knowledge.length_generalization \
+//!   --tier frontier --run-id run-1 --seed 91 --difficulty 1 --samples 8 \
+//!   --checkpoint-step 100 --checkpoint-hash sha256:model \
+//!   --length-buckets 2048,4096
+//!
 //! Separately namespaced training sibling from a materialized frontier exam:
 //!
 //! cargo run -p grug-data --example knowledge_workflow -- sibling \
@@ -110,6 +123,7 @@ fn prepare(arguments: &[String]) -> Result<(), Box<dyn Error>> {
 
     let bindings = KnowledgeToolBindings::default();
     let generator = KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone())?;
+    let generator = apply_length_buckets(generator, arguments)?;
     let train = generator.generate_training(train_seed, train_episodes, max_difficulty)?;
     let evaluation = generator.generate_training(eval_seed, eval_episodes, max_difficulty)?;
     verify_training_coverage(&train)?;
@@ -222,6 +236,7 @@ fn training(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let contracts = load_contracts(required(arguments, "--contracts")?)?;
     let bindings = KnowledgeToolBindings::default();
     let generator = KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone())?;
+    let generator = apply_length_buckets(generator, arguments)?;
     let seed = required(arguments, "--seed")?.parse()?;
     let episode_count = required(arguments, "--episodes")?.parse()?;
     let max_difficulty = optional(arguments, "--max-difficulty")
@@ -248,6 +263,7 @@ fn training(arguments: &[String]) -> Result<(), Box<dyn Error>> {
 fn exam(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let contracts = load_contracts(required(arguments, "--contracts")?)?;
     let generator = KnowledgeWorkflowGenerator::new(contracts, KnowledgeToolBindings::default())?;
+    let generator = apply_length_buckets(generator, arguments)?;
     let plan = ExamPlan {
         schema_version: ADAPTIVE_EXAM_SCHEMA_VERSION,
         generator_version: optional(arguments, "--plan-generator-version")
@@ -300,6 +316,10 @@ fn sibling(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     }
     let bindings = KnowledgeToolBindings::default();
     let generator = KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone())?;
+    // Must match the buckets the source exam was generated with (see
+    // `--length-buckets`); otherwise a `knowledge.length_generalization`
+    // exam cannot replay identically below.
+    let generator = apply_length_buckets(generator, arguments)?;
     let regenerated = generator.generate_exam(&exam.plan)?;
     if regenerated != exam {
         return Err("frontier exam does not replay from its declared plan".into());
@@ -536,6 +556,34 @@ fn load_contracts(path: &str) -> Result<ToolContractSnapshot, Box<dyn Error>> {
     };
     contracts.verify_integrity()?;
     Ok(contracts)
+}
+
+/// Parse `--length-buckets 2048,4096,...` for `knowledge.length_generalization`
+/// (ADR 104 D5(b)). `None` leaves the generator's default buckets in place.
+fn parse_length_buckets(arguments: &[String]) -> Result<Option<Vec<u32>>, Box<dyn Error>> {
+    let Some(raw) = optional(arguments, "--length-buckets") else {
+        return Ok(None);
+    };
+    let buckets = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<u32>()
+                .map_err(|error| format!("invalid --length-buckets entry {part:?}: {error}"))
+        })
+        .collect::<Result<Vec<u32>, String>>()?;
+    Ok(Some(buckets))
+}
+
+fn apply_length_buckets(
+    generator: KnowledgeWorkflowGenerator,
+    arguments: &[String],
+) -> Result<KnowledgeWorkflowGenerator, Box<dyn Error>> {
+    match parse_length_buckets(arguments)? {
+        Some(buckets) => Ok(generator.with_length_buckets(buckets)?),
+        None => Ok(generator),
+    }
 }
 
 fn required<'a>(arguments: &'a [String], flag: &str) -> Result<&'a str, Box<dyn Error>> {

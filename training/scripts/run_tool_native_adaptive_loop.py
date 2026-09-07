@@ -40,6 +40,7 @@ KNOWLEDGE_FAMILIES = (
     "knowledge.grounded_abstention",
     "knowledge.textbook_inventory",
     "knowledge.note_navigation",
+    "knowledge.length_generalization",
 )
 UNBOUND_SENTINEL = "unbound:immutable-sentinel"
 MAX_STEERING_SHARE_PPM = 50_000

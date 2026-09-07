@@ -3,9 +3,12 @@
 //! These are not one-shot trivia prompts. An episode makes the model check
 //! memory, diagnose a gap, acquire or retrieve textbook evidence, preserve
 //! provenance in an append-only note, and only then answer. Separate scenarios
-//! exercise restart recall, edition conflicts, broken providers, and grounded
-//! abstention. Every generated call is checked against a content-addressed
-//! runtime tool snapshot before it can enter a corpus.
+//! exercise restart recall, edition conflicts, broken providers, grounded
+//! abstention, and (per ADR 104 D5(b)) length generalization, where the
+//! evidence the model must act on is pushed a controlled distance back in
+//! the prompt by additional legitimate tool results. Every generated call is
+//! checked against a content-addressed runtime tool snapshot before it can
+//! enter a corpus.
 
 use std::collections::BTreeMap;
 
@@ -21,7 +24,7 @@ use crate::adaptive_exam::{
 use crate::tool_contract::{SchemaIssue, ToolContractSnapshot};
 
 pub const KNOWLEDGE_WORKFLOW_SCHEMA_VERSION: u32 = 1;
-pub const KNOWLEDGE_WORKFLOW_GENERATOR_VERSION: &str = "akh-knowledge-workflow-v2";
+pub const KNOWLEDGE_WORKFLOW_GENERATOR_VERSION: &str = "akh-knowledge-workflow-v3";
 
 pub const ACQUIRE_FAMILY: &str = "knowledge.acquire_textbook";
 pub const RESTART_FAMILY: &str = "knowledge.recall_after_restart";
@@ -30,6 +33,35 @@ pub const FALLBACK_FAMILY: &str = "knowledge.provider_fallback";
 pub const ABSTAIN_FAMILY: &str = "knowledge.grounded_abstention";
 pub const TEXTBOOK_INVENTORY_FAMILY: &str = "knowledge.textbook_inventory";
 pub const NOTE_NAVIGATION_FAMILY: &str = "knowledge.note_navigation";
+/// ADR 104 D5(b): recall/navigation episodes where the note id, textbook id
+/// or quoted passage the model must act on sits a controlled distance back
+/// in the prompt, built from additional legitimate tool results rather than
+/// noise. Gates the serving length a checkpoint is probed at.
+pub const LENGTH_GENERALIZATION_FAMILY: &str = "knowledge.length_generalization";
+
+/// Approximate characters-per-token ratio assumed for
+/// `knowledge.length_generalization` prompts. The generator has no
+/// tokenizer, and these prompts are tool-schema/tool-result heavy (dense
+/// JSON) rather than prose, so a flat multiplier stands in for a real
+/// tokenizer. `bucket_tokens` on [`LengthBucketRecord`] is therefore a
+/// *label*, not a measurement; `prompt_chars` is the actual measurement, so
+/// a scorer with a real tokenizer can re-bin episodes by true token count
+/// later without regenerating them.
+pub const LENGTH_GENERALIZATION_CHARS_PER_TOKEN: f64 = 3.5;
+
+/// Default target token-count buckets probed by the
+/// `knowledge.length_generalization` family, expressed as how far back in
+/// the prompt (in approximate tokens, see
+/// [`LENGTH_GENERALIZATION_CHARS_PER_TOKEN`]) the evidence the model must
+/// act on sits. Overridable via [`KnowledgeWorkflowGenerator::with_length_buckets`]
+/// so a smaller-context checkpoint can be probed only on the buckets it can
+/// hold.
+pub const DEFAULT_LENGTH_BUCKETS: [u32; 4] = [2048, 4096, 8192, 12288];
+
+/// Safety bound on inserted padding tool results so a target bucket that
+/// cannot be reached (for example a target far below the fixed per-episode
+/// overhead) cannot loop the generator forever.
+const MAX_LENGTH_PADDING_STEPS: u32 = 600;
 
 /// Capability matrix for the adaptive exam controller. The lanes trend
 /// independently so an average cannot hide collapsing citation or fallback
@@ -43,6 +75,7 @@ pub fn knowledge_capability_specs() -> Vec<CapabilitySpec> {
         ABSTAIN_FAMILY,
         TEXTBOOK_INVENTORY_FAMILY,
         NOTE_NAVIGATION_FAMILY,
+        LENGTH_GENERALIZATION_FAMILY,
     ]
     .into_iter()
     .map(|id| CapabilitySpec::new(id, 0, 5).with_initial_difficulty(1))
@@ -97,6 +130,7 @@ pub enum KnowledgeScenario {
     GroundedAbstention,
     TextbookInventory,
     NoteNavigation,
+    LengthGeneralization,
 }
 
 impl KnowledgeScenario {
@@ -109,10 +143,11 @@ impl KnowledgeScenario {
             Self::GroundedAbstention => ABSTAIN_FAMILY,
             Self::TextbookInventory => TEXTBOOK_INVENTORY_FAMILY,
             Self::NoteNavigation => NOTE_NAVIGATION_FAMILY,
+            Self::LengthGeneralization => LENGTH_GENERALIZATION_FAMILY,
         }
     }
 
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 8] {
         [
             Self::AcquireTextbook,
             Self::RecallAfterRestart,
@@ -121,6 +156,7 @@ impl KnowledgeScenario {
             Self::GroundedAbstention,
             Self::TextbookInventory,
             Self::NoteNavigation,
+            Self::LengthGeneralization,
         ]
     }
 }
@@ -455,6 +491,19 @@ pub struct TextbookFixture {
     pub concurrent_revision: String,
 }
 
+/// Length-generalization bucket metadata carried by episodes in the
+/// `knowledge.length_generalization` family (ADR 104 D5(b)). The generator
+/// has no tokenizer: `bucket_tokens` is the requested target label, and
+/// `prompt_chars` is the actually measured character length of the
+/// rendered prompt immediately before the final answer step, so a scorer
+/// with a real tokenizer can re-bin episodes by true token count later. See
+/// [`LENGTH_GENERALIZATION_CHARS_PER_TOKEN`] for the conversion assumption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LengthBucketRecord {
+    pub bucket_tokens: u32,
+    pub prompt_chars: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KnowledgeEpisode {
     pub schema_version: u32,
@@ -466,6 +515,9 @@ pub struct KnowledgeEpisode {
     pub language: WorkflowLanguage,
     pub fixture: TextbookFixture,
     pub steps: Vec<KnowledgeStep>,
+    /// Present only for `knowledge.length_generalization` episodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length_bucket: Option<LengthBucketRecord>,
 }
 
 impl KnowledgeEpisode {
@@ -681,11 +733,17 @@ pub enum KnowledgeWorkflowError {
     Serialize { message: String },
     #[error("invalid model prediction: {message}")]
     InvalidPrediction { message: String },
+    #[error("length-generalization buckets must be non-empty and non-zero, got {buckets:?}")]
+    InvalidLengthBuckets { buckets: Vec<u32> },
 }
 
 pub struct KnowledgeWorkflowGenerator {
     contracts: ToolContractSnapshot,
     bindings: KnowledgeToolBindings,
+    /// Target token-count buckets for `knowledge.length_generalization`
+    /// (default [`DEFAULT_LENGTH_BUCKETS`]); see
+    /// [`Self::with_length_buckets`].
+    length_buckets: Vec<u32>,
 }
 
 impl KnowledgeWorkflowGenerator {
@@ -704,11 +762,36 @@ impl KnowledgeWorkflowGenerator {
         Ok(Self {
             contracts,
             bindings,
+            length_buckets: DEFAULT_LENGTH_BUCKETS.to_vec(),
         })
     }
 
     pub fn contracts(&self) -> &ToolContractSnapshot {
         &self.contracts
+    }
+
+    /// Override the target token-count buckets probed by the
+    /// `knowledge.length_generalization` family (default
+    /// [`DEFAULT_LENGTH_BUCKETS`]). Lets a caller restrict a probe to the
+    /// buckets a smaller-context checkpoint can actually hold, for example
+    /// `--length-buckets 2048,4096` for a 4k-context checkpoint.
+    pub fn with_length_buckets(
+        mut self,
+        buckets: Vec<u32>,
+    ) -> Result<Self, KnowledgeWorkflowError> {
+        if buckets.is_empty() || buckets.contains(&0) {
+            return Err(KnowledgeWorkflowError::InvalidLengthBuckets { buckets });
+        }
+        self.length_buckets = buckets;
+        Ok(self)
+    }
+
+    /// Deterministic bucket assignment for episode `index`, cycling through
+    /// the configured buckets the same way [`language_for`] cycles
+    /// languages, so a single exam or sentinel file exercises every
+    /// requested bucket rather than only the one implied by `difficulty`.
+    fn length_bucket_for_index(&self, index: usize) -> u32 {
+        self.length_buckets[index % self.length_buckets.len()]
     }
 
     pub fn generate_training(
@@ -810,7 +893,23 @@ impl KnowledgeWorkflowGenerator {
             partition,
         ]);
         let fixture = make_fixture(episode_seed, language, difficulty);
-        let steps = self.steps_for(scenario, language, difficulty, &fixture);
+        let (steps, length_bucket) = if scenario == KnowledgeScenario::LengthGeneralization {
+            let bucket_tokens = self.length_bucket_for_index(index);
+            let (steps, prompt_chars) =
+                self.length_generalization_steps(language, &fixture, bucket_tokens)?;
+            (
+                steps,
+                Some(LengthBucketRecord {
+                    bucket_tokens,
+                    prompt_chars: u32::try_from(prompt_chars).unwrap_or(u32::MAX),
+                }),
+            )
+        } else {
+            (
+                self.steps_for(scenario, language, difficulty, &fixture),
+                None,
+            )
+        };
         for step in &steps {
             if let KnowledgeAction::ToolCall { tool, arguments } = &step.expected {
                 let validation = self.contracts.validate_call(tool, arguments);
@@ -832,6 +931,7 @@ impl KnowledgeWorkflowGenerator {
             language,
             fixture,
             steps,
+            length_bucket,
         })
     }
 
@@ -854,6 +954,20 @@ impl KnowledgeWorkflowGenerator {
                 self.textbook_inventory_steps(language, fixture)
             }
             KnowledgeScenario::NoteNavigation => self.note_navigation_steps(language, fixture),
+            // `generate_episode` special-cases this scenario so it can also
+            // capture the measured `LengthBucketRecord`; this arm exists
+            // only so the match stays exhaustive for any other caller, and
+            // falls back to the first configured bucket, ignoring
+            // `difficulty` the way the other seven scenarios ignore it for
+            // stages that do not consume it.
+            KnowledgeScenario::LengthGeneralization => {
+                self.length_generalization_steps(language, fixture, self.length_buckets[0])
+                    .expect(
+                        "length-generalization steps use only bindings validated at generator \
+                     construction and the same contract snapshot used to build the fixture",
+                    )
+                    .0
+            }
         }
     }
 }
@@ -867,6 +981,7 @@ fn scenario_from_family(family: &str) -> Result<KnowledgeScenario, KnowledgeWork
         ABSTAIN_FAMILY => Ok(KnowledgeScenario::GroundedAbstention),
         TEXTBOOK_INVENTORY_FAMILY => Ok(KnowledgeScenario::TextbookInventory),
         NOTE_NAVIGATION_FAMILY => Ok(KnowledgeScenario::NoteNavigation),
+        LENGTH_GENERALIZATION_FAMILY => Ok(KnowledgeScenario::LengthGeneralization),
         _ => Err(KnowledgeWorkflowError::UnknownFamily {
             family: family.into(),
         }),
@@ -1306,6 +1421,92 @@ impl KnowledgeWorkflowGenerator {
             answer_step(language, fixture),
         ]
     }
+
+    /// Recall/navigation episode (ADR 104 D5(b)) where the note id the model
+    /// must copy back into `study_note_read` is pushed a controlled
+    /// distance back in the prompt by additional, legitimate tool results
+    /// (more note-catalog pages, other archive documents, unrelated memory
+    /// recalls) rather than by noise — the same workflow would plausibly
+    /// keep working on other threads while this note id stays valid.
+    /// Distance is expressed as a target character budget derived from
+    /// `bucket_tokens`; the actual measured length travels with the episode
+    /// so a scorer with a real tokenizer can re-bin by true token count.
+    fn length_generalization_steps(
+        &self,
+        language: WorkflowLanguage,
+        fixture: &TextbookFixture,
+        bucket_tokens: u32,
+    ) -> Result<(Vec<KnowledgeStep>, usize), KnowledgeWorkflowError> {
+        let target_chars = length_bucket_target_chars(bucket_tokens);
+        let mut steps = vec![call_step(
+            WorkflowStage::ListNotes,
+            length_generalization_prompt(language, fixture),
+            EvidenceState::Unknown,
+            &self.bindings.study_note_list,
+            serde_json::json!({
+                "query": format!("learn:{}", fixture.concept),
+                "limit": 20,
+                "offset": 0
+            }),
+            note_catalog_result(fixture),
+        )];
+
+        let read_note = call_step(
+            WorkflowStage::ReadNote,
+            "The catalog entry read earlier, well above this point, links the challenge to one stable note id. Read that exact note id now; do not guess a nearby one.",
+            EvidenceState::Unknown,
+            &self.bindings.study_note_read,
+            serde_json::json!({"note_id": fixture.note_id}),
+            note_read_result(fixture),
+        );
+        let answer = answer_step(language, fixture);
+
+        let mut padding_index: u32 = 0;
+        loop {
+            let mut probe = steps.clone();
+            probe.push(read_note.clone());
+            probe.push(answer.clone());
+            let projected = self.measure_prompt_chars(fixture, &probe)?;
+            if projected >= target_chars || padding_index >= MAX_LENGTH_PADDING_STEPS {
+                break;
+            }
+            steps.push(length_padding_step(padding_index, fixture, &self.bindings));
+            padding_index += 1;
+        }
+
+        steps.push(read_note);
+        steps.push(answer);
+        let actual_chars = self.measure_prompt_chars(fixture, &steps)?;
+        Ok((steps, actual_chars))
+    }
+
+    /// Character length of the canonical SFT prompt for the last step of a
+    /// trial step sequence, reusing [`KnowledgeEpisode::to_sft_records`] (the
+    /// same renderer training and serving use) so the measurement matches
+    /// what a checkpoint is actually probed against.
+    fn measure_prompt_chars(
+        &self,
+        fixture: &TextbookFixture,
+        steps: &[KnowledgeStep],
+    ) -> Result<usize, KnowledgeWorkflowError> {
+        let probe = KnowledgeEpisode {
+            schema_version: KNOWLEDGE_WORKFLOW_SCHEMA_VERSION,
+            id: "length-generalization-probe".into(),
+            contract_hash: self.contracts.manifest_hash.clone(),
+            scenario: KnowledgeScenario::LengthGeneralization,
+            family: LENGTH_GENERALIZATION_FAMILY.into(),
+            difficulty: 0,
+            language: fixture.source_language,
+            fixture: fixture.clone(),
+            steps: steps.to_vec(),
+            length_bucket: None,
+        };
+        let records = probe.to_sft_records(&self.contracts, &self.bindings)?;
+        Ok(records
+            .last()
+            .map(|record| record.prompt.chars().count())
+            .unwrap_or(0))
+    }
 }
 
 fn make_fixture(seed: u64, user_language: WorkflowLanguage, difficulty: u8) -> TextbookFixture {
@@ -1548,6 +1749,21 @@ fn note_navigation_prompt(language: WorkflowLanguage, fixture: &TextbookFixture)
     format!("{lead} {}", fixture.question)
 }
 
+fn length_generalization_prompt(language: WorkflowLanguage, fixture: &TextbookFixture) -> String {
+    let lead = match language {
+        WorkflowLanguage::English => {
+            "Many other tool results will follow before you need this note id again. Browse note metadata now, keep working through the other results, then read back the exact note id you found here."
+        }
+        WorkflowLanguage::German => {
+            "Es folgen viele weitere Werkzeugergebnisse, bevor du diese Notiz-ID erneut brauchst. Durchsuche jetzt die Notizmetadaten, arbeite die weiteren Ergebnisse ab und lies dann genau die hier gefundene ID zurueck."
+        }
+        WorkflowLanguage::French => {
+            "De nombreux autres resultats d'outils suivront avant que tu aies de nouveau besoin de cet identifiant. Parcours d'abord les metadonnees, traite les autres resultats, puis relis exactement l'identifiant trouve ici."
+        }
+    };
+    format!("{lead} {}", fixture.question)
+}
+
 fn call_step(
     stage: WorkflowStage,
     input: impl Into<String>,
@@ -1683,6 +1899,131 @@ fn note_catalog_result(fixture: &TextbookFixture) -> String {
                 }
             }
         ]
+    })
+    .to_string()
+}
+
+fn length_bucket_target_chars(bucket_tokens: u32) -> usize {
+    ((f64::from(bucket_tokens)) * LENGTH_GENERALIZATION_CHARS_PER_TOKEN).round() as usize
+}
+
+/// One padding tool-call step for `knowledge.length_generalization`: a
+/// legitimate, schema-valid result the same workflow would plausibly
+/// produce while the model keeps working before it needs the earlier note
+/// id again (another note-catalog page, another archive-document page, or
+/// an unrelated memory recall) — never noise, and never the fixture's own
+/// note id, source id or answer.
+fn length_padding_step(
+    padding_index: u32,
+    fixture: &TextbookFixture,
+    bindings: &KnowledgeToolBindings,
+) -> KnowledgeStep {
+    let note = "Keep working through other open threads; the note id found earlier stays valid and unrevised.";
+    match padding_index % 3 {
+        0 => call_step(
+            WorkflowStage::ListNotes,
+            note,
+            EvidenceState::Unknown,
+            &bindings.study_note_list,
+            serde_json::json!({
+                "query": format!("learn:{}-related-{padding_index}", fixture.concept),
+                "limit": 20,
+                "offset": (padding_index + 1) * 20
+            }),
+            padding_note_catalog_result(fixture, padding_index),
+        ),
+        1 => call_step(
+            WorkflowStage::ListTextbooks,
+            note,
+            EvidenceState::Unknown,
+            &bindings.corpus_documents,
+            serde_json::json!({
+                "limit": 50,
+                "offset": (padding_index + 1) * 50
+            }),
+            padding_document_catalog_result(fixture, padding_index),
+        ),
+        _ => call_step(
+            WorkflowStage::CheckMemory,
+            note,
+            EvidenceState::Unknown,
+            &bindings.memory_recall,
+            serde_json::json!({
+                "query_symbols": format!("{}-context-{padding_index}", fixture.concept)
+            }),
+            padding_memory_result(padding_index),
+        ),
+    }
+}
+
+fn padding_note_id(fixture: &TextbookFixture, suffix: u32) -> String {
+    let digest = blake3::hash(format!("padding-note:{}:{suffix}", fixture.concept).as_bytes());
+    format!("note-{}", &digest.to_hex()[..32])
+}
+
+fn padding_note_catalog_result(fixture: &TextbookFixture, padding_index: u32) -> String {
+    let entries: Vec<Value> = (0..2)
+        .map(|slot| {
+            let suffix = padding_index * 2 + slot;
+            let note_id = padding_note_id(fixture, suffix);
+            let revision = blake3::hash(format!("{note_id}:head").as_bytes())
+                .to_hex()
+                .to_string();
+            serde_json::json!({
+                "note_id": note_id,
+                "document_id": format!("padding-topic-{suffix}"),
+                "title": format!("Unrelated study note {suffix}"),
+                "tags": ["textbook", "unrelated"],
+                "revision": revision,
+                "stored_at": 1_893_542_400_i64 - i64::from(suffix),
+                "frontmatter": {"status": {"text": "active"}}
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "operation": "list",
+        "query": format!("learn:{}-related-{padding_index}", fixture.concept),
+        "catalog_total": 2 + entries.len(),
+        "total": entries.len(),
+        "offset": (padding_index + 1) * 20,
+        "limit": 20,
+        "returned": entries.len(),
+        "has_more": true,
+        "next_offset": (padding_index + 2) * 20,
+        "notes": entries
+    })
+    .to_string()
+}
+
+fn padding_document_catalog_result(fixture: &TextbookFixture, padding_index: u32) -> String {
+    let entries: Vec<Value> = (0..2)
+        .map(|slot| {
+            let suffix = padding_index * 2 + slot;
+            serde_json::json!({
+                "id": format!("textbook:padding-{suffix:08x}:edition-1"),
+                "title": format!("Unrelated Reference Manual {suffix}"),
+                "slug": format!("unrelated-reference-{suffix}"),
+                "format": "markdown",
+                "chunk_count": 1,
+                "ingested_at": "2029-06-01 00:00:00 UTC"
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "documents": entries,
+        "total": 2 + entries.len(),
+        "offset": (padding_index + 1) * 50,
+        "limit": 50,
+        "unrelated_to": fixture.concept
+    })
+    .to_string()
+}
+
+fn padding_memory_result(padding_index: u32) -> String {
+    serde_json::json!({
+        "query_symbols": format!("context-{padding_index}"),
+        "matches": [],
+        "note": "No episodic memories are linked to this unrelated context symbol yet."
     })
     .to_string()
 }
@@ -2523,7 +2864,7 @@ mod tests {
             .iter()
             .map(|episode| episode.language.code())
             .collect();
-        assert_eq!(scenarios.len(), 7);
+        assert_eq!(scenarios.len(), 8);
         assert_eq!(languages, BTreeSet::from(["de", "en", "fr"]));
         assert!(corpus.episodes.iter().all(|episode| {
             episode.steps.iter().all(|step| match &step.expected {
@@ -2809,6 +3150,122 @@ mod tests {
         assert_eq!(
             read["frontmatter"]["supporting_quotes"]["list"][0],
             episode.fixture.target_sentence
+        );
+    }
+
+    #[test]
+    fn length_generalization_is_deterministic_and_hits_its_bucket() {
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default()).unwrap();
+        let exam_plan = plan(
+            LENGTH_GENERALIZATION_FAMILY,
+            DEFAULT_LENGTH_BUCKETS.len() as u64,
+        );
+        let exam = generator.generate_exam(&exam_plan).unwrap();
+        let replay = generator.generate_exam(&exam_plan).unwrap();
+        assert_eq!(exam, replay, "same seed must yield identical episodes");
+        assert_eq!(exam.episodes.len(), DEFAULT_LENGTH_BUCKETS.len());
+
+        let mut seen_buckets: Vec<u32> = Vec::new();
+        for episode in &exam.episodes {
+            assert_eq!(episode.scenario, KnowledgeScenario::LengthGeneralization);
+            assert_eq!(episode.family, LENGTH_GENERALIZATION_FAMILY);
+            let record = episode
+                .length_bucket
+                .expect("length_generalization episodes carry a length_bucket record");
+            seen_buckets.push(record.bucket_tokens);
+
+            let target = length_bucket_target_chars(record.bucket_tokens) as f64;
+            let actual = f64::from(record.prompt_chars);
+            let tolerance = target * 0.15;
+            assert!(
+                (actual - target).abs() <= tolerance,
+                "bucket {} target {target} chars, got {actual} chars (tolerance {tolerance})",
+                record.bucket_tokens
+            );
+
+            // The note id read far below in the prompt must be exactly the
+            // one surfaced by the earlier catalog listing: this is the
+            // copy-faithful distance test, not a fresh lookup.
+            let calls: Vec<_> = episode
+                .steps
+                .iter()
+                .filter_map(|step| match &step.expected {
+                    KnowledgeAction::ToolCall { tool, arguments } => {
+                        Some((tool.as_str(), arguments.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let (first_tool, _) = &calls[0];
+            assert_eq!(*first_tool, "study_note_list");
+            let (last_tool, last_arguments) = calls.last().unwrap();
+            assert_eq!(*last_tool, "study_note_read");
+            assert_eq!(last_arguments["note_id"], episode.fixture.note_id);
+            assert!(
+                calls.len() > 2,
+                "expected padding tool calls between the catalog listing and the read"
+            );
+        }
+        assert_eq!(seen_buckets, DEFAULT_LENGTH_BUCKETS.to_vec());
+    }
+
+    #[test]
+    fn length_generalization_respects_custom_buckets() {
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![512, 1024])
+                .unwrap();
+        let exam = generator
+            .generate_exam(&plan(LENGTH_GENERALIZATION_FAMILY, 2))
+            .unwrap();
+        let buckets: Vec<u32> = exam
+            .episodes
+            .iter()
+            .map(|episode| episode.length_bucket.unwrap().bucket_tokens)
+            .collect();
+        assert_eq!(buckets, vec![512, 1024]);
+
+        assert!(matches!(
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![]),
+            Err(KnowledgeWorkflowError::InvalidLengthBuckets { .. })
+        ));
+        assert!(matches!(
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![0]),
+            Err(KnowledgeWorkflowError::InvalidLengthBuckets { .. })
+        ));
+    }
+
+    #[test]
+    fn length_generalization_padding_calls_validate_against_the_tool_contract() {
+        let contracts = contracts();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), KnowledgeToolBindings::default())
+                .unwrap();
+        let exam = generator
+            .generate_exam(&plan(LENGTH_GENERALIZATION_FAMILY, 1))
+            .unwrap();
+        let episode = &exam.episodes[0];
+        let mut tool_call_steps = 0;
+        for step in &episode.steps {
+            if let KnowledgeAction::ToolCall { tool, arguments } = &step.expected {
+                tool_call_steps += 1;
+                let validation = contracts.validate_call(tool, arguments);
+                assert!(
+                    validation.valid,
+                    "inserted call to {tool:?} with {arguments} failed contract validation: {:?}",
+                    validation.issues
+                );
+            }
+        }
+        assert!(
+            tool_call_steps > 2,
+            "expected the evidence call, at least one padding call, and the copy-back read"
         );
     }
 

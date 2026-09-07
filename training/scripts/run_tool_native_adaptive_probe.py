@@ -2,9 +2,10 @@
 """Run the first checkpoint-bound adaptive probe, never promotion.
 
 The script waits for `run_tool_native_post_foundation.py` to finish one SFT
-epoch, then produces rolling (not sentinel) closed-loop evidence for all seven
-knowledge workflows and every captured tool. It updates a serialized adaptive
-controller and stops, leaving the next training-mixture decision inspectable.
+epoch, then produces rolling (not sentinel) closed-loop evidence for all eight
+knowledge workflows (including `knowledge.length_generalization`, ADR 104
+D5(b)) and every captured tool. It updates a serialized adaptive controller
+and stops, leaving the next training-mixture decision inspectable.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ KNOWLEDGE_FAMILIES = (
     "knowledge.grounded_abstention",
     "knowledge.textbook_inventory",
     "knowledge.note_navigation",
+    "knowledge.length_generalization",
 )
 
 

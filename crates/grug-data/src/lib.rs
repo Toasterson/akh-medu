@@ -78,17 +78,18 @@ pub use foundation::{
 pub use generator::{DistractorConfig, Generator, PhrasingMode};
 pub use ground::{GroundStats, ground_values};
 pub use knowledge_workflow::{
-    ABSTAIN_FAMILY, ACQUIRE_FAMILY, EvidenceState, FALLBACK_FAMILY,
+    ABSTAIN_FAMILY, ACQUIRE_FAMILY, DEFAULT_LENGTH_BUCKETS, EvidenceState, FALLBACK_FAMILY,
     KNOWLEDGE_WORKFLOW_GENERATOR_VERSION, KNOWLEDGE_WORKFLOW_SCHEMA_VERSION, KnowledgeAction,
     KnowledgeCaseScore, KnowledgeEpisode, KnowledgeEvaluationMode, KnowledgeExamEvidence,
     KnowledgeExamReport, KnowledgeExamSet, KnowledgeScenario, KnowledgeScoreIssue,
     KnowledgeScoreIssueKind, KnowledgeSftRecord, KnowledgeStep, KnowledgeStepScore,
     KnowledgeToolBindings, KnowledgeTrainingCorpus, KnowledgeWorkflowError,
-    KnowledgeWorkflowGenerator, NOTE_NAVIGATION_FAMILY, RESTART_FAMILY, REVISION_FAMILY,
-    TEXTBOOK_INVENTORY_FAMILY, TextbookFixture, WorkflowCitation, WorkflowLanguage, WorkflowStage,
-    knowledge_capability_specs, render_knowledge_prompt, render_knowledge_prompt_with_system,
-    score_episode as score_knowledge_episode, score_knowledge_exam,
-    score_raw_episode as score_raw_knowledge_episode,
+    KnowledgeWorkflowGenerator, LENGTH_GENERALIZATION_CHARS_PER_TOKEN,
+    LENGTH_GENERALIZATION_FAMILY, LengthBucketRecord, NOTE_NAVIGATION_FAMILY, RESTART_FAMILY,
+    REVISION_FAMILY, TEXTBOOK_INVENTORY_FAMILY, TextbookFixture, WorkflowCitation,
+    WorkflowLanguage, WorkflowStage, knowledge_capability_specs, render_knowledge_prompt,
+    render_knowledge_prompt_with_system, score_episode as score_knowledge_episode,
+    score_knowledge_exam, score_raw_episode as score_raw_knowledge_episode,
 };
 pub use organ::{GapRecoveryReport, GapResponse, respond_to_gap};
 pub use phrasing::{PhrasingBank, PhrasingRegistry, PhrasingTemplate, TemplatePart};
