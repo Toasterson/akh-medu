@@ -16,6 +16,19 @@ override: pass ``--ordinary-learning-rate-scale`` (0 < value <= 1.0, default
 1.0) and ``--ordinary-warmup-steps`` (int, default None = keep run.json value)
 to tune ordinary-window SFT hyperparameters independently. Effective values are
 recorded in each window's state JSON.
+
+Pass ``--length-buckets`` (comma-separated, strictly increasing positive
+integers, e.g. ``2048,4096,6144``) to bound the target token-count buckets the
+``knowledge.length_generalization`` family (ADR 104 D5(b)) probes. The
+``knowledge_workflow`` binary's own default (2048,4096,8192,12288) includes
+buckets larger than a smaller lane's context window; those get compacted and
+fail spuriously, so an 8192-context lane should pass
+``--length-buckets 2048,4096,6144``. Left unset (default ``None``), the
+binary's own default is used. The value is forwarded verbatim as
+``--length-buckets`` to every ``knowledge_workflow exam``/``sibling``
+invocation this loop issues (sentinel preparation, frontier materialization,
+and training-sibling separation), and is persisted in ``launch-config.json``
+and ``loop-config.json`` so ``--resume`` can verify it did not change.
 """
 
 from __future__ import annotations
@@ -44,6 +57,30 @@ KNOWLEDGE_FAMILIES = (
 )
 UNBOUND_SENTINEL = "unbound:immutable-sentinel"
 MAX_STEERING_SHARE_PPM = 50_000
+
+
+def validate_length_buckets(raw: str) -> None:
+    """Validate ``--length-buckets`` as comma-separated, strictly increasing positive ints.
+
+    This mirrors the format the ``knowledge_workflow`` binary itself parses
+    (``crates/grug-data/examples/knowledge_workflow.rs``
+    ``parse_length_buckets``), with the additional strictly-increasing check
+    applied here so a malformed budget fails fast in the supervisor instead
+    of silently reaching the binary.
+    """
+    parts = raw.split(",")
+    if not parts or any(not part.strip() for part in parts):
+        raise ValueError("--length-buckets must be a comma-separated list of positive integers")
+    try:
+        values = [int(part.strip()) for part in parts]
+    except ValueError as error:
+        raise ValueError(
+            f"--length-buckets must be a comma-separated list of positive integers: {error}"
+        ) from error
+    if any(value <= 0 for value in values):
+        raise ValueError("--length-buckets entries must be positive integers")
+    if any(later <= earlier for earlier, later in zip(values, values[1:])):
+        raise ValueError("--length-buckets entries must be strictly increasing")
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +128,21 @@ def parse_args() -> argparse.Namespace:
         default=",".join(KNOWLEDGE_FAMILIES),
         help="comma-separated knowledge workflow families for sentinels and frontier plans",
     )
+    parser.add_argument(
+        "--length-buckets",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated, strictly increasing positive target token-count buckets "
+            "(e.g. 2048,4096,6144) forwarded as --length-buckets to every "
+            "knowledge_workflow exam/sibling invocation; bounds the "
+            "knowledge.length_generalization family (ADR 104 D5(b)) to buckets the "
+            "checkpoint's context can hold -- an 8192-context lane should pass "
+            "2048,4096,6144. Default: unset, which leaves the knowledge_workflow binary's "
+            "own default (2048,4096,8192,12288) in place. Persisted in launch-config.json "
+            "and loop-config.json; --resume requires an unchanged value."
+        ),
+    )
     args = parser.parse_args()
     positive = (
         args.poll_seconds,
@@ -109,6 +161,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ordinary-learning-rate-scale must be > 0 and <= 1.0")
     if args.ordinary_warmup_steps is not None and args.ordinary_warmup_steps < 0:
         parser.error("--ordinary-warmup-steps must be non-negative")
+    if args.length_buckets is not None:
+        try:
+            validate_length_buckets(args.length_buckets)
+        except ValueError as error:
+            parser.error(str(error))
     if (args.initial_bundle is None) != (args.initial_step is None):
         parser.error("--initial-bundle and --initial-step must be supplied together")
     families = tuple(
@@ -239,6 +296,7 @@ def launch_configuration(
         "max_sibling_records": args.max_sibling_records,
         "max_new_tokens": args.max_new_tokens,
         "knowledge_families": list(args.knowledge_families),
+        "length_buckets": args.length_buckets,
         "promotion_enabled": False,
     }
 
@@ -422,36 +480,36 @@ def generate_knowledge_exam(
     plan: dict[str, Any],
     output: Path,
     error_log: Path,
+    length_buckets: str | None = None,
 ) -> None:
     point = plan["checkpoint"]
-    run_stdout_new(
-        [
-            workflow,
-            "exam",
-            "--contracts",
-            str(contracts),
-            "--family",
-            str(plan["family"]),
-            "--tier",
-            str(plan["tier"]),
-            "--run-id",
-            str(plan["run_id"]),
-            "--plan-generator-version",
-            str(plan["generator_version"]),
-            "--seed",
-            str(plan["seed"]),
-            "--difficulty",
-            str(plan["difficulty"]),
-            "--samples",
-            str(plan["sample_count"]),
-            "--checkpoint-step",
-            str(point["step"]),
-            "--checkpoint-hash",
-            str(point["artifact_hash"]),
-        ],
-        output,
-        error_log,
-    )
+    command = [
+        workflow,
+        "exam",
+        "--contracts",
+        str(contracts),
+        "--family",
+        str(plan["family"]),
+        "--tier",
+        str(plan["tier"]),
+        "--run-id",
+        str(plan["run_id"]),
+        "--plan-generator-version",
+        str(plan["generator_version"]),
+        "--seed",
+        str(plan["seed"]),
+        "--difficulty",
+        str(plan["difficulty"]),
+        "--samples",
+        str(plan["sample_count"]),
+        "--checkpoint-step",
+        str(point["step"]),
+        "--checkpoint-hash",
+        str(point["artifact_hash"]),
+    ]
+    if length_buckets is not None:
+        command.extend(["--length-buckets", length_buckets])
+    run_stdout_new(command, output, error_log)
     exam = load_json(output)
     if exam.get("plan") != plan:
         raise RuntimeError(f"materialized knowledge exam does not equal its plan: {output}")
@@ -542,6 +600,7 @@ def prepare_sentinels(
             plan,
             path,
             temporary / f"{safe_stem(family)}.generate.log",
+            length_buckets=args.length_buckets,
         )
         knowledge_paths.append(path)
 
@@ -644,11 +703,17 @@ def materialize_frontier(
     contracts: Path,
     plan: dict[str, Any],
     path: Path,
+    length_buckets: str | None = None,
 ) -> None:
     family = str(plan["family"])
     if family.startswith("knowledge."):
         generate_knowledge_exam(
-            binaries["workflow"], contracts, plan, path, path.with_suffix(".generate.log")
+            binaries["workflow"],
+            contracts,
+            plan,
+            path,
+            path.with_suffix(".generate.log"),
+            length_buckets=length_buckets,
         )
     elif family.startswith("tool_contract."):
         generate_tool_exam(
@@ -908,19 +973,22 @@ def make_sibling(
         units = budget // next(iter(step_counts))
         if units == 0:
             raise RuntimeError("steering budget cannot fit one knowledge episode")
+        sibling_command = [
+            binaries["workflow"],
+            "sibling",
+            "--contracts",
+            str(contracts),
+            "--exam",
+            str(exam),
+            "--out",
+            str(output),
+            "--samples",
+            str(units),
+        ]
+        if args.length_buckets is not None:
+            sibling_command.extend(["--length-buckets", args.length_buckets])
         run_logged(
-            [
-                binaries["workflow"],
-                "sibling",
-                "--contracts",
-                str(contracts),
-                "--exam",
-                str(exam),
-                "--out",
-                str(output),
-                "--samples",
-                str(units),
-            ],
+            sibling_command,
             window / "training-sibling.generate.log",
         )
     elif family.startswith("tool_contract."):
@@ -1163,6 +1231,8 @@ def main() -> int:
             # Backfill legacy configs that don't have ordinary learning rate scale/warmup overrides.
             stored_loop_config.setdefault("ordinary_learning_rate_scale", 1.0)
             stored_loop_config.setdefault("ordinary_warmup_steps", None)
+            # Backfill legacy configs that predate --length-buckets.
+            stored_loop_config.setdefault("length_buckets", None)
             knowledge_sentinels, tool_sentinel = load_sentinel_inventory(
                 output,
                 stored_loop_config.get("sentinels", {}),
@@ -1203,6 +1273,7 @@ def main() -> int:
                 "max_sibling_records": args.max_sibling_records,
                 "maximum_steering_share_ppm": MAX_STEERING_SHARE_PPM,
                 "knowledge_families": list(args.knowledge_families),
+                "length_buckets": args.length_buckets,
                 "sentinels": sentinel_inventory(
                     output, knowledge_sentinels, tool_sentinel
                 ),
@@ -1225,6 +1296,7 @@ def main() -> int:
             "max_sibling_records": args.max_sibling_records,
             "maximum_steering_share_ppm": MAX_STEERING_SHARE_PPM,
             "knowledge_families": list(args.knowledge_families),
+            "length_buckets": args.length_buckets,
             "promotion_enabled": False,
         }
         if any(stored_loop_config.get(key) != value for key, value in expected_loop_fields.items()):
@@ -1282,7 +1354,9 @@ def main() -> int:
                 },
             )
             frontier = window / "frontier.exam.json"
-            materialize_frontier(binaries, contracts, plan, frontier)
+            materialize_frontier(
+                binaries, contracts, plan, frontier, length_buckets=args.length_buckets
+            )
             sentinel_observations = evaluate_sentinels(
                 args,
                 binaries,
@@ -1334,7 +1408,13 @@ def main() -> int:
             if selected_frontier_steer(evaluated):
                 steering_plan = evaluated["next_plan"]
                 steering_frontier = window / "steering-source.exam.json"
-                materialize_frontier(binaries, contracts, steering_plan, steering_frontier)
+                materialize_frontier(
+                    binaries,
+                    contracts,
+                    steering_plan,
+                    steering_frontier,
+                    length_buckets=args.length_buckets,
+                )
                 sibling_manifest, sibling_jsonl, sibling_records = make_sibling(
                     args,
                     binaries,

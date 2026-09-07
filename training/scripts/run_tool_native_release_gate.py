@@ -5,6 +5,14 @@ This is intentionally separate from the adaptive training loop. It reuses the
 loop's immutable knowledge/all-tool sentinels, executes them once more against
 the final candidate, and invokes the Rust certifier. A controller stop, partial
 loop, failed exam, or failed threshold leaves the candidate inactive.
+
+``--length-buckets`` is accepted for provenance parity with the adaptive loop
+it gates (same comma-separated, strictly increasing positive integer format,
+e.g. ``2048,4096,6144``, validated via
+``run_tool_native_adaptive_loop.validate_length_buckets``) and is recorded in
+``launch-config.json``. This gate re-evaluates the loop's already-materialized
+sentinel files rather than generating new episodes, so the value is not
+forwarded to any ``knowledge_workflow`` subprocess here -- there isn't one.
 """
 
 from __future__ import annotations
@@ -32,6 +40,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--maximum-wait-hours", type=float, default=24.0)
     parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument(
+        "--length-buckets",
+        type=str,
+        default=None,
+        help=(
+            "comma-separated, strictly increasing positive target token-count buckets "
+            "(e.g. 2048,4096,6144), accepted and recorded in launch-config.json for "
+            "provenance parity with the adaptive loop's --length-buckets; this gate "
+            "re-evaluates already-materialized sentinels so the value is not forwarded "
+            "to a knowledge_workflow subprocess. Default: unset."
+        ),
+    )
     args = parser.parse_args()
     if (
         args.poll_seconds < 5
@@ -39,6 +59,11 @@ def parse_args() -> argparse.Namespace:
         or args.max_new_tokens <= 0
     ):
         parser.error("poll must be >=5 and wait/token budgets must be positive")
+    if args.length_buckets is not None:
+        try:
+            loop.validate_length_buckets(args.length_buckets)
+        except ValueError as error:
+            parser.error(str(error))
     return args
 
 
@@ -106,6 +131,7 @@ def main() -> int:
             "poll_seconds": args.poll_seconds,
             "maximum_wait_hours": args.maximum_wait_hours,
             "max_new_tokens": args.max_new_tokens,
+            "length_buckets": args.length_buckets,
             "promotion_requires_certifier_success": True,
         },
     )
