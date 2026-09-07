@@ -425,11 +425,17 @@ impl GrugChatBackend {
         let artifact = runner.artifact().clone();
         let trained_contracts = runner.contracts().clone();
         let maximum = artifact.shape.max_seq_len.saturating_sub(3).max(1);
+        // Default of 768 (was 384): the measured tool-native lane result
+        // (training/results/tool-native-4k-lane-20260906-RESULT.md §4)
+        // found note-write turns (`ingest_textbook`/`revise_note`/
+        // `distill_note`) need >=640 completion tokens end to end -- 384
+        // truncated them mid-call (100/100 catastrophic at 128, still failing
+        // well past that). `AKH_GRUG_MAX_NEW_TOKENS` overrides this per akh.
         let max_new_tokens = std::env::var("AKH_GRUG_MAX_NEW_TOKENS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
-            .unwrap_or(384)
+            .unwrap_or(768)
             .min(maximum);
 
         Ok(Self {
@@ -453,11 +459,17 @@ impl GrugChatBackend {
         let artifact = runner.artifact().clone();
         let trained_contracts = runner.contracts().clone();
         let maximum = artifact.text_shape.max_seq_len.saturating_sub(3).max(1);
+        // Default of 768 (was 384): the measured tool-native lane result
+        // (training/results/tool-native-4k-lane-20260906-RESULT.md §4)
+        // found note-write turns (`ingest_textbook`/`revise_note`/
+        // `distill_note`) need >=640 completion tokens end to end -- 384
+        // truncated them mid-call (100/100 catastrophic at 128, still failing
+        // well past that). `AKH_GRUG_MAX_NEW_TOKENS` overrides this per akh.
         let max_new_tokens = std::env::var("AKH_GRUG_MAX_NEW_TOKENS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
-            .unwrap_or(384)
+            .unwrap_or(768)
             .min(maximum);
 
         Ok(Self {
@@ -616,15 +628,40 @@ impl GrugChatBackend {
             .map_err(|_| ChatBackendError::Unavailable {
                 backend: "grug".into(),
             })?;
-        let (raw, prompt_tokens, completion_tokens) = match &*runner {
+        let (raw, prompt_tokens, completion_tokens, decode_report) = match &*runner {
+            // The text runner decodes under the runtime `<tool_call>` grammar
+            // plus byte-level value-copy constraints by default (ADR 104 D1).
             GrugRunner::Text(runner) => runner
                 .generate_turn_with_system(tools, conversation, system_context, self.max_new_tokens)
                 .map_err(|error| grug_turn_error(error.to_string()))?,
-            GrugRunner::Multimodal(runner) => runner
-                .generate_turn_with_system(tools, conversation, system_context, self.max_new_tokens)
-                .map_err(|error| grug_turn_error(error.to_string()))?,
+            // The multimodal (vision) runner does not yet share the
+            // constrained decoder -- it keeps its own pre-D1 unconstrained
+            // path, so there is no decode report to surface for it.
+            GrugRunner::Multimodal(runner) => {
+                let (raw, prompt_tokens, completion_tokens) = runner
+                    .generate_turn_with_system(
+                        tools,
+                        conversation,
+                        system_context,
+                        self.max_new_tokens,
+                    )
+                    .map_err(|error| grug_turn_error(error.to_string()))?;
+                (
+                    raw,
+                    prompt_tokens,
+                    completion_tokens,
+                    grug_data::constrain::DecodeReport::default(),
+                )
+            }
         };
         drop(runner);
+        if decode_report.constrained {
+            tracing::debug!(
+                backend = "grug",
+                copy_fields = ?decode_report.copy_fields,
+                "value-copy decode report"
+            );
+        }
         let mut turn = grug_turn_from_output(&raw, tools)?;
         turn.prompt_tokens = prompt_tokens as u64;
         turn.completion_tokens = completion_tokens as u64;

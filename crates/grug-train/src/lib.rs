@@ -61,14 +61,15 @@ pub use foundation::{
     source_identity as foundation_source_identity, verify_foundation_bundle,
 };
 pub use generate::{
-    GenerateConfig, generate, generate_constrained, generate_from_prompt_ids,
-    generate_from_prompt_ids_cached, generate_ptr, generate_ptr_constrained,
+    ConstrainedDecode, GenerateConfig, generate, generate_constrained, generate_from_prompt_ids,
+    generate_from_prompt_ids_cached, generate_from_prompt_ids_cached_constrained, generate_ptr,
+    generate_ptr_constrained,
 };
 #[cfg(any(feature = "gpu", feature = "cuda"))]
 pub use knowledge_runtime::GpuKnowledgeModel;
 pub use knowledge_runtime::{
-    CpuKnowledgeModel, KnowledgeModel, KnowledgeRuntimeError, VerifiedKnowledgeBundle,
-    verify_active_knowledge_bundle, verify_candidate_knowledge_bundle,
+    CpuKnowledgeModel, DecodingMode, KnowledgeModel, KnowledgeRuntimeError,
+    VerifiedKnowledgeBundle, verify_active_knowledge_bundle, verify_candidate_knowledge_bundle,
 };
 pub use knowledge_train::{
     CertifiedKnowledgeExam, KNOWLEDGE_MODEL_ARTIFACT_SCHEMA_VERSION,
