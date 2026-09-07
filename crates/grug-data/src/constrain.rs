@@ -1423,6 +1423,19 @@ pub struct DecodeReport {
     /// path always did).
     pub constrained: bool,
     pub copy_fields: Vec<CopyFieldOutcome>,
+    /// Phase 51 / ADR 104 D2 mechanism 1: how many string values the
+    /// identifier hard-copy lock engaged on during this decode (a
+    /// content-so-far became an unambiguous identifier prefix).
+    pub identifier_copy_locks: u32,
+    /// How many of those locks were subsequently released mid-value because
+    /// no vocabulary token could extend the match (the documented
+    /// no-deadlock escape hatch), rather than the value simply completing
+    /// while still locked.
+    pub identifier_copy_releases: u32,
+    /// Phase 51 / ADR 104 D2 mechanism 2: how many decode steps the soft
+    /// suffix-copy bias picked a within-margin alternative over the masked
+    /// argmax because it continued a verbatim context match.
+    pub copy_bias_overrides: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1446,7 +1459,7 @@ pub fn build_decode_report(
 ) -> DecodeReport {
     let mut report = DecodeReport {
         constrained: true,
-        copy_fields: Vec::new(),
+        ..DecodeReport::default()
     };
     let Some(body) = output
         .strip_prefix(std::str::from_utf8(RUNTIME_TAG_OPEN).unwrap_or_default())
@@ -1627,16 +1640,315 @@ impl RuntimeCallGrammar {
     }
 }
 
+// ── General copy-from-context (Phase 51 / ADR 104 D2) ──────────────────────
+//
+// The schema pattern/enum copy above only fires when a parameter declares a
+// `pattern`/fixed-length/`enum` fragment. Measurement on the A100 checkpoint
+// showed the *next* residual failure is identical in kind (a dropped/doubled/
+// inserted character while copying an identifier-shaped string verbatim from
+// the prompt) but on fields with **no** such schema fragment at all --
+// `source_id`/`source_path` values, and even free-text `body`/`quote` runs
+// that happen to reproduce a digit-bearing token from the retrieved
+// evidence. Since the schema gives no candidate list to build a [`CopyTrie`]
+// from for these, this section adds two context-*derived* mechanisms
+// instead of a schema-derived one:
+//
+// 1. [`IdentifierIndex`] -- a hard lock: once a string value's emitted bytes
+//    become an unambiguous prefix of a whitespace-free, digit/`:/_-.`-bearing
+//    substring of the context, only bytes preserving that prefix (or, at the
+//    closing `"`, completing it exactly) are legal. If no vocabulary token
+//    can preserve it (checked once per decode step, not per candidate --
+//    see [`ConstrainedDecodeState::identifier_lock_engaged`] and
+//    [`ConstrainedDecodeState::with_identifier_lock_released`]), the lock is
+//    released for the rest of that value rather than deadlocking generation.
+// 2. [`SuffixCopyIndex`] -- a soft bias: the longest suffix of a string
+//    value's emitted content that recurs in the context predicts what byte
+//    comes next (an LZ-style copy prediction); `grug-train`'s decode loop
+//    uses it to prefer an already-legal, near-argmax token that continues
+//    that match over one that doesn't. This is a *ranking* choice, not a
+//    legality one, so it has no presence in [`ConstrainedDecodeState::step`]
+//    -- only [`ConstrainedDecodeState::active_string_content`] exposes what
+//    it needs.
+//
+// Both derive their working set from the *unescaped* value content (a JSON
+// `\"`/`\n`/`\\` escape is not what appears in the context, which is plain
+// text), tracked alongside the D1 schema-trie bookkeeping in
+// [`ConstrainedDecodeState::step`].
+
+/// The first byte of how raw content byte `c` would be emitted inside a JSON
+/// string: `"`, `\`, and control characters require a leading `\` escape, so
+/// the literal output's first byte is `\` rather than `c` itself. Used to
+/// translate a context byte (raw text) into what a *matching* generated
+/// token's first output byte would have to be.
+fn json_escape_first_byte(c: u8) -> u8 {
+    match c {
+        b'"' | b'\\' | 0x00..=0x1F => b'\\',
+        other => other,
+    }
+}
+
+/// The inverse mapping for one escaped byte *inside* a `\`-prefixed pair
+/// (the byte immediately after a `\` in the raw decode stream): what
+/// semantic character it contributes to the value's unescaped content.
+/// Anything not one of JSON's short escapes (`"`, `\`, `/`, `b`, `f`, `n`,
+/// `r`, `t`) is passed through literally -- `\u` unicode escapes are rare in
+/// this project's training data and are approximated as their literal `u`
+/// rather than decoded, which only affects the copy mechanisms' precision on
+/// that rare path, never correctness of the surrounding grammar.
+fn unescape_byte(byte: u8) -> u8 {
+    match byte {
+        b'n' => b'\n',
+        b't' => b'\t',
+        b'r' => b'\r',
+        b'b' => 0x08,
+        b'f' => 0x0C,
+        other => other,
+    }
+}
+
+/// Split `context` into whitespace-free "identifier tokens" for
+/// [`IdentifierIndex`]: cut on Unicode whitespace and the JSON structural
+/// delimiters `"` `{` `}` `[` `]` `,` -- deliberately **not** `:`, `/`, `_`,
+/// `-`, `.`, since those are exactly the characters a compound identifier
+/// like `textbook:484a5a7ec4e0ae11:edition-2` is built from; splitting on
+/// them would shred the very substring this mechanism needs to copy whole.
+/// Keeps tokens of byte length >= 8 containing at least one ASCII digit or
+/// one of `:/_-.`.
+fn identifier_tokens(context: &str) -> Vec<String> {
+    fn push_if_qualifies(tokens: &mut Vec<String>, candidate: &str) {
+        if candidate.len() < 8 {
+            return;
+        }
+        let qualifies = candidate.chars().any(|c| c.is_ascii_digit())
+            || candidate.chars().any(|c| matches!(c, ':' | '/' | '_' | '-' | '.'));
+        if qualifies {
+            tokens.push(candidate.to_string());
+        }
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for c in context.chars() {
+        if c.is_whitespace() || matches!(c, '"' | '{' | '}' | '[' | ']' | ',') {
+            push_if_qualifies(&mut tokens, &current);
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    push_if_qualifies(&mut tokens, &current);
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+/// The identifier-shaped substrings of one generation call's context,
+/// indexed once ([`identifier_tokens`]) for repeated prefix/exact-match
+/// queries during decoding (Phase 51 / ADR 104 D2 mechanism 1). Reuses
+/// [`CopyTrie`] -- an identifier candidate list is exactly the same
+/// "small set of strings, queried by prefix" shape the schema-pattern copy
+/// trie already needed.
+#[derive(Debug, Clone, Default)]
+pub struct IdentifierIndex {
+    trie: CopyTrie,
+}
+
+impl IdentifierIndex {
+    pub fn build(context: &str) -> Self {
+        Self {
+            trie: CopyTrie::new(&identifier_tokens(context)),
+        }
+    }
+
+    fn is_prefix_of_any(&self, bytes: &[u8]) -> bool {
+        self.trie.is_prefix_of_any(bytes)
+    }
+
+    fn is_exact_match(&self, bytes: &[u8]) -> bool {
+        self.trie.is_exact_match(bytes)
+    }
+}
+
+/// Byte length of the hashed window [`SuffixCopyIndex`] indexes the context
+/// by. A fixed window means its byte value is *invariant* across every
+/// candidate suffix length being considered (they all end at the same
+/// position, `content`'s end), so one hash lookup finds every candidate
+/// occurrence regardless of how far it turns out to extend backward.
+const SUFFIX_WINDOW: usize = 8;
+
+/// Cap on how far a suffix match is extended backward, per the task spec.
+const MAX_SUFFIX_LEN: usize = 64;
+
+/// A hashed 8-byte-window index over one generation call's rendered context,
+/// built once ([`SuffixCopyIndex::build`]) and queried once per decode step
+/// (not per vocabulary token -- see the module docs' efficiency note) for
+/// the soft suffix-copy bias (Phase 51 / ADR 104 D2 mechanism 2).
+#[derive(Debug, Clone, Default)]
+pub struct SuffixCopyIndex {
+    context: Vec<u8>,
+    windows: HashMap<[u8; SUFFIX_WINDOW], Vec<usize>>,
+}
+
+impl SuffixCopyIndex {
+    pub fn build(context: &str) -> Self {
+        let context = context.as_bytes().to_vec();
+        let mut windows: HashMap<[u8; SUFFIX_WINDOW], Vec<usize>> = HashMap::new();
+        if context.len() >= SUFFIX_WINDOW {
+            for start in 0..=context.len() - SUFFIX_WINDOW {
+                let mut key = [0u8; SUFFIX_WINDOW];
+                key.copy_from_slice(&context[start..start + SUFFIX_WINDOW]);
+                windows.entry(key).or_default().push(start);
+            }
+        }
+        Self { context, windows }
+    }
+
+    /// The bytes (mapped through [`json_escape_first_byte`]) observed to
+    /// follow the longest (>= [`SUFFIX_WINDOW`], capped at
+    /// [`MAX_SUFFIX_LEN`]) suffix of `content` (the value's *unescaped*
+    /// emitted bytes so far) that occurs anywhere in the context. `None`
+    /// when even the shortest (8-byte) window has no occurrence at all --
+    /// novel text, where the bias is inactive.
+    pub fn continuations(&self, content: &[u8]) -> Option<std::collections::HashSet<u8>> {
+        if content.len() < SUFFIX_WINDOW {
+            return None;
+        }
+        let cap = content.len().min(MAX_SUFFIX_LEN);
+        let mut key = [0u8; SUFFIX_WINDOW];
+        key.copy_from_slice(&content[content.len() - SUFFIX_WINDOW..]);
+        let positions = self.windows.get(&key)?;
+
+        let mut best_len = 0usize;
+        for &window_start in positions {
+            let end = window_start + SUFFIX_WINDOW;
+            let mut matched = SUFFIX_WINDOW;
+            while matched < cap && matched < end {
+                let context_index = end - matched - 1;
+                let content_index = content.len() - matched - 1;
+                if self.context[context_index] == content[content_index] {
+                    matched += 1;
+                } else {
+                    break;
+                }
+            }
+            best_len = best_len.max(matched);
+        }
+        if best_len < SUFFIX_WINDOW {
+            return None;
+        }
+
+        let needle = &content[content.len() - best_len..];
+        let mut next_bytes = std::collections::HashSet::new();
+        for &window_start in positions {
+            let end = window_start + SUFFIX_WINDOW;
+            if end < best_len {
+                continue;
+            }
+            let start = end - best_len;
+            if self.context.get(start..end) == Some(needle)
+                && let Some(&next) = self.context.get(end)
+            {
+                next_bytes.insert(json_escape_first_byte(next));
+            }
+        }
+        if next_bytes.is_empty() {
+            None
+        } else {
+            Some(next_bytes)
+        }
+    }
+}
+
+/// Configuration plus precomputed indices for one generation call's
+/// context-derived copy mechanisms (Phase 51 / ADR 104 D1 schema-pattern
+/// copy + D2 general copy-from-context): bundles [`ValueConstraintTable`]
+/// (schema `pattern`/`enum`), [`IdentifierIndex`] (D2 mechanism 1), and
+/// [`SuffixCopyIndex`] (D2 mechanism 2) so [`ConstrainedDecodeState::step`]
+/// and `grug-train`'s decode loop each take one reference instead of
+/// threading three separately, and so building all three (each a single
+/// pass over the context) happens exactly once per generation call.
+#[derive(Debug, Clone)]
+pub struct CopyConstraints {
+    pub table: ValueConstraintTable,
+    pub identifiers: IdentifierIndex,
+    pub suffix: SuffixCopyIndex,
+    /// Phase 51 / ADR 104 D2 mechanism 1 on/off switch (default `true`).
+    pub identifier_copy: bool,
+    /// Phase 51 / ADR 104 D2 mechanism 2 margin in nats, `None` to disable.
+    pub copy_bias_margin: Option<f32>,
+}
+
+impl CopyConstraints {
+    pub fn build(
+        grammar: &ToolCallGrammar,
+        context: &str,
+        identifier_copy: bool,
+        copy_bias_margin: Option<f32>,
+    ) -> Self {
+        Self {
+            table: ValueConstraintTable::build(grammar, context),
+            identifiers: IdentifierIndex::build(context),
+            suffix: SuffixCopyIndex::build(context),
+            identifier_copy,
+            copy_bias_margin,
+        }
+    }
+}
+
+/// Tracking for the D2 general copy mechanisms while inside one string
+/// value; [`CopyState::Idle`] outside a string, or inside one the D1
+/// schema-trie already hard-locks (see [`ConstrainedDecodeState::step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CopyState {
+    Idle,
+    Active {
+        /// The value's *unescaped* content bytes typed so far.
+        content: Vec<u8>,
+        /// A pending `\` escape in the raw (possibly-escaped) decode stream.
+        escaped: bool,
+        /// Once true (an ASCII whitespace byte has appeared in `content`),
+        /// the identifier lock can never engage for the rest of this value
+        /// (the task spec: "do not apply this to values that begin with
+        /// whitespace-containing text" -- since `content` only grows, "has
+        /// whitespace anywhere so far" is equivalent to "began with
+        /// whitespace" for the purpose of "never lock", and is O(1) to
+        /// maintain incrementally instead of rescanning `content` every
+        /// step).
+        has_whitespace: bool,
+        lock: IdLock,
+    },
+}
+
+/// Phase 51 / ADR 104 D2 mechanism 1's per-value lock phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdLock {
+    /// Not yet locked: too short, contains whitespace, or not (yet) a
+    /// prefix of any identifier candidate.
+    Unlocked,
+    /// `content` is a strict prefix of >= 1 identifier candidate (or exactly
+    /// equals one): only bytes preserving that stay legal.
+    Locked,
+    /// The strict lock would have deadlocked generation (no vocabulary
+    /// token could extend the match) for at least one decode step -- see
+    /// [`ConstrainedDecodeState::with_identifier_lock_released`] -- and has
+    /// been released for the remainder of this value.
+    Released,
+}
+
 /// Combined decode-time state: the structural [`RuntimeCallState`] plus the
-/// bytes committed so far to the current value-copy-constrained string
-/// (empty outside one, and whenever the active field has no such constraint).
-/// This is the single seam `generate.rs`'s decode loop drives one candidate
-/// token at a time, so structural legality and value-copy legality can never
-/// drift apart into two separate, inconsistent checks.
+/// bytes committed so far to the current value-copy-constrained string for
+/// the D1 schema-trie (`Enum`/`Copy`; empty outside one, and whenever the
+/// active field has no such constraint), plus [`CopyState`], the analogous
+/// tracking for the D2 general context-copy mechanisms, which run whenever
+/// the D1 schema-trie is not already hard-locking the value. This is the
+/// single seam `generate.rs`'s decode loop drives one candidate token at a
+/// time, so structural legality and value-copy legality can never drift
+/// apart into separate, inconsistent checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstrainedDecodeState {
     pub frontier: RuntimeCallState,
     value_bytes: Vec<u8>,
+    copy: CopyState,
 }
 
 impl ConstrainedDecodeState {
@@ -1644,27 +1956,38 @@ impl ConstrainedDecodeState {
         Self {
             frontier: grammar.start(),
             value_bytes: Vec::new(),
+            copy: CopyState::Idle,
         }
     }
 
-    /// Advance by one byte, honoring both the structural grammar and — when
-    /// the byte lands inside an `Enum`/`Copy`-constrained string — the copy
-    /// trie. `None` means `byte` is illegal under either.
+    /// Advance by one byte, honoring the structural grammar, the D1
+    /// schema-trie (`Enum`/`Copy`), and -- for values the schema-trie does
+    /// not already hard-lock -- the D2 identifier hard-copy lock. `None`
+    /// means `byte` is illegal under any of these. The D2 soft suffix-copy
+    /// *bias* (mechanism 2) is a ranking choice, not a legality one, so it
+    /// has no presence here -- see `grug-train`'s decode loop and
+    /// [`Self::active_string_content`].
     pub fn step(
         &self,
         grammar: &RuntimeCallGrammar,
-        table: &ValueConstraintTable,
+        copy_constraints: &CopyConstraints,
         byte: u8,
     ) -> Option<Self> {
+        let table = &copy_constraints.table;
         let active = grammar
             .current_string_field(&self.frontier)
             .map(|schema| table.resolve_schema(schema));
+        let was_in_string = grammar.current_string_field(&self.frontier).is_some();
 
         let next_frontier = grammar.step(&self.frontier, byte)?;
-        let still_in_same_string = grammar.current_string_field(&self.frontier).is_some()
-            && grammar.current_string_field(&next_frontier).is_some();
+        let now_in_string = grammar.current_string_field(&next_frontier).is_some();
+        let still_in_same_string = was_in_string && now_in_string;
 
         let mut value_bytes = self.value_bytes.clone();
+        let schema_locked = matches!(
+            active,
+            Some((ValueConstraint::Enum { .. } | ValueConstraint::Copy { .. }, _))
+        );
         match active {
             Some((ValueConstraint::Enum { .. } | ValueConstraint::Copy { .. }, Some(trie))) => {
                 if still_in_same_string {
@@ -1685,10 +2008,145 @@ impl ConstrainedDecodeState {
             }
         }
 
+        let copy = self.step_copy(copy_constraints, schema_locked, was_in_string, now_in_string, byte)?;
+
         Some(Self {
             frontier: next_frontier,
             value_bytes,
+            copy,
         })
+    }
+
+    /// The D2 half of [`Self::step`], split out for readability: advances
+    /// [`CopyState`] and enforces the identifier hard-copy lock. Returns
+    /// `None` exactly when the lock rejects `byte` (a closing quote on an
+    /// incomplete copy, or a byte that would break prefix-hood while
+    /// `identifier_copy` is enabled and [`IdLock::Locked`]).
+    fn step_copy(
+        &self,
+        copy_constraints: &CopyConstraints,
+        schema_locked: bool,
+        was_in_string: bool,
+        now_in_string: bool,
+        byte: u8,
+    ) -> Option<CopyState> {
+        if schema_locked {
+            return Some(CopyState::Idle);
+        }
+        let identifiers = &copy_constraints.identifiers;
+        let identifier_copy = copy_constraints.identifier_copy;
+
+        if !was_in_string && now_in_string {
+            // Opening quote just consumed: fresh tracking for the new value.
+            return Some(CopyState::Active {
+                content: Vec::new(),
+                escaped: false,
+                has_whitespace: false,
+                lock: IdLock::Unlocked,
+            });
+        }
+
+        if was_in_string && now_in_string {
+            let (mut content, mut escaped, mut has_whitespace, mut lock) = match &self.copy {
+                CopyState::Active {
+                    content,
+                    escaped,
+                    has_whitespace,
+                    lock,
+                } => (content.clone(), *escaped, *has_whitespace, lock.clone()),
+                // The schema-trie governed the previous byte (or this is the
+                // first byte after some other transition); start fresh
+                // rather than assume a mismatched variant.
+                CopyState::Idle => (Vec::new(), false, false, IdLock::Unlocked),
+            };
+
+            if escaped {
+                content.push(unescape_byte(byte));
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else {
+                content.push(byte);
+                if byte.is_ascii_whitespace() {
+                    has_whitespace = true;
+                }
+            }
+
+            if identifier_copy && !has_whitespace && !escaped {
+                match lock {
+                    IdLock::Unlocked => {
+                        if content.len() >= 4 && identifiers.is_prefix_of_any(&content) {
+                            lock = IdLock::Locked;
+                        }
+                    }
+                    IdLock::Locked => {
+                        if !identifiers.is_prefix_of_any(&content) {
+                            return None;
+                        }
+                    }
+                    IdLock::Released => {}
+                }
+            }
+
+            return Some(CopyState::Active {
+                content,
+                escaped,
+                has_whitespace,
+                lock,
+            });
+        }
+
+        // Closing byte (`was_in_string && !now_in_string`), or not in a
+        // string either before or after.
+        if was_in_string
+            && !now_in_string
+            && identifier_copy
+            && let CopyState::Active {
+                content,
+                lock: IdLock::Locked,
+                ..
+            } = &self.copy
+            && !identifiers.is_exact_match(content)
+        {
+            return None; // closing on an incomplete copy is illegal
+        }
+        Some(CopyState::Idle)
+    }
+
+    /// Whether the currently-active string value's identifier hard-copy lock
+    /// (D2 mechanism 1) is engaged. `grug-train`'s decode loop uses this to
+    /// detect a would-be deadlock (every vocabulary token illegal under the
+    /// strict lock) and retry the same decode step with
+    /// [`Self::with_identifier_lock_released`].
+    pub fn identifier_lock_engaged(&self) -> bool {
+        matches!(&self.copy, CopyState::Active { lock: IdLock::Locked, .. })
+    }
+
+    /// `self` with the active string's identifier lock forced to
+    /// [`IdLock::Released`] (a no-op if not currently [`IdLock::Locked`]) --
+    /// the documented escape hatch for "no identifier matches": never
+    /// deadlock generation.
+    pub fn with_identifier_lock_released(&self) -> Self {
+        let mut copy = self.copy.clone();
+        if let CopyState::Active { lock, .. } = &mut copy {
+            *lock = IdLock::Released;
+        }
+        Self {
+            frontier: self.frontier.clone(),
+            value_bytes: self.value_bytes.clone(),
+            copy,
+        }
+    }
+
+    /// The unescaped content bytes of the string value currently being
+    /// typed (`None` outside one), for `grug-train`'s soft suffix-copy bias
+    /// (mechanism 2), which runs for every string value regardless of
+    /// whether the D2 hard lock or the D1 schema-trie also governs it.
+    pub fn active_string_content(&self) -> Option<&[u8]> {
+        match &self.copy {
+            CopyState::Active { content, .. } => Some(content),
+            CopyState::Idle => None,
+        }
     }
 
     /// Fold a whole candidate token's bytes through [`Self::step`]. `None`
@@ -1697,12 +2155,12 @@ impl ConstrainedDecodeState {
     pub fn advance(
         &self,
         grammar: &RuntimeCallGrammar,
-        table: &ValueConstraintTable,
+        copy_constraints: &CopyConstraints,
         bytes: &[u8],
     ) -> Option<Self> {
         let mut current = self.clone();
         for &byte in bytes {
-            current = current.step(grammar, table, byte)?;
+            current = current.step(grammar, copy_constraints, byte)?;
         }
         Some(current)
     }
@@ -1911,10 +2369,16 @@ mod tests {
     /// value-copy stepper; `None` means some byte was illegal.
     fn advance_constrained(
         grammar: &RuntimeCallGrammar,
-        table: &ValueConstraintTable,
+        copy: &CopyConstraints,
         text: &str,
     ) -> Option<ConstrainedDecodeState> {
-        ConstrainedDecodeState::start(grammar).advance(grammar, table, text.as_bytes())
+        ConstrainedDecodeState::start(grammar).advance(grammar, copy, text.as_bytes())
+    }
+
+    /// Build the default (both D2 mechanisms enabled) [`CopyConstraints`]
+    /// for a test's grammar + context.
+    fn copy_constraints(grammar: &RuntimeCallGrammar, context: &str) -> CopyConstraints {
+        CopyConstraints::build(grammar.inner(), context, true, Some(4.0))
     }
 
     #[test]
@@ -1928,12 +2392,12 @@ mod tests {
         );
         let tools = vec![revise_tool()];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
-        let table = ValueConstraintTable::build(grammar.inner(), &context);
+        let copy = copy_constraints(&grammar, &context);
 
         let correct = format!(
             "<tool_call>\n{{\"arguments\":{{\"expected_revision\":\"{hex}\"}},\"name\":\"study_note_revise\"}}\n</tool_call>"
         );
-        let end = advance_constrained(&grammar, &table, &correct)
+        let end = advance_constrained(&grammar, &copy, &correct)
             .expect("the exact context hex must be a legal decode path");
         assert!(grammar.accepts_eos(&end.frontier));
 
@@ -1944,7 +2408,7 @@ mod tests {
         let corrupted =
             format!("<tool_call>\n{{\"arguments\":{{\"expected_revision\":\"{corrupted_hex}");
         assert_eq!(
-            advance_constrained(&grammar, &table, &corrupted),
+            advance_constrained(&grammar, &copy, &corrupted),
             None,
             "a char-dropped copy must have no legal continuation"
         );
@@ -1958,7 +2422,7 @@ mod tests {
         let context = format!("prior revision {hex} was recorded");
         let tools = vec![revise_tool()];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
-        let table = ValueConstraintTable::build(grammar.inner(), &context);
+        let copy = copy_constraints(&grammar, &context);
 
         let prefix = format!(
             "<tool_call>\n{{\"arguments\":{{\"expected_revision\":\"{}",
@@ -1966,13 +2430,13 @@ mod tests {
         );
         // Closing the string one byte early (63 of 64 chars) must be illegal.
         assert_eq!(
-            advance_constrained(&grammar, &table, &format!("{prefix}\"")),
+            advance_constrained(&grammar, &copy, &format!("{prefix}\"")),
             None,
             "closing quote must be rejected before the candidate is complete"
         );
         // The 64th byte followed by the closing quote is legal.
         let complete = format!("{prefix}{}\"", &hex[63..64]);
-        assert!(advance_constrained(&grammar, &table, &complete).is_some());
+        assert!(advance_constrained(&grammar, &copy, &complete).is_some());
     }
 
     #[test]
@@ -1983,9 +2447,9 @@ mod tests {
             &["mode_level"],
         )];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
-        let table = ValueConstraintTable::build(grammar.inner(), "please switch to high");
+        let copy = copy_constraints(&grammar, "please switch to high");
 
-        let entry = table.entry(0, 0).unwrap();
+        let entry = copy.table.entry(0, 0).unwrap();
         assert_eq!(
             entry.0,
             ValueConstraint::Enum {
@@ -1994,10 +2458,10 @@ mod tests {
         );
 
         let good = "<tool_call>\n{\"arguments\":{\"mode_level\":\"high\"},\"name\":\"set_mode\"}\n</tool_call>";
-        assert!(advance_constrained(&grammar, &table, good).is_some());
+        assert!(advance_constrained(&grammar, &copy, good).is_some());
 
         let bad = "<tool_call>\n{\"arguments\":{\"mode_level\":\"medium\"";
-        assert_eq!(advance_constrained(&grammar, &table, bad), None);
+        assert_eq!(advance_constrained(&grammar, &copy, bad), None);
     }
 
     #[test]
@@ -2005,19 +2469,19 @@ mod tests {
         let tools = vec![revise_tool()];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         // No 64-hex substring anywhere in the context.
-        let table = ValueConstraintTable::build(grammar.inner(), "no revision has ever been seen");
-        let entry = table.entry(0, 0).unwrap();
+        let copy = copy_constraints(&grammar, "no revision has ever been seen");
+        let entry = copy.table.entry(0, 0).unwrap();
         assert!(matches!(&entry.0, ValueConstraint::PatternFallback { .. }));
         assert!(entry.1.is_none(), "fallback must not build a copy trie");
 
         // Any string value must still have a legal decode path (fallback is
         // permissive, not a dead end).
         let arbitrary = "<tool_call>\n{\"arguments\":{\"expected_revision\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"},\"name\":\"study_note_revise\"}\n</tool_call>";
-        assert!(advance_constrained(&grammar, &table, arbitrary).is_some());
+        assert!(advance_constrained(&grammar, &copy, arbitrary).is_some());
 
         let report = build_decode_report(
             grammar.inner(),
-            &table,
+            &copy.table,
             "<tool_call>\n{\"arguments\":{\"expected_revision\":\"zzzz\"},\"name\":\"study_note_revise\"}\n</tool_call>",
         );
         assert_eq!(report.copy_fields.len(), 1);
@@ -2029,10 +2493,10 @@ mod tests {
     fn gap_envelope_and_free_answer_text_pass_the_runtime_grammar_unconstrained() {
         let tools = vec![revise_tool()];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
-        let table = ValueConstraintTable::build(grammar.inner(), "irrelevant context");
+        let copy = copy_constraints(&grammar, "irrelevant context");
 
         let gap = "Knowledge gap: expected_revision\nReason: no verified evidence is available.";
-        let end = advance_constrained(&grammar, &table, gap)
+        let end = advance_constrained(&grammar, &copy, gap)
             .expect("gap envelope must have a legal decode path");
         assert!(
             grammar.accepts_eos(&end.frontier),
@@ -2040,7 +2504,7 @@ mod tests {
         );
 
         let answer = "The capital of France is Paris.";
-        let end = advance_constrained(&grammar, &table, answer)
+        let end = advance_constrained(&grammar, &copy, answer)
             .expect("a free-text answer must have a legal decode path");
         assert!(grammar.accepts_eos(&end.frontier));
     }
@@ -2331,5 +2795,177 @@ mod tests {
         let contracts = crate::tool_contract::ToolContractSnapshot::from_openai_tools(&tools).unwrap();
         let validation = contracts.validate_call(name, &arguments);
         assert!(validation.valid, "{:?}\n{out}", validation.issues);
+    }
+
+    // ── General copy-from-context (Phase 51 / ADR 104 D2) ──────────────────
+
+    /// A tool with a plain `source_id` string parameter and **no** declared
+    /// `pattern`/`enum` -- exactly the measured residual-failure shape
+    /// (schema-pattern copy, D1, cannot help these fields at all).
+    fn cite_source_tool() -> Value {
+        openai_tool(
+            "cite_source",
+            serde_json::json!({ "source_id": { "type": "string" } }),
+            &["source_id"],
+        )
+    }
+
+    /// A tool with a free-text `body` string parameter, no schema
+    /// constraint at all.
+    fn note_body_tool() -> Value {
+        openai_tool(
+            "note_body",
+            serde_json::json!({ "body": { "type": "string" } }),
+            &["body"],
+        )
+    }
+
+    /// (a) The measured failure this mechanism targets: `source_id` has no
+    /// schema pattern, so D1 offers nothing, but the exact value is present
+    /// verbatim in the context as a compound (colon/hyphen-bearing)
+    /// identifier. The doubled-run corruption from the task report
+    /// (`484a5a7ec4e0ae11` -> `484a5a7a5a7ec4e0ae11`) must have no legal
+    /// decode path once the identifier lock engages.
+    #[test]
+    fn identifier_hard_copy_reproduces_the_exact_context_id_and_rejects_a_doubled_run() {
+        let id = "textbook:484a5a7ec4e0ae11:edition-2";
+        let corrupted_id = "textbook:484a5a7a5a7ec4e0ae11:edition-2";
+        let context =
+            format!("<tool_response>\n{{\"source_id\":\"{id}\",\"locator\":\"p.1\"}}\n</tool_response>");
+        let tools = vec![cite_source_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        // Sanity: with no `pattern`/`enum`, D1 leaves this field `Free`.
+        assert_eq!(copy.table.entry(0, 0).unwrap().0, ValueConstraint::Free);
+
+        let correct = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_id\":\"{id}\"}},\"name\":\"cite_source\"}}\n</tool_call>"
+        );
+        let end = advance_constrained(&grammar, &copy, &correct)
+            .expect("the exact context identifier must be a legal decode path");
+        assert!(grammar.accepts_eos(&end.frontier));
+
+        let corrupted = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_id\":\"{corrupted_id}\""
+        );
+        assert_eq!(
+            advance_constrained(&grammar, &copy, &corrupted),
+            None,
+            "a doubled-run copy of an un-patterned identifier must have no legal continuation"
+        );
+    }
+
+    /// (c) A value that never matches any context identifier (novel text)
+    /// must decode identically whether or not `identifier_copy` is enabled
+    /// -- the lock must never even attempt to engage.
+    #[test]
+    fn identifier_hard_copy_stays_permissive_for_novel_free_text() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let with_lock = CopyConstraints::build(grammar.inner(), context, true, Some(4.0));
+        let without_lock = CopyConstraints::build(grammar.inner(), context, false, Some(4.0));
+
+        let call = "<tool_call>\n{\"arguments\":{\"body\":\"a wholly novel sentence about nothing in particular\"},\"name\":\"note_body\"}\n</tool_call>";
+        let with_end = advance_constrained(&grammar, &with_lock, call)
+            .expect("novel text must still have a legal decode path");
+        let without_end = advance_constrained(&grammar, &without_lock, call)
+            .expect("disabling identifier_copy must not change legality either");
+        assert!(grammar.accepts_eos(&with_end.frontier));
+        assert!(grammar.accepts_eos(&without_end.frontier));
+    }
+
+    /// (d) A `\"` escape inside a copy-tracked value must decode: the
+    /// unescaping [`ConstrainedDecodeState::step_copy`] performs internally
+    /// must not desynchronize from the grammar's own escape handling.
+    #[test]
+    fn escaped_quote_inside_a_copy_tracked_value_does_not_break_decoding() {
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, "irrelevant context with no identifiers at all");
+        let call = "<tool_call>\n{\"arguments\":{\"body\":\"a \\\"quoted\\\" phrase\"},\"name\":\"note_body\"}\n</tool_call>";
+        let end = advance_constrained(&grammar, &copy, call)
+            .expect("an escaped quote inside the value must decode");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// [`SuffixCopyIndex`] must translate a raw context byte that needs JSON
+    /// escaping (here, a literal `"`) into the *escape lead byte* `\` --
+    /// the byte a matching generated token would actually have to start
+    /// with, per the task spec's escaping requirement.
+    #[test]
+    fn suffix_copy_index_maps_a_quote_continuation_to_its_escape_lead_byte() {
+        let context = "the id is \"abc12345\" exactly";
+        let index = SuffixCopyIndex::build(context);
+        let continuations = index
+            .continuations(b"abc12345")
+            .expect("an 8-byte suffix present verbatim in the context must be found");
+        assert!(continuations.contains(&b'\\'));
+        assert!(!continuations.contains(&b'"'));
+    }
+
+    /// (c) Novel content with no occurrence anywhere in the context (not
+    /// even the 8-byte floor) leaves the suffix-copy bias inactive.
+    #[test]
+    fn suffix_copy_index_is_inactive_for_content_with_no_context_occurrence() {
+        let index = SuffixCopyIndex::build("nothing relevant appears in this context at all");
+        assert!(index.continuations(b"zzzzzzzzzzzz").is_none());
+    }
+
+    /// (e) A field with a declared `pattern` (D1) must never let D2's
+    /// identifier index leak in, even when the context also contains a
+    /// substring that would otherwise look like a valid identifier
+    /// containing the same hex run.
+    #[test]
+    fn schema_pattern_lock_takes_precedence_over_the_identifier_index() {
+        let hex = "0123456789abcdef".repeat(4);
+        assert_eq!(hex.len(), 64);
+        let context = format!("revision {hex} plus an unrelated id shard-{hex}-copy");
+        let tools = vec![revise_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let via_decoy =
+            format!("<tool_call>\n{{\"arguments\":{{\"expected_revision\":\"shard-{hex}-copy");
+        assert_eq!(
+            advance_constrained(&grammar, &copy, &via_decoy),
+            None,
+            "the decoy identifier substring must not leak into the schema-pattern trie"
+        );
+
+        let correct = format!(
+            "<tool_call>\n{{\"arguments\":{{\"expected_revision\":\"{hex}\"}},\"name\":\"study_note_revise\"}}\n</tool_call>"
+        );
+        assert!(advance_constrained(&grammar, &copy, &correct).is_some());
+    }
+
+    /// The documented no-deadlock escape hatch: a byte that breaks an
+    /// engaged identifier lock is illegal while locked, but legal again once
+    /// `grug-train`'s decode loop (simulated here directly) force-releases
+    /// the lock via [`ConstrainedDecodeState::with_identifier_lock_released`].
+    #[test]
+    fn identifier_lock_can_be_released_to_avoid_deadlocking_generation() {
+        let id = "textbook:484a5a7ec4e0ae11:edition-2";
+        let context = format!("\"source_id\":\"{id}\"");
+        let tools = vec![cite_source_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let prefix = "<tool_call>\n{\"arguments\":{\"source_id\":\"textbook";
+        let state = ConstrainedDecodeState::start(&grammar)
+            .advance(&grammar, &copy, prefix.as_bytes())
+            .expect("a real identifier prefix must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "8 clean bytes matching the context identifier must have locked"
+        );
+
+        // `z` is not the identifier's next byte (`:`) -- illegal while locked.
+        assert_eq!(state.step(&grammar, &copy, b'z'), None);
+
+        let released = state.with_identifier_lock_released();
+        assert!(!released.identifier_lock_engaged());
+        assert!(released.step(&grammar, &copy, b'z').is_some());
     }
 }

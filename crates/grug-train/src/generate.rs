@@ -7,8 +7,8 @@
 use burn::tensor::backend::Backend;
 use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 use grug_data::constrain::{
-    ConstrainedDecodeState, DecodeReport, GrammarState, RuntimeCallGrammar, ToolCallGrammar,
-    ValueConstraintTable, build_decode_report,
+    ConstrainedDecodeState, CopyConstraints, DecodeReport, GrammarState, RuntimeCallGrammar,
+    ToolCallGrammar, build_decode_report,
 };
 
 use crate::pointer::PointerTransformer;
@@ -187,12 +187,34 @@ pub fn generate_from_prompt_ids_cached<B: Backend, V: Vocab>(
 /// What governs value-copy-constrained decoding for one generation call:
 /// the runtime grammar (`None` when no tools were offered) and the exact
 /// context text it scans for copy candidates. Bundled into one type rather
-/// than two more parameters on [`generate_from_prompt_ids_cached_constrained`]
-/// because they are always supplied (or omitted) together.
+/// than several more parameters on
+/// [`generate_from_prompt_ids_cached_constrained`] because they are always
+/// supplied (or omitted) together.
 #[derive(Debug, Clone, Copy)]
 pub struct ConstrainedDecode<'a> {
     pub grammar: Option<&'a RuntimeCallGrammar>,
     pub context: &'a str,
+    /// Phase 51 / ADR 104 D2 mechanism 1 (identifier hard-copy lock) on/off
+    /// switch. Default `true`.
+    pub identifier_copy: bool,
+    /// Phase 51 / ADR 104 D2 mechanism 2 (soft suffix-copy bias) margin, in
+    /// nats. `None` disables the bias entirely. Default `Some(4.0)`.
+    pub copy_bias_margin: Option<f32>,
+}
+
+impl<'a> ConstrainedDecode<'a> {
+    /// The runtime's default value-copy configuration: both D2 mechanisms
+    /// on, D1's schema-pattern/enum copy always active regardless (it needs
+    /// no toggle -- it only ever fires when the schema itself declares a
+    /// `pattern`/`enum`).
+    pub fn new(grammar: Option<&'a RuntimeCallGrammar>, context: &'a str) -> Self {
+        Self {
+            grammar,
+            context,
+            identifier_copy: true,
+            copy_bias_margin: Some(4.0),
+        }
+    }
 }
 
 /// KV-cached generation under the runtime's `<tool_call>` envelope grammar,
@@ -226,7 +248,12 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
     config: GenerateConfig,
     device: &B::Device,
 ) -> (String, DecodeReport) {
-    let ConstrainedDecode { grammar, context } = decode;
+    let ConstrainedDecode {
+        grammar,
+        context,
+        identifier_copy,
+        copy_bias_margin,
+    } = decode;
     let Some(grammar) = grammar else {
         let text = generate_from_prompt_ids_cached(model, tokenizer, prompt_ids, config, device);
         return (text, DecodeReport::default());
@@ -244,7 +271,7 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
         return (text, DecodeReport::default());
     }
 
-    let table = ValueConstraintTable::build(grammar.inner(), context);
+    let copy = CopyConstraints::build(grammar.inner(), context, identifier_copy, copy_bias_margin);
     let eos_id = tokenizer.eos_id();
 
     let input = Tensor::<B, 2, Int>::from_data(
@@ -257,6 +284,9 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
     let (mut logits, mut cache) = model.prefill_cached(input);
     let mut generated: Vec<u32> = Vec::with_capacity(config.max_new_tokens);
     let mut state = ConstrainedDecodeState::start(grammar);
+    let mut identifier_copy_locks = 0u32;
+    let mut identifier_copy_releases = 0u32;
+    let mut copy_bias_overrides = 0u32;
 
     for index in 0..config.max_new_tokens {
         let [_, seq_len, vocab_size] = logits.dims();
@@ -265,22 +295,20 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
             .slice([0..1, seq_len - 1..seq_len, 0..vocab_size])
             .reshape([vocab_size]);
 
-        let mut mask = vec![f32::NEG_INFINITY; vocab_size];
-        let mut any_allowed = false;
-        for (id, piece) in pieces.iter().enumerate().take(vocab_size) {
-            let Some(bytes) = piece else { continue };
-            if bytes.is_empty() {
-                continue;
-            }
-            if state.advance(grammar, &table, bytes).is_some() {
-                mask[id] = 0.0;
-                any_allowed = true;
-            }
-        }
-        let eos_ok = grammar.accepts_eos(&state.frontier);
-        if eos_ok && (eos_id as usize) < vocab_size {
-            mask[eos_id as usize] = 0.0;
-            any_allowed = true;
+        // Pass 1: the identifier lock (if engaged) is enforced strictly by
+        // `state.advance` (Phase 51 / ADR 104 D2 mechanism 1 -- see
+        // `ConstrainedDecodeState::step_copy`). If that leaves no legal
+        // continuation at all, this is the documented deadlock case: force
+        // the lock released for the rest of the value and retry the same
+        // step (never emit an illegal byte, never hang).
+        let (mut mask, mut any_allowed) =
+            build_copy_mask(&state, grammar, &copy, pieces, vocab_size, eos_id);
+        let mut active_state = state.clone();
+        if !any_allowed && state.identifier_lock_engaged() {
+            active_state = state.with_identifier_lock_released();
+            identifier_copy_releases += 1;
+            (mask, any_allowed) =
+                build_copy_mask(&active_state, grammar, &copy, pieces, vocab_size, eos_id);
         }
         if !any_allowed {
             // Dead end -- should not happen (every reachable state has a
@@ -288,8 +316,33 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
             break;
         }
 
-        let mask_tensor = Tensor::<B, 1>::from_data(TensorData::new(mask, [vocab_size]), device);
-        let next_id = argmax(last_logits + mask_tensor);
+        // Phase 51 / ADR 104 D2 mechanism 2: inside a string value, prefer a
+        // near-argmax, already-legal token that continues a verbatim context
+        // match over one that doesn't. Falls back to the exact pre-existing
+        // tensor argmax path whenever not inside a string (the overwhelming
+        // majority of steps: structural bytes, keys, the tool name), so that
+        // path stays byte-for-byte unchanged.
+        let next_id = match (copy_bias_margin, active_state.active_string_content()) {
+            (Some(margin), Some(content)) => select_biased_next_id(
+                &last_logits,
+                &mask,
+                pieces,
+                &copy,
+                content,
+                margin,
+                &mut copy_bias_overrides,
+            )
+            .unwrap_or_else(|| {
+                let mask_tensor =
+                    Tensor::<B, 1>::from_data(TensorData::new(mask.clone(), [vocab_size]), device);
+                argmax(last_logits.clone() + mask_tensor)
+            }),
+            _ => {
+                let mask_tensor =
+                    Tensor::<B, 1>::from_data(TensorData::new(mask, [vocab_size]), device);
+                argmax(last_logits + mask_tensor)
+            }
+        };
 
         if next_id == eos_id {
             break;
@@ -298,8 +351,14 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
         let Some(bytes) = pieces.get(next_id as usize).and_then(|p| p.as_ref()) else {
             break;
         };
-        match state.advance(grammar, &table, bytes) {
-            Some(next_state) => state = next_state,
+        let was_locked = active_state.identifier_lock_engaged();
+        match active_state.advance(grammar, &copy, bytes) {
+            Some(next_state) => {
+                if !was_locked && next_state.identifier_lock_engaged() {
+                    identifier_copy_locks += 1;
+                }
+                state = next_state;
+            }
             None => break, // was checked allowed above; defensive only
         }
         generated.push(next_id);
@@ -322,8 +381,143 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     });
-    let report = build_decode_report(grammar.inner(), &table, &text);
+    let mut report = build_decode_report(grammar.inner(), &copy.table, &text);
+    report.identifier_copy_locks = identifier_copy_locks;
+    report.identifier_copy_releases = identifier_copy_releases;
+    report.copy_bias_overrides = copy_bias_overrides;
     (text, report)
+}
+
+/// Build the additive legality mask for one decode step from `state`: `0.0`
+/// for every vocabulary id whose piece bytes keep `state` on a path to an
+/// accepted call (structurally, under the D1 schema-trie, and under the D2
+/// identifier lock), plus `EOS` once a call is complete; `f32::NEG_INFINITY`
+/// otherwise. Returns the mask plus whether it offers at least one legal
+/// continuation.
+fn build_copy_mask(
+    state: &ConstrainedDecodeState,
+    grammar: &RuntimeCallGrammar,
+    copy: &CopyConstraints,
+    pieces: &[Option<Vec<u8>>],
+    vocab_size: usize,
+    eos_id: u32,
+) -> (Vec<f32>, bool) {
+    let mut mask = vec![f32::NEG_INFINITY; vocab_size];
+    let mut any_allowed = false;
+    for (id, piece) in pieces.iter().enumerate().take(vocab_size) {
+        let Some(bytes) = piece else { continue };
+        if bytes.is_empty() {
+            continue;
+        }
+        if state.advance(grammar, copy, bytes).is_some() {
+            mask[id] = 0.0;
+            any_allowed = true;
+        }
+    }
+    if grammar.accepts_eos(&state.frontier) && (eos_id as usize) < vocab_size {
+        mask[eos_id as usize] = 0.0;
+        any_allowed = true;
+    }
+    (mask, any_allowed)
+}
+
+/// Pull `logits` to a host `Vec<f32>` (the same `.into_data().to_vec()`
+/// idiom [`crate::vision`]'s decode loops already use) and run the D2
+/// mechanism-2 soft bias, incrementing `overrides` when it picks something
+/// other than the masked argmax. Returns `None` when the host extraction
+/// fails (a non-`f32` backend float element type) or there is no context
+/// suffix match at all, in which case the caller falls back to the exact
+/// pre-existing tensor argmax path.
+fn select_biased_next_id<B: Backend>(
+    last_logits: &Tensor<B, 1>,
+    mask: &[f32],
+    pieces: &[Option<Vec<u8>>],
+    copy: &CopyConstraints,
+    content: &[u8],
+    margin: f32,
+    overrides: &mut u32,
+) -> Option<u32> {
+    let continuations = copy.suffix.continuations(content)?;
+    let host: Vec<f32> = last_logits.clone().into_data().to_vec().ok()?;
+    if host.len() != mask.len() {
+        return None;
+    }
+    let (id, overridden) = select_next_token_with_copy_bias(&host, mask, pieces, &continuations, margin)?;
+    if overridden {
+        *overrides += 1;
+    }
+    Some(id)
+}
+
+/// Pure token-selection logic for the D2 soft suffix-copy bias (mechanism 2),
+/// decoupled from any tensor backend so it can be exercised directly with
+/// scripted logits in tests. `logits` and `mask` are parallel arrays over the
+/// vocabulary (`mask[i]` is `0.0` for a legal continuation, exactly what
+/// [`build_copy_mask`] produces, `f32::NEG_INFINITY` otherwise). Returns
+/// `(chosen_id, overridden)`, where `overridden` is `true` iff the margin
+/// bias picked something other than the masked argmax; `None` only when no
+/// id is legal at all (should not happen -- the caller already checked
+/// `any_allowed`).
+///
+/// The bias never considers an illegal id (`legal` gates every candidate),
+/// so the structural grammar and any D1/D2 hard constraint always take
+/// precedence over this ranking choice.
+pub fn select_next_token_with_copy_bias(
+    logits: &[f32],
+    mask: &[f32],
+    pieces: &[Option<Vec<u8>>],
+    continuations: &std::collections::HashSet<u8>,
+    margin: f32,
+) -> Option<(u32, bool)> {
+    let len = logits.len().min(mask.len());
+    let legal = |id: usize| mask[id].is_finite();
+    let score = |id: usize| logits[id] + mask[id];
+    let starts_with_continuation = |id: usize| {
+        pieces
+            .get(id)
+            .and_then(|piece| piece.as_ref())
+            .and_then(|bytes| bytes.first())
+            .is_some_and(|byte| continuations.contains(byte))
+    };
+
+    let mut best_id = None;
+    let mut best_score = f32::NEG_INFINITY;
+    for id in 0..len {
+        if !legal(id) {
+            continue;
+        }
+        let s = score(id);
+        if best_id.is_none() || s > best_score {
+            best_id = Some(id);
+            best_score = s;
+        }
+    }
+    let best_id = best_id?;
+
+    if starts_with_continuation(best_id) {
+        return Some((best_id as u32, false));
+    }
+
+    let mut override_id = None;
+    let mut override_score = f32::NEG_INFINITY;
+    for id in 0..len {
+        if !legal(id) || id == best_id {
+            continue;
+        }
+        let s = score(id);
+        if s < best_score - margin {
+            continue;
+        }
+        if starts_with_continuation(id) && s > override_score {
+            override_id = Some(id);
+            override_score = s;
+        }
+    }
+
+    match override_id {
+        Some(id) => Some((id as u32, true)),
+        None => Some((best_id as u32, false)),
+    }
 }
 
 /// Schema-constrained greedy generation (Phase 51 P1a-4 Step A).
@@ -688,10 +882,7 @@ mod tests {
             &model,
             &tokenizer,
             &prompt_ids,
-            ConstrainedDecode {
-                grammar: Some(&grammar),
-                context: "irrelevant context",
-            },
+            ConstrainedDecode::new(Some(&grammar), "irrelevant context"),
             &pieces,
             config,
             &device,
@@ -699,6 +890,11 @@ mod tests {
         assert_eq!(plain, constrained);
         assert!(report.constrained);
         assert!(report.copy_fields.is_empty());
+        // No string parameters exist at all, so neither D2 mechanism ever
+        // had anything to engage on.
+        assert_eq!(report.identifier_copy_locks, 0);
+        assert_eq!(report.identifier_copy_releases, 0);
+        assert_eq!(report.copy_bias_overrides, 0);
     }
 
     /// With `grammar: None` the constrained entry point must degrade
@@ -724,15 +920,99 @@ mod tests {
             &model,
             &tokenizer,
             &prompt_ids,
-            ConstrainedDecode {
-                grammar: None,
-                context: "irrelevant context",
-            },
+            ConstrainedDecode::new(None, "irrelevant context"),
             &pieces,
             config,
             &device,
         );
         assert_eq!(plain, constrained);
         assert!(!report.constrained);
+    }
+
+    // ── D2 mechanism 2: soft suffix-copy bias (pure selection logic) ───────
+
+    fn byte_pieces(bytes: &[u8]) -> Vec<Option<Vec<u8>>> {
+        bytes.iter().map(|&b| Some(vec![b])).collect()
+    }
+
+    /// (b) The measured failure this mechanism targets: the argmax choice
+    /// does not continue a verbatim context match, but a near-argmax
+    /// alternative (here, `'9'` continuing `TV-9..` toward `TV-926`) does,
+    /// and is well within the default 4.0-nat margin -- it must be preferred.
+    #[test]
+    fn margin_bias_overrides_the_argmax_when_the_alternative_is_within_margin() {
+        // id 0 = 'z' (argmax, does not continue the match), id 1 = '9'
+        // (continues the match, close in logit), id 2 = 'x' (irrelevant).
+        let pieces = byte_pieces(b"z9x");
+        let mask = vec![0.0, 0.0, 0.0];
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![10.0, 7.0, 0.0]; // deficit for id1 is 3.0 <= 4.0
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+                .expect("some legal id must be selected");
+        assert_eq!(id, 1, "the within-margin context-continuing token must win");
+        assert!(overridden);
+    }
+
+    /// The negative case: the same alternative exists but its logit deficit
+    /// exceeds the margin, so the plain masked argmax must stand.
+    #[test]
+    fn margin_bias_does_not_override_when_the_alternative_is_far_outside_margin() {
+        let pieces = byte_pieces(b"z9x");
+        let mask = vec![0.0, 0.0, 0.0];
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![10.0, 4.0, 0.0]; // deficit for id1 is 6.0 > 4.0
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+                .expect("some legal id must be selected");
+        assert_eq!(id, 0, "a far-outside-margin alternative must not override argmax");
+        assert!(!overridden);
+    }
+
+    /// When the argmax itself already continues the context match, there is
+    /// nothing to override -- report it as such rather than a spurious
+    /// override.
+    #[test]
+    fn margin_bias_is_a_no_op_when_the_argmax_already_continues_the_match() {
+        let pieces = byte_pieces(b"9zx");
+        let mask = vec![0.0, 0.0, 0.0];
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![10.0, 0.0, 0.0];
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+                .expect("some legal id must be selected");
+        assert_eq!(id, 0);
+        assert!(!overridden);
+    }
+
+    /// (e) Grammar/hard-constraint precedence: an id that continues the
+    /// context match but is illegal under the mask (e.g. rejected by the
+    /// structural grammar or a D1/D2 hard lock) must never be selected, no
+    /// matter how attractive its logit -- the bias only ranks among ids the
+    /// mask already allows.
+    #[test]
+    fn margin_bias_never_selects_an_id_the_mask_marks_illegal() {
+        let pieces = byte_pieces(b"z9");
+        let mask = vec![0.0, f32::NEG_INFINITY]; // id 1 ('9') is illegal
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![5.0, 100.0]; // id 1 would dominate if legality were ignored
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0)
+                .expect("the one legal id must still be selected");
+        assert_eq!(id, 0, "an illegal id must never be picked regardless of margin or logit");
+        assert!(!overridden);
+    }
+
+    /// `None` (no legal id at all) only when the mask allows nothing.
+    #[test]
+    fn margin_bias_returns_none_when_nothing_is_legal() {
+        let pieces = byte_pieces(b"z9");
+        let mask = vec![f32::NEG_INFINITY, f32::NEG_INFINITY];
+        let continuations = std::collections::HashSet::from(*b"9");
+        let logits = vec![5.0, 100.0];
+        assert_eq!(
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, 4.0),
+            None
+        );
     }
 }

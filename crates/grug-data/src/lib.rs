@@ -61,9 +61,10 @@ pub use adaptive_exam::{
 };
 pub use catalog::ToolCatalog;
 pub use constrain::{
-    ConstrainedDecodeState, CopyFieldOutcome, CopyTrie, DecodeReport, GrammarState,
-    RuntimeCallGrammar, RuntimeCallState, ToolCallGrammar, ToolCallGrammarError, ValueConstraint,
-    ValueConstraintTable, build_decode_report, derive_value_constraint,
+    ConstrainedDecodeState, CopyConstraints, CopyFieldOutcome, CopyTrie, DecodeReport,
+    GrammarState, IdentifierIndex, RuntimeCallGrammar, RuntimeCallState, SuffixCopyIndex,
+    ToolCallGrammar, ToolCallGrammarError, ValueConstraint, ValueConstraintTable,
+    build_decode_report, derive_value_constraint,
 };
 pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};

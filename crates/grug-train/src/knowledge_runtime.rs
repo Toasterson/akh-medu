@@ -336,10 +336,7 @@ impl<B: Backend> KnowledgeModel<B> {
                     &self.model,
                     &self.tokenizer,
                     &compacted,
-                    crate::ConstrainedDecode {
-                        grammar: grammar.as_ref(),
-                        context: &context,
-                    },
+                    crate::ConstrainedDecode::new(grammar.as_ref(), &context),
                     &pieces,
                     config,
                     &self.device,
