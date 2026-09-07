@@ -7,14 +7,16 @@
 use std::path::{Component, Path, PathBuf};
 
 use burn::tensor::backend::Backend;
+use grug_data::constrain::{DecodeReport, RuntimeCallGrammar, ToolCallGrammarError};
 use grug_data::{KnowledgeSftRecord, ToolContractSnapshot, render_knowledge_prompt_with_system};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::tokenizer::Vocab;
 use crate::{
     BpeTokenizer, CpuBackend, GenerateConfig, KnowledgeAdaptationLineage, KnowledgeModelArtifact,
     TinyTransformer, compact_knowledge_prompt_ids, fingerprint_artifact_file,
-    generate_from_prompt_ids_cached, load_model_only,
+    generate_from_prompt_ids_cached, generate_from_prompt_ids_cached_constrained, load_model_only,
 };
 
 #[derive(Debug, Error)]
@@ -45,6 +47,8 @@ pub enum KnowledgeRuntimeError {
     Contract(#[from] grug_data::ToolContractError),
     #[error(transparent)]
     Train(#[from] crate::GrugError),
+    #[error(transparent)]
+    Grammar(#[from] ToolCallGrammarError),
 }
 
 /// A fully verified inference model. Serving uses the CPU alias; accelerated
@@ -242,24 +246,53 @@ impl<B: Backend> KnowledgeModel<B> {
         Ok(self.tokenizer.encode(text)?.len())
     }
 
-    /// Generate one runtime action through the canonical corpus prompt.
-    /// Returns `(raw_output, retained_prompt_tokens, completion_tokens)`.
+    /// Generate one runtime action through the canonical corpus prompt, under
+    /// the default (constrained) decoder.
+    /// Returns `(raw_output, retained_prompt_tokens, completion_tokens, decode_report)`.
     pub fn generate_turn(
         &self,
         tools: &[Value],
         conversation: &[Value],
         max_new_tokens: usize,
-    ) -> Result<(String, usize, usize), KnowledgeRuntimeError> {
+    ) -> Result<(String, usize, usize, DecodeReport), KnowledgeRuntimeError> {
         self.generate_turn_with_system(tools, conversation, None, max_new_tokens)
     }
 
+    /// Generate one runtime action under the default (constrained) decoder
+    /// (Phase 51 / ADR 104 D1): the runtime `<tool_call>` grammar plus
+    /// byte-level value-copy constraints for identifier-shaped string
+    /// arguments (hex revision tokens, note ids) that must be copied
+    /// verbatim from the rendered context rather than freely generated.
+    /// Returns `(raw_output, retained_prompt_tokens, completion_tokens, decode_report)`.
     pub fn generate_turn_with_system(
         &self,
         tools: &[Value],
         conversation: &[Value],
         system_context: Option<&str>,
         max_new_tokens: usize,
-    ) -> Result<(String, usize, usize), KnowledgeRuntimeError> {
+    ) -> Result<(String, usize, usize, DecodeReport), KnowledgeRuntimeError> {
+        self.generate_turn_with_system_mode(
+            tools,
+            conversation,
+            system_context,
+            max_new_tokens,
+            DecodingMode::Constrained,
+        )
+    }
+
+    /// As [`Self::generate_turn_with_system`], but selecting the decoder
+    /// explicitly. `DecodingMode::Plain` reproduces the pre-D1 unconstrained
+    /// greedy decoder exactly (no runtime grammar, no value-copy masking) --
+    /// evaluators use it only to compare against historical certification
+    /// numbers; the deployed runtime always uses `Constrained`.
+    pub fn generate_turn_with_system_mode(
+        &self,
+        tools: &[Value],
+        conversation: &[Value],
+        system_context: Option<&str>,
+        max_new_tokens: usize,
+        mode: DecodingMode,
+    ) -> Result<(String, usize, usize, DecodeReport), KnowledgeRuntimeError> {
         let maximum = self.artifact.shape.max_seq_len.saturating_sub(3);
         if max_new_tokens == 0 || max_new_tokens > maximum {
             return Err(KnowledgeRuntimeError::InvalidArtifact(format!(
@@ -273,15 +306,48 @@ impl<B: Backend> KnowledgeModel<B> {
             max_seq_len: self.artifact.shape.max_seq_len,
         };
         let compacted = compact_knowledge_prompt_ids(&prompt_ids, config);
-        let output = generate_from_prompt_ids_cached(
-            &self.model,
-            &self.tokenizer,
-            &compacted,
-            config,
-            &self.device,
-        );
+        let (output, report) = match mode {
+            DecodingMode::Plain => {
+                let output = generate_from_prompt_ids_cached(
+                    &self.model,
+                    &self.tokenizer,
+                    &compacted,
+                    config,
+                    &self.device,
+                );
+                (output, DecodeReport::default())
+            }
+            DecodingMode::Constrained => {
+                // The candidates a value-copy field may draw from must come
+                // from exactly what the model can see -- the *compacted*
+                // prompt, not the uncompacted one, or the grammar could offer
+                // a "copy" candidate the model never actually observed.
+                let context = self
+                    .tokenizer
+                    .decode(&compacted)
+                    .unwrap_or_else(|_| prompt.clone());
+                let grammar = if tools.is_empty() {
+                    None
+                } else {
+                    Some(RuntimeCallGrammar::from_openai_tools(tools)?)
+                };
+                let pieces = self.tokenizer.token_pieces();
+                generate_from_prompt_ids_cached_constrained(
+                    &self.model,
+                    &self.tokenizer,
+                    &compacted,
+                    crate::ConstrainedDecode {
+                        grammar: grammar.as_ref(),
+                        context: &context,
+                    },
+                    &pieces,
+                    config,
+                    &self.device,
+                )
+            }
+        };
         let completion_tokens = self.tokenizer.encode(&output)?.len();
-        Ok((output, compacted.len() + 2, completion_tokens))
+        Ok((output, compacted.len() + 2, completion_tokens, report))
     }
 
     pub fn generate_records(
@@ -298,10 +364,19 @@ impl<B: Backend> KnowledgeModel<B> {
                     record.system_context.as_deref(),
                     max_new_tokens,
                 )
-                .map(|(output, _, _)| output)
+                .map(|(output, _, _, _)| output)
             })
             .collect()
     }
+}
+
+/// Which decoder [`KnowledgeModel::generate_turn_with_system_mode`] uses. See
+/// that method's docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodingMode {
+    #[default]
+    Constrained,
+    Plain,
 }
 
 fn verify_knowledge_bundle(

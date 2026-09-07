@@ -13,14 +13,15 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use grug_data::adaptive_exam::ADAPTIVE_EXAM_SCHEMA_VERSION;
+use grug_data::constrain::DecodeReport;
 use grug_data::{
     CheckpointRef, ExamTier, KNOWLEDGE_WORKFLOW_GENERATOR_VERSION,
     KNOWLEDGE_WORKFLOW_SCHEMA_VERSION, KnowledgeAction, KnowledgeEpisode, KnowledgeEvaluationMode,
     KnowledgeExamEvidence, KnowledgeExamSet, KnowledgeToolBindings, score_knowledge_exam,
 };
-use grug_train::KnowledgeModel;
 #[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::{CpuBackend as ActiveBackend, CpuKnowledgeModel as ActiveKnowledgeModel};
+use grug_train::{DecodingMode, KnowledgeModel};
 #[cfg(any(feature = "gpu", feature = "cuda"))]
 use grug_train::{GpuBackend as ActiveBackend, GpuKnowledgeModel as ActiveKnowledgeModel};
 use serde::Serialize;
@@ -44,6 +45,12 @@ struct Args {
     #[arg(long)]
     predictions_out: Option<PathBuf>,
 
+    /// Optional per-episode decode reports (closed-loop mode only): which
+    /// fields were value-copy constrained and whether the emitted value
+    /// landed on a context candidate (ADR 104 D1).
+    #[arg(long)]
+    decode_reports_out: Option<PathBuf>,
+
     #[arg(long, default_value_t = 384)]
     max_new_tokens: usize,
 
@@ -51,6 +58,28 @@ struct Args {
     /// from this mode is deliberately not eligible for model certification.
     #[arg(long)]
     teacher_forced: bool,
+
+    /// `constrained` (default) decodes under the runtime `<tool_call>`
+    /// grammar plus byte-level value-copy constraints (ADR 104 D1). `plain`
+    /// reproduces the pre-D1 unconstrained greedy decoder, for comparing
+    /// against historical certification numbers only.
+    #[arg(long, value_enum, default_value_t = Decoding::Constrained)]
+    decoding: Decoding,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Decoding {
+    Constrained,
+    Plain,
+}
+
+impl From<Decoding> for DecodingMode {
+    fn from(value: Decoding) -> Self {
+        match value {
+            Decoding::Constrained => DecodingMode::Constrained,
+            Decoding::Plain => DecodingMode::Plain,
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -64,14 +93,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let exam: KnowledgeExamSet = serde_json::from_reader(BufReader::new(File::open(&args.exam)?))?;
     validate_exam(&exam, artifact, contracts.manifest_hash.as_str())?;
 
+    let mode: DecodingMode = args.decoding.into();
     let bindings = KnowledgeToolBindings::default();
     let mut predictions = BTreeMap::new();
+    let mut decode_reports: BTreeMap<String, Vec<DecodeReport>> = BTreeMap::new();
     for (index, episode) in exam.episodes.iter().enumerate() {
         let outputs = if args.teacher_forced {
             let records = episode.to_sft_records(contracts, &bindings)?;
             runner.generate_records(&records, args.max_new_tokens)?
         } else {
-            generate_closed_loop(&runner, episode, &bindings, args.max_new_tokens)?
+            let (outputs, reports) =
+                generate_closed_loop(&runner, episode, &bindings, args.max_new_tokens, mode)?;
+            decode_reports.insert(episode.id.clone(), reports);
+            outputs
         };
         predictions.insert(episode.id.clone(), outputs);
         if index == 0 || (index + 1) % 10 == 0 || index + 1 == exam.episodes.len() {
@@ -103,6 +137,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = &args.predictions_out {
         write_json_pretty_atomic(path, &predictions)?;
     }
+    if let Some(path) = &args.decode_reports_out {
+        write_json_pretty_atomic(path, &decode_reports)?;
+    }
     write_json_pretty_atomic(&args.evidence_out, &evidence)?;
 
     let samples = evidence.observation.sample_count.max(1) as f64;
@@ -123,19 +160,28 @@ fn generate_closed_loop(
     episode: &KnowledgeEpisode,
     bindings: &KnowledgeToolBindings,
     max_new_tokens: usize,
-) -> Result<Vec<String>, Box<dyn Error>> {
+    mode: DecodingMode,
+) -> Result<(Vec<String>, Vec<DecodeReport>), Box<dyn Error>> {
     let records = episode.to_sft_records(runner.contracts(), bindings)?;
     let mut conversation = vec![serde_json::json!({
         "role": "user",
         "content": episode.steps.first().map(|step| step.input.as_str()).unwrap_or("")
     })];
     let mut outputs = Vec::with_capacity(episode.steps.len());
+    let mut reports = Vec::with_capacity(episode.steps.len());
     for (index, step) in episode.steps.iter().enumerate() {
         let Some(record) = records.get(index) else {
             break;
         };
-        let (raw, _, _) = runner.generate_turn(&record.tools, &conversation, max_new_tokens)?;
+        let (raw, _, _, report) = runner.generate_turn_with_system_mode(
+            &record.tools,
+            &conversation,
+            None,
+            max_new_tokens,
+            mode,
+        )?;
         outputs.push(raw.clone());
+        reports.push(report);
         let Ok(action) = KnowledgeAction::parse_runtime(&raw) else {
             break;
         };
@@ -165,7 +211,7 @@ fn generate_closed_loop(
             KnowledgeAction::Answer { .. } | KnowledgeAction::Gap { .. } => break,
         }
     }
-    Ok(outputs)
+    Ok((outputs, reports))
 }
 
 fn validate_exam(

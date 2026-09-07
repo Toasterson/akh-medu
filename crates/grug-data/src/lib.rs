@@ -60,7 +60,11 @@ pub use adaptive_exam::{
     validate_sibling_separation, wilson_interval,
 };
 pub use catalog::ToolCatalog;
-pub use constrain::{GrammarState, ToolCallGrammar};
+pub use constrain::{
+    ConstrainedDecodeState, CopyFieldOutcome, CopyTrie, DecodeReport, GrammarState,
+    RuntimeCallGrammar, RuntimeCallState, ToolCallGrammar, ToolCallGrammarError, ValueConstraint,
+    ValueConstraintTable, build_decode_report, derive_value_constraint,
+};
 pub use dataset::{AxisReport, Dataset, EvalAxis};
 pub use error::{GrugError, GrugResult};
 pub use eval::{

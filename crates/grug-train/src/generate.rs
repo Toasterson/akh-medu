@@ -6,7 +6,10 @@
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
-use grug_data::constrain::{GrammarState, ToolCallGrammar};
+use grug_data::constrain::{
+    ConstrainedDecodeState, DecodeReport, GrammarState, RuntimeCallGrammar, ToolCallGrammar,
+    ValueConstraintTable, build_decode_report,
+};
 
 use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
@@ -179,6 +182,148 @@ pub fn generate_from_prompt_ids_cached<B: Backend, V: Vocab>(
             .collect();
         String::from_utf8_lossy(&bytes).into_owned()
     })
+}
+
+/// What governs value-copy-constrained decoding for one generation call:
+/// the runtime grammar (`None` when no tools were offered) and the exact
+/// context text it scans for copy candidates. Bundled into one type rather
+/// than two more parameters on [`generate_from_prompt_ids_cached_constrained`]
+/// because they are always supplied (or omitted) together.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstrainedDecode<'a> {
+    pub grammar: Option<&'a RuntimeCallGrammar>,
+    pub context: &'a str,
+}
+
+/// KV-cached generation under the runtime's `<tool_call>` envelope grammar,
+/// with byte-level value-copy constraints applied to identifier-shaped string
+/// arguments (Phase 51 / ADR 104 D1).
+///
+/// Unlike [`generate_constrained`] (which constrains the isolated, untagged
+/// procedural-catalog surface for the Step A/B research harness), this is the
+/// grammar the deployed runtime and its evaluators actually decode under:
+/// Akh-Medu's `<tool_call>\n{...}\n</tool_call>` envelope, or unconstrained
+/// free text for an `Answer`/`Knowledge gap:` turn (see
+/// [`grug_data::constrain::RuntimeCallState`] for why free text is never
+/// blocked).
+///
+/// `decode.context` is the exact text the model can see (the rendered, and
+/// possibly left-compacted, prompt) — it is scanned once up front for
+/// value-copy candidates ([`grug_data::constrain::ValueConstraintTable::build`]),
+/// not re-derived per step. `decode.grammar` is `None` when no tools were
+/// offered (a pure-answer turn), in which case this degrades byte-for-byte to
+/// [`generate_from_prompt_ids_cached`] and reports `constrained: false`.
+///
+/// Returns the decoded text plus a [`DecodeReport`] describing which
+/// (tool, property) pairs were value-copy-constrained and whether the
+/// emitted value actually landed on a context candidate.
+pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
+    model: &TinyTransformer<B>,
+    tokenizer: &V,
+    prompt_ids: &[u32],
+    decode: ConstrainedDecode<'_>,
+    pieces: &[Option<Vec<u8>>],
+    config: GenerateConfig,
+    device: &B::Device,
+) -> (String, DecodeReport) {
+    let ConstrainedDecode { grammar, context } = decode;
+    let Some(grammar) = grammar else {
+        let text = generate_from_prompt_ids_cached(model, tokenizer, prompt_ids, config, device);
+        return (text, DecodeReport::default());
+    };
+
+    let mut framed = Vec::with_capacity(prompt_ids.len() + 2);
+    framed.push(tokenizer.bos_id());
+    framed.extend_from_slice(prompt_ids);
+    framed.push(tokenizer.sep_id());
+    if framed.len().saturating_add(config.max_new_tokens) > config.max_seq_len {
+        // Compatibility fallback, matching `generate_from_prompt_ids_cached`'s
+        // own overflow behavior -- normal serving always compacts the prompt
+        // to fit, so this path should not be exercised in practice.
+        let text = generate_from_prompt_ids(model, tokenizer, prompt_ids, config, device);
+        return (text, DecodeReport::default());
+    }
+
+    let table = ValueConstraintTable::build(grammar.inner(), context);
+    let eos_id = tokenizer.eos_id();
+
+    let input = Tensor::<B, 2, Int>::from_data(
+        TensorData::new(
+            framed.iter().map(|token| i64::from(*token)).collect(),
+            [1, framed.len()],
+        ),
+        device,
+    );
+    let (mut logits, mut cache) = model.prefill_cached(input);
+    let mut generated: Vec<u32> = Vec::with_capacity(config.max_new_tokens);
+    let mut state = ConstrainedDecodeState::start(grammar);
+
+    for index in 0..config.max_new_tokens {
+        let [_, seq_len, vocab_size] = logits.dims();
+        let last_logits = logits
+            .clone()
+            .slice([0..1, seq_len - 1..seq_len, 0..vocab_size])
+            .reshape([vocab_size]);
+
+        let mut mask = vec![f32::NEG_INFINITY; vocab_size];
+        let mut any_allowed = false;
+        for (id, piece) in pieces.iter().enumerate().take(vocab_size) {
+            let Some(bytes) = piece else { continue };
+            if bytes.is_empty() {
+                continue;
+            }
+            if state.advance(grammar, &table, bytes).is_some() {
+                mask[id] = 0.0;
+                any_allowed = true;
+            }
+        }
+        let eos_ok = grammar.accepts_eos(&state.frontier);
+        if eos_ok && (eos_id as usize) < vocab_size {
+            mask[eos_id as usize] = 0.0;
+            any_allowed = true;
+        }
+        if !any_allowed {
+            // Dead end -- should not happen (every reachable state has a
+            // legal continuation), but stop rather than emit an illegal byte.
+            break;
+        }
+
+        let mask_tensor = Tensor::<B, 1>::from_data(TensorData::new(mask, [vocab_size]), device);
+        let next_id = argmax(last_logits + mask_tensor);
+
+        if next_id == eos_id {
+            break;
+        }
+
+        let Some(bytes) = pieces.get(next_id as usize).and_then(|p| p.as_ref()) else {
+            break;
+        };
+        match state.advance(grammar, &table, bytes) {
+            Some(next_state) => state = next_state,
+            None => break, // was checked allowed above; defensive only
+        }
+        generated.push(next_id);
+
+        if index + 1 < config.max_new_tokens {
+            let input = Tensor::<B, 2, Int>::from_data(
+                TensorData::new(vec![i64::from(next_id)], [1, 1]),
+                device,
+            );
+            (logits, cache) = model.decode_cached(input, cache);
+        }
+    }
+
+    let text = tokenizer.decode(&generated).unwrap_or_else(|_| {
+        let bytes: Vec<u8> = generated
+            .iter()
+            .copied()
+            .filter(|&token| token < 256)
+            .map(|token| token as u8)
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+    let report = build_decode_report(grammar.inner(), &table, &text);
+    (text, report)
 }
 
 /// Schema-constrained greedy generation (Phase 51 P1a-4 Step A).
@@ -509,5 +654,82 @@ mod tests {
             generate_from_prompt_ids(&model, &tokenizer, &prompt_ids, config, &device),
             generate_from_prompt_ids_cached(&model, &tokenizer, &prompt_ids, config, &device)
         );
+    }
+
+    /// Phase 51 / ADR 104 D1 (f): with a grammar offered but no field
+    /// value-copy-constrained (a tool with only a non-string parameter), the
+    /// constrained cached decoder must match the plain cached decoder
+    /// byte-for-byte on the same untrained model -- the runtime envelope's
+    /// `Undecided`/`Free` states never mask a byte the model wouldn't already
+    /// have produced (see `RuntimeCallState` docs), so there is nothing here
+    /// for the copy constraint to change.
+    #[test]
+    fn constrained_cached_generation_matches_the_plain_cached_path_with_no_copy_fields() {
+        let device = Default::default();
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model = model_config.init::<CpuBackend>(&device);
+        let tokenizer = ByteTokenizer::new();
+        let prompt_ids = tokenizer.encode("cache parity");
+        let config = GenerateConfig {
+            max_new_tokens: 8,
+            max_seq_len: 64,
+        };
+        let pieces = tokenizer.token_pieces();
+        let tools = vec![grug_data::ToolSchema::new("noop", "d", vec![])];
+        let grammar = grug_data::constrain::RuntimeCallGrammar::new(&tools);
+
+        let plain =
+            generate_from_prompt_ids_cached(&model, &tokenizer, &prompt_ids, config, &device);
+        let (constrained, report) = generate_from_prompt_ids_cached_constrained(
+            &model,
+            &tokenizer,
+            &prompt_ids,
+            ConstrainedDecode {
+                grammar: Some(&grammar),
+                context: "irrelevant context",
+            },
+            &pieces,
+            config,
+            &device,
+        );
+        assert_eq!(plain, constrained);
+        assert!(report.constrained);
+        assert!(report.copy_fields.is_empty());
+    }
+
+    /// With `grammar: None` the constrained entry point must degrade
+    /// byte-for-byte to the plain cached path and report `constrained: false`
+    /// -- this is the pure-answer/no-tools-offered turn.
+    #[test]
+    fn constrained_cached_generation_with_no_grammar_matches_the_plain_cached_path() {
+        let device = Default::default();
+        let model_config =
+            TinyTransformerConfig::new(crate::tokenizer::VOCAB_SIZE, 16, 2, 1, 32, 64);
+        let model = model_config.init::<CpuBackend>(&device);
+        let tokenizer = ByteTokenizer::new();
+        let prompt_ids = tokenizer.encode("no tools offered");
+        let config = GenerateConfig {
+            max_new_tokens: 8,
+            max_seq_len: 64,
+        };
+        let pieces = tokenizer.token_pieces();
+
+        let plain =
+            generate_from_prompt_ids_cached(&model, &tokenizer, &prompt_ids, config, &device);
+        let (constrained, report) = generate_from_prompt_ids_cached_constrained(
+            &model,
+            &tokenizer,
+            &prompt_ids,
+            ConstrainedDecode {
+                grammar: None,
+                context: "irrelevant context",
+            },
+            &pieces,
+            config,
+            &device,
+        );
+        assert_eq!(plain, constrained);
+        assert!(!report.constrained);
     }
 }

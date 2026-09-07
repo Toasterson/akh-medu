@@ -7,12 +7,14 @@ use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use grug_data::constrain::DecodeReport;
 use grug_data::{
     TOOL_CONTRACT_EXAM_SCHEMA_VERSION, ToolContractEvaluationMode, ToolContractExamEvidence,
     ToolContractExamSet, score_tool_contract_exam,
 };
 #[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::CpuKnowledgeModel as ActiveKnowledgeModel;
+use grug_train::DecodingMode;
 #[cfg(any(feature = "gpu", feature = "cuda"))]
 use grug_train::GpuKnowledgeModel as ActiveKnowledgeModel;
 use serde::Serialize;
@@ -41,8 +43,37 @@ struct Args {
     #[arg(long)]
     observations_out: Option<PathBuf>,
 
+    /// Optional per-case decode reports (which fields were value-copy
+    /// constrained and whether the emitted value landed on a context
+    /// candidate), for forensic review of ADR 104 D1 copy fidelity.
+    #[arg(long)]
+    decode_reports_out: Option<PathBuf>,
+
     #[arg(long, default_value_t = 384)]
     max_new_tokens: usize,
+
+    /// `constrained` (default) decodes under the runtime `<tool_call>`
+    /// grammar plus byte-level value-copy constraints (ADR 104 D1). `plain`
+    /// reproduces the pre-D1 unconstrained greedy decoder, for comparing
+    /// against historical certification numbers only -- it is never the
+    /// deployed runtime's behavior.
+    #[arg(long, value_enum, default_value_t = Decoding::Constrained)]
+    decoding: Decoding,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Decoding {
+    Constrained,
+    Plain,
+}
+
+impl From<Decoding> for DecodingMode {
+    fn from(value: Decoding) -> Self {
+        match value {
+            Decoding::Constrained => DecodingMode::Constrained,
+            Decoding::Plain => DecodingMode::Plain,
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -67,11 +98,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         ));
     }
 
+    let mode: DecodingMode = args.decoding.into();
     let mut predictions = BTreeMap::new();
+    let mut decode_reports: BTreeMap<String, DecodeReport> = BTreeMap::new();
     for (index, case) in exam.cases.iter().enumerate() {
-        let (raw, _, _) =
-            runner.generate_turn(&case.tools, &case.conversation, args.max_new_tokens)?;
+        let (raw, _, _, report) = runner.generate_turn_with_system_mode(
+            &case.tools,
+            &case.conversation,
+            None,
+            args.max_new_tokens,
+            mode,
+        )?;
         predictions.insert(case.id.clone(), raw);
+        decode_reports.insert(case.id.clone(), report);
         if index == 0 || (index + 1) % 100 == 0 || index + 1 == exam.cases.len() {
             eprintln!(
                 "evaluated {}/{} all-tool cases",
@@ -94,6 +133,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     if let Some(path) = &args.predictions_out {
         write_json_pretty_atomic(path, &predictions)?;
+    }
+    if let Some(path) = &args.decode_reports_out {
+        write_json_pretty_atomic(path, &decode_reports)?;
     }
     if let Some(path) = &args.observations_out {
         write_jsonl_atomic(path, &evidence.observations)?;
