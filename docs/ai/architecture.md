@@ -1,6 +1,6 @@
 # Akh-medu Architecture
 
-> Last updated: 2026-08-30 (overview corrected: the LLM is first-class — the agentic loop runs on per-akh selectable chat backing (Ollama local/cloud, in-process Candle with grammar-constrained tool calling, OpenAI-compatible endpoints; ADRs 070/095) through the Phase 44 context-assembly runtime. The symbolic core remains CPU-native and LLM-optional.)
+> Last updated: 2026-09-07 (Phase 51 Grug-Brain BabyLLM section added — ADR 102/104 runtime shape. Previous: 2026-08-30, overview corrected: the LLM is first-class — the agentic loop runs on per-akh selectable chat backing (Ollama local/cloud, in-process Candle with grammar-constrained tool calling, OpenAI-compatible endpoints; ADRs 070/095) through the Phase 44 context-assembly runtime. The symbolic core remains CPU-native and LLM-optional.)
 
 > Previous update: 2026-08-26 (**ADR 098 — exact Qwen3.8 Candle inference stack on RDNA3** ([decision](decisions/098-candle-qwen35-rdna3-inference-stack.md), [plan](plans/2026-08-24-candle-qwen38-rdna3-inference.md))). `ModelFamily::Qwen35` owns the custom Qwen3.8 architecture and its ChatML behavior. Its reference Candle adapter validates the complete target+MTP GGUF schema before allocation and implements the exact 3:1 gated-delta/full-attention text forward with explicit KV, recurrent, convolution, checkpoint, and rewind state, including Qwen35 GGUF's tiled V-head conversion contract. Hermetic non-zero logits/state tests, the installed Ptah artifact schema, a bounded-memory exact-model multi-token CPU prefill, and a full HIP stepped decode all match the llama.cpp oracle in greedy token and log-probability. Slice 2a now privately quantizes each 32-value decode activation group to Q8 and consumes packed Q4_K weights with the gfx11 `dp4a` path; independent operation parity plus three accumulated exact-model steps preserve every greedy token with minimum hidden/logit cosine `0.999960874`/`0.999991194`, while twelve counterbalanced warm runs show a `1.162x` median win. That promotes it to the default while `AKH_HIP_Q8_GEMV=0` preserves the f32 reference. WMMA short-batch/prefill, gated-delta scan, and flash attention remain the next measured private operations. A bounded C1/C2/C4/C8 scheduler is recorded after the owned `InferenceSession`, with target-only and realistic-makespan gates before optional MTP. Exact vision, VSA signals, TurboQuant, and DFlash2 remain later parity-gated slices; llama.cpp remains the production oracle until the canary passes.
 
@@ -602,6 +602,30 @@ Phase 14a–14i: Purpose-driven bootstrapping with identity (9 sub-phases):
 - **Assessment**: 14g competence assessment (Dreyfus model, competency questions, graph completeness, VSA structural analysis)
 - **Orchestration**: 14h bootstrap orchestrator (meta-OODA loop, personality shapes exploration style, Dreyfus-adaptive exploration), 14i community recipe sharing (TOML purpose recipes with identity section, ActivityPub federation, skillpack export)
 - **NLU Extension**: 14j extended rule parser (negation, quantifiers, comparatives, conditionals, temporal, modals — all 5 langs), 14k micro-ML NER (DistilBERT multilingual via ONNX, feature-gated), 14l small LLM translator (Qwen2.5-1.5B + GBNF constrained decoding, feature-gated), 14m VSA parse ranker (exemplar memory, self-improving disambiguation)
+
+### Phase 51 — Grug-Brain BabyLLM (`crates/grug-data`, `crates/grug-train`, ADR 102/103/104)
+
+A from-scratch tool-native model that runs the akh's *memory* workflows
+(Seshat textbooks, study notes, recall, provider fallback, abstention) as a
+third chat backing (`GrugChatBackend`, feature `grug-backend`). Shape:
+Burn/CubeCL decoder-only `TinyTransformer`; presets `small` (35.5M, 4096,
+learned positions) and `small_8k` / `350m_8k` (RoPE + query-chunked
+attention, `grad_checkpointing` feature for autodiff recompute). Tokenizer
+is byte-level BPE with identifier-aware pre-tokenization (digits and ≥8-char
+hex runs split per character) recorded in the artifact. Pipeline: causal
+foundation → warm-started knowledge/dojo/tool SFT on the 53-tool contract
+(`blake3:3d6e18bb…`) → adaptive probe/loop (immutable sentinels, two-window
+confirm→stop controller) → closed-loop release gate → native OCR gate →
+cross-host offline gate → install → publish. **Decoding contract (ADR 104
+D1):** the runtime and every evaluator share one KV-cached decoder that
+enforces the `<tool_call>` grammar and a byte-level value-copy constraint for
+`enum`/`pattern` arguments (candidates taken from the compacted prompt);
+free text, `Answer` and the `Knowledge gap:` abstention envelope are left
+unconstrained. `DecodeReport` records copy outcomes and fallbacks.
+Effective context is provided by the Phase 44 `compacting`/`passive`
+strategies plus the learned memory tools, not by the raw window (ADR 104
+D4). Runbooks: `docs/ai/manuals/2026-09-04-adaptive-exams-native-vision.md`;
+results under `training/results/`.
 
 ## Deployment Topology
 
