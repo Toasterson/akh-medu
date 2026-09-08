@@ -85,6 +85,7 @@ tar = "0.4"
 grug-data = { path = "../grug-data" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+sea-orm = { version = "1", features = ["mock"] }
 
 [features]
 default = ["embedding", "tracing-otel"]

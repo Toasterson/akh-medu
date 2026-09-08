@@ -26,6 +26,7 @@ pub mod migration;
 pub mod metrics;
 pub mod query;
 pub mod scripts;
+pub mod transcript;
 /// Phase 38i: OTLP tracing skeleton for seshd.
 pub mod observability;
 

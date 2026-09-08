@@ -46,6 +46,15 @@ struct SearchParams {
     /// Minimum cosine similarity threshold (0.0–1.0).
     #[serde(default = "default_min_similarity")]
     min_similarity: f32,
+    /// Exact Anima work-item metadata filter.
+    #[serde(default)]
+    work_item_id: Option<String>,
+    /// Case-insensitive executor metadata filter (for example `codex`).
+    #[serde(default)]
+    executor: Option<String>,
+    /// Case-insensitive session outcome metadata filter (for example `completed`).
+    #[serde(default)]
+    outcome: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -78,9 +87,10 @@ struct IngestParams {
     /// URL-safe unique slug. Auto-derived from `title` when omitted.
     #[serde(default)]
     slug: Option<String>,
-    /// Document format: `markdown`, `text`, `html`, `pdf`, `epub`, `mobi`.
-    /// Markdown enables heading extraction; other formats are treated as
-    /// opaque prose for chunking purposes.
+    /// Document format: `markdown`, `text`, `html`, `pdf`, `epub`, `mobi`, or
+    /// `agent_session_transcript`. Markdown enables heading extraction;
+    /// agent-session transcripts extract assistant and tool-result text from
+    /// JSONL; other formats are treated as opaque prose.
     #[serde(default = "default_format")]
     format: String,
     /// Full document body.
@@ -194,7 +204,7 @@ impl SeshatMcpServer {
 
     #[tool(
         name = "seshat_search",
-        description = "Search the corpus for chunks similar to a query using vector similarity. Returns ranked text chunks with source document info and similarity scores."
+        description = "Search the corpus for chunks similar to a query using vector similarity. Optional work_item_id, executor, and outcome fields filter Anima session metadata. Returns ranked text chunks with source document metadata, tags, and similarity scores."
     )]
     async fn seshat_search(
         &self,
@@ -204,11 +214,17 @@ impl SeshatMcpServer {
         let query_embedding = self.embed_query(params.query.clone()).await?;
 
         // Search pgvector.
-        let results = crate::query::search_similar(
+        let filters = crate::query::SearchFilters {
+            work_item_id: params.work_item_id,
+            executor: params.executor,
+            outcome: params.outcome,
+        };
+        let results = crate::query::search_similar_filtered(
             &self.state.db,
             &query_embedding,
             params.top_k,
             params.min_similarity,
+            &filters,
         )
         .await
         .map_err(|e| McpError::internal_error(format!("search: {e}"), None))?;
@@ -344,7 +360,7 @@ impl SeshatMcpServer {
 
     #[tool(
         name = "seshat_ingest",
-        description = "Ingest a document into Seshat's Archive. Body is chunked paragraph-aware (greedy pack to `target_chunk_chars`, markdown headings propagated onto chunks, overlong paragraphs split on sentence boundaries). Returns the new document id, slug, chunk count and total word count. Embedding is handled asynchronously by the worker; call `seshat_embed_now` to force an immediate pass if you need search to be live right away."
+        description = "Ingest a document into Seshat's Archive. Ordinary bodies are chunked paragraph-aware. The `agent_session_transcript` format parses JSONL and indexes assistant/tool-result text while preserving document metadata and tags. Returns the new document id, slug, chunk count and total word count. Embedding is handled asynchronously by the worker; call `seshat_embed_now` to force an immediate pass if you need search to be live right away."
     )]
     async fn seshat_ingest(
         &self,

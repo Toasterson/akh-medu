@@ -63,7 +63,7 @@ pub struct IngestRequest {
     pub title: String,
     /// URL-safe unique slug. Auto-derived from title if `None`.
     pub slug: Option<String>,
-    /// Document format: `markdown`, `text`, `html`, `pdf`, `epub`, …
+    /// Document format: `markdown`, `text`, `agent_session_transcript`, …
     pub format: String,
     /// Full document body.
     pub body: String,
@@ -104,7 +104,7 @@ pub async fn ingest_document(
         ));
     }
 
-    let chunks = chunk_paragraph_aware(&req.body, req.target_chunk_chars, &req.format);
+    let chunks = chunks_for_request(&req)?;
     if chunks.is_empty() {
         return Err(SeshatError::Config(
             "ingest: chunker produced zero chunks — is body non-empty whitespace only?"
@@ -168,6 +168,23 @@ pub async fn ingest_document(
         chunk_count,
         word_count: total_words,
     })
+}
+
+fn chunks_for_request(req: &IngestRequest) -> SeshatResult<Vec<ChunkDraft>> {
+    if req.format == crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT {
+        crate::transcript::chunk_agent_session_transcript(
+            &req.body,
+            req.target_chunk_chars,
+            &req.tags,
+            &req.metadata,
+        )
+    } else {
+        Ok(chunk_paragraph_aware(
+            &req.body,
+            req.target_chunk_chars,
+            &req.format,
+        ))
+    }
 }
 
 /// Derive a URL-safe slug from a title. Appends an 8-char UUID suffix
@@ -427,6 +444,89 @@ fn hard_split(s: &str, target: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult, Value};
+
+    #[tokio::test]
+    async fn ingest_transcript_persists_anima_fields_and_extracted_chunks() {
+        let tags = vec!["WI-341".to_string(), "outcome:completed".to_string()];
+        let metadata = serde_json::json!({
+            "work_item_id": "01a03511-6678-7e93-89d7-64fdb0033c44",
+            "executor": "codex",
+            "outcome": "completed",
+            "producer_extension": { "retry": 2 }
+        });
+        let req = IngestRequest {
+            title: "WI-341 completed session".to_string(),
+            slug: None,
+            format: crate::transcript::AGENT_SESSION_TRANSCRIPT_FORMAT.to_string(),
+            body: include_str!("../tests/fixtures/completed_agent_session.jsonl").to_string(),
+            source_path: Some("anima://session/session-wi341/transcript".to_string()),
+            tags: tags.clone(),
+            metadata: metadata.clone(),
+            ingested_by: Some("anima-upload-transcript".to_string()),
+            target_chunk_chars: DEFAULT_TARGET_CHUNK_CHARS,
+        };
+        let returned_document = pa_document::Model {
+            id: Uuid::nil(),
+            title: req.title.clone(),
+            slug: "ignored-by-ingest-summary".to_string(),
+            source_path: req.source_path.clone(),
+            format: req.format.clone(),
+            tags: serde_json::to_value(&tags).unwrap(),
+            metadata: metadata.clone(),
+            chunk_count: 3,
+            ingested_at: chrono::Utc::now(),
+            ingested_by: req.ingested_by.clone(),
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[returned_document]])
+            .append_exec_results([MockExecResult {
+                last_insert_id: 0,
+                rows_affected: 3,
+            }])
+            .into_connection();
+
+        let summary = ingest_document(&db, req)
+            .await
+            .expect("representative completed transcript should ingest");
+        let transaction_log = db.into_transaction_log();
+        let statements = transaction_log[0].statements();
+        let document_statement = statements
+            .iter()
+            .find(|statement| statement.sql.contains("INSERT INTO \"pa_documents\""))
+            .expect("transaction should insert the document");
+        let chunk_statement = statements
+            .iter()
+            .find(|statement| statement.sql.contains("INSERT INTO \"pa_chunks\""))
+            .expect("transaction should insert extracted chunks");
+
+        assert_eq!(summary.chunk_count, 3);
+        let document_values = &document_statement
+            .values
+            .as_ref()
+            .expect("document insert should bind values")
+            .0;
+        let expected_tags: Value = serde_json::to_value(tags).unwrap().into();
+        let expected_metadata: Value = metadata.into();
+        assert!(document_values.contains(&expected_tags));
+        assert!(document_values.contains(&expected_metadata));
+
+        let chunk_values = chunk_statement
+            .values
+            .as_ref()
+            .expect("chunk insert should bind values")
+            .0
+            .iter()
+            .filter_map(|value| match value {
+                Value::String(Some(value)) => Some(value.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(chunk_values.contains("17 passed"));
+        assert!(!chunk_values.contains("tool_use_id"));
+        assert!(!chunk_values.contains("session_id"));
+    }
 
     #[test]
     fn packs_small_paragraphs_into_one_chunk() {
