@@ -111,6 +111,7 @@ the user's explicit approval.
 | + identifier-suffix lock (`2f55af30`) | 47 | – | 80 | 81 | – | – | – | 1042 / 80 |
 | + deadlock-only release, left-anchored runs (`a72b2837`) — regression | 54 | – | 26 | – | – | – | – | – |
 | + run completion by run-byte children, strict escapes (`9b03b856`) | 54 | – | 80 | – | – | – | – | – |
+| + lock from the first run byte after ':' or '/' (`20a33eaa`) — **lane decoder** | 69 | – | 80 | – | – | – | – | – |
 
 Residual after `957589e1` (addressed by `a72b2837`/`9b03b856`, now 0 lock releases): identifiers embedded in composed values
 (`synthetic://textbook:<id>:edition-2`, `MY-159`→`MY-15`) where neither the
