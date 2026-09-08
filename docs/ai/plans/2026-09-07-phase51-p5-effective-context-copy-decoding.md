@@ -108,8 +108,11 @@ the user's explicit approval.
 | + array/object grammar (`eae9e849`) | 43 | 81 | 76 | 78 | 100 | 89 | 70 | 1027 / 130 |
 | + copy bias v1 (`939df6eb`) — regression | 0 | 81 | 0 | – | – | – | – | – |
 | + copy bias fixed, key dedup (`957589e1`) | 47 | 81 | 80 | 81 | 100 | 89 | 70 | 1041 / 80 |
+| + identifier-suffix lock (`2f55af30`) | 47 | – | 80 | 81 | – | – | – | 1042 / 80 |
+| + deadlock-only release, left-anchored runs (`a72b2837`) — regression | 54 | – | 26 | – | – | – | – | – |
+| + run completion by run-byte children, strict escapes (`9b03b856`) | 54 | – | 80 | – | – | – | – | – |
 
-Residual after `957589e1`: identifiers embedded in composed values
+Residual after `957589e1` (addressed by `a72b2837`/`9b03b856`, now 0 lock releases): identifiers embedded in composed values
 (`synthetic://textbook:<id>:edition-2`, `MY-159`→`MY-15`) where neither the
 whole-value bias nor the identifier lock engages → token-level lock on the
 identifier-like suffix of a value (next). The all-tool note tools
