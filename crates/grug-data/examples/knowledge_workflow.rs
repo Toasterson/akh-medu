@@ -32,6 +32,33 @@
 //!   --checkpoint-step 100 --checkpoint-hash sha256:model \
 //!   --length-buckets 2048,4096
 //!
+//! `training` and `prepare` also accept a repeatable `--family-weight
+//! family=weight` flag (measured: v3's equal per-family allocation let
+//! `knowledge.length_generalization`'s padded, multi-step episodes crowd out
+//! 31% of SFT records while `knowledge.provider_fallback` got a sliver,
+//! plausibly biasing the trained model toward free-text answers). Weight
+//! must be a finite number greater than zero; the family id must be one of
+//! the eight `knowledge.*` families. Unweighted families keep weight `1.0`,
+//! and the flag may repeat to set several families at once:
+//!
+//! cargo run -p grug-data --example knowledge_workflow -- training \
+//!   --contracts contracts.json --seed 42 --episodes 7350 --sft \
+//!   --family-weight knowledge.length_generalization=0.25
+//!
+//! cargo run -p grug-data --example knowledge_workflow -- prepare \
+//!   --contracts contracts.json --out runs/knowledge/corpus-v4 \
+//!   --run-id corpus-v4 --train-seed 42 --eval-seed 4242 \
+//!   --sentinel-seed 9001 --train-episodes 7350 --eval-episodes 500 \
+//!   --family-weight knowledge.length_generalization=0.25 \
+//!   --family-weight knowledge.provider_fallback=2.0
+//!
+//! Leaving `--family-weight` unset reproduces today's allocation exactly
+//! (every family at its implicit default weight of `1.0`); setting any
+//! non-uniform weight changes which scenario lands on which episode index
+//! for every family, not only the reweighted one, so opted-in runs will not
+//! byte-for-byte match an unweighted run at the same seed. `prepare` records
+//! the effective weights it used under `family_weights` in `curriculum.json`.
+//!
 //! Separately namespaced training sibling from a materialized frontier exam:
 //!
 //! cargo run -p grug-data --example knowledge_workflow -- sibling \
@@ -124,6 +151,7 @@ fn prepare(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let bindings = KnowledgeToolBindings::default();
     let generator = KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone())?;
     let generator = apply_length_buckets(generator, arguments)?;
+    let generator = apply_family_weights(generator, arguments)?;
     let train = generator.generate_training(train_seed, train_episodes, max_difficulty)?;
     let evaluation = generator.generate_training(eval_seed, eval_episodes, max_difficulty)?;
     verify_training_coverage(&train)?;
@@ -204,6 +232,7 @@ fn prepare(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         "run_id": run_id,
         "contract_hash": contracts.manifest_hash,
         "contracts": {"path": "contracts.json", "file_hash": fingerprint_file(&output.join("contracts.json"))?},
+        "family_weights": generator.family_weights(),
         "training": {
             "seed": train_seed,
             "episodes": train.episodes.len(),
@@ -237,6 +266,7 @@ fn training(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let bindings = KnowledgeToolBindings::default();
     let generator = KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone())?;
     let generator = apply_length_buckets(generator, arguments)?;
+    let generator = apply_family_weights(generator, arguments)?;
     let seed = required(arguments, "--seed")?.parse()?;
     let episode_count = required(arguments, "--episodes")?.parse()?;
     let max_difficulty = optional(arguments, "--max-difficulty")
@@ -586,6 +616,36 @@ fn apply_length_buckets(
     }
 }
 
+/// Parse every repeated `--family-weight family=weight` occurrence for
+/// `training`/`prepare` allocation. Missing entirely leaves the generator's
+/// default weights (every family `1.0`) untouched, reproducing today's
+/// allocation exactly.
+fn parse_family_weights(arguments: &[String]) -> Result<BTreeMap<&str, f64>, Box<dyn Error>> {
+    let mut weights = BTreeMap::new();
+    for raw in all_values(arguments, "--family-weight") {
+        let (family, weight) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("invalid --family-weight {raw:?}: expected family=weight"))?;
+        let weight: f64 = weight
+            .parse()
+            .map_err(|error| format!("invalid --family-weight {raw:?}: {error}"))?;
+        weights.insert(family, weight);
+    }
+    Ok(weights)
+}
+
+fn apply_family_weights(
+    generator: KnowledgeWorkflowGenerator,
+    arguments: &[String],
+) -> Result<KnowledgeWorkflowGenerator, Box<dyn Error>> {
+    let weights = parse_family_weights(arguments)?;
+    if weights.is_empty() {
+        Ok(generator)
+    } else {
+        Ok(generator.with_family_weights(weights)?)
+    }
+}
+
 fn required<'a>(arguments: &'a [String], flag: &str) -> Result<&'a str, Box<dyn Error>> {
     optional(arguments, flag).ok_or_else(|| format!("{flag} is required").into())
 }
@@ -593,6 +653,17 @@ fn required<'a>(arguments: &'a [String], flag: &str) -> Result<&'a str, Box<dyn 
 fn optional<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
     let index = arguments.iter().position(|value| value == flag)?;
     arguments.get(index + 1).map(String::as_str)
+}
+
+/// Every value following a (possibly repeated) occurrence of `flag`, in
+/// argument order. Used for flags like `--family-weight` that may be passed
+/// more than once, unlike [`optional`], which only ever returns the first.
+fn all_values<'a>(arguments: &'a [String], flag: &str) -> Vec<&'a str> {
+    arguments
+        .iter()
+        .zip(arguments.iter().skip(1))
+        .filter_map(|(name, value)| (name == flag).then_some(value.as_str()))
+        .collect()
 }
 
 fn has_flag(arguments: &[String], flag: &str) -> bool {

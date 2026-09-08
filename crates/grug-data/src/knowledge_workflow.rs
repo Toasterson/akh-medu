@@ -750,6 +750,8 @@ pub enum KnowledgeWorkflowError {
     InvalidPrediction { message: String },
     #[error("length-generalization buckets must be non-empty and non-zero, got {buckets:?}")]
     InvalidLengthBuckets { buckets: Vec<u32> },
+    #[error("family weight for {family:?} must be finite and greater than zero, got {weight}")]
+    InvalidFamilyWeight { family: String, weight: f64 },
 }
 
 pub struct KnowledgeWorkflowGenerator {
@@ -759,6 +761,10 @@ pub struct KnowledgeWorkflowGenerator {
     /// (default [`DEFAULT_LENGTH_BUCKETS`]); see
     /// [`Self::with_length_buckets`].
     length_buckets: Vec<u32>,
+    /// Per-family episode weight used by [`Self::generate_training`] to
+    /// interleave [`KnowledgeScenario::all()`] (default: every family
+    /// weight `1.0`); see [`Self::with_family_weights`].
+    family_weights: BTreeMap<&'static str, f64>,
 }
 
 impl KnowledgeWorkflowGenerator {
@@ -778,6 +784,7 @@ impl KnowledgeWorkflowGenerator {
             contracts,
             bindings,
             length_buckets: DEFAULT_LENGTH_BUCKETS.to_vec(),
+            family_weights: default_family_weights(),
         })
     }
 
@@ -801,6 +808,57 @@ impl KnowledgeWorkflowGenerator {
         Ok(self)
     }
 
+    /// Opt-in per-family episode weighting for [`Self::generate_training`]'s
+    /// allocation across [`KnowledgeScenario::all()`] (default: every
+    /// family weight `1.0`, i.e. unchanged from before this option
+    /// existed). `weights` maps a family id (e.g.
+    /// [`LENGTH_GENERALIZATION_FAMILY`]) to its weight; families not
+    /// mentioned keep whatever weight they already had (`1.0` unless an
+    /// earlier call to this method changed it). Every weight must be
+    /// finite and strictly greater than zero and every key must be a real
+    /// knowledge-workflow family id, both checked with a typed error
+    /// (mirrors how [`Self::generate_exam`] rejects an unknown family).
+    ///
+    /// `generate_training` interleaves families with a smooth weighted
+    /// round-robin (see [`WeightedFamilyCycle`]): with every weight equal
+    /// (the default), this reduces index-for-index to the plain
+    /// `KnowledgeScenario::all()[index % 8]` cycling used before this
+    /// option existed, so leaving it unused reproduces today's exact
+    /// per-seed episode sequence. Once a non-uniform weight is set, the
+    /// index → family cycling changes shape (a down-weighted family is
+    /// skipped more often, up-weighting the others' relative cadence),
+    /// which changes which scenario — and therefore which episode seed —
+    /// lands on a given index for every family, not only the reweighted
+    /// one. That reshuffle is the accepted "seeds differ from v3"
+    /// tradeoff of opting in;
+    /// [`KNOWLEDGE_WORKFLOW_GENERATOR_VERSION`] stays unchanged because
+    /// the generation rules per scenario/language/difficulty are
+    /// unchanged — only which scenario a given index maps to.
+    pub fn with_family_weights(
+        mut self,
+        weights: BTreeMap<&str, f64>,
+    ) -> Result<Self, KnowledgeWorkflowError> {
+        for (&family, &weight) in weights.iter() {
+            let scenario = scenario_from_family(family)?;
+            if !(weight.is_finite() && weight > 0.0) {
+                return Err(KnowledgeWorkflowError::InvalidFamilyWeight {
+                    family: family.to_string(),
+                    weight,
+                });
+            }
+            self.family_weights.insert(scenario.family(), weight);
+        }
+        Ok(self)
+    }
+
+    /// The effective per-family weights (see [`Self::with_family_weights`]),
+    /// keyed by family id. Callers that want to record what was actually
+    /// used, for example in a run manifest, can read this back rather than
+    /// re-deriving it from CLI arguments.
+    pub fn family_weights(&self) -> &BTreeMap<&'static str, f64> {
+        &self.family_weights
+    }
+
     /// Deterministic bucket assignment for episode `index`, cycling through
     /// the configured buckets the same way [`language_for`] cycles
     /// languages, so a single exam or sentinel file exercises every
@@ -817,8 +875,9 @@ impl KnowledgeWorkflowGenerator {
     ) -> Result<KnowledgeTrainingCorpus, KnowledgeWorkflowError> {
         let seed = stable_seed(&["knowledge-training", &seed.to_string()]);
         let mut episodes = Vec::with_capacity(episode_count);
+        let mut family_cycle = WeightedFamilyCycle::new(&self.family_weights);
         for index in 0..episode_count {
-            let scenario = KnowledgeScenario::all()[index % KnowledgeScenario::all().len()];
+            let scenario = family_cycle.next();
             let language = language_for(index);
             let difficulty = (index as u8) % max_difficulty.min(5).saturating_add(1);
             episodes
@@ -1000,6 +1059,79 @@ fn scenario_from_family(family: &str) -> Result<KnowledgeScenario, KnowledgeWork
         _ => Err(KnowledgeWorkflowError::UnknownFamily {
             family: family.into(),
         }),
+    }
+}
+
+/// Every knowledge-workflow family at weight `1.0`, the
+/// [`KnowledgeWorkflowGenerator`] default before
+/// [`KnowledgeWorkflowGenerator::with_family_weights`] changes any of them.
+fn default_family_weights() -> BTreeMap<&'static str, f64> {
+    KnowledgeScenario::all()
+        .into_iter()
+        .map(|scenario| (scenario.family(), 1.0))
+        .collect()
+}
+
+/// Deterministic weighted interleaving of [`KnowledgeScenario::all()`],
+/// driving the family assigned to each successive episode index in
+/// [`KnowledgeWorkflowGenerator::generate_training`].
+///
+/// This implements "smooth weighted round-robin" (the scheme nginx uses to
+/// interleave weighted upstreams): every step, each family's counter
+/// accrues its own weight; the family with the largest counter is picked
+/// and its counter is discounted by the total weight. Two properties this
+/// feature relies on fall out of that scheme for free:
+///
+/// 1. With uniform weights (the default, every family `1.0`) it reduces,
+///    index for index, to the plain `KnowledgeScenario::all()[index % 8]`
+///    cycling `generate_training` used before this type existed — so the
+///    default weight map reproduces today's exact episode sequence for a
+///    given seed. (Verified in `training_default_family_weights_match_v3`.)
+/// 2. With non-uniform weights, over any prefix of `n` picks a family's
+///    observed pick count differs from the ideal `n * w_f / sum(w)` by
+///    strictly less than one pick (the scheme's bounded-unfairness
+///    property), so weighting a family down to `0.25` gives it
+///    approximately a quarter of the share it would otherwise have
+///    received, while the total pick count is always exactly `n` — every
+///    step picks exactly one family, so counts across families always sum
+///    to the requested episode count.
+struct WeightedFamilyCycle {
+    scenarios: [KnowledgeScenario; 8],
+    weights: [f64; 8],
+    counters: [f64; 8],
+    total_weight: f64,
+}
+
+impl WeightedFamilyCycle {
+    fn new(weights_by_family: &BTreeMap<&'static str, f64>) -> Self {
+        let scenarios = KnowledgeScenario::all();
+        let weights = scenarios.map(|scenario| {
+            weights_by_family
+                .get(scenario.family())
+                .copied()
+                .unwrap_or(1.0)
+        });
+        let total_weight = weights.iter().sum();
+        Self {
+            scenarios,
+            weights,
+            counters: [0.0; 8],
+            total_weight,
+        }
+    }
+
+    fn next(&mut self) -> KnowledgeScenario {
+        for (counter, weight) in self.counters.iter_mut().zip(&self.weights) {
+            *counter += weight;
+        }
+        let mut best = 0;
+        for index in 1..self.counters.len() {
+            if self.counters[index] > self.counters[best] {
+                best = index;
+            }
+        }
+        self.counters[best] -= self.total_weight;
+        self.scenarios[best]
     }
 }
 
@@ -3254,6 +3386,168 @@ mod tests {
                 .with_length_buckets(vec![0]),
             Err(KnowledgeWorkflowError::InvalidLengthBuckets { .. })
         ));
+    }
+
+    #[test]
+    fn training_default_family_weights_match_v3() {
+        // (a) Leaving `with_family_weights` unused must reproduce, byte for
+        // byte, the episode sequence `generate_training` produced before
+        // per-family weights existed: scenario cycling was a plain
+        // `KnowledgeScenario::all()[index % 8]`.
+        // `with_length_buckets([2048])` keeps every
+        // `knowledge.length_generalization` episode at the cheapest default
+        // bucket: bucket size is orthogonal to family-cycling correctness,
+        // and the padding loop's cost otherwise dominates a 7350-episode
+        // run (the exact production scale from the measured bias report).
+        let plain = KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+            .unwrap()
+            .with_length_buckets(vec![2048])
+            .unwrap();
+        let explicit_default =
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![2048])
+                .unwrap()
+                .with_family_weights(BTreeMap::from([
+                    (ACQUIRE_FAMILY, 1.0),
+                    (RESTART_FAMILY, 1.0),
+                    (REVISION_FAMILY, 1.0),
+                    (FALLBACK_FAMILY, 1.0),
+                    (ABSTAIN_FAMILY, 1.0),
+                    (TEXTBOOK_INVENTORY_FAMILY, 1.0),
+                    (NOTE_NAVIGATION_FAMILY, 1.0),
+                    (LENGTH_GENERALIZATION_FAMILY, 1.0),
+                ]))
+                .unwrap();
+        let seed = 42;
+        let episode_count = 7350;
+        let plain_corpus = plain.generate_training(seed, episode_count, 5).unwrap();
+        let weighted_corpus = explicit_default
+            .generate_training(seed, episode_count, 5)
+            .unwrap();
+        assert_eq!(plain_corpus, weighted_corpus);
+
+        // Pin the actual v3 cycling formula so a future change to
+        // `WeightedFamilyCycle` that happens to leave the corpus-equality
+        // check above passing (e.g. by coincidence at this episode count)
+        // still gets caught for the general case.
+        let all = KnowledgeScenario::all();
+        let expected: Vec<&str> = (0..episode_count)
+            .map(|index| all[index % all.len()].family())
+            .collect();
+        let actual: Vec<&str> = plain_corpus
+            .episodes
+            .iter()
+            .map(|episode| episode.scenario.family())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn training_family_weight_shrinks_family_share_and_preserves_total() {
+        // (b) Weighting one family down to 0.25 should noticeably shrink its
+        // share of episodes relative to the unweighted baseline, while the
+        // total number of episodes generated is unchanged (every step of
+        // `WeightedFamilyCycle::next` picks exactly one family).
+        let episode_count = 7350;
+        // See the comment on `training_default_family_weights_match_v3`:
+        // pinning `knowledge.length_generalization` to its cheapest bucket
+        // is orthogonal to this test (family share, not bucket coverage).
+        let baseline =
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![2048])
+                .unwrap()
+                .generate_training(42, episode_count, 5)
+                .unwrap();
+        let baseline_count = baseline
+            .episodes
+            .iter()
+            .filter(|episode| episode.family == FALLBACK_FAMILY)
+            .count();
+
+        let weighted =
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![2048])
+                .unwrap()
+                .with_family_weights(BTreeMap::from([(FALLBACK_FAMILY, 0.25)]))
+                .unwrap()
+                .generate_training(42, episode_count, 5)
+                .unwrap();
+        assert_eq!(weighted.episodes.len(), episode_count);
+        let weighted_count = weighted
+            .episodes
+            .iter()
+            .filter(|episode| episode.family == FALLBACK_FAMILY)
+            .count();
+
+        // Ideal share under weight 0.25 against the other seven families'
+        // unchanged weight of 1.0 is `episode_count * 0.25 / 7.25`; allow a
+        // generous band around it since the smooth-weighted-round-robin
+        // scheme only bounds unfairness to within one pick per prefix, not
+        // an exact quota.
+        let ideal = episode_count as f64 * 0.25 / 7.25;
+        assert!(
+            (weighted_count as f64 - ideal).abs() <= 2.0,
+            "expected close to {ideal} `{FALLBACK_FAMILY}` episodes at weight 0.25, got {weighted_count}"
+        );
+        assert!(
+            weighted_count < baseline_count / 2,
+            "expected weight 0.25 to noticeably shrink the family's share: baseline \
+             {baseline_count}, weighted {weighted_count}"
+        );
+
+        // Every other family's total weight is unchanged, so their combined
+        // share must absorb what `FALLBACK_FAMILY` gave up.
+        let other_baseline = baseline.episodes.len() - baseline_count;
+        let other_weighted = weighted.episodes.len() - weighted_count;
+        assert!(other_weighted > other_baseline);
+    }
+
+    #[test]
+    fn training_family_weight_rejects_unknown_family_and_non_positive_weight() {
+        // (c) A weight for a family id this crate does not recognize, or a
+        // non-positive/non-finite weight for a real family, must be a typed
+        // error rather than silently accepted.
+        assert!(matches!(
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_family_weights(BTreeMap::from([("knowledge.not_a_real_family", 1.0)])),
+            Err(KnowledgeWorkflowError::UnknownFamily { family }) if family == "knowledge.not_a_real_family"
+        ));
+        for bad_weight in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let result =
+                KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                    .unwrap()
+                    .with_family_weights(BTreeMap::from([(FALLBACK_FAMILY, bad_weight)]));
+            assert!(
+                matches!(
+                    result,
+                    Err(KnowledgeWorkflowError::InvalidFamilyWeight { .. })
+                ),
+                "expected weight {bad_weight} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn training_family_weight_allocation_is_deterministic() {
+        // (d) The same seed and the same weights must produce byte-identical
+        // corpora across independent generator instances.
+        let weights =
+            BTreeMap::from([(FALLBACK_FAMILY, 0.25), (LENGTH_GENERALIZATION_FAMILY, 3.0)]);
+        let build = || {
+            KnowledgeWorkflowGenerator::new(contracts(), KnowledgeToolBindings::default())
+                .unwrap()
+                .with_length_buckets(vec![2048])
+                .unwrap()
+                .with_family_weights(weights.clone())
+                .unwrap()
+                .generate_training(4242, 500, 5)
+                .unwrap()
+        };
+        assert_eq!(build(), build());
     }
 
     #[test]
