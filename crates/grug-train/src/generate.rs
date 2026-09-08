@@ -329,28 +329,52 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
         let mut any_allowed = locked_any;
         let mut active_state = state.clone();
         if state.identifier_lock_engaged() {
-            let released_state = state.with_identifier_lock_released();
-            let (released_mask, released_any) =
-                build_copy_mask(&released_state, grammar, &copy, pieces, vocab_size, eos_id);
-            let release = if released_any {
-                let released_tensor = Tensor::<B, 1>::from_data(
-                    TensorData::new(released_mask.clone(), [vocab_size]),
-                    device,
-                );
-                let preferred_id = argmax(last_logits.clone() + released_tensor);
-                should_release_identifier_lock(&locked_mask, preferred_id)
-            } else {
-                // Even with the lock released nothing is legal (some other
-                // constraint, e.g. the D1 schema-pattern trie, is what is
-                // actually blocking): release anyway so the outer
-                // `!any_allowed` check below reports the true dead end.
-                true
-            };
-            if release {
-                active_state = released_state;
-                mask = released_mask;
-                any_allowed = released_any;
-                identifier_copy_releases += 1;
+            // Perf shortcut (Phase 51: this per-step mask build over the
+            // whole vocabulary is the dominant decode-time cost, and used to
+            // run *twice* -- once locked, once released -- on every step
+            // inside a locked value): releasing the lock never happens
+            // unless the model's own *unconstrained* top choice is illegal
+            // under the strict lock (`should_release_identifier_lock` below
+            // is exactly that check). The released mask can only ever be a
+            // superset of what the locked mask allows (releasing the D2 lock
+            // relaxes a constraint, never adds one; structural/D1 legality
+            // is identical either way -- see `step_copy`), so if the raw
+            // (fully unmasked) argmax is already legal under `locked_mask`,
+            // it is necessarily also the released mask's argmax, and it is
+            // legal under the lock -- `should_release_identifier_lock` would
+            // return `false` regardless. Skip the second O(vocab) mask build
+            // entirely in that case; only fall through to building it when
+            // the raw argmax is *not* already locked-legal, exactly the
+            // "would release" branch that needs the real released mask to
+            // decide (and, if it does release, to decode with).
+            let raw_argmax = argmax(last_logits.clone());
+            let raw_argmax_locked_legal = locked_mask
+                .get(raw_argmax as usize)
+                .is_some_and(|v| v.is_finite());
+            if !raw_argmax_locked_legal {
+                let released_state = state.with_identifier_lock_released();
+                let (released_mask, released_any) =
+                    build_copy_mask(&released_state, grammar, &copy, pieces, vocab_size, eos_id);
+                let release = if released_any {
+                    let released_tensor = Tensor::<B, 1>::from_data(
+                        TensorData::new(released_mask.clone(), [vocab_size]),
+                        device,
+                    );
+                    let preferred_id = argmax(last_logits.clone() + released_tensor);
+                    should_release_identifier_lock(&locked_mask, preferred_id)
+                } else {
+                    // Even with the lock released nothing is legal (some other
+                    // constraint, e.g. the D1 schema-pattern trie, is what is
+                    // actually blocking): release anyway so the outer
+                    // `!any_allowed` check below reports the true dead end.
+                    true
+                };
+                if release {
+                    active_state = released_state;
+                    mask = released_mask;
+                    any_allowed = released_any;
+                    identifier_copy_releases += 1;
+                }
             }
         }
         if !any_allowed {
@@ -1309,5 +1333,302 @@ mod tests {
         let locked_mask = vec![f32::NEG_INFINITY, f32::NEG_INFINITY];
         assert!(should_release_identifier_lock(&locked_mask, 0));
         assert!(should_release_identifier_lock(&locked_mask, 5));
+    }
+
+    // ── Phase 51 perf: synthetic copy-from-context decode-step timing ──────
+    //
+    // Measured on the A100 4096 checkpoint: `eval_knowledge_exam --decoding
+    // constrained` (vocab 8000, prompts up to ~3.5k tokens, 640-token
+    // budget) went from ~3 min/family (grammar+pattern decoder alone) to
+    // ~60-80 min/family once the copy-from-context machinery (identifier
+    // lock + whole-value bias + proactive release) was added -- with the
+    // model forward pass unchanged. This bench isolates that machinery's
+    // CPU-side per-decode-step cost (mask-building over an 8000-piece
+    // vocabulary, the identifier-prefix trie walk, and the whole-value
+    // suffix-copy scan) from the neural net entirely, driving the exact
+    // same `grug_data::constrain` state machine and `build_copy_mask` /
+    // `should_release_identifier_lock` / `select_biased_next_id` this
+    // file's real decode loop uses, over a synthetic ~3k-byte context and a
+    // 300-byte copied identifier value -- the shapes the task spec calls
+    // out for a before/after comparison.
+
+    /// An ~8000-entry synthetic vocabulary whose pieces are drawn from the
+    /// same byte alphabet as the identifier being copied (so most pieces
+    /// remain live candidates deep into the trie walk, the realistic
+    /// worst case) plus every single byte (so the identifier's own next
+    /// byte is always offered).
+    fn synthetic_vocab(alphabet: &[u8], target_len: usize) -> Vec<Option<Vec<u8>>> {
+        let mut pieces: Vec<Option<Vec<u8>>> = (0..=255u16).map(|b| Some(vec![b as u8])).collect();
+        // A cheap deterministic PRNG (xorshift) -- no `rand` dependency
+        // needed for a synthetic fixture.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let next_byte = |state: &mut u64| {
+            *state ^= *state << 13;
+            *state ^= *state >> 7;
+            *state ^= *state << 17;
+            alphabet[(*state as usize) % alphabet.len()]
+        };
+        while pieces.len() < target_len {
+            let len = 2 + (pieces.len() % 3); // pieces of length 2..=4
+            let piece: Vec<u8> = (0..len).map(|_| next_byte(&mut state)).collect();
+            pieces.push(Some(piece));
+        }
+        pieces.truncate(target_len);
+        pieces
+    }
+
+    /// Builds the synthetic fixture: an ~8000-piece vocabulary, a ~3k-byte
+    /// context with one embedded 300-byte identifier, the grammar/copy
+    /// constraints for a single string-valued tool parameter, and a
+    /// [`ConstrainedDecodeState`] already advanced to the opening quote of
+    /// that value (ready to have the identifier's bytes fed in one at a
+    /// time).
+    #[allow(clippy::type_complexity)] // test-only fixture tuple, named fields would not add clarity
+    fn copy_bench_fixture() -> (
+        Vec<Option<Vec<u8>>>,
+        Vec<u8>, // the identifier value, to be typed one byte at a time
+        RuntimeCallGrammar,
+        CopyConstraints,
+        ConstrainedDecodeState,
+    ) {
+        const VOCAB_SIZE: usize = 8000;
+        const VALUE_LEN: usize = 300;
+        let id_alphabet = b"0123456789abcdef-:";
+        let identifier: Vec<u8> = {
+            let mut state: u64 = 0xD1B54A32D192ED03;
+            (0..VALUE_LEN)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    id_alphabet[(state as usize) % id_alphabet.len()]
+                })
+                .collect()
+        };
+        let identifier_str = String::from_utf8(identifier.clone()).unwrap();
+
+        let filler = "the retrieved evidence discusses unrelated background material and prior context. ";
+        let mut context = String::new();
+        while context.len() < 1400 {
+            context.push_str(filler);
+        }
+        context.push_str(&format!("the record id is \"{identifier_str}\" exactly. "));
+        while context.len() < 3000 {
+            context.push_str(filler);
+        }
+        assert!(
+            context.len() >= 3000,
+            "fixture context must be at least ~3k bytes per the task spec"
+        );
+
+        let tools = vec![grug_data::ToolSchema::new(
+            "copy_id",
+            "copies an id verbatim",
+            vec![grug_data::ParamSpec::new(
+                "value",
+                grug_data::ParamType::String,
+                true,
+            )],
+        )];
+        let grammar = RuntimeCallGrammar::new(&tools);
+        let copy = CopyConstraints::build(grammar.inner(), &context, true, Some(4.0));
+
+        // Drive the real state machine up to (and including) the opening
+        // quote of the "value" string, exactly as `generate_from_prompt_ids_cached_constrained`
+        // would after the model emits `<tool_call>\n{"arguments":{"value":"`.
+        let prefix = b"<tool_call>\n{\"arguments\":{\"value\":\"";
+        let state = ConstrainedDecodeState::start(&grammar)
+            .advance(&grammar, &copy, prefix)
+            .expect("fixture prefix must be a legal call prefix");
+
+        let mut vocab: Vec<u8> = id_alphabet.to_vec();
+        vocab.extend_from_slice(b"the quickbrownfoxjmpsvz.,;'\" ");
+        let pieces = synthetic_vocab(&vocab, VOCAB_SIZE);
+
+        (pieces, identifier, grammar, copy, state)
+    }
+
+    /// Times [`build_copy_mask`] alone -- the O(vocab) per-step legality
+    /// scan -- and [`CopyConstraints::suffix`]'s whole-value suffix-copy
+    /// scan, once per byte of a 300-byte identifier value being typed
+    /// (which engages the D2 identifier hard-copy lock after
+    /// `MIN_IDENTIFIER_LOCK_LEN` bytes and holds it for the rest of the
+    /// value -- the sustained worst case for both mechanisms).
+    #[test]
+    #[ignore = "manual timing probe, not part of the fast test gate"]
+    fn bench_copy_mask_and_suffix_index_per_decode_step() {
+        let (pieces, identifier, grammar, copy, mut state) = copy_bench_fixture();
+        let vocab_size = pieces.len();
+        let eos_id = vocab_size as u32 + 1; // deliberately out of range
+
+        let mut mask_build_total = std::time::Duration::ZERO;
+        let mut suffix_total = std::time::Duration::ZERO;
+        let mut locked_steps = 0usize;
+
+        for &byte in &identifier {
+            let mask_start = std::time::Instant::now();
+            let (_mask, _any) = build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
+            mask_build_total += mask_start.elapsed();
+
+            if let Some(content) = state.active_string_content() {
+                let suffix_start = std::time::Instant::now();
+                let _ = copy.suffix.continuations(content);
+                suffix_total += suffix_start.elapsed();
+            }
+            if state.identifier_lock_engaged() {
+                locked_steps += 1;
+            }
+
+            state = state
+                .advance(&grammar, &copy, &[byte])
+                .expect("the fixture's own identifier must stay legal to type");
+        }
+
+        let steps = identifier.len() as u32;
+        println!(
+            "bench_copy_mask_and_suffix_index_per_decode_step: {steps} steps, {locked_steps} identifier-locked; \
+             build_copy_mask: total {mask_build_total:?}, avg {:?}/step; \
+             suffix continuations: total {suffix_total:?}, avg {:?}/step",
+            mask_build_total / steps,
+            suffix_total / steps,
+        );
+    }
+
+    /// Runs the [`copy_bench_fixture`] identifier one byte at a time
+    /// through the *actual* decode-loop shape from
+    /// [`generate_from_prompt_ids_cached_constrained`] -- the
+    /// identifier-lock proactive-release check plus the soft suffix-copy
+    /// bias selection -- using a real (tiny, CPU) [`Tensor`] for the argmax
+    /// steps so the bench exercises the exact same code path the
+    /// model-driven loop does, modulo the forward pass itself. When
+    /// `use_raw_argmax_shortcut` is `false`, the second (released)
+    /// [`build_copy_mask`] call always runs whenever the lock is engaged --
+    /// the pre-fix shape, before the perf fix at this function's real call
+    /// site skipped it whenever the model's own unconstrained top choice
+    /// was already legal under the lock -- so a caller can A/B the two
+    /// shapes against the *same* build of `grug_data::constrain` (isolating
+    /// just this one change, with no other code or machine-variance
+    /// confound).
+    fn run_full_decode_step_shape(use_raw_argmax_shortcut: bool) -> std::time::Duration {
+        let (pieces, identifier, grammar, copy, mut state) = copy_bench_fixture();
+        let vocab_size = pieces.len();
+        let eos_id = vocab_size as u32 + 1;
+        let device = Default::default();
+
+        // Deterministic "logits": favor the identifier's own next byte --
+        // the realistic common case this mechanism targets (the model's
+        // unconstrained top choice already continues the copy correctly),
+        // so the identifier-lock proactive-release check's cheap early-out
+        // (Phase 51 perf) actually applies on most steps rather than always
+        // falling through to the second `build_copy_mask` call.
+        let mut value_bias_overrides = 0u32;
+        let mut global_overrides = 0u32;
+        let mut total = std::time::Duration::ZERO;
+
+        for &byte in &identifier {
+            let step_start = std::time::Instant::now();
+
+            let logits_vec: Vec<f32> = (0..vocab_size)
+                .map(|id| if id as u32 == u32::from(byte) { 2.0 } else { 1.0 })
+                .collect();
+            let last_logits = Tensor::<CpuBackend, 1>::from_data(
+                TensorData::new(logits_vec, [vocab_size]),
+                &device,
+            );
+
+            let (locked_mask, _locked_any) =
+                build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
+            let mut mask = locked_mask.clone();
+            let mut active_state = state.clone();
+            if state.identifier_lock_engaged() {
+                let raw_argmax_locked_legal = if use_raw_argmax_shortcut {
+                    let raw_argmax = argmax(last_logits.clone());
+                    locked_mask
+                        .get(raw_argmax as usize)
+                        .is_some_and(|v| v.is_finite())
+                } else {
+                    false // pre-fix shape: always build the released mask
+                };
+                if !raw_argmax_locked_legal {
+                    let released_state = state.with_identifier_lock_released();
+                    let (released_mask, released_any) = build_copy_mask(
+                        &released_state,
+                        &grammar,
+                        &copy,
+                        &pieces,
+                        vocab_size,
+                        eos_id,
+                    );
+                    let release = if released_any {
+                        let released_tensor = Tensor::<CpuBackend, 1>::from_data(
+                            TensorData::new(released_mask.clone(), [vocab_size]),
+                            &device,
+                        );
+                        let preferred_id = argmax(last_logits.clone() + released_tensor);
+                        should_release_identifier_lock(&locked_mask, preferred_id)
+                    } else {
+                        true
+                    };
+                    if release {
+                        active_state = released_state;
+                        mask = released_mask;
+                    }
+                }
+            }
+
+            if let Some(content) = active_state.active_string_content() {
+                let content = content.to_vec();
+                let _ = select_biased_next_id(
+                    &last_logits,
+                    &mask,
+                    &pieces,
+                    &copy,
+                    &content,
+                    4.0,
+                    &mut global_overrides,
+                    &mut value_bias_overrides,
+                );
+            }
+
+            total += step_start.elapsed();
+            state = state
+                .advance(&grammar, &copy, &[byte])
+                .expect("the fixture's own identifier must stay legal to type");
+        }
+        total
+    }
+
+    #[test]
+    #[ignore = "manual timing probe, not part of the fast test gate"]
+    fn bench_full_decode_step_shape_over_a_300_byte_copied_value() {
+        let steps = 300u32;
+        let total = run_full_decode_step_shape(true);
+        println!(
+            "bench_full_decode_step_shape_over_a_300_byte_copied_value: {steps} steps over a 300-byte \
+             value, 8000-piece vocab, ~3k-byte context: total {total:?}, avg {:?}/step",
+            total / steps,
+        );
+    }
+
+    /// Isolated A/B of just the raw-argmax proactive-release shortcut
+    /// (Phase 51 perf, see the call site in
+    /// [`generate_from_prompt_ids_cached_constrained`]): both arms run
+    /// against the exact same (already-optimized) `grug_data::constrain`
+    /// state machine, so the only variable is whether the second
+    /// `build_copy_mask` call is skipped when the model's own unconstrained
+    /// top choice already continues the identifier lock.
+    #[test]
+    #[ignore = "manual timing probe, not part of the fast test gate"]
+    fn bench_raw_argmax_shortcut_isolated_a_b() {
+        let steps = 300u32;
+        let without_shortcut = run_full_decode_step_shape(false);
+        let with_shortcut = run_full_decode_step_shape(true);
+        println!(
+            "bench_raw_argmax_shortcut_isolated_a_b: {steps} steps; \
+             always-double-build (pre-fix shape): total {without_shortcut:?}, avg {:?}/step; \
+             raw-argmax shortcut (post-fix shape): total {with_shortcut:?}, avg {:?}/step",
+            without_shortcut / steps,
+            with_shortcut / steps,
+        );
     }
 }

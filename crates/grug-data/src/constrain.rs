@@ -1346,12 +1346,28 @@ impl CopyTrie {
         trie
     }
 
+    /// The root node index -- always `0` by construction (`new` seeds
+    /// `children`/`terminal` with exactly one entry before inserting any
+    /// candidate). Exposed so an incremental byte-by-byte walk (e.g.
+    /// [`IdentifierIndex::advance_prefix`]) can start one without first
+    /// calling [`Self::is_prefix_of_any`] on an empty query.
+    const ROOT: usize = 0;
+
     fn walk(&self, bytes: &[u8]) -> Option<usize> {
-        let mut node = 0usize;
+        let mut node = Self::ROOT;
         for &byte in bytes {
             node = *self.children[node].get(&byte)?;
         }
         Some(node)
+    }
+
+    /// One step of [`Self::walk`] from an already-reached `node` rather than
+    /// the root -- the incremental-walk primitive [`IdentifierIndex::advance_prefix`]
+    /// uses so a caller tracking its own cursor across many single-byte
+    /// steps (e.g. [`CopyState::Active::id_prefix_node`]) never re-walks
+    /// bytes it has already consumed.
+    fn child(&self, node: usize, byte: u8) -> Option<usize> {
+        self.children[node].get(&byte).copied()
     }
 
     /// Is `bytes` a prefix of at least one candidate (including being a full
@@ -1803,7 +1819,7 @@ impl RuntimeCallGrammar {
 //    the context that merely prefixes a longer identifier -- see rule (b) on
 //    [`IdentifierIndex::is_closable`]) are legal. The lock may only *engage*
 //    over content that itself already looks identifier-shaped (rule (a),
-//    [`looks_like_identifier`]) -- a plain word like `textbook` must never
+//    [`is_identifier_shape_byte`]) -- a plain word like `textbook` must never
 //    lock just because it happens to prefix a longer compound identifier
 //    elsewhere in the context. If no vocabulary token can preserve an
 //    engaged lock (checked once per decode step, not per candidate -- see
@@ -1943,10 +1959,15 @@ const MIN_IDENTIFIER_LOCK_LEN: usize = 4;
 /// context (`textbook:e89c...:edition-2`) -- forcing that word to keep
 /// typing out the whole unrelated identifier was root cause 1 of the
 /// runaway tag/array bug this rule fixes.
-fn looks_like_identifier(content: &[u8]) -> bool {
-    content
-        .iter()
-        .any(|&b| b.is_ascii_digit() || matches!(b, b':' | b'/' | b'_' | b'-' | b'.'))
+///
+/// Per-byte rather than over a whole `content` slice (Phase 51 perf):
+/// [`CopyState::Active::has_identifier_shape`] OR-accumulates this over each
+/// newly appended byte instead of rescanning the whole (up to ~300 byte)
+/// value from scratch on every one of the (up to 8000) vocabulary
+/// candidates checked per decode step -- `content` only grows, so the two
+/// are equivalent.
+fn is_identifier_shape_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b':' | b'/' | b'_' | b'-' | b'.')
 }
 
 /// The identifier-shaped substrings of one generation call's context,
@@ -1971,12 +1992,24 @@ impl IdentifierIndex {
         }
     }
 
-    fn is_prefix_of_any(&self, bytes: &[u8]) -> bool {
-        self.trie.is_prefix_of_any(bytes)
-    }
-
     fn is_exact_match(&self, bytes: &[u8]) -> bool {
         self.trie.is_exact_match(bytes)
+    }
+
+    /// Advance an incremental identifier-prefix cursor
+    /// ([`CopyState::Active::id_prefix_node`]) by one byte, without
+    /// re-walking the bytes already consumed to reach `node` (Phase 51
+    /// perf: `step_copy` used to call the equivalent of
+    /// `self.trie.is_prefix_of_any(&content)` -- a full walk of the
+    /// *entire* accumulated value -- on every single byte of every
+    /// vocabulary candidate during mask-building, O(value length) work per
+    /// byte per candidate; this is the same trie walked one edge at a
+    /// time instead). `node` is `Some(`[`CopyTrie::ROOT`]`)` for an empty
+    /// prefix, or `None` once the cursor has left every candidate --
+    /// mirroring `is_prefix_of_any`'s "false forever after" guarantee once
+    /// broken, since `None.and_then(..)` stays `None`.
+    fn advance_prefix(&self, node: Option<usize>, byte: u8) -> Option<usize> {
+        node.and_then(|n| self.trie.child(n, byte))
     }
 
     /// Rule (b) of the Phase 51 / ADR 104 D2 bug fix: whether `bytes` may
@@ -2010,16 +2043,71 @@ impl IdentifierIndex {
 /// has diverged from every context occurrence), it is mathematically
 /// guaranteed to keep returning `None` for the rest of that same value --
 /// the bias never re-engages mid-value.
+///
+/// # Incremental matching (Phase 51 perf)
+///
+/// `grug-train`'s decode loop calls [`Self::continuations`] once per decode
+/// step with `content` one (occasionally a few, for a multi-byte vocabulary
+/// piece) byte(s) longer than the previous call -- naively re-scanning the
+/// *entire* context for the *entire* value from scratch every step is
+/// O(context length x value length) per step, which dominated a measured
+/// 15-20x regression on long (~300 byte) copied values. Instead, an interior
+/// [`MatchCache`] remembers the match-start positions found for the
+/// previous call's content: when the new `content` extends that exact
+/// prefix (the overwhelmingly common case -- see the struct docs' monotonic
+/// growth guarantee), the next call only has to re-check the *newly
+/// appended* bytes at each already-known position (O(previous matches x new
+/// bytes) instead of O(context length x value length)) rather than
+/// research the whole context. Any call whose `content` is not a simple
+/// extension of the cached one (a fresh value, or a value that skipped
+/// calls while [`crate`]'s per-value override cap was exhausted) falls back
+/// to the exact original full-context scan, so the result is identical to
+/// the from-scratch algorithm in every case -- this is a pure
+/// caching/complexity optimization, not a behavior change.
 #[derive(Debug, Clone, Default)]
 pub struct SuffixCopyIndex {
     context: Vec<u8>,
+    cache: std::cell::RefCell<MatchCache>,
+}
+
+/// [`SuffixCopyIndex`]'s incremental-matching cache: the match-start
+/// positions found the last time [`SuffixCopyIndex::continuations`] was
+/// called, and the exact `content` bytes they correspond to (so the next
+/// call can tell whether it is a simple extension of this one).
+#[derive(Debug, Clone, Default)]
+struct MatchCache {
+    content: Vec<u8>,
+    positions: Vec<usize>,
 }
 
 impl SuffixCopyIndex {
     pub fn build(context: &str) -> Self {
         Self {
             context: context.as_bytes().to_vec(),
+            cache: std::cell::RefCell::new(MatchCache::default()),
         }
+    }
+
+    /// Every starting offset in `context` where `content` occurs verbatim,
+    /// found by the same exhaustive (overlap-permitting) scan the original
+    /// implementation used: advance one byte past each match rather than
+    /// past the whole match length, so overlapping occurrences are all
+    /// found.
+    fn scan_positions(context: &[u8], content: &[u8]) -> Vec<usize> {
+        let mut positions = Vec::new();
+        let mut search_from = 0usize;
+        while search_from + content.len() <= context.len() {
+            let Some(offset) = context[search_from..]
+                .windows(content.len())
+                .position(|window| window == content)
+            else {
+                break;
+            };
+            let match_start = search_from + offset;
+            positions.push(match_start);
+            search_from = match_start + 1;
+        }
+        positions
     }
 
     /// The bytes (mapped through [`json_escape_first_byte`]) observed to
@@ -2033,21 +2121,42 @@ impl SuffixCopyIndex {
         if content.is_empty() || content.len() > self.context.len() {
             return None;
         }
+        let mut cache = self.cache.borrow_mut();
+        // Incremental path: `content` extends the previously-cached content
+        // by >= 0 bytes -- every position that matched the shorter prefix is
+        // a superset of the positions that can match `content` (a longer
+        // string can only be a substring where its own prefix already was),
+        // so filtering by just the newly appended bytes at each previously
+        // known position is exactly equivalent to (but far cheaper than) a
+        // full re-scan. Requires a non-empty cached prefix: an empty cache
+        // trivially "starts with" anything, but carries no position set to
+        // filter (bootstrap case below).
+        let positions: Vec<usize> = if !cache.content.is_empty()
+            && content.len() >= cache.content.len()
+            && content[..cache.content.len()] == cache.content[..]
+        {
+            let prev_len = cache.content.len();
+            let new_suffix = &content[prev_len..];
+            cache
+                .positions
+                .iter()
+                .copied()
+                .filter(|&p| self.context.get(p + prev_len..p + content.len()) == Some(new_suffix))
+                .collect()
+        } else {
+            Self::scan_positions(&self.context, content)
+        };
+
+        cache.content = content.to_vec();
+        cache.positions = positions.clone();
+        drop(cache);
+
         let mut next_bytes = std::collections::HashSet::new();
-        let mut search_from = 0usize;
-        while search_from + content.len() <= self.context.len() {
-            let Some(offset) = self.context[search_from..]
-                .windows(content.len())
-                .position(|window| window == content)
-            else {
-                break;
-            };
-            let match_start = search_from + offset;
+        for match_start in positions {
             let match_end = match_start + content.len();
             if let Some(&next) = self.context.get(match_end) {
                 next_bytes.insert(json_escape_first_byte(next));
             }
-            search_from = match_start + 1;
         }
         if next_bytes.is_empty() {
             None
@@ -2113,6 +2222,20 @@ enum CopyState {
         /// maintain incrementally instead of rescanning `content` every
         /// step).
         has_whitespace: bool,
+        /// Incremental cache of [`is_identifier_shape_byte`] OR-accumulated
+        /// over `content`'s bytes (Phase 51 perf: `content` only grows, so
+        /// this is equivalent to rescanning the whole value on every byte,
+        /// without the O(value length) cost of actually doing so).
+        has_identifier_shape: bool,
+        /// Incremental cursor into [`IdentifierIndex`]'s prefix trie
+        /// ([`IdentifierIndex::advance_prefix`]): the node reached by
+        /// walking `content`'s bytes from the trie root, or `None` once
+        /// `content` has left every identifier candidate. Lets the
+        /// identifier lock's per-byte legality check
+        /// ([`ConstrainedDecodeState::step_copy`]) run in O(1) instead of
+        /// re-walking all of `content` on every byte of every vocabulary
+        /// candidate during mask-building (Phase 51 perf).
+        id_prefix_node: Option<usize>,
         lock: IdLock,
     },
 }
@@ -2240,31 +2363,60 @@ impl ConstrainedDecodeState {
                 content: Vec::new(),
                 escaped: false,
                 has_whitespace: false,
+                has_identifier_shape: false,
+                id_prefix_node: Some(CopyTrie::ROOT),
                 lock: IdLock::Unlocked,
             });
         }
 
         if was_in_string && now_in_string {
-            let (mut content, mut escaped, mut has_whitespace, mut lock) = match &self.copy {
+            let (
+                mut content,
+                mut escaped,
+                mut has_whitespace,
+                mut has_identifier_shape,
+                mut id_prefix_node,
+                mut lock,
+            ) = match &self.copy {
                 CopyState::Active {
                     content,
                     escaped,
                     has_whitespace,
+                    has_identifier_shape,
+                    id_prefix_node,
                     lock,
-                } => (content.clone(), *escaped, *has_whitespace, lock.clone()),
+                } => (
+                    content.clone(),
+                    *escaped,
+                    *has_whitespace,
+                    *has_identifier_shape,
+                    *id_prefix_node,
+                    lock.clone(),
+                ),
                 // The schema-trie governed the previous byte (or this is the
                 // first byte after some other transition); start fresh
                 // rather than assume a mismatched variant.
-                CopyState::Idle => (Vec::new(), false, false, IdLock::Unlocked),
+                CopyState::Idle => (Vec::new(), false, false, false, Some(CopyTrie::ROOT), IdLock::Unlocked),
             };
 
+            // `content` only ever grows, so `has_identifier_shape` and
+            // `id_prefix_node` are maintained as pure incremental
+            // accumulations of what a from-scratch `is_identifier_shape_byte`
+            // scan / `IdentifierIndex::is_prefix_of_any` walk over the whole
+            // of `content` would compute (Phase 51 perf) -- see the field
+            // docs on [`CopyState::Active`].
             if escaped {
-                content.push(unescape_byte(byte));
+                let semantic = unescape_byte(byte);
+                content.push(semantic);
+                has_identifier_shape = has_identifier_shape || is_identifier_shape_byte(semantic);
+                id_prefix_node = identifiers.advance_prefix(id_prefix_node, semantic);
                 escaped = false;
             } else if byte == b'\\' {
                 escaped = true;
             } else {
                 content.push(byte);
+                has_identifier_shape = has_identifier_shape || is_identifier_shape_byte(byte);
+                id_prefix_node = identifiers.advance_prefix(id_prefix_node, byte);
                 if byte.is_ascii_whitespace() {
                     has_whitespace = true;
                 }
@@ -2278,16 +2430,14 @@ impl ConstrainedDecodeState {
                         // word must never lock just because it prefixes some
                         // unrelated identifier elsewhere in the context.
                         if content.len() >= MIN_IDENTIFIER_LOCK_LEN
-                            && looks_like_identifier(&content)
-                            && identifiers.is_prefix_of_any(&content)
+                            && has_identifier_shape
+                            && id_prefix_node.is_some()
                         {
                             lock = IdLock::Locked;
                         }
                     }
                     IdLock::Locked => {
-                        if !identifiers.is_prefix_of_any(&content) {
-                            return None;
-                        }
+                        id_prefix_node?;
                     }
                     IdLock::Released => {}
                 }
@@ -2297,6 +2447,8 @@ impl ConstrainedDecodeState {
                 content,
                 escaped,
                 has_whitespace,
+                has_identifier_shape,
+                id_prefix_node,
                 lock,
             });
         }
