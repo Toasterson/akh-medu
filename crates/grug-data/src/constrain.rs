@@ -1364,7 +1364,7 @@ impl CopyTrie {
     /// One step of [`Self::walk`] from an already-reached `node` rather than
     /// the root -- the incremental-walk primitive [`IdentifierIndex::advance_prefix`]
     /// uses so a caller tracking its own cursor across many single-byte
-    /// steps (e.g. [`CopyState::Active::id_prefix_node`]) never re-walks
+    /// steps (e.g. [`CopyState::Active::run_prefix_node`]) never re-walks
     /// bytes it has already consumed.
     fn child(&self, node: usize, byte: u8) -> Option<usize> {
         self.children[node].get(&byte).copied()
@@ -1812,23 +1812,21 @@ impl RuntimeCallGrammar {
 // from for these, this section adds two context-*derived* mechanisms
 // instead of a schema-derived one:
 //
-// 1. [`IdentifierIndex`] -- a hard lock: once a string value's emitted bytes
-//    become an unambiguous prefix of a whitespace-free, digit/`:/_-.`-bearing
-//    substring of the context, only bytes preserving that prefix (or, at the
-//    closing `"`, completing it exactly, or completing a whole word/tag of
-//    the context that merely prefixes a longer identifier -- see rule (b) on
-//    [`IdentifierIndex::is_closable`]) are legal. The lock may only *engage*
-//    over content that itself already looks identifier-shaped (rule (a),
-//    [`is_identifier_shape_byte`]) -- a plain word like `textbook` must never
-//    lock just because it happens to prefix a longer compound identifier
-//    elsewhere in the context. If no vocabulary token can preserve an
-//    engaged lock (checked once per decode step, not per candidate -- see
+// 1. [`IdentifierIndex`] -- a hard lock over the identifier-shaped *suffix
+//    run* of a string value's emitted bytes (not the whole value -- see the
+//    redesign note below), so a value the runtime *composes* around a
+//    copied identifier (a fixed URI prefix, a distilled sentence) still gets
+//    that identifier locked even though the whole value itself never occurs
+//    verbatim anywhere in the prompt. Once the run becomes an unambiguous
+//    prefix of a digit-bearing identifier token in the context, only bytes
+//    preserving that prefix are legal, until the run either completes (the
+//    lock releases -- see [`Self::identifier_lock_engaged`]) or diverges. If
+//    no vocabulary token can preserve an engaged lock (checked once per
+//    decode step, not per candidate -- see
 //    [`ConstrainedDecodeState::identifier_lock_engaged`] and
-//    [`ConstrainedDecodeState::with_identifier_lock_released`]), or the
-//    model's own lock-unconstrained preference would leave the identifier
-//    entirely (rule (c), enforced by `grug-train`'s decode loop), the lock is
-//    released for the rest of that value rather than forcing the "longest
-//    match" completion.
+//    [`ConstrainedDecodeState::with_identifier_lock_released`]), the lock is
+//    released for the rest of *that run* (not the whole value) rather than
+//    forcing the "longest match" completion.
 // 2. [`SuffixCopyIndex`] -- a soft bias over the **whole value** emitted so
 //    far (not a recurring short suffix -- see the struct docs for why that
 //    was root cause 2 of a runaway repetition bug): while the entire value
@@ -1839,6 +1837,39 @@ impl RuntimeCallGrammar {
 //    that doesn't. This is a *ranking* choice, not a legality one, so it has
 //    no presence in [`ConstrainedDecodeState::step`] -- only
 //    [`ConstrainedDecodeState::active_string_content`] exposes what it needs.
+//    This mechanism is untouched by the suffix-run redesign below -- it
+//    already operates on the whole value and stays as is.
+//
+// # Suffix-run redesign (measured on decoder 957589e1, paired v5)
+//
+// The original mechanism 1 tracked the identifier lock over the **whole**
+// value typed so far, on the theory that a value copying an identifier from
+// the prompt would itself be that identifier, verbatim. That is false
+// whenever the runtime *composes* the value around the copied identifier --
+// `"source_path":"synthetic://textbook:8d87cddac3f4fccf:edition-2"` (the
+// `synthetic://textbook:` prefix and `:edition-2` suffix are template text,
+// not drawn from the prompt) or `"body":"... Namar-vanta-43 is MY-159."` (a
+// distilled sentence wrapping a copied token). Because the *whole value*
+// never occurs in the prompt, the old whole-content prefix check never found
+// a match, and the lock never engaged at all -- the model was free to
+// corrupt `8d87cddac3f4fccf` or `MY-159` mid-copy with no mechanism watching
+// it.
+//
+// The fix operates on the *suffix run* of the value's unescaped content: the
+// maximal trailing span of identifier-run bytes ([`is_identifier_run_byte`];
+// `[A-Za-z0-9_.-]`), reset to empty every time a non-run byte (`:`, `/`,
+// whitespace, a JSON structural byte) is emitted. Tracking just the current
+// run -- rather than the whole value -- means a composed prefix like
+// `synthetic://textbook:` is invisible to the mechanism (it is all run
+// resets and a no-digit run that never engages), while the embedded
+// `8d87cddac3f4fccf` run is tracked and locked exactly as it would be if it
+// were the entire value. `:` and `/` are deliberately run *delimiters* now
+// (not run bytes) -- unlike the old whole-value design, a compound
+// identifier built from multiple `:`/`/`-joined pieces is now several
+// separate runs, each independently locked while it is being typed. `-`,
+// `_`, `.` stay inside runs (splitting `note-<32hex>` on `-`, or
+// `Namar-vanta-43` at all, would shred the very identifier this mechanism
+// needs to protect).
 //
 // Both derive their working set from the *unescaped* value content (a JSON
 // `\"`/`\n`/`\\` escape is not what appears in the context, which is plain
@@ -1876,22 +1907,32 @@ fn unescape_byte(byte: u8) -> u8 {
     }
 }
 
-/// Split `context` into whitespace-free "identifier tokens" for
-/// [`IdentifierIndex`]: cut on Unicode whitespace and the JSON structural
-/// delimiters `"` `{` `}` `[` `]` `,` -- deliberately **not** `:`, `/`, `_`,
-/// `-`, `.`, since those are exactly the characters a compound identifier
-/// like `textbook:484a5a7ec4e0ae11:edition-2` is built from; splitting on
-/// them would shred the very substring this mechanism needs to copy whole.
-/// Keeps tokens of byte length >= 8 containing at least one ASCII digit or
-/// one of `:/_-.`.
+/// Minimum byte length a context substring must have to qualify as an
+/// [`IdentifierIndex`] candidate token (Phase 51 / ADR 104 D2 suffix-run
+/// redesign, rule 1).
+const MIN_IDENTIFIER_TOKEN_LEN: usize = 6;
+
+/// Split `context` into candidate identifier tokens for [`IdentifierIndex`]:
+/// cut on Unicode whitespace, the JSON structural delimiters `"` `{` `}` `[`
+/// `]` `,`, and -- unlike the pre-redesign version of this function -- the
+/// compound-identifier joiners `:` and `/` too, since those are now run
+/// *delimiters* ([`is_identifier_run_byte`]) rather than run bytes: a value
+/// like `synthetic://textbook:8d87cddac3f4fccf:edition-2` is typed as
+/// several independent runs, so the context tokens it can lock against must
+/// be split the same way. Deliberately keeps `-`, `_`, `.` inside tokens
+/// (splitting `note-<32hex>` on `-`, or `Namar-vanta-43` at all, would shred
+/// the very identifier this mechanism needs to protect). Keeps tokens of
+/// byte length >= [`MIN_IDENTIFIER_TOKEN_LEN`] that contain at least one
+/// ASCII digit -- a plain compound word like `keph-index` must never
+/// qualify just because it shares its alphabet with real identifiers (the
+/// old `:/_-.`-or-digit alternative let exactly this kind of false positive
+/// through).
 fn identifier_tokens(context: &str) -> Vec<String> {
     fn push_if_qualifies(tokens: &mut Vec<String>, candidate: &str) {
-        if candidate.len() < 8 {
+        if candidate.len() < MIN_IDENTIFIER_TOKEN_LEN {
             return;
         }
-        let qualifies = candidate.chars().any(|c| c.is_ascii_digit())
-            || candidate.chars().any(|c| matches!(c, ':' | '/' | '_' | '-' | '.'));
-        if qualifies {
+        if candidate.chars().any(|c| c.is_ascii_digit()) {
             tokens.push(candidate.to_string());
         }
     }
@@ -1899,7 +1940,7 @@ fn identifier_tokens(context: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     for c in context.chars() {
-        if c.is_whitespace() || matches!(c, '"' | '{' | '}' | '[' | ']' | ',') {
+        if c.is_whitespace() || matches!(c, '"' | '{' | '}' | '[' | ']' | ',' | ':' | '/') {
             push_if_qualifies(&mut tokens, &current);
             current.clear();
         } else {
@@ -1912,62 +1953,20 @@ fn identifier_tokens(context: &str) -> Vec<String> {
     tokens
 }
 
-/// A finer split of `context` than [`identifier_tokens`]: cuts on Unicode
-/// whitespace, the JSON structural delimiters, *and* the compound-identifier
-/// joiners `:` `/` `_` `-` `.`, keeping every non-empty piece regardless of
-/// shape or length. Used only for rule (b) of the Phase 51 / ADR 104 D2 bug
-/// fix -- [`IdentifierIndex::is_closable`]'s closing-permission check -- so a
-/// plain word like `textbook` is recognized as a complete, closable token of
-/// the context even though it is merely a *prefix* of one whole
-/// [`identifier_tokens`] token (`textbook:e89c...:edition-2`, which
-/// deliberately preserves those joiners so the compound identifier itself
-/// can still be copied whole).
-fn whole_word_tokens(context: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for c in context.chars() {
-        if c.is_whitespace()
-            || matches!(c, '"' | '{' | '}' | '[' | ']' | ',' | ':' | '/' | '_' | '-' | '.')
-        {
-            if !current.is_empty() {
-                tokens.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(c);
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens.sort();
-    tokens.dedup();
-    tokens
-}
+/// Minimum run length before the identifier hard-copy lock may engage at all
+/// (Phase 51 / ADR 104 D2 suffix-run redesign, rule 2): a byte or two is not
+/// enough to distinguish "coincidentally shares a prefix with some
+/// identifier" from "is actually typing that identifier". Lower than the
+/// pre-redesign whole-value threshold (was 4) because a *run* is already a
+/// narrower, more specific signal than a whole value was.
+const MIN_IDENTIFIER_RUN_LEN: usize = 3;
 
-/// Minimum content length before the identifier hard-copy lock may engage at
-/// all (Phase 51 / ADR 104 D2 mechanism 1): a handful of bytes is not enough
-/// to distinguish "coincidentally shares a prefix with some identifier" from
-/// "is actually typing that identifier".
-const MIN_IDENTIFIER_LOCK_LEN: usize = 4;
-
-/// Rule (a) of the Phase 51 / ADR 104 D2 bug fix: the identifier hard-copy
-/// lock may only engage over content that itself already looks like part of
-/// an identifier -- at least one ASCII digit, or one of the compound-
-/// identifier joiners `:` `/` `_` `-` `.`. A plain alphabetic word (e.g. the
-/// legitimate complete tag `textbook`) must never lock just because it
-/// happens to be a *prefix* of some longer identifier elsewhere in the
-/// context (`textbook:e89c...:edition-2`) -- forcing that word to keep
-/// typing out the whole unrelated identifier was root cause 1 of the
-/// runaway tag/array bug this rule fixes.
-///
-/// Per-byte rather than over a whole `content` slice (Phase 51 perf):
-/// [`CopyState::Active::has_identifier_shape`] OR-accumulates this over each
-/// newly appended byte instead of rescanning the whole (up to ~300 byte)
-/// value from scratch on every one of the (up to 8000) vocabulary
-/// candidates checked per decode step -- `content` only grows, so the two
-/// are equivalent.
-fn is_identifier_shape_byte(byte: u8) -> bool {
-    byte.is_ascii_digit() || matches!(byte, b':' | b'/' | b'_' | b'-' | b'.')
+/// Is `byte` part of an identifier's own run body (`[A-Za-z0-9_.-]`)? `:`
+/// and `/` are deliberately *not* run bytes (Phase 51 / ADR 104 D2
+/// suffix-run redesign) -- they, whitespace, and every JSON structural byte
+/// reset the current run to empty (see [`ConstrainedDecodeState::step_copy`]).
+fn is_identifier_run_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
 }
 
 /// The identifier-shaped substrings of one generation call's context,
@@ -1979,49 +1978,37 @@ fn is_identifier_shape_byte(byte: u8) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct IdentifierIndex {
     trie: CopyTrie,
-    /// Finer-grained whole-word tokens ([`whole_word_tokens`]) used only by
-    /// [`Self::is_closable`] (rule (b)).
-    whole_words: CopyTrie,
 }
 
 impl IdentifierIndex {
     pub fn build(context: &str) -> Self {
         Self {
             trie: CopyTrie::new(&identifier_tokens(context)),
-            whole_words: CopyTrie::new(&whole_word_tokens(context)),
         }
     }
 
-    fn is_exact_match(&self, bytes: &[u8]) -> bool {
-        self.trie.is_exact_match(bytes)
+    /// Does `node` sit at the end of a complete candidate token -- i.e. does
+    /// the run that reached it equal that candidate exactly, rather than
+    /// merely being a proper prefix of it? Used by
+    /// [`ConstrainedDecodeState::step_copy`] to decide when a run has
+    /// finished copying an identifier (the lock releases) versus is still
+    /// mid-copy (rule 2 of the Phase 51 / ADR 104 D2 suffix-run redesign).
+    fn is_terminal(&self, node: usize) -> bool {
+        self.trie.terminal[node]
     }
 
-    /// Advance an incremental identifier-prefix cursor
-    /// ([`CopyState::Active::id_prefix_node`]) by one byte, without
-    /// re-walking the bytes already consumed to reach `node` (Phase 51
-    /// perf: `step_copy` used to call the equivalent of
-    /// `self.trie.is_prefix_of_any(&content)` -- a full walk of the
-    /// *entire* accumulated value -- on every single byte of every
-    /// vocabulary candidate during mask-building, O(value length) work per
-    /// byte per candidate; this is the same trie walked one edge at a
-    /// time instead). `node` is `Some(`[`CopyTrie::ROOT`]`)` for an empty
-    /// prefix, or `None` once the cursor has left every candidate --
-    /// mirroring `is_prefix_of_any`'s "false forever after" guarantee once
-    /// broken, since `None.and_then(..)` stays `None`.
+    /// Advance an incremental identifier-run cursor
+    /// ([`CopyState::Active::run_prefix_node`]) by one byte, without
+    /// re-walking the run's bytes already consumed to reach `node` (Phase 51
+    /// perf: this is the same trie [`CopyTrie::is_prefix_of_any`] would walk
+    /// from the root, but walked one edge at a time so a caller tracking its
+    /// own cursor across many single-byte steps never re-walks bytes it has
+    /// already consumed). `node` is `Some(`[`CopyTrie::ROOT`]`)` for an empty
+    /// run, or `None` once the run has left every candidate -- mirroring
+    /// `is_prefix_of_any`'s "false forever after" guarantee once broken,
+    /// since `None.and_then(..)` stays `None`.
     fn advance_prefix(&self, node: Option<usize>, byte: u8) -> Option<usize> {
         node.and_then(|n| self.trie.child(n, byte))
-    }
-
-    /// Rule (b) of the Phase 51 / ADR 104 D2 bug fix: whether `bytes` may
-    /// legally close an identifier-locked string value. Legal either when
-    /// `bytes` is a full compound identifier ([`Self::is_exact_match`]), or
-    /// when it equals a whole delimiter/whitespace-bounded word of the
-    /// context ([`whole_word_tokens`]) -- so a complete word/tag that merely
-    /// happens to prefix a longer identifier (`textbook` prefixing
-    /// `textbook:e89c...:edition-2`) can still close instead of being forced
-    /// to keep typing out the rest of that unrelated identifier.
-    fn is_closable(&self, bytes: &[u8]) -> bool {
-        self.is_exact_match(bytes) || self.whole_words.is_exact_match(bytes)
     }
 }
 
@@ -2209,51 +2196,46 @@ impl CopyConstraints {
 enum CopyState {
     Idle,
     Active {
-        /// The value's *unescaped* content bytes typed so far.
+        /// The value's *unescaped* content bytes typed so far -- the whole
+        /// value, for [`SuffixCopyIndex`] (mechanism 2), independent of the
+        /// suffix-run tracking below (mechanism 1).
         content: Vec<u8>,
         /// A pending `\` escape in the raw (possibly-escaped) decode stream.
         escaped: bool,
-        /// Once true (an ASCII whitespace byte has appeared in `content`),
-        /// the identifier lock can never engage for the rest of this value
-        /// (the task spec: "do not apply this to values that begin with
-        /// whitespace-containing text" -- since `content` only grows, "has
-        /// whitespace anywhere so far" is equivalent to "began with
-        /// whitespace" for the purpose of "never lock", and is O(1) to
-        /// maintain incrementally instead of rescanning `content` every
-        /// step).
-        has_whitespace: bool,
-        /// Incremental cache of [`is_identifier_shape_byte`] OR-accumulated
-        /// over `content`'s bytes (Phase 51 perf: `content` only grows, so
-        /// this is equivalent to rescanning the whole value on every byte,
-        /// without the O(value length) cost of actually doing so).
-        has_identifier_shape: bool,
+        /// How many bytes long the current identifier run (the maximal
+        /// trailing span of [`is_identifier_run_byte`] bytes) is. Reset to
+        /// `0` whenever a non-run byte is emitted (Phase 51 / ADR 104 D2
+        /// suffix-run redesign).
+        run_len: usize,
+        /// Whether the current run has seen an ASCII digit yet -- the lock
+        /// may only engage over a run that already looks identifier-shaped
+        /// (rule (a) of the redesign: a plain compound word like
+        /// `keph-index` must never lock). Reset alongside `run_len`.
+        run_has_digit: bool,
         /// Incremental cursor into [`IdentifierIndex`]'s prefix trie
-        /// ([`IdentifierIndex::advance_prefix`]): the node reached by
-        /// walking `content`'s bytes from the trie root, or `None` once
-        /// `content` has left every identifier candidate. Lets the
-        /// identifier lock's per-byte legality check
-        /// ([`ConstrainedDecodeState::step_copy`]) run in O(1) instead of
-        /// re-walking all of `content` on every byte of every vocabulary
-        /// candidate during mask-building (Phase 51 perf).
-        id_prefix_node: Option<usize>,
-        lock: IdLock,
+        /// ([`IdentifierIndex::advance_prefix`]) for the *current run*: the
+        /// node reached by walking the run's bytes from the trie root, or
+        /// `None` once the run has left every identifier candidate. Lets the
+        /// identifier lock's per-byte legality check run in O(1) instead of
+        /// re-walking the run on every byte of every vocabulary candidate
+        /// during mask-building (Phase 51 perf). Reset to
+        /// `Some(`[`CopyTrie::ROOT`]`)` alongside `run_len`.
+        run_prefix_node: Option<usize>,
+        /// Cached "is the lock currently engaged over this run" as of the
+        /// last processed byte -- kept as a field, rather than derived on
+        /// demand from `run_len`/`run_has_digit`/`run_prefix_node` (which
+        /// would need [`IdentifierIndex::is_terminal`], i.e. a
+        /// [`CopyConstraints`] reference), because
+        /// [`ConstrainedDecodeState::identifier_lock_engaged`] and
+        /// [`ConstrainedDecodeState::with_identifier_lock_released`] must
+        /// stay `&self`-only to match `grug-train`'s existing call sites.
+        /// `true` iff `run_len >= `[`MIN_IDENTIFIER_RUN_LEN`]`,
+        /// `run_has_digit`, and `run_prefix_node` is a *proper* (non-
+        /// terminal) prefix of >= 1 candidate -- once the run completes a
+        /// candidate exactly, this goes back to `false` (rule 2: "the lock
+        /// releases").
+        engaged: bool,
     },
-}
-
-/// Phase 51 / ADR 104 D2 mechanism 1's per-value lock phase.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum IdLock {
-    /// Not yet locked: too short, contains whitespace, or not (yet) a
-    /// prefix of any identifier candidate.
-    Unlocked,
-    /// `content` is a strict prefix of >= 1 identifier candidate (or exactly
-    /// equals one): only bytes preserving that stay legal.
-    Locked,
-    /// The strict lock would have deadlocked generation (no vocabulary
-    /// token could extend the match) for at least one decode step -- see
-    /// [`ConstrainedDecodeState::with_identifier_lock_released`] -- and has
-    /// been released for the remainder of this value.
-    Released,
 }
 
 /// Combined decode-time state: the structural [`RuntimeCallState`] plus the
@@ -2339,10 +2321,12 @@ impl ConstrainedDecodeState {
     }
 
     /// The D2 half of [`Self::step`], split out for readability: advances
-    /// [`CopyState`] and enforces the identifier hard-copy lock. Returns
-    /// `None` exactly when the lock rejects `byte` (a closing quote on an
-    /// incomplete copy, or a byte that would break prefix-hood while
-    /// `identifier_copy` is enabled and [`IdLock::Locked`]).
+    /// [`CopyState`] and enforces the identifier hard-copy lock over the
+    /// value's current identifier *run* (Phase 51 / ADR 104 D2 suffix-run
+    /// redesign). Returns `None` exactly when the lock rejects `byte` (a
+    /// non-run byte or closing quote that would truncate an incomplete run,
+    /// or a run byte that would break prefix-hood) while `identifier_copy`
+    /// is enabled and the run is engaged -- see [`Self::identifier_lock_engaged`].
     fn step_copy(
         &self,
         copy_constraints: &CopyConstraints,
@@ -2362,94 +2346,112 @@ impl ConstrainedDecodeState {
             return Some(CopyState::Active {
                 content: Vec::new(),
                 escaped: false,
-                has_whitespace: false,
-                has_identifier_shape: false,
-                id_prefix_node: Some(CopyTrie::ROOT),
-                lock: IdLock::Unlocked,
+                run_len: 0,
+                run_has_digit: false,
+                run_prefix_node: Some(CopyTrie::ROOT),
+                engaged: false,
             });
         }
 
         if was_in_string && now_in_string {
-            let (
-                mut content,
-                mut escaped,
-                mut has_whitespace,
-                mut has_identifier_shape,
-                mut id_prefix_node,
-                mut lock,
-            ) = match &self.copy {
-                CopyState::Active {
-                    content,
-                    escaped,
-                    has_whitespace,
-                    has_identifier_shape,
-                    id_prefix_node,
-                    lock,
-                } => (
-                    content.clone(),
-                    *escaped,
-                    *has_whitespace,
-                    *has_identifier_shape,
-                    *id_prefix_node,
-                    lock.clone(),
-                ),
-                // The schema-trie governed the previous byte (or this is the
-                // first byte after some other transition); start fresh
-                // rather than assume a mismatched variant.
-                CopyState::Idle => (Vec::new(), false, false, false, Some(CopyTrie::ROOT), IdLock::Unlocked),
-            };
+            let (mut content, mut escaped, mut run_len, mut run_has_digit, mut run_prefix_node, mut engaged) =
+                match &self.copy {
+                    CopyState::Active {
+                        content,
+                        escaped,
+                        run_len,
+                        run_has_digit,
+                        run_prefix_node,
+                        engaged,
+                    } => (
+                        content.clone(),
+                        *escaped,
+                        *run_len,
+                        *run_has_digit,
+                        *run_prefix_node,
+                        *engaged,
+                    ),
+                    // The schema-trie governed the previous byte (or this is
+                    // the first byte after some other transition); start
+                    // fresh rather than assume a mismatched variant.
+                    CopyState::Idle => (Vec::new(), false, 0, false, Some(CopyTrie::ROOT), false),
+                };
 
-            // `content` only ever grows, so `has_identifier_shape` and
-            // `id_prefix_node` are maintained as pure incremental
-            // accumulations of what a from-scratch `is_identifier_shape_byte`
-            // scan / `IdentifierIndex::is_prefix_of_any` walk over the whole
-            // of `content` would compute (Phase 51 perf) -- see the field
-            // docs on [`CopyState::Active`].
-            if escaped {
+            // Resolve the semantic (unescaped) byte, mirroring the D1
+            // schema-trie's own escape handling. `None` means this byte only
+            // opened or continued a `\` escape -- no semantic byte to feed
+            // the run tracking below yet.
+            let semantic = if escaped {
                 let semantic = unescape_byte(byte);
                 content.push(semantic);
-                has_identifier_shape = has_identifier_shape || is_identifier_shape_byte(semantic);
-                id_prefix_node = identifiers.advance_prefix(id_prefix_node, semantic);
                 escaped = false;
+                Some(semantic)
             } else if byte == b'\\' {
                 escaped = true;
+                None
             } else {
                 content.push(byte);
-                has_identifier_shape = has_identifier_shape || is_identifier_shape_byte(byte);
-                id_prefix_node = identifiers.advance_prefix(id_prefix_node, byte);
-                if byte.is_ascii_whitespace() {
-                    has_whitespace = true;
-                }
-            }
+                Some(byte)
+            };
 
-            if identifier_copy && !has_whitespace && !escaped {
-                match lock {
-                    IdLock::Unlocked => {
-                        // Rule (a): only content that already looks
-                        // identifier-shaped may engage the lock -- a plain
-                        // word must never lock just because it prefixes some
-                        // unrelated identifier elsewhere in the context.
-                        if content.len() >= MIN_IDENTIFIER_LOCK_LEN
-                            && has_identifier_shape
-                            && id_prefix_node.is_some()
-                        {
-                            lock = IdLock::Locked;
+            if identifier_copy
+                && let Some(sem) = semantic
+            {
+                if is_identifier_run_byte(sem) {
+                    if engaged {
+                        // Engaged implies `run_prefix_node` is a *proper*
+                        // (non-terminal) prefix of >= 1 candidate, so
+                        // extending it must stay on a path toward one.
+                        match identifiers.advance_prefix(run_prefix_node, sem) {
+                            Some(next) => run_prefix_node = Some(next),
+                            None => {
+                                let was_terminal = run_prefix_node
+                                    .is_some_and(|node| identifiers.is_terminal(node));
+                                if was_terminal {
+                                    // The run already equals a complete
+                                    // candidate and this byte doesn't extend
+                                    // toward a *longer* one (rule 2: "extend
+                                    // only if a longer candidate exists") --
+                                    // fall back to untracked instead of
+                                    // rejecting, since a trailing `.`/prose
+                                    // byte right after a copied id must stay
+                                    // legal.
+                                    run_prefix_node = None;
+                                } else {
+                                    return None; // mid-identifier corruption
+                                }
+                            }
                         }
+                    } else {
+                        // Not (yet) engaged: track passively, never reject.
+                        run_prefix_node = identifiers.advance_prefix(run_prefix_node, sem);
                     }
-                    IdLock::Locked => {
-                        id_prefix_node?;
+                    run_len += 1;
+                    run_has_digit = run_has_digit || sem.is_ascii_digit();
+                } else {
+                    // A non-run byte while still inside the string: a run
+                    // boundary. `engaged` already implies the run is
+                    // non-terminal (incomplete), so this would truncate a
+                    // copy in progress -- illegal.
+                    if engaged {
+                        return None;
                     }
-                    IdLock::Released => {}
+                    run_len = 0;
+                    run_has_digit = false;
+                    run_prefix_node = Some(CopyTrie::ROOT);
                 }
+                engaged = run_len >= MIN_IDENTIFIER_RUN_LEN
+                    && run_has_digit
+                    && run_prefix_node.is_some_and(|node| !identifiers.is_terminal(node));
             }
 
             return Some(CopyState::Active {
                 content,
                 escaped,
-                has_whitespace,
-                has_identifier_shape,
-                id_prefix_node,
-                lock,
+                run_len,
+                run_has_digit,
+                run_prefix_node,
+                engaged,
             });
         }
 
@@ -2458,35 +2460,39 @@ impl ConstrainedDecodeState {
         if was_in_string
             && !now_in_string
             && identifier_copy
-            && let CopyState::Active {
-                content,
-                lock: IdLock::Locked,
-                ..
-            } = &self.copy
-            && !identifiers.is_closable(content)
+            && let CopyState::Active { engaged: true, .. } = &self.copy
         {
-            return None; // closing on an incomplete copy is illegal
+            return None; // closing on an incomplete run is illegal
         }
         Some(CopyState::Idle)
     }
 
     /// Whether the currently-active string value's identifier hard-copy lock
-    /// (D2 mechanism 1) is engaged. `grug-train`'s decode loop uses this to
-    /// detect a would-be deadlock (every vocabulary token illegal under the
-    /// strict lock) and retry the same decode step with
-    /// [`Self::with_identifier_lock_released`].
+    /// (D2 mechanism 1) is engaged over its current run. `grug-train`'s
+    /// decode loop uses this to detect a would-be deadlock (every
+    /// vocabulary token illegal under the strict lock) and retry the same
+    /// decode step with [`Self::with_identifier_lock_released`].
     pub fn identifier_lock_engaged(&self) -> bool {
-        matches!(&self.copy, CopyState::Active { lock: IdLock::Locked, .. })
+        matches!(&self.copy, CopyState::Active { engaged: true, .. })
     }
 
-    /// `self` with the active string's identifier lock forced to
-    /// [`IdLock::Released`] (a no-op if not currently [`IdLock::Locked`]) --
-    /// the documented escape hatch for "no identifier matches": never
-    /// deadlock generation.
+    /// `self` with the active string's identifier run lock forced open (a
+    /// no-op if not currently engaged) -- the documented escape hatch for
+    /// "no identifier matches": never deadlock generation. Scoped to the
+    /// *current run* (Phase 51 / ADR 104 D2 suffix-run redesign): once this
+    /// run ends (a delimiter byte is next accepted), the lock is free to
+    /// re-engage on whatever run follows, since run boundaries always reset
+    /// tracking from scratch.
     pub fn with_identifier_lock_released(&self) -> Self {
         let mut copy = self.copy.clone();
-        if let CopyState::Active { lock, .. } = &mut copy {
-            *lock = IdLock::Released;
+        if let CopyState::Active {
+            run_prefix_node,
+            engaged,
+            ..
+        } = &mut copy
+        {
+            *run_prefix_node = None;
+            *engaged = false;
         }
         Self {
             frontier: self.frontier.clone(),
@@ -3403,6 +3409,19 @@ mod tests {
         )
     }
 
+    /// A tool with a plain `source_path` string parameter and **no**
+    /// declared `pattern`/`enum` -- used by the suffix-run redesign tests
+    /// below, where the *value* the runtime composes wraps a copied id in
+    /// template text (`synthetic://textbook:<id>:edition-2`) that never
+    /// occurs verbatim in the context.
+    fn source_path_tool() -> Value {
+        openai_tool(
+            "cite_source_path",
+            serde_json::json!({ "source_path": { "type": "string" } }),
+            &["source_path"],
+        )
+    }
+
     /// (a) The measured failure this mechanism targets: `source_id` has no
     /// schema pattern, so D1 offers nothing, but the exact value is present
     /// verbatim in the context as a compound (colon/hyphen-bearing)
@@ -3557,20 +3576,21 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
 
-        // `textbook` alone is a plain word (no digit/`:/_-.`) and must never
-        // lock on its own (rule (a)) -- the prefix here continues past the
-        // `:` into the first hex digit, which is what actually makes the
-        // content identifier-shaped and engages the lock.
-        let prefix = "<tool_call>\n{\"arguments\":{\"source_id\":\"textbook:4";
+        // `textbook` alone is a plain word (no digit) and must never lock on
+        // its own (rule (a)); `:` is a run delimiter (Phase 51 / ADR 104 D2
+        // suffix-run redesign) so it resets tracking, and the *run* only
+        // becomes identifier-shaped -- and long enough (>= 3 bytes) to
+        // engage -- once three digits into the hex id after the colon.
+        let prefix = "<tool_call>\n{\"arguments\":{\"source_id\":\"textbook:484";
         let state = ConstrainedDecodeState::start(&grammar)
             .advance(&grammar, &copy, prefix.as_bytes())
             .expect("a real identifier prefix must be legal");
         assert!(
             state.identifier_lock_engaged(),
-            "identifier-shaped content matching the context identifier must have locked"
+            "identifier-shaped run matching the context identifier must have locked"
         );
 
-        // `z` is not the identifier's next byte (`8`) -- illegal while locked.
+        // `z` is not the identifier's next byte (`a`) -- illegal while locked.
         assert_eq!(state.step(&grammar, &copy, b'z'), None);
 
         let released = state.with_identifier_lock_released();
@@ -3595,8 +3615,11 @@ mod tests {
         let copy = copy_constraints(&grammar, context);
 
         // Drive up to (and including) the closing quote of the first tag,
-        // "textbook" -- this must be legal despite the identifier sharing
-        // its first 8 bytes.
+        // "textbook" -- this must be legal. `:` is a run delimiter (Phase 51
+        // / ADR 104 D2 suffix-run redesign), so "textbook" is not even a
+        // prefix of the compound identifier's own run in the new scheme; it
+        // is also digit-free, so rule (a) would keep it from ever locking
+        // either way.
         let up_to_tag_close = "<tool_call>\n{\"arguments\":{\"body\":\"b\",\"citations\":[{\"locator\":\"l\",\"quote\":\"q\",\"source_id\":\"s\"}],\"tags\":[\"textbook";
         let state = advance_constrained(&grammar, &copy, up_to_tag_close)
             .expect("typing the plain word tag must never lock");
@@ -3615,5 +3638,196 @@ mod tests {
             .advance(&grammar, &copy, rest.as_bytes())
             .expect("the rest of the call must decode to completion");
         assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    // ── Suffix-run redesign (Phase 51 / ADR 104 D2, decoder 957589e1) ──────
+    //
+    // The mechanism above (whole-value hard lock) never engages once the
+    // *value* the runtime emits is composed around a copied identifier
+    // rather than being that identifier verbatim -- a fixed URI prefix, or a
+    // distilled sentence. These tests target that residual gap directly:
+    // the identifier lock now tracks the value's current identifier *run*
+    // (a maximal `[A-Za-z0-9_.-]` span, reset by `:`/`/`/whitespace/JSON
+    // delimiters) rather than the whole value.
+
+    /// (a) The measured failure: `source_path` has no schema pattern, and
+    /// the *whole* emitted value (`synthetic://textbook:<id>:edition-2`)
+    /// never occurs verbatim in the context -- only the bare id does. The
+    /// pre-redesign whole-value lock could never engage here at all; the
+    /// run-suffix lock must still catch a corrupted copy of the embedded id.
+    #[test]
+    fn identifier_hard_copy_locks_an_embedded_id_inside_a_runtime_composed_value() {
+        let id = "8d87cddac3f4fccf";
+        let context = format!("<tool_response>\n{{\"id\":\"{id}\"}}\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        // Sanity: the whole composed value never occurs in the context, so
+        // this is not a D1 schema-pattern/enum field either.
+        assert_eq!(copy.table.entry(0, 0).unwrap().0, ValueConstraint::Free);
+
+        let correct = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:edition-2\"}},\"name\":\"cite_source_path\"}}\n</tool_call>"
+        );
+        let end = advance_constrained(&grammar, &copy, &correct).expect(
+            "a value composed around a verbatim context id must be a legal decode path",
+        );
+        assert!(grammar.accepts_eos(&end.frontier));
+
+        // The measured corruption: the argmax wants to insert an extra
+        // digit partway into the run (dropping a trailing byte elsewhere to
+        // keep the same overall length) -- reproduced here as the point of
+        // divergence itself, which must have no legal continuation.
+        let corrupted =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:8d87c9";
+        assert_eq!(
+            advance_constrained(&grammar, &copy, corrupted),
+            None,
+            "a corrupted copy of an id embedded in a composed value must have no legal continuation"
+        );
+    }
+
+    /// (b) The measured failure: `body` is a free-text, distilled sentence
+    /// (never verbatim in the context) that embeds a verbatim numeric token
+    /// from the retrieved evidence (`MY-159`). The lock must engage on that
+    /// embedded run, reject closing it one digit early, and release once it
+    /// completes so the sentence-ending period stays legal.
+    #[test]
+    fn identifier_hard_copy_locks_a_run_embedded_in_a_distilled_sentence() {
+        let context = "<tool_response>\nNamar-vanta-43 was catalogued as MY-159 in the ledger.\n</tool_response>";
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let correct = "<tool_call>\n{\"arguments\":{\"body\":\"the note says Namar-vanta-43 is MY-159.\"},\"name\":\"note_body\"}\n</tool_call>";
+        let end = advance_constrained(&grammar, &copy, correct)
+            .expect("a distilled sentence embedding verbatim context tokens must decode");
+        assert!(grammar.accepts_eos(&end.frontier));
+
+        // The measured failure: the argmax wants to close the number one
+        // digit early (`.` right after `MY-15` instead of the real `9`).
+        let truncated =
+            "<tool_call>\n{\"arguments\":{\"body\":\"the note says Namar-vanta-43 is MY-15";
+        let state = advance_constrained(&grammar, &copy, truncated)
+            .expect("a real prefix of the context token must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "MY-15 must still be locked -- MY-159 is not yet complete"
+        );
+        assert_eq!(
+            state.step(&grammar, &copy, b'.'),
+            None,
+            "closing the number one digit early must be illegal"
+        );
+
+        // The real next digit is legal, and completing the number releases
+        // the lock so the sentence-ending period becomes legal again.
+        let completed = state
+            .step(&grammar, &copy, b'9')
+            .expect("the real next digit must be legal");
+        assert!(
+            !completed.identifier_lock_engaged(),
+            "the run now equals the complete context token; the lock must have released"
+        );
+        assert!(
+            completed.step(&grammar, &copy, b'.').is_some(),
+            "a sentence-ending period right after a completed id must stay legal"
+        );
+    }
+
+    /// (c) Rule 1 drops the old ":/_-."-or-digit alternative: a compound
+    /// word with no digit at all (`keph-index`) must never engage the lock,
+    /// even when it is a genuine prefix of a real, digit-bearing context
+    /// identifier (`keph-index-9000`).
+    #[test]
+    fn tag_with_no_digit_never_engages_the_identifier_lock() {
+        let context = "<tool_response>\nsee also keph-index-9000 for details\n</tool_response>";
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let call = "<tool_call>\n{\"arguments\":{\"body\":\"see keph-index";
+        let state = advance_constrained(&grammar, &copy, call)
+            .expect("typing a plain, digit-free compound word must never be blocked");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "keph-index has no digit and must never engage the lock, even as a real prefix"
+        );
+        // Closing here (a different word than the context's
+        // `keph-index-9000`) must still be legal.
+        assert!(state.step(&grammar, &copy, b'"').is_some());
+    }
+
+    /// (d) Once a run exactly completes a context identifier token
+    /// (`edition-2`), the lock releases: the value's own next delimiter
+    /// (`:`) is legal, and so is closing the value immediately.
+    #[test]
+    fn identifier_run_completes_and_permits_the_values_own_delimiter_afterward() {
+        let context = "<tool_response>\nsee edition-2 of the volume\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_run = "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:edition-2";
+        let state = advance_constrained(&grammar, &copy, up_to_run)
+            .expect("a real context token must be a legal decode path");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "edition-2 exactly completes the context token; the lock must have released"
+        );
+
+        let after_colon = state
+            .step(&grammar, &copy, b':')
+            .expect("`:` right after a completed identifier run must be legal");
+        assert!(
+            state.step(&grammar, &copy, b'"').is_some(),
+            "closing the value immediately after a completed run must also be legal"
+        );
+
+        let end = after_colon
+            .advance(
+                &grammar,
+                &copy,
+                b"more\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("the rest of the call must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (e) The documented escape hatch (a would-be deadlock releases the
+    /// lock) is now scoped to the *current run only* -- once that run ends
+    /// (a delimiter is accepted) and a later, independent run begins in the
+    /// same value, the lock must be free to engage again on it.
+    #[test]
+    fn identifier_lock_release_is_scoped_to_the_current_run_only() {
+        let context = "<tool_response>\nsee foo-9999 and also bar-1234 here\n</tool_response>";
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_first_run = "<tool_call>\n{\"arguments\":{\"body\":\"foo-99";
+        let state = advance_constrained(&grammar, &copy, up_to_first_run)
+            .expect("a real context-token prefix must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "foo-99 must be locked -- foo-9999 is not yet complete"
+        );
+
+        // Simulate the documented escape hatch: the argmax would leave
+        // every legal candidate for the rest of this run.
+        let released = state.with_identifier_lock_released();
+        assert!(!released.identifier_lock_engaged());
+
+        // Diverge from the context id entirely for the rest of *this* run,
+        // then start a brand new run (`bar-12`, a real prefix of the
+        // context's `bar-1234`) after a word-boundary space.
+        let diverged = released
+            .advance(&grammar, &copy, b"zzz bar-12")
+            .expect("a released run must accept an arbitrary continuation");
+        assert!(
+            diverged.identifier_lock_engaged(),
+            "a later run in the same value must still be able to lock, independent of an earlier run's release"
+        );
     }
 }
