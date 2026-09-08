@@ -2672,6 +2672,24 @@ impl ConstrainedDecodeState {
             // schema-trie's own escape handling. `None` means this byte only
             // opened or continued a `\` escape -- no semantic byte to feed
             // the run tracking below yet.
+            //
+            // The `\` escape *opener* is deliberately gated here, before it
+            // can produce that `None` (Phase 51 / ADR 104 D2 v9 bug fix,
+            // defect 1): measured on the A100, `synthetic://textbook:<id>:`
+            // engaged the identifier run lock, the model's next argmax was
+            // not a legal run continuation, and `\` -- which resolves to no
+            // semantic byte at all -- slipped through untouched by the
+            // `engaged`/`anchor` checks below (they only ever see bytes that
+            // *do* produce a `semantic`), opening a `\n` escape and letting
+            // the rest of the value free-run as copied prose. An identifier
+            // run lock or left anchor forces one specific, already-known
+            // continuation byte; `\` is never that byte, so it must be
+            // illegal on exactly the same terms as any other non-run byte
+            // that would truncate an incomplete forced copy (mirrored below,
+            // and at the closing-quote check further down).
+            if byte == b'\\' && !escaped && (engaged || anchor.is_some()) {
+                return None;
+            }
             let semantic = if escaped {
                 let semantic = unescape_byte(byte);
                 content.push(semantic);
@@ -4749,6 +4767,123 @@ mod tests {
                 .as_bytes(),
             )
             .expect("typing the real identifier to completion must stay legal");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    // ── Phase 51 / ADR 104 D2 v9 bug fixes (identifier run lock v9) ─────────
+    //
+    // Measured on the A100 with the v9 constrained decoder on
+    // `mcp__seshat__seshat_ingest`: composing
+    // `synthetic://textbook:e750fb3cb3319a81:edition-2` from a prompt whose
+    // earlier search result gave `"source_id":"textbook:e750fb3cb3319a81:
+    // edition-2"` (plus a prose mention, `Synthetic Keph Manual
+    // e750fb3cb3319a81, edition 2`), the decoder emitted
+    // `...e750fb3cb3319a81:a\nchapter 6, section 5\n\n...` instead -- the
+    // identifier run lock engaged on `a` (a real prefix of some *other* hex
+    // candidate elsewhere in the much larger real prompt) right after the
+    // second `:`, then the model's next argmax had no legal run
+    // continuation, but the `\` escape opener was still legal under the
+    // lock (it resolves to no semantic byte at all, so the `engaged`/
+    // `anchor` checks never saw it) -- so the decoder emitted `\`, then the
+    // legal escape byte `n`, and free-ran the rest of the value as copied
+    // prose.
+
+    /// Defect 1: the `\` escape opener must be illegal while the identifier
+    /// run lock (or the left anchor) is engaged over an incomplete run --
+    /// it is never itself a real continuation byte, so accepting it just
+    /// lets the run silently escape the lock instead of completing the
+    /// forced copy. Before the fix, this byte bypassed the `engaged`/
+    /// `anchor` legality checks entirely (they only run for bytes that
+    /// resolve to a semantic byte; `\` alone does not).
+    #[test]
+    fn escape_opener_is_illegal_while_the_identifier_run_lock_is_engaged() {
+        let id = "b851eb11b1b27ab9";
+        let context = format!(
+            "<tool_response>\n{{\"source_path\":\"synthetic://textbook:{id}:edition-2\"}}\n</tool_response>"
+        );
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert!(state.identifier_lock_engaged());
+        assert!(state.identifier_anchor_active());
+
+        assert_eq!(
+            state.step(&grammar, &copy, b'\\'),
+            None,
+            "the `\\` escape opener must be illegal while the identifier run lock is engaged"
+        );
+
+        // Sanity: the same byte is legal once the run is complete and
+        // nothing is engaged/anchored (a trailing literal backslash in the
+        // rest of an unconstrained value must still decode normally).
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                format!("{}:edition-2", &id[1..]).as_bytes(),
+            )
+            .expect("typing the real identifier to completion must stay legal");
+        assert!(!end.identifier_lock_engaged() && !end.identifier_anchor_active());
+        assert!(
+            end.step(&grammar, &copy, b'\\').is_some(),
+            "`\\` must remain a legal escape opener once no run is engaged or anchored"
+        );
+    }
+
+    /// Defect 2 regression: the exact measured failure shape. The prompt
+    /// contains both the composed source id verbatim
+    /// (`"source_id":"textbook:e750fb3cb3319a81:edition-2"`) and a prose
+    /// mention of the same id (`Manual e750fb3cb3319a81, edition 2`). Once
+    /// the value has copied `synthetic://textbook:e750fb3cb3319a81:`, the
+    /// left anchor on the last 12 bytes of that value (`b3cb3319a81:`) must
+    /// find the real occurrence in the prompt and force its continuation:
+    /// `a` (the measured wrong argmax) is illegal, `e` is the only legal
+    /// byte, and the rest of `edition-2` must decode to completion and
+    /// release the anchor at the closing quote.
+    #[test]
+    fn left_anchor_forces_the_real_continuation_after_the_second_colon() {
+        let id = "e750fb3cb3319a81";
+        let context = format!(
+            "<tool_response>\n{{\"source_id\":\"textbook:{id}:edition-2\"}}\n</tool_response>\nSynthetic Keph Manual {id}, edition 2"
+        );
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_id_and_second_colon = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:"
+        );
+        let state = advance_constrained(&grammar, &copy, &up_to_id_and_second_colon)
+            .expect("the composed prefix up to and including the id must be legal");
+
+        assert_eq!(
+            state.step(&grammar, &copy, b'a'),
+            None,
+            "the measured wrong argmax `a` must have no legal continuation: the left anchor \
+             on `b3cb3319a81:` finds the real occurrence in the prompt, whose only \
+             continuation is `e`"
+        );
+        let forced = state
+            .step(&grammar, &copy, b'e')
+            .expect("`e`, the real continuation the left anchor forces, must be legal");
+        assert!(forced.identifier_anchor_active());
+
+        let end = forced
+            .advance(
+                &grammar,
+                &copy,
+                b"dition-2\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("the rest of 'edition-2' must decode to completion under the anchor");
+        assert!(
+            !end.identifier_anchor_active() && !end.identifier_lock_engaged(),
+            "the anchor (and lock) must release once 'edition-2' completes"
+        );
         assert!(grammar.accepts_eos(&end.frontier));
     }
 }
