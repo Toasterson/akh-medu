@@ -299,6 +299,29 @@ enum Frame {
     AnyObject,
 }
 
+/// Where a JSON string leaf sits relative to a `\` escape sequence
+/// (Phase 51 / ADR 104 D2 v8 bug fix): restricts what byte legally follows a
+/// `\` to JSON's own escape set, rather than the previous unconditional
+/// "any byte closes the escape" rule, which let an illegal byte slip through
+/// disguised as e.g. `\?` and produce invalid JSON (measured: the identifier
+/// lock's post-match release left `\` as the highest-logit *legal* byte
+/// because it bypasses the lock's own run tracking -- see
+/// [`ConstrainedDecodeState::step_copy`] -- and this grammar gap then let
+/// anything follow it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeState {
+    /// Not mid-escape: an ordinary content byte, `"` (closes the string), or
+    /// `\` (opens an escape) may come next.
+    Plain,
+    /// Just consumed a `\`: the next byte must be one of JSON's short escape
+    /// bytes (`"` `\` `/` `b` `f` `n` `r` `t`) or `u` (opens a 4-hex-digit
+    /// unicode escape) -- anything else is illegal JSON.
+    Pending,
+    /// Inside a `\uXXXX` escape with this many hex digits still to come
+    /// (starts at 4, counts down to 0 which returns to [`Self::Plain`]).
+    Unicode(u8),
+}
+
 /// Where the recursive value parser is, relative to the innermost open
 /// [`Frame`] (or, with an empty stack, relative to nothing — the top of the
 /// whole parameter value).
@@ -306,8 +329,9 @@ enum Frame {
 enum Leaf {
     /// Expecting the first byte of a value governed by `schema`.
     Start(SchemaRef),
-    /// Inside a string value; `escaped` tracks a pending `\` escape.
-    Str { schema: SchemaRef, escaped: bool },
+    /// Inside a string value; `escape` tracks position relative to a
+    /// pending `\` escape sequence.
+    Str { schema: SchemaRef, escape: EscapeState },
     /// Inside a bare (number/boolean/null) token.
     Bare,
     /// At the very start of the innermost frame's body (just after `{`/`[`):
@@ -325,8 +349,9 @@ enum Leaf {
     ObjectKey { cands: Vec<u16>, pos: usize },
     /// Consumed a schema-declared key's closing `"`; expecting `:`.
     ObjectColon { prop: u16 },
-    /// Typing a free-form (`Any`-object) key; `escaped` tracks a pending `\`.
-    AnyKey { escaped: bool },
+    /// Typing a free-form (`Any`-object) key; `escape` tracks position
+    /// relative to a pending `\` escape sequence.
+    AnyKey { escape: EscapeState },
     /// Consumed a free-form key's closing `"`; expecting `:`.
     AnyColon,
 }
@@ -359,7 +384,7 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
         SchemaKind::String => match byte {
             b'"' => Some(StartOutcome::Leaf(Leaf::Str {
                 schema: schema.clone(),
-                escaped: false,
+                escape: EscapeState::Plain,
             })),
             _ => None,
         },
@@ -398,7 +423,7 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
         SchemaKind::Any => match byte {
             b'"' => Some(StartOutcome::Leaf(Leaf::Str {
                 schema: schema.clone(),
-                escaped: false,
+                escape: EscapeState::Plain,
             })),
             b'[' if depth < MAX_VALUE_DEPTH => {
                 Some(StartOutcome::PushFrame(Frame::AnyArray { count: 0 }))
@@ -492,35 +517,66 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 }))
             }
         },
-        Leaf::Str { schema, escaped } => {
-            if *escaped {
-                Some(ValueOutcome::Continue(ValueParser {
+        Leaf::Str { schema, escape } => match escape {
+            EscapeState::Pending => match byte {
+                // JSON's short escapes: the byte after `\` fully resolves
+                // the escape and returns to plain string content.
+                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                    Some(ValueOutcome::Continue(ValueParser {
+                        stack: stack.clone(),
+                        leaf: Leaf::Str {
+                            schema: schema.clone(),
+                            escape: EscapeState::Plain,
+                        },
+                    }))
+                }
+                // `\u` opens a 4-hex-digit unicode escape.
+                b'u' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
                     leaf: Leaf::Str {
                         schema: schema.clone(),
-                        escaped: false,
+                        escape: EscapeState::Unicode(4),
                     },
-                }))
-            } else {
-                match byte {
-                    b'\\' => Some(ValueOutcome::Continue(ValueParser {
+                })),
+                // Anything else (e.g. `?`) is not a legal JSON escape byte.
+                _ => None,
+            },
+            EscapeState::Unicode(remaining) => {
+                if byte.is_ascii_hexdigit() {
+                    let escape = if *remaining <= 1 {
+                        EscapeState::Plain
+                    } else {
+                        EscapeState::Unicode(remaining - 1)
+                    };
+                    Some(ValueOutcome::Continue(ValueParser {
                         stack: stack.clone(),
                         leaf: Leaf::Str {
                             schema: schema.clone(),
-                            escaped: true,
+                            escape,
                         },
-                    })),
-                    b'"' => Some(value_completed(stack.clone())),
-                    _ => Some(ValueOutcome::Continue(ValueParser {
-                        stack: stack.clone(),
-                        leaf: Leaf::Str {
-                            schema: schema.clone(),
-                            escaped: false,
-                        },
-                    })),
+                    }))
+                } else {
+                    None
                 }
             }
-        }
+            EscapeState::Plain => match byte {
+                b'\\' => Some(ValueOutcome::Continue(ValueParser {
+                    stack: stack.clone(),
+                    leaf: Leaf::Str {
+                        schema: schema.clone(),
+                        escape: EscapeState::Pending,
+                    },
+                })),
+                b'"' => Some(value_completed(stack.clone())),
+                _ => Some(ValueOutcome::Continue(ValueParser {
+                    stack: stack.clone(),
+                    leaf: Leaf::Str {
+                        schema: schema.clone(),
+                        escape: EscapeState::Plain,
+                    },
+                })),
+            },
+        },
         Leaf::Bare => match byte {
             b'"' | b'\\' => None,
             b',' | b'}' | b']' => match after_value(stack.clone()) {
@@ -589,7 +645,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             Some(Frame::AnyObject) => match byte {
                 b'"' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escaped: false },
+                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
                 })),
                 b'}' => {
                     let mut stack = stack.clone();
@@ -633,7 +689,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             Some(Frame::AnyObject) => match byte {
                 b'"' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escaped: false },
+                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
                 })),
                 _ => None,
             },
@@ -747,29 +803,50 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 leaf: Leaf::Start(schema),
             }))
         }
-        Leaf::AnyKey { escaped } => {
-            if *escaped {
-                Some(ValueOutcome::Continue(ValueParser {
+        Leaf::AnyKey { escape } => match escape {
+            EscapeState::Pending => match byte {
+                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
+                    Some(ValueOutcome::Continue(ValueParser {
+                        stack: stack.clone(),
+                        leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                    }))
+                }
+                b'u' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escaped: false },
-                }))
-            } else {
-                match byte {
-                    b'\\' => Some(ValueOutcome::Continue(ValueParser {
+                    leaf: Leaf::AnyKey { escape: EscapeState::Unicode(4) },
+                })),
+                _ => None,
+            },
+            EscapeState::Unicode(remaining) => {
+                if byte.is_ascii_hexdigit() {
+                    let escape = if *remaining <= 1 {
+                        EscapeState::Plain
+                    } else {
+                        EscapeState::Unicode(remaining - 1)
+                    };
+                    Some(ValueOutcome::Continue(ValueParser {
                         stack: stack.clone(),
-                        leaf: Leaf::AnyKey { escaped: true },
-                    })),
-                    b'"' => Some(ValueOutcome::Continue(ValueParser {
-                        stack: stack.clone(),
-                        leaf: Leaf::AnyColon,
-                    })),
-                    _ => Some(ValueOutcome::Continue(ValueParser {
-                        stack: stack.clone(),
-                        leaf: Leaf::AnyKey { escaped: false },
-                    })),
+                        leaf: Leaf::AnyKey { escape },
+                    }))
+                } else {
+                    None
                 }
             }
-        }
+            EscapeState::Plain => match byte {
+                b'\\' => Some(ValueOutcome::Continue(ValueParser {
+                    stack: stack.clone(),
+                    leaf: Leaf::AnyKey { escape: EscapeState::Pending },
+                })),
+                b'"' => Some(ValueOutcome::Continue(ValueParser {
+                    stack: stack.clone(),
+                    leaf: Leaf::AnyColon,
+                })),
+                _ => Some(ValueOutcome::Continue(ValueParser {
+                    stack: stack.clone(),
+                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                })),
+            },
+        },
         Leaf::AnyColon => {
             if byte != b':' {
                 return None;
@@ -1374,6 +1451,18 @@ impl CopyTrie {
     /// candidate itself)?
     pub fn is_prefix_of_any(&self, bytes: &[u8]) -> bool {
         self.walk(bytes).is_some()
+    }
+
+    /// Does `node` have at least one child edge whose byte satisfies
+    /// `predicate`? Used by [`IdentifierIndex::extendable`] to ask "could
+    /// this run still be continued by a *run byte*", independent of the
+    /// literal `terminal` flag -- a node whose only children are non-run
+    /// bytes (e.g. a candidate token that absorbed trailing punctuation like
+    /// `Zorim-meru-74?`, since [`identifier_tokens`] only splits on a fixed
+    /// delimiter set) behaves exactly like a terminal for the run lock, even
+    /// when `terminal[node]` is `false`.
+    fn has_child_matching(&self, node: usize, predicate: impl Fn(u8) -> bool) -> bool {
+        self.children[node].keys().any(|&byte| predicate(byte))
     }
 
     /// Does `bytes` exactly equal one whole candidate?
@@ -2129,14 +2218,28 @@ impl IdentifierIndex {
         }
     }
 
-    /// Does `node` sit at the end of a complete candidate token -- i.e. does
-    /// the run that reached it equal that candidate exactly, rather than
-    /// merely being a proper prefix of it? Used by
+    /// Could the run that reached `node` still be extended by a *further
+    /// run byte* toward a longer candidate? Used by
     /// [`ConstrainedDecodeState::step_copy`] to decide when a run has
     /// finished copying an identifier (the lock releases) versus is still
     /// mid-copy (rule 2 of the Phase 51 / ADR 104 D2 suffix-run redesign).
-    fn is_terminal(&self, node: usize) -> bool {
-        self.trie.terminal[node]
+    ///
+    /// Deliberately broader than the trie's own literal-leaf flag:
+    /// [`identifier_tokens`] only splits candidates on a fixed delimiter set (whitespace, JSON
+    /// structural bytes, `:`/`/`), so a context sentence like `"...
+    /// Zorim-meru-74?"` produces the candidate `Zorim-meru-74?` -- the
+    /// trailing `?` is glued on, even though `?` is not itself an
+    /// [`is_identifier_run_byte`] and the run mechanism can therefore never
+    /// actually walk that edge. Using literal `terminal` here left the run
+    /// "engaged" forever once it reached `Zorim-meru-74` (a real, complete
+    /// identifier, just not a trie leaf), permanently rejecting the value's
+    /// own next byte (`?`) with no legal run-byte continuation to replace it
+    /// -- a bug measured on decoder v7 (Phase 51 / ADR 104 D2, paired v7). A
+    /// node with no run-byte-keyed child at all can never be extended by the
+    /// run mechanism regardless of what non-run-byte children it has, so it
+    /// is treated the same as a literal terminal: the lock releases.
+    fn extendable(&self, node: usize) -> bool {
+        self.trie.has_child_matching(node, is_identifier_run_byte)
     }
 
     /// Advance an incremental identifier-run cursor
@@ -2366,7 +2469,7 @@ enum CopyState {
         /// Cached "is the lock currently engaged over this run" as of the
         /// last processed byte -- kept as a field, rather than derived on
         /// demand from `run_len`/`run_has_digit`/`run_prefix_node` (which
-        /// would need [`IdentifierIndex::is_terminal`], i.e. a
+        /// would need [`IdentifierIndex::extendable`], i.e. a
         /// [`CopyConstraints`] reference), because
         /// [`ConstrainedDecodeState::identifier_lock_engaged`] and
         /// [`ConstrainedDecodeState::with_identifier_lock_released`] must
@@ -2641,9 +2744,15 @@ impl ConstrainedDecodeState {
                         match identifiers.advance_prefix(run_prefix_node, sem) {
                             Some(next) => run_prefix_node = Some(next),
                             None => {
-                                let was_terminal = run_prefix_node
-                                    .is_some_and(|node| identifiers.is_terminal(node));
-                                if was_terminal {
+                                // Not extendable means no candidate has a
+                                // *run-byte* child from here -- the run has
+                                // effectively completed (whether or not this
+                                // node is a literal trie leaf; see
+                                // `IdentifierIndex::extendable`'s docs for why
+                                // "literal terminal" alone is not enough).
+                                let effectively_complete = run_prefix_node
+                                    .is_some_and(|node| !identifiers.extendable(node));
+                                if effectively_complete {
                                     // The run already equals a complete
                                     // candidate and this byte doesn't extend
                                     // toward a *longer* one (rule 2: "extend
@@ -2683,7 +2792,7 @@ impl ConstrainedDecodeState {
                 }
                 engaged = run_len >= MIN_IDENTIFIER_RUN_LEN
                     && run_has_digit
-                    && run_prefix_node.is_some_and(|node| !identifiers.is_terminal(node));
+                    && run_prefix_node.is_some_and(|node| identifiers.extendable(node));
             }
 
             return Some(CopyState::Active {
@@ -3694,6 +3803,17 @@ mod tests {
         )
     }
 
+    /// A tool with a free-text `query` string parameter -- mirrors the exact
+    /// JSON shape (`{"query": "..."}`) from the measured deadlock regression
+    /// on decoder v7 (Phase 51 / ADR 104 D2 amendment).
+    fn query_tool() -> Value {
+        openai_tool(
+            "answer_query",
+            serde_json::json!({ "query": { "type": "string" } }),
+            &["query"],
+        )
+    }
+
     /// (a) The measured failure this mechanism targets: `source_id` has no
     /// schema pattern, so D1 offers nothing, but the exact value is present
     /// verbatim in the context as a compound (colon/hyphen-bearing)
@@ -4065,6 +4185,145 @@ mod tests {
             )
             .expect("the rest of the call must decode to completion");
         assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (v8 bug fix) The exact measured regression on the A100 (paired
+    /// decoder v7, commit a72b2837): `revise_from_new_edition` collapsed
+    /// 80->26/100 because the context sentence containing the copied
+    /// identifier ends in `?` with no separating whitespace
+    /// (`"...Zorim-meru-74?"`). [`identifier_tokens`] does not split on `?`,
+    /// so the *candidate* it derives is `Zorim-meru-74?`, not
+    /// `Zorim-meru-74`. Once the run exactly reaches `Zorim-meru-74`, no
+    /// further [`is_identifier_run_byte`] byte can ever continue toward that
+    /// candidate (`?` is not a run byte) -- the run is, for the lock's own
+    /// purposes, complete. It must release for **any** next byte, including
+    /// the value's own literal `?`, rather than staying engaged forever with
+    /// no legal run-byte continuation (the literal-`terminal`-only check
+    /// missed exactly this case, deadlocking the strict mask; a `\` escape
+    /// opener then falsely appeared "legal" because it bypasses the run
+    /// lock's own semantic-byte check, hiding the deadlock from
+    /// `grug-train`'s release detector and producing invalid `\?` JSON).
+    #[test]
+    fn identifier_run_releases_when_only_a_trailing_non_run_byte_extends_the_candidate() {
+        let context = "What is the keph index of Zorim-meru-74? Please compute it.";
+        let tools = vec![query_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_run =
+            "<tool_call>\n{\"arguments\":{\"query\":\"What is the keph index of Zorim-meru-74";
+        let state = advance_constrained(&grammar, &copy, up_to_run)
+            .expect("typing the identifier itself must be a legal decode path");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "Zorim-meru-74 has no run-byte continuation toward the `?`-suffixed \
+             candidate, so the lock must have released"
+        );
+
+        // The value's own real next byte, bare `?`, must be directly legal
+        // -- no escape required, and no deadlock.
+        let with_question_mark = state
+            .step(&grammar, &copy, b'?')
+            .expect("a released lock must accept the value's own literal `?`");
+
+        let end = with_question_mark
+            .advance(
+                &grammar,
+                &copy,
+                b"\"},\"name\":\"answer_query\"}\n</tool_call>",
+            )
+            .expect("the rest of the call must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (v8 bug fix regression guard) A genuinely longer real candidate
+    /// (`Zorim-meru-742`, not just trailing punctuation) must still lock and
+    /// force its continuation -- the fix above (releasing when only a
+    /// non-run byte extends the trie candidate) must not also let a run that
+    /// is a proper prefix of a *real*, longer identifier go free early.
+    #[test]
+    fn identifier_run_still_locks_toward_a_longer_real_candidate() {
+        let context = "context mentions Zorim-meru-742 exactly once, nothing else";
+        let tools = vec![query_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_run = "<tool_call>\n{\"arguments\":{\"query\":\"Zorim-meru-74";
+        let state = advance_constrained(&grammar, &copy, up_to_run)
+            .expect("a prefix of the real, longer candidate must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "Zorim-meru-74 is a proper prefix of the longer Zorim-meru-742 \
+             candidate and must stay locked"
+        );
+
+        assert!(
+            state.step(&grammar, &copy, b'?').is_none(),
+            "a byte that doesn't continue the longer candidate must be \
+             rejected while the lock is engaged"
+        );
+        let continued = state
+            .step(&grammar, &copy, b'2')
+            .expect("`2` completes the longer candidate and must be legal");
+        assert!(
+            !continued.identifier_lock_engaged(),
+            "Zorim-meru-742 is now a complete candidate with no further \
+             run-byte continuation; the lock must release"
+        );
+    }
+
+    /// (v8 bug fix) Inside a JSON string, a `\` may only be followed by one
+    /// of JSON's own escape bytes -- this is a grammar-level restriction
+    /// ([`GrammarState`]/[`ValueParser`]'s `Str`/`AnyKey` leaves previously
+    /// accepted *any* byte after `\`), independent of the identifier lock.
+    /// `\?` is not legal JSON and must have no decode path -- this is what
+    /// let the identifier-lock deadlock above actually reach the model as
+    /// invalid output (`\?` in place of the correct `?`) instead of being
+    /// caught structurally.
+    #[test]
+    fn backslash_inside_a_string_only_accepts_a_legal_json_escape_byte() {
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, "nothing identifier-shaped here");
+        let prefix = "<tool_call>\n{\"arguments\":{\"body\":\"abc\\";
+
+        for good in *b"\"\\/bfnrt" {
+            let state = advance_constrained(&grammar, &copy, prefix)
+                .expect("the escape opener itself must be legal");
+            assert!(
+                state.step(&grammar, &copy, good).is_some(),
+                "{good} must be a legal JSON escape byte"
+            );
+        }
+
+        // `\u` opens a 4-hex-digit unicode escape; exactly four hex digits
+        // must follow before the string can close.
+        let state = advance_constrained(&grammar, &copy, prefix).unwrap();
+        let after_u = state
+            .step(&grammar, &copy, b'u')
+            .expect("`u` must open a unicode escape");
+        let mut cur = after_u;
+        for hex in *b"0041" {
+            cur = cur
+                .step(&grammar, &copy, hex)
+                .expect("hex digits must be legal inside a \\u escape");
+        }
+        assert!(
+            cur.step(&grammar, &copy, b'"').is_some(),
+            "the string may close once all four hex digits are consumed"
+        );
+        let non_hex = state
+            .step(&grammar, &copy, b'u')
+            .unwrap()
+            .step(&grammar, &copy, b'g');
+        assert!(non_hex.is_none(), "a non-hex byte inside \\u must be rejected");
+
+        // The measured regression: `\?` is not valid JSON.
+        let state = advance_constrained(&grammar, &copy, prefix).unwrap();
+        assert!(
+            state.step(&grammar, &copy, b'?').is_none(),
+            "\\? is not a legal JSON escape and must be rejected"
+        );
     }
 
     /// (e) The documented escape hatch (a would-be deadlock releases the
