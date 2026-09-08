@@ -295,6 +295,7 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
     let mut identifier_copy_locks = 0u32;
     let mut identifier_copy_releases = 0u32;
     let mut copy_bias_overrides = 0u32;
+    let mut anchored_run_bytes = 0u32;
     // Rule from the Phase 51 / ADR 104 D2 bug fix: the soft suffix-copy bias
     // may override the masked argmax at most this many times per *value* --
     // reset whenever generation is not currently inside a string (see the
@@ -312,70 +313,35 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
             .slice([0..1, seq_len - 1..seq_len, 0..vocab_size])
             .reshape([vocab_size]);
 
-        // Pass 1: the identifier lock (if engaged) is enforced strictly by
+        // Pass 1: the identifier lock and the left-anchored run-start
+        // forcing (if either is active) are enforced strictly by
         // `state.advance` (Phase 51 / ADR 104 D2 mechanism 1 -- see
-        // `ConstrainedDecodeState::step_copy`). Two situations release it
-        // for the rest of the value rather than forcing the model to keep
-        // spelling out the identifier (Phase 51 / ADR 104 D2 bug fix, rule
-        // (c)): (i) the strict lock leaves no legal continuation at all (the
-        // original deadlock escape hatch), or (ii) the model's own
-        // lock-*unconstrained* preference (computed from the released mask)
-        // is for a byte the strict lock forbids -- forcing the masked argmax
-        // to complete the identifier anyway, rather than releasing, is what
-        // produced the measured runaway tag/array garbage.
+        // `ConstrainedDecodeState::step_copy`). v7 (Phase 51 / ADR 104 D2
+        // amendment): release is now *deadlock-only* -- the strict mask
+        // leaving no legal continuation at all, the original no-deadlock
+        // escape hatch. The earlier "proactive" release (firing whenever the
+        // model's own lock-unconstrained preference merely disagreed with
+        // the lock, even though the lock still allowed something) defeated
+        // the lock in exactly the case it exists for: the model's argmax
+        // wanting a byte that is not a legal continuation of the identifier
+        // being copied is precisely when the lock's forcing must win, not
+        // release. Plain digit-free words never reach this branch at all
+        // (rule (a) keeps the trie lock from ever engaging on them, and the
+        // anchor requires a `:`/`/`-anchored left context -- see
+        // `advance_anchor`'s docs), so this is safe.
         let (locked_mask, locked_any) =
             build_copy_mask(&state, grammar, &copy, pieces, vocab_size, eos_id);
-        let mut mask = locked_mask.clone();
+        let mut mask = locked_mask;
         let mut any_allowed = locked_any;
         let mut active_state = state.clone();
-        if state.identifier_lock_engaged() {
-            // Perf shortcut (Phase 51: this per-step mask build over the
-            // whole vocabulary is the dominant decode-time cost, and used to
-            // run *twice* -- once locked, once released -- on every step
-            // inside a locked value): releasing the lock never happens
-            // unless the model's own *unconstrained* top choice is illegal
-            // under the strict lock (`should_release_identifier_lock` below
-            // is exactly that check). The released mask can only ever be a
-            // superset of what the locked mask allows (releasing the D2 lock
-            // relaxes a constraint, never adds one; structural/D1 legality
-            // is identical either way -- see `step_copy`), so if the raw
-            // (fully unmasked) argmax is already legal under `locked_mask`,
-            // it is necessarily also the released mask's argmax, and it is
-            // legal under the lock -- `should_release_identifier_lock` would
-            // return `false` regardless. Skip the second O(vocab) mask build
-            // entirely in that case; only fall through to building it when
-            // the raw argmax is *not* already locked-legal, exactly the
-            // "would release" branch that needs the real released mask to
-            // decide (and, if it does release, to decode with).
-            let raw_argmax = argmax(last_logits.clone());
-            let raw_argmax_locked_legal = locked_mask
-                .get(raw_argmax as usize)
-                .is_some_and(|v| v.is_finite());
-            if !raw_argmax_locked_legal {
-                let released_state = state.with_identifier_lock_released();
-                let (released_mask, released_any) =
-                    build_copy_mask(&released_state, grammar, &copy, pieces, vocab_size, eos_id);
-                let release = if released_any {
-                    let released_tensor = Tensor::<B, 1>::from_data(
-                        TensorData::new(released_mask.clone(), [vocab_size]),
-                        device,
-                    );
-                    let preferred_id = argmax(last_logits.clone() + released_tensor);
-                    should_release_identifier_lock(&locked_mask, preferred_id)
-                } else {
-                    // Even with the lock released nothing is legal (some other
-                    // constraint, e.g. the D1 schema-pattern trie, is what is
-                    // actually blocking): release anyway so the outer
-                    // `!any_allowed` check below reports the true dead end.
-                    true
-                };
-                if release {
-                    active_state = released_state;
-                    mask = released_mask;
-                    any_allowed = released_any;
-                    identifier_copy_releases += 1;
-                }
-            }
+        if (state.identifier_lock_engaged() || state.identifier_anchor_active()) && !locked_any {
+            let released_state = state.with_identifier_lock_released();
+            let (released_mask, released_any) =
+                build_copy_mask(&released_state, grammar, &copy, pieces, vocab_size, eos_id);
+            active_state = released_state;
+            mask = released_mask;
+            any_allowed = released_any;
+            identifier_copy_releases += 1;
         }
         if !any_allowed {
             // Dead end -- should not happen (every reachable state has a
@@ -427,11 +393,22 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
             break;
         };
         let was_locked = active_state.identifier_lock_engaged();
+        let anchor_consumed_before = active_state.identifier_anchor_consumed();
         match active_state.advance(grammar, &copy, bytes) {
             Some(next_state) => {
                 if !was_locked && next_state.identifier_lock_engaged() {
                     identifier_copy_locks += 1;
                 }
+                // Approximate (telemetry only, per `DecodeReport`'s own
+                // docs): counts how many more run bytes the anchor had
+                // force-matched after committing this token's bytes than
+                // before. A multi-byte piece that both exhausts one anchored
+                // run and starts a fresh one further undercounts by a byte
+                // or two rather than overcounting, which is the safer
+                // direction for a metric that never gates scoring.
+                let anchor_consumed_after = next_state.identifier_anchor_consumed();
+                anchored_run_bytes +=
+                    anchor_consumed_after.saturating_sub(anchor_consumed_before) as u32;
                 state = next_state;
             }
             None => break, // was checked allowed above; defensive only
@@ -460,6 +437,7 @@ pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
     report.identifier_copy_locks = identifier_copy_locks;
     report.identifier_copy_releases = identifier_copy_releases;
     report.copy_bias_overrides = copy_bias_overrides;
+    report.anchored_run_bytes = anchored_run_bytes;
     (text, report)
 }
 
@@ -494,29 +472,6 @@ fn build_copy_mask(
         any_allowed = true;
     }
     (mask, any_allowed)
-}
-
-/// Phase 51 / ADR 104 D2 bug fix, rule (c): pure decision logic for
-/// proactively releasing the identifier hard-copy lock, decoupled from any
-/// tensor backend so it can be exercised directly in tests. `locked_mask` is
-/// what [`build_copy_mask`] produced *with* the lock still enforced;
-/// `preferred_id` is the model's own preference computed from the
-/// lock-*released* mask (i.e. what it would pick if the lock weren't
-/// constraining it, everything else -- structure, D1 -- held constant).
-///
-/// Releases whenever `preferred_id` is illegal under `locked_mask`, which
-/// covers both cases the task calls out: the strict lock leaving no legal
-/// continuation at all (`locked_mask` all `NEG_INFINITY`, so nothing can be
-/// legal under it), and the narrower case the strict lock still allows
-/// *something* but not what the model actually wants next -- forcing the
-/// masked argmax to complete the identifier anyway in that second case is
-/// what produced the measured runaway tag/array garbage (root cause: the
-/// lock is a nudge against dropped/doubled characters, not a mandate to
-/// emit the longest match).
-fn should_release_identifier_lock(locked_mask: &[f32], preferred_id: u32) -> bool {
-    !locked_mask
-        .get(preferred_id as usize)
-        .is_some_and(|v| v.is_finite())
 }
 
 /// How many trailing bytes of a value's own emitted content (not including
@@ -1045,6 +1000,7 @@ mod tests {
         assert_eq!(report.identifier_copy_locks, 0);
         assert_eq!(report.identifier_copy_releases, 0);
         assert_eq!(report.copy_bias_overrides, 0);
+        assert_eq!(report.anchored_run_bytes, 0);
     }
 
     /// With `grammar: None` the constrained entry point must degrade
@@ -1301,38 +1257,155 @@ mod tests {
         assert!(!overridden);
     }
 
-    // ── Phase 51 / ADR 104 D2 bug fix, rule (c): proactive lock release ────
+    // ── Phase 51 / ADR 104 D2 v7: deadlock-only release ─────────────────────
 
-    /// (d) The lock must release (and the release must be countable by the
-    /// caller) when the model's own lock-unconstrained preference would
-    /// leave every identifier candidate, even though the strict lock still
-    /// allows *something* (so this is not the total-deadlock case).
+    /// (A) Regression for measured failure shape (A) in the v7 task report:
+    /// the run `d89c56e4` (8 of 16 hex chars into `d89c56e427b4d7b8`) is
+    /// locked, and the model's own preferred next byte is `d` -- not a legal
+    /// continuation (the real next byte is `2`). Before this fix, a
+    /// "proactive" release fired whenever the argmax disagreed with the lock
+    /// even though the lock still allowed *something*, letting `d` through
+    /// and corrupting the copy (the reported `...d89c56e4d7b8...`, dropping
+    /// `27b4`). v7's release condition is `!locked_any` only, so a
+    /// satisfiable lock is never released regardless of what the model
+    /// prefers -- the mask legalizes only the real next byte, full stop.
     #[test]
-    fn identifier_lock_releases_when_the_unconstrained_argmax_would_leave_every_candidate() {
-        // Locked mask only allows id 0 (e.g. the digit continuing the
-        // identifier); the model's own unconstrained preference (computed
-        // from the released mask, simulated here as `preferred_id = 1`) is
-        // for a byte the strict lock forbids.
-        let locked_mask = vec![0.0, f32::NEG_INFINITY, f32::NEG_INFINITY];
-        assert!(should_release_identifier_lock(&locked_mask, 1));
+    fn deadlock_only_release_never_lets_a_disfavored_but_satisfiable_lock_go() {
+        let id = "d89c56e427b4d7b8";
+        let context = format!("<tool_response>\n{{\"id\":\"{id}\"}}\n</tool_response>");
+        let tools = vec![grug_data::ToolSchema::new(
+            "cite_source_path",
+            "cites a source path",
+            vec![grug_data::ParamSpec::new(
+                "source_path",
+                grug_data::ParamType::String,
+                true,
+            )],
+        )];
+        let grammar = RuntimeCallGrammar::new(&tools);
+        let copy = CopyConstraints::build(grammar.inner(), &context, true, Some(4.0));
+
+        let prefix = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{}",
+            &id[..8]
+        );
+        let state = ConstrainedDecodeState::start(&grammar)
+            .advance(&grammar, &copy, prefix.as_bytes())
+            .expect("a real 8-byte prefix of the context id must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "d89c56e4 must be locked -- the id is not yet complete"
+        );
+
+        let pieces: Vec<Option<Vec<u8>>> = (0..=255u16).map(|b| Some(vec![b as u8])).collect();
+        let vocab_size = pieces.len();
+        let eos_id = vocab_size as u32; // deliberately out of range
+        let (locked_mask, locked_any) =
+            build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
+
+        assert!(
+            locked_any,
+            "the lock still allows the real next byte -- this is not the deadlock case"
+        );
+        assert!(
+            locked_mask[b'2' as usize].is_finite(),
+            "the real next byte must be legal under the lock"
+        );
+        assert!(
+            !locked_mask[b'd' as usize].is_finite(),
+            "the wrong byte the argmax prefers must stay illegal under the lock"
+        );
+
+        // v7's release condition, exactly as in
+        // `generate_from_prompt_ids_cached_constrained`'s pass 1.
+        let would_release =
+            (state.identifier_lock_engaged() || state.identifier_anchor_active()) && !locked_any;
+        assert!(
+            !would_release,
+            "a satisfiable lock must never release, no matter what the model prefers"
+        );
     }
 
-    /// When the model's unconstrained preference already matches what the
-    /// strict lock allows, there is nothing to release.
+    /// (E) The documented total-deadlock escape hatch still works, and the
+    /// v7 decode loop still counts it: a vocabulary that omits the locked
+    /// identifier's own real next byte entirely leaves the strict mask with
+    /// nothing legal at all, so the release condition (replicated here
+    /// exactly as `generate_from_prompt_ids_cached_constrained`'s pass 1
+    /// uses it) must fire, and it must be countable.
     #[test]
-    fn identifier_lock_does_not_release_when_the_unconstrained_argmax_already_matches() {
-        let locked_mask = vec![0.0, f32::NEG_INFINITY];
-        assert!(!should_release_identifier_lock(&locked_mask, 0));
-    }
+    fn deadlock_release_still_fires_and_is_countable_when_the_lock_admits_nothing() {
+        let id = "aa11bb22cc33dd44";
+        let context = format!("<tool_response>\n{{\"id\":\"{id}\"}}\n</tool_response>");
+        let tools = vec![grug_data::ToolSchema::new(
+            "cite_source_path",
+            "cites a source path",
+            vec![grug_data::ParamSpec::new(
+                "source_path",
+                grug_data::ParamType::String,
+                true,
+            )],
+        )];
+        let grammar = RuntimeCallGrammar::new(&tools);
+        let copy = CopyConstraints::build(grammar.inner(), &context, true, Some(4.0));
 
-    /// The original escape hatch still holds: total deadlock under the
-    /// strict lock (nothing legal at all) always releases, regardless of
-    /// what the "preferred" id even is.
-    #[test]
-    fn identifier_lock_releases_on_total_deadlock() {
-        let locked_mask = vec![f32::NEG_INFINITY, f32::NEG_INFINITY];
-        assert!(should_release_identifier_lock(&locked_mask, 0));
-        assert!(should_release_identifier_lock(&locked_mask, 5));
+        let prefix = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{}",
+            &id[..4]
+        );
+        let state = ConstrainedDecodeState::start(&grammar)
+            .advance(&grammar, &copy, prefix.as_bytes())
+            .expect("a real prefix of the context id must be legal");
+        assert!(state.identifier_lock_engaged(), "aa11 must be locked");
+
+        // A byte vocabulary that omits the real next byte (`b`) -- and the
+        // `\` escape lead byte, which is otherwise always legal on its own
+        // regardless of any lock (its semantics depend on the byte that
+        // follows, so `step_copy` defers judgment rather than rejecting it
+        // outright) -- so nothing at all can legally continue the run under
+        // the strict lock.
+        let pieces: Vec<Option<Vec<u8>>> = (0..=255u16)
+            .map(|b| {
+                if matches!(b as u8, b'b' | b'\\') {
+                    None
+                } else {
+                    Some(vec![b as u8])
+                }
+            })
+            .collect();
+        let vocab_size = pieces.len();
+        let eos_id = vocab_size as u32; // deliberately out of range
+
+        let (locked_mask, locked_any) =
+            build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
+        assert!(
+            !locked_any,
+            "omitting the real next byte must deadlock the strict lock"
+        );
+
+        let mut identifier_copy_releases = 0u32;
+        let mut mask = locked_mask;
+        let mut active_state = state.clone();
+        let mut any_allowed = locked_any;
+        if (state.identifier_lock_engaged() || state.identifier_anchor_active()) && !locked_any {
+            let released_state = state.with_identifier_lock_released();
+            let (released_mask, released_any) =
+                build_copy_mask(&released_state, &grammar, &copy, &pieces, vocab_size, eos_id);
+            active_state = released_state;
+            mask = released_mask;
+            any_allowed = released_any;
+            identifier_copy_releases += 1;
+        }
+
+        assert_eq!(
+            identifier_copy_releases, 1,
+            "the deadlock release must fire exactly once and be countable"
+        );
+        assert!(any_allowed, "releasing the lock must open up some legal continuation");
+        assert!(
+            !active_state.identifier_lock_engaged(),
+            "the released state must no longer report the lock as engaged"
+        );
+        assert!(mask[b'z' as usize].is_finite());
     }
 
     // ── Phase 51 perf: synthetic copy-from-context decode-step timing ──────
@@ -1341,16 +1414,15 @@ mod tests {
     // constrained` (vocab 8000, prompts up to ~3.5k tokens, 640-token
     // budget) went from ~3 min/family (grammar+pattern decoder alone) to
     // ~60-80 min/family once the copy-from-context machinery (identifier
-    // lock + whole-value bias + proactive release) was added -- with the
+    // lock + whole-value bias + deadlock release) was added -- with the
     // model forward pass unchanged. This bench isolates that machinery's
     // CPU-side per-decode-step cost (mask-building over an 8000-piece
     // vocabulary, the identifier-prefix trie walk, and the whole-value
     // suffix-copy scan) from the neural net entirely, driving the exact
     // same `grug_data::constrain` state machine and `build_copy_mask` /
-    // `should_release_identifier_lock` / `select_biased_next_id` this
-    // file's real decode loop uses, over a synthetic ~3k-byte context and a
-    // 300-byte copied identifier value -- the shapes the task spec calls
-    // out for a before/after comparison.
+    // `select_biased_next_id` this file's real decode loop uses, over a
+    // synthetic ~3k-byte context and a 300-byte copied identifier value --
+    // the shapes the task spec calls out for a before/after comparison.
 
     /// An ~8000-entry synthetic vocabulary whose pieces are drawn from the
     /// same byte alphabet as the identifier being copied (so most pieces
@@ -1494,33 +1566,25 @@ mod tests {
         );
     }
 
-    /// Runs the [`copy_bench_fixture`] identifier one byte at a time
-    /// through the *actual* decode-loop shape from
-    /// [`generate_from_prompt_ids_cached_constrained`] -- the
-    /// identifier-lock proactive-release check plus the soft suffix-copy
-    /// bias selection -- using a real (tiny, CPU) [`Tensor`] for the argmax
-    /// steps so the bench exercises the exact same code path the
-    /// model-driven loop does, modulo the forward pass itself. When
-    /// `use_raw_argmax_shortcut` is `false`, the second (released)
-    /// [`build_copy_mask`] call always runs whenever the lock is engaged --
-    /// the pre-fix shape, before the perf fix at this function's real call
-    /// site skipped it whenever the model's own unconstrained top choice
-    /// was already legal under the lock -- so a caller can A/B the two
-    /// shapes against the *same* build of `grug_data::constrain` (isolating
-    /// just this one change, with no other code or machine-variance
-    /// confound).
-    fn run_full_decode_step_shape(use_raw_argmax_shortcut: bool) -> std::time::Duration {
+    /// Runs the [`copy_bench_fixture`] identifier one byte at a time through
+    /// the *actual* v7 decode-loop shape from
+    /// [`generate_from_prompt_ids_cached_constrained`] -- the deadlock-only
+    /// release check plus the soft suffix-copy bias selection -- using a
+    /// real (tiny, CPU) [`Tensor`] for the argmax steps so the bench
+    /// exercises the exact same code path the model-driven loop does,
+    /// modulo the forward pass itself. Unlike the pre-v7 shape, the second
+    /// (released) [`build_copy_mask`] call only ever runs when the *locked*
+    /// mask itself allows nothing at all, so this fixture (whose logits
+    /// always favor the identifier's own next byte, keeping the lock
+    /// satisfied every step) never takes that branch -- it measures the
+    /// steady-state cost once the "proactive release" double-build was
+    /// removed entirely.
+    fn run_full_decode_step_shape() -> std::time::Duration {
         let (pieces, identifier, grammar, copy, mut state) = copy_bench_fixture();
         let vocab_size = pieces.len();
         let eos_id = vocab_size as u32 + 1;
         let device = Default::default();
 
-        // Deterministic "logits": favor the identifier's own next byte --
-        // the realistic common case this mechanism targets (the model's
-        // unconstrained top choice already continues the copy correctly),
-        // so the identifier-lock proactive-release check's cheap early-out
-        // (Phase 51 perf) actually applies on most steps rather than always
-        // falling through to the second `build_copy_mask` call.
         let mut value_bias_overrides = 0u32;
         let mut global_overrides = 0u32;
         let mut total = std::time::Duration::ZERO;
@@ -1536,44 +1600,24 @@ mod tests {
                 &device,
             );
 
-            let (locked_mask, _locked_any) =
+            let (locked_mask, locked_any) =
                 build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
-            let mut mask = locked_mask.clone();
+            let mut mask = locked_mask;
             let mut active_state = state.clone();
-            if state.identifier_lock_engaged() {
-                let raw_argmax_locked_legal = if use_raw_argmax_shortcut {
-                    let raw_argmax = argmax(last_logits.clone());
-                    locked_mask
-                        .get(raw_argmax as usize)
-                        .is_some_and(|v| v.is_finite())
-                } else {
-                    false // pre-fix shape: always build the released mask
-                };
-                if !raw_argmax_locked_legal {
-                    let released_state = state.with_identifier_lock_released();
-                    let (released_mask, released_any) = build_copy_mask(
-                        &released_state,
-                        &grammar,
-                        &copy,
-                        &pieces,
-                        vocab_size,
-                        eos_id,
-                    );
-                    let release = if released_any {
-                        let released_tensor = Tensor::<CpuBackend, 1>::from_data(
-                            TensorData::new(released_mask.clone(), [vocab_size]),
-                            &device,
-                        );
-                        let preferred_id = argmax(last_logits.clone() + released_tensor);
-                        should_release_identifier_lock(&locked_mask, preferred_id)
-                    } else {
-                        true
-                    };
-                    if release {
-                        active_state = released_state;
-                        mask = released_mask;
-                    }
-                }
+            if (state.identifier_lock_engaged() || state.identifier_anchor_active())
+                && !locked_any
+            {
+                let released_state = state.with_identifier_lock_released();
+                let (released_mask, _released_any) = build_copy_mask(
+                    &released_state,
+                    &grammar,
+                    &copy,
+                    &pieces,
+                    vocab_size,
+                    eos_id,
+                );
+                active_state = released_state;
+                mask = released_mask;
             }
 
             if let Some(content) = active_state.active_string_content() {
@@ -1602,33 +1646,11 @@ mod tests {
     #[ignore = "manual timing probe, not part of the fast test gate"]
     fn bench_full_decode_step_shape_over_a_300_byte_copied_value() {
         let steps = 300u32;
-        let total = run_full_decode_step_shape(true);
+        let total = run_full_decode_step_shape();
         println!(
             "bench_full_decode_step_shape_over_a_300_byte_copied_value: {steps} steps over a 300-byte \
              value, 8000-piece vocab, ~3k-byte context: total {total:?}, avg {:?}/step",
             total / steps,
-        );
-    }
-
-    /// Isolated A/B of just the raw-argmax proactive-release shortcut
-    /// (Phase 51 perf, see the call site in
-    /// [`generate_from_prompt_ids_cached_constrained`]): both arms run
-    /// against the exact same (already-optimized) `grug_data::constrain`
-    /// state machine, so the only variable is whether the second
-    /// `build_copy_mask` call is skipped when the model's own unconstrained
-    /// top choice already continues the identifier lock.
-    #[test]
-    #[ignore = "manual timing probe, not part of the fast test gate"]
-    fn bench_raw_argmax_shortcut_isolated_a_b() {
-        let steps = 300u32;
-        let without_shortcut = run_full_decode_step_shape(false);
-        let with_shortcut = run_full_decode_step_shape(true);
-        println!(
-            "bench_raw_argmax_shortcut_isolated_a_b: {steps} steps; \
-             always-double-build (pre-fix shape): total {without_shortcut:?}, avg {:?}/step; \
-             raw-argmax shortcut (post-fix shape): total {with_shortcut:?}, avg {:?}/step",
-            without_shortcut / steps,
-            with_shortcut / steps,
         );
     }
 }

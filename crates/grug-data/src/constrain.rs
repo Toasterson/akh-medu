@@ -1587,14 +1587,22 @@ pub struct DecodeReport {
     /// content-so-far became an unambiguous identifier prefix).
     pub identifier_copy_locks: u32,
     /// How many of those locks were subsequently released mid-value because
-    /// no vocabulary token could extend the match (the documented
-    /// no-deadlock escape hatch), rather than the value simply completing
-    /// while still locked.
+    /// no vocabulary token could extend the match under either the trie lock
+    /// or the left anchor (the documented total-deadlock escape hatch;
+    /// Phase 51 / ADR 104 D2 v7 removed the earlier proactive release, so
+    /// this now counts *only* true deadlock releases), rather than the value
+    /// simply completing while still locked.
     pub identifier_copy_releases: u32,
     /// Phase 51 / ADR 104 D2 mechanism 2: how many decode steps the soft
     /// suffix-copy bias picked a within-margin alternative over the masked
     /// argmax because it continued a verbatim context match.
     pub copy_bias_overrides: u32,
+    /// Phase 51 / ADR 104 D2 v7: how many run bytes the left-anchored
+    /// run-start forcing (see the module notes) hard-restricted during this
+    /// decode -- the mechanism that protects a run's first 1-2 bytes, before
+    /// `MIN_IDENTIFIER_RUN_LEN` lets the trie lock counted in
+    /// `identifier_copy_locks` engage.
+    pub anchored_run_bytes: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1969,6 +1977,140 @@ fn is_identifier_run_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
 }
 
+// ── Left-anchored run start (Phase 51 / ADR 104 D2 v7) ─────────────────────
+//
+// The trie lock above only *engages* once a run reaches
+// [`MIN_IDENTIFIER_RUN_LEN`] and has seen a digit -- by design (rule (a):
+// never lock a plain word). That leaves the run's first 1-2 bytes
+// unprotected, which measurement showed is exploitable: a run can start with
+// a byte that prefixes no real identifier at all (e.g. the model emits `a`
+// as a run's 2nd byte when the real token continues with `8`), and nothing
+// catches it because the trie lock has no opinion yet. The left anchor closes
+// that gap by looking *backward* instead of forward: at the moment a run
+// starts, take the value's own last few bytes (the literal text immediately
+// preceding the run -- e.g. `//textbook:`) and find where *that* occurs in
+// the raw prompt. If it occurs, the byte(s) that follow it there are exactly
+// what a faithful copy should type next, independent of whether the run has
+// accumulated enough length/digits for the trie lock to have an opinion.
+//
+// The anchor is deliberately narrower in scope than the trie lock: it only
+// forces bytes while at least one anchored occurrence's continuation is
+// itself an identifier-run byte (never a delimiter), and it gives up
+// entirely once the left context doesn't occur in the prompt at all (a novel
+// composition, where there is nothing to anchor against). Once established,
+// it narrows monotonically as the run grows -- the same incremental
+// filter-by-appended-byte shape [`SuffixCopyIndex`] already uses for the
+// whole-value bias -- and is capped at [`MAX_ANCHORED_RUN_BYTES`] bytes so a
+// pathological case (a left context that matches a very long stretch of the
+// prompt) cannot force forever.
+
+/// How many trailing bytes of the value's content *before* a fresh run may
+/// anchor it (Phase 51 / ADR 104 D2 v7). Long enough to capture a real
+/// distinguishing prefix (`//textbook:` is 11 bytes) without pulling in
+/// unrelated preceding text.
+const ANCHOR_LEFT_CONTEXT_LEN: usize = 12;
+
+/// Hard cap on how many bytes of one run the left anchor may force before
+/// giving up and letting the rest of the run decode unconstrained by it (the
+/// trie lock, if it has engaged by then, still applies independently).
+/// Guards against an anchor that, by coincidence, keeps finding *some*
+/// matching occurrence indefinitely.
+const MAX_ANCHORED_RUN_BYTES: usize = 64;
+
+/// The left-anchored occurrence set for one identifier run in progress
+/// (Phase 51 / ADR 104 D2 v7): every offset in the prompt where the run's
+/// left context is followed by exactly the run bytes emitted so far.
+/// Invariant: whenever this exists (`Some`), `positions` is non-empty *and*
+/// at least one of those positions' next byte is an [`is_identifier_run_byte`]
+/// continuation -- the moment that stops being true, the anchor is dropped
+/// (`None`) rather than kept around inert, so "is the anchor forcing
+/// anything right now" is just `.is_some()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnchorRun {
+    /// Byte length of the left context this anchor was computed from --
+    /// fixed for the run's lifetime, needed to locate each position's
+    /// continuation byte (`context[position + left_len + consumed]`).
+    left_len: usize,
+    /// Prompt offsets where `left context ++ run-so-far` currently matches,
+    /// narrowed by one byte per call to [`advance_anchor`].
+    positions: Vec<usize>,
+    /// How many run bytes have been force-matched under this anchor so far
+    /// (including the run's first byte, which is what establishes it) --
+    /// gates [`MAX_ANCHORED_RUN_BYTES`].
+    consumed: usize,
+}
+
+/// Every offset in `context` where `needle` occurs -- empty for an empty
+/// `needle`. A run that starts with no left context at all (the run is the
+/// very first bytes of its value, e.g. one bare array element like
+/// `"textbook"`) has nothing to anchor against: matching a single byte
+/// "anywhere in the prompt" is true of nearly every letter in ordinary text
+/// (measured: this degenerate case forced spurious rejections on wholly
+/// unrelated free text), so an empty left context leaves the anchor
+/// inactive from the start, exactly like a non-empty left context that does
+/// not occur in the prompt.
+fn positions_of(context: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    SuffixCopyIndex::scan_positions(context, needle)
+}
+
+/// Advance a left-anchored occurrence set by one run byte `sem`, where
+/// `consumed` is how many run bytes were already force-matched under this
+/// anchor (so the continuation byte for `position` sits at
+/// `position + left_len + consumed`).
+///
+/// - `None`: the anchor is still actively forcing (some remaining occurrence
+///   continues with an identifier-run byte) but `sem` matches none of
+///   them -- `sem` is illegal.
+/// - `Some(None)`: the anchor deactivates -- either no occurrence's
+///   continuation is an identifier-run byte at all (every one is a
+///   delimiter: the copied token already ended in the source, or there were
+///   no occurrences to begin with -- novel composition), so `sem` is
+///   unconstrained by the anchor for the rest of this run.
+/// - `Some(Some(next))`: the anchor stays active, narrowed to the
+///   occurrences whose continuation byte is exactly `sem`.
+fn advance_anchor(
+    context: &[u8],
+    positions: &[usize],
+    left_len: usize,
+    consumed: usize,
+    sem: u8,
+) -> Option<Option<Vec<usize>>> {
+    let continuation_at = |p: &usize, offset: usize| context.get(p + left_len + offset).copied();
+    let has_run_continuation_at = |positions: &[usize], offset: usize| {
+        positions
+            .iter()
+            .any(|p| continuation_at(p, offset).is_some_and(is_identifier_run_byte))
+    };
+    if !has_run_continuation_at(positions, consumed) {
+        return Some(None);
+    }
+    let filtered: Vec<usize> = positions
+        .iter()
+        .copied()
+        .filter(|p| continuation_at(p, consumed) == Some(sem))
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+    // `sem` matched -- but look one byte further ahead before committing to
+    // keeping the anchor active: if every surviving occurrence's *next*
+    // continuation is itself a delimiter, the copied token completed exactly
+    // on this byte, so deactivate immediately (the invariant documented on
+    // [`AnchorRun`] is "`Some` implies a live forcing continuation exists
+    // *right now*", not "existed as of the last byte"). Without this
+    // lookahead, a run that exactly completes an anchored token would still
+    // report `anchor.is_some()` for the byte immediately after -- rejecting
+    // a legal close/delimiter one byte too aggressively.
+    if has_run_continuation_at(&filtered, consumed + 1) {
+        Some(Some(filtered))
+    } else {
+        Some(None)
+    }
+}
+
 /// The identifier-shaped substrings of one generation call's context,
 /// indexed once ([`identifier_tokens`]) for repeated prefix/exact-match
 /// queries during decoding (Phase 51 / ADR 104 D2 mechanism 1). Reuses
@@ -2235,6 +2377,15 @@ enum CopyState {
         /// candidate exactly, this goes back to `false` (rule 2: "the lock
         /// releases").
         engaged: bool,
+        /// The left-anchored occurrence set for the *current* run (Phase 51
+        /// / ADR 104 D2 v7), or `None` when nothing is anchoring it (never
+        /// established, the left context doesn't occur in the prompt, or
+        /// every remaining occurrence's continuation has stopped being an
+        /// identifier-run byte). See [`AnchorRun`] and [`advance_anchor`].
+        /// Reset to `None` alongside `run_len` at every run boundary, and
+        /// (re-)established from the value's own preceding bytes the moment
+        /// a fresh run starts.
+        anchor: Option<AnchorRun>,
     },
 }
 
@@ -2350,32 +2501,42 @@ impl ConstrainedDecodeState {
                 run_has_digit: false,
                 run_prefix_node: Some(CopyTrie::ROOT),
                 engaged: false,
+                anchor: None,
             });
         }
 
         if was_in_string && now_in_string {
-            let (mut content, mut escaped, mut run_len, mut run_has_digit, mut run_prefix_node, mut engaged) =
-                match &self.copy {
-                    CopyState::Active {
-                        content,
-                        escaped,
-                        run_len,
-                        run_has_digit,
-                        run_prefix_node,
-                        engaged,
-                    } => (
-                        content.clone(),
-                        *escaped,
-                        *run_len,
-                        *run_has_digit,
-                        *run_prefix_node,
-                        *engaged,
-                    ),
-                    // The schema-trie governed the previous byte (or this is
-                    // the first byte after some other transition); start
-                    // fresh rather than assume a mismatched variant.
-                    CopyState::Idle => (Vec::new(), false, 0, false, Some(CopyTrie::ROOT), false),
-                };
+            let (
+                mut content,
+                mut escaped,
+                mut run_len,
+                mut run_has_digit,
+                mut run_prefix_node,
+                mut engaged,
+                mut anchor,
+            ) = match &self.copy {
+                CopyState::Active {
+                    content,
+                    escaped,
+                    run_len,
+                    run_has_digit,
+                    run_prefix_node,
+                    engaged,
+                    anchor,
+                } => (
+                    content.clone(),
+                    *escaped,
+                    *run_len,
+                    *run_has_digit,
+                    *run_prefix_node,
+                    *engaged,
+                    anchor.clone(),
+                ),
+                // The schema-trie governed the previous byte (or this is
+                // the first byte after some other transition); start
+                // fresh rather than assume a mismatched variant.
+                CopyState::Idle => (Vec::new(), false, 0, false, Some(CopyTrie::ROOT), false, None),
+            };
 
             // Resolve the semantic (unescaped) byte, mirroring the D1
             // schema-trie's own escape handling. `None` means this byte only
@@ -2397,7 +2558,82 @@ impl ConstrainedDecodeState {
             if identifier_copy
                 && let Some(sem) = semantic
             {
+                let context: &[u8] = &copy_constraints.suffix.context;
                 if is_identifier_run_byte(sem) {
+                    // Left-anchored run start (Phase 51 / ADR 104 D2 v7): a
+                    // run beginning right now is anchored on the value's own
+                    // preceding bytes (`content` already has `sem` appended,
+                    // so exclude it); an in-progress run's anchor is instead
+                    // narrowed by this one byte. Both paths must reject `sem`
+                    // the same way -- "still actively forcing, but `sem`
+                    // isn't one of the forced continuations".
+                    if run_len == 0 {
+                        let before_run = &content[..content.len() - 1];
+                        // Only anchor a run whose left context itself ends on
+                        // a compound-identifier joiner (`:`/`/` -- the same
+                        // bytes the suffix-run redesign treats as run
+                        // *delimiters* rather than run bytes, see
+                        // `is_identifier_run_byte`'s docs). This is a
+                        // necessary safety gate beyond the plain "does the
+                        // left context occur in the prompt" check: without
+                        // it, an ordinary word boundary (a space) anchors
+                        // just as readily, and short common words/phrases
+                        // (`"the "`, `"see "`) coincidentally recur in
+                        // unrelated context text often enough to force wrong
+                        // continuations on wholly unrelated free text or on
+                        // prose that diverges from the context's own
+                        // phrasing around a copied identifier (a distilled
+                        // sentence) -- measured while implementing this: it
+                        // broke plain free-text decoding outright. A `:`/`/`
+                        // boundary is a much stronger signal that what
+                        // follows is a composed compound identifier rather
+                        // than incidental prose.
+                        let left = match before_run.last() {
+                            Some(b':') | Some(b'/') => {
+                                let left_start =
+                                    before_run.len().saturating_sub(ANCHOR_LEFT_CONTEXT_LEN);
+                                Some(&before_run[left_start..])
+                            }
+                            _ => None,
+                        };
+                        anchor = match left {
+                            None => None,
+                            Some(left) => {
+                                let left_len = left.len();
+                                let occurrences = positions_of(context, left);
+                                match advance_anchor(context, &occurrences, left_len, 0, sem) {
+                                    None => return None,
+                                    Some(None) => None,
+                                    Some(Some(positions)) => Some(AnchorRun {
+                                        left_len,
+                                        positions,
+                                        consumed: 1,
+                                    }),
+                                }
+                            }
+                        };
+                    } else if let Some(active) = anchor.take() {
+                        anchor = if active.consumed >= MAX_ANCHORED_RUN_BYTES {
+                            None
+                        } else {
+                            match advance_anchor(
+                                context,
+                                &active.positions,
+                                active.left_len,
+                                active.consumed,
+                                sem,
+                            ) {
+                                None => return None,
+                                Some(None) => None,
+                                Some(Some(positions)) => Some(AnchorRun {
+                                    left_len: active.left_len,
+                                    positions,
+                                    consumed: active.consumed + 1,
+                                }),
+                            }
+                        };
+                    }
+
                     if engaged {
                         // Engaged implies `run_prefix_node` is a *proper*
                         // (non-terminal) prefix of >= 1 candidate, so
@@ -2432,13 +2668,18 @@ impl ConstrainedDecodeState {
                     // A non-run byte while still inside the string: a run
                     // boundary. `engaged` already implies the run is
                     // non-terminal (incomplete), so this would truncate a
-                    // copy in progress -- illegal.
-                    if engaged {
+                    // copy in progress -- illegal. An active anchor
+                    // (`anchor.is_some()`) means the same thing for the same
+                    // reason: it only survives while it is still forcing an
+                    // identifier-run-byte continuation, so a non-run byte
+                    // here would abandon that forced copy mid-way.
+                    if engaged || anchor.is_some() {
                         return None;
                     }
                     run_len = 0;
                     run_has_digit = false;
                     run_prefix_node = Some(CopyTrie::ROOT);
+                    anchor = None;
                 }
                 engaged = run_len >= MIN_IDENTIFIER_RUN_LEN
                     && run_has_digit
@@ -2452,6 +2693,7 @@ impl ConstrainedDecodeState {
                 run_has_digit,
                 run_prefix_node,
                 engaged,
+                anchor,
             });
         }
 
@@ -2460,7 +2702,12 @@ impl ConstrainedDecodeState {
         if was_in_string
             && !now_in_string
             && identifier_copy
-            && let CopyState::Active { engaged: true, .. } = &self.copy
+            && let CopyState::Active {
+                engaged: locked,
+                anchor,
+                ..
+            } = &self.copy
+            && (*locked || anchor.is_some())
         {
             return None; // closing on an incomplete run is illegal
         }
@@ -2476,23 +2723,48 @@ impl ConstrainedDecodeState {
         matches!(&self.copy, CopyState::Active { engaged: true, .. })
     }
 
-    /// `self` with the active string's identifier run lock forced open (a
-    /// no-op if not currently engaged) -- the documented escape hatch for
-    /// "no identifier matches": never deadlock generation. Scoped to the
-    /// *current run* (Phase 51 / ADR 104 D2 suffix-run redesign): once this
-    /// run ends (a delimiter byte is next accepted), the lock is free to
-    /// re-engage on whatever run follows, since run boundaries always reset
-    /// tracking from scratch.
+    /// Whether the left-anchored run-start forcing (Phase 51 / ADR 104 D2
+    /// v7) is currently restricting the next byte of the active run. Folded
+    /// into `grug-train`'s deadlock check alongside
+    /// [`Self::identifier_lock_engaged`], since the anchor can force a byte
+    /// before the trie lock has even engaged (the run's first 1-2 bytes).
+    pub fn identifier_anchor_active(&self) -> bool {
+        matches!(&self.copy, CopyState::Active { anchor: Some(_), .. })
+    }
+
+    /// How many run bytes the left anchor has force-matched so far in the
+    /// active run (`0` when no anchor is active) -- `grug-train`'s decode
+    /// loop diffs this before/after committing a token's bytes to build the
+    /// `anchored_run_bytes` telemetry count in [`DecodeReport`].
+    pub fn identifier_anchor_consumed(&self) -> usize {
+        match &self.copy {
+            CopyState::Active {
+                anchor: Some(active),
+                ..
+            } => active.consumed,
+            _ => 0,
+        }
+    }
+
+    /// `self` with the active string's identifier run lock and left-anchored
+    /// run-start forcing both forced open (a no-op if neither is currently
+    /// active) -- the documented escape hatch for "no legal continuation at
+    /// all": never deadlock generation. Scoped to the *current run* (Phase 51
+    /// / ADR 104 D2 suffix-run redesign): once this run ends (a delimiter
+    /// byte is next accepted), both are free to (re-)engage on whatever run
+    /// follows, since run boundaries always reset tracking from scratch.
     pub fn with_identifier_lock_released(&self) -> Self {
         let mut copy = self.copy.clone();
         if let CopyState::Active {
             run_prefix_node,
             engaged,
+            anchor,
             ..
         } = &mut copy
         {
             *run_prefix_node = None;
             *engaged = false;
+            *anchor = None;
         }
         Self {
             frontier: self.frontier.clone(),
@@ -3829,5 +4101,138 @@ mod tests {
             diverged.identifier_lock_engaged(),
             "a later run in the same value must still be able to lock, independent of an earlier run's release"
         );
+    }
+
+    // ── Left-anchored run start (Phase 51 / ADR 104 D2 v7) ──────────────────
+
+    /// (B) Regression for measured failure shape (B) in the v7 task report:
+    /// `synthetic://textbook:b851eb11b1b27ab9:edition-2` -- the argmax wants
+    /// `a` as the run's *2nd* byte (the real id starts `b8...`). At that
+    /// point `run_len` is only 1, so `MIN_IDENTIFIER_RUN_LEN` keeps the trie
+    /// lock from having an opinion yet; the left anchor on `textbook:`
+    /// (found verbatim in the prompt, immediately followed by the real id)
+    /// must hard-restrict the run's first bytes anyway.
+    #[test]
+    fn anchor_hard_restricts_the_runs_first_bytes_before_the_trie_lock_can_engage() {
+        let id = "b851eb11b1b27ab9";
+        let context = format!(
+            "<tool_response>\n{{\"source_path\":\"synthetic://textbook:{id}:edition-2\"}}\n</tool_response>"
+        );
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "run_len is only 1 -- the trie lock cannot have engaged yet"
+        );
+        assert!(
+            state.identifier_anchor_active(),
+            "the left anchor on `textbook:` must be forcing the run's first byte"
+        );
+
+        assert_eq!(
+            state.step(&grammar, &copy, b'a'),
+            None,
+            "a wrong 2nd byte must have no legal continuation before the trie lock can even engage"
+        );
+
+        let rest = format!(
+            "{}:edition-2\"}},\"name\":\"cite_source_path\"}}\n</tool_call>",
+            &id[1..]
+        );
+        let end = state
+            .advance(&grammar, &copy, rest.as_bytes())
+            .expect("typing the real identifier to completion must stay legal");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (C) A composed prefix (`://textbook:`) that never occurs anywhere in
+    /// the prompt (a wholly novel composition) must leave the anchor
+    /// inactive -- decoding proceeds exactly as unconstrained free text
+    /// would, with no forced continuation at all.
+    #[test]
+    fn anchor_stays_inactive_for_a_novel_composition_never_seen_in_the_prompt() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_prefix = "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:";
+        let state = advance_constrained(&grammar, &copy, up_to_prefix)
+            .expect("the fixed template prefix must always be legal");
+
+        let mid = state
+            .advance(&grammar, &copy, b"f")
+            .expect("typing a wholly novel value must stay legal");
+        assert!(
+            !mid.identifier_anchor_active(),
+            "`://textbook:` never occurs in this context -- the anchor must never engage"
+        );
+
+        let end = mid
+            .advance(
+                &grammar,
+                &copy,
+                b"oo\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("a novel composition must decode exactly as unconstrained free text would");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (D) A plain, digit-free word (`textbook`) anchored on a `:`-joined
+    /// left context that genuinely occurs in the prompt must be forced
+    /// *within* the token (a wrong byte mid-word is illegal), but the anchor
+    /// must deactivate the instant the token completes -- the value is free
+    /// to continue with anything afterward, even though the context's own
+    /// occurrence is followed by a delimiter (`,`) the value never types.
+    #[test]
+    fn anchored_plain_word_is_forced_within_the_token_but_not_beyond_it() {
+        let context = "<tool_response>\nsee ref:textbook, page 3 for details\n</tool_response>";
+        let tools = vec![note_body_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_ref_colon = "<tool_call>\n{\"arguments\":{\"body\":\"ref:";
+        let state = advance_constrained(&grammar, &copy, up_to_ref_colon)
+            .expect("a ':'-anchored prefix must be legal");
+        assert!(
+            !state.identifier_anchor_active(),
+            "the anchor engages on the run's first byte, not before it"
+        );
+
+        let mid = state
+            .advance(&grammar, &copy, b"textboo")
+            .expect("typing a real anchored continuation must stay legal");
+        assert!(
+            mid.identifier_anchor_active(),
+            "'textboo' must still be anchored -- 'textbook' is not yet complete"
+        );
+
+        // The context's real 8th letter is `k`; a divergent byte must be
+        // illegal while the anchor is still forcing.
+        assert_eq!(mid.step(&grammar, &copy, b'z'), None);
+
+        let completed = mid
+            .step(&grammar, &copy, b'k')
+            .expect("the real 8th letter must be legal");
+        assert!(
+            !completed.identifier_anchor_active(),
+            "'textbook' exactly completes the anchored token in the context; the anchor must deactivate"
+        );
+
+        // Not forced beyond the token: the context's own occurrence
+        // continues with `,`, but the value instead continues with
+        // unrelated free prose, and this must still be legal.
+        let end = completed
+            .advance(&grammar, &copy, b" is relevant.\"},\"name\":\"note_body\"}\n</tool_call>")
+            .expect(
+                "the rest of the call must decode to completion, unconstrained by the completed anchor",
+            );
+        assert!(grammar.accepts_eos(&end.frontier));
     }
 }
