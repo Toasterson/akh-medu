@@ -2489,6 +2489,20 @@ enum CopyState {
         /// (re-)established from the value's own preceding bytes the moment
         /// a fresh run starts.
         anchor: Option<AnchorRun>,
+        /// Whether the *current* run started immediately after a `:` or `/`
+        /// byte in the value's own content -- the same gate `anchor`'s
+        /// establishment uses (Phase 51 / ADR 104 D2 v8: composed-value
+        /// second-byte bug fix). When `true`, [`engaged`](Self::Active::engaged)
+        /// drops the `run_len >= `[`MIN_IDENTIFIER_RUN_LEN`]`/`run_has_digit`
+        /// requirements and may go `true` after just the run's first byte,
+        /// because a run right after `:`/`/` is already a strong signal that
+        /// what follows is a composed identifier (the same signal the left
+        /// anchor already trusts), not merely "any 3+-byte digit-bearing
+        /// span". Runs that do *not* start after `:`/`/` are unaffected --
+        /// they keep the original length/digit-gated rule. Reset to `false`
+        /// alongside `run_len` at every run boundary, and (re-)computed from
+        /// the value's own preceding byte the moment a fresh run starts.
+        run_after_colon_slash: bool,
     },
 }
 
@@ -2605,6 +2619,7 @@ impl ConstrainedDecodeState {
                 run_prefix_node: Some(CopyTrie::ROOT),
                 engaged: false,
                 anchor: None,
+                run_after_colon_slash: false,
             });
         }
 
@@ -2617,6 +2632,7 @@ impl ConstrainedDecodeState {
                 mut run_prefix_node,
                 mut engaged,
                 mut anchor,
+                mut run_after_colon_slash,
             ) = match &self.copy {
                 CopyState::Active {
                     content,
@@ -2626,6 +2642,7 @@ impl ConstrainedDecodeState {
                     run_prefix_node,
                     engaged,
                     anchor,
+                    run_after_colon_slash,
                 } => (
                     content.clone(),
                     *escaped,
@@ -2634,11 +2651,21 @@ impl ConstrainedDecodeState {
                     *run_prefix_node,
                     *engaged,
                     anchor.clone(),
+                    *run_after_colon_slash,
                 ),
                 // The schema-trie governed the previous byte (or this is
                 // the first byte after some other transition); start
                 // fresh rather than assume a mismatched variant.
-                CopyState::Idle => (Vec::new(), false, 0, false, Some(CopyTrie::ROOT), false, None),
+                CopyState::Idle => (
+                    Vec::new(),
+                    false,
+                    0,
+                    false,
+                    Some(CopyTrie::ROOT),
+                    false,
+                    None,
+                    false,
+                ),
             };
 
             // Resolve the semantic (unescaped) byte, mirroring the D1
@@ -2691,13 +2718,21 @@ impl ConstrainedDecodeState {
                         // boundary is a much stronger signal that what
                         // follows is a composed compound identifier rather
                         // than incidental prose.
-                        let left = match before_run.last() {
-                            Some(b':') | Some(b'/') => {
-                                let left_start =
-                                    before_run.len().saturating_sub(ANCHOR_LEFT_CONTEXT_LEN);
-                                Some(&before_run[left_start..])
-                            }
-                            _ => None,
+                        //
+                        // The same gate now also controls the trie lock's own
+                        // early engagement (Phase 51 / ADR 104 D2 v8): a run
+                        // starting right after `:`/`/` may engage the lock
+                        // from its very first byte -- see where
+                        // `run_after_colon_slash` feeds `engaged` below.
+                        let starts_after_colon_slash =
+                            matches!(before_run.last(), Some(b':') | Some(b'/'));
+                        run_after_colon_slash = starts_after_colon_slash;
+                        let left = if starts_after_colon_slash {
+                            let left_start =
+                                before_run.len().saturating_sub(ANCHOR_LEFT_CONTEXT_LEN);
+                            Some(&before_run[left_start..])
+                        } else {
+                            None
                         };
                         anchor = match left {
                             None => None,
@@ -2789,10 +2824,21 @@ impl ConstrainedDecodeState {
                     run_has_digit = false;
                     run_prefix_node = Some(CopyTrie::ROOT);
                     anchor = None;
+                    run_after_colon_slash = false;
                 }
-                engaged = run_len >= MIN_IDENTIFIER_RUN_LEN
-                    && run_has_digit
-                    && run_prefix_node.is_some_and(|node| identifiers.extendable(node));
+                // A run that started right after `:`/`/` may engage from its
+                // first byte on: `run_prefix_node` being a proper prefix of
+                // >= 1 candidate is itself already a strong signal at that
+                // position (Phase 51 / ADR 104 D2 v8 -- see
+                // `run_after_colon_slash`'s docs). Every other run keeps the
+                // original length/digit-gated rule unchanged.
+                engaged = if run_after_colon_slash {
+                    run_prefix_node.is_some_and(|node| identifiers.extendable(node))
+                } else {
+                    run_len >= MIN_IDENTIFIER_RUN_LEN
+                        && run_has_digit
+                        && run_prefix_node.is_some_and(|node| identifiers.extendable(node))
+                };
             }
 
             return Some(CopyState::Active {
@@ -2803,6 +2849,7 @@ impl ConstrainedDecodeState {
                 run_prefix_node,
                 engaged,
                 anchor,
+                run_after_colon_slash,
             });
         }
 
@@ -4367,10 +4414,15 @@ mod tests {
     /// (B) Regression for measured failure shape (B) in the v7 task report:
     /// `synthetic://textbook:b851eb11b1b27ab9:edition-2` -- the argmax wants
     /// `a` as the run's *2nd* byte (the real id starts `b8...`). At that
-    /// point `run_len` is only 1, so `MIN_IDENTIFIER_RUN_LEN` keeps the trie
-    /// lock from having an opinion yet; the left anchor on `textbook:`
-    /// (found verbatim in the prompt, immediately followed by the real id)
-    /// must hard-restrict the run's first bytes anyway.
+    /// point `run_len` is only 1; the left anchor on `textbook:` (found
+    /// verbatim in the prompt, immediately followed by the real id) hard-
+    /// restricts the run's first bytes -- and, since v8, so does the trie
+    /// lock itself: the run starts right after ':' and `b` is a real prefix
+    /// of the context id, so the lock engages from this very first byte too.
+    /// Both mechanisms agreeing here is expected; the case where the trie
+    /// lock *alone* has to carry this (the anchor cannot engage, because the
+    /// id occurs in the prompt only in prose form) is covered separately by
+    /// `first_run_byte_after_colon_engages_the_trie_lock_when_the_anchor_cannot`.
     #[test]
     fn anchor_hard_restricts_the_runs_first_bytes_before_the_trie_lock_can_engage() {
         let id = "b851eb11b1b27ab9";
@@ -4386,8 +4438,9 @@ mod tests {
         let state = advance_constrained(&grammar, &copy, up_to_first_byte)
             .expect("the real first byte of the context id must be legal");
         assert!(
-            !state.identifier_lock_engaged(),
-            "run_len is only 1 -- the trie lock cannot have engaged yet"
+            state.identifier_lock_engaged(),
+            "since v8, the trie lock also engages from the run's first byte after ':' \
+             when that byte is a real candidate prefix"
         );
         assert!(
             state.identifier_anchor_active(),
@@ -4492,6 +4545,210 @@ mod tests {
             .expect(
                 "the rest of the call must decode to completion, unconstrained by the completed anchor",
             );
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    // ── First-run-byte trie-lock engagement after ':'/'/' (Phase 51 / ADR 104
+    //    D2 v8) ───────────────────────────────────────────────────────────
+    //
+    // Measured on the A100 (paired v8): the remaining `acquire_textbook`
+    // failures are all a wrong *2nd* byte of an identifier run that starts
+    // right after ':' in a composed value, *before* the trie lock could
+    // engage (it needed `MIN_IDENTIFIER_RUN_LEN` == 3 bytes) -- and the left
+    // anchor (v7) didn't help either, because the id occurs in the prompt
+    // only in prose form (`Manual <id>`), never directly preceded by
+    // `textbook:`. These tests cover the fix: a run starting right after
+    // ':'/'/' may engage the trie lock from its very first byte, as long as
+    // that byte is itself a prefix of >= 1 context identifier candidate.
+
+    /// (a) The exact measured failure shape: `b` is a real prefix of the
+    /// context id, so the trie lock must engage immediately (the left anchor
+    /// cannot help -- `textbook:` never occurs verbatim in this context) and
+    /// reject the wrong 2nd byte the model wants (`a` instead of the real
+    /// `8`).
+    #[test]
+    fn first_run_byte_after_colon_engages_the_trie_lock_when_the_anchor_cannot() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert_eq!(
+            state.identifier_anchor_consumed(),
+            0,
+            "the left anchor must not have engaged -- `textbook:` never occurs verbatim in this context"
+        );
+        assert!(
+            state.identifier_lock_engaged(),
+            "the trie lock must engage from the run's first byte when the run starts right after ':'"
+        );
+
+        assert_eq!(
+            state.step(&grammar, &copy, b'a'),
+            None,
+            "a wrong 2nd byte must be rejected even though run_len is only 1"
+        );
+
+        let rest = format!(
+            "{}:edition-2\"}},\"name\":\"cite_source_path\"}}\n</tool_call>",
+            &id[1..]
+        );
+        let end = state
+            .advance(&grammar, &copy, rest.as_bytes())
+            .expect("typing the real identifier (and the unrelated 'edition-2' run after it) to completion must stay legal");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (b) A second ':'-anchored run in the *same* value (`edition-2`) that
+    /// does have a matching context candidate must decode to completion --
+    /// the v8 engagement rule is not one-shot-per-value, it re-applies to
+    /// every run that starts right after ':'/'/'.
+    #[test]
+    fn first_run_byte_after_colon_engages_and_completes_a_second_run_in_the_same_value() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_edition_first_byte = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:e"
+        );
+        let state = advance_constrained(&grammar, &copy, &up_to_edition_first_byte)
+            .expect("the real first byte of the 'edition-2' run must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "'e' is a real prefix of the context's 'edition-2' candidate -- the trie lock must engage"
+        );
+
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                b"dition-2\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("typing the real 'edition-2' suffix to completion must stay legal");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (c) A run starting right after ':' whose first byte prefixes *no*
+    /// context candidate at all must stay fully unconstrained -- there is
+    /// nothing for the trie lock to engage on, so the run decodes exactly as
+    /// ordinary free text would.
+    #[test]
+    fn run_after_colon_with_no_matching_candidate_prefix_stays_unconstrained() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_colon = "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:";
+        let state = advance_constrained(&grammar, &copy, up_to_colon)
+            .expect("the fixed template prefix must always be legal");
+
+        let after_z = state
+            .advance(&grammar, &copy, b"zzz-unrelated")
+            .expect("a run whose first byte prefixes no candidate must stay unconstrained");
+        assert!(
+            !after_z.identifier_lock_engaged(),
+            "'z' prefixes no candidate identifier -- the trie lock must never engage"
+        );
+        assert!(!after_z.identifier_anchor_active());
+
+        let end = after_z
+            .advance(
+                &grammar,
+                &copy,
+                b"\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("an unconstrained run must decode to completion like ordinary free text");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (d) A novel id sharing only its first byte with a real context
+    /// candidate engages the lock (byte 1 is a real prefix) but then has no
+    /// legal continuation at its 2nd byte -- the documented, acceptable
+    /// deadlock outcome for a genuinely novel composition, not a bug.
+    /// `grug-train`'s decode loop detects exactly this ("no legal byte at
+    /// all") and retries via [`ConstrainedDecodeState::with_identifier_lock_released`],
+    /// after which the rest of the run decodes unconstrained.
+    #[test]
+    fn novel_id_after_colon_diverges_and_releases_via_the_deadlock_escape_hatch() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert!(state.identifier_lock_engaged());
+
+        assert_eq!(
+            state.step(&grammar, &copy, b'q'),
+            None,
+            "a novel id sharing only the first byte with a real candidate must deadlock at its 2nd byte"
+        );
+
+        let released = state.with_identifier_lock_released();
+        assert!(!released.identifier_lock_engaged());
+
+        let end = released
+            .advance(
+                &grammar,
+                &copy,
+                b"qqq-novel-99\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("after release, an arbitrary novel continuation must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (e) The same digit-bearing candidate id, typed as the *entire* value
+    /// with nothing preceding it (no ':'/'/' immediately before the run):
+    /// `run_after_colon_slash` must be `false` here, so the original
+    /// length/digit-gated rule still applies unchanged -- a single byte
+    /// (`run_len == 1`) must not engage the lock.
+    #[test]
+    fn run_not_after_colon_or_slash_still_needs_min_len_and_a_digit_to_engage() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte = "<tool_call>\n{\"arguments\":{\"source_path\":\"b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert!(
+            !state.identifier_lock_engaged(),
+            "run_len is only 1 and the run starts at the value's own beginning (no ':'/'/' \
+             before it) -- the original length/digit-gated rule must still apply"
+        );
+
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                format!(
+                    "{}\"}},\"name\":\"cite_source_path\"}}\n</tool_call>",
+                    &id[1..]
+                )
+                .as_bytes(),
+            )
+            .expect("typing the real identifier to completion must stay legal");
         assert!(grammar.accepts_eos(&end.frontier));
     }
 }
