@@ -122,3 +122,11 @@ exam's exact-value reproduction and truncation, not on grammar; they are
 re-measured on the 8k lane's model. Constrained evaluation is ~15× slower
 than grammar-only (≈1 h per family) — performance pass in progress; it must
 land before the loop stage.
+
+## 8k lane — first measurements (2026-09-08)
+
+- Foundation `small_rope_4k`: 49,999 steps, eval perplexity **40.1** (learned-position 4k run: 60.9), 33.4M params.
+- SFT `small_8k --extend-context` (RoPE scale 2.0): p95 prompt 5,473 tokens, `compacted=0`, candidate step 43,841.
+- Probe (n=20, decoder v9): abstention 20, navigation 20, recall 19, inventory 19, revise 18, length_generalization 7, acquire_textbook 0, provider_fallback 0; all-tool 517/636 (cat 36).
+- Loop v1 window 1 (n=100, v9): abstention 100, recall 96, navigation 95, inventory 95, revise 90 (cat 9), length_generalization 34 (cat 66), acquire 0, fallback 0; all-tool 1027/1272 (cat 82). Ordinary training then failed on the resume shape check (`c4911cf9` fixes it); the loop refuses `--resume` after a binary change by design, so loop v2 restarts from the probe with decoder v10 (`1814e564`).
+- Both zeros share one symptom: the model answers in free text at `distill_note`. Hypothesis: `length_generalization` padding steps make up 31% of SFT records → `--family-weight` (`5c0f6f39`) for the next curricula; decided after loop v2 window 1.
