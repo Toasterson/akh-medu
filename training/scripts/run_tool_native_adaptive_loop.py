@@ -15,7 +15,11 @@ Ordinary-epoch training may use scaled learning rates and optional warmup
 override: pass ``--ordinary-learning-rate-scale`` (0 < value <= 1.0, default
 1.0) and ``--ordinary-warmup-steps`` (int, default None = keep run.json value)
 to tune ordinary-window SFT hyperparameters independently. Effective values are
-recorded in each window's state JSON.
+recorded in each window's state JSON. Whenever either differs from the
+resumed bundle's run.json, ``train_ordinary`` passes
+``train_knowledge --allow-schedule-change`` so the otherwise fail-closed
+resume path (ADR 104 D5) accepts the change; ``train_knowledge`` itself
+records the from/to values in the bundle's ``run-history``.
 
 Pass ``--length-buckets`` (comma-separated, strictly increasing positive
 integers, e.g. ``2048,4096,6144``) to bound the target token-count buckets the
@@ -1031,7 +1035,7 @@ def train_ordinary(
     bundle: Path,
     artifact: dict[str, Any],
     window: Path,
-) -> tuple[Path, float, int]:
+) -> tuple[Path, float, int, bool]:
     run = load_json(bundle / "run.json")
     sources = source_files(run, include_current_sibling=True)
 
@@ -1041,6 +1045,15 @@ def train_ordinary(
         args.ordinary_warmup_steps
         if args.ordinary_warmup_steps is not None
         else int(run["warmup_steps"])
+    )
+    # ADR 104 D5 deliberately trains ordinary windows at a reduced learning
+    # rate (and optionally a different warmup). train_knowledge's --resume
+    # path is fail-closed on any schedule drift unless explicitly sanctioned
+    # via --allow-schedule-change, so pass it whenever this window's
+    # effective schedule actually differs from the resumed run.json.
+    schedule_change = (
+        effective_learning_rate != float(run["learning_rate"])
+        or args.ordinary_warmup_steps is not None
     )
 
     # Build command with effective values
@@ -1087,8 +1100,10 @@ def train_ordinary(
         command.extend(["--supplemental-eval-jsonl", str(path)])
 
     command.extend(["--resume", str(bundle / str(artifact["checkpoint_dir"]))])
+    if schedule_change:
+        command.append("--allow-schedule-change")
     run_logged(command, window / "ordinary-training.log")
-    return bundle, effective_learning_rate, effective_warmup_steps
+    return bundle, effective_learning_rate, effective_warmup_steps, schedule_change
 
 
 def train_steered_segment(
@@ -1405,6 +1420,7 @@ def main() -> int:
             sibling_records = 0
             ordinary_learning_rate = None
             ordinary_warmup_steps = None
+            ordinary_schedule_change = False
             if selected_frontier_steer(evaluated):
                 steering_plan = evaluated["next_plan"]
                 steering_frontier = window / "steering-source.exam.json"
@@ -1470,9 +1486,12 @@ def main() -> int:
                         "promotion_enabled": False,
                     },
                 )
-                next_bundle, ordinary_learning_rate, ordinary_warmup_steps = train_ordinary(
-                    args, binaries, bundle, artifact, window
-                )
+                (
+                    next_bundle,
+                    ordinary_learning_rate,
+                    ordinary_warmup_steps,
+                    ordinary_schedule_change,
+                ) = train_ordinary(args, binaries, bundle, artifact, window)
                 action = "continue"
 
             next_artifact = load_candidate(next_bundle)
@@ -1519,6 +1538,7 @@ def main() -> int:
             if action == "continue" and ordinary_learning_rate is not None:
                 record["ordinary_learning_rate"] = ordinary_learning_rate
                 record["ordinary_warmup_steps"] = ordinary_warmup_steps
+                record["schedule_change"] = ordinary_schedule_change
             append_window_record(ledger, record)
             atomic_json(status_path, {**record, "stage": "window_complete"})
             bundle = next_bundle

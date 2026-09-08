@@ -131,6 +131,16 @@ struct Args {
     #[arg(long)]
     resume: Option<PathBuf>,
 
+    /// Permit a resumed run's `learning_rate` and `warmup_steps` to differ
+    /// from the resumed run.json (ADR 104 D5: ordinary adaptive-loop windows
+    /// deliberately train at a reduced learning rate). Every other resume
+    /// invariant -- corpus/contract hashes, model shape, batch size,
+    /// optimizer type, evaluation schedule -- stays strict regardless of
+    /// this flag. Off by default; the change is recorded in
+    /// `run-history/schedule-change-step_<step>.json`.
+    #[arg(long, default_value_t = false)]
+    allow_schedule_change: bool,
+
     /// Verified causal-language foundation bundle. Its tokenizer and model
     /// shape become immutable inputs to this SFT run; Adam starts fresh.
     #[arg(long)]
@@ -232,6 +242,26 @@ struct RunDescriptor {
     steering_sibling_jsonl: Option<PathBuf>,
     steered_from: Option<KnowledgeSteeringLineage>,
     start_step: usize,
+    /// Every `--allow-schedule-change` resume applied to this bundle's
+    /// lineage, oldest first. Absent from run.json files written before
+    /// this field existed, so old bundles still load strictly.
+    #[serde(default)]
+    schedule_changes: Vec<ScheduleChange>,
+}
+
+/// One sanctioned `--allow-schedule-change` resume: the learning-rate and/or
+/// warmup-step schedule changed while every other resume invariant (corpus,
+/// contract, model shape, batch size, optimizer, eval schedule) held. Mirrors
+/// the `run-history/schedule-change-step_<step>.json` record so the change
+/// is visible both from the live `run.json` and from the immutable history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct ScheduleChange {
+    resumed_at_step: usize,
+    epochs: usize,
+    from_learning_rate: f64,
+    to_learning_rate: f64,
+    from_warmup_steps: usize,
+    to_warmup_steps: usize,
 }
 
 #[derive(Deserialize)]
@@ -564,7 +594,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         model_config.max_seq_len
     );
 
-    let resume_artifact = verify_resume_manifest(
+    let (resume_artifact, resume_schedule_changes) = match verify_resume_manifest(
         &args,
         &train_inventory,
         eval_inventory.as_ref(),
@@ -574,7 +604,10 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         parameter_count,
         tokenizer.vocab_size(),
         learning_rate,
-    )?;
+    )? {
+        Some((artifact, schedule_changes)) => (Some(artifact), schedule_changes),
+        None => (None, Vec::new()),
+    };
     let foundation_lineage = foundation
         .as_ref()
         .map(VerifiedFoundationBundle::lineage)
@@ -726,6 +759,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         steering_sibling_jsonl: args.steering_sibling_jsonl.clone(),
         steered_from: steering_lineage.clone(),
         start_step: segment_start_step,
+        schedule_changes: resume_schedule_changes,
     };
     if let Some(artifact) = &resume_artifact {
         preserve_resume_run_descriptor(&args.artifacts_dir, artifact.checkpoint_step)?;
@@ -893,6 +927,11 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
 }
 
 fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
+    if args.allow_schedule_change && args.resume.is_none() {
+        return Err(invalid_data(
+            "--allow-schedule-change only applies to a --resume run",
+        ));
+    }
     let steering_inputs = [
         args.steer_from_bundle.is_some(),
         args.steering_decision.is_some(),
@@ -1397,6 +1436,83 @@ fn read_segment_start_step(path: &Path) -> Result<usize, Box<dyn Error>> {
         .map(|value| value.unwrap_or(0))
 }
 
+/// A verified `--resume` artifact paired with the accumulated
+/// `--allow-schedule-change` history to carry forward into the new run.json.
+type ResumeVerification = (KnowledgeModelArtifact, Vec<ScheduleChange>);
+
+/// Whether a resumed run.json differs from this invocation along the one
+/// sanctioned escape hatch (`learning_rate`/`warmup_steps`, ADR 104 D5) and/or
+/// along every other invariant that must never change on resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResumeComparison {
+    schedule_changed: bool,
+    other_mismatch: bool,
+}
+
+impl ResumeComparison {
+    /// Whether `verify_resume_manifest` must reject this resume outright.
+    /// `other_mismatch` is fatal unconditionally; `schedule_changed` is
+    /// fatal unless the caller explicitly opted in via
+    /// `--allow-schedule-change` (ADR 104 D5).
+    fn rejects(self, allow_schedule_change: bool) -> bool {
+        self.other_mismatch || (self.schedule_changed && !allow_schedule_change)
+    }
+}
+
+/// Exact, stable text of the resume-invariant violation error so the
+/// production error path and its tests cannot drift apart.
+const RESUME_SCHEDULE_INVARIANT_ERROR: &str =
+    "resume arguments do not preserve the original corpus, model, optimizer, or evaluation schedule";
+
+/// Pure comparison between a resumed bundle's stored `run.json` and this
+/// invocation's corpus/model/schedule inputs. Kept free of I/O so the
+/// resume-invariant policy (which fields may move under
+/// `--allow-schedule-change` and which never can) is unit-testable without a
+/// real checkpoint or candidate-model.json.
+#[allow(clippy::too_many_arguments)]
+fn compare_resume_run(
+    stored: &RunDescriptor,
+    args: &Args,
+    inventory: &CorpusInventory,
+    eval_hash: Option<&str>,
+    shape: &KnowledgeModelShape,
+    parameter_count: usize,
+    training_records: usize,
+    eval_records: usize,
+    tokenizer_vocab_size: usize,
+    learning_rate: f64,
+) -> ResumeComparison {
+    // `learning_rate`/`warmup_steps` are the one sanctioned schedule escape
+    // hatch (ADR 104 D5: ordinary adaptive-loop windows deliberately train
+    // at a reduced learning rate). Every other invariant below stays strict
+    // no matter what `--allow-schedule-change` says.
+    let schedule_changed =
+        stored.learning_rate != learning_rate || stored.warmup_steps != args.warmup_steps;
+    let other_mismatch = stored.schema_version != 1
+        || stored.seed != args.seed
+        || stored.model_size != args.model
+        || stored.shape != *shape
+        || stored.parameter_count != parameter_count
+        || stored.contract_hash != inventory.contract_hash
+        || stored.training_corpus_hash != inventory.fingerprint
+        || stored.eval_corpus_hash.as_deref() != eval_hash
+        || stored.training_records != training_records
+        || stored.eval_records != eval_records
+        || args.epochs < stored.epochs
+        || stored.batch_size != args.batch_size
+        || stored.eval_every != args.eval_every
+        || stored.eval_samples != args.eval_samples
+        || stored.eval_max_new_tokens != args.eval_max_new_tokens
+        || stored.ckpt_every != args.ckpt_every
+        || stored.loss_cap != args.loss_cap
+        || stored.grad_norm_cap != args.grad_norm_cap
+        || stored.tokenizer_vocab_size != tokenizer_vocab_size;
+    ResumeComparison {
+        schedule_changed,
+        other_mismatch,
+    }
+}
+
 fn verify_resume_manifest(
     args: &Args,
     inventory: &CorpusInventory,
@@ -1407,7 +1523,7 @@ fn verify_resume_manifest(
     parameter_count: usize,
     tokenizer_vocab_size: usize,
     learning_rate: f64,
-) -> Result<Option<KnowledgeModelArtifact>, Box<dyn Error>> {
+) -> Result<Option<ResumeVerification>, Box<dyn Error>> {
     let Some(resume) = args.resume.as_deref() else {
         return Ok(None);
     };
@@ -1448,33 +1564,54 @@ fn verify_resume_manifest(
             ))
         })?))?;
     let eval_hash = eval_inventory.map(|value| value.fingerprint.as_str());
-    if stored.schema_version != 1
-        || stored.seed != args.seed
-        || stored.model_size != args.model
-        || stored.shape != *shape
-        || stored.parameter_count != parameter_count
-        || stored.contract_hash != inventory.contract_hash
-        || stored.training_corpus_hash != inventory.fingerprint
-        || stored.eval_corpus_hash.as_deref() != eval_hash
-        || stored.training_records != training_records
-        || stored.eval_records != eval_records
-        || args.epochs < stored.epochs
-        || stored.batch_size != args.batch_size
-        || stored.learning_rate != learning_rate
-        || stored.warmup_steps != args.warmup_steps
-        || stored.eval_every != args.eval_every
-        || stored.eval_samples != args.eval_samples
-        || stored.eval_max_new_tokens != args.eval_max_new_tokens
-        || stored.ckpt_every != args.ckpt_every
-        || stored.loss_cap != args.loss_cap
-        || stored.grad_norm_cap != args.grad_norm_cap
-        || stored.tokenizer_vocab_size != tokenizer_vocab_size
-    {
-        return Err(invalid_data(
-            "resume arguments do not preserve the original corpus, model, optimizer, or evaluation schedule",
-        ));
+    let comparison = compare_resume_run(
+        &stored,
+        args,
+        inventory,
+        eval_hash,
+        shape,
+        parameter_count,
+        training_records,
+        eval_records,
+        tokenizer_vocab_size,
+        learning_rate,
+    );
+    if comparison.rejects(args.allow_schedule_change) {
+        return Err(invalid_data(RESUME_SCHEDULE_INVARIANT_ERROR));
     }
-    Ok(Some(artifact))
+    let mut schedule_changes = stored.schedule_changes.clone();
+    if comparison.schedule_changed {
+        let change = ScheduleChange {
+            resumed_at_step: artifact.checkpoint_step,
+            epochs: args.epochs,
+            from_learning_rate: stored.learning_rate,
+            to_learning_rate: learning_rate,
+            from_warmup_steps: stored.warmup_steps,
+            to_warmup_steps: args.warmup_steps,
+        };
+        record_schedule_change(&args.artifacts_dir, artifact.checkpoint_step, &change)?;
+        schedule_changes.push(change);
+    }
+    Ok(Some((artifact, schedule_changes)))
+}
+
+/// Append an immutable `run-history/schedule-change-step_<step>.json` record
+/// for a `--allow-schedule-change` resume, mirroring
+/// `preserve_resume_run_descriptor`'s before-resume snapshot. Idempotent: a
+/// second resume from the same checkpoint step leaves the first record in
+/// place rather than overwriting it.
+fn record_schedule_change(
+    artifacts_dir: &Path,
+    checkpoint_step: usize,
+    change: &ScheduleChange,
+) -> Result<(), Box<dyn Error>> {
+    let target = artifacts_dir
+        .join("run-history")
+        .join(format!("schedule-change-step_{checkpoint_step:08}.json"));
+    if target.exists() {
+        return Ok(());
+    }
+    write_json_pretty_atomic(&target, change)
 }
 
 fn preserve_resume_run_descriptor(
@@ -1648,4 +1785,255 @@ fn write_json_pretty_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), 
 
 fn invalid_data(message: impl Into<String>) -> Box<dyn Error> {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message.into()).into()
+}
+
+
+#[cfg(test)]
+mod schedule_change_tests {
+    use super::*;
+
+    /// A tiny, arbitrary but internally consistent shape -- only used for
+    /// equality comparisons in these tests, never fed to a real model.
+    fn sample_shape() -> KnowledgeModelShape {
+        KnowledgeModelShape {
+            vocab_size: 64,
+            d_model: 8,
+            n_heads: 1,
+            n_layers: 1,
+            d_ff: 16,
+            max_seq_len: 32,
+            positional_encoding: PositionalEncoding::Learned,
+            attention_chunk: None,
+        }
+    }
+
+    fn sample_inventory() -> CorpusInventory {
+        CorpusInventory {
+            contract_hash: "blake3:contract".into(),
+            fingerprint: "blake3:corpus".into(),
+            families: BTreeSet::new(),
+            languages: BTreeSet::new(),
+            stages: BTreeSet::new(),
+            record_ids: HashSet::new(),
+            episode_ids: HashSet::new(),
+        }
+    }
+
+    /// Minimal `Args` covering only the fields `compare_resume_run` reads.
+    /// `--allow-schedule-change` is left off here; individual tests set it
+    /// through `Args::try_parse_from` when it matters.
+    fn sample_args(extra: &[&str]) -> Args {
+        let mut argv = vec![
+            "train_knowledge",
+            "--contracts",
+            "contracts.json",
+            "--train-jsonl",
+            "train.jsonl",
+            "--artifacts-dir",
+            "artifacts",
+        ];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("fixed test argv must parse")
+    }
+
+    /// The stored `run.json` matching `sample_args(&[])` (every field at its
+    /// clap default) / `sample_shape()` / `sample_inventory()` exactly, with
+    /// `learning_rate = 1e-4`. Resuming with these exact values back through
+    /// `compare_resume_run` must be a clean no-op (neither the schedule nor
+    /// anything else has moved).
+    fn sample_run() -> RunDescriptor {
+        RunDescriptor {
+            schema_version: 1,
+            seed: 42,
+            model_size: KnowledgeModelSize::Small,
+            shape: sample_shape(),
+            parameter_count: 1_234,
+            contract_hash: "blake3:contract".into(),
+            training_corpus_hash: "blake3:corpus".into(),
+            eval_corpus_hash: None,
+            training_records: 100,
+            eval_records: 10,
+            epochs: 8,
+            batch_size: 8,
+            learning_rate: 1e-4,
+            warmup_steps: 250,
+            eval_every: 250,
+            eval_samples: 32,
+            eval_max_new_tokens: 384,
+            ckpt_every: 500,
+            loss_cap: 20.0,
+            grad_norm_cap: 100.0,
+            tokenizer_vocab_size: 64,
+            train_jsonl: PathBuf::from("train.jsonl"),
+            supplemental_jsonl: Vec::new(),
+            eval_jsonl: None,
+            supplemental_eval_jsonl: Vec::new(),
+            foundation_bundle: None,
+            foundation: None,
+            adapt_from_bundle: None,
+            adapted_from: None,
+            steer_from_bundle: None,
+            steering_decision: None,
+            steering_frontier_exam: None,
+            steering_sibling_manifest: None,
+            steering_sibling_jsonl: None,
+            steered_from: None,
+            start_step: 0,
+            schedule_changes: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compare(
+        stored: &RunDescriptor,
+        args: &Args,
+        learning_rate: f64,
+    ) -> ResumeComparison {
+        compare_resume_run(
+            stored,
+            args,
+            &sample_inventory(),
+            None,
+            &sample_shape(),
+            stored.parameter_count,
+            stored.training_records,
+            stored.eval_records,
+            stored.tokenizer_vocab_size,
+            learning_rate,
+        )
+    }
+
+    /// An unchanged resume (identical schedule and everything else) is
+    /// always a no-op, regardless of the flag.
+    #[test]
+    fn identical_resume_is_never_a_schedule_change_or_mismatch() {
+        let stored = sample_run();
+        let args = sample_args(&[]);
+        let comparison = compare(&stored, &args, stored.learning_rate);
+        assert!(!comparison.schedule_changed);
+        assert!(!comparison.other_mismatch);
+        assert!(!comparison.rejects(false));
+        assert!(!comparison.rejects(true));
+    }
+
+    /// (a) A different learning rate with no `--allow-schedule-change`
+    /// rejects with the exact existing invariant error.
+    #[test]
+    fn different_learning_rate_without_flag_rejects_with_existing_error() {
+        let stored = sample_run();
+        let args = sample_args(&[]);
+        assert!(!args.allow_schedule_change);
+        let comparison = compare(&stored, &args, stored.learning_rate * 0.2);
+        assert!(comparison.schedule_changed);
+        assert!(!comparison.other_mismatch);
+        assert!(comparison.rejects(args.allow_schedule_change));
+
+        let error = invalid_data(RESUME_SCHEDULE_INVARIANT_ERROR);
+        assert_eq!(error.to_string(), RESUME_SCHEDULE_INVARIANT_ERROR);
+    }
+
+    /// (b) With `--allow-schedule-change`, a differing learning rate and/or
+    /// warmup is accepted, and `record_schedule_change` writes a
+    /// `run-history/schedule-change-step_<step>.json` record carrying the
+    /// exact from/to values.
+    #[test]
+    fn allow_schedule_change_accepts_and_records_from_to_values() {
+        let stored = sample_run();
+        let args = sample_args(&["--allow-schedule-change", "--warmup-steps", "3"]);
+        assert!(args.allow_schedule_change);
+        let new_learning_rate = stored.learning_rate * 0.2;
+        let comparison = compare(&stored, &args, new_learning_rate);
+        assert!(comparison.schedule_changed);
+        assert!(!comparison.other_mismatch);
+        assert!(!comparison.rejects(args.allow_schedule_change));
+
+        let change = ScheduleChange {
+            resumed_at_step: 500,
+            epochs: args.epochs,
+            from_learning_rate: stored.learning_rate,
+            to_learning_rate: new_learning_rate,
+            from_warmup_steps: stored.warmup_steps,
+            to_warmup_steps: args.warmup_steps,
+        };
+        let temp = tempfile::tempdir().expect("tempdir");
+        record_schedule_change(temp.path(), 500, &change).expect("record schedule change");
+        let recorded_path = temp
+            .path()
+            .join("run-history")
+            .join("schedule-change-step_00000500.json");
+        let recorded: ScheduleChange = serde_json::from_reader(BufReader::new(
+            File::open(&recorded_path).expect("schedule-change record exists"),
+        ))
+        .expect("schedule-change record parses");
+        assert_eq!(recorded, change);
+        assert_eq!(recorded.from_learning_rate, stored.learning_rate);
+        assert_eq!(recorded.to_learning_rate, new_learning_rate);
+        assert_eq!(recorded.from_warmup_steps, stored.warmup_steps);
+        assert_eq!(recorded.to_warmup_steps, 3);
+
+        // Idempotent: a second resume from the same checkpoint step leaves
+        // the first record in place rather than overwriting it.
+        let other_change = ScheduleChange {
+            to_learning_rate: 9.9,
+            ..change.clone()
+        };
+        record_schedule_change(temp.path(), 500, &other_change).expect("second call is a no-op");
+        let still_first: ScheduleChange = serde_json::from_reader(BufReader::new(
+            File::open(&recorded_path).expect("schedule-change record still exists"),
+        ))
+        .expect("schedule-change record still parses");
+        assert_eq!(still_first, change);
+    }
+
+    /// (c) Even with `--allow-schedule-change`, a changed batch size still
+    /// fails: only `learning_rate`/`warmup_steps` are sanctioned escape
+    /// hatches.
+    #[test]
+    fn allow_schedule_change_does_not_waive_batch_size_invariant() {
+        let stored = sample_run();
+        let args = sample_args(&["--allow-schedule-change", "--batch-size", "999"]);
+        let comparison = compare(&stored, &args, stored.learning_rate);
+        assert!(!comparison.schedule_changed);
+        assert!(comparison.other_mismatch);
+        assert!(comparison.rejects(args.allow_schedule_change));
+    }
+
+    /// (c) Even with `--allow-schedule-change`, a changed corpus hash still
+    /// fails.
+    #[test]
+    fn allow_schedule_change_does_not_waive_corpus_hash_invariant() {
+        let stored = sample_run();
+        let args = sample_args(&["--allow-schedule-change"]);
+        let mut inventory = sample_inventory();
+        inventory.fingerprint = "blake3:different-corpus".into();
+        let comparison = compare_resume_run(
+            &stored,
+            &args,
+            &inventory,
+            None,
+            &sample_shape(),
+            stored.parameter_count,
+            stored.training_records,
+            stored.eval_records,
+            stored.tokenizer_vocab_size,
+            stored.learning_rate,
+        );
+        assert!(!comparison.schedule_changed);
+        assert!(comparison.other_mismatch);
+        assert!(comparison.rejects(args.allow_schedule_change));
+    }
+
+    /// `RunDescriptor::schedule_changes` defaults to empty when absent, so a
+    /// run.json written before this field existed still deserializes.
+    #[test]
+    fn schedule_changes_defaults_when_absent_from_legacy_run_json() {
+        let mut legacy = serde_json::to_value(sample_run()).expect("serialize sample run");
+        legacy
+            .as_object_mut()
+            .expect("run descriptor is a JSON object")
+            .remove("schedule_changes");
+        let parsed: RunDescriptor =
+            serde_json::from_value(legacy).expect("legacy run.json without schedule_changes");
+        assert!(parsed.schedule_changes.is_empty());
+    }
 }
