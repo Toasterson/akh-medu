@@ -551,6 +551,10 @@ impl OllamaClient {
 
         // Metrics: track this non-streaming request.
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -714,6 +718,10 @@ impl OllamaClient {
         // Metrics: track per-request counters (chunks, bytes, deltas) for diagnosing
         // "turns die quietly" (work item ask 1-4).
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
 
         let mut body = serde_json::json!({
