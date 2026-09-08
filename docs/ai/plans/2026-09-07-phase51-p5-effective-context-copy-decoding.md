@@ -98,3 +98,23 @@ the user's explicit approval.
   embedding when the receiving model was built as `Rope` (no error). Matching
   configs load bitwise-exact (verified 2026-09-07 across `9abeb4fc`→HEAD).
   Follow-up WI filed to fail closed on encoding mismatch in `checkpoint.rs`.
+
+## Paired decoder measurements (2026-09-07/08, 4096 checkpoint step 35207, window-2 sentinels, n=100 per family)
+
+| decoder (commit) | acquire | recall | revise | fallback | abstain | inventory | navigate | all-tool pass / catastrophic |
+|---|---|---|---|---|---|---|---|---|
+| plain greedy (window 2) | 43 | 81 | 12 | 78 | 100 | 89 | 67 | 790/1272 / 435 |
+| grammar + pattern copy (`ce31da65`) | 43 | 81 | 76 | 78 | 100 | 89 | 70 | 1006 / 179 |
+| + array/object grammar (`eae9e849`) | 43 | 81 | 76 | 78 | 100 | 89 | 70 | 1027 / 130 |
+| + copy bias v1 (`939df6eb`) — regression | 0 | 81 | 0 | – | – | – | – | – |
+| + copy bias fixed, key dedup (`957589e1`) | 47 | 81 | 80 | 81 | 100 | 89 | 70 | 1041 / 80 |
+
+Residual after `957589e1`: identifiers embedded in composed values
+(`synthetic://textbook:<id>:edition-2`, `MY-159`→`MY-15`) where neither the
+whole-value bias nor the identifier lock engages → token-level lock on the
+identifier-like suffix of a value (next). The all-tool note tools
+(`study_note_revise` 0/24, `study_note_append` 3/24) fail on the synthetic
+exam's exact-value reproduction and truncation, not on grammar; they are
+re-measured on the 8k lane's model. Constrained evaluation is ~15× slower
+than grammar-only (≈1 h per family) — performance pass in progress; it must
+land before the loop stage.
