@@ -1,8 +1,10 @@
 //! Peer akh-medu instance coordination (Phase 36d).
 //!
 //! The [`PeerRegistry`] tracks known peer instances, their capabilities,
-//! and historical performance metrics. [`delegate_to_peer`] sends a
-//! `DelegateTask` message and awaits a `TaskResult` response.
+//! and historical performance metrics. [`delegate_to_peer`] opens an ACP
+//! session on the peer's Unix/TCP endpoint (ADR-061: the daemon speaks only
+//! ACP — there is no HTTP surface) and drives one prompt turn with the task
+//! description, collecting the streamed events into the delegation outcome.
 //!
 //! Peer discovery is currently explicit (configured endpoints). Future:
 //! mDNS/DNS-SD auto-discovery on LAN.
@@ -24,7 +26,8 @@ use crate::agent::delegation::PeerDelegationConfig;
 /// Metadata about a known peer akh-medu instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
-    /// HTTP endpoint (e.g. "http://research-akh.local:3001").
+    /// ACP address: `host:port` for a TCP peer, an absolute socket path (or
+    /// `unix:<path>`) for a same-host peer (ADR-061 — no HTTP surface).
     pub endpoint: String,
     /// Capabilities advertised by this peer.
     pub capabilities: Vec<String>,
@@ -212,56 +215,194 @@ impl std::fmt::Debug for PeerRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Delegation via HTTP
+// Delegation via ACP (ADR-061: the daemon speaks only ACP over Unix/TCP)
 // ---------------------------------------------------------------------------
 
-/// Delegate a task to a peer akh-medu instance.
+/// Bound on one peer delegation turn. Deliberately matches the `AkhMeduPeer`
+/// timeout the `DelegationManager` records when dispatching
+/// (`DelegationTargetKind::AkhMeduPeer { .. } => 60` in delegation/mod.rs) so
+/// the transport gives up at the same horizon the tracker does.
+const PEER_TURN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The ACP address of a peer, parsed from the configured endpoint string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAcpAddress {
+    /// TCP `host:port` — a remote peer daemon's ACP listener.
+    Tcp(String),
+    /// Unix domain socket path — a same-host peer (or self-delegation).
+    Unix(std::path::PathBuf),
+}
+
+/// Parse a configured peer endpoint into an ACP address. Accepted forms:
+/// `host:port`, an absolute socket path, `unix:<path>`, and the legacy
+/// `http(s)://host:port` shape (scheme stripped, any trailing path dropped).
+/// Returns `None` for strings that name no usable transport — the caller
+/// reports an unreachable peer rather than guessing.
+pub fn peer_acp_address(endpoint: &str) -> Option<PeerAcpAddress> {
+    if let Some(path) = endpoint.strip_prefix("unix:") {
+        return Some(PeerAcpAddress::Unix(std::path::PathBuf::from(path)));
+    }
+    for scheme in ["http://", "https://"] {
+        if let Some(rest) = endpoint.strip_prefix(scheme) {
+            let hostport = rest.split('/').next().unwrap_or(rest);
+            return if hostport.contains(':') {
+                Some(PeerAcpAddress::Tcp(hostport.to_string()))
+            } else {
+                None
+            };
+        }
+    }
+    if endpoint.starts_with('/') {
+        return Some(PeerAcpAddress::Unix(std::path::PathBuf::from(endpoint)));
+    }
+    if endpoint.contains(':') {
+        return Some(PeerAcpAddress::Tcp(endpoint.to_string()));
+    }
+    None
+}
+
+/// Delegate a task to a peer akh-medu instance over ACP.
 ///
-/// Sends a delegation request to the peer's `/delegation/incoming` endpoint
-/// and polls for the result. The peer is expected to return a
-/// `DelegationCallbackPayload` on its result channel.
+/// Opens an ACP connection to the peer (ADR-061: the daemon speaks only ACP
+/// over Unix socket/TCP — there is no HTTP surface), creates a session in the
+/// target workspace (`session/new` with the `akh-ws:<name>` cwd sentinel; the
+/// fresh session carries its own isolated `SessionContext`, per WI-1), sends
+/// one `session/prompt` carrying the task description, and collects the
+/// streamed `session/update` events into the outcome's visible text. Pure
+/// internal akhomed-to-akhomed ACP — it never touches Anima.
 ///
-/// **Current status**: HTTP peer delegation requires the peer's akhomed server
-/// to expose a delegation API endpoint (planned in the daemon integration).
-/// This function provides the scaffold; until both sides are wired, it returns
-/// `DelegationError::PeerUnreachable`.
-#[cfg(feature = "daemon")]
+/// `task.target_workspace` selects the peer-side workspace; `None` means the
+/// peer's default workspace.
+#[cfg(feature = "delegation")]
 pub async fn delegate_to_peer(
     endpoint: &str,
     task: &DelegationTask,
     id: DelegationId,
 ) -> DelegationResult<DelegationOutcome> {
-    // Build the delegation request payload.
-    let payload = serde_json::json!({
-        "task_id": id.0.to_string(),
-        "description": task.description,
-        "required_capabilities": task.required_capabilities,
-        "context_triples": task.context_triples,
-        "goal_id": task.goal_id,
-    });
-
-    let url = format!("{endpoint}/delegation/incoming");
     let start = Instant::now();
+    let workspace = task.target_workspace.as_deref().unwrap_or("default");
+    let client_name = format!("akh-delegation-{}", id.0);
+    let prompt = task.description.clone();
 
-    // Attempt the HTTP call if reqwest is available.
-    // The delegation feature doesn't enable reqwest directly; fall back to
-    // PeerUnreachable so the manager can try a different target.
-    let _ = (payload, url, start, id);
-    Err(DelegationError::PeerUnreachable {
-        endpoint: endpoint.to_string(),
+    let address = peer_acp_address(endpoint).ok_or_else(|| {
+        tracing::warn!(endpoint = %endpoint, "peer endpoint is not a usable ACP address");
+        DelegationError::PeerUnreachable { endpoint: endpoint.to_string() }
+    })?;
+
+    tracing::info!(
+        delegation_id = id.0,
+        peer_endpoint = %endpoint,
+        workspace = %workspace,
+        ?address,
+        "dispatching peer delegation over ACP",
+    );
+
+    // One bounded turn: connect → session/new → session/prompt → drain the
+    // streamed updates → disconnect.
+    let turn = match address {
+        PeerAcpAddress::Unix(path) => tokio::time::timeout(
+            PEER_TURN_TIMEOUT,
+            crate::acp::run_prompt_turn_unix(&path, &client_name, workspace, &prompt),
+        )
+        .await,
+        PeerAcpAddress::Tcp(addr) => tokio::time::timeout(
+            PEER_TURN_TIMEOUT,
+            crate::acp::run_prompt_turn_tcp(&addr, &client_name, workspace, &prompt),
+        )
+        .await,
+    };
+
+    let text = match turn {
+        Err(_elapsed) => {
+            tracing::warn!(
+                delegation_id = id.0,
+                endpoint = %endpoint,
+                timeout_secs = PEER_TURN_TIMEOUT.as_secs(),
+                "peer ACP turn timed out",
+            );
+            return Err(DelegationError::PeerTurnFailed {
+                endpoint: endpoint.to_string(),
+                reason: format!("turn exceeded {}s", PEER_TURN_TIMEOUT.as_secs()),
+            });
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                delegation_id = id.0,
+                endpoint = %endpoint,
+                error = %e,
+                "peer ACP turn failed",
+            );
+            // Connect-phase failures mean the peer is not there; anything
+            // else is a session/turn failure on a reachable peer.
+            let unreachable = matches!(
+                e,
+                crate::acp::AcpError::Connect { .. }
+                    | crate::acp::AcpError::ConnectTimeout { .. }
+            );
+            return Err(if unreachable {
+                DelegationError::PeerUnreachable { endpoint: endpoint.to_string() }
+            } else {
+                DelegationError::PeerTurnFailed {
+                    endpoint: endpoint.to_string(),
+                    reason: e.to_string(),
+                }
+            });
+        }
+        Ok(Ok(text)) => text,
+    };
+
+    // WI-221 #4: a turn that produced no visible text is a failure, never a
+    // silent success with exit_code 0 and an empty result.
+    if text.trim().is_empty() {
+        tracing::warn!(
+            delegation_id = id.0,
+            endpoint = %endpoint,
+            "peer ACP turn returned an empty response",
+        );
+        return Err(DelegationError::PeerTurnFailed {
+            endpoint: endpoint.to_string(),
+            reason: "peer returned an empty turn response".into(),
+        });
+    }
+
+    let wall_time = start.elapsed();
+    tracing::info!(
+        delegation_id = id.0,
+        endpoint = %endpoint,
+        workspace = %workspace,
+        chars = text.len(),
+        wall_time_ms = wall_time.as_millis() as u64,
+        "peer delegation completed",
+    );
+
+    Ok(DelegationOutcome {
+        id,
+        stdout: text,
+        // The peer's knowledge graph is separate; no structured triples flow
+        // back over the chat turn.
+        structured: None,
+        wall_time,
+        tokens_consumed: None,
+        cost_usd: None,
+        exit_code: Some(0),
+        goal_id: task.goal_id,
+        error: None,
+        target: None,
     })
 }
 
-/// Not available in non-daemon builds.
-#[cfg(not(feature = "daemon"))]
+/// Not available without the `delegation` feature — the real path above needs
+/// the `acp` transport that `delegation` pulls in, and `server` builds
+/// include `daemon` but not `delegation`, so this stub keeps the
+/// `daemon`-only build compiling. Returns a clean `PeerUnreachable` so the
+/// daemon tick records the failure.
+#[cfg(not(feature = "delegation"))]
 pub async fn delegate_to_peer(
     endpoint: &str,
     _task: &DelegationTask,
     _id: DelegationId,
 ) -> DelegationResult<DelegationOutcome> {
-    Err(DelegationError::PeerUnreachable {
-        endpoint: endpoint.to_string(),
-    })
+    Err(DelegationError::PeerUnreachable { endpoint: endpoint.to_string() })
 }
 
 // ---------------------------------------------------------------------------

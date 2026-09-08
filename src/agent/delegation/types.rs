@@ -124,7 +124,8 @@ impl Default for RemoteDelegationConfig {
 pub struct PeerDelegationConfig {
     /// Whether peer delegation is enabled.
     pub enabled: bool,
-    /// Explicit peer endpoint URLs (e.g. "http://research-akh.local:3001").
+    /// Explicit peer ACP addresses (`host:port` for a TCP peer, an absolute
+    /// socket path or `unix:<path>` for a same-host peer).
     pub endpoints: Vec<String>,
     /// Whether to attempt auto-discovery via mDNS (future feature).
     pub auto_discover: bool,
@@ -195,6 +196,9 @@ pub struct DelegationTask {
     pub priority: f32,
     /// Optional explicit target hint ("local", "remote", "peer").
     pub target_hint: Option<String>,
+    /// Target workspace name for peer delegation (default: same as caller).
+    /// When None, the peer endpoint uses its default workspace.
+    pub target_workspace: Option<String>,
 }
 
 impl DelegationTask {
@@ -207,6 +211,7 @@ impl DelegationTask {
             goal_id: 0,
             priority: 0.5,
             target_hint: None,
+            target_workspace: None,
         }
     }
 }

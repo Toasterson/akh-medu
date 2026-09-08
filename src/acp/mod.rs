@@ -6374,6 +6374,43 @@ pub async fn run_headless_chat_tcp(addr: &str, name: &str, label: &str) -> AcpRe
     .await
 }
 
+/// Programmatic one-shot session (WI-222 peer delegation): connect over a
+/// Unix socket, `initialize`, create a fresh session bound to `workspace`
+/// (the daemon routes via the `akh-ws:<name>` cwd sentinel — the fresh
+/// session carries its own isolated `SessionContext`, the WI-1 cognitive
+/// boundary), send ONE `session/prompt`, collect the streamed
+/// `session/update` events until the turn responds, and return the
+/// concatenated visible text. No TUI, no stdin — the shape machine callers
+/// (the daemon's delegation tick) use.
+pub async fn run_prompt_turn_unix(
+    path: impl AsRef<Path>,
+    client_name: &str,
+    workspace: &str,
+    prompt: &str,
+) -> AcpResult<String> {
+    let prompt = prompt.to_string();
+    chat_over_unix(path, client_name, workspace, async move |mut session, _cx| {
+        session.send_prompt(&prompt)?;
+        session.read_to_string().await
+    })
+    .await
+}
+
+/// TCP analogue of [`run_prompt_turn_unix`] (`host:port`) for remote peers.
+pub async fn run_prompt_turn_tcp(
+    addr: &str,
+    client_name: &str,
+    workspace: &str,
+    prompt: &str,
+) -> AcpResult<String> {
+    let prompt = prompt.to_string();
+    chat_over_tcp(addr, client_name, workspace, async move |mut session, _cx| {
+        session.send_prompt(&prompt)?;
+        session.read_to_string().await
+    })
+    .await
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // End-to-end test: real Unix socket, real ACP client ↔ ACP agent.
 // ──────────────────────────────────────────────────────────────────────────
@@ -8516,6 +8553,49 @@ tags = []
 
         thread_a.join().expect("thread A must not panic");
         thread_b.join().expect("thread B must not panic");
+    }
+
+    // ── WI-222: programmatic one-shot session (peer-delegation transport) ──
+
+    /// WI-222 acceptance: [`run_prompt_turn_unix`] against a real loopback
+    /// ACP listener — connect, `session/new` bound to the target workspace,
+    /// one `session/prompt`, streamed `session/update` events collected into
+    /// a single non-empty answer. This is the exact transport the daemon's
+    /// peer-delegation tick drives (src/agent/delegation/peer.rs), proven
+    /// end-to-end against the production accept loop rather than a mock.
+    ///
+    /// `Barrier::new(1)` — a one-party barrier passes straight through, so
+    /// the backend is a deterministic canned answer, not a rendezvous.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_prompt_turn_unix_round_trips_one_delegation_prompt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("akh-acp-delegation.sock");
+
+        let me = workspace_with_chat_backend(std::sync::Arc::new(RendezvousBackend {
+            barrier: std::sync::Arc::new(std::sync::Barrier::new(1)),
+        }));
+
+        let listener = UnixListener::bind(&sock).expect("bind unix");
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let loop_task =
+            tokio::spawn(async move { serve_unix_loop(me, listener, shutdown_rx).await });
+
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            run_prompt_turn_unix(&sock, "akh-delegation-test", "default", "What is the Sun?"),
+        )
+        .await
+        .expect("prompt turn timed out — listener or session wedged")
+        .expect("prompt turn failed");
+
+        assert!(
+            !resp.trim().is_empty(),
+            "turn must return visible text: {resp:?}"
+        );
+        assert!(resp.contains("rendezvous reached"), "unexpected answer: {resp:?}");
+
+        shutdown_tx.send(true).expect("send shutdown");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), loop_task).await;
     }
 
     // ── WI-259 tier-1: two full ACP `session/prompt` turns, same workspace,

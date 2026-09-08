@@ -255,7 +255,10 @@ wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
-delegation = ["daemon"]
+# WI-222: peer dispatch rides ACP (ADR-061 — the daemon is ACP-only over
+# Unix socket/TCP; there is no HTTP surface). reqwest is dropped entirely:
+# after this change nothing in the workspace references it.
+delegation = ["daemon", "acp"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
 # WI-339: composite daemon profile for akhomed hosts that serve Candle-backed
