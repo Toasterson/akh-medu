@@ -76,3 +76,18 @@ Or drop into the interactive chat loop:
     --model mlx-community/Qwen3-0.6B-4bit \
     --adapter-path adapters/white-belt-v0
 ```
+
+## 4. Follow-on curriculum: process consultation
+
+The [six process consultation kata](../../docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md#10-process-consultation-curriculum-added-2026-09-08)
+were added on 2026-09-08 for training after the running LLM run and its existing
+gates. They practice working agreements, observation and inquiry, competing
+explanations, small interventions, correction and repair, and participant
+ownership. Complete episodes train how the next action changes in response
+to expressed needs and feedback.
+
+Follow the [deferred-stage handoff](../README.md#deferred-tail-stage-process-consultation-dojo).
+The present `convert_corpus.py`, source JSONL files, and `run_sft.sh` still
+describe the existing White/Yellow/Green corpus. The new episode specification
+needs a separate versioned corpus, converter, evaluator, and output directory;
+running the commands above does not train the new curriculum.

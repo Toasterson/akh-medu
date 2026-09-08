@@ -86,3 +86,40 @@ and rely on `--ckpt-every` + `resume.sh`.
    (`eval_rule --n 512`) **at the end**, when the GPU is free.
 4. **Quote the best checkpoint, not the final one.** High-LR runs dip and
    recover; the final step is not reliably the best.
+
+## Deferred tail stage: process consultation dojo
+
+Added at Till's request on 2026-09-08: train the
+[process consultation curriculum](../docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md#10-process-consultation-curriculum-added-2026-09-08)
+after the currently running LLM run and its already-planned terminal gates.
+This is a documented follow-on stage, not an automatic job appended to a live
+supervisor. Preserve that run's pinned corpus, checkpoint lineage, tokenizer,
+configuration, and stop conditions. A failed or stopped run is not a successful
+parent merely because its process has exited.
+
+Handoff for the follow-on stage:
+
+1. Record the completed run's actual outcome and select an eligible parent by
+   exact checkpoint/config/tokenizer/contract hashes and gate evidence. For
+   the tool-native continual adaptation path, use the certified parent required
+   by [ADR 102](../docs/ai/decisions/102-tool-native-learning-model.md) and the
+   [operator runbook](../docs/ai/manuals/2026-09-04-adaptive-exams-native-vision.md).
+   If that parent is unavailable, keep this stage pending and record the gap.
+2. Prepare a versioned consultation corpus and independent held-out suite:
+   six forms, complete episodes, mistaken first interpretations, correction and
+   repair, differing participant needs, and useful non-intervention. Freeze
+   scenario-family splits, provenance, scoring rubric, sample sizes, and
+   promotion thresholds before training.
+3. Add the episode-preserving converter and consultation evaluator. The existing
+   character converter does not ingest this specification. Keep new outputs in
+   a separate stage directory; do not overwrite the current datasets/adapters.
+4. Train a new candidate sequentially from the selected compatible parent,
+   retaining the original dojo, knowledge, and tool capabilities through replay
+   and retention evaluation. Pin the mixture and budget in the stage manifest.
+5. Compare parent/candidate consultation results, pass the applicable existing
+   release gates again, and record exact artifact hashes and failure slices.
+   Certification, activation, and publication retain their separate boundaries.
+
+Preparation status: curriculum and handoff recorded; new corpus, converter,
+evaluator, training, and promotion evidence are pending. No active-run status
+is inferred from this note, and no training process is launched by it.
