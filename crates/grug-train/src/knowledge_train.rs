@@ -1781,4 +1781,124 @@ mod tests {
             .expect("small_rope_4k -> small_8k is exactly the accepted context extension");
         assert_eq!(effective_scale, 2.0);
     }
+
+    // --- `train_knowledge --resume` (ADR 104 D3 amendment): the resumed ---
+    // --- candidate's own shape is the source of truth, checked against ---
+    // --- the `--model` preset via `matches_canonical_shape`. -------------
+
+    /// (a) An SFT candidate resumed from a `small_rope_4k` -> `small_8k`
+    /// `--extend-context` warm start carries Rope `scale = 2.0` and
+    /// `context_extended_from = Some(4096)` in its `candidate-model.json`.
+    /// `train_knowledge --resume ... --model small_8k` (no `--extend-context`
+    /// on the resumed invocation) must accept this shape wholesale --
+    /// `matches_canonical_shape` against the plain `small_8k` canonical shape
+    /// (Rope `scale = 1.0`) is exactly the check that replaces the old
+    /// strict `PartialEq` comparison that rejected every resumed
+    /// context-extended run. `KnowledgeModelArtifact::verify` (which every
+    /// `verify_candidate_knowledge_bundle` call re-runs) must also still
+    /// accept the artifact unchanged.
+    #[test]
+    fn resumed_context_extended_shape_matches_canonical_target_and_verifies() {
+        let vocab_size = 3_000;
+        let canonical_target =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::Small8k.config(vocab_size));
+        let foundation_shape =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::SmallRope4k.config(vocab_size));
+        let effective_scale = foundation_shape
+            .context_extension_scale(&canonical_target)
+            .expect("small_rope_4k -> small_8k is the accepted context extension");
+        assert_eq!(effective_scale, 2.0);
+
+        let mut resumed_shape = canonical_target.clone();
+        resumed_shape.positional_encoding = PositionalEncoding::Rope {
+            theta: 10_000.0,
+            scale: effective_scale,
+        };
+
+        // The exact predicate `train_knowledge --resume` now runs before
+        // adopting the resumed candidate's shape as this run's model shape.
+        assert!(resumed_shape.matches_canonical_shape(&canonical_target));
+
+        let artifact = KnowledgeModelArtifact {
+            schema_version: KNOWLEDGE_MODEL_ARTIFACT_SCHEMA_VERSION,
+            model_size: KnowledgeModelSize::Small8k,
+            shape: resumed_shape,
+            parameter_count: 1,
+            tokenizer_file: "tokenizer.json".into(),
+            tokenizer_hash: "blake3:tokenizer".into(),
+            contracts_file: "contracts.json".into(),
+            checkpoint_dir: "checkpoints/step_00000001".into(),
+            checkpoint_step: 1,
+            checkpoint_model_hash: "blake3:model".into(),
+            checkpoint_optimizer_hash: Some("blake3:optim".into()),
+            contract_hash: "blake3:contract".into(),
+            training_corpus_hash: "blake3:corpus".into(),
+            training_records: 1,
+            eval_corpus_hash: None,
+            capability_families: BTreeSet::new(),
+            languages: BTreeSet::new(),
+            stages: BTreeSet::new(),
+            foundation: Some(FoundationLineage {
+                artifact_hash: "blake3:foundation-artifact".into(),
+                checkpoint_model_hash: "blake3:foundation-model".into(),
+                checkpoint_step: 999,
+                training_corpus_hash: "blake3:foundation-corpus".into(),
+                training_tokens_seen: 1_000_000,
+                tokenizer_hash: "blake3:tokenizer".into(),
+                languages: BTreeSet::from(["english".into()]),
+                sources: BTreeSet::from(["source@revision|license".into()]),
+            }),
+            context_extended_from: Some(4096),
+            adapted_from: None,
+            steered_from: None,
+            certification: None,
+        };
+        assert_eq!(artifact.verify(), Ok(()));
+        assert_eq!(artifact.context_extended_from, Some(4096));
+        assert_eq!(
+            artifact.shape.positional_encoding,
+            PositionalEncoding::Rope {
+                theta: 10_000.0,
+                scale: 2.0
+            }
+        );
+    }
+
+    /// (b) A resumed candidate whose `d_model` (or any other architectural
+    /// field besides `max_seq_len`/Rope `scale`) does not match the
+    /// `--model` preset's canonical shape must still be rejected --
+    /// `matches_canonical_shape` is scale-tolerant, not a rubber stamp.
+    #[test]
+    fn resumed_shape_with_mismatched_d_model_is_rejected() {
+        let vocab_size = 3_000;
+        let canonical_target =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::Small8k.config(vocab_size));
+        let mut resumed_shape = canonical_target.clone();
+        resumed_shape.d_model *= 2;
+        assert!(!resumed_shape.matches_canonical_shape(&canonical_target));
+    }
+
+    /// (c) A resumed candidate trained with the pre-ADR-104
+    /// `PositionalEncoding::Learned` encoding (no Rope `scale` to tolerate)
+    /// is unaffected by the scale-tolerant fallback: `matches_canonical_shape`
+    /// still requires it to equal the canonical target shape exactly.
+    #[test]
+    fn resumed_learned_shape_still_requires_exact_match() {
+        let vocab_size = 3_000;
+        let canonical_target =
+            KnowledgeModelShape::from_config(&KnowledgeModelSize::Small.config(vocab_size));
+        assert_eq!(
+            canonical_target.positional_encoding,
+            PositionalEncoding::Learned
+        );
+
+        // Identical shape (the ordinary resume case): matches.
+        assert!(canonical_target.matches_canonical_shape(&canonical_target.clone()));
+
+        // Any drift at all (there is no `scale` field to tolerate under
+        // `Learned`) is still rejected.
+        let mut drifted = canonical_target.clone();
+        drifted.max_seq_len += 1;
+        assert!(!drifted.matches_canonical_shape(&canonical_target));
+    }
 }

@@ -423,7 +423,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     }
     let tokenizer = load_or_train_tokenizer(&args, &train_records, &tokenizer_path)?;
     let tokenizer_hash = fingerprint_artifact_file(&tokenizer_path)?;
-    let model_config = args.model.config(tokenizer.vocab_size());
+    let mut model_config = args.model.config(tokenizer.vocab_size());
     let mut shape = KnowledgeModelShape::from_config(&model_config);
     // ADR 104 D3 (`--extend-context`): a foundation whose shape differs from
     // this run's target shape *only* in `max_seq_len`/Rope `scale` is not a
@@ -466,6 +466,32 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
                  foundation)",
             ));
         }
+    }
+    // A `--resume` checkpoint is the source of truth for the model shape it
+    // was actually built and trained with, including a `--extend-context`
+    // warm start's Rope `scale` and `context_extended_from` lineage (ADR 104
+    // D3): `--resume` and `--foundation-bundle` are mutually exclusive
+    // (`validate_args`), so on an ordinary resumed run `shape` above is still
+    // just the unextended canonical preset for `--model`, and the checkpoint
+    // must NOT be re-extended (nor is `--extend-context` required again).
+    // `matches_canonical_shape` -- the same scale-tolerant structural check
+    // `KnowledgeModelArtifact::verify` uses -- confirms every other
+    // architectural field (vocab, d_model, heads, layers, d_ff, max_seq_len,
+    // attention_chunk, Rope theta) still matches the `--model` preset before
+    // adopting the resumed shape wholesale, Rope `scale` included.
+    if args.resume.is_some() {
+        let resumed = verify_candidate_knowledge_bundle(&args.artifacts_dir)?;
+        let resumed_shape = resumed.artifact().shape.clone();
+        if !resumed_shape.matches_canonical_shape(&shape) {
+            return Err(invalid_data(format!(
+                "--resume checkpoint shape {resumed_shape:?} is not structurally compatible \
+                 with --model {} shape {shape:?}",
+                args.model
+            )));
+        }
+        shape = resumed_shape;
+        context_extended_from = context_extended_from.or(resumed.artifact().context_extended_from);
+        model_config = shape.config();
     }
     if let Some(parent) = &adaptation
         && (parent.artifact().model_size != args.model
