@@ -24,7 +24,11 @@ tree-sitter-stack-graphs = { version = "0.10", default-features = false }
 # Parser runtime + Rust grammar (only Rust is wired up in WI-262; the
 # mechanism is polyglot and per-language rules land one at a time).
 tree-sitter = "0.24"
-tree-sitter-rust = "0.24"
+# tree-sitter-graph 0.12 accepts language versions 13–14; tree-sitter-rust
+# 0.24 emits version 15, which it rejects at query-compile time. Pin the
+# grammar to the 0.23 line (language version 14) — the upstream-recommended
+# pairing: tree-sitter runtime 0.24 + grammar at ABI 14.
+tree-sitter-rust = "0.23"
 
 # Error handling
 thiserror = "2"
