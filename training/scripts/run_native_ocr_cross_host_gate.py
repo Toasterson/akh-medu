@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--maximum-wait-hours", type=float, default=36.0)
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="generation budget forwarded to the offline gate inside the image (default: the image script default, 256; ADR 104 D6 lanes use 768)",
+    )
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     if args.ssh_port < 1 or args.ssh_port > 65535:
@@ -145,6 +151,7 @@ def launch_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "binaries": binaries,
         "poll_seconds": args.poll_seconds,
         "maximum_wait_hours": args.maximum_wait_hours,
+        "max_new_tokens": args.max_new_tokens,
         "docker_network": "none",
     }
 
@@ -431,6 +438,8 @@ def docker_command(
         name = Path(identity["path"]).name
         command.extend(["--retention-eval-jsonl", f"/work/retention/{name}"])
     command.extend(["--out", "/work/offline-gate-v1"])
+    if args.max_new_tokens is not None:
+        command.extend(["--max-new-tokens", str(args.max_new_tokens)])
     if resume:
         command.append("--resume")
     return command
