@@ -162,7 +162,7 @@ attribute symbol_reference = symbol  => type = "push_symbol", symbol = symbol, i
 ;; impl blocks: inherent-associated functions are exported under the type's
 ;; module surface, so `Type::method()` resolves. The type itself is also a
 ;; reference resolved in the enclosing scope.
-(impl_item type: (type_identifier)@tname body: (declaration_list (_)@member)@tbody)@impl {
+(impl_item type: (type_identifier)@tname body: (declaration_list (_)@member))@impl {
     node tref
     attr (tref) node_reference = @tname
 
