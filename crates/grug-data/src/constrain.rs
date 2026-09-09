@@ -322,6 +322,96 @@ enum EscapeState {
     Unicode(u8),
 }
 
+/// How far a [`Leaf::Str`] value has gotten toward matching a URI scheme
+/// prefix (`^[A-Za-z][A-Za-z0-9+.-]*://`) from byte 0, tracked so
+/// [`UriGuard::Locked`] can forbid whitespace for the rest of the value: a
+/// value that begins with a URI scheme can never legally contain unencoded
+/// whitespace, but the pre-existing grammar let one through (measured on the
+/// A100, 8k lane, `acquire_textbook`: emitted
+/// `synthetic://textbook:<id>: edition 2` where the prompt only ever showed
+/// `Manual <id>, edition 2` -- no copy mechanism could have produced that
+/// stray space, so the gap was the grammar itself never ruling it out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeStage {
+    /// No bytes committed yet: the very next byte must be `[A-Za-z]` to
+    /// keep the probe alive at all (`^` anchors the pattern to byte 0).
+    Start,
+    /// At least one scheme byte matched; `[A-Za-z0-9+.-]` extends the
+    /// scheme, `:` moves to [`Self::Colon`], anything else fails the probe.
+    Scheme,
+    /// `:` just matched; only `/` may follow.
+    Colon,
+    /// `:/` just matched; only `/` may follow to complete `://`.
+    Slash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UriGuard {
+    /// The scheme prefix is confirmed (either `://` was matched from byte 0,
+    /// or the schema declared `format: "uri"`/`"uri-reference"` up front):
+    /// raw whitespace bytes and the `\n`/`\t`/`\r` escapes are illegal for
+    /// the rest of this value.
+    Locked,
+    /// Still trying to match the scheme prefix from byte 0; not yet
+    /// determined either way.
+    Probing(ProbeStage),
+    /// Determined this value does not begin with a URI scheme (the probe
+    /// failed at some byte): no restriction.
+    Free,
+}
+
+/// Advance a [`UriGuard`] by one *logical* content byte (never called for a
+/// byte that is itself part of an in-progress `\` escape sequence -- see the
+/// call sites in [`step_value`]'s `Leaf::Str` arm). [`UriGuard::Locked`] and
+/// [`UriGuard::Free`] are terminal: once the scheme is confirmed or the
+/// probe has failed, nothing later in the value can change that.
+fn advance_uri_guard(guard: UriGuard, byte: u8) -> UriGuard {
+    let stage = match guard {
+        UriGuard::Locked => return UriGuard::Locked,
+        UriGuard::Free => return UriGuard::Free,
+        UriGuard::Probing(stage) => stage,
+    };
+    match (stage, byte) {
+        (ProbeStage::Start, b'A'..=b'Z' | b'a'..=b'z') => UriGuard::Probing(ProbeStage::Scheme),
+        (ProbeStage::Start, _) => UriGuard::Free,
+        (ProbeStage::Scheme, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'.' | b'-') => {
+            UriGuard::Probing(ProbeStage::Scheme)
+        }
+        (ProbeStage::Scheme, b':') => UriGuard::Probing(ProbeStage::Colon),
+        (ProbeStage::Scheme, _) => UriGuard::Free,
+        (ProbeStage::Colon, b'/') => UriGuard::Probing(ProbeStage::Slash),
+        (ProbeStage::Colon, _) => UriGuard::Free,
+        (ProbeStage::Slash, b'/') => UriGuard::Locked,
+        (ProbeStage::Slash, _) => UriGuard::Free,
+    }
+}
+
+/// Is `byte` one of the whitespace bytes [`UriGuard::Locked`] forbids as raw
+/// string content (space, tab, CR, LF)?
+fn is_raw_whitespace_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// Is `byte` (the byte immediately after a `\`) one of the whitespace
+/// escapes -- `\n` `\t` `\r` -- [`UriGuard::Locked`] forbids? `\b`/`\f` are
+/// deliberately not included: they are not whitespace and out of this rule's
+/// documented scope.
+fn is_whitespace_escape_byte(byte: u8) -> bool {
+    matches!(byte, b'n' | b't' | b'r')
+}
+
+/// The initial [`UriGuard`] for a fresh [`Leaf::Str`] governed by `schema`:
+/// [`UriGuard::Locked`] immediately when the schema declares
+/// `format: "uri"`/`"uri-reference"` (whitespace illegal from byte 0, no
+/// probing needed), otherwise [`UriGuard::Probing`] to detect a scheme
+/// prefix as bytes arrive.
+fn initial_uri_guard(schema: &Value) -> UriGuard {
+    match schema.get("format").and_then(Value::as_str) {
+        Some("uri") | Some("uri-reference") => UriGuard::Locked,
+        _ => UriGuard::Probing(ProbeStage::Start),
+    }
+}
+
 /// Where the recursive value parser is, relative to the innermost open
 /// [`Frame`] (or, with an empty stack, relative to nothing — the top of the
 /// whole parameter value).
@@ -330,8 +420,13 @@ enum Leaf {
     /// Expecting the first byte of a value governed by `schema`.
     Start(SchemaRef),
     /// Inside a string value; `escape` tracks position relative to a
-    /// pending `\` escape sequence.
-    Str { schema: SchemaRef, escape: EscapeState },
+    /// pending `\` escape sequence, `uri` tracks whether the value has
+    /// committed to a URI scheme prefix (see [`UriGuard`]).
+    Str {
+        schema: SchemaRef,
+        escape: EscapeState,
+        uri: UriGuard,
+    },
     /// Inside a bare (number/boolean/null) token.
     Bare,
     /// At the very start of the innermost frame's body (just after `{`/`[`):
@@ -383,6 +478,7 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
     match classify(schema) {
         SchemaKind::String => match byte {
             b'"' => Some(StartOutcome::Leaf(Leaf::Str {
+                uri: initial_uri_guard(schema),
                 schema: schema.clone(),
                 escape: EscapeState::Plain,
             })),
@@ -422,6 +518,7 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
         },
         SchemaKind::Any => match byte {
             b'"' => Some(StartOutcome::Leaf(Leaf::Str {
+                uri: initial_uri_guard(schema),
                 schema: schema.clone(),
                 escape: EscapeState::Plain,
             })),
@@ -517,8 +614,14 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 }))
             }
         },
-        Leaf::Str { schema, escape } => match escape {
+        Leaf::Str { schema, escape, uri } => match escape {
             EscapeState::Pending => match byte {
+                // Whitespace escapes are illegal once the value has
+                // committed to a URI scheme prefix -- see [`UriGuard`] and
+                // [`is_whitespace_escape_byte`]. Checked before the general
+                // short-escape match below so `\n`/`\t`/`\r` fall through to
+                // the catch-all `_ => None` when locked.
+                _ if matches!(uri, UriGuard::Locked) && is_whitespace_escape_byte(byte) => None,
                 // JSON's short escapes: the byte after `\` fully resolves
                 // the escape and returns to plain string content.
                 b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
@@ -527,6 +630,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                         leaf: Leaf::Str {
                             schema: schema.clone(),
                             escape: EscapeState::Plain,
+                            uri: *uri,
                         },
                     }))
                 }
@@ -536,6 +640,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                     leaf: Leaf::Str {
                         schema: schema.clone(),
                         escape: EscapeState::Unicode(4),
+                        uri: *uri,
                     },
                 })),
                 // Anything else (e.g. `?`) is not a legal JSON escape byte.
@@ -553,6 +658,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                         leaf: Leaf::Str {
                             schema: schema.clone(),
                             escape,
+                            uri: *uri,
                         },
                     }))
                 } else {
@@ -560,19 +666,30 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 }
             }
             EscapeState::Plain => match byte {
+                // `\` never fits the scheme grammar (`[A-Za-z0-9+.-]`, `:`,
+                // or `/`) at any probe stage, so it always fails an
+                // in-progress probe outright -- same call as any other
+                // non-matching byte, just routed through `advance_uri_guard`
+                // like every other content byte below.
                 b'\\' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
                     leaf: Leaf::Str {
                         schema: schema.clone(),
                         escape: EscapeState::Pending,
+                        uri: advance_uri_guard(*uri, byte),
                     },
                 })),
                 b'"' => Some(value_completed(stack.clone())),
+                // Raw whitespace is illegal once the value has committed to
+                // a URI scheme prefix (space, tab, CR, LF) -- see
+                // [`UriGuard`] and [`is_raw_whitespace_byte`].
+                _ if matches!(uri, UriGuard::Locked) && is_raw_whitespace_byte(byte) => None,
                 _ => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
                     leaf: Leaf::Str {
                         schema: schema.clone(),
                         escape: EscapeState::Plain,
+                        uri: advance_uri_guard(*uri, byte),
                     },
                 })),
             },
@@ -4438,6 +4555,160 @@ mod tests {
         );
     }
 
+    // ── URI scheme whitespace guard ([`UriGuard`]) ──────────────────────────
+
+    /// (a) The exact measured regression on the A100 (8k lane,
+    /// `acquire_textbook`, 11/100 catastrophic): the model emitted
+    /// `synthetic://textbook:e2d9be435b4474a6: edition 2` in place of
+    /// `synthetic://textbook:e2d9be435b4474a6:edition-2` -- a stray space
+    /// right after the URI scheme prefix. The prompt never contains
+    /// `textbook:<id>:edition-2` verbatim (so neither the identifier lock
+    /// nor the left anchor can be doing anything here), which is confirmed
+    /// by using a context with no identifier-shaped tokens at all: the
+    /// space must still be illegal on the grammar's own URI-scheme rule
+    /// alone, and an ordinary unconstrained byte like `e` must still be
+    /// legal.
+    #[test]
+    fn uri_scheme_prefix_forbids_whitespace_with_no_copy_context_at_all() {
+        let id = "e2d9be435b4474a6";
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_colon =
+            format!("<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:");
+        let state = advance_constrained(&grammar, &copy, &up_to_colon)
+            .expect("the fixed template prefix must always be legal");
+        assert!(
+            !state.identifier_anchor_active() && !state.identifier_lock_engaged(),
+            "the id never occurs in this context -- neither copy mechanism can be involved"
+        );
+
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "a space right after a confirmed URI scheme prefix must have no legal decode path"
+        );
+
+        let with_e = state.step(&grammar, &copy, b'e').expect(
+            "'e' must stay legal here -- nothing anchors or copies it, but it is not whitespace",
+        );
+        let end = with_e
+            .advance(
+                &grammar,
+                &copy,
+                b"dition-2\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("the real 'edition-2' suffix must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (b) A plain sentence value with no URI scheme prefix at all must
+    /// still allow ordinary spaces -- the guard only ever restricts a value
+    /// that has itself committed to `<scheme>://`.
+    #[test]
+    fn plain_sentence_value_without_a_uri_scheme_still_allows_whitespace() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![query_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let text = "<tool_call>\n{\"arguments\":{\"query\":\"what is the weather today\"},\"name\":\"answer_query\"}\n</tool_call>";
+        let end = advance_constrained(&grammar, &copy, text)
+            .expect("an ordinary sentence with spaces must stay a legal decode path");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (c) `https://example.com/a b` (raw space) can never be produced, but
+    /// `https://example.com/a%20b` (percent-encoded) can -- a URI value's
+    /// content isn't frozen, only its raw whitespace bytes are.
+    #[test]
+    fn uri_scheme_prefix_forbids_raw_space_but_allows_percent_encoding() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_a = "<tool_call>\n{\"arguments\":{\"source_path\":\"https://example.com/a";
+        let state = advance_constrained(&grammar, &copy, up_to_a)
+            .expect("a URL up to the path segment must be legal");
+
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "a raw space inside a confirmed URI value must have no legal decode path"
+        );
+
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                b"%20b\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("percent-encoded whitespace must stay legal inside a URI value");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (d) The `\n`/`\t`/`\r` JSON escapes are whitespace too: once a value
+    /// has committed to a URI scheme, they must be exactly as illegal as
+    /// their raw-byte counterparts -- but the `\` escape opener itself must
+    /// stay legal (it also opens `\"`/`\\`/`\/`, all legitimate inside a
+    /// URI), so the rejection has to land on the *second* byte.
+    #[test]
+    fn uri_scheme_prefix_forbids_the_newline_escape() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_a = "<tool_call>\n{\"arguments\":{\"source_path\":\"https://example.com/a";
+        let state = advance_constrained(&grammar, &copy, up_to_a)
+            .expect("a URL up to the path segment must be legal");
+
+        let escaping = state
+            .step(&grammar, &copy, b'\\')
+            .expect("opening a `\\` escape must stay legal by itself inside a URI value");
+        assert_eq!(
+            escaping.step(&grammar, &copy, b'n'),
+            None,
+            "a `\\n` escape inside a confirmed URI value must have no legal decode path"
+        );
+        // A legitimate escape (an escaped literal slash) must still work.
+        assert!(
+            escaping.step(&grammar, &copy, b'/').is_some(),
+            "`\\/` must stay legal inside a URI value -- only the whitespace escapes are barred"
+        );
+    }
+
+    /// (bonus) When the schema declares `format: "uri"`/`"uri-reference"`,
+    /// the guard locks from byte 0 -- no `://` needs to appear at all, so
+    /// even a value that never becomes a real URI still has whitespace
+    /// barred throughout (the schema authored a promise the grammar now
+    /// enforces directly, per the task's "or, if not readily available, the
+    /// `://` rule alone is acceptable" fallback -- this repo's schema
+    /// fragments *are* reachable from [`Leaf::Str`], so both rules apply).
+    #[test]
+    fn format_uri_locks_the_guard_from_byte_zero_with_no_scheme_needed() {
+        let tools = vec![openai_tool(
+            "cite_url",
+            serde_json::json!({ "url": { "type": "string", "format": "uri" } }),
+            &["url"],
+        )];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, "no identifiers appear anywhere in here");
+
+        let up_to_open_quote = "<tool_call>\n{\"arguments\":{\"url\":\"";
+        let state = advance_constrained(&grammar, &copy, up_to_open_quote)
+            .expect("opening the string must be legal");
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "format: uri must bar whitespace from the very first content byte, before any \
+             `://` has even been typed"
+        );
+    }
+
     // ── Left-anchored run start (Phase 51 / ADR 104 D2 v7) ──────────────────
 
     /// (B) Regression for measured failure shape (B) in the v7 task report:
@@ -4972,10 +5243,16 @@ mod tests {
     }
 
     /// (b) A delimiter whose left context does not occur anywhere else in the
-    /// prompt (a wholly novel composition) must leave the very next byte
-    /// unconstrained -- there is nothing to anchor against, so a byte that
-    /// would be "wrong" under a real anchor (like a space) must still be
-    /// legal here.
+    /// prompt (a wholly novel composition) must leave the very next
+    /// *non-whitespace* byte unconstrained by the anchor -- there is nothing
+    /// to anchor against, so a byte that would be "wrong" under a real
+    /// anchor (like a stray letter) must still be legal here. A space is a
+    /// different matter: this value opened with `synthetic://`, a confirmed
+    /// URI scheme prefix, so [`UriGuard`] bars raw whitespace regardless of
+    /// what the anchor does or doesn't do -- this is the exact measured
+    /// regression the guard now closes (previously this test asserted the
+    /// space stayed legal here, which was the bug: no copy mechanism could
+    /// ever have produced or rejected it, so nothing did).
     #[test]
     fn delimiter_with_no_matching_left_context_leaves_the_next_byte_unconstrained() {
         let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
@@ -4990,16 +5267,23 @@ mod tests {
             !state.identifier_anchor_active(),
             "`://textbook:` never occurs in this context -- the anchor must never arm"
         );
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "the value opened with a confirmed URI scheme (`synthetic://`) -- a raw space is \
+             illegal here on the grammar's own URI rule, independent of the anchor"
+        );
         assert!(
-            state.step(&grammar, &copy, b' ').is_some(),
-            "with nothing to anchor against, a space right after the delimiter must stay legal"
+            state.step(&grammar, &copy, b'z').is_some(),
+            "with nothing to anchor against, a non-whitespace byte right after the delimiter \
+             must stay legal"
         );
 
         let end = state
             .advance(
                 &grammar,
                 &copy,
-                b" free text\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+                b"free-text\"},\"name\":\"cite_source_path\"}\n</tool_call>",
             )
             .expect("a novel composition must decode exactly as unconstrained free text would");
         assert!(grammar.accepts_eos(&end.frontier));
