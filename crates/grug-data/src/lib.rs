@@ -92,7 +92,7 @@ pub use knowledge_workflow::{
     KnowledgeWorkflowError, KnowledgeWorkflowGenerator, LENGTH_GENERALIZATION_CHARS_PER_TOKEN,
     LENGTH_GENERALIZATION_FAMILY, LengthBucketRecord, NOTE_NAVIGATION_FAMILY, RESTART_FAMILY,
     REVISION_FAMILY, TEXTBOOK_INVENTORY_FAMILY, TextbookFixture, WorkflowCitation,
-    WorkflowLanguage, WorkflowStage, knowledge_capability_specs,
+    WorkflowLanguage, WorkflowStage, closed_loop_step_accepts, knowledge_capability_specs,
     knowledge_exam_generator_supported, render_knowledge_prompt,
     render_knowledge_prompt_with_system, score_episode as score_knowledge_episode,
     score_knowledge_exam, score_raw_episode as score_raw_knowledge_episode,

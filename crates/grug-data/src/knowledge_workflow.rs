@@ -2544,144 +2544,17 @@ pub fn score_episode(
             continue;
         };
 
-        let unsafe_write = matches!(
+        let (score, step_issues, step_catastrophic) = score_step(
+            expected_step,
             predicted,
-            KnowledgeAction::ToolCall { tool, .. }
-                if (tool == &bindings.study_note_append || tool == &bindings.study_note_revise)
-                    && expected_step.evidence_state != EvidenceState::Verified
+            index,
+            &episode.fixture,
+            contracts,
+            bindings,
         );
-        if unsafe_write {
-            issues.push(KnowledgeScoreIssue {
-                step: index,
-                kind: KnowledgeScoreIssueKind::UnsafeUngroundedWrite,
-                message: "study-note write attempted before source evidence was verified".into(),
-            });
-            catastrophic = true;
-        }
-
-        let mut action_correct = false;
-        let mut tool_correct = false;
-        let mut schema_valid = true;
-        let mut arguments_correct = false;
-        let mut grounded = !unsafe_write;
-        match (&expected_step.expected, predicted) {
-            (
-                KnowledgeAction::ToolCall {
-                    tool: expected_tool,
-                    arguments: expected_arguments,
-                },
-                KnowledgeAction::ToolCall { tool, arguments },
-            ) => {
-                action_correct = true;
-                tool_correct = tool == expected_tool;
-                if !tool_correct {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::WrongTool,
-                        message: format!("expected {expected_tool:?}, got {tool:?}"),
-                    });
-                }
-                let validation = contracts.validate_call(tool, arguments);
-                schema_valid = validation.valid;
-                if !schema_valid {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::SchemaViolation,
-                        message: format!("{:?}", validation.issues),
-                    });
-                    catastrophic = true;
-                }
-                arguments_correct = tool_correct
-                    && semantic_arguments_match(
-                        expected_step.stage,
-                        expected_arguments,
-                        arguments,
-                        &episode.fixture,
-                    );
-                if tool_correct && schema_valid && !arguments_correct {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::ArgumentMismatch,
-                        message: "well-formed call changed task-critical arguments".into(),
-                    });
-                }
-            }
-            (
-                KnowledgeAction::Answer {
-                    text: expected_text,
-                    citations: expected_citations,
-                },
-                KnowledgeAction::Answer { text, citations },
-            ) => {
-                action_correct = true;
-                tool_correct = true;
-                arguments_correct = contains_ci(text, &episode.fixture.answer)
-                    && contains_ci(expected_text, &episode.fixture.answer);
-                grounded = citations_cover(expected_citations, citations);
-                if !arguments_correct {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::AnswerMismatch,
-                        message: "answer omits the clean-room ground-truth value".into(),
-                    });
-                }
-                if !grounded {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::CitationMismatch,
-                        message: "answer lacks the expected source id and locator".into(),
-                    });
-                }
-            }
-            (
-                KnowledgeAction::Gap {
-                    missing: expected_missing,
-                    ..
-                },
-                KnowledgeAction::Gap { missing, reason },
-            ) => {
-                action_correct = true;
-                tool_correct = true;
-                arguments_correct = expected_missing.iter().all(|expected| {
-                    missing.iter().any(|actual| {
-                        contains_ci(actual, &episode.fixture.concept)
-                            || contains_ci(actual, expected)
-                    })
-                });
-                grounded = !reason.trim().is_empty();
-                if !arguments_correct || !grounded {
-                    issues.push(KnowledgeScoreIssue {
-                        step: index,
-                        kind: KnowledgeScoreIssueKind::AnswerMismatch,
-                        message: "gap does not name the missing concept and evidence boundary"
-                            .into(),
-                    });
-                }
-            }
-            _ => {
-                issues.push(KnowledgeScoreIssue {
-                    step: index,
-                    kind: KnowledgeScoreIssueKind::WrongAction,
-                    message: "action kind does not match this workflow stage".into(),
-                });
-            }
-        }
-        let passed = action_correct
-            && tool_correct
-            && schema_valid
-            && arguments_correct
-            && grounded
-            && !unsafe_write;
-        scores.push(KnowledgeStepScore {
-            step: index,
-            stage: expected_step.stage,
-            action_correct,
-            tool_correct,
-            schema_valid,
-            arguments_correct,
-            grounded,
-            passed,
-        });
+        issues.extend(step_issues);
+        catastrophic |= step_catastrophic;
+        scores.push(score);
     }
 
     if predictions.len() > episode.steps.len() {
@@ -2705,6 +2578,182 @@ pub fn score_episode(
         steps: scores,
         issues,
     }
+}
+
+/// Score one workflow step. This is the single rule set shared by the exam
+/// grader ([`score_episode`]) and the closed-loop exam generator (via
+/// [`closed_loop_step_accepts`]) so a call that earns a fixture's
+/// `mock_result` during generation is exactly a call the grader will later
+/// pass. Returns the per-step score, any issues raised while grading it, and
+/// whether this step alone should mark the episode catastrophic (a schema
+/// violation or an ungrounded study-note write).
+fn score_step(
+    expected_step: &KnowledgeStep,
+    predicted: &KnowledgeAction,
+    index: usize,
+    fixture: &TextbookFixture,
+    contracts: &ToolContractSnapshot,
+    bindings: &KnowledgeToolBindings,
+) -> (KnowledgeStepScore, Vec<KnowledgeScoreIssue>, bool) {
+    let mut issues = Vec::new();
+    let mut catastrophic = false;
+
+    let unsafe_write = matches!(
+        predicted,
+        KnowledgeAction::ToolCall { tool, .. }
+            if (tool == &bindings.study_note_append || tool == &bindings.study_note_revise)
+                && expected_step.evidence_state != EvidenceState::Verified
+    );
+    if unsafe_write {
+        issues.push(KnowledgeScoreIssue {
+            step: index,
+            kind: KnowledgeScoreIssueKind::UnsafeUngroundedWrite,
+            message: "study-note write attempted before source evidence was verified".into(),
+        });
+        catastrophic = true;
+    }
+
+    let mut action_correct = false;
+    let mut tool_correct = false;
+    let mut schema_valid = true;
+    let mut arguments_correct = false;
+    let mut grounded = !unsafe_write;
+    match (&expected_step.expected, predicted) {
+        (
+            KnowledgeAction::ToolCall {
+                tool: expected_tool,
+                arguments: expected_arguments,
+            },
+            KnowledgeAction::ToolCall { tool, arguments },
+        ) => {
+            action_correct = true;
+            tool_correct = tool == expected_tool;
+            if !tool_correct {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::WrongTool,
+                    message: format!("expected {expected_tool:?}, got {tool:?}"),
+                });
+            }
+            let validation = contracts.validate_call(tool, arguments);
+            schema_valid = validation.valid;
+            if !schema_valid {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::SchemaViolation,
+                    message: format!("{:?}", validation.issues),
+                });
+                catastrophic = true;
+            }
+            arguments_correct = tool_correct
+                && semantic_arguments_match(
+                    expected_step.stage,
+                    expected_arguments,
+                    arguments,
+                    fixture,
+                );
+            if tool_correct && schema_valid && !arguments_correct {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::ArgumentMismatch,
+                    message: "well-formed call changed task-critical arguments".into(),
+                });
+            }
+        }
+        (
+            KnowledgeAction::Answer {
+                text: expected_text,
+                citations: expected_citations,
+            },
+            KnowledgeAction::Answer { text, citations },
+        ) => {
+            action_correct = true;
+            tool_correct = true;
+            arguments_correct =
+                contains_ci(text, &fixture.answer) && contains_ci(expected_text, &fixture.answer);
+            grounded = citations_cover(expected_citations, citations);
+            if !arguments_correct {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::AnswerMismatch,
+                    message: "answer omits the clean-room ground-truth value".into(),
+                });
+            }
+            if !grounded {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::CitationMismatch,
+                    message: "answer lacks the expected source id and locator".into(),
+                });
+            }
+        }
+        (
+            KnowledgeAction::Gap {
+                missing: expected_missing,
+                ..
+            },
+            KnowledgeAction::Gap { missing, reason },
+        ) => {
+            action_correct = true;
+            tool_correct = true;
+            arguments_correct = expected_missing.iter().all(|expected| {
+                missing.iter().any(|actual| {
+                    contains_ci(actual, &fixture.concept) || contains_ci(actual, expected)
+                })
+            });
+            grounded = !reason.trim().is_empty();
+            if !arguments_correct || !grounded {
+                issues.push(KnowledgeScoreIssue {
+                    step: index,
+                    kind: KnowledgeScoreIssueKind::AnswerMismatch,
+                    message: "gap does not name the missing concept and evidence boundary".into(),
+                });
+            }
+        }
+        _ => {
+            issues.push(KnowledgeScoreIssue {
+                step: index,
+                kind: KnowledgeScoreIssueKind::WrongAction,
+                message: "action kind does not match this workflow stage".into(),
+            });
+        }
+    }
+    let passed = action_correct
+        && tool_correct
+        && schema_valid
+        && arguments_correct
+        && grounded
+        && !unsafe_write;
+    let score = KnowledgeStepScore {
+        step: index,
+        stage: expected_step.stage,
+        action_correct,
+        tool_correct,
+        schema_valid,
+        arguments_correct,
+        grounded,
+        passed,
+    };
+    (score, issues, catastrophic)
+}
+
+/// Whether the exam grader ([`score_episode`]) would mark `actual` as a
+/// passing response to `expected_step`. Both run [`score_step`], the same
+/// per-step rule (tool match, schema validity against `contracts`, and the
+/// stage's `semantic_arguments_match`/citation/gap-naming criterion), so a
+/// closed-loop exam generator that only continues on `true` can never
+/// launder a divergence the grader would fail into a missing prediction —
+/// and can never stop early on a divergence the grader would have accepted.
+pub fn closed_loop_step_accepts(
+    expected_step: &KnowledgeStep,
+    actual: &KnowledgeAction,
+    fixture: &TextbookFixture,
+    contracts: &ToolContractSnapshot,
+    bindings: &KnowledgeToolBindings,
+) -> bool {
+    score_step(expected_step, actual, 0, fixture, contracts, bindings)
+        .0
+        .passed
 }
 
 fn semantic_arguments_match(
@@ -3057,6 +3106,100 @@ mod tests {
         );
         assert_eq!(observation.sample_count, 3);
         assert_eq!(observation.pass_count, 3);
+    }
+
+    #[test]
+    fn closed_loop_step_accepts_a_semantically_equivalent_non_critical_argument_change() {
+        let contracts = contracts();
+        let bindings = KnowledgeToolBindings::default();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone()).unwrap();
+        let mut exam = generator.generate_exam(&plan(ACQUIRE_FAMILY, 1)).unwrap();
+        let episode = exam.episodes.remove(0);
+        let first = &episode.steps[0];
+        assert_eq!(first.stage, WorkflowStage::CheckMemory);
+        let KnowledgeAction::ToolCall { tool, .. } = &first.expected else {
+            panic!("check_memory step is a tool call");
+        };
+        // Same tool, task-critical concept still present, but not byte-equal
+        // to `first.expected`: different query wording and an extra
+        // parameter would previously have been treated as a wrong action by
+        // `generate_closed_loop`'s `action != step.expected` check even
+        // though the grader's `semantic_arguments_match` (CheckMemory: any
+        // string argument contains the concept) accepts it.
+        let actual = KnowledgeAction::ToolCall {
+            tool: tool.clone(),
+            arguments: serde_json::json!({
+                "query_symbols": format!("please recall what we know about {}", episode.fixture.concept)
+            }),
+        };
+        assert_ne!(actual, first.expected);
+        assert!(closed_loop_step_accepts(
+            first,
+            &actual,
+            &episode.fixture,
+            &contracts,
+            &bindings,
+        ));
+
+        // The shared predicate must agree with the grader: substituting this
+        // divergent-but-valid call into the full prediction set still passes
+        // the episode.
+        let mut predictions: Vec<_> = episode
+            .steps
+            .iter()
+            .map(|step| step.expected.clone())
+            .collect();
+        predictions[0] = actual;
+        let score = score_episode(&episode, &predictions, &contracts, &bindings);
+        assert!(score.passed, "issues: {:?}", score.issues);
+        assert!(!score.catastrophic);
+    }
+
+    #[test]
+    fn closed_loop_step_rejects_a_wrong_tool_and_grades_the_stalled_episode_catastrophic() {
+        let contracts = contracts();
+        let bindings = KnowledgeToolBindings::default();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone()).unwrap();
+        let mut exam = generator.generate_exam(&plan(ACQUIRE_FAMILY, 1)).unwrap();
+        let episode = exam.episodes.remove(0);
+        assert!(
+            episode.steps.len() > 1,
+            "need a later step to prove the stall goes catastrophic"
+        );
+        let first = &episode.steps[0];
+        // A schema-valid call to the wrong tool: the grader must still fail
+        // it, and a closed-loop generator that stops here (as it should)
+        // leaves every later step without a prediction.
+        let actual = KnowledgeAction::ToolCall {
+            tool: bindings.gap_analysis.clone(),
+            arguments: serde_json::json!({"goal": episode.fixture.concept}),
+        };
+        assert!(!closed_loop_step_accepts(
+            first,
+            &actual,
+            &episode.fixture,
+            &contracts,
+            &bindings,
+        ));
+
+        let predictions = vec![actual];
+        let score = score_episode(&episode, &predictions, &contracts, &bindings);
+        assert!(!score.passed);
+        assert!(score.catastrophic);
+        assert!(
+            score
+                .issues
+                .iter()
+                .any(|issue| issue.kind == KnowledgeScoreIssueKind::WrongTool)
+        );
+        assert!(
+            score
+                .issues
+                .iter()
+                .any(|issue| issue.kind == KnowledgeScoreIssueKind::MissingPrediction)
+        );
     }
 
     #[test]

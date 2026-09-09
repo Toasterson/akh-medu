@@ -17,7 +17,7 @@ use grug_data::constrain::DecodeReport;
 use grug_data::{
     CheckpointRef, ExamTier, KNOWLEDGE_WORKFLOW_SCHEMA_VERSION, KnowledgeAction, KnowledgeEpisode,
     KnowledgeEvaluationMode, KnowledgeExamEvidence, KnowledgeExamSet, KnowledgeToolBindings,
-    knowledge_exam_generator_supported, score_knowledge_exam,
+    closed_loop_step_accepts, knowledge_exam_generator_supported, score_knowledge_exam,
 };
 #[cfg(not(any(feature = "gpu", feature = "cuda")))]
 use grug_train::{CpuBackend as ActiveBackend, CpuKnowledgeModel as ActiveKnowledgeModel};
@@ -186,16 +186,22 @@ fn generate_closed_loop(
             break;
         };
         // A fixed synthetic fixture can only return the declared result for
-        // the exact expected call. Stop at divergence rather than laundering
-        // a wrong action through gold state.
-        if action != step.expected {
+        // a call the grader would accept as this step. Use the grader's own
+        // predicate rather than byte-exact equality, or a semantically
+        // correct-but-differently-worded call gets laundered into a
+        // `missing_prediction` catastrophic failure for every step after it
+        // even though the grader would have passed it.
+        if !closed_loop_step_accepts(
+            step,
+            &action,
+            &episode.fixture,
+            runner.contracts(),
+            bindings,
+        ) {
             break;
         }
         match action {
             KnowledgeAction::ToolCall { tool, arguments } => {
-                if !runner.contracts().validate_call(&tool, &arguments).valid {
-                    break;
-                }
                 conversation.push(serde_json::json!({
                     "role": "assistant",
                     "content": "",
