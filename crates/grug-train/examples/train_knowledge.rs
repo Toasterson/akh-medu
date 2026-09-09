@@ -497,30 +497,18 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             ));
         }
     }
-    // A `--resume` checkpoint is the source of truth for the model shape it
-    // was actually built and trained with, including a `--extend-context`
-    // warm start's Rope `scale` and `context_extended_from` lineage (ADR 104
-    // D3): `--resume` and `--foundation-bundle` are mutually exclusive
-    // (`validate_args`), so on an ordinary resumed run `shape` above is still
-    // just the unextended canonical preset for `--model`, and the checkpoint
-    // must NOT be re-extended (nor is `--extend-context` required again).
-    // `matches_canonical_shape` -- the same scale-tolerant structural check
-    // `KnowledgeModelArtifact::verify` uses -- confirms every other
-    // architectural field (vocab, d_model, heads, layers, d_ff, max_seq_len,
-    // attention_chunk, Rope theta) still matches the `--model` preset before
-    // adopting the resumed shape wholesale, Rope `scale` included.
-    if args.resume.is_some() {
-        let resumed = verify_candidate_knowledge_bundle(&args.artifacts_dir)?;
-        let resumed_shape = resumed.artifact().shape.clone();
-        if !resumed_shape.matches_canonical_shape(&shape) {
-            return Err(invalid_data(format!(
-                "--resume checkpoint shape {resumed_shape:?} is not structurally compatible \
-                 with --model {} shape {shape:?}",
-                args.model
-            )));
-        }
-        shape = resumed_shape;
-        context_extended_from = context_extended_from.or(resumed.artifact().context_extended_from);
+    // Both ordinary resumes and steered segments retain the verified
+    // candidate's effective Rope scale and context-extension lineage. The
+    // canonical --model preset describes the architecture, not the scale
+    // established by an earlier --extend-context foundation warm start.
+    let resumed_candidate = args
+        .resume
+        .as_ref()
+        .map(|_| verify_candidate_knowledge_bundle(&args.artifacts_dir))
+        .transpose()?;
+    if let Some(parent) = resumed_candidate.as_ref().or(steering_parent.as_ref()) {
+        shape = continued_candidate_shape(&shape, &parent.artifact().shape)?;
+        context_extended_from = context_extended_from.or(parent.artifact().context_extended_from);
         model_config = shape.config();
     }
     if let Some(parent) = &adaptation
@@ -1461,8 +1449,7 @@ impl ResumeComparison {
 
 /// Exact, stable text of the resume-invariant violation error so the
 /// production error path and its tests cannot drift apart.
-const RESUME_SCHEDULE_INVARIANT_ERROR: &str =
-    "resume arguments do not preserve the original corpus, model, optimizer, or evaluation schedule";
+const RESUME_SCHEDULE_INVARIANT_ERROR: &str = "resume arguments do not preserve the original corpus, model, optimizer, or evaluation schedule";
 
 /// Pure comparison between a resumed bundle's stored `run.json` and this
 /// invocation's corpus/model/schedule inputs. Kept free of I/O so the
@@ -1783,10 +1770,23 @@ fn write_json_pretty_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), 
     Ok(())
 }
 
+/// Preserve the already verified candidate's effective context without
+/// accepting structural drift or applying the extension a second time.
+fn continued_candidate_shape(
+    canonical: &KnowledgeModelShape,
+    candidate: &KnowledgeModelShape,
+) -> Result<KnowledgeModelShape, Box<dyn Error>> {
+    if !candidate.matches_canonical_shape(canonical) {
+        return Err(invalid_data(format!(
+            "candidate checkpoint shape {candidate:?} is not structurally compatible with model shape {canonical:?}"
+        )));
+    }
+    Ok(candidate.clone())
+}
+
 fn invalid_data(message: impl Into<String>) -> Box<dyn Error> {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message.into()).into()
 }
-
 
 #[cfg(test)]
 mod schedule_change_tests {
@@ -1884,11 +1884,7 @@ mod schedule_change_tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn compare(
-        stored: &RunDescriptor,
-        args: &Args,
-        learning_rate: f64,
-    ) -> ResumeComparison {
+    fn compare(stored: &RunDescriptor, args: &Args, learning_rate: f64) -> ResumeComparison {
         compare_resume_run(
             stored,
             args,
@@ -2035,5 +2031,47 @@ mod schedule_change_tests {
         let parsed: RunDescriptor =
             serde_json::from_value(legacy).expect("legacy run.json without schedule_changes");
         assert!(parsed.schedule_changes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod continuation_shape_tests {
+    use super::*;
+
+    #[test]
+    fn continued_8k_candidate_keeps_its_extended_rope_scale() {
+        let canonical = KnowledgeModelShape::from_config(&KnowledgeModelSize::Small8k.config(8000));
+        let mut candidate = canonical.clone();
+        candidate.positional_encoding = PositionalEncoding::Rope {
+            theta: 10000.0,
+            scale: 2.0,
+        };
+        let continued = continued_candidate_shape(&canonical, &candidate).unwrap();
+        assert_eq!(continued, candidate);
+        assert_eq!(
+            continued.config().positional_encoding,
+            candidate.positional_encoding
+        );
+        assert_eq!(
+            continued_candidate_shape(&canonical, &continued).unwrap(),
+            candidate
+        );
+    }
+
+    #[test]
+    fn continuation_rejects_structural_drift() {
+        let canonical = KnowledgeModelShape::from_config(&KnowledgeModelSize::Small8k.config(8000));
+        let mut wrong_length = canonical.clone();
+        wrong_length.max_seq_len = 4096;
+        assert!(continued_candidate_shape(&canonical, &wrong_length).is_err());
+        let mut wrong_theta = canonical.clone();
+        wrong_theta.positional_encoding = PositionalEncoding::Rope {
+            theta: 20000.0,
+            scale: 2.0,
+        };
+        assert!(continued_candidate_shape(&canonical, &wrong_theta).is_err());
+        let mut wrong_width = canonical.clone();
+        wrong_width.d_model = 256;
+        assert!(continued_candidate_shape(&canonical, &wrong_width).is_err());
     }
 }
