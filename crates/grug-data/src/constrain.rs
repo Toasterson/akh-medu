@@ -2066,7 +2066,8 @@ fn is_identifier_run_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
 }
 
-// ── Left-anchored run start (Phase 51 / ADR 104 D2 v7) ─────────────────────
+// ── Left-anchored run start (Phase 51 / ADR 104 D2 v7, armed at the
+//    delimiter since v11) ───────────────────────────────────────────────────
 //
 // The trie lock above only *engages* once a run reaches
 // [`MIN_IDENTIFIER_RUN_LEN`] and has seen a digit -- by design (rule (a):
@@ -2075,12 +2076,28 @@ fn is_identifier_run_byte(byte: u8) -> bool {
 // a byte that prefixes no real identifier at all (e.g. the model emits `a`
 // as a run's 2nd byte when the real token continues with `8`), and nothing
 // catches it because the trie lock has no opinion yet. The left anchor closes
-// that gap by looking *backward* instead of forward: at the moment a run
-// starts, take the value's own last few bytes (the literal text immediately
-// preceding the run -- e.g. `//textbook:`) and find where *that* occurs in
-// the raw prompt. If it occurs, the byte(s) that follow it there are exactly
-// what a faithful copy should type next, independent of whether the run has
-// accumulated enough length/digits for the trie lock to have an opinion.
+// that gap by looking *backward* instead of forward: take the value's own
+// last few bytes (the literal text immediately preceding the run -- e.g.
+// `//textbook:`) and find where *that* occurs in the raw prompt. If it
+// occurs, the byte(s) that follow it there are exactly what a faithful copy
+// should type next, independent of whether the run has accumulated enough
+// length/digits for the trie lock to have an opinion.
+//
+// v7-v10 computed this at the moment a run's first byte *arrived* -- which
+// requires that first byte to itself already be an
+// [`is_identifier_run_byte`] byte, since the computation lived inside the
+// "is this byte a run byte" branch. That left a gap: `:`/`/` are themselves
+// not run bytes, so nothing stopped the model from emitting a *non-run* byte
+// (measured: a stray ` `) right after the delimiter, before the anchor ever
+// got a chance to exist at all (Phase 51 / ADR 104 D2 v11 bug, measured on
+// the A100: `textbook:<id>:` followed by ` ` where the prompt continues with
+// a real identifier char decoded unconstrained). v11 fixes this by arming
+// the anchor *at the delimiter itself* -- the instant a `:`/`/` is committed
+// inside a string value, its own trailing left context (including that
+// delimiter) is matched against the prompt once, right there, before the
+// run's first byte is even proposed. From then on, narrowing by one byte per
+// call is unchanged and identical for the run's first byte and every byte
+// after it.
 //
 // The anchor is deliberately narrower in scope than the trie lock: it only
 // forces bytes while at least one anchored occurrence's continuation is
@@ -2708,87 +2725,47 @@ impl ConstrainedDecodeState {
             {
                 let context: &[u8] = &copy_constraints.suffix.context;
                 if is_identifier_run_byte(sem) {
-                    // Left-anchored run start (Phase 51 / ADR 104 D2 v7): a
-                    // run beginning right now is anchored on the value's own
-                    // preceding bytes (`content` already has `sem` appended,
-                    // so exclude it); an in-progress run's anchor is instead
-                    // narrowed by this one byte. Both paths must reject `sem`
-                    // the same way -- "still actively forcing, but `sem`
-                    // isn't one of the forced continuations".
+                    // Left-anchored run start (Phase 51 / ADR 104 D2 v7,
+                    // armed at the delimiter since v11): the anchor over this
+                    // run was armed earlier -- the moment the `:`/`/`
+                    // delimiter immediately preceding it was itself
+                    // committed (see the non-run-byte branch below), which is
+                    // also where `run_after_colon_slash` was set. Every run
+                    // byte, including the run's first, narrows that same
+                    // pre-armed occurrence set by one byte here -- there is
+                    // no separate "run start" computation any more (v11
+                    // folded it into this one path so the occurrence scan
+                    // still happens exactly once per delimiter, not once per
+                    // run start recomputed from scratch).
                     if run_len == 0 {
                         let before_run = &content[..content.len() - 1];
-                        // Only anchor a run whose left context itself ends on
-                        // a compound-identifier joiner (`:`/`/` -- the same
-                        // bytes the suffix-run redesign treats as run
-                        // *delimiters* rather than run bytes, see
-                        // `is_identifier_run_byte`'s docs). This is a
-                        // necessary safety gate beyond the plain "does the
-                        // left context occur in the prompt" check: without
-                        // it, an ordinary word boundary (a space) anchors
-                        // just as readily, and short common words/phrases
-                        // (`"the "`, `"see "`) coincidentally recur in
-                        // unrelated context text often enough to force wrong
-                        // continuations on wholly unrelated free text or on
-                        // prose that diverges from the context's own
-                        // phrasing around a copied identifier (a distilled
-                        // sentence) -- measured while implementing this: it
-                        // broke plain free-text decoding outright. A `:`/`/`
-                        // boundary is a much stronger signal that what
-                        // follows is a composed compound identifier rather
-                        // than incidental prose.
-                        //
-                        // The same gate now also controls the trie lock's own
-                        // early engagement (Phase 51 / ADR 104 D2 v8): a run
-                        // starting right after `:`/`/` may engage the lock
-                        // from its very first byte -- see where
-                        // `run_after_colon_slash` feeds `engaged` below.
-                        let starts_after_colon_slash =
+                        // Still gates the trie lock's own early engagement
+                        // (Phase 51 / ADR 104 D2 v8), independent of whether
+                        // the anchor itself armed at that delimiter -- see
+                        // where `run_after_colon_slash` feeds `engaged`
+                        // below.
+                        run_after_colon_slash =
                             matches!(before_run.last(), Some(b':') | Some(b'/'));
-                        run_after_colon_slash = starts_after_colon_slash;
-                        let left = if starts_after_colon_slash {
-                            let left_start =
-                                before_run.len().saturating_sub(ANCHOR_LEFT_CONTEXT_LEN);
-                            Some(&before_run[left_start..])
-                        } else {
-                            None
-                        };
-                        anchor = match left {
-                            None => None,
-                            Some(left) => {
-                                let left_len = left.len();
-                                let occurrences = positions_of(context, left);
-                                match advance_anchor(context, &occurrences, left_len, 0, sem) {
-                                    None => return None,
-                                    Some(None) => None,
-                                    Some(Some(positions)) => Some(AnchorRun {
-                                        left_len,
-                                        positions,
-                                        consumed: 1,
-                                    }),
-                                }
-                            }
-                        };
-                    } else if let Some(active) = anchor.take() {
-                        anchor = if active.consumed >= MAX_ANCHORED_RUN_BYTES {
-                            None
-                        } else {
-                            match advance_anchor(
-                                context,
-                                &active.positions,
-                                active.left_len,
-                                active.consumed,
-                                sem,
-                            ) {
-                                None => return None,
-                                Some(None) => None,
-                                Some(Some(positions)) => Some(AnchorRun {
-                                    left_len: active.left_len,
-                                    positions,
-                                    consumed: active.consumed + 1,
-                                }),
-                            }
-                        };
                     }
+                    anchor = match anchor.take() {
+                        None => None,
+                        Some(active) if active.consumed >= MAX_ANCHORED_RUN_BYTES => None,
+                        Some(active) => match advance_anchor(
+                            context,
+                            &active.positions,
+                            active.left_len,
+                            active.consumed,
+                            sem,
+                        ) {
+                            None => return None,
+                            Some(None) => None,
+                            Some(Some(positions)) => Some(AnchorRun {
+                                left_len: active.left_len,
+                                positions,
+                                consumed: active.consumed + 1,
+                            }),
+                        },
+                    };
 
                     if engaged {
                         // Engaged implies `run_prefix_node` is a *proper*
@@ -2841,8 +2818,42 @@ impl ConstrainedDecodeState {
                     run_len = 0;
                     run_has_digit = false;
                     run_prefix_node = Some(CopyTrie::ROOT);
-                    anchor = None;
                     run_after_colon_slash = false;
+                    // Arm the left anchor right here, at the delimiter
+                    // itself (Phase 51 / ADR 104 D2 v11), rather than waiting
+                    // for a run byte to arrive: `content` already has `sem`
+                    // (this delimiter) appended, so its own trailing
+                    // <= `ANCHOR_LEFT_CONTEXT_LEN` bytes are exactly the left
+                    // context a run starting right after it would use. This
+                    // is what lets the *very next* byte -- even a non-run
+                    // byte like a stray space -- be rejected when the prompt
+                    // shows the real continuation is an identifier char (the
+                    // v10 gap: arming only once a run byte itself arrived
+                    // could never catch a wrong non-run byte, since that
+                    // byte never reached this computation at all). Computed
+                    // once here; every subsequent byte of the run only
+                    // narrows this same position set (the `anchor.take()` /
+                    // `advance_anchor` narrowing above) -- no per-byte
+                    // rescan.
+                    anchor = if matches!(sem, b':' | b'/') {
+                        let left_start = content.len().saturating_sub(ANCHOR_LEFT_CONTEXT_LEN);
+                        let left = &content[left_start..];
+                        let left_len = left.len();
+                        let occurrences = positions_of(context, left);
+                        let has_run_continuation = occurrences.iter().any(|&p| {
+                            context
+                                .get(p + left_len)
+                                .copied()
+                                .is_some_and(is_identifier_run_byte)
+                        });
+                        has_run_continuation.then_some(AnchorRun {
+                            left_len,
+                            positions: occurrences,
+                            consumed: 0,
+                        })
+                    } else {
+                        None
+                    };
                 }
                 // A run that started right after `:`/`/` may engage from its
                 // first byte on: `run_prefix_node` being a proper prefix of
@@ -4531,8 +4542,15 @@ mod tests {
         let state = advance_constrained(&grammar, &copy, up_to_ref_colon)
             .expect("a ':'-anchored prefix must be legal");
         assert!(
-            !state.identifier_anchor_active(),
-            "the anchor engages on the run's first byte, not before it"
+            state.identifier_anchor_active(),
+            "since v11 the anchor arms at the delimiter itself (`ref:`), before the run's \
+             first byte is even proposed -- not once that first byte arrives"
+        );
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "a non-run byte right after the delimiter must be rejected: the prompt's only \
+             occurrence of `ref:` continues with `t`, a real identifier-run byte"
         );
 
         let mid = state
@@ -4884,6 +4902,192 @@ mod tests {
             !end.identifier_anchor_active() && !end.identifier_lock_engaged(),
             "the anchor (and lock) must release once 'edition-2' completes"
         );
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    // ── Anchor armed at the delimiter itself (Phase 51 / ADR 104 D2 v11) ────
+    //
+    // Measured on the A100 (8k lane window 2, decoder v10): all 11 remaining
+    // `acquire_textbook` catastrophic failures were the *same* shape --
+    // expected `"source_path":"synthetic://textbook:<id>:edition-2"`, emitted
+    // `"source_path":"synthetic://textbook:<id>: edition 2"` (a stray space
+    // right after the second `:`). v7-v10 only ever computed the left anchor
+    // once the run's first byte *arrived*, and that computation lived inside
+    // the "is this byte a run byte" branch -- a space is not a run byte, so
+    // it never reached the anchor logic at all and decoded unconstrained.
+    // v11 arms the anchor at the delimiter itself, so the very next byte,
+    // run byte or not, is already checked against it.
+
+    /// (a) The exact measured failure shape: the prompt contains the
+    /// composed id verbatim as an earlier tool result's `source_id`
+    /// (`textbook:e2d9be435b4474a6:edition-2`) plus a prose mention
+    /// (`Manual e2d9be435b4474a6, edition 2`). Once the value has copied
+    /// `synthetic://textbook:e2d9be435b4474a6:`, the wrong argmax ` ` must
+    /// have no legal continuation and the real ` e` -- er, `e` -- must be
+    /// legal, exactly as it would be for a wrong *letter* (already covered
+    /// by `left_anchor_forces_the_real_continuation_after_the_second_colon`);
+    /// this test is the same shape but with the actually-measured wrong byte,
+    /// a space.
+    #[test]
+    fn anchor_rejects_a_stray_space_right_after_the_delimiter_and_accepts_the_real_continuation()
+     {
+        let id = "e2d9be435b4474a6";
+        let context = format!(
+            "<tool_response>\n{{\"source_id\":\"textbook:{id}:edition-2\"}}\n</tool_response>\nSynthetic Keph Manual {id}, edition 2"
+        );
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_id_and_second_colon = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:"
+        );
+        let state = advance_constrained(&grammar, &copy, &up_to_id_and_second_colon)
+            .expect("the composed prefix up to and including the id must be legal");
+        assert!(
+            state.identifier_anchor_active(),
+            "the anchor must already be armed right after the delimiter, before any run byte \
+             of 'edition-2' has been proposed"
+        );
+
+        assert_eq!(
+            state.step(&grammar, &copy, b' '),
+            None,
+            "the measured wrong argmax ` ` must have no legal continuation -- it is not a run \
+             byte at all, but the anchor must still reject it since the real occurrence in the \
+             prompt continues with `e`"
+        );
+
+        let forced = state
+            .step(&grammar, &copy, b'e')
+            .expect("`e`, the real continuation the left anchor forces, must be legal");
+        let end = forced
+            .advance(
+                &grammar,
+                &copy,
+                b"dition-2\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("the rest of 'edition-2' must decode to completion under the anchor");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (b) A delimiter whose left context does not occur anywhere else in the
+    /// prompt (a wholly novel composition) must leave the very next byte
+    /// unconstrained -- there is nothing to anchor against, so a byte that
+    /// would be "wrong" under a real anchor (like a space) must still be
+    /// legal here.
+    #[test]
+    fn delimiter_with_no_matching_left_context_leaves_the_next_byte_unconstrained() {
+        let context = "<tool_response>\nno identifiers appear anywhere in here\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_colon = "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:";
+        let state = advance_constrained(&grammar, &copy, up_to_colon)
+            .expect("the fixed template prefix must always be legal");
+        assert!(
+            !state.identifier_anchor_active(),
+            "`://textbook:` never occurs in this context -- the anchor must never arm"
+        );
+        assert!(
+            state.step(&grammar, &copy, b' ').is_some(),
+            "with nothing to anchor against, a space right after the delimiter must stay legal"
+        );
+
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                b" free text\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("a novel composition must decode exactly as unconstrained free text would");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (c) A delimiter whose every occurrence in the prompt continues with a
+    /// non-run byte (the copied token already ended there in the source) must
+    /// also leave the next byte unconstrained -- there is no forcing
+    /// continuation to restrict to.
+    #[test]
+    fn delimiter_whose_occurrences_all_continue_with_a_non_run_byte_stays_unconstrained() {
+        let context =
+            "<tool_response>\nsee resource:path/, filed under a separate heading\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_slash = "<tool_call>\n{\"arguments\":{\"source_path\":\"resource:path/";
+        let state = advance_constrained(&grammar, &copy, up_to_slash)
+            .expect("a '/'-suffixed prefix that occurs verbatim in the prompt must be legal");
+        assert!(
+            !state.identifier_anchor_active(),
+            "the prompt's only occurrence of `resource:path/` continues with `,`, a non-run \
+             byte -- the anchor must not arm"
+        );
+
+        let end = state
+            .advance(
+                &grammar,
+                &copy,
+                b"unrelated\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("an unconstrained continuation must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (d) URL-like `https://`: two delimiters in a row (`:` then `/`, then
+    /// `/` again). The first `/` right after `:` never anchors anything --
+    /// `/` itself is not a run byte, so `https:`'s occurrences in the prompt
+    /// (which continue with `/`) never satisfy the "continues with a run
+    /// byte" gate. The *second* `/` does anchor, since `https://`'s
+    /// occurrence continues with `e` (from `example.com`). The whole URL
+    /// must still decode to completion when the prompt contains it verbatim.
+    #[test]
+    fn url_like_double_slash_only_anchors_on_the_second_delimiter() {
+        let context = "<tool_response>\nsee https://example.com/x for details\n</tool_response>";
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, context);
+
+        let up_to_first_colon = "<tool_call>\n{\"arguments\":{\"source_path\":\"https:";
+        let state = advance_constrained(&grammar, &copy, up_to_first_colon)
+            .expect("the scheme prefix must be legal");
+        assert!(
+            !state.identifier_anchor_active(),
+            "`https:`'s only occurrence continues with `/`, not a run byte -- the anchor must \
+             not arm here"
+        );
+
+        let after_first_slash = state
+            .step(&grammar, &copy, b'/')
+            .expect("the first '/' of '//' must be legal");
+        assert!(
+            !after_first_slash.identifier_anchor_active(),
+            "the first '/' is itself a delimiter, not a run byte -- still nothing to anchor \
+             against yet"
+        );
+
+        let after_second_slash = after_first_slash
+            .step(&grammar, &copy, b'/')
+            .expect("the second '/' must be legal");
+        assert!(
+            after_second_slash.identifier_anchor_active(),
+            "`https://` occurs verbatim in the prompt and continues with `e`, a run byte -- \
+             the anchor must arm now"
+        );
+        assert_eq!(
+            after_second_slash.step(&grammar, &copy, b'z'),
+            None,
+            "a wrong byte right after `https://` must be rejected"
+        );
+
+        let end = advance_constrained(
+            &grammar,
+            &copy,
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"https://example.com/x\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+        )
+        .expect("the real URL, verbatim from the prompt, must still decode to completion");
         assert!(grammar.accepts_eos(&end.frontier));
     }
 }
