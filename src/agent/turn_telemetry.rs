@@ -125,6 +125,88 @@ impl Drop for TurnTelemetry {
     }
 }
 
+/// Bounded outcome label for a tool-execution span.
+pub(crate) fn tool_outcome_label(success: bool) -> &'static str {
+    if success {
+        "success"
+    } else {
+        "failure"
+    }
+}
+
+/// RAII handle for one tool execution's `acp.tool_execution` child span.
+///
+/// Created alongside the existing [`ToolExecutionTracker`](crate::agent::tool_execution_tracker::ToolExecutionTracker)
+/// guard inside [`ToolRegistry::execute`](crate::agent::tool::ToolRegistry::execute) —
+/// the single shared execution hook the structured tool-activity follow-up
+/// (`019fbe82-fe37`) already fires from. Creating the span *there* means
+/// structured activity and tracing spans share one hook instead of two
+/// competing instrumentation points (WI-325 scope).
+///
+/// The span is entered by the caller around the synchronous `tool.execute(...)`
+/// body, parenting it to the ambient `acp.turn` span that `run_turn` enters.
+/// `finish(success)` records the bounded `outcome` + wall `duration_secs`;
+/// a [`Drop`] backstop records `outcome = "interrupted"` so an unwind past
+/// `finish` can never leak an unclosed/unattributed span.
+pub(crate) struct ToolExecutionSpan {
+    span: tracing::Span,
+    start: Instant,
+    /// Whether [`ToolExecutionSpan::finish`] ran; guards the drop backstop so
+    /// outcome + duration record exactly once.
+    finished: bool,
+}
+
+impl ToolExecutionSpan {
+    /// Open the `acp.tool_execution` span with `tool` set and `outcome` /
+    /// `duration_secs` declared `Empty` up front (so tracing-opentelemetry
+    /// keeps the late-recorded fields). The caller then enters
+    /// [`Self::span`] for the execution body.
+    pub(crate) fn begin(tool: &str) -> Self {
+        let span = tracing::info_span!(
+            "acp.tool_execution",
+            tool = tool,
+            outcome = tracing::field::Empty,
+            duration_secs = tracing::field::Empty,
+        );
+        Self {
+            span,
+            start: Instant::now(),
+            finished: false,
+        }
+    }
+
+    /// A clone of the child span, entered by the caller around execution.
+    pub(crate) fn span(&self) -> tracing::Span {
+        self.span.clone()
+    }
+
+    /// Record the final `outcome` and `duration_secs` exactly once.
+    pub(crate) fn finish(mut self, success: bool) {
+        self.finish_with(tool_outcome_label(success));
+    }
+
+    /// Shared finish body (does not consume, so [`Drop`] can reuse the path).
+    fn finish_with(&mut self, outcome: &'static str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let duration = self.start.elapsed().as_secs_f64();
+        self.span.record("outcome", outcome);
+        self.span.record("duration_secs", duration);
+    }
+}
+
+impl Drop for ToolExecutionSpan {
+    /// Backstop: an unwind (or a forgotten `finish`) still records a bounded
+    /// `interrupted` outcome + duration, never leaking an unclosed field set.
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finish_with("interrupted");
+        }
+    }
+}
+
 /// Core of [`record_started`], split out so tests can drive a
 /// `ManualReader`-backed registry directly instead of the `OnceLock` global.
 #[cfg(feature = "tracing-otel")]
@@ -414,3 +496,195 @@ mod tests {
         // `workspace` carries the alias, never a UUID/session/work-item id.
         assert!(turns_label_keys.iter().any(|k| k == "workspace"));
     }
+
+    #[test]
+    fn cancelled_turn_records_cancelled_stop_reason_once() {
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let telemetry = TurnTelemetry::begin("sekhmet", "sess-cancel", false);
+            let span = telemetry.span();
+            {
+                let _g = span.enter();
+            }
+            telemetry.finish("sekhmet", TurnStopReason::Cancelled);
+        });
+        let turns = cap.span_named("acp.turn");
+        assert_eq!(turns.len(), 1, "exactly one parent acp.turn span");
+        assert_eq!(cap.closed_named("acp.turn"), 1, "acp.turn closed once");
+        assert_eq!(
+            turns[0].get("stop_reason").map(String::as_str),
+            Some("cancelled"),
+            "cancellation path records the bounded cancelled stop reason"
+        );
+        assert!(
+            turns[0].contains_key("duration_secs"),
+            "duration recorded exactly once"
+        );
+    }
+
+    #[test]
+    fn refusal_turn_records_refusal_stop_reason_once() {
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let telemetry = TurnTelemetry::begin("sekhmet", "sess-refuse", false);
+            let span = telemetry.span();
+            {
+                let _g = span.enter();
+            }
+            telemetry.finish("sekhmet", TurnStopReason::Refusal);
+        });
+        let turns = cap.span_named("acp.turn");
+        assert_eq!(turns.len(), 1, "exactly one parent acp.turn span");
+        assert_eq!(cap.closed_named("acp.turn"), 1, "acp.turn closed once");
+        assert_eq!(
+            turns[0].get("stop_reason").map(String::as_str),
+            Some("refusal"),
+            "refusal path records the bounded refusal stop reason"
+        );
+        assert!(
+            turns[0].contains_key("duration_secs"),
+            "duration recorded exactly once"
+        );
+    }
+
+    /// Multi-request turn: two sequential `acp.llm_request` child spans under
+    /// one `acp.turn` parent, with the struct's own accumulated `llm_metrics`
+    /// values recorded onto the matching span — and the parent closed exactly
+    /// once (never re-closed per request).
+    #[test]
+    fn multi_request_turn_closes_one_parent_and_records_requests() {
+        use crate::agent::llm_metrics::LlmRequestMetrics;
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let telemetry = TurnTelemetry::begin("sekhmet", "sess-multi", false);
+            let turn_span = telemetry.span();
+            {
+                let _g = turn_span.enter();
+                // Request 0 and request 1 (a retry) — the multi-request turn.
+                for seq in 0..2usize {
+                    let mut m = LlmRequestMetrics::new(seq);
+                    let req_span = LlmRequestMetrics::request_span("test-model", seq);
+                    m.attach_span(req_span.clone());
+                    {
+                        let _rg = req_span.enter();
+                        m.note_chunk(128);
+                        m.note_content_delta();
+                        m.set_tokens(10 + seq as u64, 5 + seq as u64);
+                    }
+                    m.log("test-model", "completed");
+                }
+            }
+            telemetry.finish("sekhmet", TurnStopReason::EndTurn);
+        });
+
+        // Exactly one acp.turn, closed once even with two child requests.
+        assert_eq!(
+            cap.closed_named("acp.turn"),
+            1,
+            "one parent span closes exactly once across the whole multi-request turn"
+        );
+        // Two child acp.llm_request spans, each closed once.
+        let reqs = cap.span_named("acp.llm_request");
+        assert_eq!(reqs.len(), 2, "one child span per LLM request");
+        assert_eq!(cap.closed_named("acp.llm_request"), 2);
+        // request_seq distinguishes the two requests (0 then 1).
+        let mut seqs: Vec<String> = reqs
+            .iter()
+            .filter_map(|f| f.get("request_seq").cloned())
+            .collect();
+        seqs.sort();
+        assert_eq!(seqs, vec!["0".to_string(), "1".to_string()]);
+        // The struct-computed values landed on the matching span (not recomputed).
+        for f in &reqs {
+            let seq: u64 = f["request_seq"].parse().unwrap();
+            assert_eq!(f.get("chunks_received").map(String::as_str), Some("1"));
+            assert_eq!(f.get("content_deltas").map(String::as_str), Some("1"));
+            assert_eq!(
+                f.get("prompt_tokens").map(String::as_str),
+                Some((10 + seq).to_string().as_str())
+            );
+            assert_eq!(f.get("outcome").map(String::as_str), Some("completed"));
+            assert!(f.contains_key("duration_secs"));
+        }
+    }
+
+    /// A tool execution creates exactly one `acp.tool_execution` child span
+    /// with `tool`, `outcome`, and `duration_secs`, closed once.
+    #[test]
+    fn tool_execution_span_records_name_outcome_and_duration_once() {
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let telemetry = TurnTelemetry::begin("sekhmet", "sess-tool", false);
+            let turn_span = telemetry.span();
+            {
+                let _g = turn_span.enter();
+                let exec = ToolExecutionSpan::begin("shell_exec");
+                {
+                    let _eg = exec.span().entered();
+                    // ... tool.execute body would run here ...
+                }
+                exec.finish(true);
+            }
+            telemetry.finish("sekhmet", TurnStopReason::EndTurn);
+        });
+
+        let tools = cap.span_named("acp.tool_execution");
+        assert_eq!(tools.len(), 1, "exactly one acp.tool_execution span");
+        assert_eq!(
+            cap.closed_named("acp.tool_execution"),
+            1,
+            "tool execution span closed once"
+        );
+        let fields = &tools[0];
+        assert_eq!(fields.get("tool").map(String::as_str), Some("shell_exec"));
+        assert_eq!(fields.get("outcome").map(String::as_str), Some("success"));
+        assert!(
+            fields.contains_key("duration_secs"),
+            "tool execution records duration exactly once"
+        );
+        // The parent turn still closes exactly once.
+        assert_eq!(cap.closed_named("acp.turn"), 1);
+    }
+
+    /// Failure outcome path: a failing tool records `outcome = failure`.
+    #[test]
+    fn tool_execution_span_failure_records_failure_outcome() {
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let exec = ToolExecutionSpan::begin("edit");
+            {
+                let _eg = exec.span().entered();
+            }
+            exec.finish(false);
+        });
+        let tools = cap.span_named("acp.tool_execution");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0].get("outcome").map(String::as_str),
+            Some("failure")
+        );
+    }
+
+    /// Unwind backstop: dropping the span without `finish` still records a
+    /// bounded `interrupted` outcome and duration exactly once.
+    #[test]
+    fn tool_execution_span_drop_backstop_records_interrupted() {
+        let cap = capture::Captured::default();
+        capture::with_capture(&cap, || {
+            let exec = ToolExecutionSpan::begin("grep");
+            {
+                let _eg = exec.span().entered();
+                drop(_eg);
+            }
+            drop(exec); // never finish — unwind path
+        });
+        let tools = cap.span_named("acp.tool_execution");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(cap.closed_named("acp.tool_execution"), 1);
+        assert_eq!(
+            tools[0].get("outcome").map(String::as_str),
+            Some("interrupted")
+        );
+        assert!(tools[0].contains_key("duration_secs"));
+    }
+}

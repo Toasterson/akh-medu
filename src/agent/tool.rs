@@ -649,10 +649,22 @@ impl ToolRegistry {
         });
 
         let start = std::time::Instant::now();
-        let result = tool.execute(engine, input.clone());
+        // WI-325: one `acp.tool_execution` child span per actual tool run,
+        // sharing this same execution hook with the ToolCall tracker above.
+        // Entered around `tool.execute` so it parents to the ambient
+        // `acp.turn`; finished in the same match that completes the tracker.
+        let exec_span = crate::agent::turn_telemetry::ToolExecutionSpan::begin(name);
+        let result = {
+            let _exec_span_guard = exec_span.span().entered();
+            tool.execute(engine, input.clone())
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // Complete tracking (success or failure) if we started one.
+        let span_outcome_success = match &result {
+            Ok(out) => Some(out.success),
+            Err(_) => Some(false),
+        };
         if let Some(guard) = guard {
             let (success, output, diff) = match &result {
                 Ok(out) => {
@@ -662,6 +674,12 @@ impl ToolRegistry {
                 Err(e) => (false, Some(truncate_summary(&e.to_string(), 200)), None),
             };
             guard.complete(success, output, diff);
+        }
+        // Finish the tool-execution span with the same success outcome the
+        // tracker/audit paths used, so every tool run records outcome +
+        // duration exactly once on its own child span.
+        if let Some(success) = span_outcome_success {
+            exec_span.finish(success);
         }
 
         // Best-effort audit logging — never fail the tool call.
