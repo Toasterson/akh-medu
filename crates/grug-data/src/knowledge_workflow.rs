@@ -477,6 +477,17 @@ pub struct KnowledgeStep {
     pub expected: KnowledgeAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mock_result: Option<String>,
+    /// True for a `knowledge.length_generalization` scaffolding step inserted
+    /// purely to create distance between the evidence call and the copy-back
+    /// read (see [`length_padding_step`]). Padding steps carry a plausible
+    /// but arbitrary filler argument (e.g. a related-topic query counter)
+    /// that nothing in the prompt determines, so the grader must not treat
+    /// that filler as task-critical — see [`score_step`]. Old exams/episodes
+    /// without this field deserialize as `false` (non-padding), which is
+    /// correct: every step that existed before this field was added is an
+    /// evidence-bearing step, not scaffolding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub padding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1507,6 +1518,7 @@ impl KnowledgeWorkflowGenerator {
                     reason: "No memory, archive passage, or working provider supports a value; defer rather than inventing one.".into(),
                 },
                 mock_result: None,
+                padding: false,
             },
         ]
     }
@@ -1928,6 +1940,7 @@ fn call_step(
             arguments,
         },
         mock_result: Some(mock_result.into()),
+        padding: false,
     }
 }
 
@@ -2066,14 +2079,22 @@ fn length_padding_step(
     bindings: &KnowledgeToolBindings,
 ) -> KnowledgeStep {
     let note = "Keep working through other open threads; the note id found earlier stays valid and unrevised.";
-    match padding_index % 3 {
+    // The arguments here are scaffolding, not evidence: nothing in the
+    // prompt determines which unrelated page a model "chooses" to browse
+    // next, so `score_step` never grades a padding step's arguments (only
+    // that the tool is right, the call is schema-valid, and it is grounded
+    // — see the `expected_step.padding` check there). The `query` for the
+    // repeated `ListNotes` padding calls is still kept constant across an
+    // episode (only `offset` advances) where that costs nothing, so a model
+    // has a learnable pattern to fall back on even though it is not graded.
+    let mut step = match padding_index % 3 {
         0 => call_step(
             WorkflowStage::ListNotes,
             note,
             EvidenceState::Unknown,
             &bindings.study_note_list,
             serde_json::json!({
-                "query": format!("learn:{}-related-{padding_index}", fixture.concept),
+                "query": format!("learn:{}-related", fixture.concept),
                 "limit": 20,
                 "offset": (padding_index + 1) * 20
             }),
@@ -2100,7 +2121,9 @@ fn length_padding_step(
             }),
             padding_memory_result(padding_index),
         ),
-    }
+    };
+    step.padding = true;
+    step
 }
 
 fn padding_note_id(fixture: &TextbookFixture, suffix: u32) -> String {
@@ -2129,7 +2152,7 @@ fn padding_note_catalog_result(fixture: &TextbookFixture, padding_index: u32) ->
         .collect();
     serde_json::json!({
         "operation": "list",
-        "query": format!("learn:{}-related-{padding_index}", fixture.concept),
+        "query": format!("learn:{}-related", fixture.concept),
         "catalog_total": 2 + entries.len(),
         "total": entries.len(),
         "offset": (padding_index + 1) * 20,
@@ -2342,6 +2365,7 @@ fn answer_step(language: WorkflowLanguage, fixture: &TextbookFixture) -> Knowled
             }],
         },
         mock_result: None,
+        padding: false,
     }
 }
 
@@ -2587,6 +2611,11 @@ pub fn score_episode(
 /// pass. Returns the per-step score, any issues raised while grading it, and
 /// whether this step alone should mark the episode catastrophic (a schema
 /// violation or an ungrounded study-note write).
+///
+/// [`KnowledgeStep::padding`] steps are graded leniently: a `ToolCall` step
+/// marked `padding` only needs a matching tool and a schema-valid, grounded
+/// call to pass — its exact arguments are never compared, because they are
+/// arbitrary distance-filler that nothing in the prompt determines.
 fn score_step(
     expected_step: &KnowledgeStep,
     predicted: &KnowledgeAction,
@@ -2645,13 +2674,19 @@ fn score_step(
                 });
                 catastrophic = true;
             }
+            // Padding steps are scaffolding inserted purely to create
+            // distance (ADR 104 D5(b)): their arguments are plausible but
+            // undecidable filler that nothing in the prompt determines, so
+            // only the tool choice and schema/groundedness (checked above
+            // and below) are graded, never the exact filler arguments.
             arguments_correct = tool_correct
-                && semantic_arguments_match(
-                    expected_step.stage,
-                    expected_arguments,
-                    arguments,
-                    fixture,
-                );
+                && (expected_step.padding
+                    || semantic_arguments_match(
+                        expected_step.stage,
+                        expected_arguments,
+                        arguments,
+                        fixture,
+                    ));
             if tool_correct && schema_valid && !arguments_correct {
                 issues.push(KnowledgeScoreIssue {
                     step: index,
@@ -3719,6 +3754,177 @@ mod tests {
             tool_call_steps > 2,
             "expected the evidence call, at least one padding call, and the copy-back read"
         );
+    }
+
+    #[test]
+    fn padding_step_accepts_a_different_filler_argument() {
+        // ADR 104 D5(b): a padding step's arguments are undecidable filler
+        // (which unrelated page a model "chooses" to browse next), so the
+        // grader must accept any schema-valid, correctly-tooled call, not
+        // just the byte-exact fixture the generator happened to write.
+        let contracts = contracts();
+        let bindings = KnowledgeToolBindings::default();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone()).unwrap();
+        let exam = generator
+            .generate_exam(&plan(LENGTH_GENERALIZATION_FAMILY, 1))
+            .unwrap();
+        let episode = &exam.episodes[0];
+        let (padding_index, padding_step) = episode
+            .steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.padding && step.stage == WorkflowStage::ListNotes)
+            .expect("length_generalization inserts at least one ListNotes padding step");
+        let KnowledgeAction::ToolCall { tool, .. } = &padding_step.expected else {
+            panic!("padding ListNotes step is a tool call");
+        };
+
+        let actual = KnowledgeAction::ToolCall {
+            tool: tool.clone(),
+            arguments: serde_json::json!({
+                "query": "a completely different filler query nothing in the prompt implies",
+                "limit": 20,
+                "offset": 9999
+            }),
+        };
+        assert!(closed_loop_step_accepts(
+            padding_step,
+            &actual,
+            &episode.fixture,
+            &contracts,
+            &bindings,
+        ));
+
+        let mut predictions: Vec<_> = episode
+            .steps
+            .iter()
+            .map(|step| step.expected.clone())
+            .collect();
+        predictions[padding_index] = actual;
+        let score = score_episode(episode, &predictions, &contracts, &bindings);
+        assert!(score.passed, "issues: {:?}", score.issues);
+        assert!(!score.catastrophic);
+    }
+
+    #[test]
+    fn padding_step_still_rejects_the_wrong_tool() {
+        // Leniency on a padding step's arguments must not become leniency on
+        // its tool: a model that calls the wrong tool during scaffolding is
+        // still wrong, and the episode still stalls catastrophically because
+        // every later step goes unpredicted.
+        let contracts = contracts();
+        let bindings = KnowledgeToolBindings::default();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone()).unwrap();
+        let exam = generator
+            .generate_exam(&plan(LENGTH_GENERALIZATION_FAMILY, 1))
+            .unwrap();
+        let episode = &exam.episodes[0];
+        let (padding_index, padding_step) = episode
+            .steps
+            .iter()
+            .enumerate()
+            .find(|(_, step)| step.padding && step.stage == WorkflowStage::ListNotes)
+            .expect("length_generalization inserts at least one ListNotes padding step");
+
+        let actual = KnowledgeAction::ToolCall {
+            tool: bindings.gap_analysis.clone(),
+            arguments: serde_json::json!({"goal": episode.fixture.concept}),
+        };
+        assert!(!closed_loop_step_accepts(
+            padding_step,
+            &actual,
+            &episode.fixture,
+            &contracts,
+            &bindings,
+        ));
+
+        let mut predictions: Vec<_> = episode.steps[..padding_index]
+            .iter()
+            .map(|step| step.expected.clone())
+            .collect();
+        predictions.push(actual);
+        let score = score_episode(episode, &predictions, &contracts, &bindings);
+        assert!(!score.passed);
+        assert!(score.catastrophic);
+        assert!(
+            score
+                .issues
+                .iter()
+                .any(|issue| issue.kind == KnowledgeScoreIssueKind::WrongTool)
+        );
+    }
+
+    #[test]
+    fn non_padding_list_notes_still_rejects_a_wrong_query() {
+        // The leniency introduced for padding steps must stay scoped to
+        // `padding == true`: the evidence-bearing first `ListNotes` call
+        // (the catalog lookup the episode's answer actually depends on) is
+        // task-critical and must still be graded byte-for-byte.
+        let contracts = contracts();
+        let bindings = KnowledgeToolBindings::default();
+        let generator =
+            KnowledgeWorkflowGenerator::new(contracts.clone(), bindings.clone()).unwrap();
+        let exam = generator
+            .generate_exam(&plan(LENGTH_GENERALIZATION_FAMILY, 1))
+            .unwrap();
+        let episode = &exam.episodes[0];
+        let first = &episode.steps[0];
+        assert_eq!(first.stage, WorkflowStage::ListNotes);
+        assert!(
+            !first.padding,
+            "the evidence-bearing catalog lookup must not be scaffolding"
+        );
+        let KnowledgeAction::ToolCall { tool, .. } = &first.expected else {
+            panic!("first length_generalization step is a tool call");
+        };
+
+        let actual = KnowledgeAction::ToolCall {
+            tool: tool.clone(),
+            arguments: serde_json::json!({
+                "query": "learn:something-else-entirely",
+                "limit": 20,
+                "offset": 0
+            }),
+        };
+        assert!(!closed_loop_step_accepts(
+            first,
+            &actual,
+            &episode.fixture,
+            &contracts,
+            &bindings,
+        ));
+
+        let predictions = vec![actual];
+        let score = score_episode(episode, &predictions, &contracts, &bindings);
+        assert!(!score.passed);
+        assert!(
+            score
+                .issues
+                .iter()
+                .any(|issue| issue.kind == KnowledgeScoreIssueKind::ArgumentMismatch)
+        );
+    }
+
+    #[test]
+    fn knowledge_step_without_padding_field_deserializes_as_non_padding() {
+        // Old exams/episodes serialized before this field existed must keep
+        // deserializing, and every step that predates padding tracking is
+        // (correctly) not scaffolding.
+        let json = serde_json::json!({
+            "stage": "list_notes",
+            "input": "old episode captured before padding tracking existed",
+            "evidence_state": "unknown",
+            "expected": {
+                "kind": "tool_call",
+                "tool": "study_note_list",
+                "arguments": {"query": "learn:example", "limit": 20, "offset": 0}
+            },
+            "mock_result": "{}"
+        });
+        let step: KnowledgeStep = serde_json::from_value(json).unwrap();
+        assert!(!step.padding);
     }
 
     #[test]
