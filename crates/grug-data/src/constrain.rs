@@ -1509,7 +1509,7 @@ pub enum ValueConstraint {
 /// step, so lookup cost must not scale with candidate count (only with the
 /// query's own byte length) -- a per-step linear scan over candidates times
 /// an 8k-token vocabulary would be the wrong complexity class.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopyTrie {
     children: Vec<BTreeMap<u8, usize>>,
     terminal: Vec<bool>,
@@ -2343,13 +2343,77 @@ fn advance_anchor(
 #[derive(Debug, Clone, Default)]
 pub struct IdentifierIndex {
     trie: CopyTrie,
+    /// The exact candidate strings behind `trie`, kept alongside it so a run
+    /// that needs to exclude a subset ([`Self::trie_excluding`], Phase 51 /
+    /// ADR 104 D1 self-reference fix) can rebuild a filtered trie without
+    /// re-deriving tokens from the context.
+    tokens: Vec<String>,
 }
 
 impl IdentifierIndex {
     pub fn build(context: &str) -> Self {
+        let tokens = identifier_tokens(context);
         Self {
-            trie: CopyTrie::new(&identifier_tokens(context)),
+            trie: CopyTrie::new(&tokens),
+            tokens,
         }
+    }
+
+    /// The shared base trie -- every identifier token found in the context,
+    /// with no self-reference exclusions applied. What every run uses unless
+    /// [`Self::trie_excluding`] built it a narrower one.
+    fn trie(&self) -> &CopyTrie {
+        &self.trie
+    }
+
+    /// Which of this index's identifier tokens already occur verbatim in
+    /// `content_before_run` -- Phase 51 / ADR 104 D1 self-reference bug fix.
+    /// Measured on the A100 (8k lane loop v6): a value that had already
+    /// copied context identifier `e2d9be435b4474a6` then started a *new*,
+    /// unrelated run whose first byte happened to be `e` -- the same first
+    /// byte as that already-written id -- and the trie lock engaged on the
+    /// id the value just finished writing, forcing it to retype that same id
+    /// instead of letting the model produce the actually-different text
+    /// (`edition-2`) the prompt calls for. A value does not repeat an
+    /// identifier it just wrote, so any token found here must be excluded
+    /// from candidacy for the run about to start (see [`Self::trie_excluding`]).
+    ///
+    /// Called once per fresh run, not per byte: `content_before_run` only
+    /// grows between calls and identifier tokens are short
+    /// (>= [`MIN_IDENTIFIER_TOKEN_LEN`] bytes), so this is a handful of short
+    /// substring scans, not a hot-path cost.
+    fn tokens_already_written<'a>(&'a self, content_before_run: &[u8]) -> Vec<&'a str> {
+        self.tokens
+            .iter()
+            .filter(|token| {
+                let needle = token.as_bytes();
+                !needle.is_empty()
+                    && needle.len() <= content_before_run.len()
+                    && content_before_run
+                        .windows(needle.len())
+                        .any(|window| window == needle)
+            })
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// A trie over every identifier token except `excluded` -- `None` when
+    /// `excluded` is empty (the overwhelmingly common case), so callers keep
+    /// using [`Self::trie`] directly with no rebuild cost at all. Built fresh
+    /// only for the rare run that needs it; the caller ([`ConstrainedDecodeState::step_copy`])
+    /// then holds the result behind an [`Rc`] and reuses it for every byte of
+    /// that one run rather than recomputing per byte.
+    fn trie_excluding(&self, excluded: &[&str]) -> Option<CopyTrie> {
+        if excluded.is_empty() {
+            return None;
+        }
+        let filtered: Vec<String> = self
+            .tokens
+            .iter()
+            .filter(|token| !excluded.contains(&token.as_str()))
+            .cloned()
+            .collect();
+        Some(CopyTrie::new(&filtered))
     }
 
     /// Could the run that reached `node` still be extended by a *further
@@ -2372,8 +2436,14 @@ impl IdentifierIndex {
     /// node with no run-byte-keyed child at all can never be extended by the
     /// run mechanism regardless of what non-run-byte children it has, so it
     /// is treated the same as a literal terminal: the lock releases.
-    fn extendable(&self, node: usize) -> bool {
-        self.trie.has_child_matching(node, is_identifier_run_byte)
+    ///
+    /// Takes `trie` explicitly rather than always using [`Self::trie`]
+    /// because a run with an active [`Self::trie_excluding`] override (Phase
+    /// 51 / ADR 104 D1 self-reference fix) must be checked against *that*
+    /// filtered trie, not the shared base one -- callers pass whichever trie
+    /// `node` was actually walked in.
+    fn extendable(&self, trie: &CopyTrie, node: usize) -> bool {
+        trie.has_child_matching(node, is_identifier_run_byte)
     }
 
     /// Advance an incremental identifier-run cursor
@@ -2386,8 +2456,12 @@ impl IdentifierIndex {
     /// run, or `None` once the run has left every candidate -- mirroring
     /// `is_prefix_of_any`'s "false forever after" guarantee once broken,
     /// since `None.and_then(..)` stays `None`.
-    fn advance_prefix(&self, node: Option<usize>, byte: u8) -> Option<usize> {
-        node.and_then(|n| self.trie.child(n, byte))
+    ///
+    /// Takes `trie` explicitly for the same reason as [`Self::extendable`]:
+    /// an excluded-candidates override must be walked consistently for the
+    /// whole run, not mixed with the shared base trie mid-run.
+    fn advance_prefix(&self, trie: &CopyTrie, node: Option<usize>, byte: u8) -> Option<usize> {
+        node.and_then(|n| trie.child(n, byte))
     }
 }
 
@@ -2637,6 +2711,22 @@ enum CopyState {
         /// alongside `run_len` at every run boundary, and (re-)computed from
         /// the value's own preceding byte the moment a fresh run starts.
         run_after_colon_slash: bool,
+        /// A filtered trie for the *current* run, when >= 1 identifier token
+        /// had to be excluded at this run's start because the value's own
+        /// content-so-far already contains it verbatim (Phase 51 / ADR 104
+        /// D1 self-reference bug fix, [`IdentifierIndex::tokens_already_written`]
+        /// / [`IdentifierIndex::trie_excluding`]) -- `None` in the
+        /// overwhelmingly common case (nothing to exclude), meaning the run
+        /// uses [`IdentifierIndex`]'s shared base trie directly. `Rc`, not an
+        /// owned [`CopyTrie`], because [`ConstrainedDecodeState`] is cloned
+        /// once per candidate vocabulary token per decode step
+        /// (`grug-train`'s `build_copy_mask` hot loop): a trie rebuilt for
+        /// one run must stay `Rc::clone`-cheap to carry through that many
+        /// clones rather than being deep-cloned per candidate. Computed once,
+        /// at the run's first byte, from the value's content *before* that
+        /// byte; unchanged for the rest of the run. Reset to `None` at every
+        /// run boundary alongside the other run-scoped fields above.
+        run_trie_override: Option<Rc<CopyTrie>>,
     },
 }
 
@@ -2754,6 +2844,7 @@ impl ConstrainedDecodeState {
                 engaged: false,
                 anchor: None,
                 run_after_colon_slash: false,
+                run_trie_override: None,
             });
         }
 
@@ -2767,6 +2858,7 @@ impl ConstrainedDecodeState {
                 mut engaged,
                 mut anchor,
                 mut run_after_colon_slash,
+                mut run_trie_override,
             ) = match &self.copy {
                 CopyState::Active {
                     content,
@@ -2777,6 +2869,7 @@ impl ConstrainedDecodeState {
                     engaged,
                     anchor,
                     run_after_colon_slash,
+                    run_trie_override,
                 } => (
                     content.clone(),
                     *escaped,
@@ -2786,6 +2879,7 @@ impl ConstrainedDecodeState {
                     *engaged,
                     anchor.clone(),
                     *run_after_colon_slash,
+                    run_trie_override.clone(),
                 ),
                 // The schema-trie governed the previous byte (or this is
                 // the first byte after some other transition); start
@@ -2799,6 +2893,7 @@ impl ConstrainedDecodeState {
                     false,
                     None,
                     false,
+                    None,
                 ),
             };
 
@@ -2863,7 +2958,20 @@ impl ConstrainedDecodeState {
                         // below.
                         run_after_colon_slash =
                             matches!(before_run.last(), Some(b':') | Some(b'/'));
+                        // Self-reference exclusion (Phase 51 / ADR 104 D1 bug
+                        // fix): a value never repeats an identifier it just
+                        // wrote, so any context identifier already present in
+                        // `before_run` must not be a candidate for *this*
+                        // run. Computed once, right here at the run's first
+                        // byte -- not per byte -- and held for the run's
+                        // whole lifetime via `run_trie_override`. `None` (no
+                        // rebuild) in the overwhelmingly common case where
+                        // nothing needs excluding.
+                        let excluded = identifiers.tokens_already_written(before_run);
+                        run_trie_override = identifiers.trie_excluding(&excluded).map(Rc::new);
                     }
+                    let active_trie: &CopyTrie =
+                        run_trie_override.as_deref().unwrap_or_else(|| identifiers.trie());
                     anchor = match anchor.take() {
                         None => None,
                         Some(active) if active.consumed >= MAX_ANCHORED_RUN_BYTES => None,
@@ -2888,7 +2996,7 @@ impl ConstrainedDecodeState {
                         // Engaged implies `run_prefix_node` is a *proper*
                         // (non-terminal) prefix of >= 1 candidate, so
                         // extending it must stay on a path toward one.
-                        match identifiers.advance_prefix(run_prefix_node, sem) {
+                        match identifiers.advance_prefix(active_trie, run_prefix_node, sem) {
                             Some(next) => run_prefix_node = Some(next),
                             None => {
                                 // Not extendable means no candidate has a
@@ -2898,7 +3006,7 @@ impl ConstrainedDecodeState {
                                 // `IdentifierIndex::extendable`'s docs for why
                                 // "literal terminal" alone is not enough).
                                 let effectively_complete = run_prefix_node
-                                    .is_some_and(|node| !identifiers.extendable(node));
+                                    .is_some_and(|node| !identifiers.extendable(active_trie, node));
                                 if effectively_complete {
                                     // The run already equals a complete
                                     // candidate and this byte doesn't extend
@@ -2916,7 +3024,7 @@ impl ConstrainedDecodeState {
                         }
                     } else {
                         // Not (yet) engaged: track passively, never reject.
-                        run_prefix_node = identifiers.advance_prefix(run_prefix_node, sem);
+                        run_prefix_node = identifiers.advance_prefix(active_trie, run_prefix_node, sem);
                     }
                     run_len += 1;
                     run_has_digit = run_has_digit || sem.is_ascii_digit();
@@ -2936,6 +3044,12 @@ impl ConstrainedDecodeState {
                     run_has_digit = false;
                     run_prefix_node = Some(CopyTrie::ROOT);
                     run_after_colon_slash = false;
+                    // The self-reference exclusion above is scoped to one
+                    // run's lifetime; a fresh run recomputes its own from
+                    // scratch (at `run_len == 0` in the run-byte branch)
+                    // rather than inheriting whatever the previous run
+                    // excluded.
+                    run_trie_override = None;
                     // Arm the left anchor right here, at the delimiter
                     // itself (Phase 51 / ADR 104 D2 v11), rather than waiting
                     // for a run byte to arrive: `content` already has `sem`
@@ -2977,13 +3091,19 @@ impl ConstrainedDecodeState {
                 // >= 1 candidate is itself already a strong signal at that
                 // position (Phase 51 / ADR 104 D2 v8 -- see
                 // `run_after_colon_slash`'s docs). Every other run keeps the
-                // original length/digit-gated rule unchanged.
+                // original length/digit-gated rule unchanged. Checked against
+                // `active_trie` so a run whose only remaining candidates are
+                // all self-reference-excluded (Phase 51 / ADR 104 D1 bug fix)
+                // is correctly treated as not engaged, exactly like a run
+                // with no candidates at all.
+                let active_trie: &CopyTrie =
+                    run_trie_override.as_deref().unwrap_or_else(|| identifiers.trie());
                 engaged = if run_after_colon_slash {
-                    run_prefix_node.is_some_and(|node| identifiers.extendable(node))
+                    run_prefix_node.is_some_and(|node| identifiers.extendable(active_trie, node))
                 } else {
                     run_len >= MIN_IDENTIFIER_RUN_LEN
                         && run_has_digit
-                        && run_prefix_node.is_some_and(|node| identifiers.extendable(node))
+                        && run_prefix_node.is_some_and(|node| identifiers.extendable(active_trie, node))
                 };
             }
 
@@ -2996,6 +3116,7 @@ impl ConstrainedDecodeState {
                 engaged,
                 anchor,
                 run_after_colon_slash,
+                run_trie_override,
             });
         }
 
@@ -5019,6 +5140,143 @@ mod tests {
                 b"qqq-novel-99\"},\"name\":\"cite_source_path\"}\n</tool_call>",
             )
             .expect("after release, an arbitrary novel continuation must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    // ── Self-reference exclusion (Phase 51 / ADR 104 D1 amendment) ─────────
+    //
+    // Measured on the A100 (8k lane loop v6, `acquire_textbook` 89/100 -- the
+    // 11 failures are exactly the episodes whose textbook id starts with
+    // `e`): after the value had already copied a context identifier verbatim
+    // once (`synthetic://textbook:<id>:`), the model's next argmax for the
+    // *unrelated* `edition-2` continuation happened to be that same id's own
+    // first byte (`e`). The trie lock engaged anyway -- on the id the value
+    // had *just finished writing* -- and forced/garbled the rest of the run,
+    // since a value never repeats an identifier it just wrote. The fix
+    // excludes, from a fresh run's candidate set, any context identifier
+    // that already occurs verbatim in the value's own content so far.
+
+    /// (a) The exact measured failure shape: nothing else in the context
+    /// starts with `e`, so without the fix `e` would engage the lock on the
+    /// already-written id and then force its 2nd byte (`2`) instead of the
+    /// real, unrelated `edition-2` continuation's `d`. With the fix, the
+    /// already-written id is excluded from this run's candidates, `e`
+    /// decodes unconstrained, and `edition-2` plus the closing quote both
+    /// stay legal.
+    #[test]
+    fn self_written_identifier_is_excluded_from_the_next_runs_trie_lock() {
+        let id = "e2d9be435b4474a6";
+        let context = format!("<tool_response>\nManual {id}, edition 2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_second_colon =
+            format!("<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:");
+        let before_e = advance_constrained(&grammar, &copy, &up_to_second_colon)
+            .expect("the id, already typed once, must decode up to the second ':'");
+        assert!(
+            !before_e.identifier_anchor_active(),
+            "the left anchor must not be forcing here -- the context never has ':' after the id"
+        );
+
+        let after_e = before_e
+            .step(&grammar, &copy, b'e')
+            .expect("'e' -- the excluded id's own first byte -- must stay legal");
+        assert!(
+            !after_e.identifier_lock_engaged(),
+            "the id the value just wrote must be excluded from this run's trie candidates, \
+             so the lock must not engage on it"
+        );
+
+        let end = after_e
+            .advance(
+                &grammar,
+                &copy,
+                b"dition-2\"},\"name\":\"cite_source_path\"}\n</tool_call>",
+            )
+            .expect("the real 'edition-2' continuation must decode to completion");
+        assert!(grammar.accepts_eos(&end.frontier));
+    }
+
+    /// (b) The earlier v8 win (see
+    /// [`first_run_byte_after_colon_engages_the_trie_lock_when_the_anchor_cannot`])
+    /// must keep holding unmodified: when the id has *not* yet been written
+    /// into the value, the trie lock still engages on it from the run's
+    /// first byte and rejects a wrong 2nd byte -- the exclusion introduced
+    /// here must never suppress a lock for an identifier the value hasn't
+    /// written yet.
+    #[test]
+    fn v8_first_byte_engagement_is_unaffected_when_nothing_is_excluded() {
+        let id = "b851eb11b1b27ab9";
+        let context =
+            format!("<tool_response>\nSynthetic Keph Manual {id} edition-2\n</tool_response>");
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_first_byte =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:b";
+        let state = advance_constrained(&grammar, &copy, up_to_first_byte)
+            .expect("the real first byte of the context id must be legal");
+        assert!(
+            state.identifier_lock_engaged(),
+            "the id is not yet in the value, so nothing is excluded -- the lock must engage exactly as before"
+        );
+        assert_eq!(
+            state.step(&grammar, &copy, b'a'),
+            None,
+            "a wrong 2nd byte must still be rejected"
+        );
+    }
+
+    /// (c) Exclusion is scoped to the *specific* identifier the value
+    /// already wrote, not to "any identifier" broadly: a context identifier
+    /// that legitimately recurs twice in the prompt, once already copied
+    /// into the value, must not suppress the lock for a *different*
+    /// identifier the value has not written.
+    #[test]
+    fn self_reference_exclusion_does_not_suppress_a_different_identifiers_lock() {
+        let already_written = "e2d9be435b4474a6";
+        let other_id = "f7a1c93be0219d44";
+        let context = format!(
+            "<tool_response>\nManual {already_written}, see also {already_written} again, cross-reference {other_id}\n</tool_response>"
+        );
+        let tools = vec![source_path_tool()];
+        let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
+        let copy = copy_constraints(&grammar, &context);
+
+        let up_to_second_colon = format!(
+            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{already_written}:"
+        );
+        let before_f = advance_constrained(&grammar, &copy, &up_to_second_colon)
+            .expect("the already-written id must decode up to the second ':'");
+
+        let after_f = before_f
+            .step(&grammar, &copy, b'f')
+            .expect("'f' -- the *other*, not-yet-written id's first byte -- must be legal");
+        assert!(
+            after_f.identifier_lock_engaged(),
+            "a different identifier, never written into the value, must still lock normally \
+             even though some *other* identifier the value already wrote recurs in the context"
+        );
+        assert_eq!(
+            after_f.step(&grammar, &copy, b'z'),
+            None,
+            "a wrong 2nd byte of the other id must be rejected while its own lock is engaged"
+        );
+
+        let end = after_f
+            .advance(
+                &grammar,
+                &copy,
+                format!(
+                    "{}\"}},\"name\":\"cite_source_path\"}}\n</tool_call>",
+                    &other_id[1..]
+                )
+                .as_bytes(),
+            )
+            .expect("typing the other id to completion must stay legal");
         assert!(grammar.accepts_eos(&end.frontier));
     }
 
