@@ -869,10 +869,12 @@ def resolve_file(value: Any) -> Path:
 
 def source_files(run: dict[str, Any], include_current_sibling: bool) -> dict[str, Any]:
     supplements = [resolve_file(value) for value in run.get("supplemental_jsonl", [])]
-    if include_current_sibling and run.get("steering_sibling_jsonl"):
+    if run.get("steering_sibling_jsonl"):
         sibling = resolve_file(run["steering_sibling_jsonl"])
-        if sibling not in supplements:
+        if include_current_sibling and sibling not in supplements:
             supplements.append(sibling)
+        elif not include_current_sibling:
+            supplements = [path for path in supplements if path != sibling]
     return {
         "train": resolve_file(run["train_jsonl"]),
         "supplements": supplements,
@@ -894,20 +896,45 @@ def source_record_count(sources: dict[str, Any]) -> int:
     )
 
 
-def verified_base_sources(run: dict[str, Any]) -> tuple[dict[str, Any], int]:
+def verified_base_sources(
+    run: dict[str, Any], bundle: Path | None = None
+) -> tuple[dict[str, Any], int]:
     """Verify the full parent corpus, then separate its temporary sibling.
 
     A steered run's training_records includes its sibling. New segments
     replace that sibling while preserving the base; comparing the base alone
     with the full count incorrectly rejects every steered starting bundle.
     """
+    lineage = run.get("steered_from") or {}
+    if lineage and not run.get("steering_sibling_jsonl"):
+        # Ordinary resume folds the sibling into supplemental_jsonl and clears
+        # its dedicated path. Recover that path only from the same corpus and
+        # steering lineage, never from a filename or record-count guess.
+        if bundle is None or not run.get("training_corpus_hash"):
+            raise RuntimeError("resumed steering lineage requires its bundle run history")
+        siblings = set()
+        for path in (bundle / "run-history").glob("before-resume-step_*.json"):
+            previous = load_json(path)
+            if (
+                previous.get("steering_sibling_jsonl")
+                and previous.get("steered_from") == lineage
+                and previous.get("training_corpus_hash") == run["training_corpus_hash"]
+                and previous.get("training_records") == run["training_records"]
+            ):
+                siblings.add(resolve_file(previous["steering_sibling_jsonl"]))
+        if len(siblings) != 1:
+            raise RuntimeError("run history does not identify one original steering sibling")
+        sibling = siblings.pop()
+        if sibling not in source_files(run, include_current_sibling=True)["supplements"]:
+            raise RuntimeError("historical steering sibling is absent from the resumed corpus")
+        run = {**run, "steering_sibling_jsonl": str(sibling)}
+
     full_count = source_record_count(source_files(run, include_current_sibling=True))
     if full_count != int(run["training_records"]):
         raise RuntimeError("initial run descriptor does not reproduce its training record count")
     sources = source_files(run, include_current_sibling=False)
     base_count = source_record_count(sources)
     if run.get("steering_sibling_jsonl"):
-        lineage = run.get("steered_from") or {}
         if (
             lineage.get("base_training_records") != base_count
             or lineage.get("sibling_training_records") != full_count - base_count
@@ -1250,7 +1277,7 @@ def main() -> int:
         step = load_json(step_path)
         validate_controller_step(step, artifact)
         fixed_run = load_json(bundle / "run.json")
-        fixed_sources, base_records = verified_base_sources(fixed_run)
+        fixed_sources, base_records = verified_base_sources(fixed_run, bundle)
         contracts = (bundle / "contracts.json").resolve(strict=True)
         loop_config_path = output / "loop-config.json"
         if loop_config_path.exists():

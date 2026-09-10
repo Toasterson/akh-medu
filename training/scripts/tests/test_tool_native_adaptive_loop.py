@@ -15,6 +15,67 @@ SPEC.loader.exec_module(LOOP)
 
 
 class AdaptiveLoopPolicyTests(unittest.TestCase):
+    def test_ordinary_resume_does_not_turn_previous_sibling_into_base(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            base, sibling = bundle / "base.jsonl", bundle / "sibling.jsonl"
+            base.write_text("{}\n" * 19)
+            sibling.write_text("{}\n")
+            original = {
+                "train_jsonl": str(base), "training_records": 20,
+                "training_corpus_hash": "blake3:original-corpus",
+                "steering_sibling_jsonl": str(sibling),
+                "steered_from": {"base_training_records": 19, "sibling_training_records": 1},
+            }
+            resumed = {**original, "steering_sibling_jsonl": None,
+                       "supplemental_jsonl": [str(sibling)]}
+            history = bundle / "run-history"
+            history.mkdir()
+            old = history / "before-resume-step_00000019.json"
+            old.write_text(json.dumps(original))
+            sources, count = LOOP.verified_base_sources(resumed, bundle)
+            self.assertEqual((count, sources["supplements"]), (19, []))
+            self.assertEqual(LOOP.source_files(resumed, True)["supplements"], [sibling.resolve()])
+            # A later ordinary-resume descriptor carries no direct sibling path.
+            (history / "before-resume-step_00000029.json").write_text(json.dumps(resumed))
+            self.assertEqual(LOOP.verified_base_sources(resumed, bundle)[1], 19)
+            original["training_corpus_hash"] = "blake3:different-corpus"
+            old.write_text(json.dumps(original))
+            with self.assertRaisesRegex(RuntimeError, "one original steering sibling"):
+                LOOP.verified_base_sources(resumed, bundle)
+            original["training_corpus_hash"] = resumed["training_corpus_hash"]
+            old.write_text(json.dumps(original))
+            conflicting = bundle / "conflicting-sibling.jsonl"
+            conflicting.write_text("{}\n")
+            (history / "before-resume-step_00000009.json").write_text(
+                json.dumps({**original, "steering_sibling_jsonl": str(conflicting)}))
+            with self.assertRaisesRegex(RuntimeError, "one original steering sibling"):
+                LOOP.verified_base_sources(resumed, bundle)
+
+    def test_missing_resumed_sibling_history_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            base = bundle / "base.jsonl"
+            base.write_text("{}\n" * 20)
+            run = {"train_jsonl": str(base), "training_records": 20,
+                   "training_corpus_hash": "blake3:corpus",
+                   "steered_from": {"base_training_records": 19, "sibling_training_records": 1}}
+            with self.assertRaisesRegex(RuntimeError, "bundle run history"):
+                LOOP.verified_base_sources(run)
+            with self.assertRaisesRegex(RuntimeError, "one original steering sibling"):
+                LOOP.verified_base_sources(run, bundle)
+
+    def test_direct_sibling_also_listed_as_supplement_is_replaced_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base, sibling = Path(directory) / "base.jsonl", Path(directory) / "sibling.jsonl"
+            base.write_text("{}\n" * 19)
+            sibling.write_text("{}\n")
+            run = {"train_jsonl": str(base), "training_records": 20,
+                   "supplemental_jsonl": [str(sibling)], "steering_sibling_jsonl": str(sibling),
+                   "steered_from": {"base_training_records": 19, "sibling_training_records": 1}}
+            self.assertEqual(LOOP.verified_base_sources(run)[1], 19)
+            self.assertEqual(LOOP.source_files(run, True)["supplements"], [sibling.resolve()])
+
     def test_steered_parent_verifies_full_corpus_and_retains_only_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory) / "base.jsonl"
