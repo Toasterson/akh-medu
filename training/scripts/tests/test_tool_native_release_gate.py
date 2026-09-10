@@ -94,7 +94,7 @@ class ToolNativeReleaseGateTests(unittest.TestCase):
             check=False,
         )
 
-    def test_complete_loop_runs_separate_gate_and_writes_exact_active(self) -> None:
+    def check_complete_loop(self, terminal_stage: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             adaptive = root / "adaptive"
@@ -117,7 +117,7 @@ class ToolNativeReleaseGateTests(unittest.TestCase):
             adaptive.joinpath("status.json").write_text(
                 json.dumps(
                     {
-                        "stage": "window_budget_exhausted",
+                        "stage": terminal_stage,
                         "bundle": str(bundle),
                         "checkpoint": {
                             "step": 42,
@@ -138,6 +138,7 @@ class ToolNativeReleaseGateTests(unittest.TestCase):
                 "knowledge.grounded_abstention",
                 "knowledge.textbook_inventory",
                 "knowledge.note_navigation",
+                "knowledge.length_generalization",
             ):
                 path = sentinels / f"{family.replace('.', '-')}.json"
                 path.write_text(
@@ -180,6 +181,12 @@ class ToolNativeReleaseGateTests(unittest.TestCase):
             active = json.loads(bundle.joinpath("active-model.json").read_text())
             self.assertEqual(active["checkpoint_model_hash"], "blake3:model-42")
             self.assertIsInstance(active["certification"], dict)
+
+    def test_complete_loop_runs_separate_gate_and_writes_exact_active(self) -> None:
+        self.check_complete_loop("window_budget_exhausted")
+
+    def test_early_training_stop_still_runs_independent_release_certification(self) -> None:
+        self.check_complete_loop("ready_for_release")
 
     def test_controller_stop_never_invokes_certifier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

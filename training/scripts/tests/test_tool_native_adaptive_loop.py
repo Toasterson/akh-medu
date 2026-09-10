@@ -15,6 +15,21 @@ SPEC.loader.exec_module(LOOP)
 
 
 class AdaptiveLoopPolicyTests(unittest.TestCase):
+    def test_release_recovery_requires_complete_exact_candidate_sentinels(self) -> None:
+        artifact = {"checkpoint_step": 42, "checkpoint_model_hash": "blake3:42"}
+        row = {"family": "tool_contract.code_ingest", "tier": "sentinel",
+               "checkpoint": LOOP.checkpoint(artifact), "sample_count": 24,
+               "pass_count": 24, "precursor_count": 0, "catastrophic_count": 0}
+        expected = {row["family"]}
+        self.assertTrue(LOOP.release_sentinels_pass([row], artifact, expected))
+        self.assertFalse(LOOP.release_sentinels_pass([{**row, "pass_count": 23, "catastrophic_count": 1}], artifact, expected))
+        self.assertFalse(LOOP.release_sentinels_pass([{**row, "pass_count": 20, "precursor_count": 4}], artifact, expected))
+        for rows in ([], [row, row], [{**row, "checkpoint": {"step": 41}}],
+                     [{**row, "tier": "frontier"}], [{**row, "sample_count": 0}],
+                     [{**row, "precursor_count": 1}]):
+            with self.subTest(rows=rows), self.assertRaises(RuntimeError):
+                LOOP.release_sentinels_pass(rows, artifact, expected)
+
     def test_ordinary_resume_does_not_turn_previous_sibling_into_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle = Path(directory)

@@ -96,6 +96,10 @@ pub struct ControllerConfig {
     pub stop_windows: u32,
     /// Normal critical value used for Wilson intervals (1.96 = 95%).
     pub confidence_z: f64,
+    /// Operator-enabled release repair. Exact sentinel release failures can
+    /// authorize targeted frontier steering; ordinary exploration is unchanged.
+    #[serde(default)]
+    pub release_recovery: bool,
 }
 
 impl Default for ControllerConfig {
@@ -113,6 +117,7 @@ impl Default for ControllerConfig {
             steer_windows: 2,
             stop_windows: 2,
             confidence_z: 1.959_963_984_540_054,
+            release_recovery: false,
         }
     }
 }
@@ -266,6 +271,10 @@ pub struct FamilyState {
     /// regression even when neither lane changed.
     pub tier_history: BTreeMap<ExamTier, TierHistory>,
     pub priority: f64,
+    /// Latest qualified sentinel for release repair. Kept separate from the
+    /// frontier trend so a release failure never fabricates a regression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_sentinel: Option<ExamObservation>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -382,6 +391,7 @@ impl AdaptiveExamController {
                     sentinel_baseline: None,
                     tier_history: BTreeMap::new(),
                     priority: 1.0,
+                    release_sentinel: None,
                 },
             );
         }
@@ -441,6 +451,14 @@ impl AdaptiveExamController {
             self.config.confidence_z,
         );
         let eligible = observation.sample_count >= self.config.min_samples_per_window;
+        if self.config.release_recovery && eligible && observation.tier == ExamTier::Sentinel {
+            state.release_sentinel = Some(observation.clone());
+        }
+        let release_alarm = self.config.release_recovery
+            && observation.tier == ExamTier::Frontier
+            && state.release_sentinel.as_ref().is_some_and(|sentinel| {
+                sentinel.checkpoint == observation.checkpoint && release_blocked(sentinel)
+            });
         let history = state.tier_history.entry(observation.tier).or_default();
         let previous_interval = history.last_pass_interval;
         let old_ewma = history.ewma_pass_rate.unwrap_or(pass.estimate);
@@ -470,7 +488,8 @@ impl AdaptiveExamController {
             });
 
         let active_precursor_alarm = self.config.precursor_steering_enabled && precursor_alarm;
-        let steer_candidate = eligible && (significant_regression || active_precursor_alarm);
+        let steer_candidate =
+            eligible && (significant_regression || active_precursor_alarm || release_alarm);
         let stop_candidate = eligible && (sentinel_regression || catastrophic_alarm);
         history.steer_streak = if steer_candidate {
             history.steer_streak.saturating_add(1)
@@ -499,6 +518,9 @@ impl AdaptiveExamController {
             }
             WarningLevel::Stop
         } else if history.steer_streak >= self.config.steer_windows {
+            if release_alarm {
+                reasons.push("same-checkpoint sentinel violates the release threshold; operator-enabled targeted repair".into());
+            }
             if significant_regression {
                 reasons
                     .push("pass-rate regression is outside overlapping confidence bounds".into());
@@ -589,9 +611,16 @@ impl AdaptiveExamController {
             .families
             .values()
             .max_by(|left, right| {
-                left.priority
-                    .total_cmp(&right.priority)
-                    .then_with(|| right.spec.id.cmp(&left.spec.id))
+                let release_order = if self.config.release_recovery && tier == ExamTier::Frontier {
+                    release_priority(left).total_cmp(&release_priority(right))
+                } else {
+                    std::cmp::Ordering::Equal
+                };
+                release_order.then_with(|| {
+                    left.priority
+                        .total_cmp(&right.priority)
+                        .then_with(|| right.spec.id.cmp(&left.spec.id))
+                })
             })
             .ok_or_else(|| AdaptiveExamError::UnknownFamily("<no capabilities>".into()))?;
         self.plan_for_family(tier, checkpoint, &state.spec.id, sample_count)
@@ -649,6 +678,32 @@ impl AdaptiveExamController {
             seed,
             sample_count,
         })
+    }
+}
+
+/// Same per-family defaults enforced by the release certifier. This only
+/// selects repair work; release certification still evaluates independently.
+fn release_blocked(observation: &ExamObservation) -> bool {
+    observation.sample_count > 0
+        && (observation.pass_count as f64 / (observation.sample_count as f64) < 0.85
+            || observation.catastrophic_count as f64 / observation.sample_count as f64 > 0.01)
+}
+
+fn release_priority(state: &FamilyState) -> f64 {
+    let Some(sentinel) = state
+        .release_sentinel
+        .as_ref()
+        .filter(|row| release_blocked(row))
+    else {
+        return 0.0;
+    };
+    let samples = sentinel.sample_count as f64;
+    let catastrophic = sentinel.catastrophic_count as f64 / samples;
+    // Every catastrophic blocker outranks every accuracy-only blocker.
+    if catastrophic > 0.01 {
+        2.0 + catastrophic
+    } else {
+        1.0 + (0.85 - sentinel.pass_count as f64 / samples)
     }
 }
 
@@ -853,6 +908,161 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn release_recovery_prioritizes_rare_catastrophic_blockers_and_clears_fixed_ones() {
+        let mut controller = controller();
+        controller.config.release_recovery = true;
+        controller.config.min_samples_per_window = 24;
+        controller.config.steer_windows = 1;
+        let mut rare = observation(1, ExamTier::Sentinel, "reason.chain.depth", 23, 0);
+        rare.sample_count = 24;
+        rare.catastrophic_count = 1;
+        controller.observe(rare).unwrap();
+        controller
+            .observe(observation(
+                1,
+                ExamTier::Sentinel,
+                "vision.text.line",
+                200,
+                200,
+            ))
+            .unwrap();
+        assert_eq!(
+            controller
+                .next_plan(ExamTier::Frontier, checkpoint(1), 24)
+                .unwrap()
+                .family,
+            "reason.chain.depth"
+        );
+        let decision = controller
+            .observe(observation(
+                1,
+                ExamTier::Frontier,
+                "reason.chain.depth",
+                400,
+                0,
+            ))
+            .unwrap();
+        assert_eq!(decision.warning, WarningLevel::Steer);
+        assert!(
+            decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("same-checkpoint sentinel"))
+        );
+        assert!(
+            !decision
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("regression"))
+        );
+        // The frontier success does not erase a failing immutable sentinel.
+        assert_eq!(
+            controller
+                .next_plan(ExamTier::Frontier, checkpoint(1), 24)
+                .unwrap()
+                .family,
+            "reason.chain.depth"
+        );
+        controller
+            .observe(observation(
+                2,
+                ExamTier::Sentinel,
+                "reason.chain.depth",
+                400,
+                0,
+            ))
+            .unwrap();
+        assert_eq!(
+            controller
+                .next_plan(ExamTier::Frontier, checkpoint(2), 24)
+                .unwrap()
+                .family,
+            "vision.text.line"
+        );
+        let restored: AdaptiveExamController =
+            serde_json::from_str(&serde_json::to_string(&controller).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .next_plan(ExamTier::Frontier, checkpoint(2), 24)
+                .unwrap(),
+            controller
+                .next_plan(ExamTier::Frontier, checkpoint(2), 24)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn release_recovery_requires_current_checkpoint_and_qualified_frontier() {
+        let mut controller = controller();
+        controller.config.release_recovery = true;
+        controller.config.steer_windows = 1;
+        controller
+            .observe(observation(
+                1,
+                ExamTier::Sentinel,
+                "reason.chain.depth",
+                300,
+                100,
+            ))
+            .unwrap();
+        let stale = controller
+            .observe(observation(
+                2,
+                ExamTier::Frontier,
+                "reason.chain.depth",
+                400,
+                0,
+            ))
+            .unwrap();
+        assert_ne!(stale.warning, WarningLevel::Steer);
+        let mut tiny = observation(1, ExamTier::Frontier, "reason.chain.depth", 1, 0);
+        tiny.sample_count = 1;
+        let tiny = controller.observe(tiny).unwrap();
+        assert_eq!(tiny.warning, WarningLevel::Watch);
+        assert!(!tiny.statistically_eligible);
+    }
+
+    #[test]
+    fn release_recovery_does_not_override_a_controller_stop() {
+        let mut controller = controller();
+        controller.config.release_recovery = true;
+        controller.config.steer_windows = 1;
+        controller.config.stop_windows = 1;
+        controller
+            .observe(observation(
+                1,
+                ExamTier::Sentinel,
+                "reason.chain.depth",
+                300,
+                100,
+            ))
+            .unwrap();
+        let mut failed = observation(1, ExamTier::Frontier, "reason.chain.depth", 100, 0);
+        failed.catastrophic_count = 300;
+        assert_eq!(
+            controller.observe(failed).unwrap().warning,
+            WarningLevel::Stop
+        );
+    }
+
+    #[test]
+    fn legacy_controller_does_not_enable_release_recovery() {
+        let mut value = serde_json::to_value(controller()).unwrap();
+        value["config"]
+            .as_object_mut()
+            .unwrap()
+            .remove("release_recovery");
+        let restored: AdaptiveExamController = serde_json::from_value(value).unwrap();
+        assert!(!restored.config.release_recovery);
+        assert!(
+            restored
+                .families
+                .values()
+                .all(|state| state.release_sentinel.is_none())
+        );
     }
 
     #[test]

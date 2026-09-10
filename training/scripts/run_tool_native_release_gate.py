@@ -86,7 +86,7 @@ def wait_for_final_candidate(
         if status_path.exists():
             status = loop.load_json(status_path)
             stage = str(status.get("stage", ""))
-            if stage == "window_budget_exhausted":
+            if stage in ("window_budget_exhausted", "ready_for_release"):
                 return stage, status
             if stage in ("stopped_by_controller", "failed"):
                 return stage, status
@@ -146,7 +146,7 @@ def main() -> int:
         terminal_stage, terminal = wait_for_final_candidate(
             adaptive, args.poll_seconds, args.maximum_wait_hours
         )
-        if terminal_stage != "window_budget_exhausted":
+        if terminal_stage not in ("window_budget_exhausted", "ready_for_release"):
             atomic_json(
                 status_path,
                 {

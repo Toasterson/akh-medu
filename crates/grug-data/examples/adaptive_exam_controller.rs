@@ -59,7 +59,7 @@ fn initialize(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             "--steer-windows",
             "--stop-windows",
         ],
-        &["--enable-precursor-steering"],
+        &["--enable-precursor-steering", "--release-recovery"],
     )?;
     let run_id = required(&args, "--run-id")?;
     let generator_version = required(&args, "--generator-version")?;
@@ -127,6 +127,7 @@ fn initialize(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     if has_flag(&args, "--enable-precursor-steering") {
         config.precursor_steering_enabled = true;
     }
+    config.release_recovery = has_flag(&args, "--release-recovery");
     let controller =
         AdaptiveExamController::new(generator_version, run_id, seed, config, capabilities)?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &controller)?;

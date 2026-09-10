@@ -861,6 +861,33 @@ def has_stop(step: dict[str, Any]) -> bool:
     return any(decision.get("warning") == "stop" for decision in step["decisions"])
 
 
+def release_sentinels_pass(
+    observations: list[dict[str, Any]],
+    artifact: dict[str, Any],
+    expected_families: set[str],
+) -> bool:
+    """Require a complete exact-candidate suite before ending repair early.
+
+    This is a training stop, not promotion. The release certifier independently
+    reruns the immutable exams and verifies the serving artifact.
+    """
+    families = [row.get("family") for row in observations]
+    if len(families) != len(set(families)) or set(families) != expected_families:
+        raise RuntimeError("release recovery requires one sentinel for every registered family")
+    for row in observations:
+        samples = row.get("sample_count", 0)
+        if row.get("tier") != "sentinel" or row.get("checkpoint") != checkpoint(artifact) or samples <= 0:
+            raise RuntimeError("release recovery sentinel identity or sample count is invalid")
+        counts = [row.get(key, -1) for key in ("pass_count", "precursor_count", "catastrophic_count")]
+        if any(not isinstance(value, int) or value < 0 for value in counts) or sum(counts) > samples:
+            raise RuntimeError("release recovery sentinel outcome counts are invalid")
+    return all(
+        row["pass_count"] / row["sample_count"] >= 0.85
+        and row["catastrophic_count"] / row["sample_count"] <= 0.01
+        for row in observations
+    )
+
+
 def resolve_file(value: Any) -> Path:
     if not isinstance(value, str) or not value:
         raise RuntimeError("run descriptor contains an invalid file path")
@@ -1372,7 +1399,7 @@ def main() -> int:
         if previous_status is not None:
             previous_stage = str(previous_status.get("stage", ""))
             previous_window = int(previous_status.get("window", 0))
-            if previous_stage in ("stopped_by_controller", "window_budget_exhausted"):
+            if previous_stage in ("stopped_by_controller", "window_budget_exhausted", "ready_for_release"):
                 raise RuntimeError(f"refusing to resume terminal loop stage {previous_stage}")
             if previous_stage in ("training", "rebinding") and previous_window > committed_windows:
                 raise RuntimeError(
@@ -1412,10 +1439,6 @@ def main() -> int:
                     "promotion_enabled": False,
                 },
             )
-            frontier = window / "frontier.exam.json"
-            materialize_frontier(
-                binaries, contracts, plan, frontier, length_buckets=args.length_buckets
-            )
             sentinel_observations = evaluate_sentinels(
                 args,
                 binaries,
@@ -1424,6 +1447,31 @@ def main() -> int:
                 knowledge_sentinels,
                 tool_sentinel,
                 window,
+            )
+            if step["controller"]["config"].get("release_recovery", False):
+                # Choose the frontier from this candidate's complete sentinel
+                # suite, so repairing one family doesn't waste the next window
+                # on its now-passing predecessor.
+                sentinel_step = controller_step(
+                    binaries["controller"], step, sentinel_observations, artifact,
+                    args.frontier_samples, window, "controller-sentinels",
+                )
+                if not has_stop(sentinel_step) and release_sentinels_pass(
+                    sentinel_observations, artifact, set(step["controller"]["families"])
+                ):
+                    atomic_json(status_path, {
+                        "schema_version": 1, "stage": "ready_for_release",
+                        "windows": number - 1, "bundle": str(bundle),
+                        "checkpoint": checkpoint(artifact),
+                        "controller_step": str(window / "controller-sentinels.step.json"),
+                        "promotion_enabled": False,
+                        "reason": "complete sentinel suite meets release thresholds",
+                    })
+                    return 0
+                plan = validate_controller_step(sentinel_step, artifact)
+            frontier = window / "frontier.exam.json"
+            materialize_frontier(
+                binaries, contracts, plan, frontier, length_buckets=args.length_buckets
             )
             frontier_observation = evaluate_frontier(
                 args, binaries, bundle, plan, frontier, window
