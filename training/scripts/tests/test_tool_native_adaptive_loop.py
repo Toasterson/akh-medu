@@ -15,6 +15,37 @@ SPEC.loader.exec_module(LOOP)
 
 
 class AdaptiveLoopPolicyTests(unittest.TestCase):
+    def test_steered_parent_verifies_full_corpus_and_retains_only_base(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "base.jsonl"
+            sibling = Path(directory) / "sibling.jsonl"
+            base.write_text("{}\n" * 19)
+            sibling.write_text("{}\n")
+            run = {
+                "train_jsonl": str(base), "training_records": 20,
+                "steering_sibling_jsonl": str(sibling),
+                "steered_from": {"base_training_records": 19, "sibling_training_records": 1},
+            }
+            sources, count = LOOP.verified_base_sources(run)
+            self.assertEqual(count, 19)
+            self.assertEqual(sources["supplements"], [])
+            sibling.write_text("{}\n{}\n")
+            with self.assertRaisesRegex(RuntimeError, "training record count"):
+                LOOP.verified_base_sources(run)
+            run["training_records"] = 21
+            with self.assertRaisesRegex(RuntimeError, "lineage"):
+                LOOP.verified_base_sources(run)
+
+    def test_ordinary_parent_still_requires_exact_corpus_count(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "base.jsonl"
+            base.write_text("{}\n" * 3)
+            run = {"train_jsonl": str(base), "training_records": 3}
+            self.assertEqual(LOOP.verified_base_sources(run)[1], 3)
+            run["training_records"] = 2
+            with self.assertRaisesRegex(RuntimeError, "training record count"):
+                LOOP.verified_base_sources(run)
+
     def test_sibling_budget_never_exceeds_five_percent(self) -> None:
         self.assertEqual(LOOP.sibling_record_budget(1_900, 500), 100)
         self.assertEqual(LOOP.sibling_record_budget(9_917, 500), 500)

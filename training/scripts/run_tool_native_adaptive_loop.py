@@ -894,6 +894,28 @@ def source_record_count(sources: dict[str, Any]) -> int:
     )
 
 
+def verified_base_sources(run: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Verify the full parent corpus, then separate its temporary sibling.
+
+    A steered run's training_records includes its sibling. New segments
+    replace that sibling while preserving the base; comparing the base alone
+    with the full count incorrectly rejects every steered starting bundle.
+    """
+    full_count = source_record_count(source_files(run, include_current_sibling=True))
+    if full_count != int(run["training_records"]):
+        raise RuntimeError("initial run descriptor does not reproduce its training record count")
+    sources = source_files(run, include_current_sibling=False)
+    base_count = source_record_count(sources)
+    if run.get("steering_sibling_jsonl"):
+        lineage = run.get("steered_from") or {}
+        if (
+            lineage.get("base_training_records") != base_count
+            or lineage.get("sibling_training_records") != full_count - base_count
+        ):
+            raise RuntimeError("initial steering lineage does not reproduce its base/sibling counts")
+    return sources, base_count
+
+
 def common_training_command(
     binary: str,
     run: dict[str, Any],
@@ -1228,12 +1250,7 @@ def main() -> int:
         step = load_json(step_path)
         validate_controller_step(step, artifact)
         fixed_run = load_json(bundle / "run.json")
-        fixed_sources = source_files(fixed_run, include_current_sibling=False)
-        base_records = source_record_count(fixed_sources)
-        if base_records != int(fixed_run["training_records"]):
-            raise RuntimeError(
-                "initial run descriptor does not reproduce its base training record count"
-            )
+        fixed_sources, base_records = verified_base_sources(fixed_run)
         contracts = (bundle / "contracts.json").resolve(strict=True)
         loop_config_path = output / "loop-config.json"
         if loop_config_path.exists():
