@@ -90,8 +90,8 @@ pub async fn run_embed_worker(
 /// Process one batch of unembedded chunks.
 ///
 /// WI-326: records `seshat_embed_batch_duration_seconds` / batch / chunks
-/// counters per invocation via `record_embed_batch`, on both empty and
-/// populated ticks (`metrics` is `tracing-otel` builds only).
+/// counters per invocation via `record_embed_batch`, on empty, populated and
+/// failed ticks (`metrics` is `tracing-otel` builds only).
 ///
 /// Trace-stitching: the caller (worker tick or `seshat_embed_now`) attaches
 /// its span to this future via `Instrument::instrument`; the closure below
@@ -105,9 +105,67 @@ pub async fn embed_pending_batch(
     model_name: &str,
     #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
 ) -> SeshatResult<EmbedStats> {
+    let embedder = Arc::clone(embedder);
+    embed_pending_batch_with(
+        db,
+        batch_size,
+        model_name,
+        #[cfg(feature = "tracing-otel")]
+        metrics,
+        move |texts| {
+            let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let mut guard = embedder
+                .lock()
+                .map_err(|e| crate::SeshatError::Embedding(format!("embedder lock: {e}")))?;
+            guard.embed_batch(&text_refs)
+        },
+    )
+    .await
+}
+
+// Keep the database and instrumentation path identical for ONNX and tests;
+// only the blocking inference function is injected.
+async fn embed_pending_batch_with<F>(
+    db: &DatabaseConnection,
+    batch_size: usize,
+    model_name: &str,
+    #[cfg(feature = "tracing-otel")] metrics: Option<&crate::metrics::SeshatMetrics>,
+    embed: F,
+) -> SeshatResult<EmbedStats>
+where
+    F: FnOnce(Vec<String>) -> SeshatResult<Vec<Vec<f32>>> + Send + 'static,
+{
     #[cfg(feature = "tracing-otel")]
     let batch_start = std::time::Instant::now();
+    let result = embed_pending_batch_impl(db, batch_size, model_name, embed).await;
+    #[cfg(feature = "tracing-otel")]
+    if let Some(metrics) = metrics {
+        let chunks = result
+            .as_ref()
+            .map_or(0, |stats| stats.chunks_processed as u64);
+        metrics.record_embed_batch(batch_start.elapsed().as_secs_f64(), chunks);
+        // Query the full backlog after every outcome, including failures;
+        // batch length cannot represent work still waiting beyond this tick.
+        match count_pending(db).await {
+            Ok(pending) => metrics.record_pending_embedding(Some(pending)),
+            Err(error) => {
+                metrics.record_pending_embedding(None);
+                tracing::warn!(%error, "could not refresh pending embedding metric");
+            }
+        }
+    }
+    result
+}
 
+async fn embed_pending_batch_impl<F>(
+    db: &DatabaseConnection,
+    batch_size: usize,
+    model_name: &str,
+    embed: F,
+) -> SeshatResult<EmbedStats>
+where
+    F: FnOnce(Vec<String>) -> SeshatResult<Vec<Vec<f32>>> + Send + 'static,
+{
     // Find unembedded chunks.
     let pending_chunks: Vec<pa_chunk::Model> = Chunk::find()
         .filter(ChunkCol::EmbeddedAt.is_null())
@@ -119,40 +177,23 @@ pub async fn embed_pending_batch(
         .collect();
 
     if pending_chunks.is_empty() {
-        // Empty tick still counts as a batch iteration (0 chunks processed).
-        #[cfg(feature = "tracing-otel")]
-        if let Some(m) = metrics {
-            m.record_embed_batch(batch_start.elapsed().as_secs_f64(), 0);
-        }
         return Ok(EmbedStats::default());
     }
 
     let chunk_count = pending_chunks.len();
 
-    // Collect texts for batch embedding.
-    let texts: Vec<&str> = pending_chunks.iter().map(|c| c.text.as_str()).collect();
-
-    // Run embedding (blocking ONNX inference in a spawn_blocking task).
-    //
-    // WI-326 trace-stitching: capture the *current* span (the worker-tick or
-    // tool-call span) and re-enter it inside the blocking closure. A plain
-    // `spawn_blocking` runs on a separate blocking thread that is NOT running
-    // the async future's span context, so without the explicit capture +
-    // re-enter the ONNX call would be detached from the tick trace.
-    // `blocking_span.entered()` consumes `Span` and returns an
-    // `EnteredSpan` (a `!Send` guard) — sound here only because the guard
-    // lives entirely inside the blocking closure and is dropped before it
-    // returns; the closure itself never `.await`s.
-    let embedder_clone = Arc::clone(embedder);
-    let texts_owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-    let blocking_span = tracing::Span::current();
+    let texts = pending_chunks
+        .iter()
+        .map(|chunk| chunk.text.clone())
+        .collect();
+    let parent = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let embeddings = tokio::task::spawn_blocking(move || {
-        let _entered = blocking_span.entered();
-        let text_refs: Vec<&str> = texts_owned.iter().map(|s| s.as_str()).collect();
-        let mut guard = embedder_clone
-            .lock()
-            .map_err(|e| crate::SeshatError::Embedding(format!("embedder lock: {e}")))?;
-        guard.embed_batch(&text_refs)
+        tracing::dispatcher::with_default(&dispatch, || {
+            let _entered = parent.entered();
+            let _inference = tracing::info_span!("seshat.embed_batch.onnx").entered();
+            embed(texts)
+        })
     })
     .await
     .map_err(|e| crate::SeshatError::Embedding(format!("spawn_blocking: {e}")))??;
@@ -196,13 +237,6 @@ pub async fn embed_pending_batch(
         embeddings_created,
     };
 
-    // WI-326: record the full-tick batch duration + chunks processed on the
-    // success leg.
-    #[cfg(feature = "tracing-otel")]
-    if let Some(m) = metrics {
-        m.record_embed_batch(batch_start.elapsed().as_secs_f64(), stats.chunks_processed as u64);
-    }
-
     Ok(stats)
 }
 
@@ -214,3 +248,7 @@ pub async fn count_pending(db: &DatabaseConnection) -> SeshatResult<u64> {
         .await?;
     Ok(count)
 }
+
+#[cfg(all(test, feature = "tracing-otel"))]
+#[path = "../tests/support/embed_worker.rs"]
+mod instrumentation_tests;

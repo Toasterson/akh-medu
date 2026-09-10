@@ -48,15 +48,13 @@ impl Drop for ObservabilityShutdown {
 /// OTLP layer installed only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set;
 /// otherwise plain `fmt()`.
 pub fn init_observability(service_name: &'static str) -> ObservabilityShutdown {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "seshat=info".parse().unwrap());
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "seshat=info".parse().unwrap());
 
     #[cfg(not(feature = "tracing-otel"))]
     {
         let _ = service_name;
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
         return ObservabilityShutdown::empty();
     }
 
@@ -64,9 +62,7 @@ pub fn init_observability(service_name: &'static str) -> ObservabilityShutdown {
     {
         let endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT");
         if endpoint.is_err() {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
             return ObservabilityShutdown::empty();
         }
 
@@ -111,13 +107,10 @@ fn init_otel(
     filter: EnvFilter,
 ) -> Result<ObservabilityShutdown, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::{KeyValue, trace::TracerProvider as _};
-    use opentelemetry_sdk::{
-        Resource,
-        propagation::TraceContextPropagator,
-        runtime::Tokio,
-        trace::TracerProvider,
-    };
     use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
+    use opentelemetry_sdk::{
+        Resource, propagation::TraceContextPropagator, runtime::Tokio, trace::TracerProvider,
+    };
 
     let mut resource_kv = vec![KeyValue::new(
         opentelemetry_semantic_conventions::resource::SERVICE_NAME,
@@ -199,9 +192,8 @@ fn init_otel(
 fn build_sampler() -> opentelemetry_sdk::trace::Sampler {
     use opentelemetry_sdk::trace::Sampler;
 
-    let name = env::var("OTEL_TRACES_SAMPLER").unwrap_or_else(|_| {
-        "parentbased_traceidratio".to_string()
-    });
+    let name =
+        env::var("OTEL_TRACES_SAMPLER").unwrap_or_else(|_| "parentbased_traceidratio".to_string());
     let arg = env::var("OTEL_TRACES_SAMPLER_ARG").unwrap_or_else(|_| "0.1".to_string());
     let ratio: f64 = arg.parse().unwrap_or(0.1);
 

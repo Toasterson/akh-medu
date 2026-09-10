@@ -247,12 +247,16 @@ mod tests {
         };
 
         let hits = search_similar_filtered(
-            &db, &[0.1, 0.2], 5, 0.3, &filters,
+            &db,
+            &[0.1, 0.2],
+            5,
+            0.3,
+            &filters,
             #[cfg(feature = "tracing-otel")]
             None,
         )
-            .await
-            .expect("filtered transcript search should succeed");
+        .await
+        .expect("filtered transcript search should succeed");
 
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].document_id, document_id);

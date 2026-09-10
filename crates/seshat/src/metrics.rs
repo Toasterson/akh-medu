@@ -4,8 +4,8 @@
 //! This module declares the instruments and bounded label sets specified by
 //! the §5.4 catalog of the OTLP observability research doc
 //! (`docs/ai/research/2026-04-26-otlp-observability.md`) — the Seshat half of
-//! the WI-34 decomposition. It does **not** wire runtime call sites; later
-//! slices will import `SeshatMetrics` and record values.
+//! the WI-34 decomposition. WI-326 adds bounded emission helpers and a
+//! database-backed observable embedding backlog.
 //!
 //! # Naming rules
 //!
@@ -23,15 +23,20 @@
 //! corpus, so no `workspace` label is carried either — the `service.name`
 //! resource attribute already distinguishes seshd from akhomed.
 //!
-//! The only bounded label in the Seshat catalog is `tool` (the MCP tool
-//! name, a static string per handler) and `error_kind`.
+//! Bounded labels are `tool` (the MCP tool name), `status`, `result`, and
+//! `error_kind`; their vocabularies are defined below.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 
 /// Root metric registry for seshd.
 ///
 /// Construct once at startup via `SeshatMetrics::new(meter)` and share an
-/// `Arc` with the components that will emit in later slices.
+/// `Arc` with the MCP handlers and embedding worker.
 pub struct SeshatMetrics {
     meter: Meter,
 
@@ -93,6 +98,7 @@ pub struct SeshatMetrics {
     ///
     /// Type: `i64` observable gauge. Unit: `"chunk"`. Labels: none.
     pub pending_embedding_chunks: ObservableGauge<i64>,
+    pending_embedding_count: Arc<AtomicI64>,
 
     /// `seshat_microtheory_cache_size` — cached microtheory rows.
     ///
@@ -142,6 +148,9 @@ pub struct SeshatMetrics {
 impl SeshatMetrics {
     /// Build the registry from the supplied `Meter`.
     pub fn new(meter: Meter) -> Self {
+        // Negative means no current database observation is available.
+        let pending_embedding_count = Arc::new(AtomicI64::new(-1));
+        let observed_pending = Arc::clone(&pending_embedding_count);
         Self {
             meter: meter.clone(),
 
@@ -196,7 +205,14 @@ impl SeshatMetrics {
                 .i64_observable_gauge("seshat_pending_embedding_chunks")
                 .with_description("Chunks awaiting the embed worker (backlog)")
                 .with_unit("chunk")
+                .with_callback(move |observer| {
+                    let pending = observed_pending.load(Ordering::Acquire);
+                    if pending >= 0 {
+                        observer.observe(pending, &[]);
+                    }
+                })
                 .build(),
+            pending_embedding_count,
             microtheory_cache_size: meter
                 .i64_observable_gauge("seshat_microtheory_cache_size")
                 .with_description("Cached microtheory rows")
@@ -269,10 +285,7 @@ impl SeshatMetrics {
         use opentelemetry::KeyValue;
         self.mcp_requests_total.add(
             1,
-            &[
-                KeyValue::new("tool", tool),
-                KeyValue::new("status", status),
-            ],
+            &[KeyValue::new("tool", tool), KeyValue::new("status", status)],
         );
         self.mcp_request_duration_seconds
             .record(duration_seconds, &[KeyValue::new("tool", tool)]);
@@ -308,6 +321,13 @@ impl SeshatMetrics {
         if chunks_processed > 0 {
             self.embed_chunks_processed_total.add(chunks_processed, &[]);
         }
+    }
+
+    /// Publish the total pending backlog from a database count. An unavailable
+    /// count suppresses the next observation instead of reporting stale data.
+    pub fn record_pending_embedding(&self, pending: Option<u64>) {
+        let count = pending.map_or(-1, |value| value.min(i64::MAX as u64) as i64);
+        self.pending_embedding_count.store(count, Ordering::Release);
     }
 
     /// Record one pgvector similarity-search latency (label-free).
