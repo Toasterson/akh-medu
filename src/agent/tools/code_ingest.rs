@@ -1319,7 +1319,14 @@ mod tests {
         let repo = detect_repository(&source_file, None).unwrap();
         assert_eq!(repo.name, "main-repository");
         assert_eq!(repo.mt_label, "mt:repo:main-repository");
-        assert_eq!(repo.root_path, worktree_root.to_string_lossy());
+        // `detect_repository` canonicalizes the input path before walking up,
+        // so `root_path` is always canonical. The fixture root is not: on macOS
+        // the default TMPDIR (`/var/folders/...`) canonicalizes to
+        // `/private/var/folders/...`, so comparing against the raw
+        // `worktree_root` passes on Linux and fails on macOS. Canonicalize the
+        // expectation so the assertion is platform-neutral.
+        let expected_root = worktree_root.canonicalize().unwrap();
+        assert_eq!(repo.root_path, expected_root.to_string_lossy());
     }
 
     #[test]
