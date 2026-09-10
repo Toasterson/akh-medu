@@ -1261,8 +1261,20 @@ impl AkhAcpAgent {
         mode_source: &'static str,
         require_pushed_mcp: bool,
         session_cwd_candidate: Option<PathBuf>,
+        // WI-325: the turn's parent `acp.turn` span. Entered inside the
+        // `spawn_blocking` closure so the ambient-parented `acp.llm_request`
+        // and `acp.tool_execution` spans attach *under* the turn instead of
+        // the dispatcher's ambient span (review round 1, architecture risk).
+        turn_span: tracing::Span,
     ) -> tokio::task::JoinHandle<Result<(), TurnFailure>> {
         tokio::task::spawn_blocking(move || {
+            // WI-325: enter the turn span for the whole synchronous body.
+            // This closure never `.await`s (the ADR-027 boundary), so a
+            // synchronous `Span::enter()` guard held for the closure body is
+            // sound — the guard is created and dropped on this same OS
+            // thread. Every LLM-request/tool-execution span created below
+            // then parents to the turn.
+            let _turn_span_guard = turn_span.enter();
             // ── ADR-027: take a *read* lock for the agentic path (concurrent
             // turns proceed in parallel). The agentic path never touches
             // `ChatProcessor` at all — it holds only `agent.read()` for the
@@ -4904,6 +4916,19 @@ fn build_connection(
                         let session_context = Arc::clone(&session_lease.context);
                         let session_conversation = Arc::clone(&session_lease.conversation);
                         let mcp_tool_cache = Arc::clone(&session_lease.mcp_tool_cache);
+                        // WI-325: open the turn's parent `acp.turn` span and
+                        // record the started counter. The span is entered inside
+                        // the `spawn_blocking` worker (`run_turn`), so LLM-request
+                        // and tool-execution spans parent to this turn; `finish`
+                        // records the terminal counter/duration exactly once on
+                        // every exit path below (and the `Drop` backstop covers
+                        // unwind with the bounded `other` fallback). Identity
+                        // (workspace/session/work-item) is span fields only.
+                        let telemetry = crate::agent::turn_telemetry::TurnTelemetry::begin(
+                            &ws,
+                            &session_id.to_string(),
+                            is_dispatch,
+                        );
                         let handle = AkhAcpAgent::run_turn(
                             engine,
                             agent,
@@ -4922,6 +4947,7 @@ fn build_connection(
                             "session-meta",
                             require_pushed_mcp,
                             session_cwd_candidate,
+                            telemetry.span(),
                         );
                         // The busy tracker (`begin_turn` above) must stay set
                         // until the worker actually finishes, which may be
@@ -5220,6 +5246,10 @@ fn build_connection(
                                             step_age.as_secs(),
                                         ),
                                     ));
+                                    telemetry.finish(
+                                        &ws,
+                                        crate::agent::turn_telemetry::TurnStopReason::Refusal,
+                                    );
                                     return responder.respond(PromptResponse::new(stop_reason));
                                 }
                                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
@@ -5259,11 +5289,28 @@ fn build_connection(
                             Some(res) => res,
                             None => done_rx.await,
                         };
+                        // WI-325: most paths resolve to the final
+                        // cancelled-vs-end_turn selection below; the two
+                        // `TurnFailure` refusals and a panicked worker
+                        // override that with their own bounded reason. The
+                        // `Drop` backstop still fires for any path that fails
+                        // to call `finish`, so duration is recorded exactly
+                        // once per turn regardless.
+                        let mut outcome_override: Option<
+                            crate::agent::turn_telemetry::TurnStopReason,
+                        > = None;
                         match join_result {
-                            Ok(Err(e)) => sink.emit(&AkhMessage::error(
-                                "acp",
-                                format!("turn task failed: {e}"),
-                            )),
+                            Ok(Err(e)) => {
+                                // Panicked/errored worker task — outside the
+                                // three named buckets, so the explicit bounded
+                                // fallback `other` applies.
+                                outcome_override =
+                                    Some(crate::agent::turn_telemetry::TurnStopReason::Other);
+                                sink.emit(&AkhMessage::error(
+                                    "acp",
+                                    format!("turn task failed: {e}"),
+                                ));
+                            }
                             Ok(Ok(Err(start_err))) => {
                                 // The turn could not finish safely. Surface a
                                 // distinguishable refusal so Anima never
@@ -5274,6 +5321,10 @@ fn build_connection(
                                         tracing::warn!(
                                             workspace = %ws,
                                             "host-enforced completion contract refused the turn"
+                                        );
+                                        telemetry.finish(
+                                            &ws,
+                                            crate::agent::turn_telemetry::TurnStopReason::Refusal,
                                         );
                                         return responder.respond(PromptResponse::new(
                                             StopReason::Refusal,
@@ -5298,6 +5349,10 @@ fn build_connection(
                                                 failure.summary()
                                             ),
                                         ));
+                                        telemetry.finish(
+                                            &ws,
+                                            crate::agent::turn_telemetry::TurnStopReason::Refusal,
+                                        );
                                         return responder.respond(PromptResponse::new(
                                             StopReason::Refusal,
                                         ));
@@ -5328,6 +5383,18 @@ fn build_connection(
                         } else {
                             StopReason::EndTurn
                         };
+                        // WI-325: the panicked-worker override takes precedence;
+                        // otherwise map to the spec boundary cancelled-vs-end_turn.
+                        telemetry.finish(
+                            &ws,
+                            outcome_override.unwrap_or(
+                                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                                    crate::agent::turn_telemetry::TurnStopReason::Cancelled
+                                } else {
+                                    crate::agent::turn_telemetry::TurnStopReason::EndTurn
+                                },
+                            ),
+                        );
                         responder.respond(PromptResponse::new(stop_reason))
                         }) // end cx_for_spawn.spawn — see the A2 note at the top of this handler
                     }

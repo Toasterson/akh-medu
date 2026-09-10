@@ -378,6 +378,9 @@ impl ChatBackend for CandleChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         // Metrics: track this Candle request (non-streaming).
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span = super::llm_metrics::LlmRequestMetrics::request_span("candle", request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let mut be = self.backend.lock().map_err(|_| ChatBackendError::Unavailable {
             backend: "candle".into(),

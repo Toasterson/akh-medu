@@ -209,6 +209,14 @@ fn init_otel(
     opentelemetry::global::set_tracer_provider(tracer_provider.clone());
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
+    // WI-325: install the global akhomed metrics registry so turn telemetry
+    // (`acp_turns_total`, `acp_turn_duration_seconds`) records against the
+    // same meter provider. Identity stays on spans; labels stay bounded.
+    crate::metrics::install_global(std::sync::Arc::new(crate::metrics::AkhomedMetrics::new(
+        opentelemetry::global::meter(service_name),
+    )));
+
+
     // Install the OpenTelemetry layer on top of the fmt layer.
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 

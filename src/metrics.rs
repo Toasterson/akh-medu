@@ -375,6 +375,25 @@ pub mod labels {
     }
 }
 
+// ── Global registry (WI-325) ─────────────────────────────────────────
+
+static GLOBAL_METRICS: std::sync::OnceLock<std::sync::Arc<AkhomedMetrics>> =
+    std::sync::OnceLock::new();
+
+/// Install the process-global metrics registry. Called once from
+/// `observability::init_otel` after the meter provider is set; later calls
+/// with an already-installed registry are no-ops.
+pub fn install_global(metrics: std::sync::Arc<AkhomedMetrics>) {
+    let _ = GLOBAL_METRICS.set(metrics);
+}
+
+/// The process-global metrics registry, if installed. Components that emit
+/// the WI-325 ACP turn metrics call this on each recording so the no-OTLP
+/// (offline `fmt`) configuration stays a true no-op.
+pub fn global() -> Option<std::sync::Arc<AkhomedMetrics>> {
+    GLOBAL_METRICS.get().cloned()
+}
+
 #[cfg(all(test, feature = "tracing-otel"))]
 mod tests {
     use super::*;

@@ -31,6 +31,12 @@ pub struct LlmRequestMetrics {
     pub completion_tokens: u64,
     /// Request sequence number within the turn (0 = first, increments on retry).
     pub request_seq: usize,
+    /// The per-request `acp.llm_request` child span, created alongside this
+    /// metrics handle at each of the five LLM call sites (WI-325). The span
+    /// is entered by the call site around the request; accumulated fields are
+    /// recorded onto it at `log()` time so span fields exactly match the
+    /// struct — no recomputed counters, no double-counting.
+    span: Option<tracing::Span>,
 }
 
 impl LlmRequestMetrics {
@@ -80,14 +86,67 @@ impl LlmRequestMetrics {
         self.started.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0)
     }
 
+    /// Create the `acp.llm_request` child span for this request.
+    ///
+    /// The span parents onto the ambient span at creation time (the enclosing
+    /// `acp.turn` parent entered by `run_turn`'s `spawn_blocking` closure).
+    /// All fields the request will accumulate are declared `Empty` up front so
+    /// tracing-opentelemetry doesn't drop late-recorded fields; `record_on_span`
+    /// fills them at `log()` time from this same struct's values.
+    pub fn request_span(model: &str, request_seq: usize) -> tracing::Span {
+        tracing::info_span!(
+            "acp.llm_request",
+            model = model,
+            request_seq = request_seq,
+            outcome = tracing::field::Empty,
+            duration_secs = tracing::field::Empty,
+            chunks_received = tracing::field::Empty,
+            bytes_received = tracing::field::Empty,
+            content_deltas = tracing::field::Empty,
+            thinking_deltas = tracing::field::Empty,
+            tool_call_chunks = tracing::field::Empty,
+            keepalive_chunks = tracing::field::Empty,
+            prompt_tokens = tracing::field::Empty,
+            completion_tokens = tracing::field::Empty,
+        )
+    }
+
+    /// Attach the request span created by [`Self::request_span`]. Call this at
+    /// the LLM call site immediately after [`Self::new`], then enter the span
+    /// for the request's duration.
+    pub fn attach_span(&mut self, span: tracing::Span) {
+        self.span = Some(span);
+    }
+
+    /// Fill the span fields from this struct's accumulated values. Called
+    /// once at `log()` time (exactly once per request on every exit path),
+    /// which preserves exactly-once recording: the span fields are the same
+    /// values the log line emits, never recomputed or counted twice.
+    fn record_on_span(&self, outcome: &str, duration_secs: f64) {
+        if let Some(span) = &self.span {
+            span.record("outcome", outcome);
+            span.record("duration_secs", duration_secs);
+            span.record("chunks_received", self.chunks_received as u64);
+            span.record("bytes_received", self.bytes_received as u64);
+            span.record("content_deltas", self.content_deltas as u64);
+            span.record("thinking_deltas", self.thinking_deltas as u64);
+            span.record("tool_call_chunks", self.tool_call_chunks as u64);
+            span.record("keepalive_chunks", self.keepalive_chunks as u64);
+            span.record("prompt_tokens", self.prompt_tokens);
+            span.record("completion_tokens", self.completion_tokens);
+        }
+    }
+
     /// Structured log line for this request (one line per request, on completion
     /// or cancellation). The `outcome` string is `"completed"` or `"cancelled"`.
     pub fn log(&self, model: &str, outcome: &str) {
+        let duration_secs = self.duration_secs();
+        self.record_on_span(outcome, duration_secs);
         tracing::info!(
             model,
             outcome,
             request_seq = self.request_seq,
-            duration_secs = self.duration_secs(),
+            duration_secs = duration_secs,
             chunks_received = self.chunks_received,
             bytes_received = self.bytes_received,
             content_deltas = self.content_deltas,
