@@ -4,8 +4,8 @@
 //! This module declares the instruments and bounded label sets specified by
 //! the §5.4 catalog of the OTLP observability research doc
 //! (`docs/ai/research/2026-04-26-otlp-observability.md`) — the Seshat half of
-//! the WI-34 decomposition. It does **not** wire runtime call sites; later
-//! slices will import `SeshatMetrics` and record values.
+//! the WI-34 decomposition. WI-326 adds bounded emission helpers and a
+//! database-backed observable embedding backlog.
 //!
 //! # Naming rules
 //!
@@ -23,22 +23,29 @@
 //! corpus, so no `workspace` label is carried either — the `service.name`
 //! resource attribute already distinguishes seshd from akhomed.
 //!
-//! The only bounded label in the Seshat catalog is `tool` (the MCP tool
-//! name, a static string per handler) and `error_kind`.
+//! Bounded labels are `tool` (the MCP tool name), `status`, `result`, and
+//! `error_kind`; their vocabularies are defined below.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
 use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
 
 /// Root metric registry for seshd.
 ///
 /// Construct once at startup via `SeshatMetrics::new(meter)` and share an
-/// `Arc` with the components that will emit in later slices.
+/// `Arc` with the MCP handlers and embedding worker.
 pub struct SeshatMetrics {
     meter: Meter,
 
     // ── MCP request surface ───────────────────────────────────────────────
     /// `seshat_mcp_requests_total` — every `#[tool]` handler invocation.
     ///
-    /// Type: `u64` counter. Unit: `"request"`. Labels: `tool`.
+    /// Type: `u64` counter. Unit: `"request"`. Labels: `tool`, `status`
+    /// (`status` ∈ `labels::status::{OK, ERROR}`; WI-326's
+    /// `seshat_requests_total{tool,status}` maps onto this catalog counter).
     pub mcp_requests_total: Counter<u64>,
 
     /// `seshat_mcp_request_duration_seconds` — latency of an MCP tool call.
@@ -60,12 +67,14 @@ pub struct SeshatMetrics {
     // ── Wish / microtheory cache ─────────────────────────────────────────
     /// `seshat_wish_cache_hits_total` — `check_cache` returned `Some`.
     ///
-    /// Type: `u64` counter. Unit: `"hit"`. Labels: none.
+    /// Type: `u64` counter. Unit: `"hit"`. Labels: `result` (always
+    /// `labels::result::HIT`).
     pub wish_cache_hits_total: Counter<u64>,
 
     /// `seshat_wish_cache_misses_total` — `check_cache` returned `None`.
     ///
-    /// Type: `u64` counter. Unit: `"miss"`. Labels: none.
+    /// Type: `u64` counter. Unit: `"miss"`. Labels: `result` (always
+    /// `labels::result::MISS`).
     pub wish_cache_misses_total: Counter<u64>,
 
     // ── Corpus size gauges ────────────────────────────────────────────────
@@ -89,6 +98,7 @@ pub struct SeshatMetrics {
     ///
     /// Type: `i64` observable gauge. Unit: `"chunk"`. Labels: none.
     pub pending_embedding_chunks: ObservableGauge<i64>,
+    pending_embedding_count: Arc<AtomicI64>,
 
     /// `seshat_microtheory_cache_size` — cached microtheory rows.
     ///
@@ -138,6 +148,9 @@ pub struct SeshatMetrics {
 impl SeshatMetrics {
     /// Build the registry from the supplied `Meter`.
     pub fn new(meter: Meter) -> Self {
+        // Negative means no current database observation is available.
+        let pending_embedding_count = Arc::new(AtomicI64::new(-1));
+        let observed_pending = Arc::clone(&pending_embedding_count);
         Self {
             meter: meter.clone(),
 
@@ -192,7 +205,14 @@ impl SeshatMetrics {
                 .i64_observable_gauge("seshat_pending_embedding_chunks")
                 .with_description("Chunks awaiting the embed worker (backlog)")
                 .with_unit("chunk")
+                .with_callback(move |observer| {
+                    let pending = observed_pending.load(Ordering::Acquire);
+                    if pending >= 0 {
+                        observer.observe(pending, &[]);
+                    }
+                })
                 .build(),
+            pending_embedding_count,
             microtheory_cache_size: meter
                 .i64_observable_gauge("seshat_microtheory_cache_size")
                 .with_description("Cached microtheory rows")
@@ -242,6 +262,79 @@ impl SeshatMetrics {
     pub fn meter(&self) -> &Meter {
         &self.meter
     }
+
+    // ── WI-326 emission helpers ─────────────────────────────────────────
+    //
+    // All label values flowing through these helpers are `&'static str`
+    // consts from `labels::*` — document/chunk/query IDs and raw query text
+    // can never become metric labels because these signatures accept no
+    // user-derived strings.
+
+    /// Record one MCP tool-call outcome:
+    /// `seshat_mcp_requests_total{tool,status}` (WI-326's
+    /// `seshat_requests_total{tool,status}` maps onto this catalog counter),
+    /// `seshat_mcp_request_duration_seconds{tool}`, and on `status == ERROR`
+    /// `seshat_mcp_request_errors_total{tool,error_kind}`.
+    pub fn record_tool_call(
+        &self,
+        tool: &'static str,
+        status: &'static str,
+        duration_seconds: f64,
+        error_kind: Option<&'static str>,
+    ) {
+        use opentelemetry::KeyValue;
+        self.mcp_requests_total.add(
+            1,
+            &[KeyValue::new("tool", tool), KeyValue::new("status", status)],
+        );
+        self.mcp_request_duration_seconds
+            .record(duration_seconds, &[KeyValue::new("tool", tool)]);
+        if let Some(kind) = error_kind {
+            self.mcp_request_errors_total.add(
+                1,
+                &[
+                    KeyValue::new("tool", tool),
+                    KeyValue::new("error_kind", kind),
+                ],
+            );
+        }
+    }
+
+    /// Record one microtheory cache lookup. `result` is `labels::result::HIT`
+    /// or `MISS` — the WI's bounded `result=hit|miss` vocabulary, carried on
+    /// the §5.4 catalog's hit/miss counters (no user input in the labels).
+    pub fn record_cache_lookup(&self, result: &'static str) {
+        use opentelemetry::KeyValue;
+        let attrs = [KeyValue::new("result", result)];
+        match result {
+            r if r == labels::result::HIT => self.wish_cache_hits_total.add(1, &attrs),
+            _ => self.wish_cache_misses_total.add(1, &attrs),
+        }
+    }
+
+    /// Record one embed-worker batch tick: batch counter, duration, and the
+    /// chunks processed on success (pass 0 on error legs).
+    pub fn record_embed_batch(&self, duration_seconds: f64, chunks_processed: u64) {
+        self.embed_batches_total.add(1, &[]);
+        self.embed_batch_duration_seconds
+            .record(duration_seconds, &[]);
+        if chunks_processed > 0 {
+            self.embed_chunks_processed_total.add(chunks_processed, &[]);
+        }
+    }
+
+    /// Publish the total pending backlog from a database count. An unavailable
+    /// count suppresses the next observation instead of reporting stale data.
+    pub fn record_pending_embedding(&self, pending: Option<u64>) {
+        let count = pending.map_or(-1, |value| value.min(i64::MAX as u64) as i64);
+        self.pending_embedding_count.store(count, Ordering::Release);
+    }
+
+    /// Record one pgvector similarity-search latency (label-free).
+    pub fn record_pgvector_search(&self, duration_seconds: f64) {
+        self.pgvector_search_duration_seconds
+            .record(duration_seconds, &[]);
+    }
 }
 
 /// Convenience constructors for bounded label values. These are intentionally
@@ -249,12 +342,28 @@ impl SeshatMetrics {
 /// labels.
 pub mod labels {
     /// Allowed values for the `tool` label (MCP tool name — a static string
-    /// per `#[tool]` handler).
+    /// per `#[tool]` handler). One const per handler currently exposed by
+    /// `mcp/mod.rs`; the vocabulary is closed.
     pub mod tool {
         pub const SEARCH: &str = "seshat_search";
         pub const WISH: &str = "seshat_wish";
-        pub const FETCH: &str = "seshat_fetch_document";
-        pub const LIST: &str = "seshat_list_documents";
+        pub const STATUS: &str = "seshat_status";
+        pub const DOCUMENTS: &str = "seshat_documents";
+        pub const INGEST: &str = "seshat_ingest";
+        pub const EMBED_NOW: &str = "seshat_embed_now";
+    }
+
+    /// Allowed values for the `status` label on `seshat_mcp_requests_total`.
+    pub mod status {
+        pub const OK: &str = "ok";
+        pub const ERROR: &str = "error";
+    }
+
+    /// Allowed values for the `result` label on cache lookups
+    /// (`wish_cache_hits_total` / `wish_cache_misses_total`).
+    pub mod result {
+        pub const HIT: &str = "hit";
+        pub const MISS: &str = "miss";
     }
 
     /// Allowed error-kind values.

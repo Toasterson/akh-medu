@@ -79,6 +79,14 @@ async fn main() -> miette::Result<()> {
 
     let db = Arc::new(db);
 
+    // WI-326: build the typed instrument registry once and share it. When
+    // OTLP export is unconfigured the meter is the SDK no-op, so emission is
+    // a cheap no-op rather than a permanently absent handle.
+    #[cfg(feature = "tracing-otel")]
+    let metrics = Arc::new(seshat::metrics::SeshatMetrics::new(
+        seshat::observability::global_meter("seshd"),
+    ));
+
     // Load embedding model (if feature enabled).
     #[cfg(feature = "embedding")]
     let embedder = {
@@ -110,8 +118,20 @@ async fn main() -> miette::Result<()> {
         let db_clone = Arc::clone(&db);
         let emb_clone = Arc::clone(emb);
         let embed_config = config.embedding.clone();
+        // WI-326: wire the shared metrics registry into the worker so every
+        // tick emits `record_embed_batch`. `None`-safe: the worker treats a
+        // missing handle as a no-op.
+        #[cfg(feature = "tracing-otel")]
+        let metrics_clone = Some(Arc::clone(&metrics));
         tokio::spawn(async move {
-            seshat::embed_worker::run_embed_worker(db_clone, emb_clone, embed_config).await;
+            seshat::embed_worker::run_embed_worker(
+                db_clone,
+                emb_clone,
+                embed_config,
+                #[cfg(feature = "tracing-otel")]
+                metrics_clone,
+            )
+            .await;
         });
         tracing::info!("embedding worker started");
     }
@@ -120,22 +140,22 @@ async fn main() -> miette::Result<()> {
     let state = Arc::new(SeshatMcpState {
         db: Arc::clone(&db),
         embedder,
+        // WI-326: same registry handle feeds the MCP tool-call metrics.
+        #[cfg(feature = "tracing-otel")]
+        metrics: Some(metrics),
     });
 
     let mcp_server = SeshatMcpServer::new(state);
 
     // Mount MCP server on axum with streamable HTTP transport.
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     };
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let mcp_config = StreamableHttpServerConfig::default();
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(mcp_server.clone()),
-        session_manager,
-        mcp_config,
-    );
+    let mcp_service =
+        StreamableHttpService::new(move || Ok(mcp_server.clone()), session_manager, mcp_config);
 
     // Build script REST router (GET /scripts, GET /scripts/{name}, POST /scripts/{name}).
     let scripts_router = {
