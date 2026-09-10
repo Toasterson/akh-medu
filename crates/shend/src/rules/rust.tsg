@@ -1,0 +1,304 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; WI-262 — Rust name-binding ruleset for shend's resolution tier.
+;;
+;; Executes via tree-sitter-graph 0.12 against tree-sitter-rust 0.24 syntax
+;; trees to construct a stack graph per file. The mechanism is polyglot; this
+;; ruleset covers Rust only — per-language rules land one at a time (ADR draft
+;; §Decision.1).
+;;
+;; Model:
+;;  - File-local and incremental (load-bearing; not traded away). Each file
+;;    contributes a single-file stack graph built without its dependencies
+;;    present; stack-graphs' partial-path stitching composes per-file minimal
+;;    partial-path sets across files later. A file indexes on a freshly cloned
+;;    worktree without a build and without its dependencies.
+;;  - Modules come from the repo-relative FILE_PATH plus `mod` items, using the
+;;    ROOT_NODE chain pattern from the upstream tree-sitter-stack-graphs
+;;    "modules" example (the same hierarchical-module discipline the upstream
+;;    Java ruleset encodes at scale). Module definitions live at the shared
+;;    ROOT_NODE, so any file resolves any indexed module path without a crate
+;;    manifest.
+;;  - A `use` makes BOTH a reference (to the external definition) AND a local
+;;    alias (a pop node in the local defs wired to the module surface), so a
+;;    same-named symbol imported from another module is bound *through the
+;;    module chain*, not by name. The WI-262 verification test relies on this:
+;;    name matching sees two `make` definitions with no link; the .tsg graph
+;;    links one via `crate::alpha::make` and the other via `crate::beta::make`.
+;;  - A reference the graph cannot bind stays an unmatched "partial" — shend
+;;    records it EXPLICITLY UNRESOLVED. Nothing guesses by name.
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Globals (shend supplies these at execution time)
+
+global FILE_PATH
+global ROOT_NODE
+
+;;;;;;;;;;;;;;;;;;;;;;;
+;; Attribute shorthands
+
+attribute node_definition = node     => type = "pop_symbol", node_symbol = node, is_definition
+attribute node_reference = node      => type = "push_symbol", node_symbol = node, is_reference
+attribute node_symbol = node         => symbol = (source-text node), source_node = node
+attribute pop_symbol = symbol        => type = "pop_symbol", symbol = symbol
+attribute push_symbol = symbol       => type = "push_symbol", symbol = symbol
+attribute symbol_definition = symbol => type = "pop_symbol", symbol = symbol, is_definition
+attribute symbol_reference = symbol  => type = "push_symbol", symbol = symbol, is_reference
+
+;;;;;;;;;;;;;;;;
+;; Module chain — derived from FILE_PATH. "src/alpha.rs" ~ crate::alpha;
+;; "src/lib.rs" | "src/main.rs" | "*/mod.rs" ~ the enclosing chain. Every
+;; intermediate directory and each plain `.rs` filename becomes a definition
+;; reachable from ROOT_NODE/its parent chain.
+
+(source_file)@sf {
+    node @sf.module_defs                   ; module surface exported by this file
+
+    var root = ROOT_NODE
+    scan FILE_PATH {
+        "([^/]+)/" {
+            node dir_def
+            attr (dir_def) symbol_definition = $1
+
+            node dir_defs
+            attr (dir_defs) pop_symbol = "."
+            edge dir_def -> dir_defs
+
+            edge root -> dir_def
+            set root = dir_defs
+        }
+        "([^/]+)\.rs" {
+            node file_def
+            attr (file_def) symbol_definition = $1
+            edge root -> file_def
+
+            attr (@sf.module_defs) pop_symbol = "."
+            edge file_def -> @sf.module_defs
+
+            set root = @sf.module_defs
+        }
+        "(lib|main|mod)\.rs" {
+            ; crate root / directory module: the file IS the enclosing chain's
+            ; module; its definitions are that chain's exports.
+            attr (@sf.module_defs) pop_symbol = "."
+            edge root -> @sf.module_defs
+
+            set root = @sf.module_defs
+        }
+    }
+}
+
+;; The file-level scope: every top-level item sees the module surface and the
+;; root; its definitions are exported by the module (so other files can import)
+;; and visible locally.
+(source_file (_)@top)@sf2 {
+    node @sf2.lexical_scope
+    edge @top.lexical_scope -> @sf2.module_defs
+    edge @sf2.module_defs -> @top.lexical_defs
+}
+
+;;;;;;;;;;;;;;;;;;;;
+;; Named definitions. Each item creates a pop_symbol definition wired into the
+;; enclosing defs chain; for `mod` items we additionally create the exported
+;; module surface under "." so `crate::x::y` / `use crate::x::y` resolve.
+
+[
+    (function_item)
+    (mod_item)
+    (trait_item)
+    (impl_item)
+    (struct_item)
+    (enum_item)
+    (const_item)
+    (static_item)
+    (type_item)
+    (function_signature_item)
+    (macro_definition)
+]@item {
+    node @item.lexical_scope
+    node @item.lexical_defs
+}
+
+(function_item name: (identifier)@name)@fn {
+    node def
+    attr (def) node_definition = @name
+    edge @fn.lexical_defs -> def
+}
+
+(mod_item name: (identifier)@name)@mod {
+    node mod_def
+    attr (mod_def) node_definition = @name
+    edge @mod.lexical_defs -> mod_def
+
+    node @mod.module_defs
+    attr (@mod.module_defs) pop_symbol = "."
+    edge mod_def -> @mod.module_defs
+}
+
+;; Definitions inside a mod/trait/impl body are exported through the mod/trait
+;; module surface and visible in the enclosing scope chain.
+(mod_item body: (declaration_list (_)@member)@dl)@mod2 {
+    edge @mod2.module_defs -> @member.lexical_defs
+    edge @dl.lexical_defs -> @member.lexical_defs
+}
+
+(struct_item name: (type_identifier)@name)@st {
+    node def
+    attr (def) node_definition = @name
+    edge @st.lexical_defs -> def
+}
+
+(enum_item name: (type_identifier)@name)@en {
+    node def
+    attr (def) node_definition = @name
+    edge @en.lexical_defs -> def
+}
+
+(trait_item name: (type_identifier)@name)@tr {
+    node def
+    attr (def) node_definition = @name
+    edge @tr.lexical_defs -> def
+}
+
+;; impl blocks: inherent-associated functions are exported under the type's
+;; module surface, so `Type::method()` resolves. The type itself is also a
+;; reference resolved in the enclosing scope.
+(impl_item type: (type_identifier)@tname body: (declaration_list (_)@member))@impl {
+    node tref
+    attr (tref) node_reference = @tname
+
+    node @impl.module_defs
+    attr (@impl.module_defs) pop_symbol = "."
+    edge @impl.module_defs -> @member.lexical_defs
+}
+
+(const_item name: (identifier)@name)@co {
+    node def
+    attr (def) node_definition = @name
+    edge @co.lexical_defs -> def
+}
+
+(static_item name: (identifier)@name)@sa {
+    node def
+    attr (def) node_definition = @name
+    edge @sa.lexical_defs -> def
+}
+
+(type_item name: (type_identifier)@name)@ty {
+    node def
+    attr (def) node_definition = @name
+    edge @ty.lexical_defs -> def
+}
+
+(function_signature_item name: (identifier)@name)@fsig {
+    node def
+    attr (def) node_definition = @name
+    edge @fsig.lexical_defs -> def
+}
+
+(macro_definition name: (identifier)@name)@mac {
+    node def
+    attr (def) node_definition = @name
+    edge @mac.lexical_defs -> def
+}
+
+;;;;;;;;;
+;; Bodies — blocks and declaration lists nest the enclosing scope chain. A
+;; body's statements see the body's defs AND the enclosing scope.
+
+[
+    (block)
+    (declaration_list)
+]@body {
+    node @body.lexical_scope
+    node @body.lexical_defs
+}
+
+;; Statements inside a body resolve against the body's defs and outward.
+(block (_)@inner)@blk {
+    edge @inner.lexical_scope -> @blk.lexical_defs
+    edge @blk.lexical_scope -> @inner.lexical_defs
+}
+
+(declaration_list (_)@inner)@dl2 {
+    edge @dl2.lexical_defs -> @inner.lexical_defs
+}
+
+;;;;;;;;;;;;;
+;; Imports — the load-bearing rule for cross-file disambiguation.
+;;
+;; `use crate::alpha::make;`
+;;   - components crate/alpha are references that must resolve through the
+;;     ROOT_NODE module chain,
+;;   - the final name `make` becomes both a reference into the enclosing
+;;     module surface AND a local alias (a pop node in this scope's defs) so a
+;;     later bare `make()` binds to it *through that alias*, not by name.
+;;
+;; Alias is a pop_symbol (definition) wired to the referenced module surface —
+;; the same pattern the upstream "modules" example uses for `from x import y`.
+
+(use_declaration argument: (_)@arg)@use {
+    node @use.lexical_defs
+    ; use path arguments export a per-use `use_defs` chain (declared on the
+    ; scoped-path stanza below); the use declaration's defs re-export it so
+    ;; the alias reaches the enclosing scope chain.
+    edge @use.lexical_defs -> @arg.use_defs
+}
+
+;; A plain identifier anywhere inside a use path: reference plus local alias.
+(use_declaration (identifier)@uname)@u {
+    node ref
+    attr (ref) node_reference = @uname
+
+    node alias
+    attr (alias) node_definition = @uname
+    edge @u.lexical_defs -> alias
+    edge alias -> ref
+}
+
+;; `use crate::a::b;` — scoped path inside a use: each component is a reference;
+;; the alias for the final name is wired through the module chain (the "."
+;; surface of the resolved path component).
+(scoped_identifier path: (_)@p name: (_)@n)@si {
+    node pref
+    attr (pref) node_reference = @p
+    node nref
+    attr (nref) node_reference = @n
+
+    ; per-use chain: the use_declaration's defs re-export this, so the
+    ;; imported name alias and the path reference both reach the use scope.
+    node @si.use_defs
+    edge @si.use_defs -> pref
+
+    ; The path component must resolve first; its definition exports a "."
+    ;; module surface onto which the imported name binds. pref is the
+    ;; reference that finds the path's definition; the alias wires through it.
+    node alias
+    attr (alias) node_definition = @n
+    edge @si.use_defs -> alias
+    edge alias -> pref
+    edge nref -> @si.use_defs
+}
+
+(scoped_type_identifier path: (_)@p name: (_)@n)@sti {
+    node pref
+    attr (pref) node_reference = @p
+    node nref
+    attr (nref) node_reference = @n
+
+    ; The imported/qualified type name binds through the path's module
+    ;; surface; wire the name reference into the use/qualification chain so
+    ;; stitching composes path-resolution before name lookup.
+    node @sti.use_defs
+    edge @sti.use_defs -> pref
+    edge nref -> @sti.use_defs
+}
+
+;;;;;;;;;;;;;;;;
+;; References — every identifier in expression position is a reference. The
+;; scope chain + module surface determines binding; unmatched references are
+;; exactly the "explicitly unresolved" inputs WI-262 requires (never guessed).
+
+(identifier)@id {
+    node ref
+    attr (ref) node_reference = @id
+}

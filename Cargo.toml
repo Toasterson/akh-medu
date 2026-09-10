@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/seshat",
     "crates/heka",
+    "crates/shend",
     "crates/anima-ai",
     "crates/akhomed-store",
     "crates/akh-egraph-bench",

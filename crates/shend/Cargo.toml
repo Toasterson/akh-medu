@@ -1,0 +1,42 @@
+[package]
+name = "shend"
+version = "0.1.0"
+edition = "2024"
+description = "Shen — code-understanding resolution stage: stack-graph name binding, code:resolves-to, tiered provenance (ADR 057 + WI-262)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+# Library-only for now: the ADR 057 daemon (`shend` binary) hosts this crate as
+# its parse → resolve → project pipeline. WI-262 builds the resolution stage;
+# the MCP surface, codex.* store and codex_kg AGE projection land with the
+# daemon work.
+
+[dependencies]
+# Name binding via stack graphs (GitHub, MIT/Apache-2.0).
+stack-graphs = "0.14"
+# Tree-sitter-graph: executes .tsg rulesets over concrete syntax trees to
+# construct the stack graph.
+tree-sitter-graph = "0.12"
+# The TSG executor: parses with a tree-sitter grammar and applies the ruleset
+# into a stack_graphs::StackGraph. Default features off — the bundled `cli`
+# and `lsp` features (tokio, clap, tower-lsp) are not needed by the library.
+tree-sitter-stack-graphs = { version = "0.10", default-features = false }
+# Parser runtime + Rust grammar (only Rust is wired up in WI-262; the
+# mechanism is polyglot and per-language rules land one at a time).
+tree-sitter = "0.24"
+# tree-sitter-graph 0.12 accepts language versions 13–14; tree-sitter-rust
+# 0.24 emits version 15, which it rejects at query-compile time. Pin the
+# grammar to the 0.23 line (language version 14) — the upstream-recommended
+# pairing: tree-sitter runtime 0.24 + grammar at ABI 14.
+tree-sitter-rust = "0.23"
+
+# Error handling
+thiserror = "2"
+
+# Serialization (ResolutionStore snapshots)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Hashing (file content identity)
+sha2 = "0.10"
