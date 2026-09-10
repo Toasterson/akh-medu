@@ -24,8 +24,8 @@
 //! **parameter keys**, and the **tool name** to the *offered* tools — a call
 //! is accepted iff there exists an offered tool whose schema contains every
 //! emitted parameter key *and* whose name is the emitted name. Parameter
-//! **values** are left free (any well-formed JSON string, or any non-delimiter
-//! "bare" token for numbers/booleans): forcing valid *names* is the treatment;
+//! **values** are left free within JSON syntax (strings, numbers and exact
+//! boolean/null literals): forcing valid *names* is the treatment;
 //! copying correct *values* is what Step A shows constrained decoding cannot
 //! fix (that needs the copy/pointer mechanism, Step B).
 //!
@@ -428,7 +428,7 @@ enum Leaf {
         uri: UriGuard,
     },
     /// Inside a bare (number/boolean/null) token.
-    Bare,
+    Bare(ScalarState),
     /// At the very start of the innermost frame's body (just after `{`/`[`):
     /// a key/item may open, or (only here, not after a `,`) the frame may
     /// close if legal.
@@ -449,6 +449,77 @@ enum Leaf {
     AnyKey { escape: EscapeState },
     /// Consumed a free-form key's closing `"`; expecting `:`.
     AnyColon,
+}
+
+/// JSON scalar syntax, independent of the value the model chooses. In
+/// particular, a plausible first digit is not permission to emit arbitrary
+/// bytes until the next delimiter (e.g. `0.summary-zurich`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScalarState {
+    Minus,
+    Zero,
+    Integer,
+    Dot,
+    Fraction,
+    Exponent,
+    ExponentSign,
+    ExponentDigits,
+    Literal {
+        text: &'static [u8],
+        consumed: usize,
+    },
+}
+
+impl ScalarState {
+    fn start(byte: u8) -> Option<Self> {
+        Some(match byte {
+            b'-' => Self::Minus,
+            b'0' => Self::Zero,
+            b'1'..=b'9' => Self::Integer,
+            b't' => Self::Literal {
+                text: b"true",
+                consumed: 1,
+            },
+            b'f' => Self::Literal {
+                text: b"false",
+                consumed: 1,
+            },
+            b'n' => Self::Literal {
+                text: b"null",
+                consumed: 1,
+            },
+            _ => return None,
+        })
+    }
+
+    fn complete(self) -> bool {
+        match self {
+            Self::Zero | Self::Integer | Self::Fraction | Self::ExponentDigits => true,
+            Self::Literal { text, consumed } => consumed == text.len(),
+            _ => false,
+        }
+    }
+
+    fn step(self, byte: u8) -> Option<Self> {
+        Some(match (self, byte) {
+            (Self::Minus, b'0') => Self::Zero,
+            (Self::Minus, b'1'..=b'9') | (Self::Integer, b'0'..=b'9') => Self::Integer,
+            (Self::Zero | Self::Integer, b'.') => Self::Dot,
+            (Self::Dot | Self::Fraction, b'0'..=b'9') => Self::Fraction,
+            (Self::Zero | Self::Integer | Self::Fraction, b'e' | b'E') => Self::Exponent,
+            (Self::Exponent, b'+' | b'-') => Self::ExponentSign,
+            (Self::Exponent | Self::ExponentSign | Self::ExponentDigits, b'0'..=b'9') => {
+                Self::ExponentDigits
+            }
+            (Self::Literal { text, consumed }, byte) if text.get(consumed) == Some(&byte) => {
+                Self::Literal {
+                    text,
+                    consumed: consumed + 1,
+                }
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// A recursive-descent position while typing one parameter's JSON value.
@@ -484,23 +555,16 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
             })),
             _ => None,
         },
-        // A bare token's *first* byte is restricted to a plausible JSON
-        // literal opener (digit/`-` for a number, `t`/`f`/`n` for
-        // true/false/null) so a declared `number`/`boolean`/`null` type
-        // cannot open with arbitrary garbage (e.g. a stray `<`). The
-        // continuation byte (`Leaf::Bare`'s own `step`) stays as permissive
-        // as this project's scalar values always were -- see the module
-        // docs' "what it constrains (and deliberately does not)" note.
         SchemaKind::Number => match byte {
-            b'-' | b'0'..=b'9' => Some(StartOutcome::Leaf(Leaf::Bare)),
+            b'-' | b'0'..=b'9' => Some(StartOutcome::Leaf(Leaf::Bare(ScalarState::start(byte)?))),
             _ => None,
         },
         SchemaKind::Boolean => match byte {
-            b't' | b'f' => Some(StartOutcome::Leaf(Leaf::Bare)),
+            b't' | b'f' => Some(StartOutcome::Leaf(Leaf::Bare(ScalarState::start(byte)?))),
             _ => None,
         },
         SchemaKind::Null => match byte {
-            b'n' => Some(StartOutcome::Leaf(Leaf::Bare)),
+            b'n' => Some(StartOutcome::Leaf(Leaf::Bare(ScalarState::start(byte)?))),
             _ => None,
         },
         SchemaKind::Array { items } => match byte {
@@ -531,7 +595,9 @@ fn start_value(schema: &SchemaRef, byte: u8, depth: usize) -> Option<StartOutcom
             // `Any` fallback is a grammar that stays *well-formed*, not one
             // that degrades to unconstrained bytes (see the module note on
             // schemas missing `items`/`properties`).
-            b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => Some(StartOutcome::Leaf(Leaf::Bare)),
+            b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => {
+                Some(StartOutcome::Leaf(Leaf::Bare(ScalarState::start(byte)?)))
+            }
             _ => None,
         },
     }
@@ -680,6 +746,8 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                     },
                 })),
                 b'"' => Some(value_completed(stack.clone())),
+                // JSON strings never admit unescaped control bytes.
+                0x00..=0x1f => None,
                 // Raw whitespace is illegal once the value has committed to
                 // a URI scheme prefix (space, tab, CR, LF) -- see
                 // [`UriGuard`] and [`is_raw_whitespace_byte`].
@@ -694,9 +762,8 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 })),
             },
         },
-        Leaf::Bare => match byte {
-            b'"' | b'\\' => None,
-            b',' | b'}' | b']' => match after_value(stack.clone()) {
+        Leaf::Bare(scalar) => match byte {
+            b',' | b'}' | b']' if scalar.complete() => match after_value(stack.clone()) {
                 Completion::Done => match byte {
                     b',' => Some(ValueOutcome::DoneComma),
                     b'}' => Some(ValueOutcome::DoneClose),
@@ -707,7 +774,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             },
             _ => Some(ValueOutcome::Continue(ValueParser {
                 stack: stack.clone(),
-                leaf: Leaf::Bare,
+                leaf: Leaf::Bare(scalar.step(byte)?),
             })),
         },
         Leaf::FrameStart => match stack.last() {
@@ -958,6 +1025,7 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                     stack: stack.clone(),
                     leaf: Leaf::AnyColon,
                 })),
+                0x00..=0x1f => None,
                 _ => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
                     leaf: Leaf::AnyKey { escape: EscapeState::Plain },
@@ -3244,6 +3312,90 @@ mod tests {
     /// Drive the grammar over a whole byte string; return the end state.
     fn run(grammar: &ToolCallGrammar, s: &str) -> Option<GrammarState> {
         grammar.advance(&grammar.start(), s.as_bytes())
+    }
+
+    #[test]
+    fn scalar_json_syntax_matches_json_parser_in_typed_and_nested_values() {
+        let samples = [
+            "0",
+            "-0",
+            "123",
+            "-42",
+            "0.25",
+            "-1.5e+2",
+            "1E-9",
+            "true",
+            "false",
+            "null",
+            "0.summary-zurich",
+            "01",
+            "-01",
+            "-",
+            "1.",
+            ".5",
+            "1e",
+            "1e+",
+            "1e--2",
+            "truex",
+            "tru",
+            "false0",
+            "nul",
+            "nullx",
+            "NaN",
+            "Infinity",
+            "0 1",
+            "0:1",
+        ];
+        for value in samples {
+            let valid = serde_json::from_str::<Value>(value).is_ok();
+            for nested in [false, true] {
+                let schema = if nested {
+                    serde_json::json!({})
+                } else if value.starts_with(['t', 'f']) {
+                    serde_json::json!({"type":"boolean"})
+                } else if value.starts_with('n') {
+                    serde_json::json!({"type":"null"})
+                } else {
+                    serde_json::json!({"type":"number"})
+                };
+                let g = ToolCallGrammar::from_openai_tools(&[serde_json::json!({
+                    "type":"function", "function":{"name":"write", "parameters":{
+                        "type":"object", "properties":{"value":schema}, "required":["value"]
+                    }}
+                })])
+                .unwrap();
+                let value = if nested {
+                    format!("[{{\"key\":{value}}}]")
+                } else {
+                    value.into()
+                };
+                let call = format!("{{\"arguments\":{{\"value\":{value}}},\"name\":\"write\"}}");
+                assert_eq!(run(&g, &call) == Some(GrammarState::End), valid, "{call}");
+            }
+        }
+    }
+
+    #[test]
+    fn strings_and_free_object_keys_reject_raw_controls_but_accept_escapes() {
+        let g = ToolCallGrammar::from_openai_tools(&[serde_json::json!({
+            "type":"function", "function":{"name":"write", "parameters":{
+                "type":"object", "properties":{"value":{}}, "required":["value"]
+            }}
+        })])
+        .unwrap();
+        for byte in 0..=0x1f {
+            for value in [
+                format!("\"a{}b\"", char::from(byte)),
+                format!("{{\"a{}b\":0}}", char::from(byte)),
+            ] {
+                let call = format!("{{\"arguments\":{{\"value\":{value}}},\"name\":\"write\"}}");
+                assert!(run(&g, &call).is_none(), "{call:?}");
+            }
+        }
+        for value in [r#""a\nb\t\u0000""#, r#"{"a\nb":true}"#, r#""plain text €""#] {
+            let call = format!("{{\"arguments\":{{\"value\":{value}}},\"name\":\"write\"}}");
+            assert_eq!(run(&g, &call), Some(GrammarState::End), "{call}");
+        }
     }
 
     #[test]
