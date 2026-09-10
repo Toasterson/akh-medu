@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from argparse import Namespace
 from pathlib import Path
 
@@ -303,6 +304,74 @@ class NativeOcrPipelineTests(unittest.TestCase):
             self.assertFalse((root / "candidate/certifier-invoked").exists())
             self.assertFalse((root / "candidate/multimodal-active.json").exists())
 
+    def test_cross_host_stops_on_text_failure_before_ocr_status_exists(self) -> None:
+        for stage in ("failed", "blocked_by_adaptive_loop"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                status_path = Path(directory) / "status.json"
+                args = Namespace(
+                    remote_release_status="/release/status.json",
+                    remote_training_status="/ocr/status.json",
+                    maximum_wait_hours=1,
+                    poll_seconds=5,
+                )
+                release = {"stage": stage, "active_model_written": False}
+                with patch.object(cross_host, "remote_json", return_value=release) as read:
+                    self.assertIsNone(cross_host.wait_for_candidate(args, status_path))
+                read.assert_called_once_with(args, args.remote_release_status)
+                status = json.loads(status_path.read_text())
+                self.assertEqual(status["stage"], "blocked_by_text_release")
+                self.assertEqual(status["remote_release_status"], release)
+                self.assertFalse(status["active_model_written"])
+
+    def test_cross_host_retries_unreadable_release_without_declaring_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            args = Namespace(
+                remote_release_status="/release/status.json",
+                remote_training_status="/ocr/status.json",
+                maximum_wait_hours=1,
+                poll_seconds=5,
+            )
+            candidate = {"stage": "candidate_ready_for_offline_gate"}
+            waiting = []
+            with patch.object(
+                cross_host,
+                "remote_json",
+                side_effect=[
+                    subprocess.CalledProcessError(255, ["ssh"]),
+                    {"stage": "active_text_model_ready"},
+                    candidate,
+                ],
+            ), patch.object(
+                cross_host.time,
+                "sleep",
+                side_effect=lambda _: waiting.append(json.loads(status_path.read_text())),
+            ):
+                self.assertEqual(cross_host.wait_for_candidate(args, status_path), candidate)
+            self.assertEqual(len(waiting), 1)
+            self.assertEqual(waiting[0]["stage"], "waiting_for_remote_candidate")
+            self.assertIsNotNone(waiting[0]["last_connection_error"])
+            self.assertFalse(waiting[0]["active_model_written"])
+
+    def test_cross_host_retains_ocr_failure_block(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "status.json"
+            args = Namespace(
+                remote_release_status="/release/status.json",
+                remote_training_status="/ocr/status.json",
+                maximum_wait_hours=1,
+                poll_seconds=5,
+            )
+            failure = {"stage": "failed", "error": "training failed"}
+            with patch.object(
+                cross_host, "remote_json",
+                side_effect=[{"stage": "active_text_model_ready"}, failure],
+            ):
+                self.assertIsNone(cross_host.wait_for_candidate(args, status_path))
+            status = json.loads(status_path.read_text())
+            self.assertEqual(status["stage"], "blocked_by_remote_training")
+            self.assertEqual(status["remote_status"], failure)
+
     def test_cross_host_container_is_networkless_and_preserves_corpus_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             staged = Path(directory)
@@ -317,6 +386,7 @@ class NativeOcrPipelineTests(unittest.TestCase):
                 Namespace(
                     offline_image="akh/offline:pinned",
                     docker_binary=Path("/opt/homebrew/bin/docker"),
+                    max_new_tokens=None,
                 ),
                 staged,
                 marker,

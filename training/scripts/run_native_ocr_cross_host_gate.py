@@ -177,6 +177,21 @@ def wait_for_candidate(
     last_error = ""
     while time.monotonic() < deadline:
         try:
+            # The chain may exit at text certification before creating any OCR
+            # status. Read that prerequisite first so a missing OCR file cannot
+            # hide a terminal release failure until the wait budget expires.
+            release = remote_json(args, args.remote_release_status)
+            if release.get("stage") in ("failed", "blocked_by_adaptive_loop"):
+                loop.atomic_json(
+                    status_path,
+                    {
+                        "schema_version": 1,
+                        "stage": "blocked_by_text_release",
+                        "remote_release_status": release,
+                        "active_model_written": False,
+                    },
+                )
+                return None
             status = remote_json(args, args.remote_training_status)
             stage = str(status.get("stage", ""))
             if stage == "candidate_ready_for_offline_gate":
