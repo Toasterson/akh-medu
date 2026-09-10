@@ -87,6 +87,49 @@ and rely on `--ckpt-every` + `resume.sh`.
 4. **Quote the best checkpoint, not the final one.** High-LR runs dip and
    recover; the final step is not reliably the best.
 
+## Combined preparation: Portuguese and process consultation
+
+Recorded at Till's request on 2026-09-10: prepare corpus acquisition and the two
+pending training stages as one coordinated batch. Both stages are deferred until
+an eligible parent has completed its existing terminal gates. The checklist
+below is the implementation handoff; acquisition and training are still pending.
+
+**Corpus selection decision:** use accessible corpus components regardless of
+license category. Apply quality, language coverage, deduplication, and evaluation
+separation checks. Retain source IDs, revisions, and hashes for reproducibility.
+
+| Stage | Corpus preparation | Implementation still needed |
+| --- | --- | --- |
+| [Portuguese](../docs/ai/plans/2026-09-10-portuguese-language-stage.md) | Acquire the listed Portuguese prose and instruction sources; author Portuguese knowledge/tool/Dojo episodes; prepare independent language and task holdouts. | Source exporters, tokenizer audit, Portuguese workflow/generator coverage, and candidate/retention evaluation. |
+| [Process consultation](../docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md#10-process-consultation-curriculum-added-2026-09-08) | Assemble and author complete episodes for all six kata, including Portuguese alongside English/German/French; preserve corrections, outcomes, and participant ownership. | Separate episode-preserving converter, consultation evaluator, and scenario-family holdouts. |
+
+Combined execution checklist:
+
+- [ ] Record the actual parent run outcome and exact checkpoint, configuration,
+  tokenizer, and tool-contract hashes with its gate evidence.
+- [ ] Prepare both corpora in one acquisition/authoring pass. Record source
+  revisions, stable IDs, processing configuration, seeds, file hashes, and
+  record/token counts in a shared acquisition inventory. Keep a separate
+  versioned corpus manifest and output directory for each stage.
+- [ ] Deduplicate across both corpora and existing replay data; freeze held-out
+  document/scenario families before training. Keep translated equivalents in
+  the same partition and future episode outcomes out of earlier model inputs.
+- [ ] Audit the selected parent's tokenizer on Portuguese and complete both
+  stages' converters, generators, evaluators, and targeted implementation checks.
+- [ ] Freeze token budgets, mixture weights, stop conditions, evaluation sample
+  sizes, promotion thresholds, and retention tolerances for both stages.
+- [ ] Execute sequentially. The planned order is Portuguese language adaptation
+  and instruction/task training, then consultation training from the eligible
+  Portuguese candidate. Pass the applicable gates between stages and record the
+  exact parent selected for each; a failed candidate does not advance the chain.
+- [ ] Evaluate the final candidate on both Portuguese capability and consultation
+  behavior, plus English/German/French, knowledge, tool, and Dojo retention.
+  Record artifact hashes, results, and failure slices before certification.
+
+Preparation can be coordinated while checkpoints, corpus manifests, and results
+remain separately inspectable. This handoff launches no acquisition or training
+process and changes no active run. It is not a runnable combined launcher yet.
+
 ## Deferred tail stage: process consultation dojo
 
 Added at Till's request on 2026-09-08: train the
@@ -123,3 +166,12 @@ Handoff for the follow-on stage:
 Preparation status: curriculum and handoff recorded; new corpus, converter,
 evaluator, training, and promotion evidence are pending. No active-run status
 is inferred from this note, and no training process is launched by it.
+
+## Deferred language stage: Portuguese
+
+The [Portuguese language-stage plan](../docs/ai/plans/2026-09-10-portuguese-language-stage.md)
+records candidate corpora from the Manacá/Tucano ecosystem, source-level
+provenance, tokenizer checks, and Portuguese instruction/tool/Dojo coverage.
+PT-BR is the initial working target. Preparation and training remain pending;
+follow the [combined preparation checklist](#combined-preparation-portuguese-and-process-consultation)
+for acquisition, parent selection, and the planned order of both stages.
