@@ -244,7 +244,7 @@ fn admit(app: &SessionApp, p: &Principal, akh: &str, params: &Value) -> Result<M
             app.sessions.create(
                 p,
                 &NewSession {
-                    request_id: format!("a2a-{}", crate::workspace::digest(message_id.as_bytes())),
+                    request_id: format!("a2a-{}", crate::digest(message_id.as_bytes())),
                     akh: akh.into(),
                     workspace_profile: workspace,
                     conversation_key: None,
@@ -273,7 +273,7 @@ fn admit(app: &SessionApp, p: &Principal, akh: &str, params: &Value) -> Result<M
             p,
             &session.id,
             &SubmitInput {
-                request_id: format!("a2a-{}", crate::workspace::digest(message_id.as_bytes())),
+                request_id: format!("a2a-{}", crate::digest(message_id.as_bytes())),
                 text,
                 artifacts: vec![],
             },

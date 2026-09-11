@@ -8,6 +8,8 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
         RuntimeKind::Claude => wire::RuntimeKind::Claude,
     };
     let config = akh_runtime::ProviderConfig {
+        isolation: None,
+        model_endpoint: None,
         revision: "embedded-compat-v1".into(),
         kind,
         working_dir: turn.runtime.config.working_dir.clone(),

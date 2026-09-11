@@ -3,7 +3,7 @@ use akh_session_types::{ApprovalPolicy, ExecutionMode, RuntimeEvent};
 use serde_json::{Value, json};
 
 pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
-    let mut command = turn.command(&turn.config.binary);
+    let mut command = turn.command(&turn.config.binary)?;
     command.args(["app-server", "--listen", "stdio://"]);
     if turn.config.execution_mode == ExecutionMode::Brokered {
         for setting in [

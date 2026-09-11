@@ -76,7 +76,7 @@ def main():
         configs['akhsessd']['automations'] = {'alert': {'id':'alert','enabled':True,'principal':'user','akh':'test','workspace_profile':'local','instructions':'Summarize this alert','sources':['alerts'],'target':{'kind':'incident'},'notify_only':True,'max_active':2,'max_age_ms':60000}}
         configs['akhrtd']['principals'] += [principal('akhsessd','session')]
         configs['akhrtd']['endpoints'] = {'sessions':endpoint('akhsessd','akhrtd')}
-        configs['akhrtd']['runtimes'] = {'fixture':{'revision':'smoke-1','kind':'codex','working_dir':str(root/'workspaces'),'binary':str(ROOT/'scripts/session-platform/provider-fixture.py'),'execution_mode':'colocated','timeout_secs':60}}
+        configs['akhrtd']['runtimes'] = {'fixture':{'revision':'smoke-1','kind':'codex','isolation':{'directory':str(root/'runtime-profile')},'working_dir':str(root/'workspaces'),'binary':str(ROOT/'scripts/session-platform/provider-fixture.py'),'execution_mode':'colocated','timeout_secs':60}}
         configs['akhsbxd']['principals'] += [principal('akhsessd','session')]
         configs['akhsbxd']['endpoints'] = {'akhexecd':endpoint('akhexecd','akhsbxd')}
         configs['akhsbxd']['workspaces'] = {'local':{'revision':'local-1','site':'smoke','provisioner':{'kind':'existing','executor':'akhexecd','root':str(root/'workspaces')},'services':[{

@@ -1,35 +1,16 @@
 //! Allocation intent precedes provisioning; retries address the same named resource.
 use crate::{
     config::{Config, Provisioner},
-    executor::AttachWorkspace,
     http::{Client, segment},
     store::{Store, key},
     types::*,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct Allocate {
-    pub session_id: String,
-    pub principal: String,
-    pub profile: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Allocation {
-    pub request: Allocate,
-    pub id: String,
-    pub profile_revision: String,
-    pub state: String,
-    pub binding: Option<WorkspaceBinding>,
-    pub error: Option<Fault>,
-    pub lease_until: u64,
-    #[serde(default)]
-    pub access: Vec<WorkspaceAccessDescriptor>,
-}
+pub use akh_session_types::{Allocate, Allocation};
+
 #[derive(Clone)]
 pub struct Sandboxes {
     pub config: Arc<Config>,
@@ -74,7 +55,7 @@ impl Sandboxes {
                 let allocation = Allocation {
                     id: format!(
                         "akh-{}",
-                        &crate::workspace::digest(request.session_id.as_bytes())[..32]
+                        &crate::digest(request.session_id.as_bytes())[..32]
                     ),
                     request: request.clone(),
                     profile_revision: profile.revision.clone(),
@@ -165,11 +146,11 @@ impl Sandboxes {
                 }
                 allocation.access.clear();
                 for service in &profile.services {
-                    let status: crate::helper::Status = client
+                    let status: crate::types::HelperStatus = client
                         .post(
                             &binding.executor,
                             "/v1/services",
-                            &crate::executor_helpers::LaunchService {
+                            &crate::types::LaunchService {
                                 session_id: request.session_id.clone(),
                                 principal: request.principal.clone(),
                                 workspace_id: binding.id.clone(),

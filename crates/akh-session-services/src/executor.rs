@@ -5,7 +5,6 @@ use crate::{
     workspace::{Workspace, digest},
 };
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::os::{fd::AsRawFd, unix::process::CommandExt};
 use std::{
@@ -22,12 +21,7 @@ use std::{
 
 const MAX_OUTPUT: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AttachWorkspace {
-    pub session_id: String,
-    pub binding: WorkspaceBinding,
-}
+pub use akh_session_types::AttachWorkspace;
 
 struct RunningProcess {
     cancel: AtomicBool,

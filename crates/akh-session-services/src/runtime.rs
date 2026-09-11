@@ -28,12 +28,14 @@ pub struct Conformance {
     pub sdk_version: Option<String>,
     pub checks: BTreeSet<String>,
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub artifact_sha256: std::collections::BTreeMap<String, String>,
 }
 
 pub fn profile_digest(profile: &RuntimeProfile) -> Result<String> {
     let mut value = serde_json::to_value(profile).map_err(|e| Fault::invalid(e.to_string()))?;
     value.as_object_mut().unwrap().remove("conformance_file");
-    Ok(crate::workspace::digest(
+    Ok(crate::digest(
         &serde_json::to_vec(&value).map_err(|e| Fault::invalid(e.to_string()))?,
     ))
 }
@@ -57,6 +59,12 @@ fn file_digest(path: &std::path::Path) -> Result<String> {
 }
 
 pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
+    if profile.kind != RuntimeKind::Claude && !profile.native_aliases.is_empty() {
+        return Err(Fault::new(
+            "unsupported",
+            "native aliases are implemented only by the Claude bridge",
+        ));
+    }
     if profile.execution_mode != ExecutionMode::Brokered || profile.kind == RuntimeKind::Internal {
         return Ok(());
     }
@@ -82,7 +90,33 @@ pub fn validate_conformance(profile: &RuntimeProfile) -> Result<()> {
         "cancel_teardown",
         "workspace_semantics",
     ];
+    let mut artifacts = std::collections::BTreeMap::new();
+    if let Some(scope) = &profile.isolation {
+        for path in &scope.validation_artifacts {
+            if !path.is_absolute() {
+                return Err(Fault::invalid(
+                    "conformance artifact paths must be absolute",
+                ));
+            }
+            artifacts.insert(path.to_string_lossy().into_owned(), file_digest(path)?);
+        }
+    }
+    for path in profile.node_binary.iter().chain(
+        profile
+            .launcher
+            .first()
+            .map(std::path::PathBuf::from)
+            .iter(),
+    ) {
+        if !path.is_absolute() {
+            return Err(Fault::invalid(
+                "conformance requires absolute executable paths",
+            ));
+        }
+        artifacts.insert(path.to_string_lossy().into_owned(), file_digest(path)?);
+    }
     if evidence.profile_revision != profile.revision
+        || evidence.artifact_sha256 != artifacts
         || evidence.profile_sha256 != profile_digest(profile)?
         || evidence.platform != std::env::consts::OS
         || evidence.provider_sha256 != file_digest(&profile.binary)?
@@ -168,11 +202,26 @@ impl Runtime {
                 "installed runtime profile differs from session binding",
             ));
         }
-        validate_conformance(&profile)?;
+        if self
+            .store
+            .scan::<RuntimeJob>("job/")?
+            .iter()
+            .any(|j| j.status == TurnStatus::Unknown)
+        {
+            return Err(Fault::new(
+                "unknown_outcome",
+                "runtime is quarantined until unknown jobs and possible orphan processes are reconciled",
+            ));
+        }
         // One provider child per daemon keeps credential files and capacity ownership unambiguous.
         // Scale runtime replicas with distinct service IDs for additional capacity.
         if !active.is_empty() {
             return Err(Fault::new("busy", "runtime capacity is occupied"));
+        }
+        let profile_lease = crate::runtime_profile::acquire(&profile)?;
+        validate_conformance(&profile)?;
+        if profile.kind == RuntimeKind::Internal {
+            crate::internal::validate(&profile, &request)?;
         }
         let job = RuntimeJob {
             provider_session: request.provider_session.clone(),
@@ -189,6 +238,7 @@ impl Runtime {
         let service = self.clone();
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
+            let _profile_lease = profile_lease;
             let mut host = RemoteHost {
                 service: service.clone(),
                 request: request.clone(),
@@ -196,7 +246,11 @@ impl Runtime {
                 cancel: cancel.clone(),
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                akh_runtime::run(&profile, &request, &mut host, &cancel)
+                if profile.kind == RuntimeKind::Internal {
+                    crate::internal::run(&service.store, &profile, &request, &mut host, &cancel)
+                } else {
+                    akh_runtime::run(&profile, &request, &mut host, &cancel)
+                }
             }))
             .unwrap_or_else(|_| {
                 Err("runtime worker panicked; outcome requires reconciliation".into())
@@ -263,12 +317,7 @@ impl Runtime {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallbackReply {
-    pub result: Option<ToolResult>,
-    pub response: Option<Value>,
-    pub pending: bool,
-}
+pub use akh_session_types::CallbackReply;
 
 struct RemoteHost {
     service: Runtime,

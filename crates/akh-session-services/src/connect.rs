@@ -22,7 +22,7 @@ pub struct Offer {
     pub state: ConnectionState,
 }
 pub fn identity(descriptor: &WorkspaceAccessDescriptor, client_profile: &str) -> String {
-    crate::workspace::digest(
+    crate::digest(
         crate::store::key(
             "connection",
             &[

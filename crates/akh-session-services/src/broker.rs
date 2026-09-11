@@ -2,7 +2,6 @@
 use crate::{
     config::Principal,
     http::{Client, segment},
-    runtime::CallbackReply,
     session::Sessions,
     store::key,
     types::*,
@@ -24,7 +23,7 @@ fn record_key(call: &ToolCall) -> String {
     key("tool", &[&call.session_id, &call.turn_id, &call.id])
 }
 pub fn operation_id(call: &ToolCall) -> String {
-    crate::workspace::digest(record_key(call).as_bytes())
+    crate::digest(record_key(call).as_bytes())
 }
 
 #[derive(Clone)]

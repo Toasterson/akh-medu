@@ -20,11 +20,7 @@ struct CommandRecord {
     result: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Admission {
-    pub session_id: String,
-    pub turn_id: Option<String>,
-}
+pub use akh_session_types::Admission;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AutomationRun {

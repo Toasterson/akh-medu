@@ -27,21 +27,18 @@ pub struct Manifest {
     pub profile: ServiceProfile,
     pub state_dir: PathBuf,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Status {
-    pub id: String,
-    pub revision: String,
-    pub state: String,
-    pub heartbeat: u64,
-    pub error: Option<Fault>,
-    pub access: Option<WorkspaceAccessDescriptor>,
-}
+pub use akh_session_types::HelperStatus as Status;
 fn io(error: impl std::fmt::Display) -> Fault {
     Fault::new("helper_io", error.to_string())
 }
-fn private_directory(path: &Path) -> Result<()> {
+pub fn private_directory(path: &Path) -> Result<()> {
     if path.exists() {
-        if !path.is_dir() {
+        if !path.is_dir()
+            || std::fs::symlink_metadata(path)
+                .map_err(io)?
+                .file_type()
+                .is_symlink()
+        {
             return Err(Fault::invalid("state path is not a directory"));
         }
         return Ok(());
@@ -87,18 +84,32 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 pub fn materialize(manifest: &Manifest) -> Result<()> {
     private_directory(&manifest.state_dir)?;
     private_directory(&manifest.state_dir.join("home"))?;
-    let config_dir = manifest.state_dir.join("config");
+    let files = manifest
+        .profile
+        .managed_files
+        .iter()
+        .map(|(path, content)| (path.clone(), expand(content, manifest)))
+        .collect();
+    install_files(
+        &manifest.state_dir.join("config"),
+        &manifest.state_dir.join("managed-files.json"),
+        &files,
+    )
+}
+pub fn install_files(
+    config_dir: &Path,
+    index_path: &Path,
+    files: &BTreeMap<String, String>,
+) -> Result<()> {
     private_directory(&config_dir)?;
     let ws = Workspace::open(&config_dir)?;
-    let index_path = manifest.state_dir.join("managed-files.json");
     let old: BTreeMap<String, String> = if index_path.exists() {
         serde_json::from_slice(&std::fs::read(&index_path).map_err(io)?).map_err(io)?
     } else {
         BTreeMap::new()
     };
     let mut next = old.clone();
-    for (path, content) in &manifest.profile.managed_files {
-        let content = expand(content, manifest);
+    for (path, content) in files {
         let hash = digest(content.as_bytes());
         let current = revision(&ws, path)?;
         if current.as_ref() == Some(&hash) {
@@ -375,17 +386,8 @@ pub async fn action(manifest: &Manifest, action: &str) -> Result<Value> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
-        .await
-        .map_err(|_| Fault::new("helper_timeout", "upstream action timed out"))?
-        .map_err(io)?;
-    if !output.status.success() || output.stdout.len() > 1024 * 1024 {
-        return Err(Fault::new(
-            "upstream_action",
-            "upstream action failed or output exceeded limit",
-        ));
-    }
-    Ok(json!({"output":String::from_utf8_lossy(&output.stdout)}))
+    let output = crate::process::output(command, Duration::from_secs(30), 1024 * 1024).await?;
+    Ok(json!({"output":String::from_utf8_lossy(&output)}))
 }
 
 #[cfg(test)]

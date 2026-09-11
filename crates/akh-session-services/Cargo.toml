@@ -5,33 +5,104 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Independent Akh session, runtime, sandbox, executor and ingress services"
 
+[features]
+default = ["session", "runtime", "executor", "sandbox", "events", "client"]
+session = ["dep:jsonschema", "dep:async-stream", "axum/ws"]
+runtime = ["dep:akh-runtime", "helpers"]
+executor = ["helpers", "dep:regex", "dep:globset", "dep:base64"]
+sandbox = []
+events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait"]
+helpers = []
+client = ["helpers", "dep:tokio-tungstenite"]
+
 [dependencies]
 akh-session-types = { path = "../akh-session-types" }
-akh-runtime = { path = "../akh-runtime" }
+akh-runtime = { path = "../akh-runtime", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 akh-service-store = { path = "../akh-service-store" }
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", default-features = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "stream"] }
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
 sha2 = "0.10"
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-regex = "1"
-globset = "0.4"
+regex = { version = "1", optional = true }
+globset = { version = "0.4", optional = true }
 url = "2"
-jsonschema = { version = "0.33", default-features = false }
-async-stream = "0.3"
-lapin = "2"
-tokio-executor-trait = "2"
-tokio-reactor-trait = "1"
+jsonschema = { version = "0.33", default-features = false, optional = true }
+async-stream = { version = "0.3", optional = true }
+lapin = { version = "2", optional = true }
+tokio-executor-trait = { version = "2", optional = true }
+tokio-reactor-trait = { version = "1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "akhsessd"
+path = "src/bin/akhsessd.rs"
+required-features = ["session"]
+
+[[bin]]
+name = "akhrtd"
+path = "src/bin/akhrtd.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "akhexecd"
+path = "src/bin/akhexecd.rs"
+required-features = ["executor"]
+
+[[bin]]
+name = "akhsbxd"
+path = "src/bin/akhsbxd.rs"
+required-features = ["sandbox"]
+
+[[bin]]
+name = "akheventd"
+path = "src/bin/akheventd.rs"
+required-features = ["events"]
+
+[[bin]]
+name = "akh-service"
+path = "src/bin/akh-service.rs"
+required-features = ["helpers"]
+
+[[bin]]
+name = "akh-connect"
+path = "src/bin/akh-connect.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "akh-acp"
+path = "src/bin/akh-acp.rs"
+required-features = ["client"]
+
+[[test]]
+name = "sessions"
+required-features = ["session"]
+
+[[test]]
+name = "acp"
+required-features = ["session", "client"]
+
+[[test]]
+name = "a2a"
+required-features = ["session"]
+
+[[test]]
+name = "executor"
+required-features = ["executor"]
+
+[[bin]]
+name = "akh-runtime-profile"
+path = "src/bin/akh-runtime-profile.rs"
+required-features = ["runtime"]

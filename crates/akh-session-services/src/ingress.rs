@@ -2,7 +2,6 @@
 use crate::{
     config::{Config, Principal},
     http::Client,
-    session::Admission,
     store::{Store, key},
     types::*,
 };
@@ -77,7 +76,7 @@ impl Events {
                 if route.source != event.source || route.event_type != event.event_type {
                     continue;
                 }
-                let id = crate::workspace::digest(
+                let id = crate::digest(
                     key("delivery", &[&event.source, &event.id, &route.id]).as_bytes(),
                 );
                 let delivery = Delivery {

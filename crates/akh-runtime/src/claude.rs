@@ -8,7 +8,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
             .node_binary
             .as_deref()
             .unwrap_or(std::path::Path::new("node")),
-    );
+    )?;
     command.arg(
         turn.config
             .bridge_script

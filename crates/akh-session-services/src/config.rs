@@ -90,7 +90,7 @@ pub struct AkhProfile {
     pub approval_policy: ApprovalPolicy,
 }
 
-pub use akh_runtime::ProviderConfig as RuntimeProfile;
+pub use akh_session_types::ProviderConfig as RuntimeProfile;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

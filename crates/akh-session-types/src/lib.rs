@@ -572,3 +572,124 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    pub isolation: Option<RuntimeIsolation>,
+    pub model_endpoint: Option<ModelEndpoint>,
+    pub revision: String,
+    pub kind: RuntimeKind,
+    pub working_dir: std::path::PathBuf,
+    pub binary: std::path::PathBuf,
+    pub node_binary: Option<std::path::PathBuf>,
+    pub bridge_script: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+    #[serde(default)]
+    pub launcher: Vec<String>,
+    #[serde(default = "default_runtime_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
+    pub conformance_file: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub native_aliases: BTreeMap<String, String>,
+    pub effort: Option<String>,
+}
+fn default_runtime_timeout() -> u64 {
+    600
+}
+
+/// Provider-owned state and config, local to the runtime machine. Values are never
+/// copied from the daemon's ambient HOME, environment, or login profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeIsolation {
+    pub directory: std::path::PathBuf,
+    #[serde(default)]
+    pub managed_files: BTreeMap<String, String>,
+    #[serde(default)]
+    pub environment_files: BTreeMap<String, std::path::PathBuf>,
+    #[serde(default)]
+    pub login_command: Vec<String>,
+    #[serde(default)]
+    pub status_command: Vec<String>,
+    #[serde(default)]
+    pub version_command: Vec<String>,
+    /// SDK lockfiles, launchers and other immutable inputs included in conformance.
+    #[serde(default)]
+    pub validation_artifacts: Vec<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelEndpoint {
+    /// Complete OpenAI-compatible chat-completions URL, including its path.
+    pub url: String,
+    pub token_file: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
+    pub max_iterations: u32,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttachWorkspace {
+    pub session_id: String,
+    pub binding: WorkspaceBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Allocate {
+    pub session_id: String,
+    pub principal: String,
+    pub profile: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Allocation {
+    pub request: Allocate,
+    pub id: String,
+    pub profile_revision: String,
+    pub state: String,
+    pub binding: Option<WorkspaceBinding>,
+    pub error: Option<Fault>,
+    pub lease_until: u64,
+    #[serde(default)]
+    pub access: Vec<WorkspaceAccessDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchService {
+    pub session_id: String,
+    pub principal: String,
+    pub workspace_id: String,
+    pub generation: u64,
+    pub profile: ServiceProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallbackReply {
+    pub result: Option<ToolResult>,
+    pub response: Option<Value>,
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Admission {
+    pub session_id: String,
+    pub turn_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HelperStatus {
+    pub id: String,
+    pub revision: String,
+    pub state: String,
+    pub heartbeat: u64,
+    pub error: Option<Fault>,
+    pub access: Option<WorkspaceAccessDescriptor>,
+}

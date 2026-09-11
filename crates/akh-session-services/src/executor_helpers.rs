@@ -7,15 +7,8 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LaunchService {
-    pub session_id: String,
-    pub principal: String,
-    pub workspace_id: String,
-    pub generation: u64,
-    pub profile: ServiceProfile,
-}
+pub use akh_session_types::LaunchService;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Instance {
     manifest: Manifest,
@@ -44,9 +37,8 @@ impl Executor {
         {
             return Err(Fault::conflict("workspace released"));
         }
-        let id = crate::workspace::digest(
-            key("helper", &[&request.workspace_id, &request.profile.id]).as_bytes(),
-        );
+        let id =
+            crate::digest(key("helper", &[&request.workspace_id, &request.profile.id]).as_bytes());
         let manifest = Manifest {
             schema_version: SCHEMA_VERSION,
             id: id.clone(),

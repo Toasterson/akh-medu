@@ -188,9 +188,40 @@ this first process slice.
   The initializer and test adapter were corrected; the bounded-label metric
   test passes against the pinned dependency.
 
-The implementations remain in progress: per-service dependency features,
-internal model-loop runtime, native profile/login configuration and conformance,
+The implementations remain in progress: native conformance,
 explicit recovery operations, upstream T3 central-session bridging, real
 provisioner/event-source checks, deployment artifacts and Anima migration are
 still required. No native conformance, deployment, or Fable review is implied
 by these fixture results.
+
+### Independent build profiles and private runtime state
+
+- `session`, `runtime`, `executor`, `sandbox`, `events`, `helpers`, and `client`
+  features select the implementation each binary needs. The routers live in
+  separate modules. Wire requests, helper status and provider profile types
+  moved into `akh-session-types`. `scripts/session-platform/check-profiles.py`
+  passes all nine daemon/helper builds and verifies their normal dependency
+  graphs: only the runtime feature includes `akh-runtime`, only events includes
+  RabbitMQ, and none includes the cognitive engine.
+- Dedicated runtime workers require an explicit `isolation.directory`. They
+  clear inherited environment variables and use private HOME, XDG config/cache,
+  CODEX_HOME and CLAUDE_CONFIG_DIR. `akh-runtime-profile --config FILE --profile
+  NAME prepare|login|status|version` uses the same profile and exclusive owner
+  lock. Config files are installed below its `config/` directory; external edits
+  cause conflicts and unmanaged login files remain provider-owned. Secret values
+  are read from configured files at launch and are not persisted in wire records.
+- The internal runtime now runs a bounded OpenAI-compatible chat-completions
+  tool loop in `akhrtd`. It supports SSE text/tool deltas, broker callbacks,
+  durable private continuation, exact resume, cancellation and byte/token/turn
+  bounds. Cognitive context continues to come from `akhomed`. A truncated stream,
+  unavailable continuation, or unfinished turn is not retried as a new turn.
+  This transport targets the documented [Ollama compatibility interface](https://docs.ollama.com/api/openai-compatibility).
+  It currently accepts text and event data; artifact access uses workspace tools.
+- Native brokered conformance additionally covers configured immutable artifacts,
+  Node and launcher executable hashes. Non-Claude native aliases are explicitly
+  rejected. Runtime hosts quarantine new admissions when any job has an unknown
+  outcome, pending explicit reconciliation.
+- Shared-crate tests pass, including streamed model/tool fixtures with exact
+  continuation, private profile locking/config preservation, and bounded helper
+  output with timeout teardown of descendant processes. These are local protocol
+  and failure tests, not native-provider certification.

@@ -2,44 +2,19 @@
 mod claude;
 mod codex;
 mod process;
+pub mod profile;
 
 use akh_session_types::{
     ApprovalPolicy, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind, ToolResult,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderConfig {
-    pub revision: String,
-    pub kind: RuntimeKind,
-    pub working_dir: PathBuf,
-    pub binary: PathBuf,
-    pub node_binary: Option<PathBuf>,
-    pub bridge_script: Option<PathBuf>,
-    #[serde(default)]
-    pub environment: BTreeMap<String, String>,
-    #[serde(default)]
-    pub launcher: Vec<String>,
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
-    pub conformance_file: Option<PathBuf>,
-    #[serde(default)]
-    pub native_aliases: BTreeMap<String, String>,
-    pub effort: Option<String>,
-}
-fn default_timeout() -> u64 {
-    600
-}
+pub use akh_session_types::ProviderConfig;
 
 pub trait Host {
     fn event(&mut self, event: RuntimeEvent) -> Result<(), String>;
@@ -158,7 +133,7 @@ impl Turn<'_> {
         self.session = Some(id.into());
         Ok(())
     }
-    fn command(&self, executable: &std::path::Path) -> Command {
+    fn command(&self, executable: &std::path::Path) -> Result<Command, String> {
         let mut command = if let Some(launcher) = self.config.launcher.first() {
             let mut cmd = Command::new(launcher);
             cmd.args(&self.config.launcher[1..]);
@@ -167,9 +142,12 @@ impl Turn<'_> {
         } else {
             Command::new(executable)
         };
+        if self.config.isolation.is_some() {
+            command.env_clear();
+        }
         command
             .current_dir(&self.cwd)
-            .envs(&self.config.environment);
-        command
+            .envs(profile::environment(self.config)?);
+        Ok(command)
     }
 }

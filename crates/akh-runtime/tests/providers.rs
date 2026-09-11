@@ -54,6 +54,8 @@ fn setup(
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let cwd = dir.path().canonicalize().unwrap();
     let config = ProviderConfig {
+        isolation: None,
+        model_endpoint: None,
         revision: "1".into(),
         kind,
         working_dir: cwd.clone(),
