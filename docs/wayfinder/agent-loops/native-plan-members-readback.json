@@ -1,0 +1,95 @@
+{
+  "work_items": [
+    {
+      "id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Migration path and provider conformance gates",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-425"
+    },
+    {
+      "id": "01a0878c-3228-79f1-a997-8c8d38896bc1",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Different loop strategies and composition",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-424"
+    },
+    {
+      "id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Akh and external clients attach to the same session service",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-423"
+    },
+    {
+      "id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Memory, transcript continuity and provider usage",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-422"
+    },
+    {
+      "id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "AgentLoop contract and lifecycle events",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-421"
+    },
+    {
+      "id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Tool execution ownership and workspace location",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-420"
+    },
+    {
+      "id": "01a0878c-30a2-7022-942f-078aaf065f19",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-419"
+    },
+    {
+      "id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-418"
+    },
+    {
+      "id": "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "title": "Session ownership and loop selection",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "code": "WI-417"
+    }
+  ],
+  "total": 9
+}

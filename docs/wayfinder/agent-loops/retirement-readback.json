@@ -1,0 +1,128 @@
+{
+  "verified_at": "2026-09-09T19:06:03.540923+00:00",
+  "retired_count": 10,
+  "open_obsolete_items": 0,
+  "items": [
+    {
+      "id": "01a086ef-7fd1-7692-a16e-a9ced40149b7",
+      "code": "WI-407",
+      "title": "Incorrect map placeholder \u2014 replace with native agent-loop Plan",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-8032-7e63-be25-1574988ed23d",
+      "code": "WI-408",
+      "title": "Session ownership and loop selection",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+      "code": "WI-409",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+      "code": "WI-410",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+      "code": "WI-411",
+      "title": "Tool execution ownership and workspace location",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d"
+      ],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+      "code": "WI-412",
+      "title": "AgentLoop contract and lifecycle events",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-8032-7e63-be25-1574988ed23d",
+        "01a086ef-818e-7141-91f4-43de3d44d5d3"
+      ],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+      "code": "WI-413",
+      "title": "Memory, transcript continuity and provider usage",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+      "code": "WI-414",
+      "title": "Akh and external clients attach to the same session service",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6"
+      ],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-8343-7963-85de-93d3342b66c1",
+      "code": "WI-415",
+      "title": "Different loop strategies and composition",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "replacement_link_verified": true
+    },
+    {
+      "id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+      "code": "WI-416",
+      "title": "Migration path and provider conformance gates",
+      "status": "cancelled",
+      "current_phase": "cancelled",
+      "total_sessions": 0,
+      "depends_on_ids": [
+        "01a086ef-818e-7141-91f4-43de3d44d5d3",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+        "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+        "01a086ef-8343-7963-85de-93d3342b66c1"
+      ],
+      "replacement_link_verified": true
+    }
+  ]
+}
