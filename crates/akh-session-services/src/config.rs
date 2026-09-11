@@ -181,6 +181,23 @@ fn board_interval() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DjehutySource {
+    pub endpoint: String,
+    pub source: String,
+    pub threads: Vec<String>,
+    #[serde(default)]
+    pub ignore_authors: Vec<String>,
+    #[serde(default = "board_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "djehuty_page_size")]
+    pub page_size: u16,
+}
+fn djehuty_page_size() -> u16 {
+    50
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub service_id: String,
     pub public_url: Option<String>,
@@ -203,6 +220,8 @@ pub struct Config {
     pub brokers: Vec<BrokerSource>,
     #[serde(default)]
     pub boards: Vec<BoardSource>,
+    #[serde(default)]
+    pub djehuty: Vec<DjehutySource>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub workspace_root: Option<PathBuf>,
@@ -242,6 +261,21 @@ impl Config {
         }
         for endpoint in self.endpoints.values() {
             endpoint.validate()?;
+        }
+        let mut sources = std::collections::HashSet::new();
+        for source in &self.djehuty {
+            validate_key(&source.source)?;
+            self.endpoint(&source.endpoint)?;
+            if !sources.insert(&source.source)
+                || source.threads.is_empty()
+                || source.page_size == 0
+                || source.page_size > 200
+                || source.interval_secs == 0
+            {
+                return Err(Fault::invalid(
+                    "Djehuty sources require unique source IDs, threads, a positive interval and page size 1..200",
+                ));
+            }
         }
         for (name, profile) in &self.akhs {
             validate_key(name)?;

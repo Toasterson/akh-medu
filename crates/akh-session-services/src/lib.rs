@@ -9,6 +9,8 @@ pub mod broker;
 pub mod config;
 #[cfg(feature = "client")]
 pub mod connect;
+#[cfg(feature = "events")]
+pub mod djehuty;
 #[cfg(feature = "executor")]
 pub mod executor;
 #[cfg(feature = "executor")]
@@ -18,6 +20,8 @@ pub mod helper;
 pub mod http;
 #[cfg(feature = "events")]
 pub mod ingress;
+#[cfg(feature = "session")]
+pub mod mcp;
 pub mod recovery;
 #[cfg(feature = "runtime")]
 pub mod runtime;

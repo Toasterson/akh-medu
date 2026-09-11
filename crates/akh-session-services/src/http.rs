@@ -154,6 +154,17 @@ impl Client {
         path: &str,
         body: Option<Value>,
     ) -> Result<T> {
+        self.call_with_headers(service, method, path, body)
+            .await
+            .map(|(value, _)| value)
+    }
+    pub async fn call_with_headers<T: DeserializeOwned>(
+        &self,
+        service: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(T, HeaderMap)> {
         let endpoint = self.config.endpoint(service)?;
         let route = endpoint.route(path);
         let route = if route.contains("{sandbox}") {
@@ -182,6 +193,7 @@ impl Client {
             )
         })?;
         let status = response.status();
+        let headers = response.headers().clone();
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -207,6 +219,7 @@ impl Client {
             }));
         }
         serde_json::from_slice(&bytes)
+            .map(|value| (value, headers))
             .map_err(|_| Fault::new("transport", "service returned an invalid response"))
     }
     pub async fn get<T: DeserializeOwned>(&self, service: &str, path: &str) -> Result<T> {

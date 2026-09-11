@@ -249,3 +249,19 @@ by these fixture results.
   UID. The six-process smoke additionally passes helper stop/restart/deduplication,
   environment identity preservation, lease renewal and archival cleanup. The
   Kubernetes fixture is not a real controller/sandbox deployment.
+
+### Native event sources and MCP exchange
+
+- Added the native Djehuty thread-message adapter, independent durable cursors,
+  identity/order validation and outbox-before-cursor advancement. Added
+  `akh-trigger` for external cron and Kubernetes Job occurrences. Scheduler
+  identity/time survives retry; session admission remains the only run ledger.
+- MCP tools now use a bounded negotiated Streamable HTTP exchange with typed
+  protocol results, JSON/SSE handling and cursor-based GET recovery. An uncertain
+  tool POST is never automatically repeated. See [contracts and configuration](events-and-mcp.md).
+- All service tests pass with `admin,trigger`; all eleven isolated build profiles
+  and dependency checks pass. Native Djehuty, MCP and Kubernetes occurrence
+  fixtures pass; real service deployment remains separate validation.
+- Anima work continues in `/Users/toasty/ws/anima-agent-platform`, branch
+  `feat/akh-session-client`, based on freshly fetched main
+  `95d7cc1301cf40a1593a33f8e30d9c5166be06e0`. Its original checkout is untouched.

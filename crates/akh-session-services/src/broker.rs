@@ -210,11 +210,15 @@ impl Broker {
             }
             ToolDestination::Mcp { service, tool } => {
                 if was_sent { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; return Err(Fault::new("unknown_outcome", "MCP has no standard idempotency guarantee; inspect the server before reconciling")); }
-                let reply: Result<Value> = self.client.post(service, "", &json!({"jsonrpc":"2.0","id":record.operation_id,"method":"tools/call","params":{"name":tool,"arguments":call.arguments}})).await;
-                match reply {
-                    Ok(reply) if reply.get("error").is_none() => Ok(ToolResult { success: reply["result"]["isError"] != true, text: reply["result"]["content"].to_string(), data: Some(reply["result"].clone()), receipt: None }),
-                    Ok(_) => Err(Fault::new("tool_error", "MCP server rejected the tool call")),
-                    Err(error) => { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; Err(error) }
+                let mut endpoint=self.sessions.config.endpoint(service)?.clone();
+                if endpoint.url.contains("{sandbox}") {
+                    let workspace=session.workspace.as_ref().ok_or_else(||Fault::missing("MCP sandbox is unbound"))?;
+                    self.client.in_sandbox(&workspace.sandbox_id)?;
+                    endpoint.url=endpoint.url.replace("{sandbox}",&workspace.sandbox_id);
+                }
+                match crate::mcp::call(&endpoint, &record.operation_id, tool, call.arguments.clone()).await {
+                    Ok(result) => Ok(result),
+                    Err(error) => { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; Err(Fault::new("unknown_outcome",format!("MCP exchange failed ({}); original call will not be repeated",error.code))) }
                 }
             }
             ToolDestination::Client => {

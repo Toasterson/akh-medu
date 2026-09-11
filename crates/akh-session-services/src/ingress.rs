@@ -143,6 +143,23 @@ impl Events {
         Ok(())
     }
     pub fn sources(&self) {
+        for source in self.config.djehuty.clone() {
+            for thread in source.threads.clone() {
+                let service = self.clone();
+                let source = source.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if let Err(error) = crate::djehuty::poll(&service, &source, &thread).await {
+                            tracing::warn!(source=%source.source,thread=%thread,code=%error.code,"Djehuty ingestion deferred");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            source.interval_secs.max(1),
+                        ))
+                        .await;
+                    }
+                });
+            }
+        }
         for source in self.config.brokers.clone() {
             let service = self.clone();
             tokio::spawn(async move {
@@ -167,7 +184,7 @@ impl Events {
             });
         }
     }
-    fn source_principal(&self, source: &str) -> Principal {
+    pub(crate) fn source_principal(&self, source: &str) -> Principal {
         Principal {
             id: self.config.service_id.clone(),
             token_file: "/unused".into(),
