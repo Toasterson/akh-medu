@@ -12,6 +12,7 @@ mod m20260427_000001_init;
 mod m20260604_000002_drawer_ingest;
 mod m20260604_000003_embedding_idempotency;
 mod m20260604_000004_repair_legacy_title_hashes;
+mod m20260828_000005_akh_tokens;
 
 pub use m20260604_000004_repair_legacy_title_hashes::{
     LegacyTitleHashRepairStats, repair_rejected_legacy_title_hashes,
@@ -27,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260604_000002_drawer_ingest::Migration),
             Box::new(m20260604_000003_embedding_idempotency::Migration),
             Box::new(m20260604_000004_repair_legacy_title_hashes::Migration),
+            Box::new(m20260828_000005_akh_tokens::Migration),
         ]
     }
 }

@@ -43,7 +43,7 @@ impl std::fmt::Debug for DatabaseConfig {
 /// Service (hekad) settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// Address to bind the hekad service (reserved for Phase 42b MCP server).
+    /// Address the `hekad serve` listener binds (config: `server.bind`).
     #[serde(default = "default_bind")]
     pub bind: String,
 }

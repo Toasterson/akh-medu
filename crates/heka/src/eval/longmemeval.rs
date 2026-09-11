@@ -81,6 +81,7 @@ struct EvidenceRetrievalResult {
     recalled_all: bool,
     retrieved_count: usize,
     latency_secs: f64,
+    #[allow(dead_code)]
     retrieved_session_ids: Vec<String>,
 }
 
@@ -712,6 +713,7 @@ async fn embed_question(embedder: &SharedEmbedder, question: &str) -> miette::Re
 #[derive(Debug, FromQueryResult)]
 struct RetrievedSession {
     session_id: String,
+    #[allow(dead_code)]
     similarity: f32,
 }
 
