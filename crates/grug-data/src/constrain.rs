@@ -1283,14 +1283,20 @@ impl ToolCallGrammar {
             })
     }
 
-    /// Does *some* still-viable tool have all its required parameters in
-    /// `seen`? Gates the top-level arguments object's `}` — legal iff at
-    /// least one tool consistent with every key emitted so far could
-    /// legitimately be the call's tool (its required parameters are all
-    /// present), mirroring how [`Frame::Object`]'s `}` is gated by
-    /// [`required_satisfied`] one level down.
-    fn any_viable_required_satisfied(&self, viable: &[u16], seen: &[Vec<u8>]) -> bool {
-        viable.iter().any(|&t| self.required_satisfied_top(t, seen))
+    /// Close the arguments object and retain only tools whose own required
+    /// fields are present. A valid call for one tool must not enable a later
+    /// choice of another tool that is missing required fields.
+    fn close_arguments(&self, viable: &[u16], seen: &[Vec<u8>]) -> Option<GrammarState> {
+        let viable: Viable = viable
+            .iter()
+            .copied()
+            .filter(|&tool| self.required_satisfied_top(tool, seen))
+            .collect();
+        if viable.is_empty() {
+            None
+        } else {
+            Some(GrammarState::Mid { viable, pos: 0 })
+        }
     }
 
     /// Advance the acceptor by one input byte, returning the successor state or
@@ -1322,10 +1328,7 @@ impl ToolCallGrammar {
                 // still-viable tool has no required parameters at all (e.g.
                 // a zero-parameter tool: `required_satisfied_top` is
                 // vacuously true over an empty parameter list).
-                b'}' if self.any_viable_required_satisfied(v, &[]) => Some(Mid {
-                    viable: v.clone(),
-                    pos: 0,
-                }),
+                b'}' => self.close_arguments(v, &[]),
                 _ => None,
             },
             AfterComma { viable, seen } => {
@@ -1437,13 +1440,7 @@ impl ToolCallGrammar {
                 ValueOutcome::DoneComma => None,
                 // Same for the bare value's terminator being the arguments
                 // object's closing `}`: gated on required-property coverage.
-                ValueOutcome::DoneClose if self.any_viable_required_satisfied(viable, seen) => {
-                    Some(Mid {
-                        viable: viable.clone(),
-                        pos: 0,
-                    })
-                }
-                ValueOutcome::DoneClose => None,
+                ValueOutcome::DoneClose => self.close_arguments(viable, seen),
             },
             AfterValue { viable, seen } => match byte {
                 // Legal only if some still-viable tool has a declared
@@ -1460,10 +1457,7 @@ impl ToolCallGrammar {
                 // property is in `seen` (Phase 51 / ADR 104 D1 bug fix: this
                 // used to be unconditional, so `note_id` could be missing
                 // entirely when the call closed).
-                b'}' if self.any_viable_required_satisfied(viable, seen) => Some(Mid {
-                    viable: viable.clone(),
-                    pos: 0,
-                }),
+                b'}' => self.close_arguments(viable, seen),
                 _ => None,
             },
             Mid { viable, pos } => {
@@ -3315,6 +3309,49 @@ mod tests {
     }
 
     #[test]
+    fn final_tool_name_requires_its_own_required_arguments() {
+        // Shared fields must not let a complete create call become an
+        // incomplete update call after the arguments object has closed.
+        for (schema, value) in [
+            (serde_json::json!({"type": "string"}), "\"task\""),
+            (serde_json::json!({"type": "number"}), "7"),
+        ] {
+            let tools = vec![
+                openai_tool("create", serde_json::json!({"value": schema}), &["value"]),
+                openai_tool(
+                    "update",
+                    serde_json::json!({"id": {"type": "string"}, "value": schema}),
+                    &["id"],
+                ),
+            ];
+            let grammar = ToolCallGrammar::from_openai_tools(&tools).unwrap();
+            let valid = format!(r#"{{"arguments":{{"value":{value}}},"name":"create"}}"#);
+            let invalid = format!(r#"{{"arguments":{{"value":{value}}},"name":"update"}}"#);
+            assert!(run(&grammar, &valid).is_some_and(|s| grammar.accepts_eos(&s)));
+            assert!(run(&grammar, &invalid).is_none(), "accepted {invalid}");
+            let valid_update =
+                format!(r#"{{"arguments":{{"id":"task-42","value":{value}}},"name":"update"}}"#);
+            assert!(run(&grammar, &valid_update).is_some_and(|s| grammar.accepts_eos(&s)));
+        }
+
+        // The empty-arguments close has the same requirement.
+        let grammar = ToolCallGrammar::from_openai_tools(&[
+            openai_tool("list", serde_json::json!({}), &[]),
+            openai_tool(
+                "update",
+                serde_json::json!({"id": {"type": "string"}}),
+                &["id"],
+            ),
+        ])
+        .unwrap();
+        assert!(
+            run(&grammar, r#"{"arguments":{},"name":"list"}"#)
+                .is_some_and(|s| grammar.accepts_eos(&s))
+        );
+        assert!(run(&grammar, r#"{"arguments":{},"name":"update"}"#).is_none());
+    }
+
+    #[test]
     fn scalar_json_syntax_matches_json_parser_in_typed_and_nested_values() {
         let samples = [
             "0",
@@ -3907,7 +3944,7 @@ mod tests {
     /// (`}`/`]`): even now that the top-level arguments object rejects
     /// duplicate keys and gates `}` on required-property coverage (Phase 51
     /// / ADR 104 D1 bug fix — see [`ToolCallGrammar::cands_for`] /
-    /// [`ToolCallGrammar::any_viable_required_satisfied`]), an adversarial
+    /// [`ToolCallGrammar::close_arguments`]), an adversarial
     /// `,` can still be *legally* substituted there whenever an optional
     /// property remains unemitted, which would desync the driver from a
     /// `hint` that intended to close at that exact byte; skipping keeps this
