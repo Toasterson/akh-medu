@@ -18,14 +18,26 @@ export async function run(start, sdk, z, send, request, abortController) {
     includePartialMessages: true,
     // Project/user settings stay with the installed CLI. Akh never reads or
     // copies its OAuth tokens, and never changes HOME or provider config dirs.
-    settingSources: ["user", "project", "local"],
+    settingSources: start.brokered ? [] : ["user", "project", "local"],
     systemPrompt: { type: "preset", preset: "claude_code", append: start.instructions },
     permissionMode: start.plan ? "plan" : "default",
     mcpServers: { akh: mcpServer },
+    ...(start.brokered ? {
+      tools: [],
+      strictMcpConfig: true,
+      settings: { disableAllHooks: true },
+      disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Task", "Skill", "NotebookEdit", "WebFetch", "WebSearch"],
+      ...(Object.keys(start.aliases ?? {}).length ? { toolAliases: start.aliases } : {}),
+    } : {}),
     // This namespaced server executes through Akh's own permission gate.
     allowedTools: start.tools.map(({ function: spec }) => `mcp__akh__${spec.name}`),
     canUseTool: async (name, input) => {
+      if (start.brokered) return { behavior: "deny", message: `Native ${name} is disabled. Use the provided mcp__akh__ tools in the bound workspace. Nothing ran.` };
       if (start.plan) return { behavior: "deny", message: "Akh is in plan mode" };
+      if (name === "AskUserQuestion") {
+        const result = await request("question", { questions: input });
+        return { behavior: "allow", updatedInput: { ...input, answers: result.answers } };
+      }
       const { allow } = await request("approval", { name, arguments: input });
       return allow
         ? { behavior: "allow", updatedInput: input }

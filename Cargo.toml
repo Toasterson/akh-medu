@@ -10,6 +10,9 @@ members = [
     "crates/grug-data",
     "crates/grug-train",
     "benchmarks/harness-core",
+    "crates/akh-session-types",
+    "crates/akh-runtime",
+    "crates/akh-session-services",
 ]
 resolver = "3"
 

@@ -1,7 +1,8 @@
 # Agent session platform implementation worktree
 
-Prepared: 2026-09-11. Status: worktree and design handoff prepared; implementation
-and runtime validation remain outstanding.
+Prepared: 2026-09-11. Updated: 2026-09-12. Status: provider port and the first
+authenticated five-process session/execution slice implemented and locally tested.
+Full platform implementation and native/client/deployment validation remain in progress.
 
 ## Workspace boundary
 
@@ -58,8 +59,9 @@ paths may remain absent here until the port is implemented.
 
 ## Implementation sequence
 
-All entries below remain pending. Detailed acceptance conditions are in the
-deployment plan; a new binary or a healthy endpoint alone does not pass them.
+The table describes the full scope; the evidence below records partial progress.
+Detailed acceptance conditions are in the deployment plan; a new binary or a
+healthy endpoint alone does not pass them.
 
 | Order | Scope | Required evidence |
 | --- | --- | --- |
@@ -98,3 +100,51 @@ Keep changes in reviewable implementation commits in this worktree. Worktree
 creation and local development do not authorize production restarts, account
 changes or publication. Complete concrete local artifacts before any necessary
 deployment approval step.
+
+## Local implementation evidence (2026-09-12)
+
+- P0 is committed: Codex app-server and Claude SDK adapters ported onto main.
+  The original akhomed remote-executor guard remains. Ten provider transport
+  tests passed; two credential-dependent native tests remain ignored. The
+  existing akhomed server target checks successfully.
+- Added engine-independent `akh-session-types`, `akh-runtime`, and
+  `akh-session-services`. The services currently share a build package; final
+  per-binary feature/dependency separation and akhomed extraction are pending.
+- Added durable session admission, per-conversation creation, event ordering,
+  exact dispatch requests, pending approvals, controller leases, runtime jobs,
+  execution receipts and unknown-outcome fences. Credential files authenticate
+  each service boundary. Tool schemas use JSON Schema validation with external
+  reference retrieval disabled.
+- Added the five service binaries, REST routes, deterministic webhook outbox,
+  RabbitMQ ingestion, a cursor-based event-source adapter, and initial existing,
+  command and Kubernetes provisioners. RabbitMQ and Kubernetes integrations are
+  implemented but have not yet been tested against real servers. The event-source
+  page contract is not yet a verified native Djehuty adapter.
+- Added ACP v1 over WebSocket and an upstream-editor stdio bridge (`akh-acp`).
+  The transport is separate from T3's native RPC. MCP catalog changes and non-text
+  prompts are explicitly unsupported in this first transport implementation.
+  Questions/client tools use Akh extension notifications and the durable response
+  API; standard ACP permission requests are supported.
+- Rust tests cover atomic persistence, duplicate/concurrent admission, approval
+  recovery, stale generations, workspace traversal and symlinks, revision checks,
+  process streaming/stdin/cancel, restart fencing, provider resume, authenticated
+  ACP WebSocket permissions, and replay before the load response.
+- `python3 scripts/session-platform/smoke.py` passed with five separate private
+  processes: authentication, eight duplicate requests admitting one turn,
+  approval before a workspace write, session-manager restart during approval,
+  execution receipt, exact provider continuation, cancellation, webhook dedupe
+  and delivery, and ordered replay. This uses a deterministic provider fixture
+  on one host; it is not native-provider or cross-host isolation evidence.
+- Four Node bridge tests passed. Brokered native runtime admission requires a
+  conformance document bound to the installed profile, executable/bridge hashes
+  and host platform. No native remote-execution profile has been certified yet.
+- Fable review was attempted through local `claude --model claude-fable-5` after
+  the user reported signing in again. The CLI still reported no authenticated
+  session and made no model call. Clarification about the logged-in profile is
+  pending; no Fable review is claimed.
+
+Next required work includes upstream editor service/config/login supervision,
+connection-helper behavior, T3 central-session feasibility, runtime/core
+extraction, kagent A2A, recovery operations, deployment packaging, and the Anima
+compatibility migration in a separate worktree. None of those are completed by
+this first process slice.

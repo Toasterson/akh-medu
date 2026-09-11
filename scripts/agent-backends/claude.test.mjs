@@ -71,3 +71,26 @@ test("plan mode denies a provider approval without asking the client", async () 
   await run({ ...start, plan: true }, sdk, z, (m) => emitted.push(m), () => assert.fail("approval bypass"), new AbortController());
   assert.equal(emitted.at(-1).success, false);
 });
+
+test("brokered profile removes native tools and settings while supplied MCP tools still execute", async () => {
+  const sdk = { tool: (name, description, shape, handler) => ({ name, handler }), createSdkMcpServer: (config) => config,
+    query: ({ options }) => ({ close() {}, async *[Symbol.asyncIterator]() {
+      assert.deepEqual(options.tools, []);
+      assert.deepEqual(options.settingSources, []);
+      assert.equal(options.strictMcpConfig, true);
+      assert.equal(options.settings.disableAllHooks, true);
+      assert.ok(options.disallowedTools.includes("Bash"));
+      const denial = await options.canUseTool("Bash", { command: "touch escaped" });
+      assert.equal(denial.behavior, "deny");
+      assert.match(denial.message, /provided mcp__akh__/);
+      const toolResult = await options.mcpServers.akh.tools[0].handler({ ids: [7] });
+      assert.equal(toolResult.isError, false);
+      assert.equal(toolResult.content[0].text, "executor result");
+      yield { type: "result", subtype: "success", result: "done" };
+    } }),
+  };
+  await run({ ...start, brokered: true }, sdk, z, () => {}, async (type) => {
+    assert.equal(type, "tool");
+    return { success: true, text: "executor result" };
+  }, new AbortController());
+});
