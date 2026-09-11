@@ -27,6 +27,8 @@ pub struct Allocation {
     pub binding: Option<WorkspaceBinding>,
     pub error: Option<Fault>,
     pub lease_until: u64,
+    #[serde(default)]
+    pub access: Vec<WorkspaceAccessDescriptor>,
 }
 #[derive(Clone)]
 pub struct Sandboxes {
@@ -80,6 +82,7 @@ impl Sandboxes {
                     binding: None,
                     error: None,
                     lease_until: now_ms() + 300_000,
+                    access: vec![],
                 };
                 self.store.transaction(|tx| tx.put(&k, &allocation))?;
                 allocation
@@ -159,6 +162,30 @@ impl Sandboxes {
                     return Err(Fault::conflict(
                         "executor returned another workspace identity",
                     ));
+                }
+                allocation.access.clear();
+                for service in &profile.services {
+                    let status: crate::helper::Status = client
+                        .post(
+                            &binding.executor,
+                            "/v1/services",
+                            &crate::executor_helpers::LaunchService {
+                                session_id: request.session_id.clone(),
+                                principal: request.principal.clone(),
+                                workspace_id: binding.id.clone(),
+                                generation: binding.generation,
+                                profile: service.clone(),
+                            },
+                        )
+                        .await?;
+                    if status.state != "ready" {
+                        return Err(status.error.unwrap_or_else(|| {
+                            Fault::new("busy", "waiting for upstream service readiness")
+                        }));
+                    }
+                    if let Some(access) = status.access {
+                        allocation.access.push(access);
+                    }
                 }
                 allocation.binding = Some(binding);
                 allocation.state = "ready".into();

@@ -182,6 +182,11 @@ impl Broker {
         };
         match result {
             Ok(result) => self.finish(k, record, result),
+            Err(error) if error.code == "unknown_outcome" => {
+                record.unknown = true;
+                self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
+                Err(error)
+            }
             Err(error) if error.code == "transport" => Err(error),
             Err(error) => self.finish(
                 k,

@@ -151,6 +151,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
+            core_service: profile.core_service.clone(),
             schema_version: SCHEMA_VERSION,
             id: new_id(),
             principal: principal.id.clone(),
@@ -383,7 +384,10 @@ impl Sessions {
                 workspace,
                 provider_session: session.provider_session.clone(),
                 input: turn.input.clone(),
-                instructions: session.instructions.clone(),
+                instructions: tx
+                    .get::<ContextResponse>(&key("turn_context", &[&turn.id]))?
+                    .map(|context| format!("{}\n\n{}", context.instructions, session.instructions))
+                    .unwrap_or_else(|| session.instructions.clone()),
                 tools: session.tools.clone(),
                 approval_policy: session.approval_policy,
             };

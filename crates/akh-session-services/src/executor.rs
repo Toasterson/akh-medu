@@ -198,6 +198,7 @@ impl Executor {
     }
 
     pub fn release(&self, id: &str, session: &str, generation: u64) -> Result<serde_json::Value> {
+        self.stop_services(id)?;
         let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
         self.store.transaction(|tx| {
             let allocation: AttachWorkspace = tx

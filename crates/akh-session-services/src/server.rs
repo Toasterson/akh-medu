@@ -24,18 +24,23 @@ pub struct SessionApp {
     pub sessions: Sessions,
     pub broker: Broker,
     pub client: Client,
+    pub admission_lock: Arc<std::sync::Mutex<()>>,
 }
 impl SessionApp {
     pub fn new(config: Arc<Config>, store: Store) -> Result<Self> {
         let sessions = Sessions::new(store, config.clone());
         Ok(Self {
             broker: Broker::new(sessions.clone())?,
+            admission_lock: Default::default(),
             sessions,
             client: Client::new(config)?,
         })
     }
     pub async fn tick(&self) -> Result<()> {
         for session in self.sessions.store.scan::<SessionRecord>("session/")? {
+            if let Err(error) = self.publish_completions(&session).await {
+                tracing::warn!(session=%session.id,code=%error.code,"cognitive completion delivery deferred");
+            }
             if !session.turns.iter().any(|t| !t.status.terminal()) {
                 continue;
             }
@@ -59,6 +64,74 @@ impl SessionApp {
                     Ok(())
                 })?;
             }
+        }
+        Ok(())
+    }
+    async fn publish_completions(&self, session: &SessionRecord) -> Result<()> {
+        let Some(core) = &session.core_service else {
+            return Ok(());
+        };
+        for turn in session
+            .turns
+            .iter()
+            .filter(|turn| turn.status == TurnStatus::Completed)
+        {
+            let k = key("core_accepted", &[&turn.id]);
+            if self.sessions.store.get::<ToolResult>(&k)?.is_some() {
+                continue;
+            }
+            let tools: Vec<ToolEvidence> = self
+                .sessions
+                .store
+                .scan::<crate::broker::ToolRecord>(&key("tool", &[&session.id, &turn.id]))?
+                .into_iter()
+                .filter_map(|record| {
+                    record.result.map(|result| ToolEvidence {
+                        tool: record.call.name,
+                        ok: result.success,
+                        receipt: result.receipt,
+                    })
+                })
+                .collect();
+            let receipts = tools
+                .iter()
+                .filter_map(|tool| tool.receipt.clone())
+                .collect();
+            let result: ToolResult = self
+                .client
+                .post(
+                    core,
+                    "/v1/turns/accepted",
+                    &AcceptedTurn {
+                        request_id: format!("turn-{}", turn.id),
+                        akh: session.akh.clone(),
+                        session_id: session.id.clone(),
+                        turn_id: turn.id.clone(),
+                        input: turn.input.clone(),
+                        output: turn.output.clone().unwrap_or_default(),
+                        model: session.runtime.model.clone(),
+                        tool_receipts: receipts,
+                        tools,
+                    },
+                )
+                .await?;
+            if !result.success {
+                return Err(Fault::new("core_error", result.text));
+            }
+            self.sessions.store.transaction(|tx| {
+                tx.put(&k, &result)?;
+                let mut current: SessionRecord = tx
+                    .get(&key("session", &[&session.id]))?
+                    .ok_or_else(|| Fault::missing("session disappeared"))?;
+                crate::session::append_event(
+                    tx,
+                    &mut current,
+                    Some(&turn.id),
+                    "cognitive_turn_accepted",
+                    json!({"receipt":result.receipt,"data":result.data}),
+                )?;
+                Ok(())
+            })?;
         }
         Ok(())
     }
@@ -94,6 +167,54 @@ impl SessionApp {
         let Some(turn) = current.turns.iter().find(|t| !t.status.terminal()) else {
             return Ok(());
         };
+        if turn.status == TurnStatus::Queued {
+            if let Some(core) = &current.core_service {
+                let k = key("turn_context", &[&turn.id]);
+                if self.sessions.store.get::<ContextResponse>(&k)?.is_none() {
+                    let context: ContextResponse = self
+                        .client
+                        .post(
+                            core,
+                            "/v1/context",
+                            &ContextRequest {
+                                request_id: turn.id.clone(),
+                                akh: current.akh.clone(),
+                                session_id: current.id.clone(),
+                                turn_id: turn.id.clone(),
+                                input: turn.input.clone(),
+                                tools: current.tools.clone(),
+                            },
+                        )
+                        .await?;
+                    if context.schema_version != SCHEMA_VERSION {
+                        return Err(Fault::conflict("unsupported cognitive context schema"));
+                    }
+                    if context
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| current.runtime.model.as_ref() != Some(model))
+                    {
+                        return Err(Fault::conflict(
+                            "session runtime model differs from the authoritative Akh model; reconcile the profile before dispatch",
+                        ));
+                    }
+                    self.sessions.store.transaction(|tx| {
+                        tx.put(&k, &context)?;
+                        let mut session: SessionRecord =
+                            tx.get(&key("session", &[&current.id]))?
+                                .ok_or_else(|| Fault::missing("session disappeared"))?;
+                        crate::session::append_event(
+                            tx,
+                            &mut session,
+                            Some(&turn.id),
+                            "context_prepared",
+                            json!({"service":core,"evidence":context.evidence}),
+                        )?;
+                        Ok(())
+                    })?;
+                }
+            }
+        }
         let request = match self.sessions.next_job(&session.id)? {
             Some(request) => request,
             None if turn.status == TurnStatus::Unknown => {
@@ -158,8 +279,18 @@ pub fn session_router(app: SessionApp) -> Router {
     protect(
         Router::new()
             .route("/acp", get(crate::acp::upgrade))
+            .route("/a2a/{akh}", post(crate::a2a::endpoint))
+            .route(
+                "/a2a/{akh}/.well-known/agent-card.json",
+                get(crate::a2a::card),
+            )
             .route("/v1/sessions", get(list_sessions).post(create_session))
             .route("/v1/sessions/{id}", get(get_session))
+            .route("/v1/sessions/{id}/access", get(session_access))
+            .route(
+                "/v1/sessions/{id}/services/{helper}/actions/{action}",
+                post(session_service_action),
+            )
             .route("/v1/sessions/{id}/inputs", post(submit_input))
             .route("/v1/sessions/{id}/events", get(session_events))
             .route("/v1/sessions/{id}/pending", get(pending))
@@ -375,6 +506,9 @@ pub fn executor_router(executor: Executor) -> Router {
     let config = executor.config.clone();
     protect(
         Router::new()
+            .route("/v1/services", post(launch_service))
+            .route("/v1/services/{id}", get(service_status))
+            .route("/v1/services/{id}/actions/{action}", post(service_action))
             .route("/v1/workspaces", post(attach_workspace))
             .route("/v1/workspaces/{id}/release", post(release_workspace))
             .route("/v1/operations", post(operation))
@@ -382,6 +516,42 @@ pub fn executor_router(executor: Executor) -> Router {
             .with_state(executor),
         config,
     )
+}
+async fn launch_service(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<crate::executor_helpers::LaunchService>,
+) -> Api<crate::helper::Status> {
+    http::role(&p, "sandbox")?;
+    Ok(Json(executor.launch_service(request)?))
+}
+async fn service_status(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<crate::helper::Status> {
+    if !p.has_role("session") && !p.has_role("sandbox") {
+        http::role(&p, "admin")?;
+    }
+    Ok(Json(executor.service_status(&id)?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceAction {
+    session_id: String,
+}
+async fn service_action(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path((id, action)): Path<(String, String)>,
+    Json(request): Json<ServiceAction>,
+) -> Api<Value> {
+    http::role(&p, "session")?;
+    let manifest = executor.service_manifest(&id)?;
+    if manifest.session_id != request.session_id {
+        return Err(Fault::new("forbidden", "service belongs to another session").into());
+    }
+    Ok(Json(crate::helper::action(&manifest, &action).await?))
 }
 async fn attach_workspace(
     State(executor): State<Executor>,
@@ -591,4 +761,59 @@ async fn shutdown() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+async fn session_access(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<Vec<WorkspaceAccessDescriptor>> {
+    app.sessions.get(&p, &id)?;
+    let allocation: Allocation = app
+        .client
+        .get(
+            "sandboxes",
+            &format!("/v1/allocations/{}", http::segment(&id)),
+        )
+        .await?;
+    let mut access = vec![];
+    if let Some(workspace) = allocation.binding {
+        let client = app.client.in_sandbox(&workspace.sandbox_id)?;
+        for descriptor in allocation.access {
+            let status: crate::helper::Status = client
+                .get(
+                    &workspace.executor,
+                    &format!("/v1/services/{}", http::segment(&descriptor.id)),
+                )
+                .await?;
+            if let Some(descriptor) = status.access {
+                access.push(descriptor);
+            }
+        }
+    }
+    Ok(Json(access))
+}
+async fn session_service_action(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path((id, helper, action)): Path<(String, String, String)>,
+) -> Api<Value> {
+    let session = app.sessions.get(&p, &id)?;
+    let workspace = session
+        .workspace
+        .ok_or_else(|| Fault::conflict("workspace is not ready"))?;
+    Ok(Json(
+        app.client
+            .in_sandbox(&workspace.sandbox_id)?
+            .post(
+                &workspace.executor,
+                &format!(
+                    "/v1/services/{}/actions/{}",
+                    http::segment(&helper),
+                    http::segment(&action)
+                ),
+                &json!({"session_id":id}),
+            )
+            .await?,
+    ))
 }

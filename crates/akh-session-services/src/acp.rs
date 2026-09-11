@@ -460,7 +460,7 @@ impl Connection {
                     .iter()
                     .find(|t| &t.id == turn_id)
                     .ok_or_else(|| Fault::missing("turn disappeared"))?;
-                if turn.status.terminal() || turn.status == TurnStatus::Unknown {
+                if caught_up && (turn.status.terminal() || turn.status == TurnStatus::Unknown) {
                     let result = match turn.status {
                         TurnStatus::Completed => {
                             Ok(json!({"stopReason":"end_turn","_meta":{"turnId":turn_id}}))

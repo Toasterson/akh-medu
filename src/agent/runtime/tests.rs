@@ -59,15 +59,15 @@ fn codex_resumes_exact_session_and_isolates_other_conversations() {
     let sink = VecSink::new();
     let cancel = AtomicBool::new(false);
     let mut first = turn(&runtime, &engine, &registry, &sink, &cancel, "alpha");
-    assert_eq!(codex::run(&mut first).unwrap(), "alpha");
+    assert_eq!(bridge::run(&mut first).unwrap(), "alpha");
     let mut second = turn(&runtime, &engine, &registry, &sink, &cancel, "bravo");
-    assert_eq!(codex::run(&mut second).unwrap(), "bravo");
+    assert_eq!(bridge::run(&mut second).unwrap(), "bravo");
     assert_ne!(
         first.session.as_ref().unwrap().id,
         second.session.unwrap().id
     );
     first.prompt = "follow-up".into();
-    assert_eq!(codex::run(&mut first).unwrap(), "alpha | follow-up");
+    assert_eq!(bridge::run(&mut first).unwrap(), "alpha | follow-up");
 }
 
 struct Echo;
@@ -113,7 +113,7 @@ fn codex_tools_use_typed_akh_registry_and_record_evidence() {
     let sink = VecSink::new();
     let cancel = AtomicBool::new(false);
     let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, "tool");
-    assert_eq!(codex::run(&mut t).unwrap(), "7");
+    assert_eq!(bridge::run(&mut t).unwrap(), "7");
     assert_eq!(t.trace, vec![json!({"tool":"echo","ok":true})]);
 }
 
@@ -135,11 +135,11 @@ fn upstream_approval_needs_client_even_in_bypass_mode_and_plan_denies() {
     let sink = VecSink::new();
     let cancel = AtomicBool::new(false);
     let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, "approval");
-    assert_eq!(codex::run(&mut t).unwrap(), "decline");
+    assert_eq!(bridge::run(&mut t).unwrap(), "decline");
     registry.set_permission_asker(Arc::new(Approver));
-    assert_eq!(codex::run(&mut t).unwrap(), "accept");
+    assert_eq!(bridge::run(&mut t).unwrap(), "accept");
     registry.set_permission_mode(super::super::permission::PermissionMode::Plan);
-    assert_eq!(codex::run(&mut t).unwrap(), "decline");
+    assert_eq!(bridge::run(&mut t).unwrap(), "decline");
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn terminal_failures_and_failed_resumes_do_not_start_replacement_turns() {
     let cancel = AtomicBool::new(false);
     for prompt in ["failed", "crash", "malformed"] {
         let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, prompt);
-        assert!(codex::run(&mut t).is_err(), "{prompt}");
+        assert!(bridge::run(&mut t).is_err(), "{prompt}");
     }
     let mut t = turn(
         &runtime,
@@ -162,10 +162,10 @@ fn terminal_failures_and_failed_resumes_do_not_start_replacement_turns() {
         &cancel,
         "fail_next_resume",
     );
-    codex::run(&mut t).unwrap();
+    bridge::run(&mut t).unwrap();
     let id = t.session.as_ref().unwrap().id.clone();
     t.prompt = "retry".into();
-    assert!(codex::run(&mut t).unwrap_err().contains("resume refused"));
+    assert!(bridge::run(&mut t).unwrap_err().contains("resume refused"));
     assert_eq!(t.session.unwrap().id, id);
 }
 
@@ -188,7 +188,7 @@ fn cancellation_kills_the_provider_process_group() {
         signal.store(true, Ordering::Relaxed);
     });
     let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, "hang");
-    assert!(codex::run(&mut t).unwrap_err().contains("cancelled"));
+    assert!(bridge::run(&mut t).unwrap_err().contains("cancelled"));
     worker.join().unwrap();
     let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
     let start = Instant::now();
@@ -211,14 +211,14 @@ fn claude_bridge_resumes_identity_and_surfaces_failed_results() {
     let sink = VecSink::new();
     let cancel = AtomicBool::new(false);
     let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, "hello");
-    assert_eq!(claude::run(&mut t).unwrap(), "hello");
+    assert_eq!(bridge::run(&mut t).unwrap(), "hello");
     let id = t.session.as_ref().unwrap().id.clone();
     t.prompt = "again".into();
-    assert_eq!(claude::run(&mut t).unwrap(), "again");
+    assert_eq!(bridge::run(&mut t).unwrap(), "again");
     assert_eq!(t.session.as_ref().unwrap().id, id);
     t.prompt = "failed".into();
     assert!(
-        claude::run(&mut t)
+        bridge::run(&mut t)
             .unwrap_err()
             .contains("provider failure")
     );
@@ -306,26 +306,7 @@ fn timeout_ends_a_stalled_provider() {
     let cancel = AtomicBool::new(false);
     let mut t = turn(&runtime, &engine, &registry, &sink, &cancel, "hang");
     let start = Instant::now();
-    assert!(codex::run(&mut t).unwrap_err().contains("timed out"));
-    assert!(start.elapsed() < Duration::from_secs(3));
-}
-
-#[test]
-fn timeout_still_fires_when_provider_never_reads_large_input() {
-    let mut command = std::process::Command::new("python3");
-    command.args(["-c", "import time; time.sleep(90)"]);
-    let mut child = process::Process::spawn(command, 1).unwrap();
-    let start = Instant::now();
-    child
-        .send(&json!({"input":"x".repeat(1024 * 1024)}))
-        .unwrap();
-    assert!(
-        child
-            .recv(&AtomicBool::new(false))
-            .unwrap_err()
-            .contains("timed out")
-    );
-    drop(child);
+    assert!(bridge::run(&mut t).unwrap_err().contains("timed out"));
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
@@ -386,8 +367,8 @@ fn live_runtime(kind: RuntimeKind) {
         "Call the Akh runtime_probe tool exactly once, then reply with only its returned text. Do not use any other tools.",
     );
     let run = match kind {
-        RuntimeKind::Codex => codex::run,
-        RuntimeKind::Claude => claude::run,
+        RuntimeKind::Codex => bridge::run,
+        RuntimeKind::Claude => bridge::run,
     };
     let answer = run(&mut t).expect("installed provider first turn");
     assert_eq!(

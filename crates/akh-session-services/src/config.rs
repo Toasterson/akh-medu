@@ -80,6 +80,7 @@ impl Principal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AkhProfile {
+    pub core_service: Option<String>,
     pub runtime: RuntimeBinding,
     pub instructions: String,
     pub workspace_profiles: Vec<String>,
@@ -157,6 +158,7 @@ fn board_interval() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub service_id: String,
+    pub public_url: Option<String>,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub principals: Vec<Principal>,

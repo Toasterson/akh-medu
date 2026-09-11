@@ -729,6 +729,7 @@ impl ServerState {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&name);
+                        #[cfg(not(feature = "core-server"))]
                         match self.get_agent(&name).await {
                             Ok(_) => tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect"),
                             Err(error) => tracing::error!(workspace = %name, %error, "durable reconnect hydrate succeeded but runtime resume failed"),
@@ -3471,6 +3472,7 @@ async fn run_daemon_task(
 /// not bound to one akh); `config/{get,set}` operate on the global
 /// `AkhomedConfig`. Errors collapse to a string surfaced as a JSON-RPC error.
 #[cfg(feature = "acp")]
+#[cfg(feature = "acp")]
 impl akh_medu::acp::ServerControl for ServerState {
     /// Resolve a workspace's engine + agent + a fresh chat processor (built from
     /// the cached, Arc-shared NLU pipeline — no second model load). Lazily loads
@@ -4437,7 +4439,8 @@ async fn main() {
         tracing::warn!("failed to write PID file: {e}");
     }
 
-    // Auto-start workspace daemons from config (or AKH_AUTO_START override).
+    // Session and automation execution is owned by akhsessd/akhrtd in core mode.
+    #[cfg(not(feature = "core-server"))]
     if !auto_start.is_empty() {
         let daemon_config = state.config.read().await.daemon.to_daemon_config();
         for ws_name in &auto_start {
@@ -4525,7 +4528,7 @@ async fn main() {
     // workspace — so ensure the one it will bind exists before starting it. The
     // resolution here must match `start_acp_server`'s (acp.workspace → first
     // auto_start → "default").
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     {
         let acp_ws = state
             .config
@@ -4571,7 +4574,7 @@ async fn main() {
     // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
     // Behind the `acp` feature; with it off the daemon has no inbound surface
     // and simply runs its workspace daemons until signalled.
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
         let acp_cfg = state.config.read().await.acp.clone();
         let fallback_ws = auto_start
@@ -4598,6 +4601,23 @@ async fn main() {
     // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
     // accept loops and workspace daemons. The ACP listeners and workspace
     // daemons run as their own spawned tasks; main just waits and tears down.
+    #[cfg(feature = "core-server")]
+    let (core_shutdown_tx, core_handle) = {
+        let path = std::env::var_os("AKH_CORE_CONFIG").map(std::path::PathBuf::from).unwrap_or_else(|| {
+            tracing::error!("core-server requires AKH_CORE_CONFIG pointing to its scoped service config"); std::process::exit(1);
+        });
+        let config = akh_medu::core_service::CoreConfig::load(&path).unwrap_or_else(|error| {tracing::error!(%error,"invalid cognitive service config");std::process::exit(1)});
+        let address=config.listen;
+        let backend:Arc<dyn akh_medu::core_service::CoreBackend>=state.clone();
+        let app=akh_medu::core_service::CoreApp::new(config,backend).unwrap_or_else(|error|{tracing::error!(%error,"cognitive service initialization failed");std::process::exit(1)});
+        let router=akh_medu::core_service::router(app);
+        let listener=tokio::net::TcpListener::bind(address).await.unwrap_or_else(|error|{tracing::error!(%error,"cognitive listener bind failed");std::process::exit(1)});
+        let (tx,rx)=tokio::sync::oneshot::channel::<()>();
+        let handle=tokio::spawn(async move{if let Err(error)=axum::serve(listener,router).with_graceful_shutdown(async{let _=rx.await;}).await{tracing::error!(%error,"cognitive listener failed");}});
+        tracing::info!(%address,"cognitive service ready; sessions and provider loops are external");
+        (tx,handle)
+    };
+
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
 
@@ -4619,7 +4639,7 @@ async fn main() {
     tracing::info!("akhomed shutting down — draining workspace daemons");
 
     // Stop ACP accept loops first so no new sessions start mid-drain.
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     {
         tracing::info!("stopping ACP listeners");
         let _ = acp_shutdown_tx.send(true);
@@ -4642,6 +4662,9 @@ async fn main() {
             }
         }
     }
+
+    #[cfg(feature = "core-server")]
+    { let _=core_shutdown_tx.send(());let _=core_handle.await; }
 
     // Signal all workspace daemons to stop, then join with timeout.
     let mut daemons = state_for_shutdown.daemons.write().await;
@@ -6177,4 +6200,10 @@ mod control_plane_tests {
             g.status,
         );
     }
+}
+
+#[cfg(feature = "core-server")]
+impl akh_medu::core_service::CoreBackend for ServerState {
+    fn engine<'a>(&'a self,akh:&'a str)->akh_medu::core_service::CoreFuture<'a,Arc<Engine>> {Box::pin(async move {self.get_engine(akh).await})}
+    fn config<'a>(&'a self,akh:&'a str)->akh_medu::core_service::CoreFuture<'a,Arc<AkhConfig>> {Box::pin(async move {self.get_akh_config(akh).await})}
 }

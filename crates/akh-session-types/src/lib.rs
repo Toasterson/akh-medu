@@ -219,6 +219,8 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
+    #[serde(default)]
+    pub core_service: Option<String>,
     pub schema_version: u16,
     pub id: String,
     pub principal: String,
@@ -283,6 +285,56 @@ pub struct RuntimeJobRequest {
     pub instructions: String,
     pub tools: Vec<ToolSpec>,
     pub approval_policy: ApprovalPolicy,
+}
+
+/// Per-turn cognitive context is prepared once, before the durable runtime dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextRequest {
+    pub request_id: String,
+    pub akh: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub input: TurnInput,
+    pub tools: Vec<ToolSpec>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextResponse {
+    pub schema_version: u16,
+    pub instructions: String,
+    pub model: Option<String>,
+    pub evidence: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CognitiveToolCall {
+    pub request_id: String,
+    pub session_id: String,
+    pub akh: String,
+    pub tool: String,
+    pub arguments: Value,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedTurn {
+    pub request_id: String,
+    pub akh: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub input: TurnInput,
+    pub output: String,
+    pub model: Option<String>,
+    pub tool_receipts: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<ToolEvidence>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolEvidence {
+    pub tool: String,
+    pub ok: bool,
+    pub receipt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -440,6 +492,19 @@ pub struct ServiceProfile {
     pub managed_files: BTreeMap<String, String>,
     pub health_url: Option<String>,
     pub auth_profile: Option<String>,
+    #[serde(default)]
+    pub client_kind: String,
+    pub endpoint: Option<String>,
+    /// Read-only path to the upstream environment identity, if the service exposes one.
+    pub environment_id_file: Option<String>,
+    #[serde(default)]
+    pub pair_command: Vec<String>,
+    #[serde(default)]
+    pub login_command: Vec<String>,
+    #[serde(default)]
+    pub login_status_command: Vec<String>,
+    #[serde(default)]
+    pub central_agent_attachment: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

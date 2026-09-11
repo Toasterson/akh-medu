@@ -148,3 +148,49 @@ connection-helper behavior, T3 central-session feasibility, runtime/core
 extraction, kagent A2A, recovery operations, deployment packaging, and the Anima
 compatibility migration in a separate worktree. None of those are completed by
 this first process slice.
+
+### Second local process slice
+
+- `akh-service` now supervises upstream commands inside the executor's environment,
+  checks configured readiness, preserves separately edited managed files, and
+  uses a private service HOME for upstream login state. An interactive login
+  action runs the selected upstream command directly. `akh-connect` maintains a
+  per-user/profile environment-offer ledger and uses upstream-generated pairing
+  links; it never writes T3's private connection database or marks an offer as a
+  confirmed client connection. Browser pairing is implemented; automatic native
+  desktop registration still requires a supported upstream interface.
+- A2A 0.3 JSON-RPC routes implement task/context mapping, message dedupe,
+  streaming, pending-input responses, cancellation and resubscription. Contract
+  tests pass; this has not been exercised through a deployed kagent controller.
+- The provider implementations were removed from the original agent module.
+  Its compatibility host now calls `akh-runtime` behind `embedded-runtime`.
+  Nine legacy integration tests pass, with two native-provider tests ignored;
+  the blocked-writer timeout test moved into the shared runtime package.
+- Added an `akhomed` `core-server` build profile, selected with
+  `--no-default-features --features core-server`. It serves scoped cognitive
+  context, cognitive tools and accepted-turn projection endpoints. It starts no
+  ACP listener or resident workspace agent loops. Session context is prepared
+  before dispatch; completed turns reach a durable cognitive journal according
+  to the existing transcript-capture policy.
+- The core build and its scoped-tool/transcript-opt-out test pass. Its normal
+  dependency graph contains none of `akh-runtime`, `agent-client-protocol`,
+  `russh`, or `akh-session-services`. Shared record storage moved to the small
+  `akh-service-store` crate; databases remain separately owned.
+- The six-process smoke test passes with the real cognitive core, five session
+  services, a provider fixture and a colocated editor fixture. It also checks
+  that the editor reads the executor's file and that cognitive context and
+  accepted-turn receipts appear in the central journal. Native providers,
+  upstream editor clients, cross-host confinement and deployed kagent remain
+  distinct validation work.
+- The core test build exposed two pre-existing test compilation problems on the
+  main baseline: a missing `DelegationTask.target_workspace` initializer and a
+  metric test written against a newer OpenTelemetry API than the pinned 0.27.
+  The initializer and test adapter were corrected; the bounded-label metric
+  test passes against the pinned dependency.
+
+The implementations remain in progress: per-service dependency features,
+internal model-loop runtime, native profile/login configuration and conformance,
+explicit recovery operations, upstream T3 central-session bridging, real
+provisioner/event-source checks, deployment artifacts and Anima migration are
+still required. No native conformance, deployment, or Fable review is implied
+by these fixture results.

@@ -11,7 +11,7 @@ akh-runtime = { path = "../akh-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
-redb = "2"
+akh-service-store = { path = "../akh-service-store" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "stream"] }

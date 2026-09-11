@@ -12,7 +12,14 @@ use std::{
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 fn io_error(error: std::io::Error) -> Fault {
-    Fault::new("workspace_io", error.to_string())
+    Fault::new(
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "not_found"
+        } else {
+            "workspace_io"
+        },
+        error.to_string(),
+    )
 }
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
