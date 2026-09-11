@@ -8,13 +8,30 @@
 //! - **recall** (recent conversation, paged in as the bounded history tail), and
 //! - **archival** (the long-term KG, searched on demand via `archival_search`).
 //!
-//! [`assemble`](ContextManager::assemble) renders the core-memory block first,
-//! then defers to the curating assembly with a short history tail (the recall
-//! tier). If the model never edits core memory, the result degrades to a
-//! [`PassiveManager`](super::passive::PassiveManager)-like lean context — recall +
-//! tail + the current prompt — which is the documented "passive safety net". Like
-//! every shipped manager it is wrapped in
+//! [`assemble`](ContextManager::assemble) renders the core-memory block as a
+//! leading system message *after* the session-stable head blocks (continuity
+//! seed, schema digest, active-note frontmatter) rendered by the shared
+//! curating assembly, then defers to that assembly with a short history tail
+//! (the recall tier). If the model never edits core memory, the result
+//! degrades to a [`PassiveManager`](super::passive::PassiveManager)-like lean
+//! context — recall + tail + the current prompt — which is the documented
+//! "passive safety net". Like every shipped manager it is wrapped in
 //! [`SafetyEnforced`](super::safety::SafetyEnforced).
+//!
+//! ## Core-memory placement and the KV-cache prefix (WI-357)
+//!
+//! The core block was previously inserted at `messages\[0\]` — the worst
+//! possible position: any `core_memory_append`/`core_memory_replace` edit
+//! invalidated the provider KV cache for the *entire* context, including the
+//! session-stable seed/schema blocks that never change in response to a core
+//! edit. The block now lands after the stable head, so the system prompt and
+//! the seed/schema/notes head survive an edit as a reusable prefix; only the
+//! suffix from the core block onward re-prefills. This is the accepted
+//! MemGPT tradeoff: self-editing memory is this strategy's identity, so the
+//! block cannot move to the append-only tail without hiding it from the model
+//! at the generation point where edits are decided. A full delta-render
+//! variant (append "Core memory updated:" messages instead of re-rendering)
+//! is a possible follow-up but a larger semantic change.
 
 use serde_json::json;
 
@@ -47,6 +64,19 @@ impl VirtualContextManager {
     }
 }
 
+/// Count the leading session-stable head blocks (seed, schema digest,
+/// active-note frontmatter) rendered by [`assemble_with_cap`]: the maximal
+/// run of leading `system` messages. Those are the only leading system
+/// messages the curating assembly produces (dynamic per-turn blocks render at
+/// the tail, before the last user turn), so the run length is exactly the
+/// stable-head boundary the core-memory block slots after.
+fn leading_head_len(messages: &[serde_json::Value]) -> usize {
+    messages
+        .iter()
+        .take_while(|m| m["role"] == "system")
+        .count()
+}
+
 impl ContextManager for VirtualContextManager {
     fn id(&self) -> StrategyId {
         StrategyId::new("virtual")
@@ -77,7 +107,17 @@ impl ContextManager for VirtualContextManager {
         let mut assembled = assemble_with_cap(episode, &inner, counter, Some(self.tail()))?;
 
         if let Some(block) = core_block {
-            assembled.messages.insert(0, json!({ "role": "system", "content": block }));
+            // WI-357: insert AFTER the session-stable head blocks (seed,
+            // schema digest, active-note frontmatter) instead of at position
+            // 0. Those blocks never change when core memory does, so the
+            // system prompt + stable head stay inside the reusable KV-cache
+            // prefix across a core edit; only the suffix from here forward
+            // re-prefills. Dynamic per-turn blocks (KG/recalled) already
+            // render at the tail via `assemble_with_cap`.
+            let pos = leading_head_len(&assembled.messages);
+            assembled
+                .messages
+                .insert(pos, json!({ "role": "system", "content": block }));
             assembled
                 .section_tokens
                 .entry(ContextSection::System)
