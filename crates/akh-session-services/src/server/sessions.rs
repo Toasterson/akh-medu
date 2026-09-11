@@ -31,6 +31,58 @@ impl SessionApp {
     }
     pub async fn tick(&self) -> Result<()> {
         for session in self.sessions.store.scan::<SessionRecord>("session/")? {
+            if session.closed_at.is_some() {
+                if session.workspace.is_some()
+                    && self
+                        .sessions
+                        .store
+                        .get::<bool>(&key("workspace_released", &[&session.id]))?
+                        != Some(true)
+                {
+                    match self
+                        .client
+                        .post::<Allocation>(
+                            "sandboxes",
+                            &format!("/v1/allocations/{}/release", http::segment(&session.id)),
+                            &json!({}),
+                        )
+                        .await
+                    {
+                        Ok(_) => self.sessions.store.transaction(|tx| {
+                            tx.put(&key("workspace_released", &[&session.id]), &true)
+                        })?,
+                        Err(error) => {
+                            tracing::warn!(session=%session.id,code=%error.code,"archived workspace release deferred")
+                        }
+                    }
+                }
+            } else if session.workspace.is_some() {
+                let k = key("lease_renewed", &[&session.id]);
+                if self
+                    .sessions
+                    .store
+                    .get::<u64>(&k)?
+                    .is_none_or(|at| now_ms().saturating_sub(at) >= 60_000)
+                {
+                    match self
+                        .client
+                        .post::<Allocation>(
+                            "sandboxes",
+                            &format!("/v1/allocations/{}/renew", http::segment(&session.id)),
+                            &json!({}),
+                        )
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(session=%session.id,code=%error.code,"workspace lease renewal deferred")
+                        }
+                    }
+                    self.sessions
+                        .store
+                        .transaction(|tx| tx.put(&k, &now_ms()))?;
+                }
+            }
             if let Err(error) = self.publish_completions(&session).await {
                 tracing::warn!(session=%session.id,code=%error.code,"cognitive completion delivery deferred");
             }
@@ -284,6 +336,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/pending", get(pending))
             .route("/v1/sessions/{id}/attach", post(attach))
             .route("/v1/sessions/{id}/detach", post(detach))
+            .route("/v1/sessions/{id}/archive", post(archive))
             .route("/v1/sessions/{id}/turns/{turn}/cancel", post(cancel_turn))
             .route(
                 "/v1/sessions/{id}/turns/{turn}/responses/{input}",
@@ -291,10 +344,37 @@ pub fn session_router(app: SessionApp) -> Router {
             )
             .route("/v1/automations/{id}/invoke", post(invoke))
             .route("/v1/runtime/tools", post(runtime_tool))
+            .route("/v1/runtime/tools/reconcile", post(reconcile_tool))
             .route("/v1/runtime/input", post(runtime_input))
             .with_state(app),
         config,
     )
+}
+async fn archive(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Query(query): Query<AttachmentQuery>,
+) -> Api<SessionRecord> {
+    controller(&app, &p, &id, query.attachment_id.as_deref())?;
+    Ok(Json(app.sessions.archive(&p, &id)?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolResolution {
+    call: ToolCall,
+    resolution: Reconciliation,
+}
+async fn reconcile_tool(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<ToolResolution>,
+) -> Api<ToolResult> {
+    Ok(Json(
+        app.broker
+            .reconcile_tool(&p, &request.call, &request.resolution)
+            .await?,
+    ))
 }
 async fn create_session(
     State(app): State<SessionApp>,

@@ -260,9 +260,16 @@ impl Runtime {
                     .get(&job_key(&request.id))?
                     .ok_or_else(|| Fault::missing("runtime job disappeared"))?;
                 match result {
-                    Ok(output) => {
+                    Ok(output) if output.len() <= 4 * 1024 * 1024 => {
                         job.status = TurnStatus::Completed;
                         job.output = Some(output);
+                    }
+                    Ok(_) => {
+                        job.status = TurnStatus::Unknown;
+                        job.error = Some(Fault::new(
+                            "capacity",
+                            "provider answer exceeded the durable job response budget",
+                        ));
                     }
                     Err(message) => {
                         job.status = if cancel.load(Ordering::SeqCst) {
@@ -314,6 +321,37 @@ impl Runtime {
         {
             flag.store(true, Ordering::SeqCst);
         }
+    }
+    pub fn reconcile(
+        &self,
+        principal: &Principal,
+        id: &str,
+        resolution: &Reconciliation,
+    ) -> Result<RuntimeJob> {
+        crate::http::role(principal, "admin")?;
+        let active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        if active.contains_key(id) {
+            return Err(Fault::new("busy", "runtime worker is still active"));
+        }
+        self.store.transaction(|tx| {
+            let target=job_key(id);
+            let mut job:RuntimeJob=tx.get(&target)?.ok_or_else(||Fault::missing("runtime job not found"))?;
+            crate::recovery::validate(principal,&job.request,resolution)?;
+            if crate::recovery::already(tx,principal,&target,resolution)? { return Ok(job); }
+            if job.status!=TurnStatus::Unknown { return Err(Fault::conflict("only an unknown job can be reconciled")); }
+            if resolution.result.is_some() || (resolution.status==TurnStatus::Completed && resolution.output.is_none()) {
+                return Err(Fault::invalid("runtime completion requires output; tool receipts must be reconciled at their owner"));
+            }
+            if job.request.binding.kind==RuntimeKind::Internal {
+                crate::internal::reconcile(tx,&job,resolution.status==TurnStatus::Completed)?;
+            }
+            job.status=resolution.status;
+            job.output=resolution.output.clone();
+            job.error=if job.status==TurnStatus::Completed {None} else {Some(Fault::new("operator_resolved","operator resolved the unknown turn; see reconciliation evidence"))};
+            tx.put(&target,&job)?;
+            crate::recovery::record(tx,principal,&target,resolution)?;
+            Ok(job)
+        })
     }
 }
 
@@ -386,6 +424,19 @@ impl akh_runtime::Host for RemoteHost {
                 if job.events.len() >= 100_000 {
                     return Err(Fault::new("capacity", "runtime event limit exceeded"));
                 }
+                let bytes_key = key("runtime_event_bytes", &[&self.request.id]);
+                let old_bytes = tx.get::<usize>(&bytes_key)?.unwrap_or_else(|| {
+                    serde_json::to_vec(&job.events)
+                        .map(|b| b.len())
+                        .unwrap_or(4 * 1024 * 1024)
+                });
+                let event_bytes = serde_json::to_vec(&event)
+                    .map_err(|_| Fault::invalid("cannot encode runtime event"))?
+                    .len();
+                if old_bytes + event_bytes > 4 * 1024 * 1024 {
+                    return Err(Fault::new("capacity", "runtime event byte budget exceeded"));
+                }
+                tx.put(&bytes_key, &(old_bytes + event_bytes))?;
                 job.events.push(event);
                 tx.put(&job_key(&self.request.id), &job)
             })

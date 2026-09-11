@@ -14,6 +14,7 @@ sandbox = []
 events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait"]
 helpers = []
 client = ["helpers", "dep:tokio-tungstenite"]
+admin = []
 
 [dependencies]
 akh-session-types = { path = "../akh-session-types" }
@@ -45,6 +46,11 @@ tokio-reactor-trait = { version = "1", optional = true }
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "akh-fingerprint"
+path = "src/bin/akh-fingerprint.rs"
+required-features = ["admin"]
 
 [[bin]]
 name = "akhsessd"
@@ -101,6 +107,10 @@ required-features = ["session"]
 [[test]]
 name = "executor"
 required-features = ["executor"]
+
+[[test]]
+name = "sandbox"
+required-features = ["sandbox"]
 
 [[bin]]
 name = "akh-runtime-profile"

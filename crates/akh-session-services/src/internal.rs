@@ -22,6 +22,8 @@ struct Conversation {
     binding: RuntimeBinding,
     messages: Vec<Value>,
     active_job: Option<String>,
+    #[serde(default)]
+    retired: bool,
 }
 
 pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result<()> {
@@ -30,6 +32,7 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         .as_ref()
         .ok_or_else(|| Fault::invalid("internal runtime needs a model_endpoint"))?;
     Endpoint {
+        ca_file: None,
         url: endpoint.url.clone(),
         token_file: endpoint
             .token_file
@@ -100,6 +103,7 @@ fn run_loop(
                 binding: request.binding.clone(),
                 messages: vec![],
                 active_job: None,
+                retired: false,
             },
         };
         if conversation.binding != request.binding || conversation.session_id != request.session_id
@@ -107,6 +111,12 @@ fn run_loop(
             return Err(Fault::new(
                 "forbidden",
                 "continuation belongs to another session or runtime profile",
+            ));
+        }
+        if conversation.retired {
+            return Err(Fault::new(
+                "continuation_retired",
+                "operator closed an interrupted continuation; create an explicit new session",
             ));
         }
         if conversation.active_job.is_some() {
@@ -218,6 +228,33 @@ fn run_loop(
         "capacity",
         "model iteration limit reached without a final answer",
     ))
+}
+
+pub fn reconcile(
+    tx: &mut crate::store::Transaction<'_>,
+    job: &RuntimeJob,
+    completed: bool,
+) -> Result<()> {
+    let Some(id) = &job.provider_session else {
+        return Ok(());
+    };
+    let k = key("internal", &[id]);
+    let Some(mut conversation) = tx.get::<Conversation>(&k)? else {
+        return Err(Fault::missing("internal continuation is unavailable"));
+    };
+    if conversation.session_id != job.request.session_id {
+        return Err(Fault::conflict("continuation owner differs"));
+    }
+    if completed && conversation.active_job.is_some() {
+        return Err(Fault::conflict(
+            "unfinished internal model continuation cannot be certified complete",
+        ));
+    }
+    if !completed && conversation.active_job.is_some() {
+        conversation.retired = true;
+        tx.put(&k, &conversation)?;
+    }
+    Ok(())
 }
 fn check(cancel: &AtomicBool, deadline: Instant) -> Result<()> {
     if cancel.load(Ordering::SeqCst) {

@@ -172,4 +172,131 @@ fn restart_does_not_replay_an_operation_with_an_unknown_outcome() {
             ))
             .is_err()
     );
+    let original = executor.receipt("unknown").unwrap();
+    let mut admin = executor.config.principals[0].clone();
+    let mut resolution = Reconciliation {
+        request_id: "resolve-1".into(),
+        expected_request_sha256: akh_session_services::recovery::fingerprint(&original.request)
+            .unwrap(),
+        status: TurnStatus::Failed,
+        quiescent: true,
+        evidence: vec!["fixture: inspected marker absence and no active process".into()],
+        output: None,
+        result: Some(ToolResult {
+            success: false,
+            text: "No file was written".into(),
+            data: None,
+            receipt: None,
+        }),
+    };
+    assert_eq!(
+        executor
+            .reconcile(&admin, "unknown", &resolution)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    admin.roles = vec!["admin".into()];
+    resolution.quiescent = false;
+    assert!(executor.reconcile(&admin, "unknown", &resolution).is_err());
+    resolution.quiescent = true;
+    assert_eq!(
+        executor
+            .reconcile(&admin, "unknown", &resolution)
+            .unwrap()
+            .status,
+        TurnStatus::Failed
+    );
+    assert_eq!(
+        executor
+            .reconcile(&admin, "unknown", &resolution)
+            .unwrap()
+            .status,
+        TurnStatus::Failed
+    );
+    assert!(!dir.path().join("workspaces/one/marker").exists());
+    assert!(
+        executor
+            .operate(request(
+                "after-recovery",
+                "write",
+                json!({"path":"marker","content":"explicit new operation","create":true})
+            ))
+            .unwrap()
+            .result
+            .unwrap()
+            .success
+    );
+    resolution.evidence.push("changed after acceptance".into());
+    assert_eq!(
+        executor
+            .reconcile(&admin, "unknown", &resolution)
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+}
+
+#[test]
+fn expired_lease_fences_new_effects_and_cannot_be_renewed_implicitly() {
+    let (dir, executor) = setup();
+    assert!(
+        executor
+            .renew_lease(
+                "workspace",
+                &RenewLease {
+                    session_id: "other".into(),
+                    generation: 1
+                }
+            )
+            .is_err()
+    );
+    let lease = executor
+        .renew_lease(
+            "workspace",
+            &RenewLease {
+                session_id: "session".into(),
+                generation: 1,
+            },
+        )
+        .unwrap();
+    assert!(lease.expires_at > now_ms());
+    executor
+        .store
+        .transaction(|tx| {
+            tx.put(
+                &key("lease", &["workspace"]),
+                &WorkspaceLease {
+                    expires_at: 1,
+                    ..lease
+                },
+            )
+        })
+        .unwrap();
+    executor.expire_leases().unwrap();
+    assert_eq!(
+        executor
+            .operate(request(
+                "expired",
+                "write",
+                json!({"path":"marker","content":"bad","create":true})
+            ))
+            .unwrap_err()
+            .code,
+        "expired"
+    );
+    assert!(!dir.path().join("workspaces/one/marker").exists());
+    assert_eq!(
+        executor
+            .renew_lease(
+                "workspace",
+                &RenewLease {
+                    session_id: "session".into(),
+                    generation: 1
+                }
+            )
+            .unwrap_err()
+            .code,
+        "expired"
+    );
 }

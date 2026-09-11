@@ -80,6 +80,24 @@ pub fn append_event(
 }
 
 impl Sessions {
+    pub fn archive(&self, p: &Principal, id: &str) -> Result<SessionRecord> {
+        self.store.transaction(|tx| {
+            let mut session = load(tx, id)?;
+            authorize(&session, p)?;
+            if session.closed_at.is_some() {
+                return Ok(session);
+            }
+            if session.turns.iter().any(|turn| !turn.status.terminal()) {
+                return Err(Fault::conflict(
+                    "cancel or reconcile outstanding turns before archiving",
+                ));
+            }
+            session.closed_at = Some(now_ms());
+            session.controller = None;
+            append_event(tx, &mut session, None, "session_archived", json!({}))?;
+            Ok(session)
+        })
+    }
     pub fn new(store: Store, config: Arc<Config>) -> Self {
         Self { store, config }
     }
@@ -147,6 +165,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
+            closed_at: None,
             core_service: profile.core_service.clone(),
             schema_version: SCHEMA_VERSION,
             id: new_id(),
@@ -249,6 +268,11 @@ impl Sessions {
                 .find(|t| t.id == old.result)
                 .cloned()
                 .ok_or_else(|| Fault::new("storage_error", "admitted turn is missing"));
+        }
+        if session.closed_at.is_some() {
+            return Err(Fault::conflict(
+                "session is archived; create an explicit new session",
+            ));
         }
         if session
             .turns
@@ -394,6 +418,15 @@ impl Sessions {
 
     pub fn apply_job(&self, job: &RuntimeJob) -> Result<()> {
         self.store.transaction(|tx| {
+            if tx
+                .get::<RuntimeJobRequest>(&key("dispatch", &[&job.request.id]))?
+                .as_ref()
+                != Some(&job.request)
+            {
+                return Err(Fault::conflict(
+                    "runtime response differs from the exact persisted dispatch",
+                ));
+            }
             let mut session = load(tx, &job.request.session_id)?;
             let index = session
                 .turns
@@ -425,6 +458,12 @@ impl Sessions {
             if cursor > job.events.len() {
                 return Err(Fault::conflict("runtime event history moved backwards"));
             }
+            let history_key = key("runtime_history", &[&job.request.id]);
+            if let Some(expected) = tx.get::<String>(&history_key)? {
+                if expected != crate::recovery::fingerprint(&job.events[..cursor])? {
+                    return Err(Fault::conflict("runtime rewrote an already accepted event"));
+                }
+            }
             for event in &job.events[cursor..] {
                 append_event(
                     tx,
@@ -435,6 +474,7 @@ impl Sessions {
                 )?;
             }
             tx.put(&cursor_key, &job.events.len())?;
+            tx.put(&history_key, &crate::recovery::fingerprint(&job.events)?)?;
             let awaiting = tx
                 .scan::<PendingInput>(&key("pending", &[&session.id]))?
                 .iter()

@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 pub struct ApiError(pub Fault);
 impl From<Fault> for ApiError {
@@ -118,20 +118,19 @@ pub fn segment(value: &str) -> String {
 #[derive(Clone)]
 pub struct Client {
     config: Arc<Config>,
-    client: reqwest::Client,
+    clients: BTreeMap<String, reqwest::Client>,
     sandbox: Option<String>,
 }
 impl Client {
     pub fn new(config: Arc<Config>) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| Fault::new("transport", "cannot initialize HTTP client"))?;
+        let clients = config
+            .endpoints
+            .iter()
+            .map(|(name, endpoint)| Ok((name.clone(), endpoint.http_client()?)))
+            .collect::<Result<_>>()?;
         Ok(Self {
             config,
-            client,
+            clients,
             sandbox: None,
         })
     }
@@ -168,7 +167,9 @@ impl Client {
             route
         };
         let mut request = self
-            .client
+            .clients
+            .get(service)
+            .ok_or_else(|| Fault::invalid("service has no configured HTTP client"))?
             .request(method, route)
             .bearer_auth(endpoint.token()?);
         if let Some(body) = body {

@@ -1,7 +1,10 @@
 //! Bounded administrative subprocesses. No shell and no surviving child group.
 use crate::types::{Fault, Result};
 use std::{process::Stdio, time::Duration};
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 
 struct Group(i32);
 impl Drop for Group {
@@ -12,9 +15,21 @@ impl Drop for Group {
     }
 }
 
-pub async fn output(mut command: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+pub async fn output(command: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
+    output_with_input(command, None, timeout, limit).await
+}
+pub async fn output_with_input(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+    limit: usize,
+) -> Result<Vec<u8>> {
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
@@ -24,7 +39,20 @@ pub async fn output(mut command: Command, timeout: Duration, limit: usize) -> Re
         .map_err(|_| Fault::new("helper_spawn", "upstream action could not start"))?;
     let group = Group(child.id().expect("spawned child has an ID") as i32);
     let stdout = child.stdout.take().expect("piped stdout");
+    let mut stdin = child.stdin.take();
     let work = async {
+        let write = async {
+            if let (Some(bytes), Some(pipe)) = (input, stdin.as_mut()) {
+                pipe.write_all(&bytes).await.map_err(|_| {
+                    Fault::new("upstream_action", "upstream input could not be written")
+                })?;
+                pipe.shutdown().await.map_err(|_| {
+                    Fault::new("upstream_action", "upstream input could not be closed")
+                })?;
+            }
+            drop(stdin);
+            Ok(())
+        };
         let read = async {
             let mut bytes = Vec::new();
             stdout
@@ -46,7 +74,7 @@ pub async fn output(mut command: Command, timeout: Duration, limit: usize) -> Re
             }
             Ok(())
         };
-        tokio::try_join!(read, wait).map(|(bytes, ())| bytes)
+        tokio::try_join!(read, wait, write).map(|(bytes, (), ())| bytes)
     };
     let result = tokio::time::timeout(timeout, work)
         .await

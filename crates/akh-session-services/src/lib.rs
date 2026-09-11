@@ -18,6 +18,7 @@ pub mod helper;
 pub mod http;
 #[cfg(feature = "events")]
 pub mod ingress;
+pub mod recovery;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 #[cfg(feature = "sandbox")]
@@ -42,7 +43,7 @@ pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-#[cfg(any(feature = "helpers", feature = "runtime"))]
+#[cfg(any(feature = "helpers", feature = "runtime", feature = "sandbox"))]
 pub mod process;
 
 #[cfg(feature = "runtime")]

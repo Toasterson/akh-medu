@@ -7,7 +7,6 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub use akh_session_types::{Allocate, Allocation};
 
@@ -19,6 +18,118 @@ pub struct Sandboxes {
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 impl Sandboxes {
+    pub async fn reconcile(
+        &self,
+        p: &crate::config::Principal,
+        session: &str,
+        r: &AllocationResolution,
+    ) -> Result<Allocation> {
+        crate::http::role(p, "admin")?;
+        let _lock = self.lock.lock().await;
+        self.store.transaction(|tx| {
+            let target = key("allocation", &[session]);
+            let mut allocation: Allocation = tx
+                .get(&target)?
+                .ok_or_else(|| Fault::missing("allocation not found"))?;
+            crate::recovery::validate(p, &allocation.request, &r.resolution)?;
+            if crate::recovery::already(tx, p, &target, &r.resolution)? {
+                if tx
+                    .get::<AllocationResolution>(&key(
+                        "allocation_reconciliation",
+                        &[&r.resolution.request_id],
+                    ))?
+                    .as_ref()
+                    != Some(r)
+                {
+                    return Err(Fault::conflict(
+                        "allocation reconciliation changed its observed binding",
+                    ));
+                }
+                return Ok(allocation);
+            }
+            if !matches!(allocation.state.as_str(), "unknown" | "release_unknown") {
+                return Err(Fault::conflict(
+                    "allocation is not awaiting operator reconciliation",
+                ));
+            }
+            if r.resolution.output.is_some() || r.resolution.result.is_some() {
+                return Err(Fault::invalid(
+                    "allocation recovery uses observed_binding, not model output or tool results",
+                ));
+            }
+            if r.resolution.status == TurnStatus::Completed {
+                if allocation.state == "release_unknown" {
+                    if r.observed_binding.is_some() {
+                        return Err(Fault::invalid(
+                            "released allocation must have no observed binding",
+                        ));
+                    }
+                    allocation.state = "released".into();
+                    allocation.lease_until = 0;
+                } else {
+                    let binding = r.observed_binding.as_ref().ok_or_else(|| {
+                        Fault::invalid("acquired allocation requires an observed executor binding")
+                    })?;
+                    if binding.id != allocation.id
+                        || binding.sandbox_id != allocation.id
+                        || binding.generation != 1
+                    {
+                        return Err(Fault::conflict("observed allocation identity differs"));
+                    }
+                    self.config.endpoint(&binding.executor)?;
+                    allocation.binding = Some(binding.clone());
+                    allocation.state = "attaching".into();
+                }
+            } else {
+                allocation.state = "failed".into();
+                allocation.error = Some(Fault::new(
+                    "operator_resolved",
+                    "allocation closed by operator; create an explicit new session",
+                ));
+            }
+            tx.put(&target, &allocation)?;
+            crate::recovery::record(tx, p, &target, &r.resolution)?;
+            // Include the observed binding in the durable audit, not only in current state.
+            tx.put(
+                &key("allocation_reconciliation", &[&r.resolution.request_id]),
+                r,
+            )?;
+            Ok(allocation)
+        })
+    }
+    pub async fn renew(&self, session: &str) -> Result<Allocation> {
+        let _lock = self.lock.lock().await;
+        let mut allocation = self.get(session)?;
+        if allocation.state != "ready" {
+            return Err(Fault::conflict("allocation is not ready for lease renewal"));
+        }
+        let binding = allocation
+            .binding
+            .as_ref()
+            .ok_or_else(|| Fault::conflict("allocation has no executor binding"))?;
+        let lease: WorkspaceLease = self
+            .client
+            .in_sandbox(&allocation.id)?
+            .post(
+                &binding.executor,
+                &format!("/v1/workspaces/{}/renew", segment(&binding.id)),
+                &RenewLease {
+                    session_id: session.into(),
+                    generation: binding.generation,
+                },
+            )
+            .await?;
+        if lease.session_id != session
+            || lease.workspace_id != binding.id
+            || lease.generation != binding.generation
+        {
+            return Err(Fault::conflict("executor renewed a different lease"));
+        }
+        allocation.lease_until = lease.expires_at;
+        self.store
+            .transaction(|tx| tx.put(&key("allocation", &[session]), &allocation))?;
+        Ok(allocation)
+    }
     pub fn new(config: Arc<Config>, store: Store) -> Result<Self> {
         Ok(Self {
             client: Client::new(config.clone())?,
@@ -53,6 +164,7 @@ impl Sandboxes {
             }
             None => {
                 let allocation = Allocation {
+                    resource_uid: None,
                     id: format!(
                         "akh-{}",
                         &crate::digest(request.session_id.as_bytes())[..32]
@@ -69,7 +181,10 @@ impl Sandboxes {
                 allocation
             }
         };
-        if allocation.state == "released" || allocation.state == "retained" {
+        if matches!(
+            allocation.state.as_str(),
+            "released" | "retained" | "failed" | "release_unknown"
+        ) {
             return Err(Fault::conflict(
                 "allocation was released; create a new session to allocate again",
             ));
@@ -81,8 +196,12 @@ impl Sandboxes {
             ));
         }
         if allocation.state == "ready" {
-            allocation.lease_until = now_ms() + 300_000;
-            self.store.transaction(|tx| tx.put(&k, &allocation))?;
+            if allocation.lease_until <= now_ms() {
+                return Err(Fault::new(
+                    "expired",
+                    "allocation lease expired; no implicit reacquisition",
+                ));
+            }
             return Ok(allocation);
         }
         let result: Result<WorkspaceBinding> = async {
@@ -103,7 +222,7 @@ impl Sandboxes {
                     let path = format!("{}/{}", resource.trim_end_matches('/'), segment(&allocation.id));
                     let object: Value = match self.client.get(api, &path).await {
                         Ok(object) => object,
-                        Err(error) if error.code == "not_found" => {
+                        Err(error) if error.code == "not_found" && allocation.resource_uid.is_none() => {
                             let mut object = template.clone();
                             object["metadata"]["name"] = json!(allocation.id); object["metadata"]["namespace"] = json!(namespace);
                             object["metadata"]["labels"]["akh.dev/allocation"] = json!(allocation.id);
@@ -116,6 +235,10 @@ impl Sandboxes {
                     if object["metadata"]["annotations"]["akh.dev/session"] != request.session_id || object["metadata"]["annotations"]["akh.dev/profile-revision"] != profile.revision {
                         return Err(Fault::conflict("existing Kubernetes resource has a different owner/profile"));
                     }
+                    let uid=object["metadata"]["uid"].as_str().ok_or_else(||Fault::invalid("Kubernetes resource has no UID"))?;
+                    if allocation.resource_uid.as_deref().is_some_and(|old|old!=uid) {return Err(Fault::conflict("Kubernetes allocation was replaced by another resource"));}
+                    allocation.resource_uid=Some(uid.into()); self.store.transaction(|tx|tx.put(&k,&allocation))?;
+                    if object["status"]["observedGeneration"].as_u64().zip(object["metadata"]["generation"].as_u64()).is_some_and(|(observed,current)|observed<current) {return Err(Fault::new("busy","Kubernetes controller has not observed this generation"));}
                     let ready = object["status"]["conditions"].as_array().is_some_and(|conditions|conditions.iter().any(|c|c["type"] == "Ready" && c["status"] == "True"));
                     if !ready { return Err(Fault::new("busy", "sandbox resource is not ready")); }
                     Ok(WorkspaceBinding { id: allocation.id.clone(), sandbox_id: allocation.id.clone(), executor: executor.clone(), generation: 1, site: profile.site.clone(), root: format!("/workspaces/{}",allocation.id), platform: "unobserved".into(), confinement: "unobserved".into() })
@@ -187,30 +310,42 @@ impl Sandboxes {
         if matches!(allocation.state.as_str(), "released" | "retained") {
             return Ok(allocation);
         }
+        if matches!(
+            allocation.state.as_str(),
+            "unknown" | "release_unknown" | "failed"
+        ) {
+            return Err(Fault::new(
+                "unknown_outcome",
+                "resolve the allocation outcome before releasing it",
+            ));
+        }
         let profile = self
             .config
             .workspaces
             .get(&allocation.request.profile)
             .ok_or_else(|| Fault::missing("workspace profile not found"))?;
+        let binding = allocation
+            .binding
+            .as_ref()
+            .ok_or_else(|| Fault::conflict("cannot release an unresolved allocation"))?;
+        let _: Value = self
+            .client
+            .in_sandbox(&allocation.id)?
+            .post(
+                &binding.executor,
+                &format!("/v1/workspaces/{}/release", segment(&binding.id)),
+                &json!({"session_id":session,"generation":binding.generation}),
+            )
+            .await?;
         if profile.retain_on_release {
             allocation.state = "retained".into();
         } else {
-            let binding = allocation
-                .binding
-                .as_ref()
-                .ok_or_else(|| Fault::conflict("cannot release an unresolved allocation"))?;
-            let _: Value = self
-                .client
-                .in_sandbox(&allocation.id)?
-                .post(
-                    &binding.executor,
-                    &format!("/v1/workspaces/{}/release", segment(&binding.id)),
-                    &json!({"session_id":session,"generation":binding.generation}),
-                )
-                .await?;
             match &profile.provisioner {
                 Provisioner::Existing { .. } => {} // Retain files for explicit operator-controlled deletion.
                 Provisioner::Command { release, .. } => {
+                    allocation.state = "release_unknown".into();
+                    self.store
+                        .transaction(|tx| tx.put(&key("allocation", &[session]), &allocation))?;
                     let _: Value = command(release, &json!({"operation":"release","allocation_id":allocation.id,"session_id":session})).await?;
                 }
                 Provisioner::Kubernetes { api, resource, .. } => {
@@ -224,7 +359,7 @@ impl Sandboxes {
                                 resource.trim_end_matches('/'),
                                 segment(&allocation.id)
                             ),
-                            Some(json!({"propagationPolicy":"Foreground"})),
+                            Some(json!({"propagationPolicy":"Foreground","preconditions":{"uid":allocation.resource_uid.as_ref().ok_or_else(||Fault::conflict("cannot delete allocation without observed Kubernetes UID"))?}})),
                         )
                         .await;
                     if let Err(error) = result {
@@ -257,45 +392,26 @@ pub async fn command<T: serde::de::DeserializeOwned>(argv: &[String], input: &Va
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let mut child = command
-        .spawn()
-        .map_err(|_| Fault::new("provisioner", "adapter could not start"))?;
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let bytes = serde_json::to_vec(input).map_err(|e| Fault::invalid(e.to_string()))?;
-    let reader = tokio::spawn(async move {
-        let mut bytes = vec![];
-        stdout
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map(|_| bytes)
-    });
-    let operation = async {
-        stdin.write_all(&bytes).await?;
-        stdin.shutdown().await?;
-        drop(stdin);
-        child.wait().await
-    };
-    let status = tokio::time::timeout(Duration::from_secs(120), operation)
-        .await
-        .map_err(|_| Fault::new("unknown_outcome", "provisioner timed out"))?
-        .map_err(|_| Fault::new("unknown_outcome", "provisioner wait failed"))?;
-    if !status.success() {
-        reader.abort();
-        return Err(Fault::new(
+    let input = serde_json::to_vec(input).map_err(|e| Fault::invalid(e.to_string()))?;
+    if input.len() > 1024 * 1024 {
+        return Err(Fault::invalid("provisioner input exceeds 1 MiB"));
+    }
+    let bytes = crate::process::output_with_input(
+        command,
+        Some(input),
+        Duration::from_secs(120),
+        1024 * 1024,
+    )
+    .await
+    .map_err(|e| {
+        Fault::new(
             "unknown_outcome",
-            "provisioner exited unsuccessfully; inspect the named allocation",
-        ));
-    }
-    let bytes = tokio::time::timeout(Duration::from_secs(5), reader)
-        .await
-        .map_err(|_| Fault::new("unknown_outcome", "provisioner output remains open"))?
-        .map_err(|_| Fault::new("provisioner", "output reader failed"))?
-        .map_err(|_| Fault::new("provisioner", "output read failed"))?;
-    if bytes.len() > 1024 * 1024 {
-        return Err(Fault::invalid("provisioner output exceeds 1 MiB"));
-    }
+            format!(
+                "provisioner {}: inspect the named allocation before retry",
+                e.code
+            ),
+        )
+    })?;
     serde_json::from_slice(&bytes)
         .map_err(|_| Fault::invalid("provisioner output does not match the allocation contract"))
 }

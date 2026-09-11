@@ -225,3 +225,27 @@ by these fixture results.
   continuation, private profile locking/config preservation, and bounded helper
   output with timeout teardown of descendant processes. These are local protocol
   and failure tests, not native-provider certification.
+
+### Recovery, leases and upstream restarts
+
+- Added [explicit operator recovery](recovery.md) for runtime jobs, executor
+  receipts, external tool outcomes, command allocations and helper processes.
+  Resolution records bind the authenticated admin and evidence to the original
+  request. They never rerun the old operation. Session ingestion checks the
+  original dispatch and the digest of previously accepted runtime events.
+- Workspace leases now expire at the executor. Open sessions renew through the
+  sandbox manager; expiry fences effects and stops owned processes/helpers.
+  Archival preserves session history, blocks new input and reconciles release.
+  Retention still revokes executor access. Kubernetes deletion is UID-fenced.
+- Helpers support explicit stop, reconcile and idempotent restart with an
+  optional new profile revision. Their existing upstream environment identity
+  and private login/config directory survive restart. Administrative subprocess
+  input/output and process-group teardown are bounded.
+- Added per-endpoint private CA support, runtime event/answer byte budgets and
+  bounded HTTP shutdown. The `akh-fingerprint` helper computes request digests
+  for recovery; its separate `admin` feature carries no provider or broker.
+- Local tests pass for executor recovery and lease expiry, immutable runtime
+  replay, and a Kubernetes API fixture that rejects deletion of a replacement
+  UID. The six-process smoke additionally passes helper stop/restart/deduplication,
+  environment identity preservation, lease renewal and archival cleanup. The
+  Kubernetes fixture is not a real controller/sandbox deployment.

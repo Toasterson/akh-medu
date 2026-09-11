@@ -60,7 +60,7 @@ pub struct Executor {
     pub config: Arc<Config>,
     root: Arc<Workspace>,
     processes: Arc<Mutex<HashMap<String, Arc<RunningProcess>>>>,
-    mutations: Arc<Mutex<()>>,
+    pub(crate) mutations: Arc<Mutex<()>>,
 }
 
 fn receipt_key(id: &str) -> String {
@@ -73,6 +73,124 @@ fn argument<'a>(args: &'a Value, name: &str) -> Result<&'a str> {
 }
 
 impl Executor {
+    pub fn renew_lease(&self, id: &str, request: &RenewLease) -> Result<WorkspaceLease> {
+        let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.transaction(|tx| {
+            let k = key("lease", &[id]);
+            let mut lease: WorkspaceLease = tx
+                .get(&k)?
+                .ok_or_else(|| Fault::missing("workspace lease not found"))?;
+            if lease.session_id != request.session_id || lease.generation != request.generation {
+                return Err(Fault::new(
+                    "forbidden",
+                    "workspace lease owner/generation mismatch",
+                ));
+            }
+            if lease.expires_at <= now_ms()
+                || tx.get::<bool>(&key("released", &[id]))?.unwrap_or(false)
+            {
+                return Err(Fault::new(
+                    "expired",
+                    "workspace lease expired or was released; no implicit reacquisition",
+                ));
+            }
+            lease.expires_at = now_ms() + 300_000;
+            tx.put(&k, &lease)?;
+            Ok(lease)
+        })
+    }
+    pub fn valid_lease(&self, id: &str) -> Result<()> {
+        let lease: WorkspaceLease = self.store.get(&key("lease", &[id]))?.ok_or_else(|| {
+            Fault::new(
+                "expired",
+                "workspace has no lease; explicit recovery is required",
+            )
+        })?;
+        if lease.expires_at <= now_ms() {
+            return Err(Fault::new(
+                "expired",
+                "workspace lease expired; effects are fenced",
+            ));
+        }
+        Ok(())
+    }
+    pub fn expire_leases(&self) -> Result<()> {
+        for lease in self.store.scan::<WorkspaceLease>("lease/")? {
+            if lease.expires_at > now_ms() {
+                continue;
+            }
+            for (id, process) in self
+                .processes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+            {
+                if self.receipt(id)?.request.workspace_id == lease.workspace_id {
+                    process.cancel.store(true, Ordering::SeqCst);
+                }
+            }
+            // stop_services is idempotent and reports busy until every helper stopped.
+            if let Err(error) = self.stop_services(&lease.workspace_id) {
+                if error.code != "busy" {
+                    tracing::warn!(workspace=%lease.workspace_id,code=%error.code,"expired workspace helper requires inspection");
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn reconcile(
+        &self,
+        p: &crate::config::Principal,
+        id: &str,
+        resolution: &Reconciliation,
+    ) -> Result<OperationReceipt> {
+        crate::http::role(p, "admin")?;
+        let _mutations = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
+        let processes = self.processes.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.transaction(|tx| {
+            let target = receipt_key(id);
+            let mut receipt: OperationReceipt = tx
+                .get(&target)?
+                .ok_or_else(|| Fault::missing("receipt not found"))?;
+            crate::recovery::validate(p, &receipt.request, resolution)?;
+            if crate::recovery::already(tx, p, &target, resolution)? {
+                return Ok(receipt);
+            }
+            for active in processes.keys() {
+                if tx
+                    .get::<OperationReceipt>(&receipt_key(active))?
+                    .is_some_and(|r| r.request.workspace_id == receipt.request.workspace_id)
+                {
+                    return Err(Fault::new(
+                        "busy",
+                        "workspace still has active executor processes",
+                    ));
+                }
+            }
+            if receipt.status != TurnStatus::Unknown {
+                return Err(Fault::conflict(
+                    "only an unknown operation can be reconciled",
+                ));
+            }
+            let mut result = resolution.result.clone().ok_or_else(|| {
+                Fault::invalid("operation reconciliation requires its inspected result")
+            })?;
+            if result.success != (resolution.status == TurnStatus::Completed)
+                || resolution.output.is_some()
+            {
+                return Err(Fault::invalid(
+                    "receipt success must match the resolved status",
+                ));
+            }
+            result.receipt = Some(receipt.id.clone());
+            receipt.status = resolution.status;
+            receipt.result = Some(result);
+            receipt.finished_at = Some(now_ms());
+            tx.put(&target, &receipt)?;
+            crate::recovery::record(tx, p, &target, resolution)?;
+            Ok(receipt)
+        })
+    }
     pub fn new(config: Arc<Config>, store: Store) -> Result<Self> {
         let path = config
             .workspace_root
@@ -150,10 +268,22 @@ impl Executor {
                     binding: binding.clone(),
                 },
             )?;
+            tx.put(
+                &key("lease", &[&binding.id]),
+                &WorkspaceLease {
+                    session_id: request.session_id.clone(),
+                    workspace_id: binding.id.clone(),
+                    generation: binding.generation,
+                    expires_at: now_ms() + 300_000,
+                },
+            )?;
             Ok(binding)
         })
     }
     fn workspace(&self, request: &WorkspaceOperation) -> Result<Workspace> {
+        if !matches!(request.operation.as_str(), "exec_poll" | "exec_cancel") {
+            self.valid_lease(&request.workspace_id)?;
+        }
         if self
             .store
             .get::<bool>(&key("released", &[&request.workspace_id]))?
@@ -192,6 +322,13 @@ impl Executor {
     }
 
     pub fn release(&self, id: &str, session: &str, generation: u64) -> Result<serde_json::Value> {
+        let allocation: AttachWorkspace = self
+            .store
+            .get(&key("workspace", &[id]))?
+            .ok_or_else(|| Fault::missing("workspace not found"))?;
+        if allocation.session_id != session || allocation.binding.generation != generation {
+            return Err(Fault::new("forbidden", "workspace binding mismatch"));
+        }
         self.stop_services(id)?;
         let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
         self.store.transaction(|tx| {

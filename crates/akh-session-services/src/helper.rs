@@ -46,6 +46,22 @@ pub fn private_directory(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(io)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(io)
 }
+pub fn owner_lock(manifest: &Manifest) -> Result<std::fs::File> {
+    private_directory(&manifest.state_dir)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(manifest.state_dir.join("owner.lock"))
+        .map_err(io)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(Fault::new("busy", "upstream helper still owns its process"));
+    }
+    Ok(file)
+}
 
 pub fn expand(value: &str, manifest: &Manifest) -> String {
     value
@@ -188,17 +204,7 @@ pub async fn supervise(manifest: Manifest) -> Result<()> {
         ));
     }
     private_directory(&manifest.state_dir)?;
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(manifest.state_dir.join("owner.lock"))
-        .map_err(io)?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err(Fault::conflict("a helper already owns this environment"));
-    }
+    let lock = owner_lock(&manifest)?;
     if let Ok(previous) = status(&manifest) {
         if !matches!(previous.state.as_str(), "stopped" | "failed") {
             return Err(Fault::new(
@@ -240,6 +246,7 @@ pub async fn supervise(manifest: Manifest) -> Result<()> {
             ));
         }
     };
+    let child_group = child.id().expect("spawned child has PID") as i32;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .redirect(reqwest::redirect::Policy::none())
@@ -272,11 +279,17 @@ pub async fn supervise(manifest: Manifest) -> Result<()> {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
             }
+            unsafe {
+                libc::kill(-child_group, libc::SIGKILL);
+            }
             status.state = "stopped".into();
             status.access = None;
             break;
         }
         if let Some(exit) = child.try_wait().map_err(io)? {
+            unsafe {
+                libc::kill(-child_group, libc::SIGKILL);
+            }
             status.state = "failed".into();
             status.access = None;
             status.error = Some(Fault::new(

@@ -7,6 +7,7 @@ this invocation. No deployed services or existing workspace are changed.
 import argparse
 import concurrent.futures
 import json
+import hashlib
 import os
 import pathlib
 import secrets
@@ -158,6 +159,17 @@ def main():
             offered=request('akhsessd',path+f'/services/{access[0]["id"]}/actions/pair',{})
             assert '/pair#token=fixture-only' in offered['output']
 
+            helper_id=access[0]['id']
+            request('akhexecd',f'/v1/services/{helper_id}/stop',{})
+            wait(lambda:request('akhexecd',f'/v1/services/{helper_id}')['state']=='stopped','upstream helper stop')
+            manifest=json.loads((root/'akhexecd/helpers'/helper_id/'manifest.json').read_text())
+            fingerprint=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+            restart={'request_id':'restart-1','expected_manifest_sha256':fingerprint}
+            request('akhexecd',f'/v1/services/{helper_id}/restart',restart)
+            restarted=wait(lambda:(s if (s:=request('akhexecd',f'/v1/services/{helper_id}'))['state']=='ready' else None),'upstream helper restart')
+            assert restarted['access']['environment_id']==access[0]['environment_id']
+            assert request('akhexecd',f'/v1/services/{helper_id}/restart',restart)['state']=='ready'
+
             if args.core_bin:
                 wait(lambda:any(e['kind']=='cognitive_turn_accepted' for e in request('akhsessd',path+'/events')),'cognitive accepted-turn receipt')
                 assert any(e['kind']=='context_prepared' for e in request('akhsessd',path+'/events'))
@@ -178,7 +190,13 @@ def main():
             events=request('akhsessd',path+'/events')
             sequences=[e['sequence'] for e in events]
             assert sequences==sorted(set(sequences))
-            print(json.dumps({'result':'passed','processes':len(services)+bool(args.core_bin),'checks':['authentication','duplicate admission','approval before write','session restart','workspace receipt','editor/executor shared files','helper readiness and pairing','exact continuation','cancellation','webhook dedupe and delivery','ordered replay'],'provider':'deterministic fixture; native conformance not claimed'}))
+            lease=request('akhsbxd',f'/v1/allocations/{sid}/renew',{})
+            assert lease['lease_until']>int(time.time()*1000)
+            archived=request('akhsessd',path+'/archive',{})
+            assert archived['closed_at'] is not None
+            wait(lambda:request('akhsbxd',f'/v1/allocations/{sid}')['state']=='released','archived workspace release')
+            assert (workspace/'marker').exists(), 'existing provisioner must retain files after lease release'
+            print(json.dumps({'result':'passed','processes':len(services)+bool(args.core_bin),'checks':['authentication','duplicate admission','approval before write','session restart','workspace receipt','editor/executor shared files','helper readiness, pairing and idempotent restart','exact continuation','cancellation','webhook dedupe and delivery','ordered replay','executor lease renewal','archive and upstream shutdown'],'provider':'deterministic fixture; native conformance not claimed'}))
         except BaseException:
             for name in logs:
                 print(f'--- {name} ---\n{(root/f"{name}.log").read_text()}')

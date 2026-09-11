@@ -100,11 +100,7 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
         ));
     }
     let mut visited = std::collections::HashSet::new();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| Fault::new("transport", "HTTP client initialization failed"))?;
+    let client = config.sessions.http_client()?;
     loop {
         let response = client
             .get(

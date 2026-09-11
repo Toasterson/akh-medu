@@ -220,6 +220,8 @@ pub struct TurnRecord {
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
     #[serde(default)]
+    pub closed_at: Option<u64>,
+    #[serde(default)]
     pub core_service: Option<String>,
     pub schema_version: u16,
     pub id: String,
@@ -650,6 +652,8 @@ pub struct Allocate {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Allocation {
+    #[serde(default)]
+    pub resource_uid: Option<String>,
     pub request: Allocate,
     pub id: String,
     pub profile_revision: String,
@@ -692,4 +696,48 @@ pub struct HelperStatus {
     pub heartbeat: u64,
     pub error: Option<Fault>,
     pub access: Option<WorkspaceAccessDescriptor>,
+}
+
+/// An operator's explicit resolution of an uncertain outcome. This does not
+/// instruct a service to retry effects. Evidence is recorded with the caller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Reconciliation {
+    pub request_id: String,
+    pub expected_request_sha256: String,
+    pub status: TurnStatus,
+    pub quiescent: bool,
+    pub evidence: Vec<String>,
+    pub output: Option<String>,
+    pub result: Option<ToolResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceLease {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub generation: u64,
+    pub expires_at: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenewLease {
+    pub session_id: String,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AllocationResolution {
+    pub resolution: Reconciliation,
+    pub observed_binding: Option<WorkspaceBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceRestart {
+    pub request_id: String,
+    pub expected_manifest_sha256: String,
+    pub profile: Option<ServiceProfile>,
 }

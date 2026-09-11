@@ -140,10 +140,30 @@ fn one_active_turn_unknown_outcome_blocks_next_dispatch_and_stale_generation_is_
         provider_session: Some("native-session".into()),
         output: None,
         error: Some(Fault::new("unknown", "worker disconnected")),
-        events: vec![],
+        events: vec![RuntimeEvent::Text {
+            text: "observed".into(),
+        }],
     };
     s.apply_job(&job).unwrap();
     assert!(s.next_job(&session.id).unwrap().is_none());
+    let mut altered = job.clone();
+    altered.events[0] = RuntimeEvent::Text {
+        text: "rewritten".into(),
+    };
+    assert!(
+        s.apply_job(&altered)
+            .unwrap_err()
+            .message
+            .contains("rewrote")
+    );
+    altered = job.clone();
+    altered.request.input.text = "different request".into();
+    assert!(
+        s.apply_job(&altered)
+            .unwrap_err()
+            .message
+            .contains("exact persisted")
+    );
     job.status = TurnStatus::Completed;
     job.output = Some("reconciled".into());
     job.error = None;

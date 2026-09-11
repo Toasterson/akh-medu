@@ -12,9 +12,27 @@ pub fn sandbox_router(service: Sandboxes) -> Router {
             .route("/v1/allocations", post(allocate))
             .route("/v1/allocations/{id}", get(allocation))
             .route("/v1/allocations/{id}/release", post(release_allocation))
+            .route("/v1/allocations/{id}/renew", post(renew_allocation))
+            .route("/v1/allocations/{id}/reconcile", post(reconcile_allocation))
             .with_state(service),
         config,
     )
+}
+async fn reconcile_allocation(
+    State(service): State<Sandboxes>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<AllocationResolution>,
+) -> Api<Allocation> {
+    Ok(Json(service.reconcile(&p, &id, &request).await?))
+}
+async fn renew_allocation(
+    State(service): State<Sandboxes>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<Allocation> {
+    http::role(&p, "session")?;
+    Ok(Json(service.renew(&id).await?))
 }
 async fn allocate(
     State(service): State<Sandboxes>,

@@ -17,14 +17,60 @@ pub fn executor_router(executor: Executor) -> Router {
         Router::new()
             .route("/v1/services", post(launch_service))
             .route("/v1/services/{id}", get(service_status))
+            .route("/v1/services/{id}/stop", post(stop_service))
+            .route("/v1/services/{id}/reconcile", post(reconcile_service))
+            .route("/v1/services/{id}/restart", post(restart_service))
             .route("/v1/services/{id}/actions/{action}", post(service_action))
             .route("/v1/workspaces", post(attach_workspace))
             .route("/v1/workspaces/{id}/release", post(release_workspace))
+            .route("/v1/workspaces/{id}/renew", post(renew_lease))
             .route("/v1/operations", post(operation))
             .route("/v1/operations/{id}", get(receipt))
+            .route("/v1/operations/{id}/reconcile", post(reconcile_receipt))
             .with_state(executor),
         config,
     )
+}
+async fn stop_service(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<HelperStatus> {
+    http::role(&p, "admin")?;
+    Ok(Json(crate::helper::stop(&executor.service_manifest(&id)?)?))
+}
+async fn reconcile_service(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<Reconciliation>,
+) -> Api<HelperStatus> {
+    Ok(Json(executor.reconcile_service(&p, &id, &request)?))
+}
+async fn restart_service(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<ServiceRestart>,
+) -> Api<HelperStatus> {
+    Ok(Json(executor.restart_service(&p, &id, &request)?))
+}
+async fn renew_lease(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<RenewLease>,
+) -> Api<WorkspaceLease> {
+    http::role(&p, "sandbox")?;
+    Ok(Json(executor.renew_lease(&id, &request)?))
+}
+async fn reconcile_receipt(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<Reconciliation>,
+) -> Api<OperationReceipt> {
+    Ok(Json(executor.reconcile(&p, &id, &request)?))
 }
 async fn launch_service(
     State(executor): State<Executor>,

@@ -101,6 +101,15 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         "akhexecd" => {
             let executor = Executor::new(config.clone(), store)?;
             executor_cleanup = Some(executor.clone());
+            let worker = executor.clone();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    if let Err(error) = worker.expire_leases() {
+                        tracing::error!(code=%error.code,"workspace lease reconciliation failed");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }));
             executor_router(executor)
         }
         #[cfg(feature = "sandbox")]
@@ -126,11 +135,16 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let router=router.route("/healthz",get(move||{let identity=identity.clone();async move{Json(json!({"service_id":identity,"schema_version":SCHEMA_VERSION,"status":"listening"}))}}));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(service=%config.service_id,address=%listener.local_addr()?,"service listening");
-    axum::serve(listener, router)
+    use std::future::IntoFuture;
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, router)
         .with_graceful_shutdown(async {
-            shutdown().await;
+            let _ = stopped.await;
         })
-        .await?;
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! { result=&mut server=>{return Ok(result?);}, _=shutdown()=>{} }
+    let _ = stop.send(());
     for task in tasks {
         task.abort();
     }
@@ -141,6 +155,12 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     #[cfg(feature = "executor")]
     if let Some(executor) = executor_cleanup {
         executor.cancel_all();
+    }
+    match tokio::time::timeout(std::time::Duration::from_secs(10), server).await {
+        Ok(result) => result?,
+        Err(_) => tracing::warn!(
+            "HTTP drain deadline reached; unresolved durable work remains fenced on restart"
+        ),
     }
     Ok(())
 }

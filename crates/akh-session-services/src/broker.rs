@@ -33,6 +33,53 @@ pub struct Broker {
     lock: Arc<tokio::sync::Mutex<()>>,
 }
 impl Broker {
+    pub async fn reconcile_tool(
+        &self,
+        p: &Principal,
+        call: &ToolCall,
+        resolution: &Reconciliation,
+    ) -> Result<ToolResult> {
+        crate::http::role(p, "admin")?;
+        let _lock = self.lock.lock().await;
+        self.sessions.store.transaction(|tx| {
+            let target = record_key(call);
+            let mut record: ToolRecord = tx
+                .get(&target)?
+                .ok_or_else(|| Fault::missing("tool record not found"))?;
+            if record.call != *call {
+                return Err(Fault::conflict("tool call differs from persisted request"));
+            }
+            crate::recovery::validate(p, call, resolution)?;
+            if crate::recovery::already(tx, p, &target, resolution)? {
+                return record
+                    .result
+                    .ok_or_else(|| Fault::conflict("resolved tool has no result"));
+            }
+            if !record.unknown && !(record.sent && record.result.is_none()) {
+                return Err(Fault::conflict("tool result is already known"));
+            }
+            if matches!(record.destination, ToolDestination::Workspace { .. }) {
+                return Err(Fault::invalid(
+                    "reconcile workspace effects at akhexecd; its receipt remains authoritative",
+                ));
+            }
+            let result = resolution.result.clone().ok_or_else(|| {
+                Fault::invalid("tool reconciliation requires an inspected result")
+            })?;
+            if result.success != (resolution.status == TurnStatus::Completed)
+                || resolution.output.is_some()
+            {
+                return Err(Fault::invalid(
+                    "tool success must match its resolved status",
+                ));
+            }
+            record.result = Some(result.clone());
+            record.unknown = false;
+            tx.put(&target, &record)?;
+            crate::recovery::record(tx, p, &target, resolution)?;
+            Ok(result)
+        })
+    }
     pub fn new(sessions: Sessions) -> Result<Self> {
         Ok(Self {
             client: Client::new(sessions.config.clone())?,
@@ -218,7 +265,35 @@ impl Broker {
             "tool",
             &[&job.request.session_id, &job.request.turn_id],
         ))?;
-        for record in records {
+        for mut record in records {
+            if (record.unknown || (record.sent && record.result.is_none()))
+                && matches!(record.destination, ToolDestination::Workspace { .. })
+            {
+                let workspace = &job.request.workspace;
+                let receipt: OperationReceipt = self
+                    .client
+                    .in_sandbox(&workspace.sandbox_id)?
+                    .get(
+                        &workspace.executor,
+                        &format!("/v1/operations/{}", segment(&record.operation_id)),
+                    )
+                    .await?;
+                if receipt.request.session_id != job.request.session_id
+                    || receipt.request.turn_id != job.request.turn_id
+                    || receipt.id != record.operation_id
+                {
+                    return Err(Fault::conflict(
+                        "executor recovery receipt belongs to another turn",
+                    ));
+                }
+                if receipt.status.terminal() {
+                    record.result = receipt.result;
+                    record.unknown = false;
+                    self.sessions
+                        .store
+                        .transaction(|tx| tx.put(&record_key(&record.call), &record))?;
+                }
+            }
             if record.unknown || (record.sent && record.result.is_none()) {
                 job.status = TurnStatus::Unknown;
                 job.error = Some(Fault::new("unknown_outcome", "tool outcome is unresolved"));

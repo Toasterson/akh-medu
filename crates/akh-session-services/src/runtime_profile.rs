@@ -8,6 +8,30 @@ use std::{
 };
 
 pub fn acquire(profile: &ProviderConfig) -> Result<File> {
+    if profile.timeout_secs == 0
+        || !profile.working_dir.is_absolute()
+        || !profile.working_dir.is_dir()
+    {
+        return Err(Fault::invalid(
+            "runtime requires a positive timeout and an existing absolute working directory",
+        ));
+    }
+    if profile.kind != RuntimeKind::Internal {
+        if !profile.binary.is_absolute() || !profile.binary.is_file() {
+            return Err(Fault::invalid(
+                "runtime requires an installed absolute provider executable",
+            ));
+        }
+        if profile.kind == RuntimeKind::Claude
+            && [profile.node_binary.as_ref(), profile.bridge_script.as_ref()]
+                .iter()
+                .any(|p| p.is_none_or(|p| !p.is_absolute() || !p.is_file()))
+        {
+            return Err(Fault::invalid(
+                "Claude requires installed absolute Node and bridge paths",
+            ));
+        }
+    }
     let scope = profile.isolation.as_ref().ok_or_else(|| {
         Fault::invalid("dedicated runtimes require an explicit private isolation directory")
     })?;
@@ -23,6 +47,7 @@ pub fn acquire(profile: &ProviderConfig) -> Result<File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(scope.directory.join("owner.lock"))
         .map_err(|_| Fault::new("profile_io", "profile owner lock could not be opened"))?;
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
@@ -113,7 +138,7 @@ mod tests {
     #[test]
     fn isolated_environment_config_ownership_and_exclusive_login() {
         let dir = tempfile::tempdir().unwrap();
-        let mut profile:ProviderConfig=serde_json::from_value(serde_json::json!({"revision":"1","kind":"claude","working_dir":dir.path(),"binary":"/usr/bin/false","isolation":{"directory":dir.path().join("profile"),"managed_files":{"claude/settings.json":"{}"}}})).unwrap();
+        let mut profile:ProviderConfig=serde_json::from_value(serde_json::json!({"revision":"1","kind":"codex","working_dir":dir.path(),"binary":"/usr/bin/false","isolation":{"directory":dir.path().join("profile"),"managed_files":{"claude/settings.json":"{}"}}})).unwrap();
         let lease = acquire(&profile).unwrap();
         assert_eq!(acquire(&profile).unwrap_err().code, "busy");
         let env = akh_runtime::profile::environment(&profile).unwrap();

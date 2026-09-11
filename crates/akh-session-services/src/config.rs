@@ -11,13 +11,18 @@ use std::{
 pub struct Endpoint {
     pub url: String,
     pub token_file: PathBuf,
+    pub ca_file: Option<PathBuf>,
     #[serde(default)]
     pub allow_insecure_http: bool,
 }
 
 impl Endpoint {
     pub fn validate(&self) -> Result<()> {
-        let url = url::Url::parse(&self.url).map_err(|_| Fault::invalid("invalid service URL"))?;
+        let expanded = self.url.replace("{sandbox}", "allocated");
+        if expanded.contains(['{', '}']) {
+            return Err(Fault::invalid("unknown service URL placeholder"));
+        }
+        let url = url::Url::parse(&expanded).map_err(|_| Fault::invalid("invalid service URL"))?;
         let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
         if !url.username().is_empty()
             || url.password().is_some()
@@ -33,7 +38,27 @@ impl Endpoint {
         if !self.token_file.is_absolute() {
             return Err(Fault::invalid("token_file must be absolute"));
         }
+        if self.ca_file.as_ref().is_some_and(|p| !p.is_absolute()) {
+            return Err(Fault::invalid("ca_file must be absolute"));
+        }
         Ok(())
+    }
+    pub fn http_client(&self) -> Result<reqwest::Client> {
+        self.validate()?;
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(path) = &self.ca_file {
+            let pem =
+                std::fs::read(path).map_err(|_| Fault::invalid("service CA could not be read"))?;
+            let certificate = reqwest::Certificate::from_pem(&pem)
+                .map_err(|_| Fault::invalid("service CA is invalid PEM"))?;
+            builder = builder.add_root_certificate(certificate);
+        }
+        builder
+            .build()
+            .map_err(|_| Fault::new("transport", "HTTP client initialization failed"))
     }
     pub fn token(&self) -> Result<String> {
         read_token(&self.token_file)
