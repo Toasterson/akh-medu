@@ -481,12 +481,9 @@ impl ServerState {
     ///
     /// The akh config is the existing per-workspace config file parsed as an
     /// [`AkhConfig`]; a legacy workspace-only TOML loads with all akh-level
-    /// fields defaulted, and a missing file yields a name-only default — so this
-    /// never fails for a workspace that opens. A *malformed* config is **not**
-    /// fatal: it logs a `tracing::warn!` (naming the file and parse error) and
-    /// falls back to name-only defaults, mirroring [`Self::get_engine`]'s
-    /// tolerance of a broken workspace TOML so a bad `akh.toml` can't keep the
-    /// whole ACP server from starting.
+    /// fields defaulted, and a missing file yields a name-only default. A malformed
+    /// existing config refuses this workspace: dropping a selected provider or
+    /// executor would silently change the model or execution permissions.
     async fn get_akh_config(&self, name: &str) -> Result<Arc<AkhConfig>, String> {
         {
             let map = self.akh_configs.read().await;
@@ -497,26 +494,8 @@ impl ServerState {
 
         let config_path = self.paths.workspace_config_file(name);
         let cfg = if config_path.exists() {
-            match AkhConfig::load(&config_path) {
-                Ok(cfg) => cfg,
-                // A malformed akh.toml (e.g. a hand-written file missing the
-                // required `name`) used to abort ACP startup. Match get_engine's
-                // forgiveness: warn loudly so a real misconfiguration is still
-                // visible, then fall back to name-only defaults. Note this
-                // silently drops any akh-level settings the file *did* parse
-                // (model pin, system prompt, endpoint) — fix the file to apply them.
-                Err(e) => {
-                    tracing::warn!(
-                        workspace = %name,
-                        config = %config_path.display(),
-                        error = %e,
-                        "akh.toml failed to parse; falling back to name-only akh \
-                         defaults (model pin, system prompt, and endpoint settings \
-                         are ignored until the file is fixed)"
-                    );
-                    AkhConfig::with_name(name)
-                }
-            }
+            AkhConfig::load(&config_path)
+                .map_err(|e| format!("workspace {name}: {}: {e}", config_path.display()))?
         } else {
             tracing::debug!(
                 workspace = %name,
@@ -2751,6 +2730,19 @@ impl ServerState {
         let akh_config = self.get_akh_config(name).await?;
         let host_exec = self.config.read().await.exec.clone();
         let exec_kind = akh_config.effective_exec(host_exec.as_ref());
+        // Coding runtimes execute under the local daemon identity. They cannot
+        // substitute for an explicitly disabled, remote, or privilege-dropped executor.
+        if matches!(
+            akh_config.backend,
+            akh_medu::akh_config::ChatBacking::Codex | akh_medu::akh_config::ChatBacking::Claude
+        ) && !matches!(
+            exec_kind,
+            akh_medu::akh_config::ExecBackendConfig::InProcess
+        ) {
+            return Err(format!(
+                "workspace {name}: coding-agent runtimes require exec kind in-process; the configured executor cannot be bypassed"
+            ));
+        }
 
         let mut agent = tokio::task::spawn_blocking({
             let engine = Arc::clone(&engine);
@@ -2961,6 +2953,26 @@ impl ServerState {
             }
             Ok(None) => {}
             Err(e) => return Err(format!("workspace {name}: {e}")),
+        }
+
+        if let Some(kind) = akh_medu::agent::runtime::RuntimeKind::from_backing(akh_config.backend)
+        {
+            let config = akh_config.agent_runtime.clone().ok_or_else(|| {
+                format!(
+                    "workspace {name}: backend {} requires [agent_runtime]",
+                    kind.label()
+                )
+            })?;
+            let runtime = akh_medu::agent::runtime::AgentRuntime::new(
+                kind,
+                config,
+                akh_config.model.clone(),
+                akh_config.reasoning_effort.clone(),
+                akh_config.system_prompt.clone(),
+            )
+            .map_err(|e| format!("workspace {name}: {e}"))?;
+            agent.set_agent_runtime(runtime);
+            tracing::info!(workspace = %name, backend = kind.label(), "coding-agent runtime attached");
         }
 
         // Phase 44b/c/h/i (extended ADR 081 slice 7): assemble each turn through
@@ -3472,16 +3484,8 @@ impl akh_medu::acp::ServerControl for ServerState {
                 let p = nlu.lock().unwrap_or_else(|e| e.into_inner());
                 akh_medu::chat::ChatProcessor::new(&engine, p.clone())
             };
-            // `get_akh_config` never fails in practice (a missing/malformed
-            // akh.toml falls back to name-only defaults — see its doc), so a
-            // real Err here is unexpected; fall back to the graceful-degrade
-            // default rather than let a config hiccup fail workspace
-            // resolution entirely.
-            let require_pushed_mcp = self
-                .get_akh_config(workspace)
-                .await
-                .map(|cfg| cfg.mcp.require_pushed_mcp)
-                .unwrap_or(false);
+            // Preserve the configured MCP requirement when resolving a provider.
+            let require_pushed_mcp = self.get_akh_config(workspace).await?.mcp.require_pushed_mcp;
             Ok(akh_medu::acp::WorkspaceHandles {
                 engine,
                 agent,
@@ -3700,6 +3704,25 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("default");
                     let cfg = self.get_akh_config(ws).await?;
+                    if let Some(kind) =
+                        akh_medu::agent::runtime::RuntimeKind::from_backing(cfg.backend)
+                    {
+                        return Ok(serde_json::json!({
+                            "backend": kind.label(), "current": cfg.model,
+                            "effort": cfg.reasoning_effort,
+                            "models": cfg.model.iter().collect::<Vec<_>>(),
+                            "error": "Provider model discovery is not available here; set an explicit provider model ID or keep its default",
+                        }));
+                    }
+                    if let Some(openai) = cfg.to_openai_config().map_err(|e| e.to_string())? {
+                        let models = akh_medu::agent::openai_backend::OpenAiClient::new(openai)
+                            .list_models();
+                        return Ok(serde_json::json!({
+                            "backend":"openai", "current":cfg.model, "effort":cfg.reasoning_effort,
+                            "models":models.as_ref().cloned().unwrap_or_default(),
+                            "error":models.err().map(|e| e.to_string()),
+                        }));
+                    }
                     let mm = cfg.to_model_manager_config();
                     let current = mm.ollama.model.clone();
                     let effort = mm.ollama.reasoning_effort.clone();
@@ -3741,11 +3764,11 @@ impl akh_medu::acp::ServerControl for ServerState {
                         );
                     }
 
-                    // (a) Load the akh config (fall back to name-only defaults
-                    //     so a missing/broken akh.toml still applies the change).
+                    // (a) Preserve the selected provider and fail on malformed configuration.
                     let config_path = self.paths.workspace_config_file(&ws);
-                    let mut cfg = AkhConfig::load(&config_path)
-                        .unwrap_or_else(|_| AkhConfig::with_name(&ws));
+                    let mut cfg = (*self.get_akh_config(&ws).await?).clone();
+                    let runtime_kind =
+                        akh_medu::agent::runtime::RuntimeKind::from_backing(cfg.backend);
 
                     // (b) Apply the requested fields.
                     if let Some(m) = &model {
@@ -3758,6 +3781,9 @@ impl akh_medu::acp::ServerControl for ServerState {
                             _ if VALID_THINK_LEVELS.contains(&normalized.as_str()) => {
                                 cfg.reasoning_effort = Some(normalized)
                             }
+                            "xhigh" if runtime_kind.is_some() => {
+                                cfg.reasoning_effort = Some(normalized)
+                            }
                             other => {
                                 return Err(format!(
                                     "unknown reasoning effort \"{other}\" (expected {}|off)",
@@ -3766,6 +3792,25 @@ impl akh_medu::acp::ServerControl for ServerState {
                             }
                         }
                     }
+
+                    let runtime = runtime_kind
+                        .map(|kind| {
+                            let config = cfg
+                                .agent_runtime
+                                .clone()
+                                .ok_or("missing [agent_runtime]".to_owned())?;
+                            akh_medu::agent::runtime::AgentRuntime::new(
+                                kind,
+                                config,
+                                cfg.model.clone(),
+                                cfg.reasoning_effort.clone(),
+                                cfg.system_prompt.clone(),
+                            )
+                        })
+                        .transpose()?;
+                    let openai = cfg.to_openai_config().map_err(|e| e.to_string())?;
+                    // Resolve the configured executor before persisting the update.
+                    let agent = self.get_agent(&ws).await?;
 
                     // (c) Persist akh.toml.
                     cfg.save(&config_path)
@@ -3779,11 +3824,21 @@ impl akh_medu::acp::ServerControl for ServerState {
                     //     uses the new model/effort. ADR-027: the agent
                     //     std::sync::Mutex is locked only synchronously (no await
                     //     held across the lock).
-                    let agent = self.get_agent(&ws).await?;
                     {
                         let mut a = agent.write().unwrap_or_else(|e| e.into_inner());
                         a.set_model_manager(Arc::new(AgentModelManager::new(mm_config)));
                         a.register_with_model_manager(&ws, &ws);
+                        if let Some(runtime) = runtime {
+                            a.set_agent_runtime(runtime);
+                        }
+                        if let Some(openai) = openai {
+                            a.set_chat_backend(Arc::new(
+                                akh_medu::agent::openai_backend::OpenAiChatBackend::new(
+                                    openai,
+                                    cfg.system_prompt.clone(),
+                                ),
+                            ));
+                        }
                     }
 
                     // Refresh the cached akh.toml so subsequent reads (and the
@@ -4664,6 +4719,20 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn malformed_provider_config_refuses_instead_of_using_defaults() {
+        let (_tmp, state) = temp_state();
+        let path = state.paths.workspace_config_file("codex-test");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "name = 'codex-test'\nbackend = 'codex'\n[agent_runtime]\nworking_dir = 42\n",
+        )
+        .unwrap();
+        assert!(state.get_akh_config("codex-test").await.is_err());
+        assert!(!state.akh_configs.read().await.contains_key("codex-test"));
     }
 
     async fn install_non_cooperative_daemon_owner(state: &ServerState, name: &str) {

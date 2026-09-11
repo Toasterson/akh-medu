@@ -469,6 +469,17 @@ impl ToolRegistry {
         *self.asker.lock().unwrap() = None;
     }
 
+    /// Resolve an upstream runtime's approval through this session's client.
+    /// An upstream approval is never converted into permission by Bypass mode.
+    pub(crate) fn approve_runtime_action(&self, manifest: &ToolManifest, summary: &str) -> bool {
+        if self.permission_mode() == super::permission::PermissionMode::Plan {
+            return false;
+        }
+        let session = self.with_session_state(|state| state.map(|state| state.asker.clone()));
+        let asker = session.unwrap_or_else(|| self.asker.lock().unwrap().clone());
+        asker.is_some_and(|asker| asker.ask(manifest, summary))
+    }
+
     /// Register a tool. Caches its manifest on registration.
     /// If a tool with the same name exists, it is replaced.
     pub fn register(&self, tool: Box<dyn Tool>) {

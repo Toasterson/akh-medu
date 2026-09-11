@@ -98,6 +98,10 @@ pub struct ConversationState {
     pub grammar: String,
     /// How much detail to include in responses.
     pub response_detail: ResponseDetail,
+    /// Provider session identity belongs to this conversation, never the akh.
+    /// Recreated on daemon restart; provider credentials are never copied here.
+    #[serde(skip)]
+    pub(crate) runtime_session: Option<super::runtime::RuntimeSession>,
     /// KG triple keys `(s, p, o)` already injected into this session's context
     /// (Phase 44d delta refresh). Ephemeral + session-scoped: skipped from
     /// serialization so a resumed session re-injects its grounding fresh.
@@ -116,6 +120,7 @@ impl ConversationState {
             active_topic: None,
             grammar: grammar.into(),
             response_detail: ResponseDetail::default(),
+            runtime_session: None,
             kg_seen: std::collections::HashSet::new(),
         }
     }
