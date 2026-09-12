@@ -738,7 +738,15 @@ fn metadata_lines() -> Vec<(String, String)> {
     let mut lines = vec![
         ("schema_version".to_string(), CSV_SCHEMA_VERSION.to_string()),
         ("source".to_string(), "bench_context_rot".to_string()),
-        ("git_commit".to_string(), env!("VERGEN_GIT_SHA").to_string()),
+        (
+            "git_commit".to_string(),
+            // `env!` would assert at *compile time* that vergen (or a manual
+            // build.rs) set the var; this crate has no build script wiring for
+            // it, so `env!` is a guaranteed build failure. `option_env!`
+            // compiles everywhere and degrades gracefully when provenance is
+            // absent, while letting CI inject it via `-D env:VERGEN_GIT_SHA`.
+            option_env!("VERGEN_GIT_SHA").unwrap_or("unknown").to_string(),
+        ),
     ];
     if let Ok(branch) = std::env::var("AKH_BENCH_GIT_BRANCH") {
         lines.push(("git_branch".to_string(), branch));
