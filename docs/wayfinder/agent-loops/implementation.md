@@ -406,3 +406,19 @@ by these fixture results.
 - Akh replays an already-recorded input acknowledgement after its turn advances;
   this does not reapply permission or revive a turn. A supplied input generation
   is checked before the decision. Stale or different answers remain rejected.
+
+### Anima follow-up entry points and recovery worker
+
+- Anima's thread messages and work-item description edits recognize existing
+  central owners and queue immutable commands using their persisted source IDs
+  and authenticated actor. An uncertain central/AMQP delivery cannot fall back
+  to another physical owner or a future assignment. Attachments are rejected
+  explicitly on the central text-only route.
+- `ANIMA_AKH_SESSIONS_CONFIG` enables a bounded continuation recovery worker for
+  already-authorized outbox records. Exact configured contracts select credentials;
+  stored endpoints cannot redirect them. The worker retries admission, commands,
+  revocation and closing intent, and imports the journal into the existing outbox.
+- Server checks and local HTTP/database tests cover the actual prompt router,
+  restarted background worker and cancellation progress during uncertain prompt
+  delivery. The new scheduler allocation route, UI Stop/permission controls,
+  canonical result/retirement path and activity projection remain to be wired.
