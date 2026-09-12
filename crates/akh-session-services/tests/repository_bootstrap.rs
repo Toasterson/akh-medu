@@ -54,6 +54,267 @@ fn git(cwd: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
+#[cfg(feature = "session")]
+async fn verify_session_publications(
+    app: &akh_session_services::server::SessionApp,
+    owner: &akh_session_services::config::Principal,
+    session: &str,
+    snapshot_request: &str,
+    head: &str,
+    remote: &Path,
+    executor: &Executor,
+    lost: &AtomicBool,
+    drop_send: &AtomicBool,
+) -> publication::PublishSessionRepository {
+    use akh_session_services::server::{SessionApp, session_router};
+    use axum::{
+        body::{Body, to_bytes},
+        http::Request,
+    };
+    use publication::{PublishSessionRepository, SessionPublication};
+    use tower::ServiceExt;
+    let request = PublishSessionRepository {
+        request_id: new_id(),
+        snapshot_request_id: snapshot_request.into(),
+        branch_ref: "refs/heads/anima/native-session-result".into(),
+    };
+    let mut other = owner.clone();
+    other.id = "different-owner".into();
+    assert_eq!(
+        app.sessions
+            .prepare_publication(&other, session, &request)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    other = owner.clone();
+    other.roles = vec!["client".into(), "session_bootstrap".into()];
+    assert_eq!(
+        app.sessions
+            .prepare_publication(&other, session, &request)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    let queued = app
+        .sessions
+        .prepare_publication(owner, session, &request)
+        .unwrap();
+    assert!(queued.dispatched_at.is_none() && queued.receipt.is_none());
+    assert!(app.sessions.archive(owner, session).is_err());
+    let mut changed = request.clone();
+    changed.branch_ref.push_str("-other");
+    assert_eq!(
+        app.sessions
+            .prepare_publication(owner, session, &changed)
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    let bearer = std::fs::read_to_string(&owner.token_file).unwrap();
+    let response = session_router(app.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/sessions/{session}/repository/publications"))
+                .header("authorization", format!("Bearer {bearer}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+    assert!(lost.load(Ordering::SeqCst));
+    assert_eq!(git(remote, &["rev-parse", &request.branch_ref]), head);
+    let sent = app
+        .sessions
+        .publication(owner, session, &request.request_id)
+        .unwrap();
+    assert!(sent.dispatched_at.is_some() && sent.receipt.is_none());
+    assert!(app.sessions.archive(owner, session).is_err());
+    // The session has no active model turns. A restarted dispatcher still
+    // recovers the original receipt without sending another publication.
+    let restarted =
+        SessionApp::new(app.sessions.config.clone(), app.sessions.store.clone()).unwrap();
+    let dispatch = tokio::spawn(restarted.clone().run_dispatcher());
+    let mut completed = None;
+    for _ in 0..200 {
+        let action = restarted
+            .sessions
+            .publication(owner, session, &request.request_id)
+            .unwrap();
+        if action.settled() {
+            completed = Some(action);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    dispatch.abort();
+    let _ = dispatch.await;
+    let completed = completed.expect("dispatcher did not recover native publication");
+    assert!(
+        completed
+            .receipt
+            .as_ref()
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap()
+            .success
+    );
+    assert_eq!(
+        restarted
+            .publish_repository(owner, session, &request)
+            .await
+            .unwrap(),
+        completed
+    );
+    assert_eq!(
+        executor
+            .store
+            .scan::<OperationReceipt>("receipt/")
+            .unwrap()
+            .iter()
+            .filter(|r| r.request.operation == "git_publish")
+            .count(),
+        1
+    );
+    let response = session_router(restarted.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/sessions/{session}/repository/publications/{}",
+                    request.request_id
+                ))
+                .header("authorization", format!("Bearer {bearer}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let returned: SessionPublication =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(returned, completed);
+
+    let lost_request = PublishSessionRepository {
+        request_id: new_id(),
+        branch_ref: "refs/heads/anima/never-admitted".into(),
+        ..request.clone()
+    };
+    drop_send.store(true, Ordering::SeqCst);
+    assert_eq!(
+        restarted
+            .publish_repository(owner, session, &lost_request)
+            .await
+            .unwrap_err()
+            .code,
+        "transport"
+    );
+    let uncertain = restarted
+        .sessions
+        .publication(owner, session, &lost_request.request_id)
+        .unwrap();
+    assert!(uncertain.dispatched_at.is_some() && uncertain.receipt.is_none());
+    assert!(!uncertain.settled());
+    for _ in 0..2 {
+        assert_eq!(
+            restarted
+                .publish_repository(owner, session, &lost_request)
+                .await
+                .unwrap(),
+            uncertain
+        );
+    }
+    assert_eq!(
+        executor.receipt(&uncertain.operation.id).unwrap_err().code,
+        "not_found"
+    );
+    let unsent_request = PublishSessionRepository {
+        request_id: new_id(),
+        branch_ref: "refs/heads/anima/cancel-before-send".into(),
+        ..request.clone()
+    };
+    restarted
+        .sessions
+        .prepare_publication(owner, session, &unsent_request)
+        .unwrap();
+    restarted
+        .sessions
+        .retire(
+            owner,
+            session,
+            None,
+            &RetireSession {
+                request_id: new_id(),
+                reason: "owned publication fixture complete".into(),
+            },
+        )
+        .unwrap();
+    let cancelled = restarted
+        .sessions
+        .publication(owner, session, &unsent_request.request_id)
+        .unwrap();
+    assert!(
+        cancelled.cancelled_at.is_some()
+            && cancelled.dispatched_at.is_none()
+            && cancelled.receipt.is_none()
+    );
+    assert_eq!(
+        restarted
+            .publish_repository(owner, session, &unsent_request)
+            .await
+            .unwrap(),
+        cancelled
+    );
+    assert!(restarted.sessions.archive(owner, session).is_err());
+    let fresh = PublishSessionRepository {
+        request_id: new_id(),
+        ..request.clone()
+    };
+    assert!(
+        restarted
+            .sessions
+            .prepare_publication(owner, session, &fresh)
+            .is_err()
+    );
+    let mut admin = owner.clone();
+    admin.roles = vec!["admin".into()];
+    let resolution=Reconciliation {request_id:new_id(), expected_request_sha256:akh_session_services::recovery::fingerprint(&uncertain.operation).unwrap(),
+        quiescent:true, status:TurnStatus::Cancelled, result:None, output:None,
+        evidence:vec!["Owned fault peer discarded this HTTP request before forwarding; sender returned and dispatcher was joined".into()]};
+    assert!(
+        restarted
+            .reconcile_publication(owner, session, &lost_request.request_id, &resolution)
+            .await
+            .is_err()
+    );
+    let settled = restarted
+        .reconcile_publication(&admin, session, &lost_request.request_id, &resolution)
+        .await
+        .unwrap();
+    assert!(settled.cancelled_at.is_some() && settled.receipt.is_none());
+    assert_eq!(
+        restarted
+            .reconcile_publication(&admin, session, &lost_request.request_id, &resolution)
+            .await
+            .unwrap(),
+        settled
+    );
+    restarted.sessions.archive(owner, session).unwrap();
+    assert_eq!(
+        restarted
+            .publish_repository(owner, session, &request)
+            .await
+            .unwrap(),
+        completed
+    );
+    assert_eq!(git(remote, &["rev-parse", &request.branch_ref]), head);
+    request
+}
+
 #[tokio::test]
 async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_existing_files() {
     use axum::{
@@ -93,6 +354,7 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
             .args([
                 "daemon",
                 "--export-all",
+                "--enable=receive-pack",
                 "--reuseaddr",
                 "--listen=127.0.0.1",
                 &format!("--port={}", git_address.port()),
@@ -121,7 +383,8 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
     let executor_config:Config=serde_json::from_value(json!({
         "service_id":"executor","listen":"127.0.0.1:0","data_dir":dir.path().join("executor"),"workspace_root":workspaces,
         "git_snapshot":{"executable":"/usr/bin/git","executable_sha256":akh_session_services::digest(&std::fs::read("/usr/bin/git").unwrap())},
-        "principals":[{"id":"sandbox","roles":["sandbox"],"token_file":token}]
+        "git_publication":[{"repository":repository,"branch_prefixes":["refs/heads/anima/"]}],
+        "principals":[{"id":"sandbox","roles":["sandbox","repository_publish"],"token_file":token}]
     })).unwrap();
     let executor = Executor::new(
         Arc::new(executor_config),
@@ -133,12 +396,25 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
     let lose = lost.clone();
     let lost_snapshot = Arc::new(AtomicBool::new(false));
     let lose_snapshot = lost_snapshot.clone();
+    let lost_publication = Arc::new(AtomicBool::new(false));
+    let lose_publication = lost_publication.clone();
+    let drop_publication = Arc::new(AtomicBool::new(false));
+    let drop_send = drop_publication.clone();
     let router = executor_router(executor.clone()).layer(middleware::from_fn(
         move |request: Request, next: Next| {
             let lose = lose.clone();
             let lose_snapshot = lose_snapshot.clone();
+            let lose_publication = lose_publication.clone();
+            let drop_send = drop_send.clone();
             async move {
-                let operation = request.uri().path() == "/v1/operations";
+                let publication = request.uri().path() == "/v1/repository-publications";
+                if publication && drop_send.swap(false, Ordering::SeqCst) {
+                    return Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from("fixture discarded before executor admission"))
+                        .unwrap();
+                }
+                let operation = publication || request.uri().path() == "/v1/operations";
                 let response = next.run(request).await;
                 if !operation {
                     return response;
@@ -146,6 +422,14 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
                 let (parts, body) = response.into_parts();
                 let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
                 if let Ok(receipt) = serde_json::from_slice::<OperationReceipt>(&bytes) {
+                    if receipt.request.operation == "git_publish"
+                        && !lose_publication.swap(true, Ordering::SeqCst)
+                    {
+                        return Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .body(Body::from("lost after publication receipt"))
+                            .unwrap();
+                    }
                     if receipt.request.operation == "git_snapshot"
                         && !lose_snapshot.swap(true, Ordering::SeqCst)
                     {
@@ -322,6 +606,8 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
         &repository,
         &revision,
         &lost_snapshot,
+        &lost_publication,
+        &drop_publication,
     )
     .await;
     sandbox.release("assigned").await.unwrap();
@@ -340,6 +626,8 @@ async fn verify_session_snapshots(
     repository: &str,
     base: &str,
     lost: &AtomicBool,
+    lost_publication: &AtomicBool,
+    drop_publication: &AtomicBool,
 ) {
     use akh_session_services::server::{SessionApp, session_router};
     use axum::{
@@ -350,7 +638,7 @@ async fn verify_session_snapshots(
     use tower::ServiceExt;
     let config: Config = serde_json::from_value(json!({
         "service_id":"sessions", "listen":"127.0.0.1:0", "data_dir":dir.join("sessions"),
-        "principals":[{"id":"owner","roles":["client","session_bootstrap"],"akhs":["test"],"token_file":token}],
+        "principals":[{"id":"owner","roles":["client","session_bootstrap","repository_publish"],"akhs":["test"],"token_file":token}],
         "endpoints":{"executor":{"url":endpoint,"token_file":token}},
         "akhs":{"test":{"bootstrap_repositories":[repository],"instructions":"test",
             "runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"codex","execution_mode":"colocated"},"workspace_profiles":["git"]}}
@@ -533,6 +821,18 @@ async fn verify_session_snapshots(
         )
         .unwrap();
     app.sessions.cancel(&owner, &session.id, &turn.id).unwrap();
+    let publication_request = verify_session_publications(
+        &app,
+        &owner,
+        &session.id,
+        &verified_request.request_id,
+        &head,
+        &dir.join("source.git"),
+        executor,
+        lost_publication,
+        drop_publication,
+    )
+    .await;
     app.sessions.archive(&owner, &session.id).unwrap();
     sandbox.release(&session.id).await.unwrap();
     assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
@@ -554,6 +854,10 @@ async fn verify_session_snapshots(
         assert!(Path::new(&probe).is_absolute());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let expected_publication = app
+            .sessions
+            .publication(&owner, &session.id, &publication_request.request_id)
+            .unwrap();
         let router = session_router(app);
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
@@ -578,7 +882,27 @@ async fn verify_session_snapshots(
                     .unwrap();
             assert_eq!(&remote, expected);
         }
+        let input = json!({"config":{"url":endpoint,"token_file":token,"ca_file":null,"automation":"fixture","source":"fixture"},
+            "checkout":{"repository":repository,"revision":base},"admission":{"session_id":session.id,"turn_id":turn.id},
+            "request_id":verified_request.request_id,"head":head,"expected_patch":verified_request.expected_patch,
+            "publication":{"request_id":publication_request.request_id,"branch_ref":publication_request.branch_ref}});
+        let result = akh_session_services::process::output_with_input(
+            tokio::process::Command::new(&probe),
+            Some(serde_json::to_vec(&input).unwrap()),
+            Duration::from_secs(20),
+            4 * 1024 * 1024,
+        )
+        .await;
+        if result.is_err() {
+            server.abort();
+        }
+        let observed: publication::SessionPublication =
+            serde_json::from_slice(&result.expect("native Anima publication client failed"))
+                .unwrap();
+        assert_eq!(observed, expected_publication);
         server.abort();
-        println!("Native Anima snapshot client verified the original archived executor receipt");
+        println!(
+            "Native Anima snapshot and publication clients verified original archived executor receipts"
+        );
     }
 }

@@ -203,7 +203,7 @@ impl Executor {
         let root = Arc::new(Workspace::open(path)?);
         store.transaction(|tx|{
             for mut receipt in tx.scan::<OperationReceipt>("receipt/")?{
-                if !receipt.status.terminal(){
+                if !receipt.status.terminal() && receipt.status != TurnStatus::Unknown {
                     receipt.status=if matches!(receipt.request.operation.as_str(),"read"|"list"|"search"|"exec_poll"|"git_snapshot"){TurnStatus::Failed}else{TurnStatus::Unknown};
                     receipt.result=Some(ToolResult{success:false,text:"Executor restarted before a durable terminal receipt. Reconcile the operation before further mutations.".into(),data:Some(json!({"code":"unknown_outcome"})),receipt:Some(receipt.id.clone())});
                     tx.put(&receipt_key(&receipt.id),&receipt)?;
@@ -441,6 +441,11 @@ impl Executor {
         receipt.finished_at = Some(now_ms());
         receipt.status = if result.is_ok() {
             TurnStatus::Completed
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.code == "unknown_outcome")
+        {
+            TurnStatus::Unknown
         } else {
             TurnStatus::Failed
         };
@@ -465,6 +470,8 @@ impl Executor {
     fn perform(&self, request: &WorkspaceOperation, ws: &Workspace) -> Result<Value> {
         let args = &request.arguments;
         match request.operation.as_str() {
+            "git_publish" => serde_json::to_value(self.publish_git(request, ws)?)
+                .map_err(|_| Fault::invalid("publication encoding failed")),
             "git_snapshot" => {
                 let profile = self.config.git_snapshot.as_ref().ok_or_else(|| {
                     Fault::new(

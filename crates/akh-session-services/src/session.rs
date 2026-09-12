@@ -243,6 +243,7 @@ impl Sessions {
                     json!({"status":status}),
                 )?;
             }
+            crate::session_publication::cancel_unsent(tx, id)?;
             Ok(retirement)
         })
     }
@@ -269,6 +270,7 @@ impl Sessions {
                     "cancel or reconcile outstanding turns before archiving",
                 ));
             }
+            crate::session_publication::ensure_settled(tx, id)?;
             session.closed_at = Some(now_ms());
             session.controller = None;
             append_event(tx, &mut session, None, "session_archived", json!({}))?;

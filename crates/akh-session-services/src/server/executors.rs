@@ -25,6 +25,7 @@ pub fn executor_router(executor: Executor) -> Router {
             .route("/v1/workspaces/{id}/release", post(release_workspace))
             .route("/v1/workspaces/{id}/renew", post(renew_lease))
             .route("/v1/operations", post(operation))
+            .route("/v1/repository-publications", post(publish_repository))
             .route("/v1/operations/{id}", get(receipt))
             .route("/v1/operations/{id}/reconcile", post(reconcile_receipt))
             .with_state(executor),
@@ -140,6 +141,13 @@ async fn operation(
     Extension(p): Extension<Principal>,
     Json(request): Json<WorkspaceOperation>,
 ) -> Api<OperationReceipt> {
+    if request.operation == "git_publish" {
+        return Err(Fault::new(
+            "forbidden",
+            "Git publication is a controller-owned operation",
+        )
+        .into());
+    }
     if !p.has_role("sandbox") {
         http::role(&p, "session")?;
     }
@@ -149,12 +157,27 @@ async fn operation(
             .map_err(|_| ApiError(Fault::new("executor", "operation worker failed")))??,
     ))
 }
+async fn publish_repository(
+    State(executor): State<Executor>,
+    Extension(p): Extension<Principal>,
+    Json(request): Json<WorkspaceOperation>,
+) -> Api<OperationReceipt> {
+    http::role(&p, "repository_publish")?;
+    if request.operation != "git_publish" {
+        return Err(Fault::invalid("expected Git publication operation").into());
+    }
+    Ok(Json(
+        tokio::task::spawn_blocking(move || executor.operate(request))
+            .await
+            .map_err(|_| ApiError(Fault::new("executor", "publication worker failed")))??,
+    ))
+}
 async fn receipt(
     State(executor): State<Executor>,
     Extension(p): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Api<OperationReceipt> {
-    if !p.has_role("sandbox") {
+    if !p.has_role("sandbox") && !p.has_role("repository_publish") {
         http::role(&p, "session")?;
     }
     Ok(Json(executor.receipt(&id)?))

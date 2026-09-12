@@ -129,7 +129,10 @@ impl SessionApp {
     }
 }
 
-fn validate_receipt(operation: &WorkspaceOperation, receipt: &OperationReceipt) -> Result<()> {
+pub(crate) fn validate_receipt(
+    operation: &WorkspaceOperation,
+    receipt: &OperationReceipt,
+) -> Result<()> {
     if receipt.id != operation.id || receipt.request != *operation {
         return Err(Fault::conflict(
             "executor returned another snapshot operation",

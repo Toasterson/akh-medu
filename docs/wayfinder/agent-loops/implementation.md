@@ -774,3 +774,23 @@ by these fixture results.
 - Remote Git/PR publication, canonical outcome/witness/closure composition and
   scheduler selection remain outstanding. All verification was local; no site,
   project route or production service was enabled.
+
+### Session-owned Git publication
+
+- The executor now publishes a verified snapshot only through a reserved role
+  and endpoint, an exact configured repository and a narrow work-branch scope.
+  It checks ancestry, uses a lease on the observed remote tip, and stores remote
+  availability separately from the push acknowledgement. Restart preserves an
+  existing unknown receipt rather than replacing its evidence.
+- The session records intent and dispatch before sending, reconciles receipts
+  even without active model turns, cancels unsent actions on retirement and
+  retains the workspace for uncertain publication. Missing receipts never
+  authorize replay. Audited cancellation of a lost send requires quiescence;
+  it cannot manufacture publication evidence.
+- Thirty-two focused Akh tests pass across executor, native Git, session and
+  native bootstrap/publication scenarios. The actual independent Anima client
+  also validates the original native publication after archival. Three Anima
+  client tests cover exact provenance and substituted/unknown response states.
+  See [publication contract](repository-publication.md) for configuration and
+  evidence boundaries. Canonical Anima publication selection, PRs, outcomes and
+  scheduler integration remain outstanding.

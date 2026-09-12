@@ -47,8 +47,20 @@ pub(crate) fn capture(
     profile: &GitSnapshotProfile,
     request: CaptureGitSnapshot,
 ) -> Result<GitSnapshot> {
-    profile.validate()?;
     request.validate()?;
+    let view = open_view(ws, profile, request.head_revision.len())?;
+    run_blocking(async move { capture_in(&view, request).await })
+}
+
+pub(crate) fn open_view(
+    ws: &Workspace,
+    profile: &GitSnapshotProfile,
+    oid_length: usize,
+) -> Result<View> {
+    profile.validate()?;
+    if !matches!(oid_length, 40 | 64) {
+        return Err(Fault::invalid("invalid Git object format"));
+    }
     if executable_digest(&profile.executable)? != profile.executable_sha256 {
         return Err(Fault::conflict(
             "configured Git executable fingerprint changed",
@@ -73,7 +85,37 @@ pub(crate) fn capture(
             "snapshot requires self-contained local Git objects",
         ));
     }
-    let profile = profile.clone();
+    let directory = tempfile::Builder::new()
+        .prefix("akh-git-view-")
+        .tempdir()
+        .map_err(|_| Fault::new("git_unavailable", "private Git view could not be created"))?;
+    let config = if oid_length == 64 {
+        "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n"
+    } else {
+        "[core]\nrepositoryformatversion = 0\nbare = true\n"
+    };
+    std::fs::write(directory.path().join("config"), config)
+        .and_then(|_| {
+            std::fs::write(
+                directory.path().join("HEAD"),
+                "ref: refs/heads/akh-snapshot\n",
+            )
+        })
+        .and_then(|_| std::fs::create_dir(directory.path().join("refs")))
+        .and_then(|_| std::fs::create_dir(directory.path().join("objects")))
+        .map_err(|_| Fault::new("git_unavailable", "private Git view initialization failed"))?;
+    Ok(View {
+        directory,
+        objects,
+        profile: profile.clone(),
+        network: None,
+        deadline: tokio::time::Instant::now() + TIMEOUT,
+    })
+}
+
+pub(crate) fn run_blocking<T: Send + 'static>(
+    future: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
     // operate() is synchronous and may also be called from a Tokio test/runtime.
     // Own this bounded read on another thread instead of nesting a runtime.
     std::thread::spawn(move || {
@@ -81,21 +123,25 @@ pub(crate) fn capture(
             .enable_all()
             .build()
             .map_err(|_| Fault::new("git_unavailable", "snapshot runtime unavailable"))?;
-        runtime.block_on(capture_inner(objects, profile, request))
+        runtime.block_on(future)
     })
     .join()
     .map_err(|_| Fault::new("git_unavailable", "snapshot worker failed"))?
 }
 
-struct View {
+pub(crate) struct View {
     directory: tempfile::TempDir,
     objects: File,
     profile: GitSnapshotProfile,
     deadline: tokio::time::Instant,
+    network: Option<crate::config::GitPublicationProfile>,
 }
 
 impl View {
-    async fn run(&self, args: &[&str], limit: usize) -> Result<Vec<u8>> {
+    pub(crate) fn enable_publication(&mut self, profile: crate::config::GitPublicationProfile) {
+        self.network = Some(profile);
+    }
+    pub(crate) async fn run(&self, args: &[&str], limit: usize) -> Result<Vec<u8>> {
         self.run_with_input(args, limit, None).await
     }
     async fn run_with_input(
@@ -145,8 +191,26 @@ impl View {
                 "core.commitGraph=false",
                 "-c",
                 "core.attributesFile=/dev/null",
-            ])
-            .args(args);
+            ]);
+        if let Some(profile) = &self.network {
+            let url = url::Url::parse(&profile.repository)
+                .map_err(|_| Fault::invalid("invalid publication repository"))?;
+            command
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    profile
+                        .config_file
+                        .as_deref()
+                        .unwrap_or_else(|| Path::new("/dev/null")),
+                )
+                .args([
+                    "-c",
+                    &format!("protocol.{}.allow=always", url.scheme()),
+                    "-c",
+                    "http.followRedirects=false",
+                ]);
+        }
+        command.args(args);
         // Anchor the child in the checked object directory. macOS /dev/fd/N
         // cannot be traversed as a directory path; fchdir works on both hosts.
         unsafe {
@@ -182,36 +246,10 @@ impl View {
     }
 }
 
-async fn capture_inner(
-    objects: File,
-    profile: GitSnapshotProfile,
+pub(crate) async fn capture_in(
+    view: &View,
     mut request: CaptureGitSnapshot,
 ) -> Result<GitSnapshot> {
-    let directory = tempfile::Builder::new()
-        .prefix("akh-git-snapshot-")
-        .tempdir()
-        .map_err(|_| Fault::new("git_unavailable", "private Git view could not be created"))?;
-    let config = if request.head_revision.len() == 64 {
-        "[core]\nrepositoryformatversion = 1\nbare = true\n[extensions]\nobjectformat = sha256\n"
-    } else {
-        "[core]\nrepositoryformatversion = 0\nbare = true\n"
-    };
-    std::fs::write(directory.path().join("config"), config)
-        .and_then(|_| {
-            std::fs::write(
-                directory.path().join("HEAD"),
-                "ref: refs/heads/akh-snapshot\n",
-            )
-        })
-        .and_then(|_| std::fs::create_dir(directory.path().join("refs")))
-        .and_then(|_| std::fs::create_dir(directory.path().join("objects")))
-        .map_err(|_| Fault::new("git_unavailable", "private Git view initialization failed"))?;
-    let view = View {
-        directory,
-        objects,
-        profile,
-        deadline: tokio::time::Instant::now() + TIMEOUT,
-    };
     let base = request.base_revision.as_str();
     let head = request.head_revision.as_str();
     let version = view.text(&["--version"], 256).await?;

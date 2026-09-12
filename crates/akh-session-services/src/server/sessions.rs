@@ -77,6 +77,7 @@ impl SessionApp {
         }
     }
     async fn tick_session(&self, session: SessionRecord) -> Result<()> {
+        self.reconcile_publications(&session.id).await?;
         if session.closed_at.is_some() {
             self.sessions.remove_archived_mcp_credentials(&session.id)?;
             if self
@@ -413,6 +414,18 @@ pub fn session_router(app: SessionApp) -> Router {
                 "/v1/sessions/{id}/repository/snapshots",
                 post(snapshot_repository),
             )
+            .route(
+                "/v1/sessions/{id}/repository/publications",
+                post(publish_repository),
+            )
+            .route(
+                "/v1/sessions/{id}/repository/publications/{request}",
+                get(publication),
+            )
+            .route(
+                "/v1/sessions/{id}/repository/publications/{request}/reconcile",
+                post(reconcile_publication),
+            )
             .route("/v1/sessions/{id}/input-decisions", post(decide_input))
             .route(
                 "/v1/sessions/{id}/mcp-credentials/{service}",
@@ -502,6 +515,32 @@ async fn snapshot_repository(
     Json(request): Json<repository::SnapshotSessionRepository>,
 ) -> Api<OperationReceipt> {
     Ok(Json(app.snapshot_repository(&p, &id, &request).await?))
+}
+async fn publish_repository(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<publication::PublishSessionRepository>,
+) -> Api<publication::SessionPublication> {
+    Ok(Json(app.publish_repository(&p, &id, &request).await?))
+}
+async fn publication(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path((id, request)): Path<(String, String)>,
+) -> Api<publication::SessionPublication> {
+    Ok(Json(app.sessions.publication(&p, &id, &request)?))
+}
+async fn reconcile_publication(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path((id, request)): Path<(String, String)>,
+    Json(resolution): Json<Reconciliation>,
+) -> Api<publication::SessionPublication> {
+    Ok(Json(
+        app.reconcile_publication(&p, &id, &request, &resolution)
+            .await?,
+    ))
 }
 async fn archive(
     State(app): State<SessionApp>,

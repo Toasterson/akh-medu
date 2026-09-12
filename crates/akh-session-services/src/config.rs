@@ -189,6 +189,40 @@ pub struct GitSnapshotProfile {
     pub executable_sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitPublicationProfile {
+    pub repository: String,
+    /// Full prefixes ending in '/', e.g. refs/heads/anima/. No blanket heads/.
+    pub branch_prefixes: Vec<String>,
+    pub config_file: Option<PathBuf>,
+}
+impl GitPublicationProfile {
+    pub fn validate(&self) -> Result<()> {
+        validate_repository(&self.repository)?;
+        if self.branch_prefixes.is_empty()
+            || self.branch_prefixes.len() > 32
+            || self
+                .config_file
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+        {
+            return Err(Fault::invalid(
+                "Git publication needs scoped branch prefixes and absolute private configuration",
+            ));
+        }
+        for prefix in &self.branch_prefixes {
+            publication::validate_branch(&format!("{prefix}probe"))?;
+            if !prefix.ends_with('/') || prefix == "refs/heads/" {
+                return Err(Fault::invalid(
+                    "publication prefix must select a work-branch namespace",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl GitSnapshotProfile {
     pub fn validate(&self) -> Result<()> {
         if !self.executable.is_absolute()
@@ -329,6 +363,8 @@ pub struct Config {
     pub workspace_root: Option<PathBuf>,
     #[serde(default)]
     pub git_snapshot: Option<GitSnapshotProfile>,
+    #[serde(default)]
+    pub git_publication: Vec<GitPublicationProfile>,
     #[serde(default = "unconfined")]
     pub confinement: String,
 }
@@ -351,6 +387,15 @@ impl Config {
         validate_key(&self.service_id)?;
         if let Some(profile) = &self.git_snapshot {
             profile.validate()?;
+        }
+        let mut repositories = std::collections::HashSet::new();
+        for profile in &self.git_publication {
+            profile.validate()?;
+            if self.git_snapshot.is_none() || !repositories.insert(&profile.repository) {
+                return Err(Fault::invalid(
+                    "Git publication needs a pinned Git installation and unique repository profiles",
+                ));
+            }
         }
         if !self.data_dir.is_absolute() || self.principals.is_empty() {
             return Err(Fault::invalid(

@@ -5,6 +5,99 @@ use akh_session_types::repository::GitSnapshot;
 use serde_json::json;
 use std::{path::Path, process::Command, sync::Arc};
 
+struct OwnedGit(std::process::Child);
+impl Drop for OwnedGit {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn publication_peer(fixture: &Fixture) -> (OwnedGit, String, std::path::PathBuf) {
+    let remote = fixture.dir.path().join("remote.git");
+    std::fs::create_dir(&remote).unwrap();
+    let format = if fixture.base.len() == 64 {
+        "sha256"
+    } else {
+        "sha1"
+    };
+    git(
+        &remote,
+        &[
+            "init",
+            "--bare",
+            "--template=",
+            &format!("--object-format={format}"),
+        ],
+    );
+    git(
+        &fixture.root(),
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{}:refs/heads/main", fixture.base),
+        ],
+    );
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let mut daemon = OwnedGit(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args([
+                "daemon",
+                "--export-all",
+                "--enable=receive-pack",
+                "--reuseaddr",
+                "--listen=127.0.0.1",
+                &format!("--port={}", address.port()),
+                &format!("--base-path={}", fixture.dir.path().display()),
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = false;
+    for _ in 0..100 {
+        assert!(daemon.0.try_wait().unwrap().is_none());
+        if std::net::TcpStream::connect(address).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(ready);
+    (daemon, format!("git://{address}/remote.git"), remote)
+}
+
+fn configure_publication(fixture: &mut Fixture, repository: &str) {
+    fixture.config.git_publication=vec![serde_json::from_value(json!({"repository":repository,"branch_prefixes":["refs/heads/anima/"],"config_file":null})).unwrap()];
+    fixture.config.validate().unwrap();
+    fixture.executor = Executor::new(
+        Arc::new(fixture.config.clone()),
+        fixture.executor.store.clone(),
+    )
+    .unwrap();
+}
+
+fn publication_request(
+    fixture: &Fixture,
+    id: &str,
+    repository: &str,
+    branch: &str,
+) -> WorkspaceOperation {
+    let mut request = fixture.request(id);
+    request.operation = "git_publish".into();
+    request.turn_id = "repository-publication".into();
+    request.arguments = json!({"snapshot_operation_id":"publication-source","repository":repository,"branch_ref":branch});
+    request
+}
+
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("/usr/bin/git")
         .current_dir(root)
@@ -422,4 +515,223 @@ fn native_submitted_patch_must_reproduce_exact_tree_without_changing_workspace_o
         assert_eq!(git(&fixture.root(), &["rev-parse", "HEAD"]), fixture.head);
         assert!(git(&fixture.root(), &["status", "--porcelain"]).is_empty());
     }
+}
+
+#[tokio::test]
+async fn native_publication_is_controller_owned_scoped_and_recovers_its_exact_receipt() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    for format in ["sha1", "sha256"] {
+        let mut fixture = Fixture::new(format);
+        let (_daemon, repository, remote) = publication_peer(&fixture);
+        fixture.capture("publication-source");
+        configure_publication(&mut fixture, &repository);
+        let token = fixture.dir.path().join("publisher-token");
+        std::fs::write(&token, "owned-publisher-capability-123456").unwrap();
+        let read_token = fixture.dir.path().join("reader-token");
+        std::fs::write(&read_token, "owned-reader-capability-123456").unwrap();
+        fixture.config.principals[0].token_file = token;
+        fixture.config.principals[0].roles = vec!["session".into(), "repository_publish".into()];
+        fixture.config.principals.push(
+            serde_json::from_value(
+                json!({"id":"reader","roles":["session"],"token_file":read_token}),
+            )
+            .unwrap(),
+        );
+        fixture.executor = Executor::new(
+            Arc::new(fixture.config.clone()),
+            fixture.executor.store.clone(),
+        )
+        .unwrap();
+        let router = akh_session_services::server::executor_router(fixture.executor.clone());
+        let request = publication_request(
+            &fixture,
+            "publication",
+            &repository,
+            "refs/heads/anima/work",
+        );
+        let call = |path: &str, capability: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("authorization", format!("Bearer {capability}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap()
+        };
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(call("/v1/operations", "owned-publisher-capability-123456"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(call(
+                    "/v1/repository-publications",
+                    "owned-reader-capability-123456"
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = router
+            .oneshot(call(
+                "/v1/repository-publications",
+                "owned-publisher-capability-123456",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt: OperationReceipt =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        assert!(
+            receipt.result.as_ref().unwrap().success,
+            "{:?}",
+            receipt.result
+        );
+        let published: publication::GitPublication =
+            serde_json::from_value(receipt.result.as_ref().unwrap().data.clone().unwrap()).unwrap();
+        assert!(published.push_acknowledged);
+        assert!(!published.already_present);
+        assert_eq!(published.previous_revision, None);
+        assert_eq!(published.observed_revision, fixture.head);
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/anima/work"]),
+            fixture.head
+        );
+        fixture.executor = Executor::new(
+            Arc::new(fixture.config.clone()),
+            fixture.executor.store.clone(),
+        )
+        .unwrap();
+        assert_eq!(fixture.executor.operate(request).unwrap(), receipt);
+        let another = fixture
+            .executor
+            .operate(publication_request(
+                &fixture,
+                "already-published",
+                &repository,
+                "refs/heads/anima/work",
+            ))
+            .unwrap();
+        let observed: publication::GitPublication =
+            serde_json::from_value(another.result.unwrap().data.unwrap()).unwrap();
+        assert!(observed.already_present);
+        assert!(!observed.push_acknowledged);
+        for (id, branch) in [
+            ("main", "refs/heads/main"),
+            ("tag", "refs/tags/v1"),
+            ("traversal", "refs/heads/anima/../main"),
+        ] {
+            assert!(
+                !fixture
+                    .executor
+                    .operate(publication_request(&fixture, id, &repository, branch))
+                    .unwrap()
+                    .result
+                    .unwrap()
+                    .success
+            );
+        }
+        let mut wrong = publication_request(
+            &fixture,
+            "wrong-snapshot",
+            &repository,
+            "refs/heads/anima/wrong",
+        );
+        wrong.arguments["snapshot_operation_id"] = json!("publication");
+        assert!(
+            !fixture
+                .executor
+                .operate(wrong)
+                .unwrap()
+                .result
+                .unwrap()
+                .success
+        );
+        assert_eq!(
+            git(&remote, &["rev-parse", "refs/heads/main"]),
+            fixture.base
+        );
+        assert!(git(&fixture.root(), &["status", "--porcelain"]).is_empty());
+    }
+}
+
+#[test]
+fn native_publication_preserves_a_racing_branch_and_fences_uncertain_writes_and_release() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new("sha1");
+    let (_daemon, repository, remote) = publication_peer(&fixture);
+    fixture.capture("publication-source");
+    configure_publication(&mut fixture, &repository);
+    git(&fixture.root(), &["checkout", "--detach", &fixture.base]);
+    std::fs::write(fixture.root().join("other.txt"), "another writer\n").unwrap();
+    git(&fixture.root(), &["add", "."]);
+    git(&fixture.root(), &["commit", "-m", "other writer"]);
+    let other = git(&fixture.root(), &["rev-parse", "HEAD"]);
+    git(
+        &fixture.root(),
+        &[
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{other}:refs/heads/other"),
+        ],
+    );
+    git(&fixture.root(), &["checkout", "--detach", &fixture.head]);
+    git(&remote, &["update-ref", "refs/heads/anima/ahead", &other]);
+    let before = fixture
+        .executor
+        .operate(publication_request(
+            &fixture,
+            "ahead",
+            &repository,
+            "refs/heads/anima/ahead",
+        ))
+        .unwrap();
+    assert_eq!(before.status, TurnStatus::Failed);
+    assert!(!before.result.unwrap().success);
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/anima/ahead"]),
+        other
+    );
+    git(
+        &remote,
+        &["update-ref", "refs/heads/anima/race", &fixture.base],
+    );
+    std::fs::create_dir_all(remote.join("hooks")).unwrap();
+    let hook = remote.join("hooks/pre-receive");
+    std::fs::write(&hook,format!("#!/bin/sh\nunset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES\n/usr/bin/git update-ref refs/heads/anima/race {other} {}\n",fixture.base)).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = publication_request(&fixture, "raced", &repository, "refs/heads/anima/race");
+    let receipt = fixture.executor.operate(request.clone()).unwrap();
+    assert_eq!(receipt.status, TurnStatus::Unknown, "{:?}", receipt.result);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/anima/race"]), other);
+    assert!(fixture.executor.release("workspace", "session", 1).is_err());
+    assert!(
+        fixture
+            .executor
+            .operate(fixture.request("later-write"))
+            .is_ok(),
+        "read snapshots remain available"
+    );
+    let mut write = fixture.request("write-after-unknown");
+    write.operation = "write".into();
+    write.arguments = json!({"path":"new.txt","content":"unconfirmed","create":true});
+    assert!(fixture.executor.operate(write).is_err());
+    fixture.executor = Executor::new(
+        Arc::new(fixture.config.clone()),
+        fixture.executor.store.clone(),
+    )
+    .unwrap();
+    assert_eq!(fixture.executor.operate(request).unwrap(), receipt);
 }
