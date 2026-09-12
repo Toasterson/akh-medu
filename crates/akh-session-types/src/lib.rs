@@ -760,6 +760,9 @@ pub struct RenewLease {
 pub struct AllocationResolution {
     pub resolution: Reconciliation,
     pub observed_binding: Option<WorkspaceBinding>,
+    /// Explicit inspection found no remaining allocation or late provisioner.
+    #[serde(default)]
+    pub observed_absent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

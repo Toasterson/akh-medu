@@ -300,3 +300,38 @@ fn expired_lease_fences_new_effects_and_cannot_be_renewed_implicitly() {
         "expired"
     );
 }
+
+#[test]
+fn release_before_attach_fences_delayed_delivery_and_survives_restart() {
+    let (dir, executor) = setup();
+    let request = AttachWorkspace {
+        session_id: "late-session".into(),
+        binding: WorkspaceBinding {
+            id: "late".into(),
+            sandbox_id: "sandbox".into(),
+            executor: "executor".into(),
+            generation: 1,
+            site: "test".into(),
+            root: dir
+                .path()
+                .join("workspaces/late")
+                .to_string_lossy()
+                .into_owned(),
+            platform: "unobserved".into(),
+            confinement: "unobserved".into(),
+        },
+    };
+    assert!(
+        executor.release("late", "late-session", 1).unwrap()["released"]
+            .as_bool()
+            .unwrap()
+    );
+    assert!(executor.release("late", "another-session", 1).is_err());
+    assert_eq!(executor.attach(&request).unwrap_err().code, "conflict");
+    let config = executor.config.clone();
+    drop(executor);
+    let executor =
+        Executor::new(config, Store::open(&dir.path().join("state.redb")).unwrap()).unwrap();
+    assert_eq!(executor.attach(&request).unwrap_err().code, "conflict");
+    assert!(!dir.path().join("workspaces/late").exists());
+}

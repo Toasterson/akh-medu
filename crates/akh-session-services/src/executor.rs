@@ -234,6 +234,11 @@ impl Executor {
         let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
         self.store.transaction(|tx| {
             let k = key("workspace", &[&request.binding.id]);
+            if tx.get::<bool>(&key("released", &[&request.binding.id]))? == Some(true) {
+                return Err(Fault::conflict(
+                    "workspace release fences delayed attachment",
+                ));
+            }
             if let Some(old) = tx.get::<AttachWorkspace>(&k)? {
                 let mut expected = request.clone();
                 expected.binding.root =
@@ -322,34 +327,57 @@ impl Executor {
     }
 
     pub fn release(&self, id: &str, session: &str, generation: u64) -> Result<serde_json::Value> {
-        let allocation: AttachWorkspace = self
-            .store
-            .get(&key("workspace", &[id]))?
-            .ok_or_else(|| Fault::missing("workspace not found"))?;
-        if allocation.session_id != session || allocation.binding.generation != generation {
-            return Err(Fault::new("forbidden", "workspace binding mismatch"));
+        validate_key(id)?;
+        validate_key(session)?;
+        if generation == 0 {
+            return Err(Fault::invalid("workspace generation must be positive"));
+        }
+        {
+            let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
+            self.store.transaction(|tx| {
+                if let Some(allocation) = tx.get::<AttachWorkspace>(&key("workspace", &[id]))? {
+                    if allocation.session_id != session
+                        || allocation.binding.generation != generation
+                    {
+                        return Err(Fault::new("forbidden", "workspace binding mismatch"));
+                    }
+                }
+                let intent_key = key("workspace_release", &[id]);
+                if let Some(old) = tx.get::<RenewLease>(&intent_key)? {
+                    if old.session_id != session || old.generation != generation {
+                        return Err(Fault::conflict(
+                            "workspace already revoked by another binding",
+                        ));
+                    }
+                }
+                if tx
+                    .scan::<OperationReceipt>("receipt/")?
+                    .iter()
+                    .any(|r| r.request.workspace_id == id && !r.status.terminal())
+                {
+                    return Err(Fault::conflict(
+                        "workspace still has running or unresolved operations",
+                    ));
+                }
+                // Fence new tools/helpers AND a delayed attach before waiting for
+                // helper shutdown. A missing binding is not proof no attach was sent.
+                tx.put(
+                    &intent_key,
+                    &RenewLease {
+                        session_id: session.into(),
+                        generation,
+                    },
+                )?;
+                tx.put(&key("released", &[id]), &true)?;
+                if let Some(mut lease) = tx.get::<WorkspaceLease>(&key("lease", &[id]))? {
+                    lease.expires_at = now_ms();
+                    tx.put(&key("lease", &[id]), &lease)?;
+                }
+                Ok(())
+            })?;
         }
         self.stop_services(id)?;
-        let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
-        self.store.transaction(|tx| {
-            let allocation: AttachWorkspace = tx
-                .get(&key("workspace", &[id]))?
-                .ok_or_else(|| Fault::missing("workspace not found"))?;
-            if allocation.session_id != session || allocation.binding.generation != generation {
-                return Err(Fault::new("forbidden", "workspace binding mismatch"));
-            }
-            if tx
-                .scan::<OperationReceipt>("receipt/")?
-                .iter()
-                .any(|r| r.request.workspace_id == id && !r.status.terminal())
-            {
-                return Err(Fault::conflict(
-                    "workspace still has running or unresolved operations",
-                ));
-            }
-            tx.put(&key("released", &[id]), &true)?;
-            Ok(json!({"released":true,"files_retained":true}))
-        })
+        Ok(json!({"released":true,"files_retained":true}))
     }
 
     pub fn operate(&self, request: WorkspaceOperation) -> Result<OperationReceipt> {

@@ -7,7 +7,7 @@ cross-process, native T3 bootstrap, private-CA WSS and A2A SDK checks pass.
 
 Full deployment remains in progress. T3 central-thread attachment, native provider
 remote-tool certification, the enabled Anima scheduler/PWA migration, and real
-controller/cross-host validation are not completed by these checks. See the latest
+cross-host validation are not completed by these checks. See the latest
 checkpoint below and [deployment guide](deployment.md).
 
 ## Workspace boundary
@@ -331,3 +331,22 @@ by these fixture results.
 - The complete Anima migration chain, including the two new additive migrations,
   boots successfully on a fresh disposable PostgreSQL 17 database. This is local
   database evidence; no tracker data or deployed service was changed.
+
+### Native Kubernetes allocation and cleanup
+
+- `scripts/session-platform/k8s-native-smoke.py` passed with the upstream Agent
+  Sandbox v1.0.0 controller in a disposable kind v0.33.0 cluster (Kubernetes
+  v1.35.8). It uses an explicit test context, scoped service-account token and
+  verified API CA, and loads a locally built Linux arm64 executor image.
+- A real executor pod accepted a workspace write through an authoritative receipt;
+  the file was also read from that pod's filesystem. Repeating the operation
+  preserved the receipt. The test held foreground cleanup, restarted `akhsbxd`,
+  and verified release only after the owned resource disappeared. Cancellation
+  before executor attachment also completed cleanup.
+- Lost create responses remain fenced, replacement UIDs are rejected before
+  deletion, and executor release tombstones prevent delayed attachment. Separate
+  sessions make progress while another executor is slow. Audited observed absence
+  can close an uncertain or previously failed allocation without reprovisioning.
+- This is native controller and pod evidence on one disposable local cluster.
+  It does not demonstrate gVisor/Kata confinement, work/homelab deployment,
+  cross-machine provider tools, or NetworkPolicy enforcement.

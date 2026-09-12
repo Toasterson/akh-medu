@@ -18,7 +18,7 @@ Live local workers and helper locks independently prevent resolution.
 | `akhrtd` | `POST /v1/jobs/{id}/reconcile` | Terminal status; completed jobs require the inspected output. Provider continuation identity stays unchanged. |
 | `akhexecd` | `POST /v1/operations/{id}/reconcile` | Inspected `ToolResult`; success must agree with terminal status. The executor assigns the receipt ID. |
 | `akhsessd` | `POST /v1/runtime/tools/reconcile` | `{call, resolution}` for an uncertain external MCP, cognitive or client result. Workspace effects must be resolved at the executor. |
-| `akhsbxd` | `POST /v1/allocations/{session}/reconcile` | `{resolution, observed_binding}` for a command provisioner. An observed acquired binding still passes executor attachment/readiness. An observed release has no binding. |
+| `akhsbxd` | `POST /v1/allocations/{session}/reconcile` | `{resolution, observed_binding, observed_absent}` for uncertain provisioning/deletion. An observed acquired binding still passes executor attachment/readiness. `observed_absent: true` requires completed reconciliation and no binding. |
 | `akhexecd` | `POST /v1/services/{id}/reconcile` | Certify that a stopped/failed helper and its upstream process are quiescent. This does not launch a replacement. |
 
 The common resolution shape is:
@@ -86,6 +86,16 @@ services and revokes executor access even when the profile retains its sandbox.
 The existing-workspace provisioner always retains files for separate, deliberate
 cleanup. A Kubernetes deletion uses the originally observed resource UID as a
 precondition. Command release failures require explicit outcome reconciliation.
+
+Kubernetes create intent is persisted as `creating` before the API request. A
+subsequent 404 cannot prove that this request will never complete: lookup may be
+retried, but creation is not repeated. After inspection, an admin can explicitly
+certify absence with `observed_absent: true`, `status: completed` and quiescent
+owners. A prior `failed` resolution alone does not prove cleanup. For deletion,
+`releasing` survives manager restart; foreground deletion must finish before the
+allocation reports `released`. The executor persists a release tombstone even
+before attachment, so a delayed attach cannot restore access. Allocation locks
+are per session; a slow provisioner does not serialize unrelated allocations.
 
 SIGTERM stops new HTTP admission, starts runtime/executor cancellation, and
 bounds HTTP draining to ten seconds. Any work without a durable terminal result
