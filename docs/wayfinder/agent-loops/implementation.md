@@ -392,3 +392,17 @@ by these fixture results.
   The broker, owned volume and generated test credentials were removed afterward.
 - The tested image digest is pinned in `rabbitmq-native-smoke.py`. This is a real
   local broker test; it does not prove provider execution or production delivery.
+
+### Durable Anima continuation commands
+
+- Anima now persists immutable prompt, pinned-turn cancellation and generation-
+  conditioned input responses separately from assignment admission. Its real
+  local PostgreSQL/`akhsessd` test passes lost follow-up acknowledgement recovery,
+  concurrent retries, prompt order, and closure fencing while commands or later
+  turns remain outstanding. The complete additive migration chain boots locally.
+- Closing intent is durable before archive/cleanup and prevents new commands.
+  Exact historical command receipts survive closure. Entry-point routing and
+  journal projection into Anima's existing UI remain separate migration work.
+- Akh replays an already-recorded input acknowledgement after its turn advances;
+  this does not reapply permission or revive a turn. A supplied input generation
+  is checked before the decision. Stale or different answers remain rejected.

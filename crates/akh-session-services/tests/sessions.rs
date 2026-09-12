@@ -222,6 +222,18 @@ fn pending_input_survives_restart_and_cannot_be_answered_by_another_principal() 
         .is_err()
     );
     assert_eq!(s.pending_inputs(&p, &session.id).unwrap().len(), 1);
+    assert!(
+        s.respond_if_generation(
+            &p,
+            &session.id,
+            &job.turn_id,
+            &call.id,
+            Some(job.generation + 1),
+            json!({"allow":true})
+        )
+        .is_err()
+    );
+    assert_eq!(s.pending_inputs(&p, &session.id).unwrap().len(), 1);
     s.respond(
         &p,
         &session.id,
@@ -241,6 +253,55 @@ fn pending_input_survives_restart_and_cannot_be_answered_by_another_principal() 
         .is_err()
     );
     assert!(s.pending_inputs(&p, &session.id).unwrap().is_empty());
+    // A lost acknowledgement must remain recoverable after cancellation, with
+    // no new journal event or changed answer. Unanswered requests remain fenced.
+    let mut other_call = call.clone();
+    other_call.id = "unanswered".into();
+    s.request_input(&runtime, &other_call, "approval", json!({"tool":"shell"}))
+        .unwrap();
+    s.cancel(&p, &session.id, &job.turn_id).unwrap();
+    let sequence = s.get(&p, &session.id).unwrap().next_sequence;
+    let replay = s
+        .respond(
+            &p,
+            &session.id,
+            &job.turn_id,
+            &call.id,
+            json!({"allow":false}),
+        )
+        .unwrap();
+    assert_eq!(replay.response, Some(json!({"allow":false})));
+    assert_eq!(s.get(&p, &session.id).unwrap().next_sequence, sequence);
+    assert!(
+        s.respond(
+            &p,
+            &session.id,
+            &job.turn_id,
+            &call.id,
+            json!({"allow":true})
+        )
+        .is_err()
+    );
+    assert!(
+        s.respond(
+            &p,
+            &session.id,
+            &job.turn_id,
+            &other_call.id,
+            json!({"allow":false})
+        )
+        .is_err()
+    );
+    assert!(
+        s.respond(
+            &stranger,
+            &session.id,
+            &job.turn_id,
+            &call.id,
+            json!({"allow":false})
+        )
+        .is_err()
+    );
 }
 
 #[test]

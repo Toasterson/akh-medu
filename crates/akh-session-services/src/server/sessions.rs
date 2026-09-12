@@ -575,17 +575,27 @@ async fn cancel_turn(
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
     Ok(Json(app.sessions.cancel(&p, &id, &turn)?))
 }
+#[derive(Deserialize, Default)]
+struct ResponseQuery {
+    attachment_id: Option<String>,
+    generation: Option<u64>,
+}
 async fn respond(
     State(app): State<SessionApp>,
     Extension(p): Extension<Principal>,
     Path((id, turn, input)): Path<(String, String, String)>,
-    Query(query): Query<AttachmentQuery>,
+    Query(query): Query<ResponseQuery>,
     Json(response): Json<Value>,
 ) -> Api<PendingInput> {
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
-    Ok(Json(
-        app.sessions.respond(&p, &id, &turn, &input, response)?,
-    ))
+    Ok(Json(app.sessions.respond_if_generation(
+        &p,
+        &id,
+        &turn,
+        &input,
+        query.generation,
+        response,
+    )?))
 }
 async fn invoke(
     State(app): State<SessionApp>,

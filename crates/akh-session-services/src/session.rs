@@ -683,6 +683,20 @@ impl Sessions {
         id: &str,
         response: Value,
     ) -> Result<PendingInput> {
+        self.respond_if_generation(principal, session_id, turn_id, id, None, response)
+    }
+
+    /// Conditional input acknowledgement for clients that persist the observed
+    /// generation. Check it before either recording or replaying a decision.
+    pub fn respond_if_generation(
+        &self,
+        principal: &Principal,
+        session_id: &str,
+        turn_id: &str,
+        id: &str,
+        generation: Option<u64>,
+        response: Value,
+    ) -> Result<PendingInput> {
         self.store.transaction(|tx| {
             let mut session = load(tx, session_id)?;
             authorize(&session, principal)?;
@@ -690,6 +704,18 @@ impl Sessions {
             let mut pending: PendingInput = tx
                 .get(&key)?
                 .ok_or_else(|| Fault::missing("pending input not found"))?;
+            if generation.is_some_and(|expected| expected != pending.generation) {
+                return Err(Fault::conflict("pending input generation changed"));
+            }
+            // Replay a committed acknowledgement even after the provider has
+            // advanced. This reads history; it cannot answer a new request or
+            // resurrect a terminal turn after an HTTP response was lost.
+            if let Some(old) = &pending.response {
+                if old != &response {
+                    return Err(Fault::conflict("input already answered differently"));
+                }
+                return Ok(pending);
+            }
             let turn = session
                 .turns
                 .iter_mut()
@@ -703,12 +729,6 @@ impl Sessions {
                 return Err(Fault::conflict(
                     "pending input no longer belongs to an active turn",
                 ));
-            }
-            if let Some(old) = &pending.response {
-                if old != &response {
-                    return Err(Fault::conflict("input already answered differently"));
-                }
-                return Ok(pending);
             }
             pending.response = Some(response);
             turn.status = TurnStatus::Running;
