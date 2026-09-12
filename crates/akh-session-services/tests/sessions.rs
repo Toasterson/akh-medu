@@ -66,6 +66,170 @@ fn binding(s: &Sessions, id: &str) {
 }
 
 #[test]
+fn input_decisions_reject_stale_intent_durably_and_respect_controller_leases() {
+    let (dir, s, p) = setup();
+    let session = create(&s, &p);
+    submit(&s, &p, &session.id, "first");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let call = ToolCall {
+        id: "later-input".into(),
+        session_id: session.id.clone(),
+        turn_id: job.turn_id.clone(),
+        generation: job.generation,
+        name: "read".into(),
+        arguments: json!({}),
+    };
+    let request = InputDecisionRequest {
+        request_id: "decision-before-input".into(),
+        turn_id: job.turn_id.clone(),
+        input_id: call.id.clone(),
+        generation: job.generation,
+        response: json!({"approved":true}),
+    };
+    let rejected = s.decide_input(&p, &session.id, None, &request).unwrap();
+    assert!(!rejected.accepted);
+    assert_eq!(rejected.rejection.as_ref().unwrap().code, "not_found");
+    s.request_input(&runtime, &call, "tool_approval", json!({"name":"read"}))
+        .unwrap();
+    let sequence = s.get(&p, &session.id).unwrap().next_sequence;
+    assert_eq!(
+        s.decide_input(&p, &session.id, None, &request).unwrap(),
+        rejected
+    );
+    assert_eq!(s.get(&p, &session.id).unwrap().next_sequence, sequence);
+    assert_eq!(s.pending_inputs(&p, &session.id).unwrap().len(), 1);
+    let mut stale = request.clone();
+    stale.request_id = "stale-generation".into();
+    stale.generation += 1;
+    assert!(
+        !s.decide_input(&p, &session.id, None, &stale)
+            .unwrap()
+            .accepted
+    );
+    let mut valid = request.clone();
+    valid.request_id = "current-decision".into();
+    s.attach(&p, &session.id, "controller", true).unwrap();
+    assert!(s.decide_input(&p, &session.id, None, &valid).is_err());
+    // A lease refusal did not burn the command or claim a durable rejection.
+    let accepted = s
+        .decide_input(&p, &session.id, Some("controller"), &valid)
+        .unwrap();
+    assert!(accepted.accepted && accepted.rejection.is_none());
+    assert!(s.pending_inputs(&p, &session.id).unwrap().is_empty());
+    s.cancel(&p, &session.id, &job.turn_id).unwrap();
+    let sequence = s.get(&p, &session.id).unwrap().next_sequence;
+    // Historical receipt reads cannot steal a lease or apply another answer.
+    assert_eq!(
+        s.decide_input(&p, &session.id, None, &valid).unwrap(),
+        accepted
+    );
+    assert_eq!(s.get(&p, &session.id).unwrap().next_sequence, sequence);
+    let mut changed = valid.clone();
+    changed.response = json!({"approved":false});
+    assert!(s.decide_input(&p, &session.id, None, &changed).is_err());
+    let stranger = Principal {
+        id: "stranger".into(),
+        ..p.clone()
+    };
+    assert!(
+        s.decide_input(&stranger, &session.id, None, &valid)
+            .is_err()
+    );
+    let config = s.config.clone();
+    drop(s);
+    let s = Sessions::new(Store::open(&dir.path().join("state.redb")).unwrap(), config);
+    assert_eq!(
+        s.decide_input(&p, &session.id, None, &valid).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        s.decide_input(&p, &session.id, None, &request).unwrap(),
+        rejected
+    );
+}
+
+#[test]
+fn competing_input_decisions_have_one_answer_and_two_final_receipts() {
+    let (_dir, s, p) = setup();
+    let session = create(&s, &p);
+    submit(&s, &p, &session.id, "first");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let call = ToolCall {
+        id: "approval".into(),
+        session_id: session.id.clone(),
+        turn_id: job.turn_id.clone(),
+        generation: job.generation,
+        name: "write".into(),
+        arguments: json!({}),
+    };
+    s.request_input(&runtime, &call, "tool_approval", json!({"name":"write"}))
+        .unwrap();
+    let decisions = std::thread::scope(|scope| {
+        let handles: Vec<_> = [true, false]
+            .into_iter()
+            .map(|approved| {
+                let s = &s;
+                let p = &p;
+                let session = &session;
+                let call = &call;
+                scope.spawn(move || {
+                    s.decide_input(
+                        p,
+                        &session.id,
+                        None,
+                        &InputDecisionRequest {
+                            request_id: format!("choice-{approved}"),
+                            turn_id: call.turn_id.clone(),
+                            input_id: call.id.clone(),
+                            generation: call.generation,
+                            response: json!({"approved":approved}),
+                        },
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(decisions.iter().filter(|d| d.accepted).count(), 1);
+    assert_eq!(
+        decisions.iter().filter(|d| d.rejection.is_some()).count(),
+        1
+    );
+    for decision in decisions {
+        assert_eq!(
+            s.decide_input(&p, &session.id, None, &decision.request)
+                .unwrap(),
+            decision
+        );
+    }
+    let events = s.events(&p, &session.id, 0).unwrap();
+    assert_eq!(
+        events.iter().filter(|e| e.kind == "input_answered").count(),
+        1
+    );
+    assert_eq!(
+        events.iter().filter(|e| e.kind == "input_decided").count(),
+        2
+    );
+}
+
+#[test]
 fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
     let (dir, s, p) = setup();
     let ids = std::thread::scope(|scope| {

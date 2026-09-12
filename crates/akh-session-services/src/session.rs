@@ -35,6 +35,12 @@ struct RevokedAutomation {
     at: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RecordedInputDecision {
+    principal: String,
+    decision: InputDecision,
+}
+
 fn encode(value: &impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(|e| Fault::invalid(e.to_string()))
 }
@@ -56,6 +62,75 @@ fn authorize(session: &SessionRecord, principal: &Principal) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Validate without writing. Only semantic failures from this phase may become
+/// negative receipts; a storage failure must roll the whole transaction back.
+fn prepare_response(
+    tx: &Transaction<'_>,
+    session: &SessionRecord,
+    turn_id: &str,
+    id: &str,
+    generation: Option<u64>,
+    response: &Value,
+) -> Result<PendingInput> {
+    let pending: PendingInput = tx
+        .get(&key("pending", &[&session.id, turn_id, id]))?
+        .ok_or_else(|| Fault::missing("pending input not found"))?;
+    if generation.is_some_and(|expected| expected != pending.generation) {
+        return Err(Fault::conflict("pending input generation changed"));
+    }
+    if let Some(old) = &pending.response {
+        if old != response {
+            return Err(Fault::conflict("input already answered differently"));
+        }
+        return Ok(pending);
+    }
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .ok_or_else(|| Fault::missing("turn not found"))?;
+    if pending.generation != turn.generation
+        || turn.status.terminal()
+        || turn.status == TurnStatus::Unknown
+        || turn.cancel_requested
+    {
+        return Err(Fault::conflict(
+            "pending input no longer belongs to an active turn",
+        ));
+    }
+    Ok(pending)
+}
+
+fn apply_response(
+    tx: &mut Transaction<'_>,
+    session: &mut SessionRecord,
+    mut pending: PendingInput,
+    response: Value,
+) -> Result<PendingInput> {
+    if pending.response.is_some() {
+        return Ok(pending);
+    }
+    let turn = session
+        .turns
+        .iter_mut()
+        .find(|turn| turn.id == pending.turn_id)
+        .ok_or_else(|| Fault::missing("turn not found"))?;
+    pending.response = Some(response);
+    turn.status = TurnStatus::Running;
+    tx.put(
+        &key("pending", &[&session.id, &pending.turn_id, &pending.id]),
+        &pending,
+    )?;
+    append_event(
+        tx,
+        session,
+        Some(&pending.turn_id),
+        "input_answered",
+        json!({"id":pending.id}),
+    )?;
+    Ok(pending)
 }
 
 pub fn append_event(
@@ -700,47 +775,63 @@ impl Sessions {
         self.store.transaction(|tx| {
             let mut session = load(tx, session_id)?;
             authorize(&session, principal)?;
-            let key = key("pending", &[session_id, turn_id, id]);
-            let mut pending: PendingInput = tx
-                .get(&key)?
-                .ok_or_else(|| Fault::missing("pending input not found"))?;
-            if generation.is_some_and(|expected| expected != pending.generation) {
-                return Err(Fault::conflict("pending input generation changed"));
-            }
-            // Replay a committed acknowledgement even after the provider has
-            // advanced. This reads history; it cannot answer a new request or
-            // resurrect a terminal turn after an HTTP response was lost.
-            if let Some(old) = &pending.response {
-                if old != &response {
-                    return Err(Fault::conflict("input already answered differently"));
+            let pending = prepare_response(tx, &session, turn_id, id, generation, &response)?;
+            apply_response(tx, &mut session, pending, response)
+        })
+    }
+
+    /// Atomically persist positive or negative input decisions. Replaying one
+    /// reads its original result, even if the target later appears or advances.
+    /// Lease conflicts and storage/auth failures remain retriable HTTP errors.
+    pub fn decide_input(
+        &self,
+        principal: &Principal,
+        session_id: &str,
+        attachment: Option<&str>,
+        request: &InputDecisionRequest,
+    ) -> Result<InputDecision> {
+        validate_key(&request.request_id)?;
+        validate_key(&request.turn_id)?;
+        validate_key(&request.input_id)?;
+        if request.generation == 0
+            || serde_json::to_vec(&request.response)
+                .map_err(|_| Fault::invalid("input response encoding"))?
+                .len()
+                > 64 * 1024
+        {
+            return Err(Fault::invalid(
+                "input decision needs positive generation and response at most 64 KiB",
+            ));
+        }
+        self.store.transaction(|tx| {
+            let mut session = load(tx, session_id)?;
+            authorize(&session, principal)?;
+            let target=key("input_decision", &[session_id, &request.request_id]);
+            if let Some(old)=tx.get::<RecordedInputDecision>(&target)? {
+                if old.principal != principal.id || old.decision.request != *request {
+                    return Err(Fault::conflict("input decision identity reused with different intent or principal"));
                 }
-                return Ok(pending);
+                return Ok(old.decision);
             }
-            let turn = session
-                .turns
-                .iter_mut()
-                .find(|t| t.id == turn_id)
-                .ok_or_else(|| Fault::missing("turn not found"))?;
-            if pending.generation != turn.generation
-                || turn.status.terminal()
-                || turn.status == TurnStatus::Unknown
-                || turn.cancel_requested
-            {
-                return Err(Fault::conflict(
-                    "pending input no longer belongs to an active turn",
-                ));
+            if session.controller.as_ref().is_some_and(|lease| lease.expires_at > now_ms()
+                && Some(lease.attachment_id.as_str()) != attachment) {
+                return Err(Fault::conflict("another client holds this session's controller lease"));
             }
-            pending.response = Some(response);
-            turn.status = TurnStatus::Running;
-            tx.put(&key, &pending)?;
-            append_event(
-                tx,
-                &mut session,
-                Some(turn_id),
-                "input_answered",
-                json!({"id":id}),
-            )?;
-            Ok(pending)
+            let rejection=match prepare_response(tx, &session, &request.turn_id,
+                &request.input_id, Some(request.generation), &request.response) {
+                Ok(pending) => {
+                    apply_response(tx, &mut session, pending, request.response.clone())?;
+                    None
+                },
+                Err(error) if matches!(error.code.as_str(), "conflict"|"not_found") => Some(error),
+                Err(error) => return Err(error),
+            };
+            let decision=InputDecision {schema_version:SCHEMA_VERSION,session_id:session_id.into(),
+                request:request.clone(),accepted:rejection.is_none(),rejection,at:now_ms()};
+            tx.put(&target,&RecordedInputDecision {principal:principal.id.clone(),decision:decision.clone()})?;
+            append_event(tx,&mut session,Some(&request.turn_id),"input_decided",
+                json!({"request_id":request.request_id,"input_id":request.input_id,"accepted":decision.accepted,"rejection":decision.rejection}))?;
+            Ok(decision)
         })
     }
 

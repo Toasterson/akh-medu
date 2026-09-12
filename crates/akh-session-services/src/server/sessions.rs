@@ -395,6 +395,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/inputs", post(submit_input))
             .route("/v1/sessions/{id}/events", get(session_events))
             .route("/v1/sessions/{id}/pending", get(pending))
+            .route("/v1/sessions/{id}/input-decisions", post(decide_input))
             .route("/v1/sessions/{id}/attach", post(attach))
             .route("/v1/sessions/{id}/detach", post(detach))
             .route("/v1/sessions/{id}/archive", post(archive))
@@ -579,6 +580,21 @@ async fn cancel_turn(
 struct ResponseQuery {
     attachment_id: Option<String>,
     generation: Option<u64>,
+}
+async fn decide_input(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Query(query): Query<AttachmentQuery>,
+    Json(request): Json<InputDecisionRequest>,
+) -> Api<InputDecision> {
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.decide_input(
+        &p,
+        &id,
+        query.attachment_id.as_deref(),
+        &request,
+    )?))
 }
 async fn respond(
     State(app): State<SessionApp>,

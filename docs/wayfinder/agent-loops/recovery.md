@@ -143,3 +143,30 @@ on an uncertain response, and closes that fence only after the matching central
 tombstone is acknowledged. A known admitted session still requires normal
 lifecycle cleanup. The revocation route requires a source-scoped scheduler role;
 a generic ingress capability cannot revoke occurrences.
+
+## Durable input decisions
+
+Clients with durable command outboxes should use
+`POST /v1/sessions/{id}/input-decisions`, sending an `InputDecisionRequest`:
+`request_id`, exact `turn_id`, `input_id`, observed positive `generation` and
+`response`. The response echoes the immutable request and session identity,
+alongside `accepted`, optional `rejection`, original `at` and `schema_version`.
+
+A successful HTTP response can contain a durable rejection: the target was
+missing, stale, already answered differently, cancelled or otherwise no longer
+accepting input. The same command cannot apply later if that target appears or
+changes. Persist the negative receipt as a settled command, without granting its
+requested permission. Two competing decisions produce one answer and stable
+receipts for both commands. Storage failure rolls back the answer and receipt.
+
+Session authorization is checked before historical receipt reads. A new decision
+checks the controller lease inside the same transaction; the optional
+`attachment_id` query parameter identifies the controller. A competing lease,
+invalid request, authentication failure or storage error remains an HTTP error,
+without a manufactured negative receipt. Retry the exact command after resolving
+that condition. A historical receipt read does not change a lease or answer.
+
+Anima's updated command client requires this endpoint for input responses. It
+validates the echoed request, session, timestamp and accepted/rejected shape
+before settling its outbox. Deploy the corresponding session-manager API before
+enabling these controls; older endpoints cannot supply equivalent negative proof.

@@ -273,6 +273,29 @@ pub struct PendingInput {
     pub response: Option<Value>,
 }
 
+/// Immutable decision intent. A stale or missing target can be durably rejected
+/// so a caller can settle its outbox without treating an HTTP error as evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InputDecisionRequest {
+    pub request_id: String,
+    pub turn_id: String,
+    pub input_id: String,
+    pub generation: u64,
+    pub response: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InputDecision {
+    pub schema_version: u16,
+    pub session_id: String,
+    pub request: InputDecisionRequest,
+    pub accepted: bool,
+    pub rejection: Option<Fault>,
+    pub at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeJobRequest {
