@@ -671,18 +671,25 @@ impl RuleEngine {
             }
 
             let mut new_bindings = HashMap::new();
-            let matched =
-                self.match_term(
-                    &pattern.subject,
-                    triple.subject,
-                    bindings,
-                    &mut new_bindings,
-                ) && self.match_term(
-                    &pattern.predicate,
-                    triple.predicate,
-                    bindings,
-                    &mut new_bindings,
-                ) && self.match_term(&pattern.object, triple.object, bindings, &mut new_bindings);
+            let matched = self.match_term(
+                &pattern.subject,
+                triple.subject,
+                bindings,
+                &mut new_bindings,
+                engine,
+            ) && self.match_term(
+                &pattern.predicate,
+                triple.predicate,
+                bindings,
+                &mut new_bindings,
+                engine,
+            ) && self.match_term(
+                &pattern.object,
+                triple.object,
+                bindings,
+                &mut new_bindings,
+                engine,
+            );
 
             if matched {
                 results.push((new_bindings, triple.clone()));
@@ -699,6 +706,7 @@ impl RuleEngine {
         value: SymbolId,
         existing_bindings: &HashMap<String, SymbolId>,
         new_bindings: &mut HashMap<String, SymbolId>,
+        engine: &Engine,
     ) -> bool {
         match term {
             RuleTerm::Concrete(id) => *id == value,
@@ -713,13 +721,10 @@ impl RuleEngine {
                     true
                 }
             }
-            RuleTerm::Label(_) => {
-                // Labels are not resolved during matching — they're resolved
-                // during pattern compilation. At match time, they should have
-                // been pre-resolved or handled as a predicate-index fast-path.
-                // Fall back to true (permissive).
-                true
-            }
+            // Rules retain labels when loaded from JSON or built in code.
+            // Every position must constrain the match, including an unresolved
+            // predicate on the scan path. Missing labels are never wildcards.
+            RuleTerm::Label(label) => engine.lookup_symbol(label).is_ok_and(|id| id == value),
         }
     }
 
@@ -929,6 +934,43 @@ mod tests {
             max_iterations: 1,
             auto_commit,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rule_labels_match_exactly_and_unknown_labels_do_not_match() {
+        let engine = test_engine();
+        engine
+            .ingest_label_triples(&[
+                (
+                    "request".into(),
+                    "wants".into(),
+                    "resume_worker".into(),
+                    1.0,
+                ),
+                ("other".into(), "wants".into(), "observe_job".into(), 1.0),
+            ])
+            .unwrap();
+        let matcher = RuleEngine::new(RuleEngineConfig::default());
+        for (pattern, expected) in [
+            ("(request wants resume_worker)", 1),
+            ("(request wants observe_job)", 0),
+            ("(other wants resume_worker)", 0),
+            ("(unknown_subject wants ?O)", 0),
+            ("(request wants unknown_object)", 0),
+            ("(request unknown_predicate resume_worker)", 0),
+            ("(?Q wants resume_worker)", 1),
+            ("(request wants ?O)", 1),
+        ] {
+            let matches = matcher
+                .match_pattern(
+                    &TriplePattern::parse(pattern).unwrap(),
+                    &HashMap::new(),
+                    &engine,
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(matches.len(), expected, "pattern {pattern}");
         }
     }
 
