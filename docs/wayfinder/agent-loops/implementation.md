@@ -438,3 +438,18 @@ by these fixture results.
 - This is native harness behavior with a model fixture, not live-model or
   cross-host conformance. The daemon's native admission gate remains in place.
   See [native provider checks](native-provider-checks.md) for commands and limits.
+
+### Anima transcript projection
+
+- Anima commit `cbb9b2cb` adds the existing UI's journal projection. Activity rows,
+  final thread replies and the source cursor commit together; concurrent/restarted
+  workers cannot duplicate replies. Existing authorized reads and stream buses
+  consume the projection, while Anima's business lifecycle remains separate.
+- A full-schema disposable PostgreSQL test passes injected reply-write rollback,
+  replay, thread fan-out and equal-timestamp history. Rust/PWA shared wire examples
+  pass; 97 focused UI regressions and the additional shared-wire check pass.
+  Native browser and production streaming proof remain outstanding.
+- Central text deltas are retained in both the cached source and UI projection
+  during compatibility migration. Measure that storage cost before high-volume
+  deployment. Stop/input controls and canonical retirement are the next wiring;
+  the scheduler still does not create new central allocations.
