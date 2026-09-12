@@ -140,7 +140,9 @@ jobs:
             export RUSTC_WRAPPER=sccache
             sccache --show-stats || true
           fi
-          cargo test --features postgres --lib
+          # Keep failures and totals without thousands of per-test success lines.
+          # The remote log collector otherwise outlives this suite by many minutes.
+          cargo test --quiet --features postgres --lib
 
   docker-seshd:
     runs-on: ubuntu-22.04
