@@ -54,6 +54,19 @@ fn load(tx: &Transaction<'_>, id: &str) -> Result<SessionRecord> {
         .ok_or_else(|| Fault::missing("session not found"))
 }
 
+/// Checked inside the same transaction as each client mutation. A transport's
+/// earlier read cannot authorize a write after another attachment takes control.
+fn check_controller(session: &SessionRecord, attachment: Option<&str>) -> Result<()> {
+    if session.controller.as_ref().is_some_and(|lease| {
+        lease.expires_at > now_ms() && Some(lease.attachment_id.as_str()) != attachment
+    }) {
+        return Err(Fault::conflict(
+            "another client holds this session's controller lease",
+        ));
+    }
+    Ok(())
+}
+
 fn authorize(session: &SessionRecord, principal: &Principal) -> Result<()> {
     if session.principal != principal.id && !principal.has_role("admin") {
         return Err(Fault::new(
@@ -163,9 +176,19 @@ pub fn append_event(
 
 impl Sessions {
     pub fn archive(&self, p: &Principal, id: &str) -> Result<SessionRecord> {
+        self.archive_controlled(p, id, None)
+    }
+
+    pub fn archive_controlled(
+        &self,
+        p: &Principal,
+        id: &str,
+        attachment: Option<&str>,
+    ) -> Result<SessionRecord> {
         self.store.transaction(|tx| {
             let mut session = load(tx, id)?;
             authorize(&session, p)?;
+            check_controller(&session, attachment)?;
             if session.closed_at.is_some() {
                 return Ok(session);
             }
@@ -408,7 +431,20 @@ impl Sessions {
         id: &str,
         request: &SubmitInput,
     ) -> Result<TurnRecord> {
+        self.submit_controlled(principal, id, None, request)
+    }
+
+    pub fn submit_controlled(
+        &self,
+        principal: &Principal,
+        id: &str,
+        attachment: Option<&str>,
+        request: &SubmitInput,
+    ) -> Result<TurnRecord> {
         self.store.transaction(|tx| {
+            let session = load(tx, id)?;
+            authorize(&session, principal)?;
+            check_controller(&session, attachment)?;
             Self::submit_in(
                 tx,
                 principal,
@@ -597,9 +633,20 @@ impl Sessions {
     }
 
     pub fn cancel(&self, principal: &Principal, id: &str, turn_id: &str) -> Result<TurnRecord> {
+        self.cancel_controlled(principal, id, turn_id, None)
+    }
+
+    pub fn cancel_controlled(
+        &self,
+        principal: &Principal,
+        id: &str,
+        turn_id: &str,
+        attachment: Option<&str>,
+    ) -> Result<TurnRecord> {
         self.store.transaction(|tx| {
             let mut session = load(tx, id)?;
             authorize(&session, principal)?;
+            check_controller(&session, attachment)?;
             let turn = session
                 .turns
                 .iter_mut()
@@ -772,9 +819,26 @@ impl Sessions {
         generation: Option<u64>,
         response: Value,
     ) -> Result<PendingInput> {
+        self.respond_controlled(
+            principal, session_id, turn_id, id, generation, None, response,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn respond_controlled(
+        &self,
+        principal: &Principal,
+        session_id: &str,
+        turn_id: &str,
+        id: &str,
+        generation: Option<u64>,
+        attachment: Option<&str>,
+        response: Value,
+    ) -> Result<PendingInput> {
         self.store.transaction(|tx| {
             let mut session = load(tx, session_id)?;
             authorize(&session, principal)?;
+            check_controller(&session, attachment)?;
             let pending = prepare_response(tx, &session, turn_id, id, generation, &response)?;
             apply_response(tx, &mut session, pending, response)
         })
@@ -813,10 +877,7 @@ impl Sessions {
                 }
                 return Ok(old.decision);
             }
-            if session.controller.as_ref().is_some_and(|lease| lease.expires_at > now_ms()
-                && Some(lease.attachment_id.as_str()) != attachment) {
-                return Err(Fault::conflict("another client holds this session's controller lease"));
-            }
+            check_controller(&session, attachment)?;
             let rejection=match prepare_response(tx, &session, &request.turn_id,
                 &request.input_id, Some(request.generation), &request.response) {
                 Ok(pending) => {

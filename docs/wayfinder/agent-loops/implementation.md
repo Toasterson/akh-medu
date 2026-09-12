@@ -469,3 +469,16 @@ by these fixture results.
   pass loss/retry and stale-choice behavior; Rust/PWA shared wire examples pass.
   Stop, general question forms and canonical session retirement remain separate
   integration work. These checks do not enable a project or deploy any daemon.
+
+### Pinned Anima Stop and atomic controller authority
+
+- Anima commit `c0221e5e` connects Stop to a live, authorized central turn read.
+  The command retains its original turn across lost responses and concurrent UI
+  clicks; a queued follow-up cannot replace the first nonterminal turn. Full-schema
+  HTTP recovery, native daemon turn-order/cancellation and three UI tests pass.
+- Prompt, Stop, legacy input response and archive now check controller ownership
+  in their store transaction. REST, ACP and A2A therefore cannot use a stale
+  transport-level read to mutate after another attachment takes control.
+  Twelve session tests and the ACP WebSocket/A2A integration tests pass locally.
+- Whole-session retirement remains separate from Stop. Browser runtime and
+  production deployment remain unverified; the central scheduler is not enabled.

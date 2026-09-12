@@ -445,7 +445,12 @@ async fn archive(
     Query(query): Query<AttachmentQuery>,
 ) -> Api<SessionRecord> {
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
-    Ok(Json(app.sessions.archive(&p, &id)?))
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.archive_controlled(
+        &p,
+        &id,
+        query.attachment_id.as_deref(),
+    )?))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -515,7 +520,12 @@ async fn submit_input(
 ) -> Api<TurnRecord> {
     http::role(&p, "client")?;
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
-    Ok(Json(app.sessions.submit(&p, &id, &request)?))
+    Ok(Json(app.sessions.submit_controlled(
+        &p,
+        &id,
+        query.attachment_id.as_deref(),
+        &request,
+    )?))
 }
 #[derive(Deserialize, Default)]
 struct Cursor {
@@ -574,7 +584,13 @@ async fn cancel_turn(
     Query(query): Query<AttachmentQuery>,
 ) -> Api<TurnRecord> {
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
-    Ok(Json(app.sessions.cancel(&p, &id, &turn)?))
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.cancel_controlled(
+        &p,
+        &id,
+        &turn,
+        query.attachment_id.as_deref(),
+    )?))
 }
 #[derive(Deserialize, Default)]
 struct ResponseQuery {
@@ -604,12 +620,14 @@ async fn respond(
     Json(response): Json<Value>,
 ) -> Api<PendingInput> {
     controller(&app, &p, &id, query.attachment_id.as_deref())?;
-    Ok(Json(app.sessions.respond_if_generation(
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.respond_controlled(
         &p,
         &id,
         &turn,
         &input,
         query.generation,
+        query.attachment_id.as_deref(),
         response,
     )?))
 }

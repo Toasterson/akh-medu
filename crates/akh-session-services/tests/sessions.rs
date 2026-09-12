@@ -122,7 +122,8 @@ fn input_decisions_reject_stale_intent_durably_and_respect_controller_leases() {
         .unwrap();
     assert!(accepted.accepted && accepted.rejection.is_none());
     assert!(s.pending_inputs(&p, &session.id).unwrap().is_empty());
-    s.cancel(&p, &session.id, &job.turn_id).unwrap();
+    s.cancel_controlled(&p, &session.id, &job.turn_id, Some("controller"))
+        .unwrap();
     let sequence = s.get(&p, &session.id).unwrap().next_sequence;
     // Historical receipt reads cannot steal a lease or apply another answer.
     assert_eq!(
@@ -740,4 +741,88 @@ async fn slow_cognitive_service_does_not_hold_another_sessions_dispatch() {
         result.is_ok(),
         "the unrelated session waited for the slow core request"
     );
+}
+
+#[test]
+fn controller_fences_all_client_mutations_in_the_store() {
+    let (_dir, s, p) = setup();
+    let session = create(&s, &p);
+    let turn = submit(&s, &p, &session.id, "first");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let call = ToolCall {
+        id: "permission".into(),
+        session_id: session.id.clone(),
+        turn_id: turn.id.clone(),
+        generation: job.generation,
+        name: "write".into(),
+        arguments: json!({}),
+    };
+    s.request_input(&runtime, &call, "tool_approval", json!({}))
+        .unwrap();
+    s.attach(&p, &session.id, "first-client", true).unwrap();
+    let input = SubmitInput {
+        request_id: "second".into(),
+        text: "follow up".into(),
+        artifacts: vec![],
+    };
+    let before = s.get(&p, &session.id).unwrap();
+    assert!(s.submit(&p, &session.id, &input).is_err());
+    assert!(s.cancel(&p, &session.id, &turn.id).is_err());
+    assert!(
+        s.respond(
+            &p,
+            &session.id,
+            &turn.id,
+            &call.id,
+            json!({"approved":true})
+        )
+        .is_err()
+    );
+    assert!(s.archive(&p, &session.id).is_err());
+    assert_eq!(s.get(&p, &session.id).unwrap(), before);
+    // A caller that observed the old lease cannot use it after ownership changes.
+    s.detach(&p, &session.id, "first-client").unwrap();
+    s.attach(&p, &session.id, "second-client", true).unwrap();
+    assert!(
+        s.submit_controlled(&p, &session.id, Some("first-client"), &input)
+            .is_err()
+    );
+    assert!(
+        s.cancel_controlled(&p, &session.id, &turn.id, Some("first-client"))
+            .is_err()
+    );
+    assert!(
+        s.respond_controlled(
+            &p,
+            &session.id,
+            &turn.id,
+            &call.id,
+            Some(job.generation),
+            Some("first-client"),
+            json!({"approved":true})
+        )
+        .is_err()
+    );
+    s.respond_controlled(
+        &p,
+        &session.id,
+        &turn.id,
+        &call.id,
+        Some(job.generation),
+        Some("second-client"),
+        json!({"approved":false}),
+    )
+    .unwrap();
+    s.cancel_controlled(&p, &session.id, &turn.id, Some("second-client"))
+        .unwrap();
+    let follow_up = s
+        .submit_controlled(&p, &session.id, Some("second-client"), &input)
+        .unwrap();
+    assert_ne!(follow_up.id, turn.id);
 }

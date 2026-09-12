@@ -142,11 +142,13 @@ impl Connection {
                     } else {
                         request["result"].clone()
                     };
-                    if let Err(error) = self.app.sessions.respond(
+                    if let Err(error) = self.app.sessions.respond_controlled(
                         &self.principal,
                         &session,
                         &pending.turn_id,
                         &pending.id,
+                        Some(pending.generation),
+                        Some(&self.id),
                         value,
                     ) {
                         return vec![json!({"jsonrpc":"2.0","method":"_akh/error","params":error})];
@@ -341,9 +343,10 @@ impl Connection {
                 let rpc_id = rpc_id
                     .cloned()
                     .ok_or_else(|| Fault::invalid("session/prompt requires a request ID"))?;
-                let turn = self.app.sessions.submit(
+                let turn = self.app.sessions.submit_controlled(
                     &self.principal,
                     id,
+                    Some(&self.id),
                     &SubmitInput {
                         request_id: request_id(),
                         text,
@@ -358,7 +361,12 @@ impl Connection {
                 crate::server::controller(&self.app, &self.principal, id, Some(&self.id))?;
                 let session = self.app.sessions.get(&self.principal, id)?;
                 if let Some(turn) = session.turns.iter().find(|t| !t.status.terminal()) {
-                    self.app.sessions.cancel(&self.principal, id, &turn.id)?;
+                    self.app.sessions.cancel_controlled(
+                        &self.principal,
+                        id,
+                        &turn.id,
+                        Some(&self.id),
+                    )?;
                 }
                 Ok(Some(json!({})))
             }
@@ -371,11 +379,13 @@ impl Connection {
             "_akh/respond" => {
                 let id = string(params, "sessionId")?;
                 crate::server::controller(&self.app, &self.principal, id, Some(&self.id))?;
-                let pending = self.app.sessions.respond(
+                let pending = self.app.sessions.respond_controlled(
                     &self.principal,
                     id,
                     string(params, "turnId")?,
                     string(params, "inputId")?,
+                    None,
+                    Some(&self.id),
                     params["response"].clone(),
                 )?;
                 Ok(Some(json!(pending)))
