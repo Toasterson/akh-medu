@@ -5,10 +5,12 @@ ARG RUST_VERSION=1.94.1
 FROM rust:${RUST_VERSION}-bookworm AS build
 ARG SERVICE=akhsessd
 ARG PROFILE=session
+ARG TARGETPLATFORM
 WORKDIR /src
 COPY . .
 ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target,id=akh-session-platform-${TARGETPLATFORM} \
     case "$SERVICE:$PROFILE" in \
       akhsessd:session|akhrtd:runtime|akhexecd:executor|akhsbxd:sandbox|akheventd:events|akh-trigger:trigger|akh-connect:client|akh-acp:client|akh-kagent:kagent) ;; \
       *) exit 2 ;; esac && \

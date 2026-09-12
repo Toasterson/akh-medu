@@ -39,7 +39,8 @@ and [Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/) contra
 ## Native Djehuty
 
 Configure `djehuty` sources with an endpoint name, source ID, thread UUIDs,
-optional `ignore_authors`, `interval_secs`, and `page_size` (1–200). Each thread
+optional `ignore_authors`, `allowed_authors`, `message_types`, `recipient_id`,
+`interval_secs`, and `page_size` (1–200). Each thread
 has its own durable cursor. The adapter calls the native
 `GET /v1/threads/{id}/messages?limit=N&after_message_id=UUID` API and consumes
 `X-Next-Cursor`. It verifies message identity, thread, timestamps, ordering and
@@ -90,3 +91,29 @@ admits exactly one central session and turn. Restarting the broker reconnects th
 consumer, and an acknowledged redelivery creates no extra turn. The script removes
 its own broker, volume and credentials. This does not test model execution,
 workspace allocation, or a production broker installation.
+
+## Thoth document and research delegation
+
+Use a dedicated durable Board thread for Thoth requests. The Board inbox listing
+marks messages read as a side effect and has no replay cursor, so it is not used
+as the delivery queue. Configure the thread source with the participating Akh
+UUIDs in `allowed_authors`, `coordination/delegation@v1` in `message_types`, and
+Thoth's UUID in `recipient_id`. Filtered posts are audited before the cursor moves.
+
+An Akh first posts a durable `board/note@v1` document anchor and uploads its
+attachments with the upstream Board client. After upload completes, it posts a
+`coordination/delegation@v1` to the request thread with `assignee_id`, `objective`
+and `scope`; the objective includes exact attachment IDs and returned SHA-256
+hashes or versioned Seshat references. Set `reply_to` and `parent_message_id` to
+the anchor. Never send a readiness notification before its content is available.
+The immutable delegation ID is the central occurrence/correlation source.
+
+Install the unmodified Agent Board client/skill in each executor image and mount
+only that Akh's Board credential at the client's configured private env-file path.
+Run it through the brokered process tool, so downloads land in the assigned
+workspace and their execution has a receipt. Thoth verifies attachment hashes,
+treats supplied documents as task data, and uses his configured research/tools
+and Seshat to produce a versioned result. He replies with `coordination/evidence@v1`
+and `coordination/handoff@v1`, linking the delegation via `reply_to`. His response
+protocols do not trigger another research turn. No agent overrides another
+identity, and no credential is placed in a Board message or central prompt.

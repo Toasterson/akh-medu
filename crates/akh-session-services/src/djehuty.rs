@@ -39,6 +39,15 @@ fn timestamp(value: &str) -> Result<u64> {
 pub async fn poll(service: &Events, source: &DjehutySource, thread: &str) -> Result<()> {
     validate_key(&source.source)?;
     let thread = uuid(thread)?;
+    let allowed_authors = source
+        .allowed_authors
+        .iter()
+        .map(|id| uuid(id))
+        .collect::<Result<Vec<_>>>()?;
+    let recipient = source.recipient_id.as_deref().map(uuid).transpose()?;
+    for kind in &source.message_types {
+        validate_key(kind)?;
+    }
     let endpoint = service.config.endpoint(&source.endpoint)?;
     let k = key("djehuty_cursor", &[&source.source, &thread]);
     let mut cursor = service.store.get::<Cursor>(&k)?.unwrap_or(Cursor {
@@ -117,7 +126,18 @@ pub async fn poll(service: &Events, source: &DjehutySource, thread: &str) -> Res
             })
             .transpose()?
             .is_some_and(|at| at <= now_ms());
-        let reason = if ignored.contains(&author) {
+        let filtered = (!allowed_authors.is_empty() && !allowed_authors.contains(&author))
+            || (!source.message_types.is_empty()
+                && !source
+                    .message_types
+                    .iter()
+                    .any(|t| message["message_type"].as_str() == Some(t)))
+            || recipient.as_ref().is_some_and(|recipient| {
+                message["payload"]["assignee_id"].as_str() != Some(recipient)
+            });
+        let reason = if filtered {
+            Some("not an authorized protocol or recipient")
+        } else if ignored.contains(&author) {
             Some("configured author filter")
         } else if expired {
             Some("expired at intake")
@@ -229,6 +249,9 @@ mod tests {
             source: "owned-board".into(),
             threads: vec![THREAD.into()],
             ignore_authors: vec![],
+            allowed_authors: vec![],
+            message_types: vec![],
+            recipient_id: None,
             interval_secs: 10,
             page_size: 50,
         };
@@ -291,6 +314,40 @@ mod tests {
                 .get::<Cursor>(&key("djehuty_cursor", &[&another.source, THREAD]))
                 .unwrap()
                 .is_none()
+        );
+        board.lock().unwrap().wrong_thread = false;
+        board.lock().unwrap().force_replay = false;
+        let mut filtered = source.clone();
+        filtered.source = "thoth-delegations".into();
+        filtered.allowed_authors = vec![AUTHOR.into()];
+        filtered.message_types = vec!["coordination/delegation@v1".into()];
+        filtered.recipient_id = Some(AUTHOR.into());
+        poll(&service, &filtered, THREAD).await.unwrap();
+        assert_eq!(
+            service
+                .store
+                .scan::<IngressReceipt>("ingress/")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            service
+                .store
+                .scan::<Value>("djehuty_ignored/")
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            service
+                .store
+                .get::<Cursor>(&key("djehuty_cursor", &[&filtered.source, THREAD]))
+                .unwrap()
+                .unwrap()
+                .message_id
+                .as_deref(),
+            Some(LAST)
         );
         server.abort();
     }

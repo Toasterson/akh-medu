@@ -13,8 +13,8 @@ PROFILE=runtime`, or `SERVICE=akhexecd PROFILE=executor`. The executor image als
 contains `akh-service`; the runtime contains its profile helper. Build each target
 architecture natively through buildx. This Dockerfile does not install provider
 binaries, login credentials or editors. Add the selected pinned upstream tools
-in the corresponding image pipeline. The core uses the existing akhomed build
-recipe with `FEATURES=core-server` and `--no-default-features`.
+in the corresponding image pipeline. The core uses `docker/core-service.Dockerfile`, which builds with
+`--no-default-features --features core-server`.
 
 `docker/session-workspace.Dockerfile` copies the executor and service helper into
 a selected unmodified upstream workspace image. The images must match CPU and

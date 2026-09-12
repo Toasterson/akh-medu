@@ -315,6 +315,12 @@ fn board_interval() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DjehutySource {
+    #[serde(default)]
+    pub allowed_authors: Vec<String>,
+    #[serde(default)]
+    pub message_types: Vec<String>,
+    #[serde(default)]
+    pub recipient_id: Option<String>,
     pub endpoint: String,
     pub source: String,
     pub threads: Vec<String>,
