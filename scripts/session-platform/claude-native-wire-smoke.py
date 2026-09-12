@@ -118,6 +118,10 @@ def main():
                        'ANTHROPIC_API_KEY': 'owned-local-protocol-fixture',
                        'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1', 'DISABLE_PROMPT_CACHING':'1', 'ENABLE_TOOL_SEARCH':'false'},
                    'execution_mode': 'brokered', 'timeout_secs': 45}
+        hook_marker = root / 'hook-must-not-run'
+        profile['isolation']['managed_files'] = {'claude/settings.json': json.dumps({'hooks': {
+            event: [{'matcher': '.*', 'hooks': [{'type': 'command', 'command': 'touch ' + str(hook_marker)}]}]
+            for event in ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop']}})}
         binding = {'id': workspace, 'sandbox_id': sandbox, 'executor': 'executor', 'generation': 1, 'site': 'local-probe',
                    'root': str(bound_root), 'platform': os.uname().sysname, 'confinement': 'local-test-only'}
         specs = []
@@ -200,6 +204,7 @@ def main():
             assert not (runtime / 'denied-probe.txt').exists()
             assert not (bound_root / 'denied-probe.txt').exists()
             assert not (runtime / 'probe.txt').exists()
+            assert not hook_marker.exists(), 'provider executed a configured native hook'
             names = [tool['name'] for tool in tools_seen[0]]
             forbidden = {'Bash','Read','Write','Edit','Glob','Grep','Agent','Task','Skill','NotebookEdit','WebFetch','WebSearch'}
             for catalog in tools_seen:
@@ -212,7 +217,7 @@ def main():
             assert any('probe executor unavailable; nothing ran' in json.dumps(item) for item in outputs)
             print(json.dumps({'result': 'passed', 'claude_version': version, 'calls': calls, 'model_requests': len(requests),
                               'binary_sha256': hashlib.sha256(args.claude.read_bytes()).hexdigest(), 'platform': os.uname().sysname + '-' + os.uname().machine,
-                              'advertised_tools': names, 'native_refusals': refusals,
+                              'advertised_tools': names, 'native_refusals': refusals, 'hooks_disabled': True,
                               'not_proven': ['live model behavior', 'kernel confinement', 'cross-host transport', 'production conformance']}))
         except Exception:
             print(json.dumps({'requests': requests, 'peer_errors': peer_errors, 'events': events}, default=str))
