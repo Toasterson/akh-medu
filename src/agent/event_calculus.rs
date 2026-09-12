@@ -254,6 +254,8 @@ impl EventCalculusEngine {
                     )))
                 })?;
                 ec.ensure_init(engine)?;
+                let ids: Vec<_> = ec.fluents.values().map(|f| f.symbol_id).collect();
+                for id in ids { ec.refresh_fluent_cache(id); }
                 Ok(ec)
             }
             _ => Self::new(engine),
@@ -324,7 +326,7 @@ impl EventCalculusEngine {
             engine.add_triple(&init_triple)?;
 
             // Update fluent state.
-            let fluent = self.fluents.entry(fluent_id.get()).or_insert_with(|| {
+            self.fluents.entry(fluent_id.get()).or_insert_with(|| {
                 let label = engine.resolve_label(fluent_id);
                 Fluent {
                     symbol_id: fluent_id,
@@ -336,9 +338,6 @@ impl EventCalculusEngine {
                     last_terminated_at: None,
                 }
             });
-            fluent.current_value = true;
-            fluent.last_initiated_by = Some(event_id);
-            fluent.last_initiated_at = Some(ts);
 
             // Layer 2: history dedup — prevents bloat when the engine is restored
             // from the durable store and seen_events is empty again.
@@ -369,7 +368,7 @@ impl EventCalculusEngine {
             engine.add_triple(&term_triple)?;
 
             // Update fluent state.
-            let fluent = self.fluents.entry(fluent_id.get()).or_insert_with(|| {
+            self.fluents.entry(fluent_id.get()).or_insert_with(|| {
                 let label = engine.resolve_label(fluent_id);
                 Fluent {
                     symbol_id: fluent_id,
@@ -381,9 +380,6 @@ impl EventCalculusEngine {
                     last_terminated_at: None,
                 }
             });
-            fluent.current_value = false;
-            fluent.last_terminated_by = Some(event_id);
-            fluent.last_terminated_at = Some(ts);
 
             // Layer 2: history dedup — same guard as above for terminations.
             let history = self.history.entry(fluent_id.get()).or_default();
@@ -406,11 +402,35 @@ impl EventCalculusEngine {
             }
         }
 
+        for &id in event.initiates.iter().chain(event.terminates.iter()) {
+            self.refresh_fluent_cache(id);
+        }
+
         // Store the event itself and mark as seen.
         self.events.insert(event_id.get(), event);
         self.seen_events.insert(dedup_key);
 
         Ok(())
+    }
+
+    /// Rebuild the latest recorded state from event time, not delivery order.
+    /// Equal-time source receipts use symbol ID only to choose a stable witness;
+    /// termination wins the truth-value tie, as in `holds_at`.
+    fn refresh_fluent_cache(&mut self, id: SymbolId) {
+        let history = self.history.get(&id.get());
+        let latest = |initiated| history.into_iter().flatten()
+            .filter(|entry| entry.initiated == initiated)
+            .max_by_key(|entry| (entry.timestamp, entry.by_event.get()));
+        let init = latest(true);
+        let term = latest(false);
+        if let Some(fluent) = self.fluents.get_mut(&id.get()) {
+            fluent.last_initiated_at = init.map(|e| e.timestamp);
+            fluent.last_initiated_by = init.map(|e| e.by_event);
+            fluent.last_terminated_at = term.map(|e| e.timestamp);
+            fluent.last_terminated_by = term.map(|e| e.by_event);
+            fluent.current_value = init.is_some_and(|i|
+                term.is_none_or(|t| i.timestamp > t.timestamp));
+        }
     }
 
     // ─── Core EC Axioms ───────────────────────────────────────────
@@ -719,6 +739,52 @@ mod tests {
             timestamp: 30, initiates: vec![], terminates: vec![fluent],
         }, &engine).unwrap();
         assert!(!ec.holds_at(fluent, 30));
+    }
+
+    #[test]
+    fn cached_truth_and_witnesses_survive_late_events_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::new(EngineConfig {
+            data_dir: Some(dir.path().to_path_buf()), ..EngineConfig::default()
+        }).unwrap();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let fluent = make_fluent_id(&engine, "cached-permission");
+        let mut witnesses = Vec::new();
+        for (label, timestamp, initiate) in [
+            ("grant", 10, true), ("revoke", 20, false),
+            ("correct", 30, true), ("late-revoke", 15, false),
+            ("late-grant", 12, true),
+        ] {
+            let id = make_event_id(&engine, label);
+            witnesses.push(id);
+            ec.record_event(Event { symbol_id: id, name: label.into(), timestamp,
+                initiates: if initiate { vec![fluent] } else { vec![] },
+                terminates: if initiate { vec![] } else { vec![fluent] },
+            }, &engine).unwrap();
+            assert_eq!(ec.get_fluent(fluent).unwrap().current_value,
+                ec.holds_at(fluent, u64::MAX));
+        }
+        let f = ec.get_fluent(fluent).unwrap();
+        assert_eq!(f.last_initiated_at, Some(30));
+        assert_eq!(f.last_initiated_by, Some(witnesses[2]));
+        assert_eq!(f.last_terminated_at, Some(20));
+        assert_eq!(f.last_terminated_by, Some(witnesses[1]));
+        assert_eq!(ec.holding_fluents().len(), 1);
+        // Simulate a pre-fix persisted cache; restore must derive from history.
+        let f = ec.fluents.get_mut(&fluent.get()).unwrap();
+        f.current_value = false;
+        f.last_initiated_at = Some(12);
+        f.last_initiated_by = Some(witnesses[4]);
+        ec.persist(&engine).unwrap();
+        let mut restored = EventCalculusEngine::restore(&engine).unwrap();
+        assert_eq!(restored.holding_fluents().len(), 1);
+        assert_eq!(restored.get_fluent(fluent).unwrap().last_initiated_by, Some(witnesses[2]));
+        assert_eq!(restored.fluent_history(fluent).unwrap().len(), 5);
+        restored.record_event(Event { symbol_id: make_event_id(&engine, "tie"),
+            name: "tie".into(), timestamp: 30, initiates: vec![], terminates: vec![fluent],
+        }, &engine).unwrap();
+        assert!(restored.holding_fluents().is_empty());
+        assert!(!restored.holds_at(fluent, 30));
     }
 
     // ── EC predicates namespace ───────────────────────────────────
