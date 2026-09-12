@@ -758,3 +758,19 @@ by these fixture results.
   and the actual Anima client reading both capture and verification receipts
   after archival. Three Anima client tests pass identity, tampering and replay
   checks. No live model, remote Git publication or canonical outcome is inferred.
+
+### Durable Anima result verification
+
+- The central relay now verifies eligible proposed Changes through the scoped
+  snapshot client, using the Change ID as the stable request identity. Migration
+  139 preserves executor evidence separately from immutable producer receipts.
+  It records verification and audit together without rewriting or accepting the
+  proposal, linking an outcome, or releasing ownership.
+- The full-schema result test passes invalid producer/remote evidence, phase
+  drift during capture, audit rollback, concurrent exact retries and successor
+  verification. It uses a fault-injecting protocol peer for transaction races;
+  real Git and Akh/client transport have their separate native checks. The same
+  test still passes canonical scope checks and the actual Akh MCP submit client.
+- Remote Git/PR publication, canonical outcome/witness/closure composition and
+  scheduler selection remain outstanding. All verification was local; no site,
+  project route or production service was enabled.

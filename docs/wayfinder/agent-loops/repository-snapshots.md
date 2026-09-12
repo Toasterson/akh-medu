@@ -93,4 +93,22 @@ verification against the real Akh routers after archival. Run the cross-reposito
 `snapshot-probe` example and setting `ANIMA_AKH_SNAPSHOT_PROBE` to that absolute
 binary path when running Akh's `repository_bootstrap` test with
 `session,executor,sandbox` features. With no explicit probe path, that test proves
-the Akh API only. The Anima client is not yet connected to result finalization.
+the Akh API only.
+
+Anima's relay now verifies the latest eligible session proposal using its
+canonical Change ID as the capture request ID. It supplies the immutable
+assignment checkout and proposed patch, and selects credentials only through the
+exact configured route. Migration 139 stores the full executor evidence in
+`akh_session_result_snapshots`; the original producer receipt and Change remain
+unchanged. Verification and its audit event commit together after rechecking
+session ownership, phase, bootstrap, source receipt and Change under allocation
+locks. A changed phase or failed audit rolls back local verification. Exact
+retries reuse stored evidence; superseded evidence remains available as history.
+
+The full-schema PostgreSQL test covers these transactions with a fault-injecting
+protocol peer, including invalid producer evidence, bad remote evidence, a phase
+change during capture, audit rollback, concurrent retries and a verified
+successor. Native Git and the real protocol path are covered by the separate
+cross-repository probe above. Neither test makes an unverified publication into
+an authoritative remote branch. PR/publication selection, canonical outcome and
+witness commits, and scheduler route enablement remain integration work.
