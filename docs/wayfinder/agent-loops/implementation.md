@@ -811,3 +811,20 @@ by these fixture results.
   The database race peer is synthetic; native Git/session/client proof is recorded
   separately above. PR creation, canonical outcomes and scheduler selection are
   still outstanding.
+
+### Native upstream PR identity
+
+- Added a narrow Forgejo client with fixed repository-derived API origin,
+  private credential-file access, redirect refusal and bounded whole-scan
+  pagination. PR lookup checks the work-item marker, repository IDs, branches,
+  full head commit, URL and open state. It refuses closed/colliding identities
+  and never retries a create POST.
+- A pinned upstream Forgejo 16.0.4 rootless fixture passes a native Git push,
+  one PR create, exact lookup and closed-PR refusal. Its owned container, volumes
+  and temporary credentials were removed. A separate fault peer passes identity,
+  paging, redirect and failed-create checks. The native script is in the Anima
+  worktree at `scripts/verification/central-forgejo-native.py`.
+- Existing canonical PR-head lookup, CI invalidation and exit-bar reset APIs can
+  now participate in a caller's transaction; all Anima targets check. The
+  durable PR action, canonical result linkage/outcomes and scheduler connection
+  still need to call these interfaces. No production PR or project was created.
