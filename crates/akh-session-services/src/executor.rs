@@ -647,9 +647,44 @@ impl Executor {
             return Err(Fault::invalid("timeout_ms must be 1..3600000"));
         }
         let cwd = ws.directory(args["cwd"].as_str().unwrap_or("."))?;
-        let mut command = Command::new("/bin/sh");
+        // Human/model shell commands retain their existing semantics. Trusted
+        // bootstrap controllers can instead pass literal arguments without any
+        // shell expansion, using an explicit executable installed in the image.
+        let mut command = match (args.get("command"), args.get("argv")) {
+            (Some(_), None) => {
+                let mut command = Command::new("/bin/sh");
+                command.args(["-c", argument(args, "command")?]);
+                command
+            }
+            (None, Some(value)) => {
+                let values = value
+                    .as_array()
+                    .ok_or_else(|| Fault::invalid("argv must be an array"))?;
+                if values.is_empty() || values.len() > 1024 {
+                    return Err(Fault::invalid("argv requires 1..1024 literal arguments"));
+                }
+                let arguments: Vec<&str> = values
+                    .iter()
+                    .map(|value| {
+                        value.as_str().filter(|s| !s.contains('\0')).ok_or_else(|| {
+                            Fault::invalid("argv values must be strings without NUL")
+                        })
+                    })
+                    .collect::<Result<_>>()?;
+                if !Path::new(arguments[0]).is_absolute()
+                    || arguments.iter().map(|s| s.len()).sum::<usize>() > 128 * 1024
+                {
+                    return Err(Fault::invalid(
+                        "argv requires an absolute executable and at most 128 KiB",
+                    ));
+                }
+                let mut command = Command::new(arguments[0]);
+                command.args(&arguments[1..]);
+                command
+            }
+            _ => return Err(Fault::invalid("provide exactly one of command or argv")),
+        };
         command
-            .args(["-c", argument(args, "command")?])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

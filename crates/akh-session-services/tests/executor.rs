@@ -85,6 +85,42 @@ fn duplicate_process_request_executes_once_at_bound_workspace_and_preserves_fail
 }
 
 #[test]
+fn literal_process_arguments_do_not_expand_shell_syntax_and_keep_execution_receipts() {
+    let (dir, executor) = setup();
+    let literal = "$(touch should-not-exist); `touch also-absent` $PATH * \"quoted value\"";
+    let op = request(
+        "literal",
+        "exec_start",
+        json!({"argv":["/usr/bin/printf","%s",literal]}),
+    );
+    executor.operate(op.clone()).unwrap();
+    let receipt = wait(&executor, "literal");
+    assert_eq!(executor.operate(op).unwrap(), receipt);
+    let result = receipt.result.unwrap();
+    assert!(result.success);
+    assert_eq!(result.data.unwrap()["stdout"], literal);
+    assert!(!dir.path().join("workspaces/one/should-not-exist").exists());
+    assert!(!dir.path().join("workspaces/one/also-absent").exists());
+    for (index, args) in [
+        json!({"argv":["/usr/bin/printf","ok"],"command":"touch should-not-exist"}),
+        json!({"argv":[]}),
+        json!({"argv":["printf","ok"]}),
+        json!({"argv":["/usr/bin/printf",false]}),
+        json!({"argv":["/usr/bin/printf","bad\u{0}value"]}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let receipt = executor
+            .operate(request(&format!("invalid-{index}"), "exec_start", args))
+            .unwrap();
+        assert_eq!(receipt.status, TurnStatus::Failed);
+        assert!(!receipt.result.unwrap().success);
+    }
+    assert!(!dir.path().join("workspaces/one/should-not-exist").exists());
+}
+
+#[test]
 fn process_io_and_cancellation_use_owned_handles_and_stream_progress() {
     let (_dir, executor) = setup();
     executor

@@ -533,3 +533,13 @@ by these fixture results.
 - Central scheduler allocation, canonical token issuance/revocation and exact
   repository bootstrap remain integration work. No production token was read or
   minted, and no project was enabled for central dispatch.
+
+### Literal executor arguments
+
+- `exec_start` now accepts either the existing `command` string or an `argv`
+  array with an absolute executable. The latter passes each argument literally,
+  preserving whitespace and shell metacharacters without shell expansion.
+  Workspace ownership, leases, cancellation, timeouts and operation receipts
+  continue to use the same executor lifecycle. Six executor tests pass locally.
+- This is the execution primitive for repository bootstrap; it does not itself
+  select a repository, create a checkout or certify a sandbox image.
