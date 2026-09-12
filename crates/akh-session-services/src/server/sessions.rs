@@ -408,6 +408,7 @@ pub fn session_router(app: SessionApp) -> Router {
             )
             .route("/v1/sessions/{id}/inputs", post(submit_input))
             .route("/v1/sessions/{id}/events", get(session_events))
+            .route("/v1/sessions/{id}/tools", get(session_tools))
             .route("/v1/sessions/{id}/pending", get(pending))
             .route("/v1/sessions/{id}/repository", post(prepare_repository))
             .route(
@@ -660,6 +661,24 @@ async fn session_events(
     Query(query): Query<Cursor>,
 ) -> Api<Vec<SessionEvent>> {
     Ok(Json(app.sessions.events(&p, &id, query.after)?))
+}
+#[derive(Deserialize)]
+struct ToolCursor {
+    after: Option<String>,
+    limit: Option<usize>,
+}
+async fn session_tools(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Query(query): Query<ToolCursor>,
+) -> Api<crate::broker::ToolPage> {
+    Ok(Json(app.broker.records(
+        &p,
+        &id,
+        query.after.as_deref(),
+        query.limit.unwrap_or(100),
+    )?))
 }
 async fn pending(
     State(app): State<SessionApp>,

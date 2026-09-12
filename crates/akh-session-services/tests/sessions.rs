@@ -36,6 +36,82 @@ fn create(s: &Sessions, p: &Principal) -> SessionRecord {
     )
     .unwrap()
 }
+
+#[test]
+fn tool_receipt_pages_preserve_ownership_and_unknown_results() {
+    use akh_session_services::{
+        broker::{Broker, ToolRecord},
+        store::key,
+    };
+    let (_dir, sessions, owner) = setup();
+    let session = create(&sessions, &owner);
+    for id in ["first", "second", "third"] {
+        let record = ToolRecord {
+            call: ToolCall {
+                session_id: session.id.clone(),
+                turn_id: "turn".into(),
+                id: id.into(),
+                generation: 1,
+                name: "read".into(),
+                arguments: json!({"path": "proof"}),
+            },
+            operation_id: id.into(),
+            destination: ToolDestination::Workspace {
+                operation: "read".into(),
+            },
+            sent: true,
+            result: None,
+            unknown: true,
+        };
+        sessions
+            .store
+            .transaction(|tx| tx.put(&key("tool", &[&session.id, "turn", id]), &record))
+            .unwrap();
+    }
+    let broker = Broker::new(sessions.clone()).unwrap();
+    let first = broker.records(&owner, &session.id, None, 2).unwrap();
+    assert_eq!(first.records.len(), 2);
+    assert!(
+        first
+            .records
+            .iter()
+            .all(|r| r.unknown && r.result.is_none())
+    );
+    let second = broker
+        .records(&owner, &session.id, first.next_cursor.as_deref(), 2)
+        .unwrap();
+    assert_eq!(second.records.len(), 1);
+    assert!(second.next_cursor.is_none());
+    assert!(
+        !first
+            .records
+            .iter()
+            .any(|r| r.call.id == second.records[0].call.id)
+    );
+    let mut stranger = owner.clone();
+    stranger.id = "another-client-with-the-same-akh-grant".into();
+    assert_eq!(
+        broker
+            .records(&stranger, &session.id, None, 2)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert!(
+        broker
+            .records(&owner, &session.id, Some("tool/another-session"), 2)
+            .is_err()
+    );
+    assert!(broker.records(&owner, &session.id, None, 201).is_err());
+    assert_eq!(
+        broker
+            .records(&owner, &session.id, None, 200)
+            .unwrap()
+            .records
+            .len(),
+        3
+    );
+}
 fn submit(s: &Sessions, p: &Principal, id: &str, request_id: &str) -> TurnRecord {
     s.submit(
         p,

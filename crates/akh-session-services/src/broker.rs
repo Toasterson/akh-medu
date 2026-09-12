@@ -19,6 +19,11 @@ pub struct ToolRecord {
     pub result: Option<ToolResult>,
     pub unknown: bool,
 }
+#[derive(Debug, Serialize)]
+pub struct ToolPage {
+    pub records: Vec<ToolRecord>,
+    pub next_cursor: Option<String>,
+}
 fn record_key(call: &ToolCall) -> String {
     key("tool", &[&call.session_id, &call.turn_id, &call.id])
 }
@@ -37,6 +42,35 @@ pub struct Broker {
     >,
 }
 impl Broker {
+    /// Read the authoritative broker receipts without granting runtime callback
+    /// authority or changing an uncertain operation's state.
+    pub fn records(
+        &self,
+        principal: &Principal,
+        session: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<ToolPage> {
+        self.sessions.get(principal, session)?;
+        if !(1..=200).contains(&limit) {
+            return Err(Fault::invalid("tool page limit must be 1..200"));
+        }
+        let prefix = key("tool", &[session]);
+        if after.is_some_and(|cursor| !cursor.starts_with(&prefix)) {
+            return Err(Fault::invalid("tool cursor belongs to another session"));
+        }
+        let mut records = self.sessions.store.scan::<ToolRecord>(&prefix)?;
+        records.sort_by_key(|record| record_key(&record.call));
+        records
+            .retain(|record| after.is_none_or(|cursor| record_key(&record.call).as_str() > cursor));
+        let more = records.len() > limit;
+        records.truncate(limit);
+        let next_cursor = more.then(|| record_key(&records.last().unwrap().call));
+        Ok(ToolPage {
+            records,
+            next_cursor,
+        })
+    }
     fn call_lock(&self, call: &ToolCall) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
         locks.retain(|_, lock| lock.strong_count() > 0);

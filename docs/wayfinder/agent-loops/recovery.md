@@ -6,6 +6,12 @@ Runtime hosts with unknown jobs refuse new work; executors fence mutations in
 the affected workspace. Read the actual provider state, executor receipts and
 process inventory before resolving an outcome.
 
+The session owner or an administrator can inspect the broker's authoritative
+tool calls and receipts at `GET /v1/sessions/{id}/tools?limit=100`. Follow the
+returned `next_cursor` as `after`; the maximum page size is 200. This read does
+not replay effects or resolve unknown outcomes. It includes failed results and
+downstream operation IDs so recovery can inspect the matching executor receipt.
+
 Recovery endpoints require an `admin` principal. They record the authenticated
 principal, exact request digest, evidence references, resolution and timestamp
 in the owning daemon's database. A repeated request ID must have identical
