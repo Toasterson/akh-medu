@@ -75,9 +75,12 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                 details: message.get("details").cloned(),
             })?,
             Some("question") => {
-                let response = turn
-                    .host
-                    .question(&message["id"].to_string(), &message["questions"])?;
+                let response = crate::questions::ask(
+                    turn.host,
+                    &message["id"].to_string(),
+                    &message["questions"],
+                    crate::questions::Provider::Claude,
+                )?;
                 process.send(&json!({"type":"response","id":message["id"],"result":response}))?;
             }
             Some("done") => {

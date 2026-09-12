@@ -77,7 +77,7 @@ test("plan mode denies a provider approval without asking the client", async () 
 test("brokered profile removes native tools and settings while supplied MCP tools still execute", async () => {
   const sdk = { tool: (name, description, shape, handler) => ({ name, handler }), createSdkMcpServer: (config) => config,
     query: ({ options }) => ({ close() {}, async *[Symbol.asyncIterator]() {
-      assert.deepEqual(options.tools, []);
+      assert.deepEqual(options.tools, ["AskUserQuestion"]);
       assert.deepEqual(options.settingSources, []);
       assert.equal(options.strictMcpConfig, true);
       assert.equal(options.settings.disableAllHooks, true);
@@ -95,4 +95,21 @@ test("brokered profile removes native tools and settings while supplied MCP tool
     assert.equal(type, "tool");
     return { success: true, text: "executor result" };
   }, new AbortController());
+});
+
+
+test("brokered and plan questions preserve native answers and explicit skips without allowing workspace calls", async () => {
+  for (const cancelled of [false,true]) {
+    const input={questions:[{question:"Which?",header:"Choice",options:[{label:"A",description:"Alpha"}],multiSelect:false}]};
+    const sdk={tool:()=>({}),createSdkMcpServer:()=>({}),query:({options})=>({close(){},async *[Symbol.asyncIterator](){
+      const result=await options.canUseTool("AskUserQuestion",input);
+      assert.equal(result.behavior,cancelled?"deny":"allow");
+      if (!cancelled) assert.deepEqual(result.updatedInput,{...input,answers:{"Which?":"A"}});
+      assert.equal((await options.canUseTool("Write",{file_path:"escape"})).behavior,"deny");
+      yield {type:"result",subtype:"success",result:"done"};
+    }})};
+    await run({...start,brokered:true,plan:true},sdk,z,()=>{},async(type,fields)=>{
+      assert.equal(type,"question");assert.deepEqual(fields.questions,input);return {cancelled,answers:cancelled?{}:{"Which?":"A"}};
+    },new AbortController());
+  }
 });

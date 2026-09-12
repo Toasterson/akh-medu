@@ -3,6 +3,7 @@ mod claude;
 mod codex;
 mod process;
 pub mod profile;
+mod questions;
 
 use akh_session_types::{
     ApprovalPolicy, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind, ToolResult,

@@ -1,4 +1,6 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
+pub mod questions;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

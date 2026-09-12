@@ -23,7 +23,7 @@ export async function run(start, sdk, z, send, request, abortController) {
     permissionMode: start.plan ? "plan" : "default",
     mcpServers: { akh: mcpServer },
     ...(start.brokered ? {
-      tools: [],
+      tools: ["AskUserQuestion"],
       strictMcpConfig: true,
       settings: { disableAllHooks: true },
       disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Task", "Skill", "NotebookEdit", "WebFetch", "WebSearch"],
@@ -32,12 +32,13 @@ export async function run(start, sdk, z, send, request, abortController) {
     // This namespaced server executes through Akh's own permission gate.
     allowedTools: start.tools.map(({ function: spec }) => `mcp__akh__${spec.name}`),
     canUseTool: async (name, input) => {
-      if (start.brokered) return { behavior: "deny", message: `Native ${name} is disabled. Use the provided mcp__akh__ tools in the bound workspace. Nothing ran.` };
-      if (start.plan) return { behavior: "deny", message: "Akh is in plan mode" };
       if (name === "AskUserQuestion") {
         const result = await request("question", { questions: input });
+        if (result.cancelled === true) return { behavior: "deny", message: "The user skipped these questions." };
         return { behavior: "allow", updatedInput: { ...input, answers: result.answers } };
       }
+      if (start.brokered) return { behavior: "deny", message: `Native ${name} is disabled. Use the provided mcp__akh__ tools in the bound workspace. Nothing ran.` };
+      if (start.plan) return { behavior: "deny", message: "Akh is in plan mode" };
       const { allow } = await request("approval", { name, arguments: input });
       return allow
         ? { behavior: "allow", updatedInput: input }

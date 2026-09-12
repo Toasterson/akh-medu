@@ -143,10 +143,13 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                 }
                 "item/permissions/requestApproval" => json!({"permissions":{},"scope":"turn"}),
                 "mcpServer/elicitation/request" => json!({"action":"decline","content":null}),
-                // ACP's current bridge supports approvals, not arbitrary forms.
-                "item/tool/requestUserInput" | "tool/requestUserInput" => {
-                    turn.host.question(&id.to_string(), params)?
-                }
+                // Normalize provider question semantics before crossing the host boundary.
+                "item/tool/requestUserInput" | "tool/requestUserInput" => crate::questions::ask(
+                    turn.host,
+                    &id.to_string(),
+                    params,
+                    crate::questions::Provider::Codex,
+                )?,
                 _ => {
                     process.send(&json!({"id":id,"error":{"code":-32601,"message":"unsupported runtime request"}}))?;
                     continue;

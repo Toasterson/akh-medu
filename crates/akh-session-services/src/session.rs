@@ -99,6 +99,13 @@ fn prepare_response(
         }
         return Ok(pending);
     }
+    if pending.kind == "question" && pending.prompt["format"] == questions::QuestionForm::FORMAT {
+        let form: questions::QuestionForm = serde_json::from_value(pending.prompt.clone())
+            .map_err(|_| Fault::invalid("invalid stored question form"))?;
+        let answers: questions::QuestionAnswers = serde_json::from_value(response.clone())
+            .map_err(|_| Fault::invalid("invalid question answers"))?;
+        form.validate_answers(&answers).map_err(Fault::invalid)?;
+    }
     let turn = session
         .turns
         .iter()
@@ -819,6 +826,11 @@ impl Sessions {
         prompt: Value,
     ) -> Result<PendingInput> {
         self.validate_runtime_call(principal, call)?;
+        if kind == "question" && prompt["format"] == questions::QuestionForm::FORMAT {
+            let form: questions::QuestionForm = serde_json::from_value(prompt.clone())
+                .map_err(|_| Fault::invalid("invalid question form"))?;
+            form.validate().map_err(Fault::invalid)?;
+        }
         self.store.transaction(|tx| {
             let mut session = load(tx, &call.session_id)?;
             let turn = session

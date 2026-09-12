@@ -902,3 +902,47 @@ fn retirement_fences_new_inputs_and_preserves_unknown_execution_across_restart()
         .unwrap();
     assert_eq!(s.get(&p, &session.id).unwrap().turns.len(), 2);
 }
+
+#[test]
+fn question_answers_are_validated_before_a_decision_is_journaled() {
+    let (_dir, s, p) = setup();
+    let session = create(&s, &p);
+    let turn = submit(&s, &p, &session.id, "question-turn");
+    binding(&s, &session.id);
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let call = ToolCall {
+        id: "question-1".into(),
+        session_id: session.id.clone(),
+        turn_id: turn.id.clone(),
+        generation: job.generation,
+        name: "question".into(),
+        arguments: json!({}),
+    };
+    let prompt = json!({"format":"akh.questions.v1","questions":[{"id":"q","header":"Choice","question":"Which?","options":[{"label":"A","description":"First"}],"multiple":false,"allow_text":false,"secret":false}]});
+    s.request_input(&runtime, &call, "question", prompt)
+        .unwrap();
+    let mut decision = InputDecisionRequest {
+        request_id: "answer".into(),
+        turn_id: turn.id,
+        input_id: call.id,
+        generation: job.generation,
+        response: json!({"approved":true}),
+    };
+    assert!(s.decide_input(&p, &session.id, None, &decision).is_err());
+    decision.response = json!({"cancelled":false,"answers":{"q":["not offered"]}});
+    assert!(s.decide_input(&p, &session.id, None, &decision).is_err());
+    assert_eq!(s.pending_inputs(&p, &session.id).unwrap().len(), 1);
+    decision.response = json!({"cancelled":false,"answers":{"q":["A"]}});
+    let receipt = s.decide_input(&p, &session.id, None, &decision).unwrap();
+    assert!(receipt.accepted);
+    assert_eq!(
+        s.decide_input(&p, &session.id, None, &decision).unwrap(),
+        receipt
+    );
+    assert!(s.pending_inputs(&p, &session.id).unwrap().is_empty());
+}

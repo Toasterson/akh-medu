@@ -500,3 +500,19 @@ by these fixture results.
   review and head gates remain unchanged. Replays preserve later claims.
 - Scheduler selection and result-tool/workspace bootstrap remain migration work;
   no central project allocation, production daemon or infrastructure was enabled.
+
+### Provider questions and live client input controls
+
+- Shared question forms preserve provider IDs, choices, multiple selection,
+  free text and explicit Skip; runtime adapters construct native Codex/Claude
+  answers. Secret answers cannot enter this journaled channel. Claude's brokered
+  bridge enables only its question tool alongside supplied MCP tools; native
+  workspace denials remain enforced. New bridge hashes require new conformance.
+- Anima validates the original question source and answers before its durable
+  input-decision command. Its live-input reader binds pending inputs to cached
+  journal events, replacing activity-tail inference for central permissions.
+  Forms retain their source session and freeze uncertain answers for exact retry.
+- Fourteen session tests, five runtime/transport tests, five SDK tests and the
+  shared form check pass. Full-schema Anima recovery and 97 UI checks pass locally.
+  Native question elicitation and browser/deployment proof remain unverified.
+  See [the question contract](questions.md) for protocol and source details.
