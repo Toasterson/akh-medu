@@ -636,3 +636,15 @@ by these fixture results.
 - Full-schema retirement and two existing physical lease tests pass, including
   stale runner metadata, physical sibling cleanup, first-intent preservation and
   rollback on audit failure. No scheduler route or production service was enabled.
+
+### Exact Git reference discovery for Anima staging
+
+- Added a scoped smart-HTTP repository reader to Anima's central configuration.
+  It returns an exact branch advertisement with digest/time and rejects missing
+  or changed corrective heads, without default-branch fallback. Credentials use
+  private files and stay outside command arguments and the observation record.
+- Native Apple Git 2.50.1 HTTP-backend tests pass for SHA-1/SHA-256, authenticated
+  requests, redirects and response/file limits. Two parser/configuration tests
+  pass complete-stream validation, truncation, duplicate refs and format refusal.
+- This supplies reference evidence for the pending staging integration. Executor
+  checkout verification, canonical admission and result lifecycle remain distinct.
