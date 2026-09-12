@@ -425,27 +425,16 @@ impl EventCalculusEngine {
             return false;
         };
 
-        // Find the most recent initiation at or before `time`.
-        let mut last_init_time: Option<u64> = None;
-        for entry in history.iter().rev() {
-            if entry.timestamp > time {
-                continue;
-            }
-            if entry.initiated {
-                last_init_time = Some(entry.timestamp);
-                break;
-            } else {
-                // Terminated before any initiation in this window → doesn't hold.
-                return false;
-            }
-        }
-
-        let Some(init_t) = last_init_time else {
+        // Delivery order is not event time. Delayed evidence must not override
+        // a newer initiation merely because it was appended last. At equal
+        // timestamps, termination wins conservatively.
+        let Some(init_t) = history.iter()
+            .filter(|entry| entry.initiated && entry.timestamp <= time)
+            .map(|entry| entry.timestamp).max() else {
             return false;
         };
-
-        // Check not clipped: no termination between init_t (exclusive) and time (inclusive).
         !self.is_clipped(fluent_id, init_t, time)
+            && !history.iter().any(|entry| !entry.initiated && entry.timestamp == init_t)
     }
 
     /// Is fluent `f` clipped between `t1` (exclusive) and `t2` (inclusive)?
@@ -703,6 +692,33 @@ mod tests {
 
     fn make_event_id(engine: &Engine, label: &str) -> SymbolId {
         engine.create_symbol(SymbolKind::Entity, label).unwrap().id
+    }
+
+    #[test]
+    fn late_events_use_event_time_and_termination_wins_ties() {
+        let engine = test_engine();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let fluent = make_fluent_id(&engine, "permission");
+        for (label, timestamp, initiate) in [
+            ("grant", 10, true), ("revoke", 20, false),
+            ("correct", 30, true), ("late-revoke", 15, false),
+            ("late-grant", 12, true),
+        ] {
+            ec.record_event(Event {
+                symbol_id: make_event_id(&engine, label), name: label.into(), timestamp,
+                initiates: if initiate { vec![fluent] } else { vec![] },
+                terminates: if initiate { vec![] } else { vec![fluent] },
+            }, &engine).unwrap();
+        }
+        assert!(!ec.holds_at(fluent, 9));
+        assert!(ec.holds_at(fluent, 10));
+        assert!(!ec.holds_at(fluent, 20));
+        assert!(ec.holds_at(fluent, 30));
+        ec.record_event(Event {
+            symbol_id: make_event_id(&engine, "tie"), name: "tie".into(),
+            timestamp: 30, initiates: vec![], terminates: vec![fluent],
+        }, &engine).unwrap();
+        assert!(!ec.holds_at(fluent, 30));
     }
 
     // ── EC predicates namespace ───────────────────────────────────

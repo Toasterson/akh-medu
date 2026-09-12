@@ -1,0 +1,11 @@
+# Native temporal prerequisite experiment
+
+The ordered native EventCalculusEngine → explicit permission projection → ActionSchema path allowed an actual local file effect for current permission, blocked it after revocation, and allowed it after correction. EC metadata was persisted and restored between ordered stages. This is host-authored symbolic assistance with isolated `/usr/bin/touch` effects, not a public neural incident or homelab repair.
+
+The v1 negative probe exposed an implementation defect: a revocation timestamped 15 arriving after correction at 30 made `holds_at(permission, 30)` false. The query traversed reverse insertion order. V1 evidence is retained at `runs/akh-r1-native-temporal-20260913-v1` in the main checkout; its original executable was rebuilt, so only its source, hash and outputs remain there.
+
+The repair selects the latest initiation by event timestamp and checks subsequent terminations. Equal-time termination conservatively wins. V2 retains a copied executable and frozen source snapshots at `runs/akh-r1-native-temporal-20260913-v2`. The late-old-revocation control passes. Eight independent artifact checks pass, including actual marker presence/absence and frozen hashes. All 18 native event-calculus tests pass, including a new regression covering late grants, late revocations and equal-time termination. Final source additionally reuses the existing clipping helper; native tests cover that final source, while V2's executable/source snapshot records the equivalent earlier expression.
+
+This changes the hypothesis from "native timestamp queries are suitable unchanged" to "native temporal queries need arrival-order regression coverage." Generic seed taxonomy alone is not a sufficient repair mechanism. No neural model, training, download, cloud allocation, world quota credit, promotion or gate change occurred.
+
+Remaining limitation: `Fluent.current_value` and last-event metadata still follow ingestion order. The experiment deliberately gates through `holds_at`, not cached-current APIs. Next bounded action is to reconcile cached current state with timestamp semantics and verify persistence/restoration and `holding_fluents` under the same delayed-source sequence. Broader expiry scheduling, authenticated source identity, public candidate integration, model comparison and full R0 quotas remain open.
