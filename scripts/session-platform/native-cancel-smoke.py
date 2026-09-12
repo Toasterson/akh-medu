@@ -78,9 +78,15 @@ def main():
             begin = time.monotonic(); child.terminate()
             child.communicate(timeout=10)
             elapsed = time.monotonic() - begin
-            for pid in owned:
-                stat = Path(f'/proc/{pid}/stat')
-                assert not stat.exists(), f'provider descendant survived cancellation: {pid}'
+            # Orphaned grandchildren are reaped asynchronously by container init.
+            # Require their disappearance, allowing a short bounded reap interval.
+            deadline = time.monotonic() + 3
+            remaining = set(owned)
+            while remaining and time.monotonic() < deadline:
+                remaining = {pid for pid in remaining if Path(f'/proc/{pid}/stat').exists()}
+                if remaining:
+                    time.sleep(.05)
+            assert not remaining, 'provider descendants survived cancellation: ' + repr(sorted(remaining))
             print(json.dumps({'result': 'passed', 'provider': args.kind, 'platform': os.uname().sysname + '-' + os.uname().machine,
                 'cancel_teardown': True, 'observed_descendants': len(owned), 'seconds': elapsed}))
     finally:

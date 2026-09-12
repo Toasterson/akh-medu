@@ -11,10 +11,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=akh-home-runtime-${TARGETPLATFORM},sharing=locked \
     cargo build --locked --release -p akh-session-services --no-default-features \
       --features runtime,events,executor,helpers \
-      --bin akhrtd --bin akheventd --bin akhexecd --bin akh-runtime-profile \
+      --bin akhrtd --bin akheventd --bin akhexecd --bin akh-runtime-profile --bin akh-service \
       --example native-provider-probe && \
     mkdir -p /out/examples && \
-    cp target/release/akhrtd target/release/akheventd target/release/akhexecd target/release/akh-runtime-profile /out/ && \
+    cp target/release/akhrtd target/release/akheventd target/release/akhexecd target/release/akh-runtime-profile target/release/akh-service /out/ && \
     cp target/release/examples/native-provider-probe /out/examples/
 
 FROM node:22-bookworm-slim AS runtime
