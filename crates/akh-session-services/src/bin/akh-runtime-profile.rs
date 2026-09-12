@@ -5,7 +5,7 @@ struct Args {
     config: std::path::PathBuf,
     #[arg(long)]
     profile: String,
-    #[arg(value_parser=["prepare","login","status","version"])]
+    #[arg(value_parser=["prepare","login","status","version","verify"])]
     action: String,
 }
 #[tokio::main]
@@ -16,6 +16,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .runtimes
         .get(&args.profile)
         .ok_or("runtime profile not configured")?;
+    if args.action == "verify" {
+        akh_session_services::runtime::validate_conformance(profile)?;
+        println!("{}: installed runtime conformance verified", args.profile);
+        return Ok(());
+    }
     akh_session_services::runtime_profile::action(profile, &args.action).await?;
     Ok(())
 }
