@@ -457,6 +457,26 @@ pub struct InvokeAutomation {
     pub event: EventEnvelope,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeAutomation {
+    pub request_id: String,
+    pub invocation: InvokeAutomation,
+    pub reason: String,
+}
+
+/// Revocation only wins before admission. An admitted occurrence returns its
+/// authoritative identity and still needs ordinary turn/workspace cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationRevocation {
+    pub schema_version: u16,
+    pub request_id: String,
+    pub automation_id: String,
+    pub occurrence_id: String,
+    pub revoked: bool,
+    pub admission: Option<Admission>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionTarget {

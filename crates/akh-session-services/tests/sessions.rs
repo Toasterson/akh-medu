@@ -326,6 +326,104 @@ fn attachments_are_rejected_before_admission_instead_of_silently_dropped() {
     assert!(s.get(&p, &session.id).unwrap().turns.is_empty());
 }
 
+#[test]
+fn revoking_an_unadmitted_occurrence_is_durable_and_never_cancels_an_admitted_one() {
+    let (dir, s, p) = setup();
+    let mut scheduler = p.clone();
+    scheduler.roles = vec!["scheduler".into()];
+    scheduler.sources = vec!["alerts".into()];
+    let invocation: InvokeAutomation = serde_json::from_value(json!({
+        "occurrence_id":"unadmitted","event":{"schema_version":1,"id":"event","source":"alerts","type":"alert","occurred_at":1,"correlation_id":"incident","data":{}}
+    })).unwrap();
+    let command = RevokeAutomation {
+        request_id: "revoke".into(),
+        invocation,
+        reason: "retire expired dispatch".into(),
+    };
+    assert!(s.revoke_unadmitted(&p, "alerts", &command).is_err());
+    assert!(
+        s.revoke_unadmitted(&scheduler, "alerts", &command)
+            .unwrap()
+            .revoked
+    );
+    assert!(
+        s.revoke_unadmitted(&scheduler, "alerts", &command)
+            .unwrap()
+            .revoked
+    );
+    assert_eq!(
+        s.invoke(&scheduler, "alerts", &command.invocation)
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    assert!(s.list(&p).unwrap().is_empty());
+    let config = s.config.clone();
+    drop(s);
+    let s = Sessions::new(Store::open(&dir.path().join("state.redb")).unwrap(), config);
+    assert!(
+        s.revoke_unadmitted(&scheduler, "alerts", &command)
+            .unwrap()
+            .revoked
+    );
+    assert_eq!(
+        s.invoke(&scheduler, "alerts", &command.invocation)
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    let mut later = command.clone();
+    later.request_id = "later-revoke".into();
+    later.invocation.occurrence_id = "admitted".into();
+    later.invocation.event.occurred_at = now_ms();
+    let admitted = s.invoke(&scheduler, "alerts", &later.invocation).unwrap();
+    let result = s.revoke_unadmitted(&scheduler, "alerts", &later).unwrap();
+    assert!(!result.revoked);
+    assert_eq!(result.admission.unwrap().session_id, admitted.session_id);
+    assert_eq!(
+        s.get(&p, &admitted.session_id).unwrap().turns[0].status,
+        TurnStatus::Queued
+    );
+    later.invocation.event.data = json!({"different":"input"});
+    assert!(s.revoke_unadmitted(&scheduler, "alerts", &later).is_err());
+}
+
+#[test]
+fn admission_and_revocation_choose_exactly_one_durable_owner() {
+    let (_dir, s, p) = setup();
+    let mut scheduler = p.clone();
+    scheduler.roles = vec!["scheduler".into()];
+    scheduler.sources = vec!["alerts".into()];
+    let invocation:InvokeAutomation=serde_json::from_value(json!({"occurrence_id":"raced","event":{"schema_version":1,"id":"event","source":"alerts","type":"alert","occurred_at":now_ms(),"correlation_id":"incident","data":{}}})).unwrap();
+    let command = RevokeAutomation {
+        request_id: "revoke".into(),
+        invocation: invocation.clone(),
+        reason: "concurrent stop".into(),
+    };
+    let gate = std::sync::Barrier::new(2);
+    let (admission, revocation) = std::thread::scope(|scope| {
+        let admit = scope.spawn(|| {
+            gate.wait();
+            s.invoke(&scheduler, "alerts", &invocation)
+        });
+        let revoke = scope.spawn(|| {
+            gate.wait();
+            s.revoke_unadmitted(&scheduler, "alerts", &command)
+        });
+        (admit.join().unwrap(), revoke.join().unwrap().unwrap())
+    });
+    if revocation.revoked {
+        assert!(admission.is_err());
+        assert!(s.list(&p).unwrap().is_empty());
+    } else {
+        assert_eq!(
+            admission.unwrap().session_id,
+            revocation.admission.unwrap().session_id
+        );
+        assert_eq!(s.list(&p).unwrap().len(), 1);
+    }
+}
+
 #[tokio::test]
 async fn slow_cognitive_service_does_not_hold_another_sessions_dispatch() {
     use akh_session_services::server::SessionApp;

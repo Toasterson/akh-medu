@@ -315,3 +315,19 @@ by these fixture results.
   cleanup removes a transient claim. A model completion is separate from Change
   ingestion, review, CI and phase advancement. The client/outbox is not yet wired
   into the canonical scheduler or PWA; physical routing has not been retired.
+
+### Unadmitted dispatch recovery
+
+- Added scheduler-scoped, audited automation revocation. Admission and revocation
+  share the central transaction: a never-admitted occurrence receives a durable
+  tombstone; an already-admitted occurrence returns its session/turn identity and
+  still requires normal cleanup. Concurrent admission/revocation and restart
+  tests pass.
+- Anima persists revocation intent before HTTP and can recover a central identity
+  whose admission response was lost. An expired, never-admitted assignment can
+  release its transport fence only after central revocation. The real local
+  akhsessd plus disposable PostgreSQL test passes for both outcomes, ordinary
+  cancellation, journal import into the outbox, and workspace-release fencing.
+- The complete Anima migration chain, including the two new additive migrations,
+  boots successfully on a fresh disposable PostgreSQL 17 database. This is local
+  database evidence; no tracker data or deployed service was changed.

@@ -404,12 +404,21 @@ pub fn session_router(app: SessionApp) -> Router {
                 post(respond),
             )
             .route("/v1/automations/{id}/invoke", post(invoke))
+            .route("/v1/automations/{id}/revoke", post(revoke_automation))
             .route("/v1/runtime/tools", post(runtime_tool))
             .route("/v1/runtime/tools/reconcile", post(reconcile_tool))
             .route("/v1/runtime/input", post(runtime_input))
             .with_state(app),
         config,
     )
+}
+async fn revoke_automation(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<RevokeAutomation>,
+) -> Api<AutomationRevocation> {
+    Ok(Json(app.sessions.revoke_unadmitted(&p, &id, &request)?))
 }
 async fn session_lifecycle(
     State(app): State<SessionApp>,

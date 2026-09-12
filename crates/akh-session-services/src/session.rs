@@ -28,6 +28,13 @@ struct AutomationRun {
     admission: Admission,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RevokedAutomation {
+    principal: String,
+    request: RevokeAutomation,
+    at: u64,
+}
+
 fn encode(value: &impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(|e| Fault::invalid(e.to_string()))
 }
@@ -736,6 +743,86 @@ impl Sessions {
             .collect())
     }
 
+    pub fn revoke_unadmitted(
+        &self,
+        caller: &Principal,
+        automation_id: &str,
+        request: &RevokeAutomation,
+    ) -> Result<AutomationRevocation> {
+        let definition = self
+            .config
+            .automations
+            .get(automation_id)
+            .ok_or_else(|| Fault::missing("automation not found"))?;
+        if !caller.has_role("scheduler")
+            || (!caller.has_role("admin")
+                && !caller.sources.contains(&request.invocation.event.source))
+            || !definition
+                .sources
+                .contains(&request.invocation.event.source)
+        {
+            return Err(Fault::new(
+                "forbidden",
+                "revocation requires a scheduler granted this automation source",
+            ));
+        }
+        validate_key(&request.request_id)?;
+        validate_key(&request.invocation.occurrence_id)?;
+        validate_key(&request.invocation.event.id)?;
+        if request.invocation.event.schema_version != SCHEMA_VERSION
+            || request.reason.trim().is_empty()
+            || request.reason.len() > 4096
+        {
+            return Err(Fault::invalid(
+                "revocation requires the original versioned occurrence and a bounded reason",
+            ));
+        }
+        self.store.transaction(|tx| {
+            let run_key = key(
+                "automation",
+                &[automation_id, &request.invocation.occurrence_id],
+            );
+            let admission = if let Some(run) = tx.get::<AutomationRun>(&run_key)? {
+                if run.request != request.invocation {
+                    return Err(Fault::conflict(
+                        "occurrence already admitted with different input",
+                    ));
+                }
+                Some(run.admission)
+            } else {
+                let revoked_key = key(
+                    "automation_revoked",
+                    &[automation_id, &request.invocation.occurrence_id],
+                );
+                if let Some(old) = tx.get::<RevokedAutomation>(&revoked_key)? {
+                    if old.request != *request || old.principal != caller.id {
+                        return Err(Fault::conflict(
+                            "occurrence already revoked by a different command",
+                        ));
+                    }
+                } else {
+                    tx.put(
+                        &revoked_key,
+                        &RevokedAutomation {
+                            principal: caller.id.clone(),
+                            request: request.clone(),
+                            at: now_ms(),
+                        },
+                    )?;
+                }
+                None
+            };
+            Ok(AutomationRevocation {
+                schema_version: SCHEMA_VERSION,
+                request_id: request.request_id.clone(),
+                automation_id: automation_id.into(),
+                occurrence_id: request.invocation.occurrence_id.clone(),
+                revoked: admission.is_none(),
+                admission,
+            })
+        })
+    }
+
     pub fn invoke(
         &self,
         caller: &Principal,
@@ -785,6 +872,17 @@ impl Sessions {
                     ));
                 }
                 return Ok(old.admission);
+            }
+            if tx
+                .get::<RevokedAutomation>(&key(
+                    "automation_revoked",
+                    &[automation_id, &request.occurrence_id],
+                ))?
+                .is_some()
+            {
+                return Err(Fault::conflict(
+                    "automation occurrence was durably revoked before admission",
+                ));
             }
             let now = now_ms();
             if request.event.occurred_at > now.saturating_add(120_000)

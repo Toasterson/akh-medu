@@ -111,3 +111,25 @@ roots. Optional `version_command` plus `version_output_contains` verifies the
 installed upstream version before launch. A health endpoint already serving
 before launch is rejected, preventing an unrelated existing server from making
 this helper ready. This check does not replace native server identity validation.
+
+## An automation occurrence that never reached admission
+
+An HTTP failure or an expired admission window does not prove that an assignment
+is absent. A scheduler can POST `/v1/automations/{id}/revoke` with
+`{request_id, invocation, reason}`. `invocation` is the exact original
+`InvokeAutomation` body, including its original timestamp. Use a stable
+revocation request ID and a bounded audit reason.
+
+The session manager atomically checks admission and records revocation. A
+`revoked: true` response means a durable tombstone now rejects every delayed
+admission for that occurrence. No session or workspace was created for it. If
+admission already won, the response contains `revoked: false` and its authoritative
+`admission`; follow ordinary cancellation/result and workspace cleanup. The
+endpoint never silently cancels an admitted session. Revocation records survive
+restart and include the authenticated scheduler identity and reason.
+
+Anima persists the revocation command before sending it, retains its local fence
+on an uncertain response, and closes that fence only after the matching central
+tombstone is acknowledged. A known admitted session still requires normal
+lifecycle cleanup. The revocation route requires a source-scoped scheduler role;
+a generic ingress capability cannot revoke occurrences.
