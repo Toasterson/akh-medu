@@ -707,3 +707,15 @@ by these fixture results.
 - The native akhsessd/PostgreSQL outbox test passes rollback after remote cleanup,
   missing-cache refusal, command fencing and exact replay. Canonical outcome and
   artifact policy still need to call this composition API before scheduler rollout.
+
+### Canonical transactional witness writer
+
+- The existing canonical witness composition/streak reader can now run inside
+  the caller's session-outcome transaction. Rollback consumes no ordinal; the
+  session's dispatched graph/phase remains authoritative after business movement.
+  A supplied session must actually belong to the addressed work item.
+- A full-schema local PostgreSQL test passes outcome/witness rollback and retry,
+  phase-pin preservation, cancellation semantics and compatibility-writer reuse.
+- Fable was retried with the current design and implementation context. The local
+  Claude CLI again rejected OAuth refresh before inference (zero model tokens),
+  so no Fable findings or design approval are claimed.
