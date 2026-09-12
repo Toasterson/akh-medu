@@ -379,3 +379,16 @@ by these fixture results.
   enforcement, a browser UI, native provider tools, or cross-host deployment.
   No images or changes were published. See the [deployment guide](deployment.md)
   for the required identity, projection and context-mapping configuration.
+
+### Native RabbitMQ ingress and reconnect
+
+- The disposable RabbitMQ 4.3.5 test passes actual AMQP consumption and broker
+  acknowledgement after durable outbox receipt, even while central sessions are
+  unavailable. It checks dead lettering of malformed, forged-source and
+  conflicting-ID events, ingress restart recovery, and exact central admission.
+- A broker restart reconnects the consumer. Republishing the original event is
+  acknowledged without creating another central turn. Test ports are explicit:
+  Docker may change automatically assigned host ports when restarting a container.
+  The broker, owned volume and generated test credentials were removed afterward.
+- The tested image digest is pinned in `rabbitmq-native-smoke.py`. This is a real
+  local broker test; it does not prove provider execution or production delivery.

@@ -76,4 +76,17 @@ remain scoped to their configured service.
 
 Local tests exercise JSON, resumed SSE, partial-frame replay, server ping,
 unrecoverable EOF, Djehuty cursor crash replay, and immutable scheduler identity.
-These are contract fixtures, not live MCP, Board, RabbitMQ or Kubernetes evidence.
+These are contract fixtures, not live MCP or Board evidence.
+
+## Native RabbitMQ verification
+
+`python3 scripts/session-platform/rabbitmq-native-smoke.py` creates one disposable
+Docker broker with loopback-only ports and generated test credentials. It passed
+against RabbitMQ 4.3.5 with actual `akheventd` and `akhsessd` processes: the broker
+acknowledges valid events after durable local receipt while sessions are offline;
+malformed, unauthorized-source and conflicting-ID deliveries reach a dead-letter
+queue. Restarting ingress preserves the original occurrence, which subsequently
+admits exactly one central session and turn. Restarting the broker reconnects the
+consumer, and an acknowledged redelivery creates no extra turn. The script removes
+its own broker, volume and credentials. This does not test model execution,
+workspace allocation, or a production broker installation.
