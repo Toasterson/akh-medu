@@ -209,6 +209,18 @@ pub enum OllamaError {
 /// Convenience alias.
 pub type OllamaResult<T> = std::result::Result<T, OllamaError>;
 
+/// Result of a [`OllamaClient::generate_with_options`] call: the generated text
+/// plus the actual prompt token count Ollama reported (`prompt_eval_count`).
+/// The context-rot bench needs the real count to detect silent truncation of
+/// long prompts (Ollama's default `num_ctx` drops turns, faking edge recall).
+#[derive(Debug, Clone)]
+pub struct GenerateResult {
+    /// The generated text (`message.content`).
+    pub text: String,
+    /// Actual prompt tokens evaluated. `0` when the server does not report it.
+    pub prompt_tokens: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
@@ -343,6 +355,11 @@ impl OllamaClient {
             config,
             capabilities: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The configuration this client was built with.
+    pub fn config(&self) -> &OllamaConfig {
+        &self.config
     }
 
     /// HTTP agent for chat/generate requests: a short **connect** timeout (fail
@@ -527,6 +544,73 @@ impl OllamaClient {
             .ok_or_else(|| OllamaError::ParseFailed {
                 reason: "message.content missing or empty in Ollama response".into(),
             })
+    }
+
+    /// Like [`generate`], but sets Ollama's per-request `options.num_ctx` and
+    /// returns the actual prompt token count (`prompt_eval_count`).
+    ///
+    /// The context-rot bench (WI-386) sweeps prompt lengths up to a model's
+    /// advertised window; Ollama's default `num_ctx` is small, and a prompt
+    /// longer than it is **silently truncated**, which the bench's truncation
+    /// detector must catch via the returned real count. Setting `num_ctx`
+    /// explicitly per probe keeps that honest instead of faking good edge
+    /// recall on a prompt the model never fully saw.
+    pub fn generate_with_options(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        num_ctx: usize,
+    ) -> OllamaResult<GenerateResult> {
+        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+
+        let body = serde_json::json!({
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt}
+            ],
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": { "num_ctx": num_ctx },
+        });
+
+        let mut req = self
+            .chat_agent()
+            .post(&url)
+            .set("Content-Type", "application/json");
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req.send_json(&body).map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+
+        let chat_resp: ChatResponse =
+            response.into_json().map_err(|e| OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            })?;
+
+        let text = chat_resp
+            .message
+            .and_then(|m| m.content)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| OllamaError::ParseFailed {
+                reason: "message.content missing or empty in Ollama response".into(),
+            })?;
+
+        Ok(GenerateResult {
+            text,
+            prompt_tokens: chat_resp.prompt_eval_count,
+        })
     }
 
     /// Run one tool-enabled `/api/chat` turn.
