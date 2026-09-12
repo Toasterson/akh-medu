@@ -170,3 +170,19 @@ Anima's updated command client requires this endpoint for input responses. It
 validates the echoed request, session, timestamp and accepted/rejected shape
 before settling its outbox. Deploy the corresponding session-manager API before
 enabling these controls; older endpoints cannot supply equivalent negative proof.
+
+## Whole-session retirement
+
+`POST /v1/sessions/{id}/retire` accepts `request_id` and a bounded, nonempty
+`reason` under the client principal/controller. In one store transaction it
+records the immutable intent, rejects new inputs and requests cancellation of
+all nonterminal turns. Queued turns become cancelled; unknown outcomes remain
+unknown. Replaying the same principal/intent returns its original receipt after
+restart, without reapplying cancellation. A changed intent conflicts.
+
+The receipt proves retirement intent only. Continue observing turns, resolve
+unknown effects through the audited recovery path, and archive only after every
+turn is terminal. Wait for `workspace_released` before releasing external
+ownership. Existing input receipts remain readable; new work requires an explicit
+new session. Anima's central retirement relay implements these stages and commits
+its audited terminal outcome together with ownership/dispatch-claim release.

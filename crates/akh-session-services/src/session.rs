@@ -175,6 +175,71 @@ pub fn append_event(
 }
 
 impl Sessions {
+    /// Irreversibly stop accepting new inputs and request cancellation of all
+    /// outstanding turns. Unknown outcomes remain unknown until audited recovery.
+    /// This receipt proves intent, not provider termination or sandbox cleanup.
+    pub fn retire(
+        &self,
+        p: &Principal,
+        id: &str,
+        attachment: Option<&str>,
+        request: &RetireSession,
+    ) -> Result<SessionRetirement> {
+        validate_key(&request.request_id)?;
+        if request.reason.trim().is_empty() || request.reason.len() > 4096 {
+            return Err(Fault::invalid("retirement requires a bounded audit reason"));
+        }
+        self.store.transaction(|tx| {
+            let mut session = load(tx, id)?;
+            authorize(&session, p)?;
+            if let Some(prior) = &session.retirement {
+                if prior.request != *request || prior.principal != p.id {
+                    return Err(Fault::conflict(
+                        "session retirement already belongs to another intent",
+                    ));
+                }
+                return Ok(prior.clone());
+            }
+            check_controller(&session, attachment)?;
+            if session.closed_at.is_some() {
+                return Err(Fault::conflict("session is already archived"));
+            }
+            let retirement = SessionRetirement {
+                request: request.clone(),
+                principal: p.id.clone(),
+                at: now_ms(),
+            };
+            session.retirement = Some(retirement.clone());
+            append_event(
+                tx,
+                &mut session,
+                None,
+                "session_retiring",
+                encode(&retirement)?,
+            )?;
+            for index in 0..session.turns.len() {
+                let turn = &mut session.turns[index];
+                if turn.status.terminal() || turn.cancel_requested {
+                    continue;
+                }
+                turn.cancel_requested = true;
+                if turn.status == TurnStatus::Queued {
+                    turn.status = TurnStatus::Cancelled;
+                }
+                let id = turn.id.clone();
+                let status = turn.status;
+                append_event(
+                    tx,
+                    &mut session,
+                    Some(&id),
+                    "cancel_requested",
+                    json!({"status":status}),
+                )?;
+            }
+            Ok(retirement)
+        })
+    }
+
     pub fn archive(&self, p: &Principal, id: &str) -> Result<SessionRecord> {
         self.archive_controlled(p, id, None)
     }
@@ -270,6 +335,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
+            retirement: None,
             closed_at: None,
             core_service: profile.core_service.clone(),
             schema_version: SCHEMA_VERSION,
@@ -380,9 +446,9 @@ impl Sessions {
                 .cloned()
                 .ok_or_else(|| Fault::new("storage_error", "admitted turn is missing"));
         }
-        if session.closed_at.is_some() {
+        if session.closed_at.is_some() || session.retirement.is_some() {
             return Err(Fault::conflict(
-                "session is archived; create an explicit new session",
+                "session is retiring or archived; create an explicit new session",
             ));
         }
         if session

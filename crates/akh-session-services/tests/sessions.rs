@@ -826,3 +826,79 @@ fn controller_fences_all_client_mutations_in_the_store() {
         .unwrap();
     assert_ne!(follow_up.id, turn.id);
 }
+
+#[test]
+fn retirement_fences_new_inputs_and_preserves_unknown_execution_across_restart() {
+    let (dir, s, p) = setup();
+    let session = create(&s, &p);
+    let first = submit(&s, &p, &session.id, "first");
+    let queued = submit(&s, &p, &session.id, "queued");
+    binding(&s, &session.id);
+    let request = s.next_job(&session.id).unwrap().unwrap();
+    let mut job = RuntimeJob {
+        request,
+        status: TurnStatus::Unknown,
+        provider_session: Some("original-thread".into()),
+        output: None,
+        error: Some(Fault::new("unknown", "lost worker")),
+        events: vec![],
+    };
+    s.apply_job(&job).unwrap();
+    s.attach(&p, &session.id, "controller", true).unwrap();
+    let intent = RetireSession {
+        request_id: "operator-retirement".into(),
+        reason: "operator stopped this assignment".into(),
+    };
+    assert!(s.retire(&p, &session.id, None, &intent).is_err());
+    assert!(s.get(&p, &session.id).unwrap().retirement.is_none());
+    let receipt = s
+        .retire(&p, &session.id, Some("controller"), &intent)
+        .unwrap();
+    let retired = s.get(&p, &session.id).unwrap();
+    assert_eq!(retired.turns[0].id, first.id);
+    assert_eq!(retired.turns[0].status, TurnStatus::Unknown);
+    assert!(retired.turns[0].cancel_requested);
+    assert_eq!(retired.turns[1].id, queued.id);
+    assert_eq!(retired.turns[1].status, TurnStatus::Cancelled);
+    assert!(s.next_job(&session.id).unwrap().is_none());
+    assert!(
+        s.archive_controlled(&p, &session.id, Some("controller"))
+            .is_err()
+    );
+    let config = s.config.clone();
+    drop(s);
+    let s = Sessions::new(Store::open(&dir.path().join("state.redb")).unwrap(), config);
+    assert_eq!(s.retire(&p, &session.id, None, &intent).unwrap(), receipt);
+    assert_eq!(
+        s.get(&p, &session.id).unwrap().next_sequence,
+        retired.next_sequence
+    );
+    assert!(
+        s.retire(
+            &p,
+            &session.id,
+            None,
+            &RetireSession {
+                reason: "changed".into(),
+                ..intent
+            }
+        )
+        .is_err()
+    );
+    let input = SubmitInput {
+        request_id: "late".into(),
+        text: "must not start".into(),
+        artifacts: vec![],
+    };
+    assert!(
+        s.submit_controlled(&p, &session.id, Some("controller"), &input)
+            .is_err()
+    );
+    // Only authoritative runtime resolution makes archival possible.
+    job.status = TurnStatus::Cancelled;
+    job.error = None;
+    s.apply_job(&job).unwrap();
+    s.archive_controlled(&p, &session.id, Some("controller"))
+        .unwrap();
+    assert_eq!(s.get(&p, &session.id).unwrap().turns.len(), 2);
+}

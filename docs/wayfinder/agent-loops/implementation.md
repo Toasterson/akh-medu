@@ -482,3 +482,21 @@ by these fixture results.
   Twelve session tests and the ACP WebSocket/A2A integration tests pass locally.
 - Whole-session retirement remains separate from Stop. Browser runtime and
   production deployment remain unverified; the central scheduler is not enabled.
+
+### Audited whole-session retirement
+
+- Akh now records immutable retirement intent, fences new inputs and cancels the
+  outstanding turn set atomically. Unknown execution is preserved until runtime
+  recovery confirms an outcome. Thirteen session tests plus ACP/A2A tests pass;
+  the native Anima client also verifies the actual daemon's retirement receipt.
+- Anima's canonical CancelSession/ReconcileSession paths persist retirement for
+  its configured background relay. They retain the physical owner while prior
+  commands, unknown admission, execution or workspace cleanup remain pending.
+  Normal successful closure still requires a Change; operator retirement is an
+  audited abort and explicitly does not accept the model's business result.
+- Full-schema PostgreSQL/HTTP tests pass lost replies, delayed cleanup, audit-write
+  rollback and concurrent retry. The terminal session outcome, audit, central
+  owner closure and exact claim release commit together. Existing business phase,
+  review and head gates remain unchanged. Replays preserve later claims.
+- Scheduler selection and result-tool/workspace bootstrap remain migration work;
+  no central project allocation, production daemon or infrastructure was enabled.

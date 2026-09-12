@@ -219,6 +219,9 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
+    /// Immutable operator retirement fences new inputs before cancelling turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<SessionRetirement>,
     #[serde(default)]
     pub closed_at: Option<u64>,
     #[serde(default)]
@@ -240,6 +243,21 @@ pub struct SessionRecord {
     pub provider_session: Option<String>,
     pub controller: Option<ControllerLease>,
     pub created_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RetireSession {
+    pub request_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRetirement {
+    pub request: RetireSession,
+    pub principal: String,
+    pub at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

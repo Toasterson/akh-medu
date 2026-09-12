@@ -399,6 +399,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/attach", post(attach))
             .route("/v1/sessions/{id}/detach", post(detach))
             .route("/v1/sessions/{id}/archive", post(archive))
+            .route("/v1/sessions/{id}/retire", post(retire))
             .route("/v1/sessions/{id}/turns/{turn}/cancel", post(cancel_turn))
             .route(
                 "/v1/sessions/{id}/turns/{turn}/responses/{input}",
@@ -437,6 +438,21 @@ async fn session_lifecycle(
     Ok(Json(
         json!({"schema_version":SCHEMA_VERSION,"session_id":id,"closed_at":session.closed_at,"workspace_released":released}),
     ))
+}
+async fn retire(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Query(query): Query<AttachmentQuery>,
+    Json(request): Json<RetireSession>,
+) -> Api<SessionRetirement> {
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.retire(
+        &p,
+        &id,
+        query.attachment_id.as_deref(),
+        &request,
+    )?))
 }
 async fn archive(
     State(app): State<SessionApp>,
