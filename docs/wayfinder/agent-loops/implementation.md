@@ -660,3 +660,28 @@ by these fixture results.
 - Full-schema guard/retirement tests and all 113 existing runner unit tests pass.
   Per-frame durable ownership checks still need compatibility-load measurement;
   this is not production runner/client or enabled scheduler evidence.
+
+### Anima staged central admission
+
+- Exact-head discovery now also finds a renamed advertised branch at the prior
+  canonical commit, with deterministic selection when several branches agree.
+  Three parser/configuration tests and native SHA-1/SHA-256 Git tests pass.
+- Anima now stages the versioned phase prompt, supplemental input, review context,
+  canonical protobuf envelope and exact repository observation before allocation.
+  The prompt uses the existing signed S3 writer. An interrupted/refused stage may
+  leave an ordinary retained prompt object; that object conveys no authority.
+- Admission revalidates project/remote/settings, phase/bar, dependencies, head and
+  context freshness under the canonical allocation locks. Per-project/executor
+  capacity counts every open central owner, including uncertain and retiring
+  owners. It commits the session, attempt, scoped token, prompt, envelope, owner,
+  bootstrap intent and audit together, then leaves delivery to the relay.
+- Central tokens omit the legacy diff writer and direct phase advancement. The
+  result capability addresses the canonical receipt-bearing Change submission.
+  Exact admission retries retain the session/token/bootstrap identities.
+- Local full-schema staging tests use native Git plus a recording/fault-injecting
+  signed-S3 HTTP peer. They cover storage failure, stale instructions, dispatch
+  disablement, added dependencies, a satisfied bar, audit rollback, concurrent
+  capacity and exact retry. This is not cloud-S3 or enabled scheduler evidence.
+- Scheduler selection and natural result/materialization/outcome/closure wiring
+  remain to be connected. No site deployment or Fable review is claimed; the
+  local Claude CLI still reports no authenticated profile.
