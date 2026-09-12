@@ -42,3 +42,15 @@ USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/akhrtd", "--config", "/config/service.json"]
+
+# Open-model workers and event ingress do not need provider CLIs or their SDKs.
+FROM debian:bookworm-slim AS services
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini python3 && \
+    rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 akh && \
+    useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home akh && \
+    mkdir -p /data /config && chown akh:akh /data
+COPY --from=build /out/ /usr/local/bin/
+USER 10001:10001
+WORKDIR /data
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/akhrtd", "--config", "/config/service.json"]
