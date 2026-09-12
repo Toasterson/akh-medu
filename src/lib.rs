@@ -34,6 +34,8 @@ pub mod acp;
 pub mod agent;
 pub mod advertise;
 pub mod akh_config;
+#[cfg(feature = "core-server")]
+pub mod core_service;
 pub mod bench_phase41g;
 pub mod bench_phase44;
 pub mod cluster;

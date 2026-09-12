@@ -1,0 +1,58 @@
+{{- if .Values.kagent.enabled }}
+{{- $v := .Values.kagent }}
+{{- if eq $v.secretName $v.name }}{{ fail "kagent.secretName must differ from kagent.name: the upstream controller owns that Secret" }}{{ end }}
+{{- if not (contains "@sha256:" $v.image) }}{{ fail "kagent facade image must be pinned by digest" }}{{ end }}
+{{- if empty $v.allowedCallerLabels }}{{ fail "kagent.allowedCallerLabels must identify trusted callers in this namespace" }}{{ end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $v.name }}-akh-facade
+data:
+  service.json: {{ dict "listen" "0.0.0.0:8080" "akh" $v.akh "public_url" (printf "http://%s.%s:8080/" $v.name .Release.Namespace) "trust_kagent_network" true "sessions" (dict "url" (required "kagent.sessionsUrl is required" $v.sessionsUrl) "token_file" "/run/akh/credentials/token" "ca_file" "/run/akh/credentials/ca.pem") "projection" (dict "controller" (dict "url" (required "kagent.controllerUrl is required" $v.controllerUrl) "token_file" "/var/run/secrets/tokens/kagent-token" "allow_insecure_http" true) "agent_ref" (printf "%s/%s" .Release.Namespace $v.name) "user_id" (required "kagent.userId is required" $v.userId) "workspace_profile" (required "kagent.workspaceProfile is required" $v.workspaceProfile)) | toJson | quote }}
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: {{ $v.name }}
+spec:
+  type: BYO
+  description: Centrally managed Akh sessions through the A2A 0.3 interface
+  byo:
+    deployment:
+      image: {{ required "kagent.image is required" $v.image | quote }}
+      cmd: /usr/local/bin/akh-kagent
+      args: [--config, /akh-config/service.json]
+      replicas: 1
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      podSecurityContext: {fsGroup: 10001}
+      resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+      volumes:
+        - name: akh-config
+          configMap: {name: {{ $v.name }}-akh-facade}
+        - name: akh-credentials
+          secret: {secretName: {{ required "kagent.secretName is required" $v.secretName }}, defaultMode: 288}
+      volumeMounts:
+        - {name: akh-config, mountPath: /akh-config, readOnly: true}
+        - {name: akh-credentials, mountPath: /run/akh/credentials, readOnly: true}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $v.name }}-trusted-callers
+spec:
+  podSelector:
+    matchLabels: {app: kagent, kagent: {{ $v.name }}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {{ $v.allowedCallerLabels | toJson }}
+      ports: [{protocol: TCP, port: 8080}]
+{{- end }}

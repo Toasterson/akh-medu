@@ -10,6 +10,10 @@ members = [
     "crates/grug-data",
     "crates/grug-train",
     "benchmarks/harness-core",
+    "crates/akh-session-types",
+    "crates/akh-service-store",
+    "crates/akh-runtime",
+    "crates/akh-session-services",
 ]
 resolver = "3"
 
@@ -128,6 +132,10 @@ opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_e
 
 # Async runtime (feature-gated; shared by the daemon and the ACP server)
 tokio = { version = "1", features = ["full"], optional = true }
+akh-session-types = { path = "crates/akh-session-types" }
+akh-runtime = { path = "crates/akh-runtime", optional = true }
+akh-service-store = { path = "crates/akh-service-store", optional = true }
+axum = { version = "0.8", optional = true }
 
 # Stream combinators for the oxifed federation channel (feature-gated)
 futures-util = { version = "0.3", optional = true }
@@ -235,13 +243,17 @@ base64 = { version = "0.22.1", optional = true }
 #     `backend = "candle"` rather than silently re-routing it (see the
 #     `cfg(not(feature = "candle-backend"))` arm in src/bin/akhomed.rs).
 # Per-artifact profiles are documented in docs/ops/akhomed-feature-profiles.md.
-default = ["acp"]
+default = ["acp", "embedded-runtime"]
+# Compatibility for existing embedded chat; specialized core builds omit providers.
+embedded-runtime = ["dep:akh-runtime"]
+# Cognitive/config/storage owner only: no client ACP, external provider or executor dependency.
+core-server = ["daemon", "postgres", "tracing-otel", "dep:axum", "dep:akh-service-store"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor"]
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]
@@ -310,6 +322,7 @@ client = ["acp"]
 remote-executor = ["dep:russh", "dep:base64", "tokio"]
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 sha2 = "0.10"
@@ -333,7 +346,7 @@ path = "src/main.rs"
 [[bin]]
 name = "akhomed"
 path = "src/bin/akhomed.rs"
-required-features = ["server"]
+required-features = ["daemon", "postgres"]
 
 [[bin]]
 name = "generate_qa_dataset"

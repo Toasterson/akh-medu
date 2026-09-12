@@ -1,0 +1,148 @@
+[package]
+name = "akh-session-services"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Independent Akh session, runtime, sandbox, executor and ingress services"
+
+[features]
+default = ["session", "runtime", "executor", "sandbox", "events", "client"]
+session = ["dep:jsonschema", "dep:async-stream", "dep:rmcp", "axum/ws"]
+runtime = ["dep:akh-runtime", "helpers"]
+executor = ["helpers", "dep:regex", "dep:globset", "dep:base64", "dep:tempfile"]
+sandbox = []
+events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono"]
+helpers = []
+client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
+admin = []
+trigger = ["dep:chrono"]
+kagent = ["dep:async-stream"]
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+akh-session-types = { path = "../akh-session-types" }
+rmcp = { version = "0.17", default-features = false, optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
+uuid = { version = "1" }
+akh-runtime = { path = "../akh-runtime", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+akh-service-store = { path = "../akh-service-store" }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", default-features = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls", "stream"] }
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
+sha2 = "0.10"
+tempfile = { version = "3", optional = true }
+base64 = { version = "0.22", optional = true }
+libc = "0.2"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = { version = "1", optional = true }
+globset = { version = "0.4", optional = true }
+url = "2"
+jsonschema = { version = "0.33", default-features = false, optional = true }
+async-stream = { version = "0.3", optional = true }
+lapin = { version = "2", optional = true }
+tokio-executor-trait = { version = "2", optional = true }
+tokio-reactor-trait = { version = "1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "akh-kagent"
+path = "src/bin/akh-kagent.rs"
+required-features = ["kagent"]
+
+[[bin]]
+name = "akh-fingerprint"
+path = "src/bin/akh-fingerprint.rs"
+required-features = ["admin"]
+
+[[bin]]
+name = "akh-trigger"
+path = "src/bin/akh-trigger.rs"
+required-features = ["trigger"]
+
+[[bin]]
+name = "akhsessd"
+path = "src/bin/akhsessd.rs"
+required-features = ["session"]
+
+[[bin]]
+name = "akhrtd"
+path = "src/bin/akhrtd.rs"
+required-features = ["runtime"]
+
+[[bin]]
+name = "akhexecd"
+path = "src/bin/akhexecd.rs"
+required-features = ["executor"]
+
+[[bin]]
+name = "akhsbxd"
+path = "src/bin/akhsbxd.rs"
+required-features = ["sandbox"]
+
+[[bin]]
+name = "akheventd"
+path = "src/bin/akheventd.rs"
+required-features = ["events"]
+
+[[bin]]
+name = "akh-service"
+path = "src/bin/akh-service.rs"
+required-features = ["helpers"]
+
+[[bin]]
+name = "akh-connect"
+path = "src/bin/akh-connect.rs"
+required-features = ["client"]
+
+[[bin]]
+name = "akh-acp"
+path = "src/bin/akh-acp.rs"
+required-features = ["client"]
+
+[[test]]
+name = "sessions"
+required-features = ["session"]
+
+[[test]]
+name = "anima_mcp"
+required-features = ["session"]
+
+[[test]]
+name = "acp"
+required-features = ["session", "client"]
+
+[[test]]
+name = "a2a"
+required-features = ["session"]
+
+[[test]]
+name = "executor"
+required-features = ["executor"]
+
+[[test]]
+name = "sandbox"
+required-features = ["sandbox"]
+
+[[test]]
+name = "repository_bootstrap"
+required-features = ["sandbox", "executor"]
+
+[[example]]
+name = "native-provider-probe"
+required-features = ["runtime"]
+
+[[bin]]
+name = "akh-runtime-profile"
+path = "src/bin/akh-runtime-profile.rs"
+required-features = ["runtime"]

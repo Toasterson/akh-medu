@@ -1,0 +1,83 @@
+[
+  {
+    "id": "01a086ef-8032-7e63-be25-1574988ed23d",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Session ownership and loop selection",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:14.903307+00:00"
+  },
+  {
+    "id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Codex and Claude integration contracts and subscription boundaries",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.033608+00:00"
+  },
+  {
+    "id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Cursor and OpenCode integration contracts and execution control",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.171734+00:00"
+  },
+  {
+    "id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Tool execution ownership and workspace location",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.335206+00:00"
+  },
+  {
+    "id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "AgentLoop contract and lifecycle events",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.469191+00:00"
+  },
+  {
+    "id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Memory, transcript continuity and provider usage",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.634155+00:00"
+  },
+  {
+    "id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Akh and external clients attach to the same session service",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.746295+00:00"
+  },
+  {
+    "id": "01a086ef-8343-7963-85de-93d3342b66c1",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Different loop strategies and composition",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.843497+00:00"
+  },
+  {
+    "id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+    "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+    "title": "Migration path and provider conformance gates",
+    "status": "cancelled",
+    "priority": "medium",
+    "current_phase": "cancelled",
+    "updated_at": "2026-09-09T18:52:15.938395+00:00"
+  }
+]

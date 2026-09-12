@@ -440,10 +440,21 @@ mod tests {
         // never session/work-item identity (bounded-label rule). The `mode`
         // value is on the span, not the metric.
         use opentelemetry::metrics::MeterProvider;
-        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+        use opentelemetry_sdk::metrics::data::{Histogram, Sum, ResourceMetrics};
+        use opentelemetry_sdk::metrics::reader::MetricReader;
+        use opentelemetry_sdk::metrics::{Pipeline, InstrumentKind, Temporality, MetricResult};
         use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
 
-        let reader = ManualReader::builder().build();
+        #[derive(Debug, Clone)]
+        struct SharedReader(std::sync::Arc<ManualReader>);
+        impl MetricReader for SharedReader {
+            fn register_pipeline(&self, pipeline:std::sync::Weak<Pipeline>){self.0.register_pipeline(pipeline)}
+            fn collect(&self, metrics:&mut ResourceMetrics)->MetricResult<()>{self.0.collect(metrics)}
+            fn force_flush(&self)->MetricResult<()>{self.0.force_flush()}
+            fn shutdown(&self)->MetricResult<()>{self.0.shutdown()}
+            fn temporality(&self, kind:InstrumentKind)->Temporality{self.0.temporality(kind)}
+        }
+        let reader = SharedReader(std::sync::Arc::new(ManualReader::builder().build()));
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.clone())
             .build();
@@ -453,32 +464,19 @@ mod tests {
         record_started_with(&reg, "sekhmet");
         record_completed_with(&reg, "sekhmet", TurnStopReason::Refusal, 1.25);
 
-        let mut buf = ResourceMetrics::default();
+        let mut buf = ResourceMetrics { resource: opentelemetry_sdk::Resource::empty(), scope_metrics: vec![] };
         reader.collect(&mut buf).expect("collect metrics");
 
         let mut turns_label_keys = Vec::new();
         let mut duration_label_keys = Vec::new();
         for scope in &buf.scope_metrics {
             for metric in &scope.metrics {
-                match (&metric.name, &metric.data) {
-                    ("akh_acp_turns_total", AggregatedMetrics::U64(MetricData::Sum(sum))) => {
-                        turns_label_keys.extend(
-                            sum.data_points
-                                .iter()
-                                .flat_map(|dp| dp.attributes.iter().map(|kv| kv.key.to_string())),
-                        );
-                    }
-                    (
-                        "akh_acp_turn_duration_seconds",
-                        AggregatedMetrics::F64(MetricData::Histogram(h)),
-                    ) => {
-                        duration_label_keys.extend(
-                            h.data_points
-                                .iter()
-                                .flat_map(|dp| dp.attributes.iter().map(|kv| kv.key.to_string())),
-                        );
-                    }
-                    _ => {}
+                if metric.name == "akh_acp_turns_total" {
+                    let sum=metric.data.as_any().downcast_ref::<Sum<u64>>().expect("u64 sum");
+                    turns_label_keys.extend(sum.data_points.iter().flat_map(|dp|dp.attributes.iter().map(|kv|kv.key.to_string())));
+                } else if metric.name == "akh_acp_turn_duration_seconds" {
+                    let histogram=metric.data.as_any().downcast_ref::<Histogram<f64>>().expect("f64 histogram");
+                    duration_label_keys.extend(histogram.data_points.iter().flat_map(|dp|dp.attributes.iter().map(|kv|kv.key.to_string())));
                 }
             }
         }

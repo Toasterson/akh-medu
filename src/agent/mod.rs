@@ -94,6 +94,7 @@ pub mod relation_enrichment;
 pub mod reactor;
 pub mod resource;
 pub mod response_strategy;
+pub mod runtime;
 pub mod semantic_enrichment;
 pub mod sleep;
 pub mod source_reliability;

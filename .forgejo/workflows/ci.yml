@@ -31,6 +31,22 @@ on:
   pull_request:
 
 jobs:
+  test-session-platform:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Rust and platform test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config protobuf-compiler libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev xz-utils python3 git
+          sh scripts/session-platform/install-ci-git.sh
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      - name: Verify independent daemon profiles and platform contracts
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+          python3 scripts/session-platform/check-profiles.py
+          cargo test --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+
   # Seshat crate type-check. Default features only (includes `embedding`;
   # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
   check-seshat:
@@ -124,7 +140,9 @@ jobs:
             export RUSTC_WRAPPER=sccache
             sccache --show-stats || true
           fi
-          cargo test --features postgres --lib
+          # Keep failures and totals without thousands of per-test success lines.
+          # The remote log collector otherwise outlives this suite by many minutes.
+          cargo test --quiet --features postgres --lib
 
   docker-seshd:
     runs-on: ubuntu-22.04

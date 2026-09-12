@@ -268,6 +268,7 @@ Some trailing text.
             goal_id: 42,
             priority: 0.8,
             target_hint: None,
+            target_workspace: None,
         };
         let prompt = LocalClaudeWorker::build_prompt(&task);
         assert!(prompt.contains("Write unit tests"));

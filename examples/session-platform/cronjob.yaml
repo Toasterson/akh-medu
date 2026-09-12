@@ -1,0 +1,64 @@
+# Replace image digest, namespace, endpoint and source scope before installation.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: akh-trigger}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: akh-trigger-job-metadata}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: akh-trigger-job-metadata}
+subjects: [{kind: ServiceAccount, name: akh-trigger}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: akh-trigger-job-metadata}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: akh-trigger}
+data:
+  endpoint.json: '{"url":"https://sessions.example.invalid","token_file":"/run/akh/credentials/token","ca_file":"/run/akh/credentials/ca.pem"}'
+  kubernetes.json: '{"url":"https://kubernetes.default.svc","token_file":"/var/run/secrets/kubernetes.io/serviceaccount/token","ca_file":"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"}'
+  event.json: '{"source":"nightly","type":"scheduled.run","subject":"nightly","data":{"task":"review alerts"}}'
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: akh-nightly}
+spec:
+  schedule: "0 1 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: akh-trigger
+          restartPolicy: Never
+          securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+          containers:
+            - name: trigger
+              image: registry.example.invalid/akh-trigger@sha256:REPLACE_WITH_VERIFIED_DIGEST
+              command: [/usr/local/bin/akh-trigger]
+              args: [--endpoint-config, /config/endpoint.json, --automation, nightly, --template, /config/event.json, --kubernetes-job, --kubernetes-api-config, /config/kubernetes.json]
+              env:
+                - name: AKH_JOB_NAME
+                  valueFrom: {fieldRef: {fieldPath: "metadata.labels['batch.kubernetes.io/job-name']"}}
+                - name: AKH_JOB_NAMESPACE
+                  valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+              securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
+              resources: {requests: {cpu: 25m, memory: 32Mi}, limits: {memory: 128Mi}}
+              volumeMounts:
+                - {name: config, mountPath: /config, readOnly: true}
+                - {name: credentials, mountPath: /run/akh/credentials, readOnly: true}
+          volumes:
+            - name: config
+              configMap: {name: akh-trigger}
+            - name: credentials
+              secret: {secretName: akh-trigger-credentials, defaultMode: 288}

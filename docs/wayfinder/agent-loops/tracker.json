@@ -1,0 +1,219 @@
+{
+  "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+  "map": {
+    "kind": "plan",
+    "id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+    "title": "Wayfinder: interchangeable agent loops with Akh-owned services",
+    "creation_status": "verified native Plan",
+    "url": "https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615"
+  },
+  "tickets": [
+    {
+      "slug": "session-ownership",
+      "id": "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+      "title": "Session ownership and loop selection",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [],
+      "accepted_decisions": [
+        "One loop implementation fixed for each Akh; no per-session override."
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-8032-7e63-be25-1574988ed23d",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-417"
+    },
+    {
+      "slug": "codex-claude",
+      "id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "type": "research",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [],
+      "findings": "ingested and linked",
+      "research_commit": "2ab0b7704b53b8698d8a13d05dfbf013ced813d5",
+      "research_branch": "research/akh-agent-loops-codex-claude",
+      "resolution": "Findings complete; terminal transition blocked by draft gate. Retained in draft without promotion.",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-418",
+      "document_id": "01a0878d-9451-7182-b97c-bf3470f924fc"
+    },
+    {
+      "slug": "cursor-opencode",
+      "id": "01a0878c-30a2-7022-942f-078aaf065f19",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "type": "research",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [],
+      "findings": "ingested and linked",
+      "research_commit": "3740efb4eb526ffc650c57c7696657fe9223d5cd",
+      "research_branch": "research/akh-agent-loops-cursor-opencode",
+      "resolution": "Findings complete; terminal transition blocked by draft gate. Retained in draft without promotion.",
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-419",
+      "document_id": "01a0878d-94d0-7100-8258-812d3dba8eb3"
+    },
+    {
+      "slug": "execution-boundary",
+      "id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+      "title": "Tool execution ownership and workspace location",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "codex-claude",
+        "cursor-opencode"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-420"
+    },
+    {
+      "slug": "loop-contract",
+      "id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+      "title": "AgentLoop contract and lifecycle events",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "session-ownership",
+        "execution-boundary"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-421"
+    },
+    {
+      "slug": "context-continuity",
+      "id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+      "title": "Memory, transcript continuity and provider usage",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "codex-claude",
+        "cursor-opencode",
+        "loop-contract"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-422"
+    },
+    {
+      "slug": "client-contract",
+      "id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+      "title": "Akh and external clients attach to the same session service",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "loop-contract",
+        "context-continuity"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-423"
+    },
+    {
+      "slug": "loop-strategies",
+      "id": "01a0878c-3228-79f1-a997-8c8d38896bc1",
+      "title": "Different loop strategies and composition",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "loop-contract"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-8343-7963-85de-93d3342b66c1",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-424"
+    },
+    {
+      "slug": "handoff",
+      "id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+      "title": "Migration path and provider conformance gates",
+      "type": "grilling",
+      "status": "open",
+      "assignee": null,
+      "blocked_by": [
+        "execution-boundary",
+        "loop-contract",
+        "context-continuity",
+        "client-contract",
+        "loop-strategies"
+      ],
+      "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+      "legacy_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+      "legacy_status": "cancelled",
+      "tracker_state": "native Plan member in draft",
+      "current_phase": "draft",
+      "code": "WI-425"
+    }
+  ],
+  "legacy_map_work_item": {
+    "id": "01a086ef-7fd1-7692-a16e-a9ced40149b7",
+    "title": "Incorrect map placeholder \u2014 replace with native agent-loop Plan",
+    "role": "retired incorrect map placeholder; never reopen",
+    "status": "cancelled",
+    "current_phase": "cancelled"
+  },
+  "migration": {
+    "status": "complete",
+    "plan_request": "plan-create-request.json",
+    "preserve_work_item_ids": false,
+    "preserve_dependency_edges": true,
+    "retirement_verified": true,
+    "retirement_readback": "retirement-readback.json",
+    "open_obsolete_items": 0,
+    "blockers": [],
+    "member_count": 9,
+    "dependency_count": 15,
+    "native_readback": "native-plan-readback.json",
+    "note": "Replacement IDs were required because the supported update schema does not expose plan_id reassignment; historical records remain cancelled."
+  },
+  "assets": {
+    "codex-claude": {
+      "document_id": "01a0878d-9451-7182-b97c-bf3470f924fc",
+      "seshat_document_id": "16eb2038-089a-4f2b-aebd-a18e7b3b3e68",
+      "visibility": "private"
+    },
+    "cursor-opencode": {
+      "document_id": "01a0878d-94d0-7100-8258-812d3dba8eb3",
+      "seshat_document_id": "53e8f5df-0fa3-429f-8207-5bfe04182038",
+      "visibility": "private"
+    },
+    "architecture-draft": {
+      "document_id": "01a0878d-9529-7c82-bfbe-2ce4f1f8490b",
+      "seshat_document_id": "06151fc2-c6bb-4f27-93a7-9eabba259bf4",
+      "visibility": "private"
+    }
+  }
+}

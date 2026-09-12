@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "researched_on": "2026-09-11",
+  "status": "source inspection only; no deployment or interoperability run",
+  "upstreams": [
+    {
+      "repository": "pingdotgg/t3code",
+      "inspected_main": {
+        "commit": "2ebc9fa4ed24e389eef24039f27c73ae6633858f",
+        "commit_date": "2026-09-11T16:01:23Z"
+      },
+      "files": [
+        {
+          "path": "apps/server/src/checkpointing/CheckpointStore.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/checkpointing/CheckpointStore.ts",
+          "sha256": "fd61de315cf3d28ba1cabe532d4a34ab9e54629549b287799606345b39cb23ef"
+        },
+        {
+          "path": "apps/server/src/provider/ProviderDriver.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/ProviderDriver.ts",
+          "sha256": "f736eb12700cf17abfa7984ac96ab8958e973dd711eecb910484e3b1f8d3223a"
+        },
+        {
+          "path": "apps/server/src/provider/Services/ProviderAdapter.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/Services/ProviderAdapter.ts",
+          "sha256": "78f631a25cf691503ce24d0f47862de982a469e830d9ecebf32a31a873465868"
+        },
+        {
+          "path": "apps/server/src/provider/acp/AcpAdapterSupport.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/acp/AcpAdapterSupport.ts",
+          "sha256": "f1248cd2dd3a356d047458d691bd3c2b4fe676590895e551d8247a8a580b95d7"
+        },
+        {
+          "path": "apps/server/src/provider/acp/AcpSessionRuntime.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/acp/AcpSessionRuntime.ts",
+          "sha256": "3c292f3874c72ec692cc590f2578ef9906c264eee5136b11e4b6bf98b6d7caf7"
+        },
+        {
+          "path": "apps/server/src/provider/builtInDrivers.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/builtInDrivers.ts",
+          "sha256": "0d9d3b5d3add4b49743dc05aba1f96edf29f23e9c24addd55e2a1f81ace4bb16"
+        },
+        {
+          "path": "apps/server/src/vcs/VcsDriver.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/vcs/VcsDriver.ts",
+          "sha256": "902b4d07b809f8cb5281a6a9943618740a8d3e58f29cdde2b85e24f86675ecf7"
+        },
+        {
+          "path": "apps/server/src/workspace/WorkspaceFileSystem.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/workspace/WorkspaceFileSystem.ts",
+          "sha256": "7eafd60becb68994b56253d54810b74f4dc67089fc9fe80c448c28f2c7a792f8"
+        },
+        {
+          "path": "apps/server/src/workspace/WorkspacePaths.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/workspace/WorkspacePaths.ts",
+          "sha256": "c2d633b780abeb80e3b2f3b1ab99cddaf6cf8ecd7c12da489b5cc75e0a422bba"
+        },
+        {
+          "path": "docs/internals/overview.md",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/docs/internals/overview.md",
+          "sha256": "3fee37c09c2c7d8f08774f52d7f2e510da6097abdfdda3e01db80c2043b9cbb0"
+        },
+        {
+          "path": "docs/internals/providers.md",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/docs/internals/providers.md",
+          "sha256": "214c13013f48d43c912733fb53678739175b9dbe6e597cbe0451e4cd8b3625ff"
+        },
+        {
+          "path": "docs/internals/remote.md",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/docs/internals/remote.md",
+          "sha256": "4ad27f56d75713d3d7abf43cd3f74460b32d44d2712a720af03921eb01d00b40"
+        },
+        {
+          "path": "packages/contracts/src/providerInstance.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/packages/contracts/src/providerInstance.ts",
+          "sha256": "0a1fea758707473021ff0e340015a464ff1af785a4bb842b8976a574acb0afaf"
+        },
+        {
+          "path": "apps/server/src/provider/ProviderDriver.ts",
+          "revision": "release",
+          "url": "https://github.com/pingdotgg/t3code/blob/09e8de9c655ae85410bf6b00446f272a01da81c7/apps/server/src/provider/ProviderDriver.ts",
+          "sha256": "f736eb12700cf17abfa7984ac96ab8958e973dd711eecb910484e3b1f8d3223a"
+        },
+        {
+          "path": "apps/server/src/provider/acp/AcpSessionRuntime.ts",
+          "revision": "release",
+          "url": "https://github.com/pingdotgg/t3code/blob/09e8de9c655ae85410bf6b00446f272a01da81c7/apps/server/src/provider/acp/AcpSessionRuntime.ts",
+          "sha256": "3c292f3874c72ec692cc590f2578ef9906c264eee5136b11e4b6bf98b6d7caf7"
+        },
+        {
+          "path": "apps/server/src/persistence/Layers/Sqlite.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/persistence/Layers/Sqlite.ts",
+          "sha256": "f992822d36218f5270b601d982b6fddf694f79097d0259482e988b307a76ca68"
+        },
+        {
+          "path": "apps/server/src/provider/Drivers/CodexDriver.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/server/src/provider/Drivers/CodexDriver.ts",
+          "sha256": "3375fbd7ab486d315d738f3284bdc09522acd4c0ea81570a457bf4349426a223"
+        },
+        {
+          "path": "docs/user/remote-access.md",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/docs/user/remote-access.md",
+          "sha256": "10d3e005ddbc9d34ce5c5e7a9a7d7f3a347b8c5d7b979cefb395d183c7144875"
+        },
+        {
+          "path": "apps/web/src/hostedPairing.ts",
+          "revision": "main",
+          "url": "https://github.com/pingdotgg/t3code/blob/2ebc9fa4ed24e389eef24039f27c73ae6633858f/apps/web/src/hostedPairing.ts",
+          "sha256": "f477a1b3d3be5a52892d7bcf342f84dc2306075524080bc3299b2ebbc9590454"
+        }
+      ],
+      "inspected_release": {
+        "repo": "pingdotgg/t3code",
+        "tag": "v0.0.40",
+        "sha": "09e8de9c655ae85410bf6b00446f272a01da81c7",
+        "date": "2026-09-07T22:51:24Z",
+        "relevant_paths": [
+          "apps/server/src/provider/ProviderDriver.ts",
+          "apps/server/src/provider/acp/AcpSessionRuntime.ts"
+        ]
+      }
+    },
+    {
+      "repository": "kagent-dev/kagent",
+      "inspected_main": {
+        "commit": "2d843e3732c308d7728c4c7daa1708a96277f159",
+        "commit_date": "2026-09-11T15:39:53Z"
+      },
+      "files": [
+        {
+          "path": "go/api/a2a/hitl.go",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/api/a2a/hitl.go",
+          "sha256": "a7f011e5488ce6220ebd550c874261c5f0f03c23a5a4e8ae1ca901d4823d18fa"
+        },
+        {
+          "path": "go/core/internal/translator/byo/compiler.go",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/core/internal/translator/byo/compiler.go",
+          "sha256": "be6b55f1ff3cdb1b54058b19fbc7f17c30fa0c660af6e976f1240bb69777cc7f"
+        },
+        {
+          "path": "go/harness/README.md",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/harness/README.md",
+          "sha256": "1e827c052646c8df5347be81b8f21a62f25a45c8f5d1d778807793d712deaae5"
+        },
+        {
+          "path": "go/harness/claude/README.md",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/harness/claude/README.md",
+          "sha256": "a90c25cf08bcf7d986299fa4061f0162de9c84a78391be671610660960f0077b"
+        },
+        {
+          "path": "go/harness/codex/README.md",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/harness/codex/README.md",
+          "sha256": "b8121f2858aa016327926a713dff41167adc9c30ac142f3d153163741616777e"
+        },
+        {
+          "path": "go/harness/runtime/a2a/executor.go",
+          "revision": "main",
+          "url": "https://github.com/kagent-dev/kagent/blob/2d843e3732c308d7728c4c7daa1708a96277f159/go/harness/runtime/a2a/executor.go",
+          "sha256": "faf690601afac7b432402987d855e040eaa826fe723ed11777acb8f8b85f6ea4"
+        },
+        {
+          "path": "go/api/v1alpha2/agent_types.go",
+          "revision": "release",
+          "url": "https://github.com/kagent-dev/kagent/blob/a3d26eaf2eda002d9c9104d2a8f6f27a2ff23ec3/go/api/v1alpha2/agent_types.go",
+          "sha256": "11817a3002d5c0c0ec098b549b26689b0e3cb96b83cbf369a08d3911ed8fd5a0"
+        }
+      ],
+      "inspected_release": {
+        "repo": "kagent-dev/kagent",
+        "tag": "v0.10.1",
+        "sha": "a3d26eaf2eda002d9c9104d2a8f6f27a2ff23ec3",
+        "date": "2026-09-08T20:05:34Z",
+        "relevant_paths": [
+          "go/api/v1alpha2/agent_types.go"
+        ]
+      }
+    },
+    {
+      "repository": "agentclientprotocol/typescript-sdk",
+      "inspected_main": {
+        "commit": "c88bb0da97fe1059d4e3032df2724bf39c96f3d2",
+        "commit_date": "2026-09-07T10:05:16Z"
+      },
+      "files": [
+        {
+          "path": "src/examples/ws-client.ts",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/typescript-sdk/blob/c88bb0da97fe1059d4e3032df2724bf39c96f3d2/src/examples/ws-client.ts",
+          "sha256": "02544140f5eafac02c304e19b35f06d17a540d518d46058a6de2b558cdef4c29"
+        },
+        {
+          "path": "src/ws-server.ts",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/typescript-sdk/blob/c88bb0da97fe1059d4e3032df2724bf39c96f3d2/src/ws-server.ts",
+          "sha256": "56393ec797a4b832370e7b0e862fa500d8f1cbbe291011a72230ecb99f0eb7cd"
+        },
+        {
+          "path": "src/ws-stream.ts",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/typescript-sdk/blob/c88bb0da97fe1059d4e3032df2724bf39c96f3d2/src/ws-stream.ts",
+          "sha256": "11cb8df0decda1dc7dbfc57e890ddc481b9af44f0f25509d479da31ad702039e"
+        }
+      ]
+    },
+    {
+      "repository": "agentclientprotocol/rust-sdk",
+      "inspected_main": {
+        "commit": "3a6d0ae88dbaa09fcb74e26761e3643a75b2015e",
+        "commit_date": "2026-09-07T19:17:51Z"
+      },
+      "files": [
+        {
+          "path": "md/http-transport.md",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/rust-sdk/blob/3a6d0ae88dbaa09fcb74e26761e3643a75b2015e/md/http-transport.md",
+          "sha256": "23872087721caca006cdbc2ef9503db3e09b83843cb4646be15599d758f41d00"
+        },
+        {
+          "path": "src/agent-client-protocol-http/Cargo.toml",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/rust-sdk/blob/3a6d0ae88dbaa09fcb74e26761e3643a75b2015e/src/agent-client-protocol-http/Cargo.toml",
+          "sha256": "f133d45d2b46161df79bd31cfb41b49a748cd9fe3667a7e4c33a626350705717"
+        },
+        {
+          "path": "src/agent-client-protocol-http/README.md",
+          "revision": "main",
+          "url": "https://github.com/agentclientprotocol/rust-sdk/blob/3a6d0ae88dbaa09fcb74e26761e3643a75b2015e/src/agent-client-protocol-http/README.md",
+          "sha256": "7ca3c5ce092f520b705015ec48bafdff011922e091e0396c61a1f9e5b7101ca3"
+        }
+      ]
+    }
+  ],
+  "local_evidence": {
+    "repository": "akh-medu",
+    "head": "004cfbc2ea4742a90f18f6fd6dee964d316f6ab7",
+    "dirty_checkout": true,
+    "files": [
+      "Cargo.toml",
+      "src/bin/akhomed.rs",
+      "src/agent/runtime.rs",
+      "docs/wayfinder/agent-loops/assets/daemon-boundaries.md"
+    ],
+    "infrastructure_documents": [
+      "/Users/toasty/ws/talos/clusters/archibald/anima-runners/README.md",
+      "/Users/toasty/ws/talos/clusters/archibald/solstice-executor/README.md"
+    ],
+    "live_hosts_checked": false
+  },
+  "colocation_clarification": {
+    "date": "2026-09-11",
+    "central_session_owner": "akhsessd",
+    "editor_server_placement": "same sandbox as akhexecd",
+    "anima_source_trace": {
+      "checkout": "/Users/toasty/ws/anima",
+      "head": "c63bdbefee8567b09e7a31cef9c41ff9e7fcee4d",
+      "dirty_checkout": true,
+      "files": [
+        {
+          "path": "crates/anima-server/src/execution_fabric.rs",
+          "sha256": "1c76ec15a8a4eb1af4f4f0f33549212abb859b2d871ad40565cc818d3e8dd514"
+        },
+        {
+          "path": "crates/anima-server/src/services/runner.rs",
+          "sha256": "9100c4d93cc625b7bf91ee53010d8041e4b920dc5eb5fbd192e3e622ecf29442"
+        },
+        {
+          "path": "crates/anima-server/src/services/live_session.rs",
+          "sha256": "fbe475d14a4c9b27d49157778cf8620b72dc43de7f3bbedae266825f8ddd1374"
+        },
+        {
+          "path": "crates/anima-server/src/services/bridge.rs",
+          "sha256": "b9938266e54741063341177bbe070c232e6ce7e26380d5ed66c9ae3730eeb6b5"
+        },
+        {
+          "path": "crates/anima-server/src/services/session.rs",
+          "sha256": "90c805ec13c5c7ecaff3553a3076e2f78a53e8efc078a27661a509d7f5be6133"
+        },
+        {
+          "path": "crates/anima-runner/src/acp.rs",
+          "sha256": "8d049e2958d2b7a4bfe2195111aabeb349175831c0449096bac1e8b5bb50a0f5"
+        },
+        {
+          "path": "crates/anima-runner/src/attach.rs",
+          "sha256": "0995d7e053bc88836fda34ee8f458e47aebff0a86551ab41c104729feb126e06"
+        },
+        {
+          "path": "crates/anima-runner/src/execution_fabric.rs",
+          "sha256": "d254cf8077fa71fc70d3e688b67dfcabe4a831242088bc5acb691b959359b15d"
+        },
+        {
+          "path": "proto/anima/v1/session.proto",
+          "sha256": "a0761903bac1a7c84280cd09bab3f93bef93cc16d1f4e1d91b65d50230a281c5"
+        }
+      ]
+    },
+    "editor_sources": [
+      "https://zed.dev/docs/remote-development",
+      "https://code.visualstudio.com/docs/remote/vscode-server",
+      "https://github.com/gitpod-io/openvscode-server"
+    ],
+    "live_operations": false
+  },
+  "upstream_only_clarification": {
+    "date": "2026-09-11",
+    "external_services": "unmodified upstream releases; Akh-owned helpers and supported external bridges",
+    "t3_central_attachment": "supported-interface feasibility remains unverified; no mandatory source changes",
+    "provider_evidence": [
+      {
+        "package": "@anthropic-ai/claude-agent-sdk",
+        "version": "0.3.266",
+        "url": "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.266.tgz",
+        "package_sha256": "155036c63456c2e99335a2ebc3761ceb114c618f549000be55bb997165060a6e",
+        "file": "package/sdk.d.ts",
+        "file_sha256": "5301ef6902f43423ef061465d25598f1b1218466fcab7d774b8e49a6d02da828",
+        "evidence": "published declaration inspection; no SDK execution"
+      },
+      {
+        "url": "https://github.com/anthropics/claude-code/issues/91622",
+        "evidence": "upstream user report of alias/deny interaction; not reproduced locally"
+      },
+      {
+        "url": "https://code.claude.com/docs/en/agent-sdk/permissions",
+        "evidence": "official documentation fetched"
+      },
+      {
+        "url": "https://code.claude.com/docs/en/agent-sdk/agent-loop",
+        "evidence": "official documentation fetched"
+      },
+      {
+        "url": "https://learn.chatgpt.com/docs/app-server",
+        "evidence": "official documentation fetched"
+      },
+      {
+        "url": "https://learn.chatgpt.com/docs/hooks",
+        "evidence": "official documentation fetched"
+      }
+    ],
+    "live_operations": false,
+    "conformance_tests_run": false,
+    "client_connection_helper": {
+      "placement": "per-user process on connecting machine",
+      "flow": "authorized readiness descriptor and upstream pairing",
+      "unattended_desktop_import_verified": false,
+      "live_operations": false
+    }
+  }
+}

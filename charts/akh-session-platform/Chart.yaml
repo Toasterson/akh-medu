@@ -1,0 +1,6 @@
+apiVersion: v2
+name: akh-session-platform
+description: Independent persistent Akh session platform daemons
+version: 0.1.0
+appVersion: 0.1.0
+type: application

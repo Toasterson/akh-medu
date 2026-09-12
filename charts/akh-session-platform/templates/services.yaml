@@ -1,0 +1,94 @@
+{{- range $name, $service := .Values.services }}
+{{- if not (contains "@sha256:" (required "service.image is required" $service.image)) }}{{ fail "service images must be pinned by digest" }}{{ end }}
+{{- $daemon := required "service.daemon is required" $service.daemon }}
+{{- if not (has $daemon (list "akhsessd" "akhrtd" "akhsbxd" "akheventd")) }}
+{{- fail "central chart only runs session/runtime/sandbox/event daemons; akhexecd belongs in its sandbox" }}
+{{- end }}
+{{- $id := printf "%s-%s" $.Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- $config := deepCopy (required "service.config is required" $service.config) }}
+{{- $_ := set $config "listen" "0.0.0.0:8080" }}
+{{- $_ := set $config "data_dir" "/data" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $id }}
+data:
+  service.json: {{ $config | toJson | quote }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $id }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- if hasKey $service "storageClass" }}
+  storageClassName: {{ $service.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ default "10Gi" $service.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $id }}
+spec:
+  replicas: 1
+  # redb has one process owner. Never overlap replicas or use a rolling surge.
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {akh-service: {{ $id }}}
+  template:
+    metadata:
+      labels: {akh-service: {{ $id }}}
+      annotations:
+        checksum/config: {{ $config | toJson | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001}
+      {{- with $service.nodeSelector }}
+      nodeSelector: {{ . | toJson }}
+      {{- end }}
+      containers:
+        - name: {{ $daemon }}
+          image: {{ required "service.image is required" $service.image | quote }}
+          command: [{{ printf "/usr/local/bin/%s" $daemon | quote }}]
+          args: [--config, /config/service.json]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+            seccompProfile: {type: RuntimeDefault}
+          ports: [{name: http, containerPort: 8080}]
+          # This is listening/readiness, not provider capacity or a successful turn.
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          startupProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 2, failureThreshold: 60}
+          resources: {{ default (dict "requests" (dict "cpu" "100m" "memory" "128Mi") "limits" (dict "memory" "1Gi")) $service.resources | toJson }}
+          volumeMounts:
+            - {name: state, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+            - {name: config, mountPath: /config, readOnly: true}
+            - {name: credentials, mountPath: /run/akh/credentials, readOnly: true}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: {{ $id }}}
+        - name: tmp
+          emptyDir: {sizeLimit: 256Mi}
+        - name: config
+          configMap: {name: {{ $id }}}
+        - name: credentials
+          secret: {secretName: {{ required "service.secretName is required" $service.secretName }}, defaultMode: 288}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $id }}
+spec:
+  type: ClusterIP
+  selector: {akh-service: {{ $id }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+{{- end }}

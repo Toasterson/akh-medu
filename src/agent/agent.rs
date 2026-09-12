@@ -272,6 +272,7 @@ pub struct Agent {
     /// `run_agentic_turn` drives this instead of wrapping `model_manager`
     /// (Ollama). `None` ⇒ the Ollama path via `model_manager`.
     pub(crate) chat_backend: Option<std::sync::Arc<dyn super::chat_backend::ChatBackend>>,
+    pub(crate) agent_runtime: Option<std::sync::Arc<super::runtime::AgentRuntime>>,
     /// Working-context assembly strategy (Phase 44a, ADR 065). `None` ⇒ the
     /// byte-identical pass-through manager (current behaviour). When set,
     /// `run_agentic_turn` builds each prompt through it.
@@ -962,6 +963,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
+            agent_runtime: None,
             context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2248,6 +2250,13 @@ impl Agent {
         backend: std::sync::Arc<dyn super::chat_backend::ChatBackend>,
     ) {
         self.chat_backend = Some(backend);
+        self.agent_runtime = None;
+    }
+
+    /// Select a coding-agent session runtime instead of the native model loop.
+    pub fn set_agent_runtime(&mut self, runtime: super::runtime::AgentRuntime) {
+        self.agent_runtime = Some(std::sync::Arc::new(runtime));
+        self.chat_backend = None;
     }
 
     /// Attach a working-context assembly strategy (Phase 44a, ADR 065). `None`
@@ -4340,6 +4349,7 @@ impl Agent {
             wasm_runtime: super::wasm_runtime::WasmToolRuntime::new().ok(),
             model_manager: None,
             chat_backend: None,
+            agent_runtime: None,
             context_manager: std::sync::Mutex::new(None),
             last_context_stats: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_deferred_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
