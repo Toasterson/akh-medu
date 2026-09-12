@@ -623,3 +623,16 @@ by these fixture results.
 - Automatic result linking, canonical turn/witness outcomes, workspace cleanup and
   owner closure still require lifecycle integration. The central scheduler route
   and its staging/base-resolution/previous-work preservation remain outstanding.
+
+### Anima lifecycle cleanup ownership
+
+- Legacy container/rebind/lease cleanup now preserves open central sessions and
+  their exact dispatch claims. Physical cleanup shares one transaction helper;
+  ordinary abandonment cannot overwrite an already terminal session.
+- Canonical terminal work-item transitions and operator holds stage the central
+  retirement intent in the same transaction as business state and audit. Their
+  existing relay retains ownership until command, execution and workspace
+  cleanup are confirmed. An earlier cleanup intent remains authoritative.
+- Full-schema retirement and two existing physical lease tests pass, including
+  stale runner metadata, physical sibling cleanup, first-intent preservation and
+  rollback on audit failure. No scheduler route or production service was enabled.
