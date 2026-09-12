@@ -558,3 +558,17 @@ by these fixture results.
 - Central scheduler selection, authoritative base-commit resolution, prior Change
   materialization and canonical result-token issuance/revocation remain migration
   work. No private Git login, production allocation or project dispatch was run.
+
+### Atomic Anima admission primitives
+
+- Anima's canonical claim can now compose a central session with its transport
+  owner, attempt, scoped token, prompt metadata and context snapshot in one
+  transaction, with no synthetic RunnerId. Network artifacts can be staged
+  before claiming; the attempt is accepted only if its expected value still holds.
+- The canonical claim now also refuses an open central owner after legacy-only
+  cleanup. Full-schema PostgreSQL tests pass rollback, concurrent claims,
+  transactional visibility and stale attempts. All sixteen existing phase,
+  exact-head review, CI and dependency-gate tests pass. Test containers were
+  owned fixtures; the shared-host global stale-container sweep was disabled.
+- The central route, staging coordinator, result lifecycle and provider/runtime
+  deployment remain integration work. These primitives do not enable a project.
