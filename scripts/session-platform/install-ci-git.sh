@@ -12,7 +12,7 @@ printf '%s  %s\n' 457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc175053
     "$akh_git_build/git.tar.xz" | sha256sum -c -
 tar -xJf "$akh_git_build/git.tar.xz" -C "$akh_git_build"
 make -C "$akh_git_build/git-2.55.0" -j2 prefix=/usr \
-    NO_GETTEXT=YesPlease NO_TCLTK=YesPlease all
+    NO_RUST=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease all
 sudo make -C "$akh_git_build/git-2.55.0" prefix=/usr \
-    NO_GETTEXT=YesPlease NO_TCLTK=YesPlease install
+    NO_RUST=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease install
 /usr/bin/git --no-lazy-fetch --version
