@@ -103,6 +103,7 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
     )
     .unwrap();
     let request = Allocate {
+        bootstrap: None,
         session_id: "session".into(),
         principal: "user".into(),
         profile: "pod".into(),
@@ -137,6 +138,7 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
     // exists yet, but the owned CRD still needs foreground cleanup.
     state.lock().unwrap().object = None;
     let pending = Allocate {
+        bootstrap: None,
         session_id: "pending".into(),
         principal: "user".into(),
         profile: "pod".into(),
@@ -163,6 +165,7 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
     // or to declare cleanup. Later observation of that object permits deletion.
     state.lock().unwrap().fail_create = true;
     let uncertain = Allocate {
+        bootstrap: None,
         session_id: "uncertain".into(),
         principal: "user".into(),
         profile: "pod".into(),
@@ -196,6 +199,7 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
     // Failed provisioning is not absence proof. Explicit inspected absence can
     // close cleanup, including after a prior failed operator resolution.
     let absent = Allocate {
+        bootstrap: None,
         session_id: "absent".into(),
         principal: "user".into(),
         profile: "pod".into(),
@@ -295,6 +299,7 @@ async fn slow_executor_does_not_serialize_another_allocation() {
     let slow = service.clone();
     let pending = tokio::spawn(async move {
         slow.allocate(Allocate {
+            bootstrap: None,
             session_id: "slow".into(),
             principal: "user".into(),
             profile: "local".into(),
@@ -307,6 +312,7 @@ async fn slow_executor_does_not_serialize_another_allocation() {
     let fast = tokio::time::timeout(
         Duration::from_secs(1),
         service.allocate(Allocate {
+            bootstrap: None,
             session_id: "fast".into(),
             principal: "user".into(),
             profile: "local".into(),

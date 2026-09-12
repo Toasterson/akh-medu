@@ -543,3 +543,18 @@ by these fixture results.
   continue to use the same executor lifecycle. Six executor tests pass locally.
 - This is the execution primitive for repository bootstrap; it does not itself
   select a repository, create a checkout or certify a sandbox image.
+
+### Repository bootstrap before editor and runtime readiness
+
+- An owner with the bootstrap role can pin an allowed repository and exact commit
+  to a new session. The sandbox manager validates its own allowed sources and
+  pins the Git profile before coordinating seven executor operations. Editor
+  startup and runtime dispatch require the resulting workspace/commit evidence.
+- Native Git/executor HTTP checks pass lost responses, manager restart, unknown
+  operation fencing with audited executor recovery, exact commit verification and
+  preservation of pre-existing files. Seventeen session tests, two sandbox tests
+  and six executor tests also pass locally. Anima now has an independent client
+  method for the immutable repository intent. See [repository bootstrap](repository-bootstrap.md).
+- Central scheduler selection, authoritative base-commit resolution, prior Change
+  materialization and canonical result-token issuance/revocation remain migration
+  work. No private Git login, production allocation or project dispatch was run.

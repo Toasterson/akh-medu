@@ -140,7 +140,9 @@ async fn operation(
     Extension(p): Extension<Principal>,
     Json(request): Json<WorkspaceOperation>,
 ) -> Api<OperationReceipt> {
-    http::role(&p, "session")?;
+    if !p.has_role("sandbox") {
+        http::role(&p, "session")?;
+    }
     Ok(Json(
         tokio::task::spawn_blocking(move || executor.operate(request))
             .await
@@ -152,6 +154,8 @@ async fn receipt(
     Extension(p): Extension<Principal>,
     Path(id): Path<String>,
 ) -> Api<OperationReceipt> {
-    http::role(&p, "session")?;
+    if !p.has_role("sandbox") {
+        http::role(&p, "session")?;
+    }
     Ok(Json(executor.receipt(&id)?))
 }

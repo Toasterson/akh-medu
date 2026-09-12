@@ -259,6 +259,7 @@ impl SessionApp {
                     "sandboxes",
                     "/v1/allocations",
                     &Allocate {
+                        bootstrap: self.sessions.check_repository_bootstrap(session, false)?,
                         session_id: session.id.clone(),
                         principal: session.principal.clone(),
                         profile: session.workspace_profile.clone(),
@@ -268,11 +269,12 @@ impl SessionApp {
             if allocation.state != "ready" {
                 return Ok(());
             }
-            self.sessions.bind_workspace(
+            self.sessions.bind_prepared_workspace(
                 &session.id,
                 allocation
                     .binding
                     .ok_or_else(|| Fault::conflict("ready allocation has no workspace"))?,
+                allocation.bootstrap_result,
             )?;
         }
         let current: SessionRecord = self
@@ -406,6 +408,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/inputs", post(submit_input))
             .route("/v1/sessions/{id}/events", get(session_events))
             .route("/v1/sessions/{id}/pending", get(pending))
+            .route("/v1/sessions/{id}/repository", post(prepare_repository))
             .route("/v1/sessions/{id}/input-decisions", post(decide_input))
             .route(
                 "/v1/sessions/{id}/mcp-credentials/{service}",
@@ -479,6 +482,14 @@ async fn provision_mcp_credential(
         app.sessions
             .provision_mcp_credential(&p, &id, &service, &request)?,
     ))
+}
+async fn prepare_repository(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<bootstrap::BootstrapRepository>,
+) -> Api<bootstrap::RepositoryBootstrapReceipt> {
+    Ok(Json(app.sessions.prepare_repository(&p, &id, &request)?))
 }
 async fn archive(
     State(app): State<SessionApp>,
@@ -786,8 +797,11 @@ mod lifecycle_tests {
         let posts_peer = posts.clone();
         fn allocation(id: String, state: &str) -> Allocation {
             Allocation {
+                bootstrap_profile_sha256: None,
+                bootstrap_result: None,
                 resource_uid: None,
                 request: Allocate {
+                    bootstrap: None,
                     session_id: id.clone(),
                     principal: "user".into(),
                     profile: "local".into(),

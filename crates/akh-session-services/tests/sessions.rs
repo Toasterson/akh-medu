@@ -97,6 +97,107 @@ fn scoped_setup(endpoint: &str) -> (tempfile::TempDir, Sessions, Principal) {
 }
 
 #[test]
+fn repository_intent_pins_owner_source_and_exact_revision_before_workspace_and_runtime() {
+    use bootstrap::*;
+    let (_dir, old, mut owner) = setup();
+    owner.roles.push("session_bootstrap".into());
+    let repository = "https://git.example/authorized/project.git";
+    let mut config = (*old.config).clone();
+    config.akhs.get_mut("thoth").unwrap().bootstrap_repositories = vec![repository.into()];
+    let s = Sessions::new(old.store.clone(), Arc::new(config));
+    let session = create(&s, &owner);
+    submit(&s, &owner, &session.id, "turn");
+    let request = BootstrapRepository {
+        request_id: "bootstrap-1".into(),
+        checkout: RepositoryCheckout {
+            repository: repository.into(),
+            revision: "a".repeat(40),
+        },
+    };
+    let mut wrong = owner.clone();
+    wrong.id = "other-owner".into();
+    assert_eq!(
+        s.prepare_repository(&wrong, &session.id, &request)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    let mut wrong = request.clone();
+    wrong.checkout.repository = "https://git.example/another/project.git".into();
+    assert!(s.prepare_repository(&owner, &session.id, &wrong).is_err());
+    wrong = request.clone();
+    wrong.checkout.revision = "main".into();
+    assert!(s.prepare_repository(&owner, &session.id, &wrong).is_err());
+    let receipt = s.prepare_repository(&owner, &session.id, &request).unwrap();
+    assert_eq!(
+        s.prepare_repository(&owner, &session.id, &request).unwrap(),
+        receipt
+    );
+    wrong = request.clone();
+    wrong.checkout.revision = "b".repeat(40);
+    assert!(s.prepare_repository(&owner, &session.id, &wrong).is_err());
+    let binding = WorkspaceBinding {
+        id: "workspace".into(),
+        sandbox_id: "sandbox".into(),
+        executor: "executor-1".into(),
+        generation: 1,
+        site: "fixture".into(),
+        root: "/remote/workspace".into(),
+        platform: "fixture".into(),
+        confinement: "fixture".into(),
+    };
+    assert!(s.bind_workspace(&session.id, binding.clone()).is_err());
+    let proof = RepositoryBootstrapResult {
+        request: request.clone(),
+        session_id: session.id.clone(),
+        workspace_id: binding.id.clone(),
+        generation: 1,
+        verified_revision: request.checkout.revision.clone(),
+        operation_receipts: (0..7).map(|i| format!("executor-receipt-{i}")).collect(),
+        at: now_ms(),
+    };
+    let mut wrong = proof.clone();
+    wrong.verified_revision = "b".repeat(40);
+    assert!(
+        s.bind_prepared_workspace(&session.id, binding.clone(), Some(wrong))
+            .is_err()
+    );
+    let mut wrong = proof.clone();
+    wrong.generation = 2;
+    assert!(
+        s.bind_prepared_workspace(&session.id, binding.clone(), Some(wrong))
+            .is_err()
+    );
+    assert!(s.next_job(&session.id).unwrap().is_none());
+    s.bind_prepared_workspace(&session.id, binding.clone(), Some(proof.clone()))
+        .unwrap();
+    s.bind_prepared_workspace(&session.id, binding, Some(proof))
+        .unwrap();
+    let mut drift = (*s.config).clone();
+    drift
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .bootstrap_repositories
+        .clear();
+    assert!(
+        Sessions::new(s.store.clone(), Arc::new(drift))
+            .next_job(&session.id)
+            .is_err()
+    );
+    assert!(s.next_job(&session.id).unwrap().is_some());
+    assert_eq!(
+        s.get(&owner, &session.id)
+            .unwrap()
+            .repository_bootstrap
+            .unwrap()
+            .receipt
+            .unwrap(),
+        receipt
+    );
+}
+
+#[test]
 fn scoped_credentials_fence_dispatch_and_recover_exact_intent_without_public_secrets() {
     use akh_session_services::store::key;
     use credentials::ProvisionMcpCredential;

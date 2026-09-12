@@ -342,6 +342,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
+            repository_bootstrap: crate::session_bootstrap::initial(profile)?,
             required_mcp_credentials: self.required_mcp_credentials(&profile.tools)?,
             retirement: None,
             closed_at: None,
@@ -537,8 +538,18 @@ impl Sessions {
     }
 
     pub fn bind_workspace(&self, id: &str, binding: WorkspaceBinding) -> Result<()> {
+        self.bind_prepared_workspace(id, binding, None)
+    }
+
+    pub fn bind_prepared_workspace(
+        &self,
+        id: &str,
+        binding: WorkspaceBinding,
+        result: Option<bootstrap::RepositoryBootstrapResult>,
+    ) -> Result<()> {
         self.store.transaction(|tx| {
             let mut session = load(tx, id)?;
+            crate::session_bootstrap::validate_result(&session, &binding, result.as_ref())?;
             if let Some(old) = &session.workspace {
                 if old != &binding {
                     return Err(Fault::conflict(
@@ -553,6 +564,20 @@ impl Sessions {
                 ));
             }
             session.workspace = Some(binding.clone());
+            if let Some(result) = result {
+                session
+                    .repository_bootstrap
+                    .as_mut()
+                    .expect("validated bootstrap slot")
+                    .result = Some(result.clone());
+                append_event(
+                    tx,
+                    &mut session,
+                    None,
+                    "repository_bootstrap_completed",
+                    encode(&result)?,
+                )?;
+            }
             append_event(tx, &mut session, None, "workspace_ready", encode(&binding)?)?;
             Ok(())
         })
@@ -582,6 +607,7 @@ impl Sessions {
             }
             if session.turns[index].status == TurnStatus::Queued {
                 self.check_mcp_credentials(tx, &session)?;
+                self.check_repository_bootstrap(&session, true)?;
                 session.generation = session
                     .generation
                     .checked_add(1)

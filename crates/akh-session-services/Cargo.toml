@@ -129,6 +129,10 @@ required-features = ["executor"]
 name = "sandbox"
 required-features = ["sandbox"]
 
+[[test]]
+name = "repository_bootstrap"
+required-features = ["sandbox", "executor"]
+
 [[example]]
 name = "native-provider-probe"
 required-features = ["runtime"]

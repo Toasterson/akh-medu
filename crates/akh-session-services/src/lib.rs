@@ -23,6 +23,8 @@ pub mod ingress;
 #[cfg(feature = "session")]
 pub mod mcp;
 pub mod recovery;
+#[cfg(feature = "sandbox")]
+pub mod repository_bootstrap;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 #[cfg(feature = "sandbox")]
@@ -37,6 +39,8 @@ pub mod sandbox;
 pub mod server;
 #[cfg(feature = "session")]
 pub mod session;
+#[cfg(feature = "session")]
+pub mod session_bootstrap;
 #[cfg(feature = "session")]
 pub mod session_credentials;
 pub mod store;

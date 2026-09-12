@@ -188,9 +188,16 @@ impl Sandboxes {
             .get(&request.profile)
             .ok_or_else(|| Fault::missing("workspace profile not found"))?;
         let k = key("allocation", &[&request.session_id]);
+        let bootstrap_profile_sha256 = crate::repository_bootstrap::profile_fingerprint(
+            profile.repository_bootstrap.as_ref(),
+            request.bootstrap.as_ref(),
+        )?;
         let mut allocation = match self.store.get::<Allocation>(&k)? {
             Some(old) => {
-                if old.request != request || old.profile_revision != profile.revision {
+                if old.request != request
+                    || old.profile_revision != profile.revision
+                    || old.bootstrap_profile_sha256 != bootstrap_profile_sha256
+                {
                     return Err(Fault::conflict(
                         "allocation request or installed profile changed",
                     ));
@@ -199,6 +206,8 @@ impl Sandboxes {
             }
             None => {
                 let allocation = Allocation {
+                    bootstrap_profile_sha256,
+                    bootstrap_result: None,
                     resource_uid: None,
                     id: format!(
                         "akh-{}",
@@ -304,6 +313,14 @@ impl Sandboxes {
                     return Err(Fault::conflict(
                         "executor returned another workspace identity",
                     ));
+                }
+                if let (Some(git), Some(request)) =
+                    (&profile.repository_bootstrap, &request.bootstrap)
+                {
+                    allocation.bootstrap_result = Some(
+                        self.bootstrap_repository(&client, &allocation, &binding, git, request)
+                            .await?,
+                    );
                 }
                 allocation.access.clear();
                 for service in &profile.services {

@@ -122,6 +122,9 @@ impl Principal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AkhProfile {
+    /// Nonempty requires immutable repository bootstrap before allocation.
+    #[serde(default)]
+    pub bootstrap_repositories: Vec<String>,
     pub core_service: Option<String>,
     pub runtime: RuntimeBinding,
     pub instructions: String,
@@ -157,6 +160,8 @@ pub enum Provisioner {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceProfile {
+    #[serde(default)]
+    pub repository_bootstrap: Option<GitBootstrapProfile>,
     pub revision: String,
     pub site: String,
     pub provisioner: Provisioner,
@@ -164,6 +169,57 @@ pub struct WorkspaceProfile {
     pub services: Vec<ServiceProfile>,
     #[serde(default)]
     pub retain_on_release: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBootstrapProfile {
+    pub repositories: Vec<String>,
+    pub executable: PathBuf,
+    /// Private Git/credential-helper configuration installed inside the sandbox.
+    pub config_file: Option<PathBuf>,
+}
+
+pub fn validate_repository(repository: &str) -> Result<()> {
+    let url = url::Url::parse(repository)
+        .map_err(|_| Fault::invalid("repository requires an explicit URL"))?;
+    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if repository.len() > 4096
+        || repository
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.host_str().is_none()
+        || url.path().is_empty()
+        || url.path() == "/"
+        || (!url.username().is_empty() && url.scheme() != "ssh")
+        || !(matches!(url.scheme(), "https" | "ssh")
+            || (local && matches!(url.scheme(), "http" | "git")))
+    {
+        return Err(Fault::invalid(
+            "repository requires HTTPS or SSH without embedded secrets; test transports are loopback-only",
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_checkout(request: &bootstrap::BootstrapRepository) -> Result<()> {
+    validate_key(&request.request_id)?;
+    validate_repository(&request.checkout.repository)?;
+    if !matches!(request.checkout.revision.len(), 40 | 64)
+        || !request
+            .checkout
+            .revision
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(Fault::invalid(
+            "repository bootstrap requires a complete lowercase commit object ID",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,6 +364,9 @@ impl Config {
         }
         for (name, profile) in &self.akhs {
             validate_key(name)?;
+            for repository in &profile.bootstrap_repositories {
+                validate_repository(repository)?;
+            }
             let mut tools = std::collections::HashSet::new();
             for tool in &profile.tools {
                 validate_key(&tool.name)?;
@@ -321,6 +380,21 @@ impl Config {
                     return Err(Fault::invalid(
                         "tools require unique names and object input schemas",
                     ));
+                }
+            }
+        }
+        for profile in self.workspaces.values() {
+            if let Some(git) = &profile.repository_bootstrap {
+                if git.repositories.is_empty()
+                    || !git.executable.is_absolute()
+                    || git.config_file.as_ref().is_some_and(|p| !p.is_absolute())
+                {
+                    return Err(Fault::invalid(
+                        "Git bootstrap requires allowed repositories and absolute sandbox executable/config paths",
+                    ));
+                }
+                for repository in &git.repositories {
+                    validate_repository(repository)?;
                 }
             }
         }

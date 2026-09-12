@@ -1,4 +1,5 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
+pub mod bootstrap;
 pub mod credentials;
 pub mod questions;
 
@@ -222,6 +223,8 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_bootstrap: Option<bootstrap::SessionRepositoryBootstrap>,
     /// Configured MCP destinations that require a private session capability.
     /// Values fingerprint the endpoint configuration; credentials are never here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -722,12 +725,18 @@ pub struct AttachWorkspace {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Allocate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<bootstrap::BootstrapRepository>,
     pub session_id: String,
     pub principal: String,
     pub profile: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Allocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_profile_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_result: Option<bootstrap::RepositoryBootstrapResult>,
     #[serde(default)]
     pub resource_uid: Option<String>,
     pub request: Allocate,
