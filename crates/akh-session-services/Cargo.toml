@@ -114,6 +114,10 @@ name = "sessions"
 required-features = ["session"]
 
 [[test]]
+name = "anima_mcp"
+required-features = ["session"]
+
+[[test]]
 name = "acp"
 required-features = ["session", "client"]
 

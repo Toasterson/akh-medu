@@ -592,3 +592,15 @@ by these fixture results.
   preservation of prior Changes, and result ingestion/lifecycle still need their
   integration. No project route or production service was enabled. Fable's local
   Claude CLI still reports logged out, so its design review remains outstanding.
+
+
+### Native Akh-to-Anima MCP compatibility
+
+- Found and fixed Anima's legacy-only MCP version negotiation, which the modern
+  Akh broker correctly refused. Anima now negotiates 2025-06-18 for Streamable
+  HTTP, retains explicit legacy negotiation, and validates origin/version headers.
+- The actual Akh MCP client now passes a scoped Work Item read against the actual
+  Anima HTTP router and an owned full-schema local database. The router fixture
+  also checks notifications, ping, filtered tools, auth/revocation and GET 405.
+  No production token or endpoint was used. This proves read transport; the
+  result submission and scheduler lifecycle integrations remain outstanding.
