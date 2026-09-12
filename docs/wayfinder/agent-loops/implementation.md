@@ -648,3 +648,15 @@ by these fixture results.
   pass complete-stream validation, truncation, duplicate refs and format refusal.
 - This supplies reference evidence for the pending staging integration. Executor
   checkout verification, canonical admission and result lifecycle remain distinct.
+
+### Anima physical-runner ingress fence
+
+- Legacy runner frames and reconnects now respect central session and open
+  work-item ownership. Heartbeats retain unrelated physical entries; historical
+  central identities remain protected from late events and outcome rewrites.
+- Physical registration holds the shared publication/allocation lock through
+  ownership activation and rechecks live authority. Direct legacy status and
+  binding writers also refuse central session rows.
+- Full-schema guard/retirement tests and all 113 existing runner unit tests pass.
+  Per-frame durable ownership checks still need compatibility-load measurement;
+  this is not production runner/client or enabled scheduler evidence.
