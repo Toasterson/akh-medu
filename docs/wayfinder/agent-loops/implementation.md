@@ -5,10 +5,12 @@ ownership, private runtime profiles, upstream workspace helpers, event adapters
 and deployment artifacts are implemented in the dedicated worktrees. Local
 cross-process, native T3 bootstrap, private-CA WSS and A2A SDK checks pass.
 
-Full deployment remains in progress. T3 central-thread attachment, native provider
-remote-tool certification, the enabled Anima scheduler/PWA migration, and real
-cross-host validation are not completed by these checks. See the latest
-checkpoint below and [deployment guide](deployment.md).
+Configured Anima scheduler routing and natural session finalization are now
+implemented alongside its PWA/control migration. Native Codex and Claude wire
+checks pass with local model-protocol fixtures. Deployment is not enabled:
+T3 central-thread attachment lacks an upstream interface, and live-model,
+remote-tool certification and real cross-host validation remain deployment
+acceptance checks. See the latest checkpoint below and [deployment guide](deployment.md).
 
 ## Workspace boundary
 
@@ -828,3 +830,45 @@ by these fixture results.
   now participate in a caller's transaction; all Anima targets check. The
   durable PR action, canonical result linkage/outcomes and scheduler connection
   still need to call these interfaces. No production PR or project was created.
+
+
+### Canonical completion and scheduler integration
+
+The Anima relay now selects the full settled central turn set and exact canonical
+result before conditional archival. It imports the archive event, verifies actual
+workspace release, and atomically closes the owner with the canonical session
+outcome, pinned witness, retry/no-progress/elapsed policy, capability revocation
+and audit. Verified code links the immutable original diff and its published PR
+association; documents pin their content version. Empty outcomes remain distinct
+from faults. Verified deliverables take precedence over later provider failures.
+A moved phase or newer PR head keeps its newer lifecycle state. Late central
+inputs invalidate only an authenticated, provably obsolete closing selection.
+
+Background and operator scheduler ticks use one immutable configured relay.
+Explicit project/executor routes bypass physical runner capacity, retain common
+admission gates, and count every open central owner against route capacity.
+Ready-phase preparation resolves the pinned working phase before staging; a
+failed upload leaves no allocation and is retryable through the normal working
+candidate path. Central admission never fabricates a RunnerId or falls back to
+legacy transport. Allocation, remote admission and runtime witnesses are separate.
+
+Full-schema local PostgreSQL tests cover result/PR/document selection, late turns,
+archive response loss, workspace-release delay, transactional audit rollback,
+retry-budget parking/history, exact replay, newer-head preservation and owner-safe
+retirement. The actual scheduler tick passes with zero physical slots, including
+failed S3 staging followed by retry. Native Git and signed S3 requests are used
+for staging; fault-injecting central peers and actual Akh cleanup remain separately
+identified evidence. The Anima verification wrapper is
+`scripts/verification/central-session-lifecycle-native.py`.
+
+Claude Code 2.1.269 with Agent SDK 0.3.266 also passes twelve native wire requests
+through its installed CLI, SDK bridge and real executor. It resumes the same
+provider session; native workspace tools are absent/rejected and supplied-tool
+failures do not cause local fallback. See [provider evidence](native-provider-checks.md).
+Fable's authenticated design reviews completed and their checked findings are
+recorded [here](fable-completion-review.md).
+
+These changes are local worktree artifacts. No production route, service, image,
+review approval, CI result or deployment was created by these verification runs.
+Upstream T3/editor services remain unmodified, and the documented unsupported
+central-thread attachment is not represented as a working feature.

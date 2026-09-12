@@ -39,7 +39,48 @@ Findings checked against the implementation:
   and phase-moved cleanup need distinct handling; removing the current-phase
   check from the shared mutation candidate would weaken PR gate protection.
 
-Natural finalization and scheduler route integration remain implementation work.
-Fable's suggestion to call a no-result model turn a failure must be reconciled
-with Anima's existing `Empty`/`Failed` distinction. Likewise, a stop-turn remains
-resumable; it must not silently become session retirement.
+Natural finalization and scheduler route integration are now implemented in the
+Anima worktree. Empty completed turns remain distinct from failures, and stopping
+a turn remains resumable rather than silently retiring the session.
+
+## Follow-up review of finalization and scheduling
+
+A second authenticated Fable review inspected the new completion, conditional
+close, scheduler adapter and lifecycle code. Its eight findings were checked
+against the full implementation:
+
+- Verified deliverables must count as progress even when a later provider turn
+  fails. Fixed in selection: result/document disposition takes precedence; the
+  terminal provider error remains in the archived checkpoint. The transport
+  accepts failed terminal checkpoints with an explicitly verified artifact
+  disposition. A full-schema test verifies no failure-budget debit.
+- Ready-to-working preparation commits before network staging. This is deliberate
+  lifecycle preparation, not allocation evidence. Working items without owners
+  remain canonical dispatch candidates. The real operator-tick test now injects
+  an S3 failure, verifies no authority/session rows, then successfully retries the
+  working item with zero physical runner slots. No compensating backwards phase
+  transition is needed or safe after concurrent lifecycle edits.
+- `apply_close_in_tx` returns false only for the exact previously committed
+  closure. It returns a conflict for a changed/cleared intent. The alleged false
+  success for an open superseded owner is absent; exact replay tests cover it.
+- The suggested fallback to an older published Change would discard newer
+  unverified work. Retain ownership when the latest selected proposal lacks
+  successful publication/PR evidence. Operators can inspect publication state,
+  repair through the existing session or use attributed retirement; an ordinary
+  completion must not silently discard it.
+- Canonical `compute_next_action` returns `RedispatchWithoutCharge` only for
+  refusal/cancellation. Failed/empty attempts are charged once; dependency waits
+  do not erase the already-recorded attempt. Replay tests verify single charging.
+- Document completion can record immutable session-authored history after a phase
+  moves, while preserving the newer lifecycle. This differs from publishing a
+  PR, which mutates current upstream/result state. Added an explanatory comment.
+- Revocation cannot normally race a selected admitted close through the supported
+  writer, which refuses revocation after admission. Added explicit revocation
+  guards to selected archival and final apply as defense in depth.
+- Completion preparation now recognizes an already-closed selected completion
+  and returns without restaging it. Retiring/unadmitted owners remain pending.
+  The full-schema test covers the closed selection retry.
+
+Both reviews are design input from supplied excerpts, not exact-head approval or
+CI. Findings that contradict the underlying canonical APIs are documented rather
+than applied blindly.

@@ -50,5 +50,30 @@ This verifies the installed harness's wire behavior, tool dispatch restrictions,
 adapter continuation and local executor operations. It does not verify a live
 model's tool selection, learning after refusal, production credentials, kernel
 confinement, cross-host transport, or a deployable native conformance profile.
-Claude's native check and Fable's design review still require an accessible login
-in the configured private profile.
+Fable's design review completed after the user repaired local keychain access;
+see [the design review](fable-completion-review.md).
+
+## Installed Claude with a local Messages fixture
+
+```sh
+python3 scripts/session-platform/claude-native-wire-smoke.py \
+  --claude /absolute/path/to/claude --node /absolute/path/to/node
+```
+
+Claude Code 2.1.269 and the pinned Agent SDK 0.3.266 passed on Darwin arm64.
+Twelve synthetic model requests exercised the actual SDK bridge, installed CLI
+and executor. The supplied write, read and process tools reached `akhexecd`,
+replayed their exact receipts, and changed only its workspace. Restarting the
+SDK/CLI resumed the original provider session with the same supplied tools.
+Forced native Bash, Write, Read and Edit calls returned error tool results;
+those tools were absent from all advertised catalogs, including after resume.
+An executor refusal also returned to the provider without permitting local
+fallback or creating its target file.
+
+The fixture uses the documented [gateway environment variables](https://code.claude.com/docs/en/env-vars)
+and [Messages streaming protocol](https://platform.claude.com/docs/en/build-with-claude/streaming),
+a throwaway API key, an isolated profile and disabled nonessential traffic.
+It reads or copies no user login cache and creates no conformance certificate.
+This is native harness/protocol evidence on one machine; live-model behavior,
+kernel confinement, cross-host operation and deployment admission remain separate
+checks. Fable's authenticated model review is also separate from this fixture.

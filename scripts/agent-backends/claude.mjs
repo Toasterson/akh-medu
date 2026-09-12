@@ -16,8 +16,8 @@ export async function run(start, sdk, z, send, request, abortController) {
     cwd: start.cwd,
     abortController,
     includePartialMessages: true,
-    // Project/user settings stay with the installed CLI. Akh never reads or
-    // copies its OAuth tokens, and never changes HOME or provider config dirs.
+    // Credential/profile scope comes from the runtime's configured environment.
+    // Brokered turns exclude ambient settings; no OAuth cache is copied here.
     settingSources: start.brokered ? [] : ["user", "project", "local"],
     systemPrompt: { type: "preset", preset: "claude_code", append: start.instructions },
     permissionMode: start.plan ? "plan" : "default",
