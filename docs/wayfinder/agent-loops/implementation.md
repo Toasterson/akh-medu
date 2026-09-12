@@ -794,3 +794,20 @@ by these fixture results.
   See [publication contract](repository-publication.md) for configuration and
   evidence boundaries. Canonical Anima publication selection, PRs, outcomes and
   scheduler integration remain outstanding.
+
+### Canonical Anima publication selection
+
+- Explicit project/executor publication policies now select a verified canonical
+  result into a durable intent before network access. Migration 140 records the
+  original route/policy, work-item branch, proposed Change and snapshot evidence.
+  Outstanding publication takes precedence over selecting another result.
+- Authenticated publication observations and their audits commit together and
+  remain historical evidence after supersession. Changes, integration decisions,
+  result linkage and session ownership stay under the existing lifecycle.
+- The full-schema disposable-PostgreSQL test passes opt-in selection, assignment
+  and pending-command fences, policy drift, audit rollback before/after effects,
+  response loss, corrupt remote evidence and concurrent exact recovery. It also
+  checks that a superseding native MCP submission preserves publication history.
+  The database race peer is synthetic; native Git/session/client proof is recorded
+  separately above. PR creation, canonical outcomes and scheduler selection are
+  still outstanding.

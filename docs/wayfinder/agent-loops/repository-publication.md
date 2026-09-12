@@ -62,7 +62,20 @@ receipts through the real session HTTP server. Its fault peer separately rejects
 substituted identities, destinations, hashes, timestamps and claimed success for
 unsettled results.
 
-These checks do not prove a production credential helper, cross-host deployment,
-PR creation, canonical Anima publication selection or natural outcome closure.
-The Anima client is implemented; those business-lifecycle connections remain
-separate work.
+Anima's relay now supports explicit `repository_publications` policies in its
+central-session configuration. Each policy binds a project/executor and narrow
+full work-branch prefix; the branch suffix is the canonical work-item UUID.
+Migration 140 records selection and audit before a remote request. Selection
+requires an eligible verified Change, a completed assignment observation and no
+unacknowledged Anima command. An uncertain prior publication takes priority over
+a successor. The relay validates the original route/policy and snapshot on each
+attempt, and records the authenticated observation and audit atomically. It
+does not rewrite the Change, link the selected outcome, or release ownership.
+Supersession retains the historical publication evidence.
+
+The full-schema Anima test uses an owned disposable PostgreSQL instance and a
+synthetic protocol peer for selection/observation audit rollback, response loss,
+policy drift, tampered remote evidence, concurrent retry, opt-in selection and
+supersession history. Native Git and actual Akh/client transport have their
+separate checks above. These checks do not prove a production credential helper,
+cross-host deployment, PR creation or natural outcome closure.
