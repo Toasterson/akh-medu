@@ -453,3 +453,19 @@ by these fixture results.
   during compatibility migration. Measure that storage cost before high-volume
   deployment. Stop/input controls and canonical retirement are the next wiring;
   the scheduler still does not create new central allocations.
+
+### Durable permission decisions and Anima controls
+
+- `input-decisions` atomically persists accepted and rejected permission/input
+  intent. Stale or missing targets cannot activate on a later retry. Controller
+  lease conflicts remain retryable; historical receipt reads apply no decision.
+  Eleven local session tests pass, including concurrent decisions and restart.
+- Anima validates the exact central decision before settling its command outbox.
+  A real session-daemon/disposable-PostgreSQL test passes lost negative receipt
+  recovery, concurrent retries and historical rejection replay after closure.
+- Anima's permission card now resolves the immutable source event and generation,
+  uses the authenticated actor and stable command identity, and waits for a
+  receipt. HTTP uncertainty leaves a retryable UI action. Full-schema/HTTP tests
+  pass loss/retry and stale-choice behavior; Rust/PWA shared wire examples pass.
+  Stop, general question forms and canonical session retirement remain separate
+  integration work. These checks do not enable a project or deploy any daemon.
