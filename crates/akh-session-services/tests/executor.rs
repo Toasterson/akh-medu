@@ -170,6 +170,50 @@ fn process_io_and_cancellation_use_owned_handles_and_stream_progress() {
 }
 
 #[test]
+fn bounded_poll_waits_for_completion_and_replays_its_observed_receipt() {
+    let (_dir, executor) = setup();
+    executor
+        .operate(request(
+            "wait-start",
+            "exec_start",
+            json!({"command":"sleep 0.2; printf done"}),
+        ))
+        .unwrap();
+    let short = executor
+        .operate(request(
+            "short-poll",
+            "exec_poll",
+            json!({"process_id":"wait-start","wait_ms":1}),
+        ))
+        .unwrap();
+    assert_eq!(short.result.unwrap().data.unwrap()["status"], "running");
+    let poll = request(
+        "wait-poll",
+        "exec_poll",
+        json!({"process_id":"wait-start","wait_ms":1000}),
+    );
+    let result = executor.operate(poll.clone()).unwrap();
+    let data = result.result.as_ref().unwrap().data.as_ref().unwrap();
+    assert_eq!(data["status"], "completed");
+    assert_eq!(data["result"]["data"]["stdout"], "done");
+    assert_eq!(executor.operate(poll).unwrap(), result);
+    for (index, wait_ms) in [json!(-1), json!(10001), json!("1"), json!(1.5)]
+        .into_iter()
+        .enumerate()
+    {
+        let invalid = executor
+            .operate(request(
+                &format!("invalid-wait-{index}"),
+                "exec_poll",
+                json!({"process_id":"wait-start","wait_ms":wait_ms}),
+            ))
+            .unwrap();
+        assert_eq!(invalid.status, TurnStatus::Failed);
+        assert!(!invalid.result.unwrap().success);
+    }
+}
+
+#[test]
 fn restart_does_not_replay_an_operation_with_an_unknown_outcome() {
     let (dir, executor) = setup();
     let op = request(

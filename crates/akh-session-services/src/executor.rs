@@ -585,7 +585,26 @@ impl Executor {
                 Ok(json!({"matches":found,"truncated":false}))
             }
             "exec_poll" => {
-                let receipt = self.process_receipt(request)?;
+                let wait_ms = match args.get("wait_ms") {
+                    None => 0,
+                    Some(value) => {
+                        value
+                            .as_u64()
+                            .filter(|value| *value <= 10_000)
+                            .ok_or_else(|| {
+                                Fault::invalid("wait_ms must be an integer from 0 to 10000")
+                            })?
+                    }
+                };
+                let deadline = Instant::now() + Duration::from_millis(wait_ms);
+                let mut receipt = self.process_receipt(request)?;
+                while !receipt.status.terminal() && Instant::now() < deadline {
+                    std::thread::sleep(
+                        Duration::from_millis(20)
+                            .min(deadline.saturating_duration_since(Instant::now())),
+                    );
+                    receipt = self.process_receipt(request)?;
+                }
                 let running = self
                     .processes
                     .lock()
