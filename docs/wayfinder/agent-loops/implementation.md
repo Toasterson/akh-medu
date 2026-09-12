@@ -685,3 +685,12 @@ by these fixture results.
 - Scheduler selection and natural result/materialization/outcome/closure wiring
   remain to be connected. No site deployment or Fable review is claimed; the
   local Claude CLI still reports no authenticated profile.
+
+### Central result entry-point consistency
+
+- Central session identities cannot use the generic `SubmitChange` compatibility
+  endpoint to bypass their operation receipt. It returns guidance to use
+  `submit_session_change`; ordinary physical sessions keep their existing writer.
+- The full-schema canonical result test passes through both real service entry
+  points and the native Akh MCP client, including accepted-work preservation,
+  scope/binding checks, concurrent exact retries and audit rollback.
