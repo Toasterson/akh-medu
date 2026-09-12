@@ -1,6 +1,15 @@
 //! Repository bootstrap intent and executor-backed completion evidence.
 use serde::{Deserialize, Serialize};
 
+/// Required admission gates for a fresh, per-occurrence workspace session.
+/// These are checked atomically before the automation creates its first turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapRequirements {
+    pub repository: String,
+    pub mcp_credentials: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryCheckout {

@@ -1231,6 +1231,22 @@ impl Sessions {
                     "automation target has a different Akh or workspace profile",
                 ));
             }
+            if let Some(required) = &request.bootstrap_requirements {
+                let requested: std::collections::BTreeSet<_> = required.mcp_credentials.iter().collect();
+                let granted: std::collections::BTreeSet<_> = session.required_mcp_credentials.keys().collect();
+                if definition.notify_only
+                    || definition.target != SessionTarget::PerOccurrence
+                    || session.workspace.is_some()
+                    || session.repository_bootstrap.is_none()
+                    || !self.config.akhs[&session.akh].bootstrap_repositories.contains(&required.repository)
+                    || requested.is_empty()
+                    || requested.len() > 64
+                    || requested.len() != required.mcp_credentials.len()
+                    || requested != granted
+                {
+                    return Err(Fault::conflict("automation cannot provide the requested fresh repository and credential admission gates"));
+                }
+            }
             let turn_id = if definition.notify_only {
                 let mut session = session.clone();
                 append_event(

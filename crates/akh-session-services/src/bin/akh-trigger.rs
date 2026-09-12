@@ -183,6 +183,7 @@ async fn run(args: Args) -> Result<()> {
         Some(automation) => (
             format!("/v1/automations/{}/invoke", segment(&automation)),
             json!(InvokeAutomation {
+                bootstrap_requirements: None,
                 occurrence_id: event.id.clone(),
                 event
             }),

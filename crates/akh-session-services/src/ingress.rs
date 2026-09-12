@@ -84,6 +84,7 @@ impl Events {
                     route: route.id.clone(),
                     automation: route.automation.clone(),
                     request: InvokeAutomation {
+                        bootstrap_requirements: None,
                         occurrence_id: id.clone(),
                         event: event.clone(),
                     },

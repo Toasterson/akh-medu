@@ -572,3 +572,23 @@ by these fixture results.
   owned fixtures; the shared-host global stale-container sweep was disabled.
 - The central route, staging coordinator, result lifecycle and provider/runtime
   deployment remain integration work. These primitives do not enable a project.
+
+
+### Anima bootstrap recovery and capability closure
+
+- Added optional atomic bootstrap requirements to automation invocation. Akh
+  validates the requested repository and exact session credential slots before
+  committing a fresh per-occurrence session/turn. Eighteen session tests pass,
+  including refusal without any admitted work and immutable retry.
+- Anima now pins route/config identity, token ID, checkout and request IDs in the
+  same canonical admission transaction. The relay provisions both intents and
+  stores only receipts. Full-schema/native-daemon tests pass a lost committed
+  credential response, restart, exact retry and routing-drift refusal. The native
+  journal contains one credential event and no token value.
+- Migration 137 revokes an owner's canonical session tokens atomically with every
+  closure path. Tests verify rollback and preservation of another session's
+  token; the existing operator-retirement regression also passes.
+- Central scheduler selection/staging, authoritative repository resolution,
+  preservation of prior Changes, and result ingestion/lifecycle still need their
+  integration. No project route or production service was enabled. Fable's local
+  Claude CLI still reports logged out, so its design review remains outstanding.

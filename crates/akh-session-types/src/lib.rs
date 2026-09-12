@@ -506,6 +506,8 @@ pub struct EventEnvelope {
 pub struct InvokeAutomation {
     pub occurrence_id: String,
     pub event: EventEnvelope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_requirements: Option<bootstrap::BootstrapRequirements>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

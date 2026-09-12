@@ -58,3 +58,18 @@ recovery, immutable intent, endpoint drift, broker authentication, absence from
 journal/runtime payloads, archive cleanup and lost/mismatched HTTP replies.
 Anima's independent client also exercises the real locally built daemon. These
 checks do not enable Anima scheduler selection or mint a production capability.
+
+An automation caller can include `bootstrap_requirements` with an explicit
+`repository` and exact `mcp_credentials` alias list. Akh validates those gates
+inside the admission transaction and requires a fresh per-occurrence target.
+An incompatible profile, shared target or notification-only automation leaves
+no new session or turn behind. The immutable occurrence retains these requirements
+on retry. Existing callers may omit them; Anima's new preparation path requires
+them. This prevents a misconfigured automation from dispatching before the
+required repository and capability can be provisioned.
+
+Anima migration 137 now revokes canonical session-bound tokens in the transaction
+that closes a central owner. Its relay persists only token identity and exact
+provisioning receipts, recovers the original live capability, and refuses changed
+routing bindings. Local database/native-daemon tests cover the lost-response and
+restart boundary. Scheduler selection and result ingestion remain separate work.

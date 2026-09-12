@@ -878,6 +878,7 @@ fn duplicate_alerts_share_incident_session_and_never_promote_payload_to_instruct
         sources: vec!["alerts".into()],
     };
     let mut request = InvokeAutomation {
+        bootstrap_requirements: None,
         occurrence_id: "firing".into(),
         event: EventEnvelope {
             schema_version: 1,
@@ -910,6 +911,77 @@ fn duplicate_alerts_share_incident_session_and_never_promote_payload_to_instruct
         s.invoke(&ingress, "alerts", &request).unwrap_err().code,
         "busy"
     );
+}
+
+#[test]
+fn automation_bootstrap_requirements_fail_atomically_before_any_session_or_turn_is_created() {
+    let (_dir, original, mut owner) = scoped_setup("https://anima.example/mcp");
+    owner.roles.push("scheduler".into());
+    owner.sources.push("alerts".into());
+    let mut config = (*original.config).clone();
+    config.akhs.get_mut("thoth").unwrap().bootstrap_repositories =
+        vec!["https://git.example/repo.git".into()];
+    config.automations.get_mut("alerts").unwrap().target = SessionTarget::PerOccurrence;
+    let request: InvokeAutomation = serde_json::from_value(json!({
+        "occurrence_id":"bootstrap", "event":{"schema_version":1,"id":"bootstrap","source":"alerts","type":"assignment","occurred_at":now_ms(),"data":{}},
+        "bootstrap_requirements":{"repository":"https://git.example/repo.git","mcp_credentials":["results"]}
+    })).unwrap();
+    for failure in 0..5 {
+        let mut invalid = config.clone();
+        match failure {
+            0 => invalid
+                .akhs
+                .get_mut("thoth")
+                .unwrap()
+                .bootstrap_repositories
+                .clear(),
+            1 => invalid.session_mcp_endpoints.clear(),
+            2 => {
+                invalid
+                    .akhs
+                    .get_mut("thoth")
+                    .unwrap()
+                    .bootstrap_repositories = vec!["https://git.example/other.git".into()]
+            }
+            3 => invalid.automations.get_mut("alerts").unwrap().notify_only = true,
+            _ => {
+                invalid.automations.get_mut("alerts").unwrap().target =
+                    SessionTarget::Conversation {
+                        key: "existing".into(),
+                    }
+            }
+        }
+        invalid.validate().unwrap();
+        let service = Sessions::new(original.store.clone(), Arc::new(invalid));
+        assert_eq!(
+            service.invoke(&owner, "alerts", &request).unwrap_err().code,
+            "conflict"
+        );
+        assert!(service.list(&owner).unwrap().is_empty());
+    }
+    let service = Sessions::new(original.store.clone(), Arc::new(config));
+    let mut duplicate = request.clone();
+    duplicate
+        .bootstrap_requirements
+        .as_mut()
+        .unwrap()
+        .mcp_credentials
+        .push("results".into());
+    assert!(service.invoke(&owner, "alerts", &duplicate).is_err());
+    assert!(service.list(&owner).unwrap().is_empty());
+    let admitted = service.invoke(&owner, "alerts", &request).unwrap();
+    let session = service.get(&owner, &admitted.session_id).unwrap();
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(session.turns[0].status, TurnStatus::Queued);
+    assert!(session.repository_bootstrap.is_some());
+    assert_eq!(session.required_mcp_credentials.len(), 1);
+    let repeated = service.invoke(&owner, "alerts", &request).unwrap();
+    assert_eq!(repeated.session_id, admitted.session_id);
+    assert_eq!(repeated.turn_id, admitted.turn_id);
+    let mut downgraded = request.clone();
+    downgraded.bootstrap_requirements = None;
+    assert!(service.invoke(&owner, "alerts", &downgraded).is_err());
+    assert_eq!(service.list(&owner).unwrap().len(), 1);
 }
 
 #[test]
