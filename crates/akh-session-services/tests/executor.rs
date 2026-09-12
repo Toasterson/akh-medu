@@ -214,6 +214,49 @@ fn bounded_poll_waits_for_completion_and_replays_its_observed_receipt() {
 }
 
 #[test]
+fn waiting_poll_leaves_mutation_admission_available() {
+    let (_dir, executor) = setup();
+    let executor = Arc::new(executor);
+    executor
+        .operate(request(
+            "interactive",
+            "exec_start",
+            json!({"command":"read value; printf '%s' \"$value\""}),
+        ))
+        .unwrap();
+    let other = executor.clone();
+    let waiter = std::thread::spawn(move || {
+        other
+            .operate(request(
+                "pending-poll",
+                "exec_poll",
+                json!({"process_id":"interactive","wait_ms":3000}),
+            ))
+            .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while executor.receipt("pending-poll").is_err() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let before = Instant::now();
+    executor
+        .operate(request(
+            "supply-input",
+            "exec_stdin",
+            json!({"process_id":"interactive","text":"unblocked\n"}),
+        ))
+        .unwrap();
+    assert!(
+        before.elapsed() < Duration::from_secs(1),
+        "poll held mutation admission"
+    );
+    let observed = waiter.join().unwrap().result.unwrap().data.unwrap();
+    assert_eq!(observed["status"], "completed");
+    assert_eq!(observed["result"]["data"]["stdout"], "unblocked");
+}
+
+#[test]
 fn restart_does_not_replay_an_operation_with_an_unknown_outcome() {
     let (dir, executor) = setup();
     let op = request(

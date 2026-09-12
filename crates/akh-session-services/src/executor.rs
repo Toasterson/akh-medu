@@ -430,6 +430,15 @@ impl Executor {
                 Err(error) => return self.finish(receipt, Err(error)),
             }
         }
+        if request.operation == "exec_poll" {
+            // The durable running receipt owns this read-only observation.
+            // Leave mutation admission available for stdin, cancellation and
+            // lease release while waiting; retries observe the same receipt.
+            drop(_lock);
+            let result = self.perform(&request, &ws);
+            let _lock = self.mutations.lock().unwrap_or_else(|e| e.into_inner());
+            return self.finish(receipt, result);
+        }
         let result = self.perform(&request, &ws);
         self.finish(receipt, result)
     }
