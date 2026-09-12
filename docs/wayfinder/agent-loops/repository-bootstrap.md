@@ -88,7 +88,9 @@ workspace evidence. Anima's independent client verifies the session API against
 a locally built daemon. These checks do not prove private Git authentication,
 editor UI interaction, Kubernetes image contents or cross-host deployment.
 
-The Anima scheduler must still resolve and pin an authoritative repository/base
-commit, preserve prior accepted work, and durably provision this intent alongside
-its scoped result capability. Neither a mutable branch name nor an `agent_diff`
-digest is a Git commit. Scheduler selection is not enabled by these primitives.
+Anima's staging/admission coordinator now resolves the exact repository/base and
+pins this intent with its scoped result capability. Scheduler selection and the
+natural result lifecycle remain to be connected. Neither a mutable branch name
+nor an `agent_diff` digest is a Git commit.
+
+Result capture is described in [repository snapshots](repository-snapshots.md).

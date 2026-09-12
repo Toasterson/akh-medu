@@ -183,7 +183,7 @@ impl Broker {
         };
         // Validate built-in semantics independently of a mistaken read_only annotation.
         let writes = !tool.read_only
-            || matches!(&tool.destination, ToolDestination::Workspace { operation } if !matches!(operation.as_str(), "read"|"list"|"search"|"exec_poll"));
+            || matches!(&tool.destination, ToolDestination::Workspace { operation } if !matches!(operation.as_str(), "read"|"list"|"search"|"exec_poll"|"git_snapshot"));
         if writes && session.approval_policy == ApprovalPolicy::ReadOnly {
             return self.finish(k, record, ToolResult::denied(&call.name, None));
         }

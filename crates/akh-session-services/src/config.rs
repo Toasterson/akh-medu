@@ -180,6 +180,32 @@ pub struct GitBootstrapProfile {
     pub config_file: Option<PathBuf>,
 }
 
+/// Executor-owned Git installation. No executable or configuration is accepted
+/// from a model's snapshot arguments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitSnapshotProfile {
+    pub executable: PathBuf,
+    pub executable_sha256: String,
+}
+
+impl GitSnapshotProfile {
+    pub fn validate(&self) -> Result<()> {
+        if !self.executable.is_absolute()
+            || self.executable_sha256.len() != 64
+            || !self
+                .executable_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Fault::invalid(
+                "Git snapshot requires an absolute executable and lowercase SHA-256",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn validate_repository(repository: &str) -> Result<()> {
     let url = url::Url::parse(repository)
         .map_err(|_| Fault::invalid("repository requires an explicit URL"))?;
@@ -301,6 +327,8 @@ pub struct Config {
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub workspace_root: Option<PathBuf>,
+    #[serde(default)]
+    pub git_snapshot: Option<GitSnapshotProfile>,
     #[serde(default = "unconfined")]
     pub confinement: String,
 }
@@ -321,6 +349,9 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         validate_key(&self.service_id)?;
+        if let Some(profile) = &self.git_snapshot {
+            profile.validate()?;
+        }
         if !self.data_dir.is_absolute() || self.principals.is_empty() {
             return Err(Fault::invalid(
                 "absolute data_dir and authenticated principals are required",

@@ -15,6 +15,8 @@ pub mod djehuty;
 pub mod executor;
 #[cfg(feature = "executor")]
 pub mod executor_helpers;
+#[cfg(feature = "executor")]
+mod git_snapshot;
 #[cfg(feature = "helpers")]
 pub mod helper;
 pub mod http;
@@ -43,6 +45,8 @@ pub mod session;
 pub mod session_bootstrap;
 #[cfg(feature = "session")]
 pub mod session_credentials;
+#[cfg(feature = "session")]
+mod session_snapshot;
 pub mod store;
 #[cfg(feature = "helpers")]
 pub mod workspace;

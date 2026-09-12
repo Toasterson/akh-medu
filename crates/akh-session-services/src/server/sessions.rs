@@ -409,6 +409,10 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/events", get(session_events))
             .route("/v1/sessions/{id}/pending", get(pending))
             .route("/v1/sessions/{id}/repository", post(prepare_repository))
+            .route(
+                "/v1/sessions/{id}/repository/snapshots",
+                post(snapshot_repository),
+            )
             .route("/v1/sessions/{id}/input-decisions", post(decide_input))
             .route(
                 "/v1/sessions/{id}/mcp-credentials/{service}",
@@ -490,6 +494,14 @@ async fn prepare_repository(
     Json(request): Json<bootstrap::BootstrapRepository>,
 ) -> Api<bootstrap::RepositoryBootstrapReceipt> {
     Ok(Json(app.sessions.prepare_repository(&p, &id, &request)?))
+}
+async fn snapshot_repository(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Json(request): Json<repository::SnapshotSessionRepository>,
+) -> Api<OperationReceipt> {
+    Ok(Json(app.snapshot_repository(&p, &id, &request).await?))
 }
 async fn archive(
     State(app): State<SessionApp>,

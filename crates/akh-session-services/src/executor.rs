@@ -204,7 +204,7 @@ impl Executor {
         store.transaction(|tx|{
             for mut receipt in tx.scan::<OperationReceipt>("receipt/")?{
                 if !receipt.status.terminal(){
-                    receipt.status=if matches!(receipt.request.operation.as_str(),"read"|"list"|"search"|"exec_poll"){TurnStatus::Failed}else{TurnStatus::Unknown};
+                    receipt.status=if matches!(receipt.request.operation.as_str(),"read"|"list"|"search"|"exec_poll"|"git_snapshot"){TurnStatus::Failed}else{TurnStatus::Unknown};
                     receipt.result=Some(ToolResult{success:false,text:"Executor restarted before a durable terminal receipt. Reconcile the operation before further mutations.".into(),data:Some(json!({"code":"unknown_outcome"})),receipt:Some(receipt.id.clone())});
                     tx.put(&receipt_key(&receipt.id),&receipt)?;
                 }
@@ -389,7 +389,7 @@ impl Executor {
         let ws = self.workspace(&request)?;
         let is_write = !matches!(
             request.operation.as_str(),
-            "read" | "list" | "search" | "exec_poll"
+            "read" | "list" | "search" | "exec_poll" | "git_snapshot"
         );
         let (receipt, fresh) = self.store.transaction(|tx| {
             if let Some(old) = tx.get::<OperationReceipt>(&receipt_key(&request.id))? {
@@ -465,6 +465,20 @@ impl Executor {
     fn perform(&self, request: &WorkspaceOperation, ws: &Workspace) -> Result<Value> {
         let args = &request.arguments;
         match request.operation.as_str() {
+            "git_snapshot" => {
+                let profile = self.config.git_snapshot.as_ref().ok_or_else(|| {
+                    Fault::new(
+                        "unsupported",
+                        "executor has no configured Git snapshot installation",
+                    )
+                })?;
+                let input = serde_json::from_value(args.clone()).map_err(|_| {
+                    Fault::invalid("Git snapshot requires exact base_revision and head_revision")
+                })?;
+                let snapshot = crate::git_snapshot::capture(ws, profile, input)?;
+                serde_json::to_value(snapshot)
+                    .map_err(|_| Fault::invalid("snapshot encoding failed"))
+            }
             "read" => {
                 let bytes = ws.read(argument(args, "path")?)?;
                 let revision = digest(&bytes);

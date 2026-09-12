@@ -719,3 +719,20 @@ by these fixture results.
 - Fable was retried with the current design and implementation context. The local
   Claude CLI again rejected OAuth refresh before inference (zero model tokens),
   so no Fable findings or design approval are claimed.
+
+### Executor-backed Git result capture
+
+- Added the shared Git snapshot contract, an explicitly configured executor
+  capture operation, and an owner-scoped session API. The base, executor and
+  workspace generation come from the verified bootstrap. Selected commit
+  contents are recorded separately from publication and business approval.
+- Git reads a private bare view with no workspace configuration, replacement
+  refs, grafts or external diff helpers. Captures require exact commit ancestry,
+  strict object checks, a pinned executable and bounded subprocess/output limits.
+- Twenty-nine focused local tests pass: six executor, four native snapshot,
+  eighteen session, and one native checkout/session-API scenario. SHA-1/SHA-256
+  patches reproduce their target trees; lost responses/restarts preserve the
+  original receipt and archival retains readable evidence.
+- Anima still needs to consume these receipts, verify publication and compose
+  its canonical result/witness/outcome before central scheduler rollout. No
+  remote publication, project enablement, CI or Fable review is claimed.

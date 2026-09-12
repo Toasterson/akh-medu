@@ -120,6 +120,7 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
     let workspaces = dir.path().join("workspaces");
     let executor_config:Config=serde_json::from_value(json!({
         "service_id":"executor","listen":"127.0.0.1:0","data_dir":dir.path().join("executor"),"workspace_root":workspaces,
+        "git_snapshot":{"executable":"/usr/bin/git","executable_sha256":akh_session_services::digest(&std::fs::read("/usr/bin/git").unwrap())},
         "principals":[{"id":"sandbox","roles":["sandbox"],"token_file":token}]
     })).unwrap();
     let executor = Executor::new(
@@ -130,9 +131,12 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
     let _owned_executor = OwnedExecutor(executor.clone());
     let lost = Arc::new(AtomicBool::new(false));
     let lose = lost.clone();
+    let lost_snapshot = Arc::new(AtomicBool::new(false));
+    let lose_snapshot = lost_snapshot.clone();
     let router = executor_router(executor.clone()).layer(middleware::from_fn(
         move |request: Request, next: Next| {
             let lose = lose.clone();
+            let lose_snapshot = lose_snapshot.clone();
             async move {
                 let operation = request.uri().path() == "/v1/operations";
                 let response = next.run(request).await;
@@ -142,6 +146,14 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
                 let (parts, body) = response.into_parts();
                 let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
                 if let Ok(receipt) = serde_json::from_slice::<OperationReceipt>(&bytes) {
+                    if receipt.request.operation == "git_snapshot"
+                        && !lose_snapshot.swap(true, Ordering::SeqCst)
+                    {
+                        return Response::builder()
+                            .status(StatusCode::BAD_GATEWAY)
+                            .body(Body::from("lost after snapshot receipt"))
+                            .unwrap();
+                    }
                     if receipt.request.arguments["argv"]
                         .as_array()
                         .is_some_and(|a| a.iter().any(|v| v == "init"))
@@ -300,8 +312,201 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
         "preserve me"
     );
     assert!(!root.join(".git").exists());
+    #[cfg(feature = "session")]
+    verify_session_snapshots(
+        dir.path(),
+        &sandbox,
+        &executor,
+        &endpoint,
+        &token,
+        &repository,
+        &revision,
+        &lost_snapshot,
+    )
+    .await;
     sandbox.release("assigned").await.unwrap();
     sandbox.release("existing-files").await.unwrap();
     executor.cancel_all();
     http.abort();
+}
+
+#[cfg(feature = "session")]
+async fn verify_session_snapshots(
+    dir: &Path,
+    sandbox: &Sandboxes,
+    executor: &Executor,
+    endpoint: &str,
+    token: &Path,
+    repository: &str,
+    base: &str,
+    lost: &AtomicBool,
+) {
+    use akh_session_services::server::{SessionApp, session_router};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use repository::{GitSnapshot, SnapshotSessionRepository};
+    use tower::ServiceExt;
+    let config: Config = serde_json::from_value(json!({
+        "service_id":"sessions", "listen":"127.0.0.1:0", "data_dir":dir.join("sessions"),
+        "principals":[{"id":"owner","roles":["client","session_bootstrap"],"akhs":["test"],"token_file":token}],
+        "endpoints":{"executor":{"url":endpoint,"token_file":token}},
+        "akhs":{"test":{"bootstrap_repositories":[repository],"instructions":"test",
+            "runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"codex","execution_mode":"colocated"},"workspace_profiles":["git"]}}
+    })).unwrap();
+    config.validate().unwrap();
+    let config = Arc::new(config);
+    let store = Store::open(&dir.join("sessions.redb")).unwrap();
+    let app = SessionApp::new(config.clone(), store.clone()).unwrap();
+    let owner = config.principals[0].clone();
+    let session = app
+        .sessions
+        .create(
+            &owner,
+            &NewSession {
+                request_id: "snapshot-session".into(),
+                akh: "test".into(),
+                workspace_profile: "git".into(),
+                conversation_key: None,
+            },
+        )
+        .unwrap();
+    let bootstrap = BootstrapRepository {
+        request_id: "checkout".into(),
+        checkout: RepositoryCheckout {
+            repository: repository.into(),
+            revision: base.into(),
+        },
+    };
+    app.sessions
+        .prepare_repository(&owner, &session.id, &bootstrap)
+        .unwrap();
+    let allocate = Allocate {
+        session_id: session.id.clone(),
+        principal: owner.id.clone(),
+        profile: "git".into(),
+        bootstrap: Some(bootstrap),
+    };
+    let ready = {
+        let mut result = None;
+        for _ in 0..250 {
+            match sandbox.allocate(allocate.clone()).await {
+                Ok(value) => {
+                    result = Some(value);
+                    break;
+                }
+                Err(error) => assert_eq!(error.code, "busy", "{error:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        result.expect("snapshot fixture checkout did not finish")
+    };
+    let binding = ready.binding.unwrap();
+    let root = Path::new(&binding.root);
+    app.sessions
+        .bind_prepared_workspace(&session.id, binding.clone(), ready.bootstrap_result)
+        .unwrap();
+    std::fs::write(root.join("implementation.txt"), "session result\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "session result"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let request = SnapshotSessionRepository {
+        request_id: "result-1".into(),
+        head_revision: head.clone(),
+    };
+    let call = |app: SessionApp, request: SnapshotSessionRepository| {
+        let id = session.id.clone();
+        let bearer = std::fs::read_to_string(token).unwrap();
+        async move {
+            let response = session_router(app)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/sessions/{id}/repository/snapshots"))
+                        .header("authorization", format!("Bearer {bearer}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            (status, bytes)
+        }
+    };
+    assert_eq!(
+        call(app.clone(), request.clone()).await.0,
+        StatusCode::BAD_GATEWAY
+    );
+    assert!(lost.load(Ordering::SeqCst));
+    // Restart while only the executor has a terminal receipt. No new execution.
+    let app = SessionApp::new(config, store).unwrap();
+    let (status, bytes) = call(app.clone(), request.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let receipt: OperationReceipt = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(receipt.request.session_id, session.id);
+    assert_eq!(receipt.request.workspace_id, binding.id);
+    assert_eq!(receipt.request.arguments["base_revision"], base);
+    let snapshot: GitSnapshot =
+        serde_json::from_value(receipt.result.as_ref().unwrap().data.clone().unwrap()).unwrap();
+    assert_eq!(snapshot.request.head_revision, head);
+    assert!(snapshot.patch.contains("+session result"));
+    let snapshots: Vec<_> = executor
+        .store
+        .scan::<OperationReceipt>("receipt/")
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.request.operation == "git_snapshot")
+        .collect();
+    assert_eq!(snapshots, vec![receipt.clone()]);
+    let mut other = owner.clone();
+    other.id = "other".into();
+    assert_eq!(
+        app.snapshot_repository(&other, &session.id, &request)
+            .await
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    other = owner.clone();
+    other.roles = vec!["client".into()];
+    assert_eq!(
+        app.snapshot_repository(&other, &session.id, &request)
+            .await
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    let mut changed = request.clone();
+    changed.head_revision = base.into();
+    assert_eq!(call(app.clone(), changed).await.0, StatusCode::CONFLICT);
+    // Model/editor changes do not rewrite the durable selected-commit evidence.
+    std::fs::write(root.join("implementation.txt"), "later editor changes\n").unwrap();
+    assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
+    app.sessions.archive(&owner, &session.id).unwrap();
+    sandbox.release(&session.id).await.unwrap();
+    assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
+    let mut fresh = request.clone();
+    fresh.request_id = "after-archive".into();
+    assert_eq!(call(app.clone(), fresh).await.0, StatusCode::CONFLICT);
+    // Lost local cache after archival still recovers the existing remote receipt.
+    app.sessions
+        .store
+        .transaction(|tx| {
+            tx.delete(&akh_session_services::store::key(
+                "repository_snapshot_receipt",
+                &[&session.id, &request.request_id],
+            ))
+        })
+        .unwrap();
+    assert_eq!(call(app, request).await.1, bytes);
 }
