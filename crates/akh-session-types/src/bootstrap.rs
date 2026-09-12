@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapRequirements {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub akh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub repository: String,
     pub mcp_credentials: Vec<String>,
 }

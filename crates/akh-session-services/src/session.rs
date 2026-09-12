@@ -1300,6 +1300,10 @@ impl Sessions {
                 ));
             }
             if let Some(required) = &request.bootstrap_requirements {
+                if required.akh.as_ref().is_some_and(|akh| akh != &session.akh)
+                    || required.model.as_ref().is_some_and(|model| session.runtime.model.as_ref() != Some(model)) {
+                    return Err(Fault::conflict("automation Akh or runtime model differs from required reviewer identity"));
+                }
                 let requested: std::collections::BTreeSet<_> = required.mcp_credentials.iter().collect();
                 let granted: std::collections::BTreeSet<_> = session.required_mcp_credentials.keys().collect();
                 if definition.notify_only

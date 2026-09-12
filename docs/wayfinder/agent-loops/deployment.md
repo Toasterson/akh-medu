@@ -147,6 +147,9 @@ and mount the selected capability. Cron owns the clock; `akhsessd` owns the run
 ledger and dedupe. See [event contracts](events-and-mcp.md).
 
 Drain active work before changing a provider profile or replacing a runtime.
+Scheduler bootstrap requirements may pin the exact `akh` and runtime `model`.
+The automation validates both in the same transaction as session admission;
+review integrations use this to preserve their recorded reviewer identity.
 Keep installed executables, bridge/SDK versions and conformance hashes aligned.
 An unknown runtime, tool or allocation outcome is an operational fence, not a
 reason to mint a fresh request ID. Use the [recovery API](recovery.md), retain its

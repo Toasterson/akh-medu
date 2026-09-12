@@ -980,11 +980,12 @@ fn automation_bootstrap_requirements_fail_atomically_before_any_session_or_turn_
     config.akhs.get_mut("thoth").unwrap().bootstrap_repositories =
         vec!["https://git.example/repo.git".into()];
     config.automations.get_mut("alerts").unwrap().target = SessionTarget::PerOccurrence;
+    config.akhs.get_mut("thoth").unwrap().runtime.model = Some("claude-fable-5-1".into());
     let request: InvokeAutomation = serde_json::from_value(json!({
         "occurrence_id":"bootstrap", "event":{"schema_version":1,"id":"bootstrap","source":"alerts","type":"assignment","occurred_at":now_ms(),"data":{}},
-        "bootstrap_requirements":{"repository":"https://git.example/repo.git","mcp_credentials":["results"]}
+        "bootstrap_requirements":{"akh":"thoth","model":"claude-fable-5-1","repository":"https://git.example/repo.git","mcp_credentials":["results"]}
     })).unwrap();
-    for failure in 0..5 {
+    for failure in 0..7 {
         let mut invalid = config.clone();
         match failure {
             0 => invalid
@@ -1002,12 +1003,17 @@ fn automation_bootstrap_requirements_fail_atomically_before_any_session_or_turn_
                     .bootstrap_repositories = vec!["https://git.example/other.git".into()]
             }
             3 => invalid.automations.get_mut("alerts").unwrap().notify_only = true,
-            _ => {
+            4 => {
                 invalid.automations.get_mut("alerts").unwrap().target =
                     SessionTarget::Conversation {
                         key: "existing".into(),
                     }
             }
+            5 => {
+                invalid.akhs.get_mut("thoth").unwrap().runtime.model =
+                    Some("different-model".into())
+            }
+            _ => invalid.akhs.get_mut("thoth").unwrap().runtime.model = None,
         }
         invalid.validate().unwrap();
         let service = Sessions::new(original.store.clone(), Arc::new(invalid));
@@ -1018,6 +1024,10 @@ fn automation_bootstrap_requirements_fail_atomically_before_any_session_or_turn_
         assert!(service.list(&owner).unwrap().is_empty());
     }
     let service = Sessions::new(original.store.clone(), Arc::new(config));
+    let mut wrong_akh = request.clone();
+    wrong_akh.bootstrap_requirements.as_mut().unwrap().akh = Some("different-akh".into());
+    assert!(service.invoke(&owner, "alerts", &wrong_akh).is_err());
+    assert!(service.list(&owner).unwrap().is_empty());
     let mut duplicate = request.clone();
     duplicate
         .bootstrap_requirements
