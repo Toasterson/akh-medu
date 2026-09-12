@@ -694,3 +694,16 @@ by these fixture results.
 - The full-schema canonical result test passes through both real service entry
   points and the native Akh MCP client, including accepted-work preservation,
   scope/binding checks, concurrent exact retries and audit rollback.
+
+### Composable owner closure
+
+- Remote archival now yields a typed cleanup proof while retaining Anima's open
+  owner and exact dispatch claim. Canonical callers can apply that proof in the
+  same transaction as their outcome/witness/audit; the compatibility wrapper
+  retains its transport-only semantics.
+- Cleanup imports through the central archive event before yielding the proof.
+  Missing archive evidence, unsettled follow-ups or unacknowledged commands keep
+  the owner fenced. Exact cleanup/application retries preserve the receipt.
+- The native akhsessd/PostgreSQL outbox test passes rollback after remote cleanup,
+  missing-cache refusal, command fencing and exact replay. Canonical outcome and
+  artifact policy still need to call this composition API before scheduler rollout.
