@@ -284,8 +284,14 @@ pub async fn call_with_token(
         let result = if reply.get("error").is_some() {
             ToolResult {
                 success: false,
-                text: "MCP server rejected the tool request".into(),
-                data: Some(json!({"code":"mcp_error"})),
+                // Tool errors are actionable model input, just like successful
+                // tool content. Keep the server's explanation but never echo
+                // this peer's bearer credential into a durable transcript.
+                text: reply["error"]["message"]
+                    .as_str()
+                    .unwrap_or("MCP server rejected the tool request")
+                    .replace(&peer.token, "[redacted]"),
+                data: Some(json!({"code":"mcp_error", "rpc_code":reply["error"]["code"].as_i64()})),
                 receipt: None,
             }
         } else {
@@ -389,6 +395,9 @@ mod tests {
         if trace.mode == 2 {
             return ([("content-type", "text/event-stream")], "data: \n\n").into_response();
         }
+        if trace.mode == 3 {
+            return Json(json!({"jsonrpc":"2.0","id":body["id"],"error":{"code":-32602,"message":"Missing grep evidence; credential fixture-mcp-token-0123456789012345"}})).into_response();
+        }
         (
             [("content-type", "text/event-stream")],
             "id: completed-event\r\ndata: \r\n\r\nid: incomplete-event\r\ndata: {",
@@ -418,7 +427,7 @@ mod tests {
     }
     #[tokio::test]
     async fn negotiates_json_and_sse_and_resumes_only_with_get_without_reposting_tools() {
-        for mode in 0..=2 {
+        for mode in 0..=3 {
             let trace = Arc::new(Mutex::new(Trace {
                 mode,
                 ..Default::default()
@@ -459,6 +468,12 @@ mod tests {
             if mode == 2 {
                 assert!(result.is_err());
                 assert_eq!(trace.deletes, 0);
+            } else if mode == 3 {
+                let result = result.unwrap();
+                assert!(!result.success);
+                assert_eq!(result.text, "Missing grep evidence; credential [redacted]");
+                assert_eq!(result.data.unwrap()["rpc_code"], -32602);
+                assert_eq!(trace.deletes, 1);
             } else {
                 assert!(result.unwrap().success);
                 assert_eq!(trace.deletes, 1);
