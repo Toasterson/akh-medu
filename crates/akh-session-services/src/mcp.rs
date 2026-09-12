@@ -8,6 +8,7 @@ use std::time::Duration;
 const LIMIT: usize = 8 * 1024 * 1024;
 struct Peer {
     endpoint: Endpoint,
+    token: String,
     client: reqwest::Client,
     session: Option<String>,
     version: Option<String>,
@@ -17,7 +18,7 @@ impl Peer {
         let mut request = self
             .client
             .request(method, &self.endpoint.url)
-            .bearer_auth(self.endpoint.token()?)
+            .bearer_auth(&self.token)
             .header("Accept", "application/json, text/event-stream");
         if let Some(session) = &self.session {
             request = request.header("MCP-Session-Id", session);
@@ -234,8 +235,19 @@ pub async fn call(
     tool: &str,
     arguments: Value,
 ) -> Result<ToolResult> {
+    call_with_token(endpoint, endpoint.token()?, id, tool, arguments).await
+}
+
+pub async fn call_with_token(
+    endpoint: &Endpoint,
+    token: String,
+    id: &str,
+    tool: &str,
+    arguments: Value,
+) -> Result<ToolResult> {
     let mut peer = Peer {
         endpoint: endpoint.clone(),
+        token,
         client: endpoint.http_client()?,
         session: None,
         version: None,

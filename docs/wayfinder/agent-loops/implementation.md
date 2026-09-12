@@ -516,3 +516,20 @@ by these fixture results.
   shared form check pass. Full-schema Anima recovery and 97 UI checks pass locally.
   Native question elicitation and browser/deployment proof remain unverified.
   See [the question contract](questions.md) for protocol and source details.
+
+### Private session result capabilities
+
+- Session-scoped MCP endpoints now pin their credential policy and destination
+  at admission. Required capabilities gate new runtime dispatch. The broker
+  resolves credentials before recording a sent tool call and never falls back
+  to a shared token. Only secret-free receipts enter the journal.
+- Private provisioning requires the session owner and a dedicated role. Exact
+  retry survives interrupted file/journal commits and process restart; archive
+  removes private files without allowing historical receipts to restore them.
+- Sixteen session tests, three transport/lifecycle unit tests and A2A pass.
+  Anima's client tests cover lost and mismatched acknowledgements; its native
+  credential test passes against the locally rebuilt daemon through restart and
+  archive. See [session credentials](session-credentials.md).
+- Central scheduler allocation, canonical token issuance/revocation and exact
+  repository bootstrap remain integration work. No production token was read or
+  minted, and no project was enabled for central dispatch.

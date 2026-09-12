@@ -78,6 +78,7 @@ impl SessionApp {
     }
     async fn tick_session(&self, session: SessionRecord) -> Result<()> {
         if session.closed_at.is_some() {
+            self.sessions.remove_archived_mcp_credentials(&session.id)?;
             if self
                 .sessions
                 .store
@@ -241,6 +242,16 @@ impl SessionApp {
         Ok(())
     }
     async fn dispatch(&self, session: &SessionRecord) -> Result<()> {
+        if session
+            .turns
+            .iter()
+            .find(|t| !t.status.terminal())
+            .is_some_and(|t| t.status == TurnStatus::Queued)
+        {
+            self.sessions
+                .store
+                .transaction(|tx| self.sessions.check_mcp_credentials(tx, session))?;
+        }
         if session.workspace.is_none() {
             let allocation: Allocation = self
                 .client
@@ -396,6 +407,10 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/events", get(session_events))
             .route("/v1/sessions/{id}/pending", get(pending))
             .route("/v1/sessions/{id}/input-decisions", post(decide_input))
+            .route(
+                "/v1/sessions/{id}/mcp-credentials/{service}",
+                post(provision_mcp_credential),
+            )
             .route("/v1/sessions/{id}/attach", post(attach))
             .route("/v1/sessions/{id}/detach", post(detach))
             .route("/v1/sessions/{id}/archive", post(archive))
@@ -453,6 +468,17 @@ async fn retire(
         query.attachment_id.as_deref(),
         &request,
     )?))
+}
+async fn provision_mcp_credential(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path((id, service)): Path<(String, String)>,
+    Json(request): Json<credentials::ProvisionMcpCredential>,
+) -> Api<credentials::McpCredentialReceipt> {
+    Ok(Json(
+        app.sessions
+            .provision_mcp_credential(&p, &id, &service, &request)?,
+    ))
 }
 async fn archive(
     State(app): State<SessionApp>,

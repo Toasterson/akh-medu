@@ -37,6 +37,8 @@ pub mod sandbox;
 pub mod server;
 #[cfg(feature = "session")]
 pub mod session;
+#[cfg(feature = "session")]
+pub mod session_credentials;
 pub mod store;
 #[cfg(feature = "helpers")]
 pub mod workspace;

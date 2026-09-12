@@ -223,6 +223,9 @@ pub struct Config {
     pub principals: Vec<Principal>,
     #[serde(default)]
     pub endpoints: BTreeMap<String, Endpoint>,
+    /// MCP aliases which must never use the endpoint's daemon-wide token file.
+    #[serde(default)]
+    pub session_mcp_endpoints: Vec<String>,
     #[serde(default)]
     pub akhs: BTreeMap<String, AkhProfile>,
     #[serde(default)]
@@ -278,6 +281,15 @@ impl Config {
         }
         for endpoint in self.endpoints.values() {
             endpoint.validate()?;
+        }
+        let mut scoped = std::collections::HashSet::new();
+        for service in &self.session_mcp_endpoints {
+            validate_key(service)?;
+            if !scoped.insert(service) || self.endpoint(service)?.url.contains('{') {
+                return Err(Fault::invalid(
+                    "session MCP endpoints must be unique, fixed destinations",
+                ));
+            }
         }
         let mut sources = std::collections::HashSet::new();
         for source in &self.djehuty {

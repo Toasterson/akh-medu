@@ -342,6 +342,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
+            required_mcp_credentials: self.required_mcp_credentials(&profile.tools)?,
             retirement: None,
             closed_at: None,
             core_service: profile.core_service.clone(),
@@ -580,6 +581,7 @@ impl Sessions {
                 return Ok(None);
             }
             if session.turns[index].status == TurnStatus::Queued {
+                self.check_mcp_credentials(tx, &session)?;
                 session.generation = session
                     .generation
                     .checked_add(1)

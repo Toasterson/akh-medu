@@ -205,6 +205,11 @@ impl Broker {
         }
         // An answer can arrive concurrently with cancellation. Recheck before dispatch.
         self.sessions.validate_runtime_call(principal, &call)?;
+        let mcp_token = if let ToolDestination::Mcp { service, .. } = &tool.destination {
+            Some(self.sessions.mcp_token(&session, service)?)
+        } else {
+            None
+        };
         let was_sent = record.sent;
         record.sent = true;
         self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
@@ -233,7 +238,7 @@ impl Broker {
                     self.client.in_sandbox(&workspace.sandbox_id)?;
                     endpoint.url=endpoint.url.replace("{sandbox}",&workspace.sandbox_id);
                 }
-                match crate::mcp::call(&endpoint, &record.operation_id, tool, call.arguments.clone()).await {
+                match crate::mcp::call_with_token(&endpoint, mcp_token.expect("resolved MCP capability"), &record.operation_id, tool, call.arguments.clone()).await {
                     Ok(result) => Ok(result),
                     Err(error) => { record.unknown = true; self.sessions.store.transaction(|tx|tx.put(&k, &record))?; Err(Fault::new("unknown_outcome",format!("MCP exchange failed ({}); original call will not be repeated",error.code))) }
                 }

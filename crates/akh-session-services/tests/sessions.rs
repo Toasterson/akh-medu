@@ -65,6 +65,289 @@ fn binding(s: &Sessions, id: &str) {
     .unwrap();
 }
 
+fn scoped_setup(endpoint: &str) -> (tempfile::TempDir, Sessions, Principal) {
+    let (dir, old, mut owner) = setup();
+    owner.roles.push("session_credentials".into());
+    let mut config = (*old.config).clone();
+    config.principals[0] = owner.clone();
+    config.session_mcp_endpoints = vec!["results".into()];
+    config.endpoints.insert(
+        "results".into(),
+        serde_json::from_value(json!({
+            "url":endpoint,"token_file":"/must-never-read-a-daemon-wide-token"
+        }))
+        .unwrap(),
+    );
+    config.akhs.get_mut("thoth").unwrap().tools = vec![ToolSpec {
+        name: "result".into(),
+        description: "Session result tool".into(),
+        input_schema: json!({"type":"object"}),
+        read_only: true,
+        destination: ToolDestination::Mcp {
+            service: "results".into(),
+            tool: "result".into(),
+        },
+    }];
+    config.validate().unwrap();
+    (
+        dir,
+        Sessions::new(old.store.clone(), Arc::new(config)),
+        owner,
+    )
+}
+
+#[test]
+fn scoped_credentials_fence_dispatch_and_recover_exact_intent_without_public_secrets() {
+    use akh_session_services::store::key;
+    use credentials::ProvisionMcpCredential;
+    use std::os::unix::fs::MetadataExt;
+    let (dir, s, p) = scoped_setup("http://127.0.0.1:1/mcp");
+    let session = create(&s, &p);
+    assert_eq!(session.required_mcp_credentials.len(), 1);
+    let turn = submit(&s, &p, &session.id, "turn");
+    binding(&s, &session.id);
+    assert_eq!(
+        s.next_job(&session.id).unwrap_err().code,
+        "credential_unavailable"
+    );
+    assert_eq!(
+        s.get(&p, &session.id).unwrap().turns[0].status,
+        TurnStatus::Queued
+    );
+    let before = s.get(&p, &session.id).unwrap();
+    let request = ProvisionMcpCredential {
+        request_id: "capability-1".into(),
+        token: "private-scoped-test-capability-0001".into(),
+    };
+    let mut outsider = p.clone();
+    outsider.id = "someone-else".into();
+    assert_eq!(
+        s.provision_mcp_credential(&outsider, &session.id, "results", &request)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    let mut ordinary = p.clone();
+    ordinary.roles = vec!["client".into()];
+    assert_eq!(
+        s.provision_mcp_credential(&ordinary, &session.id, "results", &request)
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert!(
+        s.provision_mcp_credential(&p, &session.id, "other", &request)
+            .is_err()
+    );
+    let receipt = s
+        .provision_mcp_credential(&p, &session.id, "results", &request)
+        .unwrap();
+    assert_eq!(
+        s.provision_mcp_credential(&p, &session.id, "results", &request)
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        s.get(&p, &session.id).unwrap().next_sequence,
+        before.next_sequence + 1
+    );
+    let changed = ProvisionMcpCredential {
+        token: "another-scoped-test-capability-0002".into(),
+        ..request
+    };
+    assert!(
+        s.provision_mcp_credential(&p, &session.id, "results", &changed)
+            .is_err()
+    );
+    let request = ProvisionMcpCredential {
+        request_id: receipt.request_id.clone(),
+        token: "private-scoped-test-capability-0001".into(),
+    };
+    // Model a crash after publishing the complete private file but before the
+    // journal transaction committed. The file's original intent still wins.
+    s.store
+        .transaction(|tx| {
+            tx.put(&key("session", &[&session.id]), &before)?;
+            tx.delete(&key("mcp_credential", &[&session.id, "results"]))?;
+            tx.delete(&key(
+                "event",
+                &[&session.id, &format!("{:020}", before.next_sequence)],
+            ))
+        })
+        .unwrap();
+    assert!(
+        s.provision_mcp_credential(&p, &session.id, "results", &changed)
+            .is_err()
+    );
+    assert_eq!(
+        s.provision_mcp_credential(&p, &session.id, "results", &request)
+            .unwrap(),
+        receipt
+    );
+    let config = s.config.clone();
+    drop(s);
+    let s = Sessions::new(Store::open(&dir.path().join("state.redb")).unwrap(), config);
+    assert_eq!(
+        s.provision_mcp_credential(&p, &session.id, "results", &request)
+            .unwrap(),
+        receipt
+    );
+    let private_files: Vec<_> = std::fs::read_dir(dir.path().join("session-mcp-credentials"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(private_files.len(), 1);
+    assert_eq!(
+        std::fs::metadata(&private_files[0]).unwrap().mode() & 0o777,
+        0o600
+    );
+    // A configured destination cannot be repointed, or downgraded to static auth.
+    let mut drift = (*s.config).clone();
+    drift.endpoints.get_mut("results").unwrap().url = "http://127.0.0.1:2/mcp".into();
+    assert!(
+        Sessions::new(s.store.clone(), Arc::new(drift))
+            .next_job(&session.id)
+            .is_err()
+    );
+    let mut drift = (*s.config).clone();
+    drift.session_mcp_endpoints.clear();
+    assert!(
+        Sessions::new(s.store.clone(), Arc::new(drift))
+            .next_job(&session.id)
+            .is_err()
+    );
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    assert!(
+        !serde_json::to_string(&job)
+            .unwrap()
+            .contains(&request.token)
+    );
+    assert!(
+        !serde_json::to_string(&s.store.scan::<serde_json::Value>("").unwrap())
+            .unwrap()
+            .contains(&request.token)
+    );
+    assert!(!format!("{request:?}").contains(&request.token));
+    assert!(s.remove_archived_mcp_credentials(&session.id).is_err());
+    let orphan = private_files[0].with_extension(new_id());
+    std::fs::write(&orphan, &request.token).unwrap();
+    s.apply_job(&RuntimeJob {
+        request: job,
+        status: TurnStatus::Cancelled,
+        provider_session: None,
+        output: None,
+        error: None,
+        events: vec![],
+    })
+    .unwrap();
+    assert_eq!(s.get(&p, &session.id).unwrap().turns[0].id, turn.id);
+    s.archive(&p, &session.id).unwrap();
+    s.remove_archived_mcp_credentials(&session.id).unwrap();
+    assert!(!private_files[0].exists());
+    assert!(
+        !orphan.exists(),
+        "archive also removes this slot's interrupted private writes"
+    );
+    assert_eq!(
+        s.provision_mcp_credential(&p, &session.id, "results", &request)
+            .unwrap(),
+        receipt
+    );
+    assert!(
+        !private_files[0].exists(),
+        "receipt replay must not restore a retired secret"
+    );
+}
+
+#[tokio::test]
+async fn broker_uses_the_session_capability_and_missing_auth_never_marks_an_effect_sent() {
+    use akh_session_services::{broker::Broker, store::key};
+    use axum::{
+        Json, Router,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
+    use credentials::ProvisionMcpCredential;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let peer = Router::new().route("/mcp", post(|headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+        assert_eq!(headers["authorization"], "Bearer private-scoped-test-capability-0001");
+        if body["method"] == "notifications/initialized" { return (StatusCode::ACCEPTED,Json(json!({}))); }
+        let result = if body["method"] == "initialize" {
+            json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"scoped-peer","version":"1"}})
+        } else { assert_eq!(body["method"], "tools/call");json!({"content":[{"type":"text","text":"accepted"}],"isError":false}) };
+        (StatusCode::OK,Json(json!({"jsonrpc":"2.0","id":body["id"],"result":result})))
+    }));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer).await.unwrap();
+    });
+    let (dir, s, p) = scoped_setup(&endpoint);
+    let session = create(&s, &p);
+    submit(&s, &p, &session.id, "turn");
+    binding(&s, &session.id);
+    let request = ProvisionMcpCredential {
+        request_id: "capability-1".into(),
+        token: "private-scoped-test-capability-0001".into(),
+    };
+    s.provision_mcp_credential(&p, &session.id, "results", &request)
+        .unwrap();
+    let job = s.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal {
+        id: "runtime-1".into(),
+        roles: vec!["runtime".into()],
+        ..p.clone()
+    };
+    let call = ToolCall {
+        id: "scoped-call".into(),
+        session_id: session.id.clone(),
+        turn_id: job.turn_id.clone(),
+        generation: job.generation,
+        name: "result".into(),
+        arguments: json!({}),
+    };
+    let private = std::fs::read_dir(dir.path().join("session-mcp-credentials"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(&private).unwrap();
+    let broker = Broker::new(s.clone()).unwrap();
+    assert_eq!(
+        broker.tool(&runtime, call.clone()).await.unwrap_err().code,
+        "credential_unavailable"
+    );
+    let record: akh_session_services::broker::ToolRecord = s
+        .store
+        .get(&key("tool", &[&session.id, &job.turn_id, &call.id]))
+        .unwrap()
+        .unwrap();
+    assert!(!record.sent && !record.unknown);
+    s.provision_mcp_credential(&p, &session.id, "results", &request)
+        .unwrap();
+    assert!(
+        broker
+            .tool(&runtime, call.clone())
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+            .success
+    );
+    // Replay is a local receipt read, independent of live credentials or HTTP.
+    std::fs::remove_file(private).unwrap();
+    server.abort();
+    assert!(
+        broker
+            .tool(&runtime, call)
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+            .success
+    );
+}
+
 #[test]
 fn input_decisions_reject_stale_intent_durably_and_respect_controller_leases() {
     let (dir, s, p) = setup();

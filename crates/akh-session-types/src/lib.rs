@@ -1,4 +1,5 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
+pub mod credentials;
 pub mod questions;
 
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,10 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
+    /// Configured MCP destinations that require a private session capability.
+    /// Values fingerprint the endpoint configuration; credentials are never here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub required_mcp_credentials: BTreeMap<String, String>,
     /// Immutable operator retirement fences new inputs before cancelling turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retirement: Option<SessionRetirement>,
