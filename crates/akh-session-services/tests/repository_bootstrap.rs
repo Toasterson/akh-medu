@@ -414,6 +414,7 @@ async fn verify_session_snapshots(
     let request = SnapshotSessionRepository {
         request_id: new_id(),
         head_revision: head.clone(),
+        expected_patch: None,
     };
     let call = |app: SessionApp, request: SnapshotSessionRepository| {
         let id = session.id.clone();
@@ -468,6 +469,33 @@ async fn verify_session_snapshots(
         .filter(|r| r.request.operation == "git_snapshot")
         .collect();
     assert_eq!(snapshots, vec![receipt.clone()]);
+    let verified_request = SnapshotSessionRepository {
+        request_id: new_id(),
+        head_revision: head.clone(),
+        expected_patch: Some(format!(
+            "{}\n",
+            git(root, &["format-patch", "--stdout", "-1", &head])
+        )),
+    };
+    let (verified_status, verified_bytes) = call(app.clone(), verified_request.clone()).await;
+    assert_eq!(
+        verified_status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&verified_bytes)
+    );
+    let verified_receipt: OperationReceipt = serde_json::from_slice(&verified_bytes).unwrap();
+    assert!(verified_receipt.result.as_ref().unwrap().success);
+    assert_eq!(
+        verified_receipt
+            .result
+            .as_ref()
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap()["expected_patch_sha256"],
+        akh_session_services::digest(verified_request.expected_patch.as_ref().unwrap().as_bytes())
+    );
     let mut other = owner.clone();
     other.id = "other".into();
     assert_eq!(
@@ -530,21 +558,27 @@ async fn verify_session_snapshots(
         let server = tokio::spawn(async move {
             axum::serve(listener, router).await.unwrap();
         });
-        let input = json!({"config":{"url":endpoint,"token_file":token,"ca_file":null,"automation":"fixture","source":"fixture"},
+        for (request, expected) in [(&request, &receipt), (&verified_request, &verified_receipt)] {
+            let input = json!({"config":{"url":endpoint,"token_file":token,"ca_file":null,"automation":"fixture","source":"fixture"},
             "checkout":{"repository":repository,"revision":base},
-            "admission":{"session_id":session.id,"turn_id":turn.id},"request_id":request.request_id,"head":head});
-        let command = tokio::process::Command::new(probe);
-        let result = akh_session_services::process::output_with_input(
-            command,
-            Some(serde_json::to_vec(&input).unwrap()),
-            Duration::from_secs(20),
-            4 * 1024 * 1024,
-        )
-        .await;
+            "admission":{"session_id":session.id,"turn_id":turn.id},"request_id":request.request_id,"head":head,"expected_patch":request.expected_patch});
+            let command = tokio::process::Command::new(&probe);
+            let result = akh_session_services::process::output_with_input(
+                command,
+                Some(serde_json::to_vec(&input).unwrap()),
+                Duration::from_secs(20),
+                4 * 1024 * 1024,
+            )
+            .await;
+            if result.is_err() {
+                server.abort();
+            }
+            let remote: OperationReceipt =
+                serde_json::from_slice(&result.expect("native Anima snapshot client failed"))
+                    .unwrap();
+            assert_eq!(&remote, expected);
+        }
         server.abort();
-        let remote: OperationReceipt =
-            serde_json::from_slice(&result.expect("native Anima snapshot client failed")).unwrap();
-        assert_eq!(remote, receipt);
         println!("Native Anima snapshot client verified the original archived executor receipt");
     }
 }

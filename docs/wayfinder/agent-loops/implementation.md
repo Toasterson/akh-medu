@@ -747,3 +747,14 @@ by these fixture results.
   routers and native Git checkout, retrieving the same receipt after archival.
   Result persistence, patch equivalence, publication and canonical finalization
   still require integration; this client does not accept or close a Change.
+
+### Semantic proposed-patch verification
+
+- Snapshots can now verify a submitted unified/format-patch against the exact
+  selected commit tree using a private index/object store. The executor records
+  the input patch digest only after equivalence succeeds. Workspace files,
+  index, refs and objects remain intact; formatting differences are permitted.
+- Thirty focused Akh tests pass, including native SHA-1/SHA-256 semantic checks
+  and the actual Anima client reading both capture and verification receipts
+  after archival. Three Anima client tests pass identity, tampering and replay
+  checks. No live model, remote Git publication or canonical outcome is inferred.

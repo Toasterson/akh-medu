@@ -38,9 +38,18 @@ successful `result.data` is the shared `repository::GitSnapshot` contract.
 Consumers must check completed/success, the exact request and receipt identities,
 and the patch digest. A capture failure is not a successful empty result.
 
+An optional `expected_patch` string requests semantic verification of a proposed
+patch. Git applies those exact bytes to the assigned base in a temporary index
+and object store, and must produce the selected commit's tree. The result carries
+`expected_patch_sha256` only after that check. The input patch stays in the
+operation request; the snapshot's revision request omits it to avoid duplicating
+the input again. This accepts equivalent unified/format-patch representations
+and binary patches without requiring identical formatting. Anima's
+`verify_repository_patch` client checks both the request and this digest.
+
 The executor operation ID is SHA-256 over UTF-8
 `repository_snapshot_intent/{session-byte-length}:{session}{request-id-byte-length}:{request-id}`.
-Retrying an ID with another head conflicts. Lost replies recover the original
+Retrying an ID with another head or input patch conflicts. Lost replies recover the original
 receipt before considering another read request. The session manager caches
 terminal evidence, including failures. Existing evidence can be recovered after
 archival; archival cannot start a fresh capture. Interrupted reads do not claim
@@ -72,11 +81,15 @@ executor routers also pass lost-response recovery after a real Git bootstrap,
 including retrieval after archival. These tests do not prove remote publication,
 cross-host deployment, or Anima's canonical finalization.
 
+Semantic-patch tests pass unified diffs with different context, format-patch and
+binary contents on both object formats. A valid patch producing a different tree
+is refused, and the workspace index, refs, object counts and files remain intact.
+
 Anima's independent compatibility client now validates the owning session,
 admitted turn, verified checkout, workspace/generation, derived operation ID,
 terminal status, commit/tree identities and patch digest before returning typed
-snapshot evidence. Its actual native probe passes against the real Akh routers
-after archival. Run the cross-repository fixture by building Anima's
+snapshot evidence. Its actual native probe passes both capture and semantic-patch
+verification against the real Akh routers after archival. Run the cross-repository fixture by building Anima's
 `snapshot-probe` example and setting `ANIMA_AKH_SNAPSHOT_PROBE` to that absolute
 binary path when running Akh's `repository_bootstrap` test with
 `session,executor,sandbox` features. With no explicit probe path, that test proves

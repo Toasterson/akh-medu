@@ -96,6 +96,14 @@ struct View {
 
 impl View {
     async fn run(&self, args: &[&str], limit: usize) -> Result<Vec<u8>> {
+        self.run_with_input(args, limit, None).await
+    }
+    async fn run_with_input(
+        &self,
+        args: &[&str],
+        limit: usize,
+        input: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
         let remaining = self
             .deadline
             .checked_duration_since(tokio::time::Instant::now())
@@ -117,7 +125,11 @@ impl View {
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "/bin/false")
-            .env("GIT_OBJECT_DIRECTORY", ".")
+            .env(
+                "GIT_OBJECT_DIRECTORY",
+                self.directory.path().join("objects"),
+            )
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", ".")
             .env("GIT_DIR", self.directory.path())
             .args([
                 "--no-pager",
@@ -147,7 +159,7 @@ impl View {
         }
         // Let the subprocess helper kill and reap on its own deadline. An outer
         // timeout would drop that cleanup future before it can await the child.
-        process::output(command, remaining, limit)
+        process::output_with_input(command, input, remaining, limit)
             .await
             .map_err(|error| {
                 Fault::new(
@@ -173,7 +185,7 @@ impl View {
 async fn capture_inner(
     objects: File,
     profile: GitSnapshotProfile,
-    request: CaptureGitSnapshot,
+    mut request: CaptureGitSnapshot,
 ) -> Result<GitSnapshot> {
     let directory = tempfile::Builder::new()
         .prefix("akh-git-snapshot-")
@@ -192,6 +204,7 @@ async fn capture_inner(
             )
         })
         .and_then(|_| std::fs::create_dir(directory.path().join("refs")))
+        .and_then(|_| std::fs::create_dir(directory.path().join("objects")))
         .map_err(|_| Fault::new("git_unavailable", "private Git view initialization failed"))?;
     let view = View {
         directory,
@@ -264,11 +277,39 @@ async fn capture_inner(
     args.extend(["--no-patch", "--numstat", "-z", base, head, "--"]);
     let (files_changed, lines_added, lines_removed, binary_files) =
         statistics(&view.run(&args, LIMIT).await?)?;
+    let expected_patch_sha256 = if let Some(expected) = request.expected_patch.take() {
+        // All index and new object writes stay in the private view. The actual
+        // workspace index, files, refs and object store remain untouched.
+        view.run(&["read-tree", base], 64).await?;
+        view.run_with_input(
+            &[
+                "apply",
+                "--cached",
+                "--binary",
+                "--unidiff-zero",
+                "--whitespace=nowarn",
+                "-",
+            ],
+            64,
+            Some(expected.as_bytes().to_vec()),
+        )
+        .await?;
+        let applied_tree = view.text(&["write-tree"], 128).await?;
+        if applied_tree.trim() != head_tree {
+            return Err(Fault::conflict(
+                "submitted patch does not produce the selected commit tree",
+            ));
+        }
+        Some(crate::digest(expected.as_bytes()))
+    } else {
+        None
+    };
     Ok(GitSnapshot {
         schema_version: SCHEMA_VERSION,
         base_tree,
         head_tree,
         patch_sha256: crate::digest(patch.as_bytes()),
+        expected_patch_sha256,
         patch,
         request,
         files_changed,

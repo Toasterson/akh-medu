@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct CaptureGitSnapshot {
     pub base_revision: String,
     pub head_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_patch: Option<String>,
 }
 
 pub fn is_commit_id(value: &str) -> bool {
@@ -18,6 +20,15 @@ pub fn is_commit_id(value: &str) -> bool {
 
 impl CaptureGitSnapshot {
     pub fn validate(&self) -> crate::Result<()> {
+        if self
+            .expected_patch
+            .as_ref()
+            .is_some_and(|patch| patch.is_empty() || patch.len() > 1024 * 1024)
+        {
+            return Err(crate::Fault::invalid(
+                "expected patch must contain 1 byte to 1 MiB",
+            ));
+        }
         if !is_commit_id(&self.base_revision)
             || !is_commit_id(&self.head_revision)
             || self.base_revision.len() != self.head_revision.len()
@@ -37,6 +48,8 @@ impl CaptureGitSnapshot {
 pub struct SnapshotSessionRepository {
     pub request_id: String,
     pub head_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_patch: Option<String>,
 }
 
 /// This proves a selected local commit's contents, not publication, current
@@ -51,6 +64,10 @@ pub struct GitSnapshot {
     pub head_tree: String,
     pub patch: String,
     pub patch_sha256: String,
+    /// Present only when the submitted patch was applied to a private base
+    /// index and produced the exact head tree. Raw input is in the operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_patch_sha256: Option<String>,
     pub files_changed: i32,
     pub lines_added: i32,
     pub lines_removed: i32,

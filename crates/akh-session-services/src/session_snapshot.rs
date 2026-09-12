@@ -56,6 +56,7 @@ impl SessionApp {
             let capture = CaptureGitSnapshot {
                 base_revision: bootstrap.verified_revision.clone(),
                 head_revision: request.head_revision.clone(),
+                expected_patch: request.expected_patch.clone(),
             };
             capture.validate()?;
             let operation = WorkspaceOperation {
@@ -158,9 +159,13 @@ fn validate_receipt(operation: &WorkspaceOperation, receipt: &OperationReceipt) 
     )
     .map_err(|_| Fault::conflict("executor returned invalid snapshot data"))?;
     if snapshot.schema_version != SCHEMA_VERSION
-        || serde_json::to_value(&snapshot.request)
-            .map_err(|_| Fault::invalid("snapshot encoding"))?
-            != operation.arguments
+        || snapshot.request.base_revision != operation.arguments["base_revision"]
+        || snapshot.request.head_revision != operation.arguments["head_revision"]
+        || snapshot.request.expected_patch.is_some()
+        || snapshot.expected_patch_sha256
+            != operation.arguments["expected_patch"]
+                .as_str()
+                .map(|patch| crate::digest(patch.as_bytes()))
         || snapshot.patch.len() > 1024 * 1024
         || snapshot.patch_sha256 != crate::digest(snapshot.patch.as_bytes())
         || !is_commit_id(&snapshot.base_tree)

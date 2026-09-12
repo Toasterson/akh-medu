@@ -346,3 +346,80 @@ fn native_snapshot_reads_packed_objects_but_refuses_corruption_and_oversized_pat
             .success
     );
 }
+
+#[test]
+fn native_submitted_patch_must_reproduce_exact_tree_without_changing_workspace_or_objects() {
+    for format in ["sha1", "sha256"] {
+        let fixture = Fixture::new(format);
+        let expected = fixture.capture("reference").1;
+        let index = std::fs::read(fixture.root().join(".git/index")).unwrap();
+        let object_counts = git(&fixture.root(), &["count-objects", "-v"]);
+        let alternate_diff = format!(
+            "{}\n",
+            git(
+                &fixture.root(),
+                &[
+                    "diff",
+                    "--binary",
+                    "--unified=0",
+                    &fixture.base,
+                    &fixture.head
+                ]
+            )
+        );
+        let email = format!(
+            "{}\n",
+            git(
+                &fixture.root(),
+                &["format-patch", "--stdout", "--binary", "-1", &fixture.head]
+            )
+        );
+        assert_ne!(email, expected.patch);
+        for (id, patch) in [
+            ("canonical", expected.patch.clone()),
+            ("no-context", alternate_diff),
+            ("email", email),
+        ] {
+            let mut request = fixture.request(id);
+            request.arguments["expected_patch"] = json!(patch);
+            let receipt = fixture.executor.operate(request.clone()).unwrap();
+            let result = receipt.result.as_ref().unwrap();
+            assert!(result.success, "{id}: {}", result.text);
+            let snapshot: GitSnapshot =
+                serde_json::from_value(result.data.clone().unwrap()).unwrap();
+            assert_eq!(
+                snapshot.expected_patch_sha256,
+                Some(akh_session_services::digest(patch.as_bytes()))
+            );
+            assert!(snapshot.request.expected_patch.is_none());
+            assert_eq!(snapshot.patch, expected.patch);
+            assert_eq!(snapshot.head_tree, expected.head_tree);
+            assert_eq!(fixture.executor.operate(request).unwrap(), receipt);
+        }
+        let mut different = fixture.request("different-tree");
+        different.arguments["expected_patch"] = json!(
+            expected
+                .patch
+                .replace("+implementation", "+different implementation")
+        );
+        let receipt = fixture.executor.operate(different).unwrap();
+        assert!(!receipt.result.as_ref().unwrap().success);
+        assert!(
+            receipt
+                .result
+                .unwrap()
+                .text
+                .contains("does not produce the selected commit tree")
+        );
+        assert_eq!(
+            std::fs::read(fixture.root().join(".git/index")).unwrap(),
+            index
+        );
+        assert_eq!(
+            git(&fixture.root(), &["count-objects", "-v"]),
+            object_counts
+        );
+        assert_eq!(git(&fixture.root(), &["rev-parse", "HEAD"]), fixture.head);
+        assert!(git(&fixture.root(), &["status", "--porcelain"]).is_empty());
+    }
+}
