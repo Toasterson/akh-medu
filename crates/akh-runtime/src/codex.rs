@@ -57,9 +57,6 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         params["sandbox"] = json!("read-only");
                         params["approvalPolicy"] = json!("never");
                     }
-                    if turn.config.execution_mode == ExecutionMode::Brokered {
-                        params["environments"] = json!([]);
-                    }
                     if let Some(model) = &turn.request.binding.model {
                         params["model"] = json!(model);
                     }
@@ -67,6 +64,9 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         params["threadId"] = json!(session);
                         "thread/resume"
                     } else {
+                        if turn.config.execution_mode == ExecutionMode::Brokered {
+                            params["environments"] = json!([]);
+                        }
                         params["dynamicTools"] = json!([{"type":"namespace", "name":"akh",
                             "description":"Akh-Medu knowledge, memory and execution tools",
                             "tools":turn.tools.iter().map(|t| json!({
@@ -89,6 +89,12 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                     turn.bind(id, message["result"]["model"].as_str())?;
                     let mut params =
                         json!({"threadId":id,"input":[{"type":"text","text":turn.prompt}]});
+                    // Resume has no environments parameter, and restoring a
+                    // thread does not preserve this restriction. Reassert it
+                    // for every turn so native workspace tools stay disabled.
+                    if turn.config.execution_mode == ExecutionMode::Brokered {
+                        params["environments"] = json!([]);
+                    }
                     if let Some(effort) = &turn.config.effort {
                         params["effort"] = json!(effort);
                     }

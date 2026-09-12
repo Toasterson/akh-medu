@@ -51,6 +51,8 @@ def codex():
     turn = read()
     assert turn["method"] == "turn/start"
     assert turn["params"]["threadId"] == thread
+    if "features.shell_tool=false" in sys.argv:
+        assert turn["params"]["environments"] == []
     response(turn, {"turn": {"id": "turn-1"}})
     prompt = turn["params"]["input"][0]["text"]
     state[thread].append(prompt)

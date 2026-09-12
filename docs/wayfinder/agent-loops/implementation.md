@@ -422,3 +422,19 @@ by these fixture results.
   restarted background worker and cancellation progress during uncertain prompt
   delivery. The new scheduler allocation route, UI Stop/permission controls,
   canonical result/retirement path and activity projection remain to be wired.
+
+### Installed Codex harness and supplied workspace tools
+
+- The actual Codex CLI 0.153.4 app-server passed thirteen requests from a local
+  synthetic Responses peer. Supplied write/read/process tools reached the real
+  executor, duplicate operations preserved receipts, and a restarted app-server
+  resumed the same provider thread. No account credentials were used.
+- Forced native execution and patch calls were unsupported and absent from the
+  advertised tool catalogs. A supplied-tool failure could not fall back to a
+  native workspace write. Provider planning/goal and skill tools remain present.
+- The strict resume check found that the adapter must disable environments on
+  every turn: `thread/resume` has no such field. The fix keeps native patch and
+  image tools unavailable after process restart; the native and fixture checks pass.
+- This is native harness behavior with a model fixture, not live-model or
+  cross-host conformance. The daemon's native admission gate remains in place.
+  See [native provider checks](native-provider-checks.md) for commands and limits.

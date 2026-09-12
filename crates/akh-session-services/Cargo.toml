@@ -129,6 +129,10 @@ required-features = ["executor"]
 name = "sandbox"
 required-features = ["sandbox"]
 
+[[example]]
+name = "native-provider-probe"
+required-features = ["runtime"]
+
 [[bin]]
 name = "akh-runtime-profile"
 path = "src/bin/akh-runtime-profile.rs"
