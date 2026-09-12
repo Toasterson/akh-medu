@@ -75,6 +75,11 @@ requires a current Ready condition, pins the observed object UID and uses a UID
 precondition on deletion. An old Ready condition cannot authorize a new spec.
 Workspace binding still requires the executor handshake and expiring lease.
 
+Repository snapshot/publication executors need a Git build accepting
+`git --no-lazy-fetch --version`. The CI installer pins upstream Git 2.55.0 by
+archive SHA-256; Ubuntu 22.04's and Debian bookworm's default Git are too old.
+Fingerprint the final installed executable after upgrading the workspace image.
+
 A template must provide its executor Service/endpoint, mounted credentials and
 workspace path `/workspaces/<allocation-id>`. Use the command provisioner for
 sites whose supervisor additionally creates per-allocation credentials, routes,
