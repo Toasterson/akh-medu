@@ -30,9 +30,24 @@ pub fn operation_id(call: &ToolCall) -> String {
 pub struct Broker {
     pub sessions: Sessions,
     client: Client,
-    lock: Arc<tokio::sync::Mutex<()>>,
+    locks: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    >,
 }
 impl Broker {
+    fn call_lock(&self, call: &ToolCall) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let entry = locks.entry(record_key(call)).or_default();
+        if let Some(lock) = entry.upgrade() {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        *entry = Arc::downgrade(&lock);
+        lock
+    }
     pub async fn reconcile_tool(
         &self,
         p: &Principal,
@@ -40,7 +55,8 @@ impl Broker {
         resolution: &Reconciliation,
     ) -> Result<ToolResult> {
         crate::http::role(p, "admin")?;
-        let _lock = self.lock.lock().await;
+        let call_lock = self.call_lock(call);
+        let _lock = call_lock.lock().await;
         self.sessions.store.transaction(|tx| {
             let target = record_key(call);
             let mut record: ToolRecord = tx
@@ -84,7 +100,7 @@ impl Broker {
         Ok(Self {
             client: Client::new(sessions.config.clone())?,
             sessions,
-            lock: Default::default(),
+            locks: Default::default(),
         })
     }
     pub fn input(
@@ -116,7 +132,8 @@ impl Broker {
         })
     }
     pub async fn tool(&self, principal: &Principal, call: ToolCall) -> Result<CallbackReply> {
-        let _lock = self.lock.lock().await;
+        let call_lock = self.call_lock(&call);
+        let _lock = call_lock.lock().await;
         let session = self.sessions.validate_runtime_call(principal, &call)?;
         let Some(tool) = session.tools.iter().find(|t| t.name == call.name) else {
             return Ok(done(ToolResult::denied(&call.name, None)));
@@ -269,7 +286,14 @@ impl Broker {
             "tool",
             &[&job.request.session_id, &job.request.turn_id],
         ))?;
-        for mut record in records {
+        for record in records {
+            let call_lock = self.call_lock(&record.call);
+            let _lock = call_lock.lock().await;
+            let mut record: ToolRecord = self
+                .sessions
+                .store
+                .get(&record_key(&record.call))?
+                .ok_or_else(|| Fault::missing("tool record disappeared"))?;
             if (record.unknown || (record.sent && record.result.is_none()))
                 && matches!(record.destination, ToolDestination::Workspace { .. })
             {

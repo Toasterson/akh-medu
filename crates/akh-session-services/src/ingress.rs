@@ -188,6 +188,7 @@ impl Events {
         Principal {
             id: self.config.service_id.clone(),
             token_file: "/unused".into(),
+            token_sha256: false,
             roles: vec!["event".into()],
             akhs: vec![],
             sources: vec![source.into()],

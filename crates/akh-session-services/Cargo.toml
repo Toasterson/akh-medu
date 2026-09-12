@@ -13,11 +13,14 @@ executor = ["helpers", "dep:regex", "dep:globset", "dep:base64"]
 sandbox = []
 events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono", "dep:uuid"]
 helpers = []
-client = ["helpers", "dep:tokio-tungstenite"]
+client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
 admin = []
 trigger = ["dep:chrono"]
+kagent = ["dep:async-stream"]
 
 [dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 akh-session-types = { path = "../akh-session-types" }
 rmcp = { version = "0.17", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
@@ -50,6 +53,11 @@ tokio-reactor-trait = { version = "1", optional = true }
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "akh-kagent"
+path = "src/bin/akh-kagent.rs"
+required-features = ["kagent"]
 
 [[bin]]
 name = "akh-fingerprint"

@@ -100,6 +100,7 @@ pub fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 pub fn materialize(manifest: &Manifest) -> Result<()> {
     private_directory(&manifest.state_dir)?;
     private_directory(&manifest.state_dir.join("home"))?;
+    private_directory(&manifest.state_dir.join("cache"))?;
     let files = manifest
         .profile
         .managed_files
@@ -190,8 +191,15 @@ fn upstream_command(manifest: &Manifest, argv: &[String]) -> Result<tokio::proce
         .current_dir(&manifest.workspace.root)
         .env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-        .env("HOME", manifest.state_dir.join("home"));
+        .env("HOME", manifest.state_dir.join("home"))
+        .env("XDG_CONFIG_HOME", manifest.state_dir.join("config"))
+        .env("XDG_CACHE_HOME", manifest.state_dir.join("cache"));
     for (name, value) in &manifest.profile.environment {
+        if matches!(name.as_str(), "HOME" | "XDG_CONFIG_HOME" | "XDG_CACHE_HOME") {
+            return Err(Fault::invalid(
+                "service environment cannot override its private account directories",
+            ));
+        }
         command.env(name, expand(value, manifest));
     }
     Ok(command)
@@ -217,6 +225,64 @@ pub async fn supervise(manifest: Manifest) -> Result<()> {
     let stop = manifest.state_dir.join("stop.json");
     if stop.exists() {
         std::fs::remove_file(&stop).map_err(io)?;
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(io)?;
+    let prepared = async {
+        if manifest.profile.version_command.is_empty()
+            != manifest.profile.version_output_contains.is_none()
+        {
+            return Err(Fault::invalid(
+                "version probe requires both a command and expected output",
+            ));
+        }
+        if let Some(expected) = &manifest.profile.version_output_contains {
+            if expected.trim().is_empty() {
+                return Err(Fault::invalid(
+                    "version probe expectation must not be empty",
+                ));
+            }
+            let command = upstream_command(&manifest, &manifest.profile.version_command)?;
+            let bytes = crate::process::output(command, Duration::from_secs(10), 64 * 1024).await?;
+            if !String::from_utf8_lossy(&bytes).contains(expected) {
+                return Err(Fault::conflict(
+                    "installed upstream version differs from the selected service profile",
+                ));
+            }
+        }
+        if let Some(url) = &manifest.profile.health_url {
+            if client
+                .get(expand(url, &manifest))
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
+                return Err(Fault::conflict(
+                    "health endpoint is already serving before this helper launched its child",
+                ));
+            }
+        }
+        // Validate the effective private environment before recording launch intent.
+        upstream_command(&manifest, &manifest.profile.command)?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = prepared {
+        atomic_json(
+            &manifest.state_dir.join("status.json"),
+            &Status {
+                id: manifest.id.clone(),
+                revision: manifest.profile.revision.clone(),
+                state: "failed".into(),
+                heartbeat: now_ms(),
+                error: Some(error.clone()),
+                access: None,
+            },
+        )?;
+        return Err(error);
     }
     let mut status = Status {
         id: manifest.id.clone(),
@@ -247,11 +313,7 @@ pub async fn supervise(manifest: Manifest) -> Result<()> {
         }
     };
     let child_group = child.id().expect("spawned child has PID") as i32;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(io)?;
+
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let signal = shutdown.clone();
     let signal_task = tokio::spawn(async move {
@@ -410,6 +472,21 @@ mod tests {
     fn managed_configs_preserve_user_edits_and_unmanaged_login_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut manifest:Manifest=serde_json::from_value(json!({"schema_version":1,"id":"service","session_id":"session","principal":"user","state_dir":dir.path(),"workspace":{"id":"w","sandbox_id":"s","executor":"e","generation":1,"site":"test","root":"/work","platform":"test","confinement":"test"},"profile":{"id":"editor","revision":"1","upstream_version":"pinned","command":["upstream"],"managed_files":{"settings.json":"{\"workspace\":\"{workspace}\"}"}}})).unwrap();
+        manifest
+            .profile
+            .environment
+            .insert("HOME".into(), "/someone-else".into());
+        assert!(upstream_command(&manifest, &manifest.profile.command).is_err());
+        manifest.profile.environment.clear();
+        let command = upstream_command(&manifest, &manifest.profile.command).unwrap();
+        let home = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "HOME")
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(home, dir.path().join("home"));
         materialize(&manifest).unwrap();
         let config = dir.path().join("config/settings.json");
         assert!(std::fs::read_to_string(&config).unwrap().contains("/work"));

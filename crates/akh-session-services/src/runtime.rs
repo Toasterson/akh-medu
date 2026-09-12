@@ -272,7 +272,11 @@ impl Runtime {
                         ));
                     }
                     Err(message) => {
-                        job.status = if cancel.load(Ordering::SeqCst) {
+                        // An internal model can stop between a persisted tool plan and
+                        // its receipt. Cancellation alone cannot close that history.
+                        job.status = if cancel.load(Ordering::SeqCst)
+                            && profile.kind != RuntimeKind::Internal
+                        {
                             TurnStatus::Cancelled
                         } else {
                             TurnStatus::Unknown

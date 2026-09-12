@@ -252,6 +252,12 @@ impl Sessions {
                 "input text must be non-empty and at most 1 MiB",
             ));
         }
+        if !input.artifacts.is_empty() {
+            return Err(Fault::new(
+                "unsupported",
+                "artifact inputs are not yet supported end to end; use workspace tools",
+            ));
+        }
         let mut session = load(tx, id)?;
         authorize(&session, principal)?;
         let dedupe = key("input", &[id, &principal.id, request_id]);
@@ -348,6 +354,11 @@ impl Sessions {
                     ));
                 }
                 return Ok(());
+            }
+            if session.closed_at.is_some() {
+                return Err(Fault::conflict(
+                    "cannot bind a new workspace to an archived session",
+                ));
             }
             session.workspace = Some(binding.clone());
             append_event(tx, &mut session, None, "workspace_ready", encode(&binding)?)?;

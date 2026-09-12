@@ -98,6 +98,7 @@ async fn websocket_preserves_prompt_order_permissions_and_replays_before_load_re
     let runtime = Principal {
         id: "runtime".into(),
         token_file: "/unused".into(),
+        token_sha256: false,
         roles: vec!["runtime".into()],
         akhs: vec![],
         sources: vec![],

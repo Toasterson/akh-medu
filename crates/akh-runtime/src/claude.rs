@@ -72,6 +72,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
             Some("tool_completed") => turn.host.event(RuntimeEvent::ToolCompleted {
                 id: message["id"].as_str().unwrap_or("").into(),
                 success: message["success"] == true,
+                details: message.get("details").cloned(),
             })?,
             Some("question") => {
                 let response = turn

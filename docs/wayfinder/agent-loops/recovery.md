@@ -92,3 +92,22 @@ bounds HTTP draining to ten seconds. Any work without a durable terminal result
 is fenced on restart. Bearer credentials are reread from mounted files. An
 endpoint may specify an absolute `ca_file`, trusted only by that endpoint's
 HTTP client, for a private Kubernetes or service CA.
+
+## Internal-loop interruption and connection handoff
+
+An internal-loop error remains unknown even when cancellation was requested.
+The worker may have persisted a tool plan without obtaining its receipt;
+requesting cancellation does not settle that gap. Reconcile the tool effects
+first, then the runtime job. Resolving an unfinished internal job as failed or
+cancelled retires its private continuation; archive that session and create an
+explicit new one. There is no automatic replay or invented tool response.
+
+`akh-connect --reconnect` requests a fresh upstream pairing link for the same T3
+environment ID. An offer or successful browser-command exit is not proof of
+pairing. Failed handoffs persist an unavailable offer and require explicit
+reconnect; pairing secrets are never journaled. HTTP responses and launcher
+execution are bounded. Service profiles cannot override their private HOME/XDG
+roots. Optional `version_command` plus `version_output_contains` verifies the
+installed upstream version before launch. A health endpoint already serving
+before launch is rejected, preventing an unrelated existing server from making
+this helper ready. This check does not replace native server identity validation.

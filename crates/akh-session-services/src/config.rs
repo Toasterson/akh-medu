@@ -86,6 +86,9 @@ pub fn read_token(path: &Path) -> Result<String> {
 pub struct Principal {
     pub id: String,
     pub token_file: PathBuf,
+    /// Store only a SHA-256 verifier on less-trusted receiving services.
+    #[serde(default)]
+    pub token_sha256: bool,
     pub roles: Vec<String>,
     #[serde(default)]
     pub akhs: Vec<String>,
@@ -94,6 +97,20 @@ pub struct Principal {
 }
 
 impl Principal {
+    pub fn credential(&self) -> Result<String> {
+        let value = read_token(&self.token_file)?;
+        if self.token_sha256
+            && (value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        {
+            return Err(Fault::invalid(
+                "incoming token verifier must be lowercase SHA-256 hex",
+            ));
+        }
+        Ok(value)
+    }
     pub fn has_role(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role || r == "admin")
     }

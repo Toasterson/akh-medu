@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio_tungstenite::{
-    connect_async,
+    Connector, connect_async_tls_with_config,
     tungstenite::{Message, client::IntoClientRequest},
 };
 
@@ -15,6 +15,9 @@ struct Args {
     endpoint: String,
     #[arg(long)]
     token_file: PathBuf,
+    /// Optional private CA bundle for a work/homelab WSS ingress.
+    #[arg(long)]
+    ca_file: Option<PathBuf>,
     #[arg(long)]
     akh: Option<String>,
     #[arg(long)]
@@ -46,7 +49,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
-    let (socket, _) = connect_async(request).await?;
+    let connector = if let Some(path) = &args.ca_file {
+        if url.scheme() != "wss" {
+            return Err("--ca-file requires WSS".into());
+        }
+        let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in rustls_pemfile::certs(&mut reader) {
+            roots.add(certificate?)?;
+        }
+        if roots.is_empty() {
+            return Err("private CA bundle contains no certificates".into());
+        }
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        Some(Connector::Rustls(std::sync::Arc::new(tls)))
+    } else {
+        None
+    };
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(8 * 1024 * 1024))
+        .max_frame_size(Some(8 * 1024 * 1024));
+    let (socket, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connect_async_tls_with_config(request, Some(ws_config), false, connector),
+    )
+    .await??;
     let (mut outgoing, mut incoming) = socket.split();
     let mut input = tokio::io::BufReader::new(tokio::io::stdin());
     let mut output = tokio::io::stdout();

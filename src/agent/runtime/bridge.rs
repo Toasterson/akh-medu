@@ -108,11 +108,11 @@ impl akh_runtime::Host for Turn<'_> {
                     locations: vec![],
                 })
             }
-            wire::RuntimeEvent::ToolCompleted { id, success } => {
+            wire::RuntimeEvent::ToolCompleted { id, success, details } => {
                 self.sink.emit(&AkhMessage::ToolCallCompleted {
                     tool_id: id,
                     success,
-                    output: None,
+                    output: details.map(|value| value.to_string()),
                     diff: None,
                 })
             }

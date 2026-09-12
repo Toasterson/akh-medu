@@ -1,8 +1,14 @@
 # Agent session platform implementation worktree
 
-Prepared: 2026-09-11. Updated: 2026-09-12. Status: provider port and the first
-authenticated five-process session/execution slice implemented and locally tested.
-Full platform implementation and native/client/deployment validation remain in progress.
+Prepared: 2026-09-11. Updated: 2026-09-12. The service split, durable session/tool
+ownership, private runtime profiles, upstream workspace helpers, event adapters
+and deployment artifacts are implemented in the dedicated worktrees. Local
+cross-process, native T3 bootstrap, private-CA WSS and A2A SDK checks pass.
+
+Full deployment remains in progress. T3 central-thread attachment, native provider
+remote-tool certification, the enabled Anima scheduler/PWA migration, and real
+controller/cross-host validation are not completed by these checks. See the latest
+checkpoint below and [deployment guide](deployment.md).
 
 ## Workspace boundary
 
@@ -103,6 +109,8 @@ deployment approval step.
 
 ## Local implementation evidence (2026-09-12)
 
+These are successive checkpoints; later sections supersede earlier pending work.
+
 - P0 is committed: Codex app-server and Claude SDK adapters ported onto main.
   The original akhomed remote-executor guard remains. Ten provider transport
   tests passed; two credential-dependent native tests remain ignored. The
@@ -157,7 +165,7 @@ this first process slice.
   action runs the selected upstream command directly. `akh-connect` maintains a
   per-user/profile environment-offer ledger and uses upstream-generated pairing
   links; it never writes T3's private connection database or marks an offer as a
-  confirmed client connection. Browser pairing is implemented; automatic native
+  confirmed client connection. A browser pairing-link handoff is implemented; automatic native
   desktop registration still requires a supported upstream interface.
 - A2A 0.3 JSON-RPC routes implement task/context mapping, message dedupe,
   streaming, pending-input responses, cancellation and resubscription. Contract
@@ -265,3 +273,45 @@ by these fixture results.
 - Anima work continues in `/Users/toasty/ws/anima-agent-platform`, branch
   `feat/akh-session-client`, based on freshly fetched main
   `95d7cc1301cf40a1593a33f8e30d9c5166be06e0`. Its original checkout is untouched.
+
+### Deployment and upstream client checkpoint
+
+- The dispatcher now runs bounded, independent session tasks; slow cognitive
+  services no longer serialize other sessions. Tool settlement and execution
+  share a per-call lock. Archived sessions expose a cleanup acknowledgement at
+  `GET /v1/sessions/{id}/lifecycle`; an allocation created during cancellation
+  must still be released, even if it never became a bound workspace. Downstream
+  404s do not count as release evidence. Tests cover these races and stale
+  Kubernetes Ready generations.
+- Receiving principals can use a SHA-256 verifier instead of a reusable bearer
+  credential. `akh-acp` supports a private CA without bypassing verification.
+  `scripts/session-platform/wss-smoke.py` passes actual WSS rejection of an
+  untrusted CA, authenticated ACP initialization, creation and reconnect/load.
+- Runtime tool events retain native structured completion details. Unsupported
+  input attachments fail at admission. Interrupted internal tool plans remain
+  unknown until audited reconciliation, including when cancellation was requested.
+- Helpers verify configured upstream versions and isolate HOME/XDG config/cache.
+  The native `t3@0.0.40` package passes `t3-native-smoke.py`: startup, environment
+  identity, fresh pairing links, restart and shutdown. The profile disables
+  native provider probes for this editor-only check. Pair secrets stay in memory.
+  Desktop handoff preserves the GUI after the dispatcher returns successfully;
+  a failed handoff remains retryable with a fresh link for the same environment.
+  Neither browser pairing nor central T3 agent attachment is claimed.
+- Added the stateless `akh-kagent` BYO facade, twelve isolated build profiles,
+  per-service container recipes, Helm chart, systemd/launchd examples and external
+  CronJob trigger. Actual A2A Python SDK 0.3.22 discovery, task/context identity,
+  dedupe, polling, cancellation and SSE pass through the facade. It requires an
+  explicitly trusted, network-restricted kagent hop and supports A2A 0.3 only.
+- A native Linux arm64 `akhsbxd` image builds with Rust 1.94.1 and starts as
+  UID/GID 10001. Its local image is approximately 35.9 MB. Other daemon images,
+  image publication, chart installation and controller operation remain separate
+  checks. Helm lint/render and launchd plist validation pass.
+- The six-process smoke passes after the lifecycle changes, using the real
+  cognitive core plus a deterministic provider/editor fixture. The four Claude
+  bridge tests and all twelve isolated feature checks pass. These fixtures do
+  not certify native provider execution or kernel sandbox confinement.
+- Anima's new `anima-akh` client/outbox pins the work-item/phase/head/attempt and
+  central occurrence. Its durable owner fences legacy dispatch even after legacy
+  cleanup removes a transient claim. A model completion is separate from Change
+  ingestion, review, CI and phase advancement. The client/outbox is not yet wired
+  into the canonical scheduler or PWA; physical routing has not been retired.

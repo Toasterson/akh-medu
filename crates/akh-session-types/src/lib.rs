@@ -367,6 +367,9 @@ pub enum RuntimeEvent {
     ToolCompleted {
         id: String,
         success: bool,
+        /// Provider-native result/diff details; executor receipts remain authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
     },
 }
 
@@ -486,6 +489,11 @@ pub struct ServiceProfile {
     pub id: String,
     pub revision: String,
     pub upstream_version: String,
+    /// Optional bounded, read-only upstream version probe before launch.
+    #[serde(default)]
+    pub version_command: Vec<String>,
+    #[serde(default)]
+    pub version_output_contains: Option<String>,
     pub image: Option<String>,
     pub command: Vec<String>,
     #[serde(default)]

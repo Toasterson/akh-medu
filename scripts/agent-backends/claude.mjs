@@ -72,7 +72,7 @@ export async function run(start, sdk, z, send, request, abortController) {
         }
       } else if (message.type === "user" && Array.isArray(message.message.content)) {
         for (const block of message.message.content) {
-          if (block.type === "tool_result") send({ type: "tool_completed", id: block.tool_use_id, success: !block.is_error });
+          if (block.type === "tool_result") send({ type: "tool_completed", id: block.tool_use_id, success: !block.is_error, details: block });
         }
       } else if (message.type === "result") {
         completed = true;

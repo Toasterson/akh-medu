@@ -67,6 +67,7 @@ async fn a2a_retries_questions_context_continuation_and_unknown_outcomes_keep_ce
     let runtime = Principal {
         id: "runtime".into(),
         token_file: "/unused".into(),
+        token_sha256: false,
         roles: vec!["runtime".into()],
         akhs: vec![],
         sources: vec![],

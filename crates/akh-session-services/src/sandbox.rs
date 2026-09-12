@@ -217,7 +217,7 @@ impl Sandboxes {
                     self.config.endpoint(&binding.executor)?; Ok(binding)
                 }
                 Provisioner::Kubernetes { api, namespace, resource, template, executor } => {
-                    // `resource` is the configured CRD collection path, e.g. /apis/agents.x-k8s.io/v1alpha1/namespaces/N/sandboxes.
+                    // `resource` is the configured CRD collection path, e.g. /apis/agents.x-k8s.io/v1beta1/namespaces/N/sandboxes.
                     if !resource.starts_with("/apis/") || !resource.contains(&format!("/namespaces/{namespace}/")) { return Err(Fault::invalid("Kubernetes resource must be a namespaced CRD collection path")); }
                     let path = format!("{}/{}", resource.trim_end_matches('/'), segment(&allocation.id));
                     let object: Value = match self.client.get(api, &path).await {
@@ -239,7 +239,7 @@ impl Sandboxes {
                     if allocation.resource_uid.as_deref().is_some_and(|old|old!=uid) {return Err(Fault::conflict("Kubernetes allocation was replaced by another resource"));}
                     allocation.resource_uid=Some(uid.into()); self.store.transaction(|tx|tx.put(&k,&allocation))?;
                     if object["status"]["observedGeneration"].as_u64().zip(object["metadata"]["generation"].as_u64()).is_some_and(|(observed,current)|observed<current) {return Err(Fault::new("busy","Kubernetes controller has not observed this generation"));}
-                    let ready = object["status"]["conditions"].as_array().is_some_and(|conditions|conditions.iter().any(|c|c["type"] == "Ready" && c["status"] == "True"));
+                    let ready = object["status"]["conditions"].as_array().is_some_and(|conditions|conditions.iter().any(|c|c["type"] == "Ready" && c["status"] == "True" && object["metadata"]["generation"].as_u64().is_some_and(|generation|c["observedGeneration"].as_u64().is_some_and(|observed|observed>=generation))));
                     if !ready { return Err(Fault::new("busy", "sandbox resource is not ready")); }
                     Ok(WorkspaceBinding { id: allocation.id.clone(), sandbox_id: allocation.id.clone(), executor: executor.clone(), generation: 1, site: profile.site.clone(), root: format!("/workspaces/{}",allocation.id), platform: "unobserved".into(), confinement: "unobserved".into() })
                 }

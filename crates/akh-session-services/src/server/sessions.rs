@@ -29,86 +29,146 @@ impl SessionApp {
             client: Client::new(config)?,
         })
     }
-    pub async fn tick(&self) -> Result<()> {
-        for session in self.sessions.store.scan::<SessionRecord>("session/")? {
-            if session.closed_at.is_some() {
-                if session.workspace.is_some()
-                    && self
-                        .sessions
-                        .store
-                        .get::<bool>(&key("workspace_released", &[&session.id]))?
-                        != Some(true)
-                {
-                    match self
-                        .client
-                        .post::<Allocation>(
-                            "sandboxes",
-                            &format!("/v1/allocations/{}/release", http::segment(&session.id)),
-                            &json!({}),
-                        )
-                        .await
-                    {
-                        Ok(_) => self.sessions.store.transaction(|tx| {
-                            tx.put(&key("workspace_released", &[&session.id]), &true)
-                        })?,
-                        Err(error) => {
-                            tracing::warn!(session=%session.id,code=%error.code,"archived workspace release deferred")
+    /// Each session progresses independently. Dropping this task aborts its owned
+    /// JoinSet, so shutdown cannot leave detached allocation/dispatch workers.
+    pub async fn run_dispatcher(self) {
+        use std::collections::{HashMap, HashSet};
+        let mut workers: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
+        let mut running: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut last = HashMap::new();
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                result = workers.join_next_with_id(), if !workers.is_empty() => {
+                    match result {
+                        Some(Ok((id, result))) => {
+                            let session = running.remove(&id).unwrap_or_default();
+                            if let Err(error) = result { tracing::error!(%session,code=%error.code,"session reconciliation failed"); }
                         }
+                        Some(Err(error)) => {
+                            let session = running.remove(&error.id()).unwrap_or_default();
+                            tracing::error!(%session,"session reconciliation task interrupted");
+                        }
+                        None => {}
                     }
                 }
-            } else if session.workspace.is_some() {
-                let k = key("lease_renewed", &[&session.id]);
-                if self
-                    .sessions
+                _ = interval.tick() => {
+                    let mut sessions = match self.sessions.store.scan::<SessionRecord>("session/") {
+                        Ok(sessions) => sessions,
+                        Err(error) => { tracing::error!(code=%error.code,"session scan failed"); continue; }
+                    };
+                    // Oldest scheduled first prevents inactive sessions at the start
+                    // of the ledger from starving later sessions when capacity is full.
+                    sessions.sort_by_key(|session| last.get(&session.id).copied());
+                    let active: HashSet<_> = running.values().cloned().collect();
+                    for session in sessions {
+                        if workers.len() >= 64 { break; }
+                        if active.contains(&session.id) { continue; }
+                        let retry_after = if session.closed_at.is_some() { Duration::from_secs(5) } else { Duration::from_millis(500) };
+                        if last.get(&session.id).is_some_and(|at: &tokio::time::Instant| at.elapsed() < retry_after) { continue; }
+                        let id = session.id.clone();
+                        let worker = self.clone();
+                        last.insert(id.clone(), tokio::time::Instant::now());
+                        let task = workers.spawn(async move { worker.tick_session(session).await });
+                        running.insert(task.id(), id);
+                    }
+                }
+            }
+        }
+    }
+    async fn tick_session(&self, session: SessionRecord) -> Result<()> {
+        if session.closed_at.is_some() {
+            if self
+                .sessions
+                .store
+                .get::<bool>(&key("workspace_released", &[&session.id]))?
+                != Some(true)
+            {
+                match self.release_archived(&session).await {
+                    Ok(()) => self.sessions.store.transaction(|tx| {
+                        tx.put(&key("workspace_released", &[&session.id]), &true)
+                    })?,
+                    Err(error) => {
+                        tracing::warn!(session=%session.id,code=%error.code,"archived workspace release deferred")
+                    }
+                }
+            }
+        } else if session.workspace.is_some() {
+            let k = key("lease_renewed", &[&session.id]);
+            if self
+                .sessions
+                .store
+                .get::<u64>(&k)?
+                .is_none_or(|at| now_ms().saturating_sub(at) >= 60_000)
+            {
+                match self
+                    .client
+                    .post::<Allocation>(
+                        "sandboxes",
+                        &format!("/v1/allocations/{}/renew", http::segment(&session.id)),
+                        &json!({}),
+                    )
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(session=%session.id,code=%error.code,"workspace lease renewal deferred")
+                    }
+                }
+                self.sessions
                     .store
-                    .get::<u64>(&k)?
-                    .is_none_or(|at| now_ms().saturating_sub(at) >= 60_000)
-                {
-                    match self
-                        .client
-                        .post::<Allocation>(
-                            "sandboxes",
-                            &format!("/v1/allocations/{}/renew", http::segment(&session.id)),
-                            &json!({}),
-                        )
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::warn!(session=%session.id,code=%error.code,"workspace lease renewal deferred")
-                        }
-                    }
-                    self.sessions
-                        .store
-                        .transaction(|tx| tx.put(&k, &now_ms()))?;
+                    .transaction(|tx| tx.put(&k, &now_ms()))?;
+            }
+        }
+        if let Err(error) = self.publish_completions(&session).await {
+            tracing::warn!(session=%session.id,code=%error.code,"cognitive completion delivery deferred");
+        }
+        if !session.turns.iter().any(|t| !t.status.terminal()) {
+            return Ok(());
+        }
+        if let Err(error) = self.dispatch(&session).await {
+            tracing::warn!(session=%session.id,code=%error.code,"session reconciliation deferred");
+            self.sessions.store.transaction(|tx| {
+                let k = key("dispatch_error", &[&session.id]);
+                if tx.get::<Fault>(&k)?.as_ref() != Some(&error) {
+                    tx.put(&k, &error)?;
+                    let mut current: SessionRecord = tx
+                        .get(&key("session", &[&session.id]))?
+                        .ok_or_else(|| Fault::missing("session disappeared"))?;
+                    crate::session::append_event(
+                        tx,
+                        &mut current,
+                        None,
+                        "dispatch_deferred",
+                        json!({"error":error}),
+                    )?;
                 }
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+    async fn release_archived(&self, session: &SessionRecord) -> Result<()> {
+        let path = format!("/v1/allocations/{}", http::segment(&session.id));
+        if session.workspace.is_none() {
+            match self.client.get::<Allocation>("sandboxes", &path).await {
+                Err(error) if error.code == "not_found" => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(_) => {}
             }
-            if let Err(error) = self.publish_completions(&session).await {
-                tracing::warn!(session=%session.id,code=%error.code,"cognitive completion delivery deferred");
-            }
-            if !session.turns.iter().any(|t| !t.status.terminal()) {
-                continue;
-            }
-            if let Err(error) = self.dispatch(&session).await {
-                tracing::warn!(session=%session.id,code=%error.code,"session reconciliation deferred");
-                self.sessions.store.transaction(|tx| {
-                    let k = key("dispatch_error", &[&session.id]);
-                    if tx.get::<Fault>(&k)?.as_ref() != Some(&error) {
-                        tx.put(&k, &error)?;
-                        let mut current: SessionRecord =
-                            tx.get(&key("session", &[&session.id]))?
-                                .ok_or_else(|| Fault::missing("session disappeared"))?;
-                        crate::session::append_event(
-                            tx,
-                            &mut current,
-                            None,
-                            "dispatch_deferred",
-                            json!({"error":error}),
-                        )?;
-                    }
-                    Ok(())
-                })?;
-            }
+        }
+        // A 404 from a downstream executor is NOT proof that the allocation is
+        // absent. Only the preceding explicit manager lookup can establish that.
+        let allocation: Allocation = self
+            .client
+            .post("sandboxes", &format!("{path}/release"), &json!({}))
+            .await?;
+        if allocation.request.session_id != session.id
+            || !matches!(allocation.state.as_str(), "released" | "retained")
+        {
+            return Err(Fault::conflict(
+                "sandbox manager did not confirm this session's release",
+            ));
         }
         Ok(())
     }
@@ -327,6 +387,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions", get(list_sessions).post(create_session))
             .route("/v1/sessions/{id}", get(get_session))
             .route("/v1/sessions/{id}/access", get(session_access))
+            .route("/v1/sessions/{id}/lifecycle", get(session_lifecycle))
             .route(
                 "/v1/sessions/{id}/services/{helper}/actions/{action}",
                 post(session_service_action),
@@ -349,6 +410,23 @@ pub fn session_router(app: SessionApp) -> Router {
             .with_state(app),
         config,
     )
+}
+async fn session_lifecycle(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<Value> {
+    http::role(&p, "client")?;
+    let session = app.sessions.get(&p, &id)?;
+    let released = session.closed_at.is_some()
+        && app
+            .sessions
+            .store
+            .get::<bool>(&key("workspace_released", &[&id]))?
+            == Some(true);
+    Ok(Json(
+        json!({"schema_version":SCHEMA_VERSION,"session_id":id,"closed_at":session.closed_at,"workspace_released":released}),
+    ))
 }
 async fn archive(
     State(app): State<SessionApp>,
@@ -588,4 +666,167 @@ async fn session_service_action(
             )
             .await?,
     ))
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn archive_waits_for_allocation_cleanup_even_without_a_bound_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let exists = Arc::new(AtomicBool::new(true));
+        let released = Arc::new(AtomicBool::new(false));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let exists_peer = exists.clone();
+        let released_peer = released.clone();
+        let posts_peer = posts.clone();
+        fn allocation(id: String, state: &str) -> Allocation {
+            Allocation {
+                resource_uid: None,
+                request: Allocate {
+                    session_id: id.clone(),
+                    principal: "user".into(),
+                    profile: "local".into(),
+                },
+                id,
+                profile_revision: "1".into(),
+                state: state.into(),
+                binding: None,
+                error: None,
+                lease_until: 0,
+                access: vec![],
+            }
+        }
+        let peer = Router::new()
+            .route(
+                "/v1/allocations/{id}",
+                get(move |Path(id): Path<String>| {
+                    let exists = exists_peer.clone();
+                    async move {
+                        if exists.load(Ordering::SeqCst) {
+                            (StatusCode::OK, Json(json!(allocation(id, "allocating"))))
+                        } else {
+                            (
+                                StatusCode::NOT_FOUND,
+                                Json(json!(Fault::missing("allocation absent"))),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/allocations/{id}/release",
+                post(move |Path(id): Path<String>| {
+                    let released = released_peer.clone();
+                    let posts = posts_peer.clone();
+                    async move {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                        if released.load(Ordering::SeqCst) {
+                            (StatusCode::OK, Json(json!(allocation(id, "released"))))
+                        } else {
+                            (
+                                StatusCode::NOT_FOUND,
+                                Json(json!(Fault::missing("downstream executor unavailable"))),
+                            )
+                        }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, peer).await.unwrap() });
+        let config:Config=serde_json::from_value(json!({
+            "service_id":"sessions","listen":"127.0.0.1:0","data_dir":dir.path(),
+            "principals":[{"id":"user","token_file":token,"roles":["client"],"akhs":["test"]}],
+            "endpoints":{"sandboxes":{"url":format!("http://{address}"),"token_file":token}},
+            "akhs":{"test":{"instructions":"test","runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"codex","execution_mode":"colocated"},"workspace_profiles":["local"]}}
+        })).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let archived = app.sessions.archive(&principal, &session.id).unwrap();
+        let marker = key("workspace_released", &[&session.id]);
+        app.tick_session(archived.clone()).await.unwrap();
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert_ne!(
+            app.sessions.store.get::<bool>(&marker).unwrap(),
+            Some(true),
+            "downstream 404 must keep ownership fenced"
+        );
+        let binding = WorkspaceBinding {
+            id: "workspace".into(),
+            sandbox_id: "sandbox".into(),
+            executor: "executor".into(),
+            generation: 1,
+            site: "test".into(),
+            root: "/workspaces/test".into(),
+            platform: "linux".into(),
+            confinement: "fixture".into(),
+        };
+        assert_eq!(
+            app.sessions
+                .bind_workspace(&session.id, binding)
+                .unwrap_err()
+                .code,
+            "conflict"
+        );
+        released.store(true, Ordering::SeqCst);
+        app.tick_session(archived).await.unwrap();
+        assert_eq!(app.sessions.store.get::<bool>(&marker).unwrap(), Some(true));
+        let never_allocated = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "empty".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let never_allocated = app
+            .sessions
+            .archive(&principal, &never_allocated.id)
+            .unwrap();
+        exists.store(false, Ordering::SeqCst);
+        app.tick_session(never_allocated.clone()).await.unwrap();
+        assert_eq!(
+            app.sessions
+                .store
+                .get::<bool>(&key("workspace_released", &[&never_allocated.id]))
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            posts.load(Ordering::SeqCst),
+            2,
+            "a proven absent allocation needs no release"
+        );
+        server.abort();
+    }
 }

@@ -183,6 +183,7 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                     turn.host.event(RuntimeEvent::ToolCompleted {
                         id: item["id"].as_str().unwrap_or("").into(),
                         success: item["status"] == "completed",
+                        details: Some(item.clone()),
                     })?;
                 }
             }

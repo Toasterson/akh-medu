@@ -1,4 +1,4 @@
-//! Bounded administrative subprocesses. No shell and no surviving child group.
+//! Bounded administrative subprocesses and explicit desktop handoffs. No shell.
 use crate::types::{Fault, Result};
 use std::{process::Stdio, time::Duration};
 use tokio::{
@@ -17,6 +17,33 @@ impl Drop for Group {
 
 pub async fn output(command: Command, timeout: Duration, limit: usize) -> Result<Vec<u8>> {
     output_with_input(command, None, timeout, limit).await
+}
+/// A desktop dispatcher may deliberately leave a GUI child running after a
+/// successful handoff. Only failed/timed-out handoffs clean up their child group.
+/// The configured command must return once it has handed off the URL.
+pub async fn handoff(mut command: Command, timeout: Duration) -> Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|_| Fault::new("helper_spawn", "desktop dispatcher could not start"))?;
+    let group = Group(child.id().expect("spawned dispatcher has an ID") as i32);
+    let result = tokio::time::timeout(timeout, child.wait()).await;
+    if matches!(result, Ok(Ok(status)) if status.success()) {
+        // Ownership has intentionally transferred to the desktop application.
+        std::mem::forget(group);
+        return Ok(());
+    }
+    drop(group);
+    let _ = child.wait().await;
+    Err(Fault::new(
+        "handoff_failed",
+        "desktop dispatcher did not confirm handoff",
+    ))
 }
 pub async fn output_with_input(
     mut command: Command,
@@ -87,6 +114,23 @@ pub async fn output_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn successful_desktop_handoff_preserves_the_receiving_application() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("received");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "(sleep 0.1; echo received > \"$1\") &", "dispatcher"])
+            .arg(&marker);
+        handoff(command, Duration::from_secs(2)).await.unwrap();
+        for _ in 0..40 {
+            if std::fs::read_to_string(&marker).is_ok_and(|text| text == "received\n") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "received\n");
+    }
     #[tokio::test]
     async fn bounds_output_and_kills_descendants_holding_stdout() {
         let mut command = Command::new("/bin/sh");

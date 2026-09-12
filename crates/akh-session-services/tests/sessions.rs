@@ -191,6 +191,7 @@ fn pending_input_survives_restart_and_cannot_be_answered_by_another_principal() 
     let runtime = Principal {
         id: "runtime-1".into(),
         token_file: "/unused".into(),
+        token_sha256: false,
         roles: vec!["runtime".into()],
         akhs: vec![],
         sources: vec![],
@@ -261,6 +262,7 @@ fn duplicate_alerts_share_incident_session_and_never_promote_payload_to_instruct
     let ingress = Principal {
         id: "events".into(),
         token_file: "/unused".into(),
+        token_sha256: false,
         roles: vec!["event".into()],
         akhs: vec![],
         sources: vec!["alerts".into()],
@@ -297,5 +299,122 @@ fn duplicate_alerts_share_incident_session_and_never_promote_payload_to_instruct
     assert_eq!(
         s.invoke(&ingress, "alerts", &request).unwrap_err().code,
         "busy"
+    );
+}
+
+#[test]
+fn attachments_are_rejected_before_admission_instead_of_silently_dropped() {
+    let (_dir, s, p) = setup();
+    let session = create(&s, &p);
+    let fault = s
+        .submit(
+            &p,
+            &session.id,
+            &SubmitInput {
+                request_id: "with-artifact".into(),
+                text: "inspect this image".into(),
+                artifacts: vec![ArtifactRef {
+                    workspace_id: "workspace".into(),
+                    path: "image.png".into(),
+                    sha256: "hash".into(),
+                    media_type: "image/png".into(),
+                }],
+            },
+        )
+        .unwrap_err();
+    assert_eq!(fault.code, "unsupported");
+    assert!(s.get(&p, &session.id).unwrap().turns.is_empty());
+}
+
+#[tokio::test]
+async fn slow_cognitive_service_does_not_hold_another_sessions_dispatch() {
+    use akh_session_services::server::SessionApp;
+    use axum::{Json, Router, routing::post};
+    use std::time::Duration;
+    let fast_seen = Arc::new(tokio::sync::Notify::new());
+    let fast_signal = fast_seen.clone();
+    let slow_seen = Arc::new(tokio::sync::Notify::new());
+    let slow_signal = slow_seen.clone();
+    let peer = Router::new()
+        .route(
+            "/v1/context",
+            post(move || {
+                let signal = slow_signal.clone();
+                async move {
+                    signal.notify_one();
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    Json(json!({}))
+                }
+            }),
+        )
+        .route(
+            "/v1/jobs",
+            post(move |Json(request): Json<RuntimeJobRequest>| {
+                let signal = fast_signal.clone();
+                async move {
+                    signal.notify_one();
+                    Json(RuntimeJob {
+                        request,
+                        status: TurnStatus::Running,
+                        provider_session: None,
+                        output: None,
+                        error: None,
+                        events: vec![],
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer).await.unwrap();
+    });
+    let (dir, s, p) = setup();
+    let token = dir.path().join("peer-token");
+    std::fs::write(&token, "private-peer-test-token-123456").unwrap();
+    let mut config = (*s.config).clone();
+    config.endpoints.insert(
+        "runtime-1".into(),
+        serde_json::from_value(json!({"url":format!("http://{address}"),"token_file":token}))
+            .unwrap(),
+    );
+    config
+        .endpoints
+        .insert("slow-core".into(), config.endpoints["runtime-1"].clone());
+    let mut slow_profile = config.akhs["thoth"].clone();
+    slow_profile.core_service = Some("slow-core".into());
+    config.akhs.insert("slow".into(), slow_profile);
+    let mut principal = p.clone();
+    principal.akhs.push("slow".into());
+    config.principals[0] = principal.clone();
+    let app = SessionApp::new(Arc::new(config), s.store.clone()).unwrap();
+    let slow = app
+        .sessions
+        .create(
+            &principal,
+            &NewSession {
+                request_id: "slow".into(),
+                akh: "slow".into(),
+                workspace_profile: "rust".into(),
+                conversation_key: None,
+            },
+        )
+        .unwrap();
+    let fast = create(&app.sessions, &principal);
+    for session in [&slow, &fast] {
+        binding(&app.sessions, &session.id);
+        submit(&app.sessions, &principal, &session.id, "go");
+    }
+    let dispatcher = tokio::spawn(app.run_dispatcher());
+    tokio::time::timeout(Duration::from_secs(1), slow_seen.notified())
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), fast_seen.notified()).await;
+    dispatcher.abort();
+    let _ = dispatcher.await;
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "the unrelated session waited for the slow core request"
     );
 }

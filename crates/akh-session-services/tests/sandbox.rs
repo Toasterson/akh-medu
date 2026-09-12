@@ -33,7 +33,7 @@ async fn create(
     object["metadata"]["uid"] = json!("original-uid");
     object["metadata"]["generation"] = json!(1);
     object["status"] =
-        json!({"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}]});
+        json!({"conditions":[{"type":"Ready","status":"True","observedGeneration":0}]});
     state.object = Some(object.clone());
     Json(object)
 }
@@ -56,7 +56,7 @@ async fn delete(
 #[tokio::test]
 async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid() {
     let state = Arc::new(Mutex::new(Kubernetes::default()));
-    let resource = "/apis/agents.x-k8s.io/v1alpha1/namespaces/work/sandboxes";
+    let resource = "/apis/agents.x-k8s.io/v1beta1/namespaces/work/sandboxes";
     let app = Router::new()
         .route(resource, post(create))
         .route(&format!("{resource}/{{id}}"), get(read).delete(delete))
@@ -76,7 +76,7 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
     let token = dir.path().join("token");
     std::fs::write(&token, "fixture-sandbox-token-0123456789").unwrap();
     let template = json!({
-        "apiVersion":"agents.x-k8s.io/v1alpha1", "kind":"Sandbox", "metadata":{},
+        "apiVersion":"agents.x-k8s.io/v1beta1", "kind":"Sandbox", "metadata":{},
         "spec":{"podTemplate":{"spec":{"containers":[{"name":"executor","image":"fixture"}]}}}
     });
     let config:Config=serde_json::from_value(json!({
@@ -98,6 +98,14 @@ async fn kubernetes_retries_one_allocation_and_never_deletes_a_replacement_uid()
         principal: "user".into(),
         profile: "pod".into(),
     };
+    // Ready from an older generation is not current provisioning evidence.
+    assert_eq!(
+        service.allocate(request.clone()).await.unwrap_err().code,
+        "busy"
+    );
+    assert_eq!(state.lock().unwrap().creates, 1);
+    state.lock().unwrap().object.as_mut().unwrap()["status"]["conditions"][0]["observedGeneration"] =
+        json!(1);
     let first = service.allocate(request.clone()).await.unwrap();
     assert_eq!(first.state, "ready");
     assert_eq!(first.resource_uid.as_deref(), Some("original-uid"));

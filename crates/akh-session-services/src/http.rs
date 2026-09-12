@@ -64,8 +64,13 @@ pub fn authenticate(config: &Config, headers: &HeaderMap) -> Result<Principal> {
     // Do not stop at the first match; also detect accidentally shared credentials.
     let mut matches = vec![];
     for principal in &config.principals {
-        if let Ok(token) = crate::config::read_token(&principal.token_file) {
-            if token_equal(supplied.as_bytes(), token.as_bytes()) {
+        if let Ok(token) = principal.credential() {
+            let candidate = if principal.token_sha256 {
+                crate::digest(supplied.as_bytes())
+            } else {
+                supplied.to_owned()
+            };
+            if token_equal(candidate.as_bytes(), token.as_bytes()) {
                 matches.push(principal);
             }
         }
@@ -234,5 +239,27 @@ impl Client {
         let body = serde_json::to_value(body).map_err(|e| Fault::invalid(e.to_string()))?;
         self.call(service, reqwest::Method::POST, path, Some(body))
             .await
+    }
+}
+
+#[cfg(test)]
+mod verifier_tests {
+    use super::*;
+    #[test]
+    fn executor_verifier_authenticates_the_caller_without_being_a_replayable_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "central-session-capability-with-256-bit-entropy-in-deployment";
+        let verifier = crate::digest(token.as_bytes());
+        let file = dir.path().join("caller.sha256");
+        std::fs::write(&file, &verifier).unwrap();
+        let config:Config=serde_json::from_value(serde_json::json!({"service_id":"executor","listen":"127.0.0.1:0","data_dir":dir.path(),"principals":[{"id":"sessions","token_file":file,"token_sha256":true,"roles":["session"]}]})).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        assert_eq!(authenticate(&config, &headers).unwrap().id, "sessions");
+        headers.insert(
+            "authorization",
+            format!("Bearer {verifier}").parse().unwrap(),
+        );
+        assert!(authenticate(&config, &headers).is_err());
     }
 }

@@ -1,6 +1,6 @@
 //! Per-user connection offers. Upstream applications own their saved connections.
 use crate::{config::Endpoint, helper::atomic_json, http::segment, types::*};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
@@ -74,6 +74,21 @@ pub fn pairing_url(output: &str, endpoint: &str) -> Result<String> {
     Ok(candidates.remove(0))
 }
 
+async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| Fault::new("transport", "connection response interrupted"))?
+    {
+        if bytes.len() + chunk.len() > 1024 * 1024 {
+            return Err(Fault::invalid("connection response exceeds 1 MiB"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| Fault::invalid("invalid connection response JSON"))
+}
+
 pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: bool) -> Result<()> {
     config.sessions.validate()?;
     validate_key(&config.client_profile)?;
@@ -91,6 +106,7 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
         .write(true)
         .create(true)
         .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW)
         .mode(0o600)
         .open(config.state_file.with_extension("lock"))
         .map_err(|e| Fault::invalid(e.to_string()))?;
@@ -121,10 +137,7 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
                 ),
             ));
         }
-        let descriptors: Vec<WorkspaceAccessDescriptor> = response
-            .json()
-            .await
-            .map_err(|_| Fault::invalid("invalid access descriptor response"))?;
+        let descriptors: Vec<WorkspaceAccessDescriptor> = bounded_json(response).await?;
         let mut offers: BTreeMap<String, Offer> = if config.state_file.exists() {
             serde_json::from_slice(
                 &std::fs::read(&config.state_file).map_err(|e| Fault::invalid(e.to_string()))?,
@@ -142,7 +155,9 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
             if visited.contains(&key) || (existing.is_some() && !reconnect) {
                 continue;
             }
-            let url = if config.client_kind == "t3" && existing.is_none() {
+            // A previous offer does not prove pairing succeeded. Explicit reconnect
+            // gets a fresh one-time link for the same upstream environment ID.
+            let url = if config.client_kind == "t3" {
                 let response = client
                     .post(config.sessions.route(&format!(
                         "/v1/sessions/{}/services/{}/actions/pair",
@@ -159,10 +174,7 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
                         "upstream could not create a pairing link",
                     ));
                 }
-                let value: Value = response
-                    .json()
-                    .await
-                    .map_err(|_| Fault::invalid("invalid pairing response"))?;
+                let value: Value = bounded_json(response).await?;
                 pairing_url(
                     value["output"]
                         .as_str()
@@ -185,23 +197,30 @@ pub async fn run(config: ConnectConfig, session: &str, watch: bool, reconnect: b
             // Store only the public descriptor before handing the URL to an upstream client.
             // Pairing secrets never enter this file or the session journal.
             visited.insert(key.clone());
-            offers.insert(key, offer);
+            offers.insert(key.clone(), offer);
             atomic_json(&config.state_file, &offers)?;
-            let result = tokio::process::Command::new(command)
+            let mut launch = tokio::process::Command::new(command);
+            launch
                 .args(arguments.iter().map(|a| {
                     a.replace("{url}", &url)
                         .replace("{workspace}", &descriptor.workspace_id)
                 }))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
+                .stderr(std::process::Stdio::null());
+            // Keep browser/desktop launch output (and the secret URL) out of logs.
+            // A failed handoff is still not evidence that the app did nothing.
+            if crate::process::handoff(launch, Duration::from_secs(30))
                 .await
-                .map_err(|_| Fault::new("client_launch", "client command could not start"))?;
-            if !result.success() {
+                .is_err()
+            {
+                if let Some(offer) = offers.get_mut(&key) {
+                    offer.state = ConnectionState::Unavailable;
+                }
+                atomic_json(&config.state_file, &offers)?;
                 return Err(Fault::new(
                     "client_launch",
-                    "client command failed; use --reconnect to retry the existing environment",
+                    "client handoff was not confirmed; --reconnect offers a fresh link for the same environment",
                 ));
             }
             println!(

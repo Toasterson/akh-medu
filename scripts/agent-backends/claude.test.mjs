@@ -35,6 +35,7 @@ test("SDK receives resume, persona, tools and approval callbacks; streamed text 
           yield { type: "system", subtype: "init", session_id: "session-a" };
           yield { type: "stream_event", event: { delta: { type: "text_delta", text: "hello" } } };
           yield { type: "assistant", message: { content: [{ type: "text", text: "hello" }] } };
+          yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "native-read", content: "file content", is_error: false }] } };
           yield { type: "result", subtype: "success", is_error: false, result: "hello" };
         },
       };
@@ -47,6 +48,7 @@ test("SDK receives resume, persona, tools and approval callbacks; streamed text 
   assert.equal(closed, true);
   assert.deepEqual(emitted.filter((m) => m.type === "text"), [{ type: "text", text: "hello" }]);
   assert.equal(emitted.at(-1).success, true);
+  assert.equal(emitted.find((m) => m.type === "tool_completed").details.content, "file content");
   assert.deepEqual(requests[0], { type: "tool", name: "lookup", arguments: { ids: [7] } });
 });
 

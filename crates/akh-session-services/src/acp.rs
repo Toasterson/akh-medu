@@ -421,7 +421,7 @@ impl Connection {
                             json!({"sessionUpdate":"tool_call","toolCallId":event.data["id"],"title":event.data["name"],"kind":"other","status":"in_progress"}),
                         ),
                         Some("tool_completed") => Some(
-                            json!({"sessionUpdate":"tool_call_update","toolCallId":event.data["id"],"status":if event.data["success"]==true{"completed"}else{"failed"}}),
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":event.data["id"],"status":if event.data["success"]==true{"completed"}else{"failed"},"rawOutput":event.data["details"]}),
                         ),
                         _ => None,
                     },

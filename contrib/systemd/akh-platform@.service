@@ -1,0 +1,24 @@
+[Unit]
+Description=Akh session platform %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akh
+Group=akh
+UMask=0077
+# Instance is a selected daemon name, e.g. akhsessd or akhrtd.
+ExecStart=/usr/local/bin/%i --config /etc/akh/%i.json
+StateDirectory=akh-%i
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Configure data_dir=/var/lib/akh-<daemon>. Provider state lives under it.
+# akhexecd must run INSIDE the selected confinement, not as a host exec service.
+
+[Install]
+WantedBy=multi-user.target

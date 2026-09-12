@@ -61,7 +61,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         .with_writer(std::io::stderr)
         .init();
     for principal in &config.principals {
-        crate::config::read_token(&principal.token_file)?;
+        principal.credential()?;
     }
     if args.check {
         println!("{kind}: configuration valid");
@@ -81,14 +81,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         "akhsessd" => {
             let app = SessionApp::new(config.clone(), store)?;
             let worker = app.clone();
-            tasks.push(tokio::spawn(async move {
-                loop {
-                    if let Err(error) = worker.tick().await {
-                        tracing::error!(code=%error.code,"session reconciliation failed");
-                    }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }));
+            tasks.push(tokio::spawn(worker.run_dispatcher()));
             session_router(app)
         }
         #[cfg(feature = "runtime")]
