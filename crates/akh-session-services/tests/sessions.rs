@@ -615,6 +615,64 @@ fn competing_input_decisions_have_one_answer_and_two_final_receipts() {
 }
 
 #[test]
+fn conversation_rebind_waits_for_retirement_and_cleanup_and_preserves_replay() {
+    let (_dir, s, p) = setup();
+    let original = create(&s, &p);
+    let next = NewSession {
+        request_id: "next".into(),
+        akh: "thoth".into(),
+        workspace_profile: "rust".into(),
+        conversation_key: Some("topic".into()),
+    };
+    s.retire(
+        &p,
+        &original.id,
+        None,
+        &RetireSession {
+            request_id: "retire".into(),
+            reason: "conversation finished".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(s.create(&p, &next).unwrap_err().code, "busy");
+    s.archive(&p, &original.id).unwrap();
+    assert_eq!(s.create(&p, &next).unwrap_err().code, "busy");
+    // The dispatcher sets this only after the allocator confirms cleanup.
+    s.store
+        .transaction(|tx| {
+            tx.put(
+                &akh_session_services::store::key("workspace_released", &[&original.id]),
+                &true,
+            )
+        })
+        .unwrap();
+    let replacement = s.create(&p, &next).unwrap();
+    assert_ne!(replacement.id, original.id);
+    assert_eq!(s.create(&p, &next).unwrap().id, replacement.id);
+    assert_eq!(create(&s, &p).id, original.id);
+    assert!(s.get(&p, &original.id).unwrap().closed_at.is_some());
+}
+
+#[test]
+fn automation_configuration_rejects_unusable_bindings() {
+    let (_dir, s, _) = setup();
+    for change in ["owner", "akh", "capacity", "age", "identity", "workspace"] {
+        let mut config = (*s.config).clone();
+        let definition = config.automations.get_mut("alerts").unwrap();
+        match change {
+            "owner" => definition.principal = "missing".into(),
+            "akh" => definition.akh = "missing".into(),
+            "capacity" => definition.max_active = 0,
+            "age" => definition.max_age_ms = 0,
+            "identity" => definition.id = "different".into(),
+            "workspace" => definition.workspace_profile = "not-granted".into(),
+            _ => unreachable!(),
+        }
+        assert!(config.validate().is_err(), "{change}");
+    }
+}
+
+#[test]
 fn concurrent_find_or_create_has_one_session_and_durable_dedupe() {
     let (dir, s, p) = setup();
     let ids = std::thread::scope(|scope| {

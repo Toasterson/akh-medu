@@ -433,6 +433,19 @@ impl Config {
         for source in &self.djehuty {
             validate_key(&source.source)?;
             self.endpoint(&source.endpoint)?;
+            for id in source
+                .threads
+                .iter()
+                .chain(&source.allowed_authors)
+                .chain(&source.ignore_authors)
+                .chain(source.recipient_id.iter())
+            {
+                uuid::Uuid::parse_str(id)
+                    .map_err(|_| Fault::invalid("invalid Djehuty UUID in configuration"))?;
+            }
+            for kind in &source.message_types {
+                validate_key(kind)?;
+            }
             if !sources.insert(&source.source)
                 || source.threads.is_empty()
                 || source.page_size == 0
@@ -442,6 +455,39 @@ impl Config {
                 return Err(Fault::invalid(
                     "Djehuty sources require unique source IDs, threads, a positive interval and page size 1..200",
                 ));
+            }
+        }
+        for (id, automation) in &self.automations {
+            validate_key(id)?;
+            let owner = self
+                .principals
+                .iter()
+                .find(|p| p.id == automation.principal)
+                .ok_or_else(|| Fault::invalid("automation owner is not configured"))?;
+            let akh = self
+                .akhs
+                .get(&automation.akh)
+                .ok_or_else(|| Fault::invalid("automation Akh is not configured"))?;
+            if automation.id != *id
+                || automation.max_active == 0
+                || automation.max_age_ms == 0
+                || automation.sources.is_empty()
+                || !owner.can_use_akh(&automation.akh)
+                || !akh
+                    .workspace_profiles
+                    .contains(&automation.workspace_profile)
+            {
+                return Err(Fault::invalid(
+                    "automation requires matching identity, authorized workspace and positive admission limits",
+                ));
+            }
+            for source in &automation.sources {
+                validate_key(source)?;
+            }
+            match &automation.target {
+                SessionTarget::Existing { session_id } => validate_key(session_id)?,
+                SessionTarget::Conversation { key } => validate_key(key)?,
+                _ => {}
             }
         }
         for (name, profile) in &self.akhs {

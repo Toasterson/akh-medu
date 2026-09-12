@@ -380,19 +380,33 @@ impl Sessions {
         if let Some(index) = &conversation_key {
             if let Some(id) = tx.get::<String>(index)? {
                 let session = load(tx, &id)?;
-                if session.workspace_profile != request.workspace_profile {
-                    return Err(Fault::conflict(
-                        "conversation already has a different workspace profile",
-                    ));
+                if session.closed_at.is_some() {
+                    if tx.get::<bool>(&key("workspace_released", &[&id]))? != Some(true) {
+                        return Err(Fault::new(
+                            "busy",
+                            "previous conversation workspace cleanup is pending",
+                        ));
+                    }
+                    // Rebind only after authoritative cleanup. Old request IDs
+                    // still replay their original session through create dedupe.
+                } else {
+                    if session.retirement.is_some() {
+                        return Err(Fault::new("busy", "previous conversation is retiring"));
+                    }
+                    if session.workspace_profile != request.workspace_profile {
+                        return Err(Fault::conflict(
+                            "conversation already has a different workspace profile",
+                        ));
+                    }
+                    tx.put(
+                        &dedupe,
+                        &CommandRecord {
+                            request: request_value,
+                            result: id,
+                        },
+                    )?;
+                    return Ok(session);
                 }
-                tx.put(
-                    &dedupe,
-                    &CommandRecord {
-                        request: request_value,
-                        result: id,
-                    },
-                )?;
-                return Ok(session);
             }
         }
         let mut session = SessionRecord {

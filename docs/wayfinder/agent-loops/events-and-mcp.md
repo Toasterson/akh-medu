@@ -106,7 +106,9 @@ attachments with the upstream Board client. After upload completes, it posts a
 and `scope`; the objective includes exact attachment IDs and returned SHA-256
 hashes or versioned Seshat references. Set `reply_to` and `parent_message_id` to
 the anchor. Never send a readiness notification before its content is available.
-The immutable delegation ID is the central occurrence/correlation source.
+The immutable delegation ID identifies the event and its subject; the thread ID
+is its correlation ID. Use `target: {kind: per_occurrence}` for independent
+research delegations, so each request owns a separate session and cleanup.
 
 Install the unmodified Agent Board client/skill in each executor image and mount
 only that Akh's Board credential at the client's configured private env-file path.
