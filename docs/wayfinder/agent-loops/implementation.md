@@ -736,3 +736,14 @@ by these fixture results.
 - Anima still needs to consume these receipts, verify publication and compose
   its canonical result/witness/outcome before central scheduler rollout. No
   remote publication, project enablement, CI or Fable review is claimed.
+
+### Anima snapshot protocol verification
+
+- Anima's independent client checks exact admission/checkout/workspace and
+  operation identities before returning typed local-commit evidence. A wire
+  fault test rejects substituted identities, altered patch bytes and unsettled
+  results; stale bootstrap evidence is refused before a capture request.
+- The actual Anima client binary passes against the real Akh session/executor
+  routers and native Git checkout, retrieving the same receipt after archival.
+  Result persistence, patch equivalence, publication and canonical finalization
+  still require integration; this client does not accept or close a Change.

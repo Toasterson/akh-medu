@@ -412,7 +412,7 @@ async fn verify_session_snapshots(
     git(root, &["commit", "--quiet", "-m", "session result"]);
     let head = git(root, &["rev-parse", "HEAD"]);
     let request = SnapshotSessionRepository {
-        request_id: "result-1".into(),
+        request_id: new_id(),
         head_revision: head.clone(),
     };
     let call = |app: SessionApp, request: SnapshotSessionRepository| {
@@ -492,6 +492,19 @@ async fn verify_session_snapshots(
     // Model/editor changes do not rewrite the durable selected-commit evidence.
     std::fs::write(root.join("implementation.txt"), "later editor changes\n").unwrap();
     assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
+    let turn = app
+        .sessions
+        .submit(
+            &owner,
+            &session.id,
+            &SubmitInput {
+                request_id: "probe-turn".into(),
+                text: "owned protocol fixture".into(),
+                artifacts: vec![],
+            },
+        )
+        .unwrap();
+    app.sessions.cancel(&owner, &session.id, &turn.id).unwrap();
     app.sessions.archive(&owner, &session.id).unwrap();
     sandbox.release(&session.id).await.unwrap();
     assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
@@ -508,5 +521,30 @@ async fn verify_session_snapshots(
             ))
         })
         .unwrap();
-    assert_eq!(call(app, request).await.1, bytes);
+    assert_eq!(call(app.clone(), request.clone()).await.1, bytes);
+    if let Ok(probe) = std::env::var("ANIMA_AKH_SNAPSHOT_PROBE") {
+        assert!(Path::new(&probe).is_absolute());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let router = session_router(app);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let input = json!({"config":{"url":endpoint,"token_file":token,"ca_file":null,"automation":"fixture","source":"fixture"},
+            "checkout":{"repository":repository,"revision":base},
+            "admission":{"session_id":session.id,"turn_id":turn.id},"request_id":request.request_id,"head":head});
+        let command = tokio::process::Command::new(probe);
+        let result = akh_session_services::process::output_with_input(
+            command,
+            Some(serde_json::to_vec(&input).unwrap()),
+            Duration::from_secs(20),
+            4 * 1024 * 1024,
+        )
+        .await;
+        server.abort();
+        let remote: OperationReceipt =
+            serde_json::from_slice(&result.expect("native Anima snapshot client failed")).unwrap();
+        assert_eq!(remote, receipt);
+        println!("Native Anima snapshot client verified the original archived executor receipt");
+    }
 }

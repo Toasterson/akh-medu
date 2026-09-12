@@ -71,3 +71,13 @@ isolation, exact retry/restart, scope and workspace fences. The real session and
 executor routers also pass lost-response recovery after a real Git bootstrap,
 including retrieval after archival. These tests do not prove remote publication,
 cross-host deployment, or Anima's canonical finalization.
+
+Anima's independent compatibility client now validates the owning session,
+admitted turn, verified checkout, workspace/generation, derived operation ID,
+terminal status, commit/tree identities and patch digest before returning typed
+snapshot evidence. Its actual native probe passes against the real Akh routers
+after archival. Run the cross-repository fixture by building Anima's
+`snapshot-probe` example and setting `ANIMA_AKH_SNAPSHOT_PROBE` to that absolute
+binary path when running Akh's `repository_bootstrap` test with
+`session,executor,sandbox` features. With no explicit probe path, that test proves
+the Akh API only. The Anima client is not yet connected to result finalization.
