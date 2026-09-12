@@ -350,3 +350,32 @@ by these fixture results.
 - This is native controller and pod evidence on one disposable local cluster.
   It does not demonstrate gVisor/Kata confinement, work/homelab deployment,
   cross-machine provider tools, or NetworkPolicy enforcement.
+
+### Released kagent controller interoperability
+
+- The actual upstream kagent 0.10.1 controller, CRDs and development database ran
+  in the disposable kind cluster. The repository's BYO Helm template created the
+  native Linux facade deployment and passed upstream readiness. Its central hop
+  used a private CA and server certificate, with separate central credentials.
+- The test exposed two requirements beyond a simple A2A proxy: the controller
+  reads task queries from its REST-backed store, and clients can create a kagent
+  context before the first prompt. `akh-kagent` now projects central tasks through
+  the released session/task REST APIs and persists context aliases in central
+  conversation keys. Each facade binds one explicit kagent user to a dedicated
+  central principal. It owns no local session database or model process.
+- `scripts/session-platform/kagent-native-smoke.py` passes actual controller
+  discovery/A2A 0.3 traffic, immutable-message dedupe, context follow-ups, another
+  user's rejected cancellation, task polling/cancellation, and SSE completion.
+  While the facade was stopped, the test cancelled a task centrally; the new
+  facade projected that state after restart. A different, explicitly deleted
+  kagent task view did not block this refresh. Upstream deleted IDs stay reserved.
+- The chart rejects credential Secrets that collide with the controller's own
+  generated Secret. Three adapter tests and the standalone A2A Python SDK 0.3.22
+  regression pass. A bounded projection cache periodically refreshes unchanged
+  tasks to repair a stale view left by overlapping rolling replicas; that repair
+  is covered by a focused test. Shutdown drains for at most ten seconds.
+- These tests use the upstream development authentication mode and kindnet.
+  They do not prove authenticated production kagent configuration, NetworkPolicy
+  enforcement, a browser UI, native provider tools, or cross-host deployment.
+  No images or changes were published. See the [deployment guide](deployment.md)
+  for the required identity, projection and context-mapping configuration.

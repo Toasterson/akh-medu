@@ -79,33 +79,65 @@ A template must provide its executor Service/endpoint, mounted credentials and
 workspace path `/workspaces/<allocation-id>`. Use the command provisioner for
 sites whose supervisor additionally creates per-allocation credentials, routes,
 VMs or host sandboxes. An uncertain command is reconciled from observed resources,
-never automatically executed a second time. The existing fixtures validate API
-and UID behavior, not a running Sandbox controller or kernel confinement.
+never automatically executed a second time. `k8s-native-smoke.py` also exercises
+the actual v1.0.0 Sandbox controller with an executor pod, scoped Kubernetes
+credentials, receipt-backed writes, and foreground cleanup across manager
+restart. Its disposable kind cluster does not prove kernel sandbox confinement
+or cross-machine runtime behavior.
 
 ## Released kagent BYO
 
 The chart's optional `kagent` section creates a `kagent.dev/v1alpha2` BYO Agent
 using the stateless `akh-kagent` binary on port 8080. Its JSON config binds one
-Akh and one central integration principal. The facade fetches and rewrites the
-central agent card, then streams the A2A JSON-RPC body without changing task,
-context or message IDs. It never forwards caller identity/Authorization headers,
-never stores sessions and never retries a lost POST.
+Akh, one dedicated central integration principal, and one explicit kagent user
+(`userId`). Set `controllerUrl` to the trusted controller API and `workspaceProfile`
+to the profile used for conversations created by kagent. The facade fetches the
+central agent card and preserves task/message IDs. It never forwards caller
+credentials or identity to central admission, and never retries a lost message
+POST. Only the configured user may send requests through this facade.
 
 The BYO hop uses the kagent trusted cluster network. `trust_kagent_network: true`
 is explicit and the chart requires a non-empty same-namespace caller label
 selector in an ingress NetworkPolicy. Run it only with a CNI enforcing that
-policy. This is one shared integration identity, not per-user authorization.
-Users requiring separate Akh ownership use separately scoped facades or the
-centrally authenticated ACP/A2A endpoint. Do not expose this facade publicly.
-The credential Secret contains `token` and `ca.pem` for central HTTPS.
+policy. Deploy separately scoped facades for different kagent users. The central
+credential must be dedicated to this facade; its owned sessions are the projection
+source. Use the centrally authenticated ACP/A2A endpoint for other clients. Do
+not expose this facade publicly.
+The credential Secret contains `token` and `ca.pem` for central HTTPS. Its name
+must differ from the Agent name: the upstream controller owns a generated Secret
+at that name. The chart rejects this collision before installation.
 
-The target is [kagent v0.10.1](https://github.com/kagent-dev/kagent/releases/tag/v0.10.1),
-not its unreleased native harness. The upstream BYO translator can advertise both
-A2A 0.3 and 1.0; this facade supports **0.3 only**, and clients must negotiate that
-version. Discovery, typed message requests, idempotency, polling, cancellation and
-SSE pass against the actual A2A Python SDK 0.3.22. The test does not run a kagent
-controller or prove its 1.0 negotiation behavior. See
-`scripts/session-platform/a2a-sdk-smoke.py` and the Rust A2A/facade tests.
+The target is [kagent v0.10.1](https://github.com/kagent-dev/kagent/releases/tag/v0.10.1).
+Its registrar selects the A2A 0.3 compatibility transport; this facade supports
+**0.3 only**. The released controller serves task queries from its own store, so
+the facade projects current central tasks through upstream `POST /api/sessions`
+and `POST /api/tasks`, using the projected kagent service-account token. A
+background refresh rebuilds this view from central sessions after facade restart.
+The process has no local session database. A lost projection response may retry
+the same task snapshot; it never starts another model turn. Projection failures
+remain visible as errors, and central ownership/receipts remain authoritative.
+
+For a kagent-created context, the facade verifies its user/Agent association and
+creates an idempotent central conversation alias. Public responses keep kagent's
+context ID and include the central ID in `metadata.akhSessionId`. Follow-ups,
+pending input and reconnect continue against that same central session. Direct
+A2A clients that let Akh create the context keep the central ID. This mapping
+does not modify user data parts or artifact contents.
+
+Kagent's projected task state does not decide execution settlement or workspace
+cleanup. Deleting a view row does not cancel an Akh session; use task cancellation
+and the central lifecycle API. Upstream permanently reserves a deleted task ID,
+so that view cannot be recreated under the same ID. Its failed projection does
+not stop refresh of other tasks, and does not erase the central journal. The
+projection uses upstream last-write-wins REST
+storage, so overlapping rolling replicas can temporarily show an older snapshot;
+central actions always reread the authoritative task. A separate kagent user or
+Agent cannot reuse an existing context mapping.
+
+The adapter follows the released [task query handler](https://github.com/kagent-dev/kagent/blob/v0.10.1/go/core/internal/a2a/task_query_store.go),
+[task REST handler](https://github.com/kagent-dev/kagent/blob/v0.10.1/go/core/internal/httpserver/handlers/tasks.go)
+and [session REST handler](https://github.com/kagent-dev/kagent/blob/v0.10.1/go/core/internal/httpserver/handlers/sessions.go).
+These APIs maintain display state; no direct kagent database access is used.
 
 ## Schedulers, upgrades and recovery
 

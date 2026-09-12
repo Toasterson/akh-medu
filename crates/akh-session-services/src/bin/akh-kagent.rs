@@ -12,6 +12,8 @@ use clap::Parser;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+#[path = "kagent/projection.rs"]
+mod projection;
 
 #[derive(Parser)]
 struct Args {
@@ -29,11 +31,14 @@ struct Config {
     /// Explicitly acknowledge that ingress NetworkPolicy is this hop's auth boundary.
     /// One facade represents one centrally scoped kagent integration principal.
     trust_kagent_network: bool,
+    #[serde(default)]
+    projection: Option<projection::Config>,
 }
 #[derive(Clone)]
 struct App {
     config: Arc<Config>,
     client: reqwest::Client,
+    projection: Option<Arc<projection::Projection>>,
 }
 impl App {
     fn new(config: Config) -> Result<Self> {
@@ -55,9 +60,16 @@ impl App {
             ));
         }
         let client = config.sessions.http_client()?;
+        let projection = config
+            .projection
+            .clone()
+            .map(projection::Projection::new)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             config: Arc::new(config),
             client,
+            projection,
         })
     }
     fn route(&self) -> String {
@@ -129,12 +141,26 @@ async fn card(State(app): State<App>) -> Response {
     }
     Json(card).into_response()
 }
-async fn call(State(app): State<App>, headers: HeaderMap, Json(request): Json<Value>) -> Response {
+async fn call(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(mut request): Json<Value>,
+) -> Response {
     if headers.contains_key(header::ORIGIN) {
         return failure(
             StatusCode::FORBIDDEN,
             "browser calls use the authenticated central endpoint",
         );
+    }
+    if let Some(projection) = &app.projection {
+        if headers.get("x-user-id").and_then(|h| h.to_str().ok())
+            != Some(&projection.config.user_id)
+        {
+            return failure(
+                StatusCode::FORBIDDEN,
+                "this facade belongs to another kagent user",
+            );
+        }
     }
     if request["jsonrpc"] != "2.0"
         || request.get("id").is_none()
@@ -150,6 +176,15 @@ async fn call(State(app): State<App>, headers: HeaderMap, Json(request): Json<Va
         )
     {
         return failure(StatusCode::BAD_REQUEST, "unsupported A2A request");
+    }
+    if let Some(projection) = &app.projection {
+        if let Err(error) = projection.prepare(&app, &mut request).await {
+            tracing::warn!(code=%error.code, reason=%error.message,"kagent context mapping pending");
+            return failure(
+                StatusCode::BAD_GATEWAY,
+                "context mapping unconfirmed; retain original message identity",
+            );
+        }
     }
     let token = match app.config.sessions.token() {
         Ok(t) => t,
@@ -182,19 +217,76 @@ async fn call(State(app): State<App>, headers: HeaderMap, Json(request): Json<Va
     };
     let status = response.status();
     let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
+    let streaming = content_type
+        .as_ref()
+        .is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream"));
+    if let Some(projection) = &app.projection {
+        if !streaming {
+            let mut value = match projection::body(response).await {
+                Ok(value) => value,
+                Err(_) => {
+                    return failure(
+                        StatusCode::BAD_GATEWAY,
+                        "central response unconfirmed; retain original message identity",
+                    );
+                }
+            };
+            if let Some(id) = projection::task_id(&value) {
+                match projection.publish(&app, id).await {
+                    Ok(task) => {
+                        value["result"] = task;
+                    }
+                    Err(error) => {
+                        tracing::warn!(code=%error.code, reason=%error.message,"kagent projection pending after central admission");
+                        return failure(
+                            StatusCode::BAD_GATEWAY,
+                            "kagent projection unconfirmed; retry the original message identity",
+                        );
+                    }
+                }
+            }
+            return (status, [(header::CACHE_CONTROL, "no-store")], Json(value)).into_response();
+        }
+    }
     let mut response = response;
     let stream: std::pin::Pin<
         Box<dyn futures_util::Stream<Item = std::io::Result<axum::body::Bytes>> + Send>,
     > = Box::pin(async_stream::try_stream! {
         let mut size=0usize;
+        let mut frame = Vec::new();
         loop {
             let chunk=tokio::time::timeout(Duration::from_secs(60),response.chunk()).await
                 .map_err(|_|std::io::Error::new(std::io::ErrorKind::TimedOut,"central stream stalled"))?
                 .map_err(|_|std::io::Error::other("central stream interrupted"))?;
-            let Some(chunk)=chunk else {break;};
+            let Some(chunk)=chunk else {
+                if !frame.is_empty() {Err(std::io::Error::other("central SSE frame was truncated"))?;}
+                break;
+            };
             size+=chunk.len();
             if size>64*1024*1024 { Err(std::io::Error::other("central stream exceeded connection budget; resume the same task"))?; }
-            yield chunk;
+            if let Some(projection) = &app.projection {
+                frame.extend_from_slice(&chunk);
+                while let Some(end) = frame.windows(2).position(|v| v == b"\n\n") {
+                    let event: Vec<_> = frame.drain(..end+2).collect();
+                    let mut translated=Vec::new();
+                    for line in event.split_inclusive(|v| *v == b'\n') {
+                        if let Some(data) = line.strip_prefix(b"data:") {
+                            let mut value:Value=serde_json::from_slice(data).map_err(|_|std::io::Error::other("invalid central SSE event"))?;
+                            if let Some(id)=projection::task_id(&value) {
+                                let task=projection.publish(&app,id).await.map_err(|_|std::io::Error::other("kagent projection pending; resume the same task"))?;
+                                projection::map_context(&mut value["result"],task["contextId"].as_str().unwrap(),task["metadata"]["akhSessionId"].as_str().unwrap());
+                            }
+                            translated.extend_from_slice(b"data: ");
+                            translated.extend_from_slice(value.to_string().as_bytes());
+                            translated.push(b'\n');
+                        } else {
+                            translated.extend_from_slice(line);
+                        }
+                    }
+                    yield axum::body::Bytes::from(translated);
+                }
+                if frame.len()>2*1024*1024 { Err(std::io::Error::other("central SSE frame exceeded budget"))?; }
+            } else {yield chunk;}
         }
     });
     let mut response = Response::new(Body::from_stream(stream));
@@ -223,15 +315,38 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let config: Config = serde_json::from_slice(&std::fs::read(args.config)?)?;
     let listen = config.listen;
     let app = App::new(config)?;
-    let listener = tokio::net::TcpListener::bind(listen).await?;
-    axum::serve(listener, router(app))
-        .with_graceful_shutdown(async {
-            let mut term =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("SIGTERM handler");
-            tokio::select! {_=term.recv()=>{},_=tokio::signal::ctrl_c()=>{}}
+    tracing_subscriber::fmt().with_env_filter("warn").init();
+    let projection_worker = app.projection.as_ref().map(|projection| {
+        let projection = projection.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = projection.refresh(&app).await {
+                    tracing::warn!(code=%error.code, reason=%error.message,"kagent projection refresh pending");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
         })
-        .await?;
+    });
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, router(app)).with_graceful_shutdown(async {
+        let _ = stopped.await;
+    });
+    let server = std::future::IntoFuture::into_future(server);
+    tokio::pin!(server);
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = &mut server => { result?; },
+        _ = async {tokio::select! {_=term.recv()=>{},_=tokio::signal::ctrl_c()=>{}}} => {
+            let _ = stop.send(());
+            if let Some(worker) = &projection_worker {worker.abort();}
+            let _ = tokio::time::timeout(Duration::from_secs(10), &mut server).await;
+        }
+    }
+    if let Some(worker) = projection_worker {
+        worker.abort();
+    }
     Ok(())
 }
 
@@ -270,6 +385,7 @@ mod tests {
             akh: "test".into(),
             public_url: "http://akh-byo.kagent:8080/".into(),
             trust_kagent_network: true,
+            projection: None,
         };
         let app = App::new(config.clone()).unwrap();
         let card = router(app.clone())

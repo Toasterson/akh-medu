@@ -1,5 +1,6 @@
 {{- if .Values.kagent.enabled }}
 {{- $v := .Values.kagent }}
+{{- if eq $v.secretName $v.name }}{{ fail "kagent.secretName must differ from kagent.name: the upstream controller owns that Secret" }}{{ end }}
 {{- if not (contains "@sha256:" $v.image) }}{{ fail "kagent facade image must be pinned by digest" }}{{ end }}
 {{- if empty $v.allowedCallerLabels }}{{ fail "kagent.allowedCallerLabels must identify trusted callers in this namespace" }}{{ end }}
 ---
@@ -8,7 +9,7 @@ kind: ConfigMap
 metadata:
   name: {{ $v.name }}-akh-facade
 data:
-  service.json: {{ dict "listen" "0.0.0.0:8080" "akh" $v.akh "public_url" (printf "http://%s.%s:8080/" $v.name .Release.Namespace) "trust_kagent_network" true "sessions" (dict "url" (required "kagent.sessionsUrl is required" $v.sessionsUrl) "token_file" "/run/akh/credentials/token" "ca_file" "/run/akh/credentials/ca.pem") | toJson | quote }}
+  service.json: {{ dict "listen" "0.0.0.0:8080" "akh" $v.akh "public_url" (printf "http://%s.%s:8080/" $v.name .Release.Namespace) "trust_kagent_network" true "sessions" (dict "url" (required "kagent.sessionsUrl is required" $v.sessionsUrl) "token_file" "/run/akh/credentials/token" "ca_file" "/run/akh/credentials/ca.pem") "projection" (dict "controller" (dict "url" (required "kagent.controllerUrl is required" $v.controllerUrl) "token_file" "/var/run/secrets/tokens/kagent-token" "allow_insecure_http" true) "agent_ref" (printf "%s/%s" .Release.Namespace $v.name) "user_id" (required "kagent.userId is required" $v.userId) "workspace_profile" (required "kagent.workspaceProfile is required" $v.workspaceProfile)) | toJson | quote }}
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent

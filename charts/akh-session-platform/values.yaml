@@ -15,7 +15,7 @@ services: {}
 #     resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }
 
 # Optional stateless facade deployed by the released kagent v1alpha2 BYO controller.
-# Its upstream credential represents one shared integration identity, not each UI user.
+# One facade and dedicated central principal per explicitly configured kagent user.
 kagent:
   enabled: false
   name: akh-byo
@@ -23,5 +23,8 @@ kagent:
   image: ""
   sessionsUrl: ""
   secretName: ""
+  controllerUrl: ""
+  userId: ""
+  workspaceProfile: ""
   # Set to your controller/client workload labels; never expose this Service publicly.
   allowedCallerLabels: {}
