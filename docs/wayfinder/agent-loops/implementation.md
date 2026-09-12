@@ -604,3 +604,22 @@ by these fixture results.
   also checks notifications, ping, filtered tools, auth/revocation and GET 405.
   No production token or endpoint was used. This proves read transport; the
   result submission and scheduler lifecycle integrations remain outstanding.
+
+
+### Scoped central Change submission
+
+- Anima's Change authorization/storage logic is now shared by its existing gRPC
+  submission and a central-only MCP result tool. The new scope isolates this
+  inventory from legacy and personal clients. Work item, base and author are
+  bound by the existing central assignment, not model arguments.
+- The Akh broker supplies a durable operation ID as application MCP metadata,
+  without changing tool arguments or permitting uncertain write replay. Anima
+  migration 138 atomically records a pending Change, its operation receipt,
+  supersession of older pending changes and its audit event. Accepted work stays.
+- Full-schema tests pass concurrent/exact retry, conflicting reuse, audit rollback,
+  scope/ownership checks and closing fences. The actual Akh MCP client submits a
+  Change to the actual Anima router and explicitly recovers the identical receipt.
+  The reported head is labeled producer evidence; no Git/materialization claim.
+- Automatic result linking, canonical turn/witness outcomes, workspace cleanup and
+  owner closure still require lifecycle integration. The central scheduler route
+  and its staging/base-resolution/previous-work preservation remain outstanding.

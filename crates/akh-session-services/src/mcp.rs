@@ -278,7 +278,9 @@ pub async fn call_with_token(
         }
         peer.notify(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .await?;
-        let reply=peer.rpc(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":arguments}})).await?;
+        // Metadata binds opt-in server receipts to this durable broker effect.
+        // It is separate from model arguments and does not authorize POST replay.
+        let reply=peer.rpc(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":arguments,"_meta":{"it.wegmueller.akh/operation-id":id}}})).await?;
         let result = if reply.get("error").is_some() {
             ToolResult {
                 success: false,
@@ -370,6 +372,11 @@ mod tests {
             return StatusCode::ACCEPTED.into_response();
         }
         assert_eq!(body["method"], "tools/call");
+        assert_eq!(
+            body["params"]["_meta"]["it.wegmueller.akh/operation-id"],
+            "operation"
+        );
+        assert_eq!(body["params"]["arguments"], json!({"n":7}));
         assert!(
             trace
                 .posts
