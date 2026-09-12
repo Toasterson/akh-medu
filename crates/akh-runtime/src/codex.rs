@@ -67,13 +67,17 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         if turn.config.execution_mode == ExecutionMode::Brokered {
                             params["environments"] = json!([]);
                         }
-                        params["dynamicTools"] = json!([{"type":"namespace", "name":"akh",
+                        params["dynamicTools"] = if turn.tools.is_empty() {
+                            json!([])
+                        } else {
+                            json!([{"type":"namespace", "name":"akh",
                             "description":"Akh-Medu knowledge, memory and execution tools",
                             "tools":turn.tools.iter().map(|t| json!({
                             "type":"function",
                             "name":t["function"]["name"],"description":t["function"]["description"],
                             "inputSchema":t["function"]["parameters"]
-                        })).collect::<Vec<_>>() }]);
+                        })).collect::<Vec<_>>() }])
+                        };
                         params["allowProviderModelFallback"] = json!(false);
                         "thread/start"
                     };
@@ -136,7 +140,14 @@ pub(super) fn run(turn: &mut Turn<'_>) -> Result<String, String> {
                         params["tool"].as_str().unwrap_or(""),
                         params["arguments"].clone(),
                     )?;
-                    json!({"success":result["success"],"contentItems":[{"type":"inputText","text":result["text"]}]})
+                    // Process handles and other structured tool outputs must
+                    // survive the provider's text-only content transport.
+                    let text = if !result["data"].is_null() {
+                        serde_json::to_string(&result).map_err(|e| e.to_string())?
+                    } else {
+                        result["text"].as_str().unwrap_or("").to_owned()
+                    };
+                    json!({"success":result["success"],"contentItems":[{"type":"inputText","text":text}]})
                 }
                 "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
                     json!({"decision":if turn.approve(&id.to_string(), method, params)? { "accept" } else { "decline" }})

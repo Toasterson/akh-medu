@@ -8,7 +8,8 @@ export async function run(start, sdk, z, send, request, abortController) {
     const schema = z.fromJSONSchema(spec.parameters);
     return sdk.tool(spec.name, spec.description, schema.shape, async (arguments_) => {
       const result = await request("tool", { name: spec.name, arguments: arguments_ });
-      return { content: [{ type: "text", text: result.text }], isError: !result.success };
+      const text = result.data == null ? result.text : JSON.stringify(result);
+      return { content: [{ type: "text", text }], isError: !result.success };
     });
   });
   const mcpServer = sdk.createSdkMcpServer({ name: "akh", version: "1.0.0", tools: definitions });

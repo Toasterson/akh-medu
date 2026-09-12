@@ -87,13 +87,16 @@ test("brokered profile removes native tools and settings while supplied MCP tool
       assert.match(denial.message, /provided mcp__akh__/);
       const toolResult = await options.mcpServers.akh.tools[0].handler({ ids: [7] });
       assert.equal(toolResult.isError, false);
-      assert.equal(toolResult.content[0].text, "executor result");
+      const result = JSON.parse(toolResult.content[0].text);
+      assert.equal(result.text, "executor result");
+      assert.equal(result.data.process_id, "remote-process");
+      assert.equal(result.receipt, "receipt");
       yield { type: "result", subtype: "success", result: "done" };
     } }),
   };
   await run({ ...start, brokered: true }, sdk, z, () => {}, async (type) => {
     assert.equal(type, "tool");
-    return { success: true, text: "executor result" };
+    return { success: true, text: "executor result", data: { process_id: "remote-process", status: "running" }, receipt: "receipt" };
   }, new AbortController());
 });
 

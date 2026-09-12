@@ -8,6 +8,7 @@ struct Witness {
     events: Vec<RuntimeEvent>,
     calls: usize,
     approvals: usize,
+    structured: bool,
 }
 impl Host for Witness {
     fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
@@ -26,7 +27,9 @@ impl Host for Witness {
         Ok(ToolResult {
             success: true,
             text: "7".into(),
-            data: None,
+            data: self
+                .structured
+                .then(|| json!({"process_id":"remote-process","status":"running"})),
             receipt: Some("receipt".into()),
         })
     }
@@ -137,6 +140,12 @@ fn brokered_codex_uses_supplied_tools_and_never_approves_native_execution() {
         "7"
     );
     assert_eq!(host.calls, 1);
+    host.structured = true;
+    let output = akh_runtime::run(&config, &request, &mut host, &cancel).unwrap();
+    let result: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(result["data"]["process_id"], "remote-process");
+    assert_eq!(result["receipt"], "receipt");
+    assert_eq!(result["text"], "7");
 }
 
 #[test]
