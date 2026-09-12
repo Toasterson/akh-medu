@@ -11,7 +11,7 @@ session = ["dep:jsonschema", "dep:async-stream", "dep:rmcp", "axum/ws"]
 runtime = ["dep:akh-runtime", "helpers"]
 executor = ["helpers", "dep:regex", "dep:globset", "dep:base64", "dep:tempfile"]
 sandbox = []
-events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono", "dep:uuid"]
+events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono"]
 helpers = []
 client = ["helpers", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-pemfile"]
 admin = []
@@ -24,7 +24,7 @@ rustls-pemfile = { version = "2", optional = true }
 akh-session-types = { path = "../akh-session-types" }
 rmcp = { version = "0.17", default-features = false, optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
-uuid = { version = "1", optional = true }
+uuid = { version = "1" }
 akh-runtime = { path = "../akh-runtime", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
