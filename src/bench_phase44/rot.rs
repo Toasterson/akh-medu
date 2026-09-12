@@ -42,7 +42,6 @@ use thiserror::Error;
 
 use crate::agent::context::{HeuristicTokenCounter, TokenCounter};
 use crate::agent::ollama::{GenerateResult, OllamaClient};
-use crate::nlu::error::NluError;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -569,11 +568,11 @@ fn positional_sensitivity(
 ) -> f64 {
     let edge_rates: Vec<f64> = EDGE_DEPTHS
         .iter()
-        .filter_map(|&&d| hit_rate(rows, model, filler, l, d))
+        .filter_map(|&d| hit_rate(rows, model, filler, l, d))
         .collect();
     let mid_rates: Vec<f64> = MID_DEPTHS
         .iter()
-        .filter_map(|&&d| hit_rate(rows, model, filler, l, d))
+        .filter_map(|&d| hit_rate(rows, model, filler, l, d))
         .collect();
 
     if edge_rates.is_empty() || mid_rates.is_empty() {
@@ -616,7 +615,7 @@ fn effective_length(
         // Mean hit_rate across all swept depths at this length.
         let rates: Vec<f64> = depths
             .iter()
-            .filter_map(|&&d| hit_rate(rows, model, filler, l, d))
+            .filter_map(|&d| hit_rate(rows, model, filler, l, d))
             .collect();
         if rates.is_empty() {
             // All cells for this length were invalid (truncated) — not evidence.
@@ -647,7 +646,9 @@ pub fn run_grid(probe: &mut dyn RotProbe, cfg: &GridConfig) -> miette::Result<Ve
 
     let counter = HeuristicTokenCounter;
     let model = probe.label().to_string();
-    let backend_label = probe.backend();
+    // Own the backend label up front so the immutable borrow of `probe` does
+    // not outlive the mutable `probe.complete(&mut self)` calls in the grid.
+    let backend_label = probe.backend().to_string();
 
     let mut rows = Vec::with_capacity(cfg.total_probes());
 
@@ -694,7 +695,7 @@ pub fn run_grid(probe: &mut dyn RotProbe, cfg: &GridConfig) -> miette::Result<Ve
 
                     rows.push(RunRow {
                         model: model.clone(),
-                        backend: backend_label.to_string(),
+                        backend: backend_label.clone(),
                         filler: filler_mode.as_str().to_string(),
                         l_target: target_len,
                         l_actual: resp.prompt_tokens,
