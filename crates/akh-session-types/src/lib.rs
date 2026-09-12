@@ -264,6 +264,16 @@ pub struct RetireSession {
     pub reason: String,
 }
 
+/// Archive only the exact observed journal prefix. A later input, runtime
+/// event or controller action requires a fresh completion decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveSelection {
+    pub request_id: String,
+    pub generation: u64,
+    pub next_sequence: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRetirement {

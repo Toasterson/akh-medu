@@ -1402,3 +1402,97 @@ fn question_answers_are_validated_before_a_decision_is_journaled() {
     );
     assert!(s.pending_inputs(&p, &session.id).unwrap().is_empty());
 }
+
+#[test]
+fn selected_archive_fences_late_turns_and_replays_only_the_original_decision() {
+    let (dir, s, p) = setup();
+    let session = create(&s, &p);
+    binding(&s, &session.id);
+    submit(&s, &p, &session.id, "first");
+    let finish = |s: &Sessions| {
+        let job = s.next_job(&session.id).unwrap().unwrap();
+        s.apply_job(&RuntimeJob {
+            request: job,
+            status: TurnStatus::Completed,
+            provider_session: None,
+            output: Some("finished".into()),
+            error: None,
+            events: vec![],
+        })
+        .unwrap();
+    };
+    finish(&s);
+    let observed = s.get(&p, &session.id).unwrap();
+    let mut selected = ArchiveSelection {
+        request_id: "complete-first".into(),
+        generation: observed.generation,
+        next_sequence: observed.next_sequence,
+    };
+    submit(&s, &p, &session.id, "late-followup");
+    finish(&s);
+    let before = s.get(&p, &session.id).unwrap();
+    assert!(
+        s.archive_selected(&p, &session.id, None, &selected)
+            .is_err()
+    );
+    assert_eq!(s.get(&p, &session.id).unwrap(), before);
+    selected.request_id = "complete-followup".into();
+    selected.generation = before.generation;
+    selected.next_sequence = before.next_sequence;
+    let mut stranger = p.clone();
+    stranger.id = "someone-else".into();
+    assert!(
+        s.archive_selected(&stranger, &session.id, None, &selected)
+            .is_err()
+    );
+    let archived = s
+        .archive_selected(&p, &session.id, None, &selected)
+        .unwrap();
+    assert!(archived.closed_at.is_some());
+    assert_eq!(archived.next_sequence, before.next_sequence + 1);
+    assert!(
+        s.submit(
+            &p,
+            &session.id,
+            &SubmitInput {
+                request_id: "too-late".into(),
+                text: "another turn".into(),
+                artifacts: vec![],
+            }
+        )
+        .is_err()
+    );
+    let config = s.config.clone();
+    drop(s);
+    let restarted = Sessions::new(Store::open(&dir.path().join("state.redb")).unwrap(), config);
+    assert_eq!(
+        restarted
+            .archive_selected(&p, &session.id, None, &selected)
+            .unwrap(),
+        archived
+    );
+    let mut other = selected.clone();
+    other.request_id = "another-decision".into();
+    assert!(
+        restarted
+            .archive_selected(&p, &session.id, None, &other)
+            .is_err()
+    );
+    other = selected.clone();
+    other.next_sequence += 1;
+    assert!(
+        restarted
+            .archive_selected(&p, &session.id, None, &other)
+            .is_err()
+    );
+    let event: SessionEvent = restarted
+        .store
+        .get(&akh_session_services::store::key(
+            "event",
+            &[&session.id, &format!("{:020}", selected.next_sequence)],
+        ))
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.kind, "session_archived");
+    assert_eq!(event.data["selection"], json!(selected));
+}

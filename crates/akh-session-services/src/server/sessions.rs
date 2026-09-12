@@ -434,6 +434,7 @@ pub fn session_router(app: SessionApp) -> Router {
             .route("/v1/sessions/{id}/attach", post(attach))
             .route("/v1/sessions/{id}/detach", post(detach))
             .route("/v1/sessions/{id}/archive", post(archive))
+            .route("/v1/sessions/{id}/archive-selected", post(archive_selected))
             .route("/v1/sessions/{id}/retire", post(retire))
             .route("/v1/sessions/{id}/turns/{turn}/cancel", post(cancel_turn))
             .route(
@@ -554,6 +555,22 @@ async fn archive(
         &p,
         &id,
         query.attachment_id.as_deref(),
+    )?))
+}
+async fn archive_selected(
+    State(app): State<SessionApp>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+    Query(query): Query<AttachmentQuery>,
+    Json(selection): Json<ArchiveSelection>,
+) -> Api<SessionRecord> {
+    controller(&app, &p, &id, query.attachment_id.as_deref())?;
+    http::role(&p, "client")?;
+    Ok(Json(app.sessions.archive_selected(
+        &p,
+        &id,
+        query.attachment_id.as_deref(),
+        &selection,
     )?))
 }
 #[derive(Deserialize)]

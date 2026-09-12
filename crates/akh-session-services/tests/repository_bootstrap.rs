@@ -610,6 +610,19 @@ async fn native_checkout_recovers_lost_http_and_manager_restart_then_preserves_e
         &drop_publication,
     )
     .await;
+    #[cfg(feature = "session")]
+    if let Ok(probe) = std::env::var("ANIMA_AKH_COMPLETION_PROBE") {
+        verify_native_completion(
+            dir.path(),
+            &sandbox,
+            &endpoint,
+            &token,
+            &repository,
+            &revision,
+            &probe,
+        )
+        .await;
+    }
     sandbox.release("assigned").await.unwrap();
     sandbox.release("existing-files").await.unwrap();
     executor.cancel_all();
@@ -905,4 +918,175 @@ async fn verify_session_snapshots(
             "Native Anima snapshot and publication clients verified original archived executor receipts"
         );
     }
+}
+
+#[cfg(feature = "session")]
+async fn verify_native_completion(
+    dir: &Path,
+    sandbox: &Sandboxes,
+    executor: &str,
+    token: &Path,
+    repository: &str,
+    revision: &str,
+    probe: &str,
+) {
+    use akh_session_services::server::{SessionApp, sandbox_router, session_router};
+    use axum::{
+        body::Body,
+        extract::Request,
+        http::StatusCode,
+        middleware::{self, Next},
+        response::Response,
+    };
+    assert!(Path::new(probe).is_absolute());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sandbox_endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let router = sandbox_router(sandbox.clone());
+    let sandbox_http = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let config:Config=serde_json::from_value(json!({
+        "service_id":"completion-sessions","listen":"127.0.0.1:0","data_dir":dir.join("completion-sessions"),
+        "principals":[{"id":"owner","roles":["client","session_bootstrap"],"akhs":["test"],"token_file":token}],
+        "endpoints":{"executor":{"url":executor,"token_file":token},"sandboxes":{"url":sandbox_endpoint,"token_file":token}},
+        "akhs":{"test":{"bootstrap_repositories":[repository],"instructions":"owned protocol fixture",
+            "runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"codex","execution_mode":"colocated"},"workspace_profiles":["git"]}}
+    })).unwrap();
+    config.validate().unwrap();
+    let owner = config.principals[0].clone();
+    let app = SessionApp::new(
+        Arc::new(config),
+        Store::open(&dir.join("completion-sessions.redb")).unwrap(),
+    )
+    .unwrap();
+    let session = app
+        .sessions
+        .create(
+            &owner,
+            &NewSession {
+                request_id: "completion".into(),
+                akh: "test".into(),
+                workspace_profile: "git".into(),
+                conversation_key: None,
+            },
+        )
+        .unwrap();
+    let bootstrap = BootstrapRepository {
+        request_id: "completion-checkout".into(),
+        checkout: RepositoryCheckout {
+            repository: repository.into(),
+            revision: revision.into(),
+        },
+    };
+    app.sessions
+        .prepare_repository(&owner, &session.id, &bootstrap)
+        .unwrap();
+    let allocate = Allocate {
+        session_id: session.id.clone(),
+        principal: owner.id.clone(),
+        profile: "git".into(),
+        bootstrap: Some(bootstrap),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let allocation = loop {
+        match sandbox.allocate(allocate.clone()).await {
+            Ok(allocation) => break allocation,
+            Err(error) => assert_eq!(error.code, "busy"),
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    app.sessions
+        .bind_prepared_workspace(
+            &session.id,
+            allocation.binding.unwrap(),
+            allocation.bootstrap_result,
+        )
+        .unwrap();
+    let mut first = None;
+    // Inject terminal provider reports through the actual session ledger. This
+    // fixture proves native HTTP/archival/executor cleanup, not model inference.
+    for name in ["initial", "followup"] {
+        let turn = app
+            .sessions
+            .submit(
+                &owner,
+                &session.id,
+                &SubmitInput {
+                    request_id: name.into(),
+                    text: name.into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        if first.is_none() {
+            first = Some(turn.id);
+        }
+        let request = app.sessions.next_job(&session.id).unwrap().unwrap();
+        app.sessions
+            .apply_job(&RuntimeJob {
+                request,
+                status: TurnStatus::Completed,
+                provider_session: None,
+                output: Some(name.into()),
+                error: None,
+                events: vec![],
+            })
+            .unwrap();
+    }
+    let lost = Arc::new(AtomicBool::new(false));
+    let lose = lost.clone();
+    let router = session_router(app.clone()).layer(middleware::from_fn(
+        move |request: Request, next: Next| {
+            let lose = lose.clone();
+            async move {
+                let selected = request.uri().path().ends_with("/archive-selected");
+                let response = next.run(request).await;
+                if selected && response.status().is_success() && !lose.swap(true, Ordering::SeqCst)
+                {
+                    return Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from("owned lost archive reply"))
+                        .unwrap();
+                }
+                response
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dispatcher = tokio::spawn(app.clone().run_dispatcher());
+    let input = json!({"config":{"url":endpoint,"token_file":token,"ca_file":null,"automation":"fixture","source":"fixture"},"admission":{"session_id":session.id,"turn_id":first},"request_id":new_id()});
+    let result = akh_session_services::process::output_with_input(
+        tokio::process::Command::new(probe),
+        Some(serde_json::to_vec(&input).unwrap()),
+        Duration::from_secs(30),
+        1024 * 1024,
+    )
+    .await;
+    dispatcher.abort();
+    server.abort();
+    sandbox_http.abort();
+    let proof: serde_json::Value =
+        serde_json::from_slice(&result.expect("native Anima completion client failed")).unwrap();
+    assert!(lost.load(Ordering::SeqCst));
+    let archived = app.sessions.get(&owner, &session.id).unwrap();
+    assert!(archived.closed_at.is_some());
+    assert_eq!(
+        proof["request"]["next_sequence"].as_u64().unwrap() + 1,
+        archived.next_sequence
+    );
+    assert_eq!(sandbox.get(&session.id).unwrap().state, "released");
+    assert_eq!(
+        app.sessions
+            .store
+            .get::<bool>(&akh_session_services::store::key(
+                "workspace_released",
+                &[&session.id]
+            ))
+            .unwrap(),
+        Some(true)
+    );
+    println!(
+        "Native Anima checkpoint recovered lost Akh archive reply and verified actual sandbox/executor release"
+    );
 }

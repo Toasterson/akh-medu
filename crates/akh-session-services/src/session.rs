@@ -258,10 +258,56 @@ impl Sessions {
         id: &str,
         attachment: Option<&str>,
     ) -> Result<SessionRecord> {
+        self.archive_guarded(p, id, attachment, None)
+    }
+
+    pub fn archive_selected(
+        &self,
+        p: &Principal,
+        id: &str,
+        attachment: Option<&str>,
+        selection: &ArchiveSelection,
+    ) -> Result<SessionRecord> {
+        validate_key(&selection.request_id)?;
+        if selection.generation == 0 || selection.next_sequence == 0 {
+            return Err(Fault::conflict(
+                "archive selection requires a generation and journal cursor",
+            ));
+        }
+        self.archive_guarded(p, id, attachment, Some(selection))
+    }
+
+    fn archive_guarded(
+        &self,
+        p: &Principal,
+        id: &str,
+        attachment: Option<&str>,
+        selection: Option<&ArchiveSelection>,
+    ) -> Result<SessionRecord> {
         self.store.transaction(|tx| {
             let mut session = load(tx, id)?;
             authorize(&session, p)?;
             check_controller(&session, attachment)?;
+            if let Some(selection) = selection {
+                let saved = tx.get::<ArchiveSelection>(&key("archive_selection", &[id]))?;
+                if let Some(saved) = saved {
+                    if saved != *selection || session.closed_at.is_none() {
+                        return Err(Fault::conflict(
+                            "session archive belongs to another selection",
+                        ));
+                    }
+                    return Ok(session);
+                }
+                if session.closed_at.is_some()
+                    || session.retirement.is_some()
+                    || session.generation != selection.generation
+                    || session.next_sequence != selection.next_sequence
+                {
+                    return Err(Fault::conflict(
+                        "session changed since completion selection",
+                    ));
+                }
+            }
             if session.closed_at.is_some() {
                 return Ok(session);
             }
@@ -273,7 +319,13 @@ impl Sessions {
             crate::session_publication::ensure_settled(tx, id)?;
             session.closed_at = Some(now_ms());
             session.controller = None;
-            append_event(tx, &mut session, None, "session_archived", json!({}))?;
+            let data = if let Some(selection) = selection {
+                tx.put(&key("archive_selection", &[id]), selection)?;
+                json!({"selection":selection})
+            } else {
+                json!({})
+            };
+            append_event(tx, &mut session, None, "session_archived", data)?;
             Ok(session)
         })
     }

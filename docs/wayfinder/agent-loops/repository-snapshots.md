@@ -112,3 +112,33 @@ successor. Native Git and the real protocol path are covered by the separate
 cross-repository probe above. Neither test makes an unverified publication into
 an authoritative remote branch. PR/publication selection, canonical outcome and
 witness commits, and scheduler route enablement remain integration work.
+
+
+## Conditional session archival
+
+Canonical completion can post `ArchiveSelection` to
+`/v1/sessions/{id}/archive-selected`: a durable `request_id` plus the observed
+`generation` and `next_sequence`. The session ledger compares both under the
+same transaction that checks settled turns/publications, stores the selection,
+closes the session and appends its archive event. Any intervening event refuses
+the stale decision without mutation. Only the exact successful selection replays,
+including after restart; legacy archival and operator retirement cannot be
+mistaken for that selection. Controller/owner authorization still applies.
+
+Anima's independent `completion_checkpoint` reads the full ordered turn set.
+Unknown/active turns and a final cancellation remain ineligible; a stopped turn
+stays resumable. `archive_checkpoint` verifies the archived turn set, cursor,
+session identity and actual lifecycle release before producing cleanup proof.
+The proof says nothing about Change acceptance, review or CI. Canonical callers
+must still persist their decision, import its archive event and commit their
+business outcome/witness/claim release atomically.
+
+Local verification: 19 session-ledger tests pass, including a late completed
+follow-up, unchanged state on refusal, owner isolation and exact restart replay.
+The native repository fixture also runs the independent Anima `completion-probe`
+against actual session/sandbox/executor HTTP, drops the first successful archive
+response and verifies actual allocation release. Its terminal provider reports
+are injected fixtures, not live model inference. Enable it with
+`ANIMA_AKH_COMPLETION_PROBE=/absolute/path/to/completion-probe` when running
+`repository_bootstrap`. One client fault test separately covers all-turn
+settlement, endpoint drift, changed replies and pending cleanup.
