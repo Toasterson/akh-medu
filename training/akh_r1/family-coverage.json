@@ -1,0 +1,248 @@
+{
+  "schema": "akh-r0-family-coverage-v1",
+  "full_R0_complete": false,
+  "R1_ready": false,
+  "accounting": "Fourteen audited distinct reference structures contribute seven development and seven validation-fixture worlds. Earlier authored controls do not fill quotas. No neural validation performed.",
+  "families": [
+    {
+      "id": "acquisition",
+      "development_target": 10,
+      "validation_target": 10,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-pipeline-evidence-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-identity-acquisition-20260913-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Strict labeled-record parsing, stable-ID/location joins and current-event selection have complete integration evidence. Independent document generators and learned free-text extraction remain missing."
+    },
+    {
+      "id": "persistent_recall",
+      "development_target": 10,
+      "validation_target": 10,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-pipeline-evidence-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-authority-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-stratified-incident-20260913-v2"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Current-version witness repair and cold command reuse have bounded reference evidence. Broader sampled environments and neural retrieval remain untested."
+    },
+    {
+      "id": "grounded_reasoning",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-pipeline-evidence-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Fixed and stratified graph paths plus generated service DAGs have authored controls; broad independent rule/composition distributions and neural reasoning remain untested."
+    },
+    {
+      "id": "knowledge_revision",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-pipeline-evidence-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-derived-effect-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-native-temporal-cache-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-stratified-incident-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-identity-acquisition-20260913-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Native timestamp/cache repairs and sourced support changes pass reference checks; broader dependency distributions, authenticated credibility and concurrency remain open."
+    },
+    {
+      "id": "tool_choice",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Direct safe effect selection and composed capability dependencies passed actual-effect controls; broader mechanisms and neural selection remain missing."
+    },
+    {
+      "id": "multi_step_work",
+      "development_target": 10,
+      "validation_target": 10,
+      "current_status": "authored_control_only",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-stratified-incident-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-stateful-service-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-structural-service-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-generated-service-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-service-breadth-incident-20260913-v1"
+      ],
+      "independent_pack_worlds": 0,
+      "validation_worlds": 0,
+      "model_worlds": 0,
+      "remaining": "Authored command semantics; cold phase inspects retained completed state, not a newly assigned repair. Only one selected world per split; no new qualification. Next: Broader qualified environments and matched learned selection; service probes closed"
+    },
+    {
+      "id": "novelty_ambiguity",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-pipeline-evidence-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Diagnostic inquiry and combined feasibility/participant constraints have distinct audited structures; natural-language ambiguity and broader generators remain missing."
+    },
+    {
+      "id": "language_transfer",
+      "development_target": 6,
+      "validation_target": 6,
+      "current_status": "authored_control_only",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-family-controls-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-language-composition-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-language-pack-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-language-breadth-descriptors-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-language-lifecycle-20260913-v1"
+      ],
+      "independent_pack_worlds": 0,
+      "validation_worlds": 0,
+      "model_worlds": 0,
+      "remaining": "Complete authored lifecycle passes in four counterbalanced languages: 72 phases, sourced native snapshots, cold new effects and correction. Translations/strata are correlated; independent generator qualification and neural conditions remain missing. Language probe lane closed pending broad-pack review."
+    },
+    {
+      "id": "recovery_durability",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "reference_structural_worlds",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-graph-generators-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-tool-choice-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ambiguity-validation-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-epoch-recovery-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-recall-20260912-v1"
+      ],
+      "independent_pack_worlds": 1,
+      "validation_worlds": 1,
+      "model_worlds": 0,
+      "remaining": "Lost-acknowledgment recovery and current-operation authority after restart have audited finite mechanisms; concurrency, power-loss durability and broad fault generators remain open."
+    },
+    {
+      "id": "perception_knowledge",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "authored_control_only",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-family-controls-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-effect-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ocr-layouts-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-control-preparation-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-structure-effects-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-assistance-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-lifecycle-20260913-v1"
+      ],
+      "independent_pack_worlds": 0,
+      "validation_worlds": 0,
+      "model_worlds": 0,
+      "remaining": "Two retained fixed-layout mechanisms now have actual OCR/native sourced graph/new cold repair/correction evidence (18 phases). Authored region/label extraction and typed authority remain explicit; broader independent layouts, learned perception and full pack qualification remain missing. Zero credit from this integration."
+    },
+    {
+      "id": "dojo_pressure",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "authored_control_only",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-family-controls-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ownership-episodes-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-control-preparation-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-dojo-episodes-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-starter-kata-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ownership-pilot-simulation-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-ownership-native-lifecycle-20260913-v1"
+      ],
+      "independent_pack_worlds": 0,
+      "validation_worlds": 0,
+      "model_worlds": 0,
+      "remaining": "Two pinned consultation mechanisms now pass native cold recall/proposal/hidden correction/action/ownership return with four blocking controls. Participant state/effects remain simulated and logic authored. Blinded participant judgments, learned EI and independent breadth remain missing; zero added credit."
+    },
+    {
+      "id": "runtime_command_learning",
+      "development_target": 8,
+      "validation_target": 8,
+      "current_status": "authored_control_only",
+      "evidence_runs": [
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-R0-reference-20260912-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-public-breadth-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-command-semantics-20260912-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-stratified-incident-20260913-v2",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-generated-service-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-command-help-acquisition-20260913-v1",
+        "/Users/toasty/ws/akh-medu/runs/akh-r1-command-lifecycle-20260913-v1"
+      ],
+      "independent_pack_worlds": 0,
+      "validation_worlds": 0,
+      "model_worlds": 0,
+      "remaining": "Two pinned grammar mechanisms now pass actual help/native skill/new cold repair/version correction (18 phases). Requested mode, typed binder and status syntax remain authored assistance. Independent breadth, learned mode selection and full pack qualification remain missing; zero new credit."
+    }
+  ],
+  "R0_prerequisites": [
+    "Build independent development and validation generators for all 12 families; identity-only variants do not qualify.",
+    "Run integrated episodes through one public protocol with complete traces and independent effect scoring.",
+    "Add real perception-to-action and complete kata/consultation coverage; retain transcript controls separately.",
+    "Freeze assistance budgets, scorer and split manifests before R1 model comparisons."
+  ]
+}

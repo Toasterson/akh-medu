@@ -1,0 +1,222 @@
+{
+  "schema": "akh-shared-execution-coverage-v1",
+  "as_of": "2026-09-13T04:54:30.505794+00:00",
+  "rows": [
+    {
+      "family": "graph",
+      "adapter": "graph-query-v1",
+      "shared_launcher": "pack_native_cli.py",
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-native-prepared-dispatch-20260913-v1/status.json",
+          "sha256": "8692125a8567b049bfb61eb102b490faa5cc49ae092a6e41436e73561e9a667d"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-native-prepared-dispatch-20260913-v1/artifact-audit.json",
+          "sha256": "614943928d8244b6473b72bf226ea99fdeb7580580c3df35462c82d02c69284c"
+        }
+      ],
+      "limits": "Three-phase prepared dispatch native evidence; launcher preflight separately tested. Not a full all-family pack run."
+    },
+    {
+      "family": "identity",
+      "adapter": "identity-effect-v1",
+      "shared_launcher": "effect_native_launch.py",
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-effect-native-integration-20260913-v1/execution/status.json",
+          "sha256": "cf0b1384f744ff436db4b7a6773f2e7ccb1758eb23d707e87ff9a5659a19305a"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-effect-native-integration-20260913-v1/execution/integration-audit.json",
+          "sha256": "42c4d1ad38c09ee39c52ae708987e6254999470fee1830fcdf017db0a9478a4a"
+        }
+      ],
+      "limits": "One inventory acquisition/cold/correction integration; adapter-specific preparation, not full pack-wide registration."
+    },
+    {
+      "family": "language",
+      "adapter": "language-v1",
+      "shared_launcher": "control_native_launch.py",
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-language-native-integration-20260913-v1/status.json",
+          "sha256": "b182f8a1a1269445f9e42b65643a50015e4ad3d15cebe01cc2b0846b77e99c4b"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-language-native-integration-20260913-v1/summary.json",
+          "sha256": "4e3ac15e545852bdcf90b252750f63993ca72f7f20203329950624a7454c20be"
+        }
+      ],
+      "limits": "Earlier single controls retained. Neutral shared-driver English exclusion and relational composition now verified; authored interpretation, correlated strata, no neural or quota credit.",
+      "neutral_inventory_integration": {
+        "adapter": "inventory-language-neutral-v2",
+        "launcher": "inventory_language_runtime.py",
+        "retained_worlds": 2,
+        "correlated_preparations": 6,
+        "phases": 18,
+        "actual_repairs": 6,
+        "cold_new_repairs": 2,
+        "blocked_no_effect_phases": 12,
+        "independent_world_credit": 0,
+        "evidence": [
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/manifest.json",
+            "sha256": "5df68ba3c2a15a8ce5e415759c60144fc0118a296179802e9a8186cc76adea32"
+          },
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/audit.json",
+            "sha256": "49a3626cb87821cc3def6bcda1fde5376062481ab8f5bed1b94957498554a29b"
+          },
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/execution/status.json",
+            "sha256": "abd417c2b2dbccfbcb92c5bfdd5f8475586d91ae81107fb8822c2e61171ee6de"
+          }
+        ]
+      }
+    },
+    {
+      "family": "ownership",
+      "adapter": "ownership-v1",
+      "shared_launcher": "control_native_launch.py",
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-single-control-integration-20260913-v1/execution/status.json",
+          "sha256": "aa2cbac629aa1c1dfc9e0fd24a774b889ea53e8a5ed73b6529ed202673207486"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-single-control-integration-20260913-v1/execution/integration-audit.json",
+          "sha256": "ff189f31a792b641ac6c8df324aec58f94d54e0b9cbedf36732916fbe6d7be17"
+        }
+      ],
+      "limits": "One owner-correction control; simulated participants. Joint-veto has local adapter tests and earlier dedicated runner evidence.",
+      "neutral_inventory_integration": {
+        "adapter": "inventory-ownership-interaction-v1",
+        "launcher": "ownership_native_launch.py",
+        "worlds": 2,
+        "phases": 4,
+        "public_calls": 57,
+        "verified_simulated_actions": 2,
+        "ownership_returns": 2,
+        "negative_native_controls": false,
+        "qualified_credit": 0,
+        "evidence": [
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/manifest.json",
+            "sha256": "276256f9918543405412c5aca108312f6dd254e86d9e83a8a168ce53b27b293d"
+          },
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/audit.json",
+            "sha256": "d1f1ca370253130d95a0c4f76ebb55aaa230d63c08ba886be0c7df2e59c18b79"
+          },
+          {
+            "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/execution/status.json",
+            "sha256": "1686bab5e38ed8eec7f2a2516632a7bbf63dcebc09fa4cb26b63511592e44569"
+          }
+        ]
+      }
+    },
+    {
+      "family": "perception",
+      "adapter": "spatial-perception-v1",
+      "shared_launcher": "control_native_launch.py",
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-structure-effects-20260913-v1/status.json",
+          "sha256": "f74dc556150495d425114160b76475ebaa8a47da94808853eeb2a3e1248110e7"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-structure-effects-20260913-v1/artifact-audit.json",
+          "sha256": "3dcf2e4b2dd6307711eeb79f36d194546e4dbf60ae8635ba26bc40189e102c8b"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-native-route-20260913-v1/summary.json",
+          "sha256": "0991de987c1d7d614abf3c5a984dcf79ff05b2b0a6af8ee9d984f1f866dac5e5"
+        }
+      ],
+      "limits": "Retained table OCR positive/negative route only; no fresh OCR, procedure/transcript native route or learned perception evidence."
+    },
+    {
+      "family": "recovery",
+      "adapter": "recovery-v1",
+      "shared_launcher": "recovery_pack_launch.py",
+      "dedicated_launcher": "run_recovery_external.py",
+      "shared_dispatch_native_evidence": true,
+      "dedicated_native_execution_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-recovery-external-20260913-v1/summary.json",
+          "sha256": "cd831f89d58243d058922c06ce6c337d23d0e5b055fca140ac9ed36e5c9f9de3"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-recovery-prepared-batch-20260913-v2/independent-audit.json",
+          "sha256": "889179fde34d4de6a74db02efcad08baaffcbab1938b07135db221d8f38e2554"
+        }
+      ],
+      "limits": "Two authored structures, four reference/control conditions; no independent-world or neural credit. Retained-container process recovery only."
+    },
+    {
+      "family": "multi_step_work",
+      "adapter": "inventory-service-neutral-v1",
+      "shared_launcher": "inventory_service_runtime.py",
+      "shared_dispatch_native_evidence": true,
+      "neutral_inventory_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/manifest.json",
+          "sha256": "35d7d863936bc5bd424562f1a406b747cf7835d21d34ce386b5f584f61ccd07f"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/audit.json",
+          "sha256": "61799c61d565e2a08387a7463373b104ebd6695b5d3c151522f1009f74f4b27d"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/execution/status.json",
+          "sha256": "01d0a0fb62590b92f956c8b5a25dc6d3e4f4dd0e416ed17d871e72c65b9cb56c"
+        }
+      ],
+      "limits": "Two retained mechanisms/four correlated preparations; authored planner, no neural or independent-world credit. Twelve-phase allowance closed."
+    },
+    {
+      "family": "tool_choice",
+      "adapter": "retained-tool-effect-neutral-v1",
+      "shared_launcher": "retained_tool_runtime.py",
+      "neutral_inventory_native_evidence": true,
+      "shared_dispatch_native_evidence": true,
+      "independent_world_credit_from_integration": 0,
+      "evidence": [
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-retained-tool-native-20260913-v3/manifest.json",
+          "sha256": "dec37fbfaa485bbf4d39aa313847ca2d3c2681458bd0295d688856998ad7e6c9"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-retained-tool-native-20260913-v3/audit.json",
+          "sha256": "acd3cba1c9fea7f506b3b6da8b450b831468846ea60be837f71cf1d7a0b50aad"
+        },
+        {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-retained-tool-native-20260913-v3/execution/status.json",
+          "sha256": "2a2cb1c238ec74100c932e1570e11ca42baaea86f68ff4b0d9a4439e6d722795"
+        }
+      ],
+      "limits": "Two retained mechanisms, six phases, four goal effects/two no-effect controls. Authored planner; no neural or independent-world credit. Prior failed preparations retained."
+    }
+  ],
+  "qualified_development": 7,
+  "qualified_validation": 7,
+  "short_family_split_quotas": 24,
+  "R1_ready": false,
+  "selected_gap": "Independent generator breadth across twelve-family contract",
+  "coverage_is_not_model_quality": true
+}

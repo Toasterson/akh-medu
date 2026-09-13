@@ -1,0 +1,302 @@
+{
+  "schema": "akh-neutral-full-pack-delivery-v1",
+  "reviewed_at": "2026-09-13T08:26:49.331087+00:00",
+  "rows": [
+    {
+      "family": "acquisition",
+      "existing_routes": "identity-effect-v1; graph-query-v1",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": false,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent breadth/model comparisons; acquisition matched negatives remain open",
+      "public_native_selector_lifecycle_verified": true,
+      "actual_effect_binding_verified": true,
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-typed-selector-integration-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "persistent_recall",
+      "existing_routes": "dedicated recall controls; neutral_transport",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent breadth and matched model comparisons",
+      "public_native_selector_lifecycle_verified": true,
+      "actual_effect_binding_verified": true,
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-typed-selector-integration-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "grounded_reasoning",
+      "existing_routes": "graph-query-v1",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent breadth and matched model comparisons; authored graph/query schema assistance explicit",
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-grounded-native-integration-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "knowledge_revision",
+      "existing_routes": "graph-query-v1; native temporal/causal controls",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent qualified breadth and matched model comparisons; finite support-rule assistance explicit",
+      "host_native_revision_verified": true,
+      "candidate_facing_revision_verified": true,
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-public-revision-integration-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "tool_choice",
+      "existing_routes": "retained-tool-neutral lifecycle; actual sana operation fixture",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent sample qualification and matched model comparisons",
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-retained-tool-native-20260913-v3/audit.json"
+    },
+    {
+      "family": "multi_step_work",
+      "existing_routes": "inventory-service-neutral-v1",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 0,
+      "qualified_validation": 0,
+      "remaining": "Six breadth descriptors lack matched execution in reviewed runtime; topology-preserving source replacement; independent qualification and model comparisons",
+      "qualification_review": "/Users/toasty/ws/akh-medu/runs/akh-r1-retained-service-qualification-20260913-v1/audit.json"
+    },
+    {
+      "family": "novelty_ambiguity",
+      "existing_routes": "dedicated inquiry controls",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Independent breadth, live observation acquisition and matched model comparisons",
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ambiguity-integration-20260913-v1/independent-audit.json",
+      "assistance": "Supplied inquiries and authored mapping/intersection"
+    },
+    {
+      "family": "language_transfer",
+      "existing_routes": "inventory-language-neutral-v2",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 0,
+      "qualified_validation": 0,
+      "remaining": "Broader independent grammar samples and model comparisons"
+    },
+    {
+      "family": "recovery_durability",
+      "existing_routes": "recovery-v1; ExternalRecovery",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 1,
+      "qualified_validation": 1,
+      "remaining": "Finite retained pair passed; independent breadth and broader stale-authority controls remain open",
+      "evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-recovery-artifact-preflight-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "perception_knowledge",
+      "existing_routes": "spatial-perception-v1; dedicated OCR lifecycle",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 0,
+      "qualified_validation": 0,
+      "remaining": "Independent qualified breadth and matched models; retained OCR with fixed regions/schema and authored command assistance; no general visual understanding claim",
+      "supplemental_evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-artifact-preflight-20260913-v1/independent-audit.json"
+    },
+    {
+      "family": "dojo_pressure",
+      "existing_routes": "inventory-ownership-interaction-v1",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": false,
+      "qualified_development": 0,
+      "qualified_validation": 0,
+      "remaining": "Matched native negative controls; independent participant breadth"
+    },
+    {
+      "family": "runtime_command_learning",
+      "existing_routes": "dedicated command lifecycle; neutral_transport",
+      "neutral_inventory_native": true,
+      "neutral_native_negative_controls": true,
+      "qualified_development": 0,
+      "qualified_validation": 0,
+      "remaining": "Finite authored reference and missing-help negative executed; native capability negatives and independent sampling remain open",
+      "evidence": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-command-artifact-preflight-20260913-v2/independent-audit.json"
+    }
+  ],
+  "evidence_hash_checks": [
+    {
+      "family": "graph",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-native-prepared-dispatch-20260913-v1/status.json",
+      "sha256": "8692125a8567b049bfb61eb102b490faa5cc49ae092a6e41436e73561e9a667d",
+      "verified": true
+    },
+    {
+      "family": "graph",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-native-prepared-dispatch-20260913-v1/artifact-audit.json",
+      "sha256": "614943928d8244b6473b72bf226ea99fdeb7580580c3df35462c82d02c69284c",
+      "verified": true
+    },
+    {
+      "family": "identity",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-effect-native-integration-20260913-v1/execution/status.json",
+      "sha256": "cf0b1384f744ff436db4b7a6773f2e7ccb1758eb23d707e87ff9a5659a19305a",
+      "verified": true
+    },
+    {
+      "family": "identity",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-effect-native-integration-20260913-v1/execution/integration-audit.json",
+      "sha256": "42c4d1ad38c09ee39c52ae708987e6254999470fee1830fcdf017db0a9478a4a",
+      "verified": true
+    },
+    {
+      "family": "language",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-language-native-integration-20260913-v1/status.json",
+      "sha256": "b182f8a1a1269445f9e42b65643a50015e4ad3d15cebe01cc2b0846b77e99c4b",
+      "verified": true
+    },
+    {
+      "family": "language",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-language-native-integration-20260913-v1/summary.json",
+      "sha256": "4e3ac15e545852bdcf90b252750f63993ca72f7f20203329950624a7454c20be",
+      "verified": true
+    },
+    {
+      "family": "language",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/manifest.json",
+      "sha256": "5df68ba3c2a15a8ce5e415759c60144fc0118a296179802e9a8186cc76adea32",
+      "verified": true
+    },
+    {
+      "family": "language",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/audit.json",
+      "sha256": "49a3626cb87821cc3def6bcda1fde5376062481ab8f5bed1b94957498554a29b",
+      "verified": true
+    },
+    {
+      "family": "language",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-language-native-20260913-v1/execution/status.json",
+      "sha256": "abd417c2b2dbccfbcb92c5bfdd5f8475586d91ae81107fb8822c2e61171ee6de",
+      "verified": true
+    },
+    {
+      "family": "ownership",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-single-control-integration-20260913-v1/execution/status.json",
+      "sha256": "aa2cbac629aa1c1dfc9e0fd24a774b889ea53e8a5ed73b6529ed202673207486",
+      "verified": true
+    },
+    {
+      "family": "ownership",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-single-control-integration-20260913-v1/execution/integration-audit.json",
+      "sha256": "ff189f31a792b641ac6c8df324aec58f94d54e0b9cbedf36732916fbe6d7be17",
+      "verified": true
+    },
+    {
+      "family": "ownership",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/manifest.json",
+      "sha256": "276256f9918543405412c5aca108312f6dd254e86d9e83a8a168ce53b27b293d",
+      "verified": true
+    },
+    {
+      "family": "ownership",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/audit.json",
+      "sha256": "d1f1ca370253130d95a0c4f76ebb55aaa230d63c08ba886be0c7df2e59c18b79",
+      "verified": true
+    },
+    {
+      "family": "ownership",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-neutral-ownership-launch-20260913-v1/execution/status.json",
+      "sha256": "1686bab5e38ed8eec7f2a2516632a7bbf63dcebc09fa4cb26b63511592e44569",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-structure-effects-20260913-v1/status.json",
+      "sha256": "f74dc556150495d425114160b76475ebaa8a47da94808853eeb2a3e1248110e7",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-structure-effects-20260913-v1/artifact-audit.json",
+      "sha256": "3dcf2e4b2dd6307711eeb79f36d194546e4dbf60ae8635ba26bc40189e102c8b",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-native-route-20260913-v1/summary.json",
+      "sha256": "0991de987c1d7d614abf3c5a984dcf79ff05b2b0a6af8ee9d984f1f866dac5e5",
+      "verified": true
+    },
+    {
+      "family": "recovery",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-recovery-external-20260913-v1/summary.json",
+      "sha256": "cd831f89d58243d058922c06ce6c337d23d0e5b055fca140ac9ed36e5c9f9de3",
+      "verified": true
+    },
+    {
+      "family": "recovery",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-recovery-prepared-batch-20260913-v2/independent-audit.json",
+      "sha256": "889179fde34d4de6a74db02efcad08baaffcbab1938b07135db221d8f38e2554",
+      "verified": true
+    },
+    {
+      "family": "multi_step_work",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/manifest.json",
+      "sha256": "35d7d863936bc5bd424562f1a406b747cf7835d21d34ce386b5f584f61ccd07f",
+      "verified": true
+    },
+    {
+      "family": "multi_step_work",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/audit.json",
+      "sha256": "61799c61d565e2a08387a7463373b104ebd6695b5d3c151522f1009f74f4b27d",
+      "verified": true
+    },
+    {
+      "family": "multi_step_work",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-inventory-service-runtime-20260913-v1/execution/status.json",
+      "sha256": "01d0a0fb62590b92f956c8b5a25dc6d3e4f4dd0e416ed17d871e72c65b9cb56c",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-artifact-preflight-20260913-v1/manifest.json",
+      "sha256": "0725096f9c3898f6e7273936ec4060a66f88260416eee04137ccbba9481cdabc",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-artifact-preflight-20260913-v1/execution-status.json",
+      "sha256": "886f53d850a12018349f01ca0f2c1c4c6c7b14ef6b684ab0cd3e3718edd95b67",
+      "verified": true
+    },
+    {
+      "family": "perception",
+      "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-perception-artifact-preflight-20260913-v1/independent-audit.json",
+      "sha256": "389dfd09cfcff25f2619d59e59c7c8e2fb0239d188962528de0f1b2a9dfe69e4",
+      "verified": true
+    }
+  ],
+  "qualified_development": 7,
+  "qualified_validation": 7,
+  "target_per_split": 100,
+  "R1_ready": false,
+  "new_credit": 0,
+  "remaining_neutral_families": 0,
+  "selected_deliverable": {
+    "scope": "Complete the retained pack provenance index for twelve families using exact episode/source/generator/assistance and execution-audit identities. Separate control correlation groups, preparation-only rows and native evidence; record missing joins and qualification blockers without assigning automatic credit. Existing artifacts only, no new schema framework, draws, tests, models, OCR or execution. Keep service/perception/helper probe lanes closed and all gates unchanged.",
+    "execution_allowed": false
+  },
+  "acceptance": [
+    "All eight retained descriptors load through explicit compatible bindings",
+    "Reject private expected fields in candidate envelope",
+    "Keep current authority witnesses distinct from retained memory",
+    "State per-family scorer and executor readiness honestly",
+    "Preserve frozen seeds and qualification counts",
+    "Declare separate budget before later native batch"
+  ],
+  "public_native_selection_families": 2
+}

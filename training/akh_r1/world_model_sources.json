@@ -1,0 +1,90 @@
+{
+  "schema": "akh-world-model-sources-v1",
+  "sources": [
+    {
+      "id": "ontology",
+      "kind": "local_seed_pack",
+      "path": "/Users/toasty/ws/akh-medu-r1-exam/data/seeds/ontology/seed.toml",
+      "sha256": "74ec744cf37c3cfbce40f11a215d33e0f2ba11641c7836974bd6b3ae0e90976a",
+      "version": "1.0.0",
+      "triples": 30,
+      "status": "available_local",
+      "authority": "general_background_not_live_environment"
+    },
+    {
+      "id": "common-sense",
+      "kind": "local_seed_pack",
+      "path": "/Users/toasty/ws/akh-medu-r1-exam/data/seeds/common-sense/seed.toml",
+      "sha256": "69792d27f2c23ee7fe54c91bef200c155afd3cf469e93bf0e4559b8f824b5043",
+      "version": "1.0.0",
+      "triples": 35,
+      "status": "available_local",
+      "authority": "general_background_not_live_environment"
+    },
+    {
+      "id": "computing",
+      "kind": "local_seed_pack",
+      "path": "/Users/toasty/ws/akh-medu-r1-exam/data/seeds/computing/seed.toml",
+      "sha256": "3c61561e761da2b917b855528d92fdec8ef46c273fa82abcf32d8554c304ada8",
+      "version": "1.0.0",
+      "triples": 90,
+      "status": "available_local",
+      "authority": "general_background_not_live_environment"
+    },
+    {
+      "id": "cyc",
+      "kind": "documented_external_source_or_design",
+      "document": "docs/ai/plans/2026-02-17-phase9-cyc-inspired.md",
+      "document_sha256": "2970d1c8f76312ceecd79794e7b8310a362fcc6f2cd982f1f936c3edff733d6d",
+      "role": "context, defeasible rules and truth maintenance",
+      "status": "documented_no_dataset_import_in_this_slice"
+    },
+    {
+      "id": "wikidata",
+      "kind": "documented_external_source_or_design",
+      "document": "docs/ai/plans/2026-03-27-phase35-t5-training-infrastructure.md",
+      "document_sha256": "6f1d3daa9b96498c47fa5948c53d36b4b8529bf5710c3a775e3dd90da76a1876",
+      "role": "identity and taxonomy",
+      "status": "documented_no_dataset_import_in_this_slice"
+    },
+    {
+      "id": "conceptnet",
+      "kind": "documented_external_source_or_design",
+      "document": "docs/ai/plans/2026-02-17-phase14-bootstrapping.md",
+      "document_sha256": "16dc5a7bea6da1e568d11209d91a6e985d9b47de667ec2a6c1c3cbcf60bb83a3",
+      "role": "commonsense relations and prerequisites",
+      "status": "documented_no_dataset_import_in_this_slice"
+    },
+    {
+      "id": "wikipedia",
+      "kind": "documented_external_source_or_design",
+      "document": "docs/ai/plans/2026-02-17-phase14-bootstrapping.md",
+      "document_sha256": "16dc5a7bea6da1e568d11209d91a6e985d9b47de667ec2a6c1c3cbcf60bb83a3",
+      "role": "source documents",
+      "status": "documented_no_dataset_import_in_this_slice"
+    },
+    {
+      "id": "dbpedia",
+      "kind": "documented_external_source_or_design",
+      "document": "docs/ai/plans/2026-02-17-phase14-bootstrapping.md",
+      "document_sha256": "16dc5a7bea6da1e568d11209d91a6e985d9b47de667ec2a6c1c3cbcf60bb83a3",
+      "role": "identity/category fallback",
+      "status": "documented_no_dataset_import_in_this_slice"
+    }
+  ],
+  "conditions": [
+    "schema_only",
+    "local_seed_packs",
+    "source_supported_operational_rules",
+    "episode_learned_rules"
+  ],
+  "required_tests": [
+    "provenance/version retention",
+    "no current authority or examiner answer in seeds",
+    "prerequisite direction",
+    "context exceptions and correction invalidate derived beliefs",
+    "matched task effect and unsupported-action comparison",
+    "cold transfer and memory cost"
+  ],
+  "external_dataset_evaluation": "Pending pinned snapshots; local packs are not external dataset imports"
+}
