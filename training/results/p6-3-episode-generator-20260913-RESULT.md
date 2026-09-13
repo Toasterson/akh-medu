@@ -268,3 +268,156 @@ modes.
   independently verified by a native speaker.
 - `structured_task_create` was not E2-gated (only `structured_task_update`, per the brief's "and, if the
   engine state supports it cheaply, `structured_task_update`" — create has no precondition to revoke).
+
+## Phase 51 P6.3b — steering sidecar rendered in the base-corpus distribution (2026-09-13)
+
+Scope: branch `p6/3b-in-distribution-siblings` off `t3code/recover-stale-work` (`a870132a`). Coordinator-verified
+problem: the steering sidecar (`<family>/train.sft.jsonl`) that `train_knowledge` mixes into `train_knowledge`
+alongside the base corpus (`runs/checkpoints/local-curricula-v3-8k/sft/tools.train.sft.jsonl`) and the release-gate
+exam (`runs/checkpoints/adaptive-loop-v9-release-recovery-20260910/sentinels/all-tools.json`) was out of
+distribution in three ways: (1) `contract_hash` was this generator's own ad hoc 4-tool snapshot
+(`blake3:8e8da27e…`), not the frozen 53-tool contract the base corpus and exam were built against
+(`blake3:3d6e18bb…`); (2) the prompt was a generator-local renderer with one offered tool, not
+`grug_data::knowledge_workflow::render_knowledge_prompt_with_system` with four OpenAI-shaped tool definitions; (3)
+the user turn used this generator's own TOML templates, not grug-data's tool-curriculum phrase table
+(`crates/grug-data/src/tool_curriculum.rs`).
+
+### What landed
+
+**`crates/grug-data`** (the one exception to "touch only the generator" the brief itself grants, "that crate is
+allowed for this one purpose"):
+
+- `render_request` (`tool_curriculum.rs`) is now `pub fn` — the base tool-contract corpus's own phrase-table
+  renderer (`{name} = {value}` lines, three phrasings per language) was previously private. No behavior change,
+  visibility only.
+- The offered-tool selection inlined in `ToolCurriculumGenerator::generate_for_tools_with_domain` (target tool
+  first, then tool-specific context tools, then shuffled distractors, then a final shuffle) was extracted verbatim
+  into a private `select_offered_indices` helper — a pure refactor (same `StdRng` calls in the same order at the
+  original call site; `fixed_seed_is_byte_deterministic` still passes unchanged) — and a new **`pub fn
+  sample_offered_tools(contracts, target_tool, offered_tool_count, seed)`** wraps it with its own local `StdRng`, so
+  an external caller gets the identical *rule* without needing to replay the base corpus's internal RNG interleave
+  (which depends on argument-sampling order across its entire run and can't be reproduced piecemeal).
+- 13/13 existing `tool_curriculum` tests still pass; `cargo test -p grug-data` (41 passed, 4 ignored) and doctests
+  are green.
+
+**`src/bin/akh_episode_generator.rs`**:
+
+- New `--contracts <contracts.json>` (optional `PathBuf`). `load_frozen_contracts` reads and
+  `ToolContractSnapshot::verify_integrity()`s it (fails closed on a hand-edited/truncated snapshot). Sidecar
+  emission is skipped entirely when absent (documented as such); the primary `<family>.jsonl` files are written
+  either way, with `contract_hash` overlaid to the frozen hash when `--contracts` is given (`overlay_frozen_contract_hash`
+  equivalent inlined in `run()`) — "the primary file may keep the engine-only view but must also carry the frozen
+  hash", per the brief.
+- New `build_sidecar_record` (replaces `to_sft_record`): for a `ToolCall` target it recovers the exact
+  engine-derived arguments via `KnowledgeAction::parse_runtime` (no new field needed — the target string is already
+  the single source of truth), renders the user turn with `grug_data::render_request` over the *frozen* contract's
+  own tool description, samples four offered tools via `grug_data::sample_offered_tools` (target + seeded
+  distractors), assembles the prompt with `grug_data::render_knowledge_prompt_with_system`, and validates the
+  arguments with `ToolContractSnapshot::validate_call` before accepting the record — a failure drops it
+  (`SidecarBuildOutcome::SchemaInvalid`, counted). For a `Gap` target (E2's refusal, reachable only with
+  `--e2-prompt raw-events|projection`) the existing `KnowledgeAction::render_runtime` Gap format is reused as-is
+  (there is only one Gap renderer in grug-data — already true before this change) and the offered-tool set centers
+  the tool that was declined; the E2 evidence phrasing itself has no base-corpus equivalent (`ToolCurriculumGenerator`
+  has no temporal-evidence concept) so it is left as this generator's own template text, unaffected by P6.3b.
+- Per-record determinism: `sidecar_seed(id)` (a BLAKE3-derived `u64` from the record's already-stable `id`) drives
+  both `sample_offered_tools` and `render_request`'s phrasing-variant selection, so sidecar output is a pure
+  function of `--seed`/index — confirmed byte-identical across two full `--count 50` runs (see below).
+- `SidecarWriteStats`/`Manifest` gained `schema_invalid_dropped` (validate_call rejections) alongside the existing
+  `e1_raw_invalid_dropped`, plus `frozen_contracts_path`, `frozen_contract_hash`, `ad_hoc_contract_hash`, and
+  `sidecar_per_family_counts` for full provenance.
+- 17 pre-existing tests updated for the new `write_steering_sidecar`/`build_sidecar_record` signatures (a small
+  4-tool `test_frozen_contracts()` fixture — the boundary case `offered_tool_count == contracts.len() == 4` —
+  stands in for the pod's `contracts.json`) plus one new acceptance test,
+  `sidecar_matches_base_corpus_distribution_per_family`: for each of the four families it builds one primary record
+  and its sidecar counterpart, round-trips a frozen contract through disk via the real `--contracts` loader, and
+  asserts against a **real base-corpus record** generated by grug-data's own `ToolCurriculumGenerator` over the
+  identical frozen snapshot — identical system-prompt preamble up to `# Tools\n`, exactly 4 offered tools each equal
+  to the frozen contract's `openai_definition()` with the target tool present, `contract_hash` equal to the hash
+  read from the round-tripped file (never hardcoded), `validate_call` accepting the target, and the user turn
+  byte-equal to a fresh `render_request` call over the same arguments/language/seed. 18/18 tests green, `cargo
+  clippy --bin akh_episode_generator --features daemon --tests` clean (one `large_enum_variant` warning on the new
+  `SidecarBuildOutcome::Built` fixed by boxing), `cargo fmt` applied to the touched files only.
+
+### Reused vs. replicated (from grug-data)
+
+- **Reused, unmodified:** `KnowledgeAction::render_runtime`/`parse_runtime` (Gap and ToolCall envelopes — already
+  the single canonical renderer before this change), `render_knowledge_prompt_with_system`,
+  `ToolContractSnapshot::validate_call`/`verify_integrity`/`tool`/`openai_definition`.
+- **Made public, unmodified logic:** `render_request` (visibility-only change).
+- **Extracted then reused:** the offered-tool sampling rule (`select_offered_indices`, called by both the existing
+  internal loop and the new `sample_offered_tools`) — this is DRY reuse of the exact algorithm, not a
+  reimplementation from a description of it.
+- **Not reused (none needed):** `note_context_tool_names` only fires for `study_note_append`/`study_note_revise`,
+  neither of which is one of this generator's four target tools, so it is a no-op for every record here and was
+  left untouched/private.
+- **Nothing was replicated by copying strings/logic into the binary.** The one piece of user-facing text that has
+  no base-corpus equivalent — the E2 raw-events/projection temporal-evidence sentence — was left as this
+  generator's own template row, documented above, because grug-data's tool-curriculum has no concept of temporal
+  evidence to reuse or replicate from.
+
+### Real base-corpus/exam artifacts: not reachable on this machine
+
+`runs/` is git-ignored (`.gitignore` line 15: "an absolute path … never committed") and, contrary to the P6.3
+RESULT doc's claim that these files exist "on this Mac", no `runs/checkpoints/local-curricula-v3-8k/`,
+`adaptive-loop-v9-release-recovery-20260910/`, or any `contracts.json`/`tools.train.sft.jsonl`/`all-tools.json` was
+found anywhere reachable from this worktree or its sibling checkouts (`find` across `/Users/toasty` at reasonable
+depth, all worktrees, and `/Volumes` — none). Per the brief's own fallback ("reuse it; if not, replicate it and say
+so"), the acceptance test and the smoke run below both build a `ToolContractSnapshot` from this worktree's own real
+tool manifests (`MemoryWriteTool`/`StructuredTaskCreateTool`/`StructuredTaskUpdateTool`/`ReactorManageTool`) via
+`ToolContractSnapshot::from_serializable` and generate the "real base-corpus record" comparison target with
+grug-data's actual `ToolCurriculumGenerator` against that same snapshot — exercising the real base-corpus code
+path, not a hand-authored fixture, just not the pod's specific 53-tool/`3d6e18bb` snapshot. This is a deliberate,
+documented substitution, not a silent one — the exact `3d6e18bb…` hash from the brief is never claimed to appear
+anywhere in this worktree's output.
+
+### Regenerated corpus (smoke run against the 4-tool stand-in contract)
+
+The brief's exact command references three files absent from this machine (`--contracts
+runs/checkpoints/local-curricula-v3-8k/sft/contracts.json`, `--sentinel runs/p6-3-sentinels-20260913.jsonl`,
+`--sentinel-baseline runs/checkpoints/local-curricula-v3-8k/sft/{tools,knowledge}.train.sft.jsonl`). Ran the
+equivalent with the 4-tool stand-in snapshot in place of the real `contracts.json` and no `--sentinel`/
+`--sentinel-baseline` (honestly reported as 0 loaded, matching the original P6.3 run's precedent):
+
+```
+cargo run --release --bin akh_episode_generator --features daemon -- \
+  --count 2000 --oracle-seeds 8 --seed 20260913 \
+  --contracts <4-tool stand-in contracts.json> \
+  --out-dir training/episodes/p6-3b-20260913-indist
+```
+
+| family | primary records | sidecar records |
+|---|---:|---:|
+| `tool_contract.memory_write` | 2000 | 2000 |
+| `tool_contract.structured_task_create` | 2000 | 2000 |
+| `tool_contract.structured_task_update` | 2000 | 2000 |
+| `tool_contract.reactor_manage` (5 languages) | 2000 | 1200 (en/de/fr only, per the existing IT/ES exclusion) |
+| oracle | 24 | — (no sidecar for this family) |
+
+Decontamination (`training/episodes/p6-3b-20260913-indist/manifest.json`): 0 sentinel files, 0 baseline files, 8,024
+records checked, 0 dropped exact, 0 dropped ngram — honest given no sentinel corpus is reachable here.
+`sidecar_schema_invalid_dropped: 0`, `e1_raw_invalid_dropped_from_sidecar: 0`. `frozen_contract_hash` and
+`ad_hoc_contract_hash` are both `blake3:8e8da27e…` in this run because the stand-in snapshot and the internal
+4-tool ad hoc snapshot happen to be the same four tools — in a real run against the pod's 53-tool `contracts.json`
+these two hashes would differ (frozen = `3d6e18bb…`, ad hoc = `8e8da27e…`), which is exactly the distribution
+mismatch this change fixes. Determinism verified directly: two independent `--count 50` runs against the same
+stand-in contract produced byte-identical `memory_write.jsonl`, `memory_write/train.sft.jsonl`,
+`reactor_manage/train.sft.jsonl`, and `structured_task_create/train.sft.jsonl`.
+
+Spot-checked one `memory_write` sidecar record's rendering directly: system prompt is
+`"...\n\n# Tools\n[...]\n\nTo call a tool, emit <tool_call>..."` (the canonical `render_knowledge_prompt_with_system`
+text), 4 offered tools with `memory_write` among them, user turn `"Perform this operation: Record one episodic
+memory (summary + distilled facts). ...\nUse these exact inputs:\n- facts = [{"object":"...","predicate":"has-field","subject":"..."}]\n- source = "..."\n- summary = "..."\n- tags = ["copy-fidelity"]"` — grug-data's own
+phrase table and compact-JSON nested-value rendering, not this generator's prior ad hoc prompt.
+
+### Deviations from the brief
+
+- The exact regenerate command in the brief could not be run verbatim (its three input files are not present on
+  this machine); ran the documented equivalent above instead.
+- The acceptance test compares against a `ToolCurriculumGenerator`-generated record rather than a static
+  `tools.train.sft.jsonl`/`all-tools.json` line, for the same reason (files not reachable) — see "Real
+  base-corpus/exam artifacts" above.
+- `sample_offered_tools` takes its own `seed: u64` and constructs a local `StdRng` rather than accepting an
+  external `&mut StdRng`, so it cannot literally replay a specific base-corpus record's own distractor draw
+  (which depends on that corpus's full-run RNG interleave); it reproduces the same *rule*, deterministically, from
+  the caller's own record identity instead. The acceptance criteria (offered-tool count, target presence, exact
+  `openai_definition()` equality) do not depend on matching a specific historical draw.

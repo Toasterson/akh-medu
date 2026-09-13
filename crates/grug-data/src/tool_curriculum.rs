@@ -225,33 +225,14 @@ impl ToolCurriculumGenerator {
                         &format!("{:08x}", rng.r#gen::<u32>()),
                     ),
                 };
-                let mut offered_indices = vec![tool_index];
                 let context_tool_names = note_context_tool_names(&contract.name, &self.contracts);
-                for context_tool in &context_tool_names {
-                    if offered_indices.len() >= self.offered_tool_count {
-                        break;
-                    }
-                    if let Some(index) = self
-                        .contracts
-                        .tools
-                        .iter()
-                        .position(|candidate| candidate.name == *context_tool)
-                        && !offered_indices.contains(&index)
-                    {
-                        offered_indices.push(index);
-                    }
-                }
-                let mut distractors: Vec<_> = (0..self.contracts.tools.len())
-                    .filter(|index| !offered_indices.contains(index))
-                    .collect();
-                distractors.shuffle(&mut rng);
-                offered_indices.extend(
-                    distractors.into_iter().take(
-                        self.offered_tool_count
-                            .saturating_sub(offered_indices.len()),
-                    ),
+                let offered_indices = select_offered_indices(
+                    &self.contracts,
+                    tool_index,
+                    self.offered_tool_count,
+                    &context_tool_names,
+                    &mut rng,
                 );
-                offered_indices.shuffle(&mut rng);
                 let tools: Vec<_> = offered_indices
                     .iter()
                     .map(|index| self.contracts.tools[*index].openai_definition())
@@ -1380,6 +1361,99 @@ fn offered_tool_names(tools: &[Value]) -> Result<BTreeSet<String>, ToolCurriculu
 /// in the normal four-tool surface when space permits and always represented
 /// in the final-write conversation, matching the preceding rounds that led to
 /// this training target.
+/// Target tool first, then any tool-specific context tools (e.g.
+/// `study_note_read` for `study_note_revise`), then shuffled distractors up
+/// to `offered_tool_count`, then a final shuffle of the whole set. Factored
+/// out of [`ToolCurriculumGenerator::generate_for_tools_with_domain`]'s
+/// inline loop body so [`sample_offered_tools`] can reuse the *exact* rule
+/// without duplicating it — both call sites thread the same `StdRng` calls
+/// in the same order, so this is a pure extraction, not a re-implementation.
+fn select_offered_indices(
+    contracts: &ToolContractSnapshot,
+    tool_index: usize,
+    offered_tool_count: usize,
+    context_tool_names: &[String],
+    rng: &mut StdRng,
+) -> Vec<usize> {
+    let mut offered_indices = vec![tool_index];
+    for context_tool in context_tool_names {
+        if offered_indices.len() >= offered_tool_count {
+            break;
+        }
+        if let Some(index) = contracts
+            .tools
+            .iter()
+            .position(|candidate| candidate.name == *context_tool)
+            && !offered_indices.contains(&index)
+        {
+            offered_indices.push(index);
+        }
+    }
+    let mut distractors: Vec<_> = (0..contracts.tools.len())
+        .filter(|index| !offered_indices.contains(index))
+        .collect();
+    distractors.shuffle(rng);
+    offered_indices.extend(
+        distractors
+            .into_iter()
+            .take(offered_tool_count.saturating_sub(offered_indices.len())),
+    );
+    offered_indices.shuffle(rng);
+    offered_indices
+}
+
+/// Sample an offered-tool set (the target tool plus deterministic
+/// distractors) using exactly [`ToolCurriculumGenerator`]'s own rule (see
+/// [`select_offered_indices`]), for callers that render training siblings
+/// against a frozen [`ToolContractSnapshot`] outside this generator's own
+/// corpus loop — e.g. `akh_episode_generator`'s in-distribution steering
+/// sidecar (Phase 51 P6.3b), which must offer the same four-tool budget
+/// (target + seeded distractors) the base tool-contract corpus offers so a
+/// consumer can't discriminate the sibling by tool-count alone.
+///
+/// `seed` drives an independent `StdRng` local to this call (not the
+/// generator's own continuous stream) so an external caller gets fully
+/// reproducible output from just its own record identity, without needing
+/// to replay `ToolCurriculumGenerator`'s internal RNG interleave (which
+/// depends on argument sampling order across the *entire* base corpus).
+pub fn sample_offered_tools(
+    contracts: &ToolContractSnapshot,
+    target_tool: &str,
+    offered_tool_count: usize,
+    seed: u64,
+) -> Result<Vec<Value>, ToolCurriculumError> {
+    contracts.verify_integrity()?;
+    if offered_tool_count == 0 || offered_tool_count > contracts.tools.len() {
+        return Err(ToolCurriculumError::InvalidConfig(format!(
+            "offered tool count must be in 1..={}, got {offered_tool_count}",
+            contracts.tools.len()
+        )));
+    }
+    let tool_index = contracts
+        .tools
+        .iter()
+        .position(|tool| tool.name == target_tool)
+        .ok_or_else(|| {
+            ToolCurriculumError::InvalidConfig(format!(
+                "tool `{target_tool}` is absent from snapshot {}",
+                contracts.manifest_hash
+            ))
+        })?;
+    let context_tool_names = note_context_tool_names(target_tool, contracts);
+    let mut rng = StdRng::seed_from_u64(seed);
+    let offered_indices = select_offered_indices(
+        contracts,
+        tool_index,
+        offered_tool_count,
+        &context_tool_names,
+        &mut rng,
+    );
+    Ok(offered_indices
+        .iter()
+        .map(|index| contracts.tools[*index].openai_definition())
+        .collect())
+}
+
 fn note_context_tool_names(target_tool: &str, contracts: &ToolContractSnapshot) -> Vec<String> {
     if !matches!(target_tool, "study_note_append" | "study_note_revise") {
         return Vec::new();
@@ -1751,7 +1825,19 @@ fn canonicalize_runtime_json(value: Value) -> Result<Value, ToolCurriculumError>
         .map_err(|error| ToolCurriculumError::Generate(error.to_string()))
 }
 
-fn render_request(
+/// Render the base tool-contract corpus's own user-turn phrasing: the
+/// tool's `description`'s first line as the intent label, then every
+/// top-level `arguments` entry as an `- {name} = {value}` line (`{value}`
+/// is `serde_json::Value`'s compact-JSON `Display`, so nested arrays/objects
+/// render as inline JSON — e.g. `memory_write`'s `facts` array). `variant`
+/// selects one of three phrasings per language (`variant % 3`); language
+/// selection is the caller's responsibility (this only picks the phrasing
+/// *within* a language). Exposed so callers outside
+/// [`ToolCurriculumGenerator`] (e.g. `akh_episode_generator`'s P6.3b
+/// in-distribution steering sidecar) can render a user turn that is
+/// byte-for-byte in the base corpus's distribution rather than
+/// reimplementing this phrase table.
+pub fn render_request(
     language: WorkflowLanguage,
     description: &str,
     arguments: &Value,

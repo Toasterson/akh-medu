@@ -19,6 +19,9 @@ runs/
 # and its training/episodes/templates/*.toml inputs are committed; the
 # generated training/episodes/<run>/ directories are not.
 training/episodes/p6-3-20260913/
+# Phase 51 P6.3b: in-distribution steering-sidecar smoke run (also
+# regeneratable from the generator + `--seed` + `--contracts`).
+training/episodes/p6-3b-20260913-indist/
 
 # Python bytecode caches (scripts/, benchmarks/*.py harness drivers).
 __pycache__/
