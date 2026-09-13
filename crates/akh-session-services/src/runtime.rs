@@ -2,7 +2,7 @@
 use crate::{
     config::{Config, Principal, RuntimeProfile},
     http::Client,
-    store::{Store, key},
+    store::{Store, Transaction, key},
     types::*,
 };
 use serde::{Deserialize, Serialize};
@@ -148,15 +148,34 @@ pub struct Runtime {
 fn job_key(id: &str) -> String {
     key("job", &[id])
 }
+fn unknown_since_key(id: &str) -> String {
+    key("unknown_since", &[id])
+}
+/// Record the first time this job's outcome became unknown, if not already
+/// recorded. Idempotent across repeated restarts so a job that is still
+/// `Unknown` after several redeploys does not keep resetting its own
+/// staleness clock back to "just now" (see `resolve_stale_unknown_jobs`).
+fn note_unknown_since(tx: &mut Transaction<'_>, id: &str) -> Result<()> {
+    if tx.get::<u64>(&unknown_since_key(id))?.is_none() {
+        tx.put(&unknown_since_key(id), &now_ms())?;
+    }
+    Ok(())
+}
 
 impl Runtime {
     pub fn new(config: Arc<Config>, store: Store) -> Result<Self> {
         store.transaction(|tx| {
             for mut job in tx.scan::<RuntimeJob>("job/")? {
-                if !job.status.terminal() {
+                // Already-Unknown jobs are left alone here: re-marking them
+                // would be a no-op status-wise, but must never touch their
+                // `unknown_since` clock, or a runtime that keeps crash-looping
+                // could make its own quarantined jobs look perpetually fresh
+                // and never eligible for `resolve_stale_unknown_jobs`.
+                if !job.status.terminal() && job.status != TurnStatus::Unknown {
                     job.status = TurnStatus::Unknown;
                     job.error = Some(Fault::new("unknown_outcome", "runtime restarted before a durable terminal result; inspect provider continuation and execution receipts"));
                     tx.put(&job_key(&job.request.id), &job)?;
+                    note_unknown_since(tx, &job.request.id)?;
                 }
             } Ok(())
         })?;
@@ -165,6 +184,45 @@ impl Runtime {
             config,
             store,
             active: Default::default(),
+        })
+    }
+    /// Automatic, evidence-free closure of a job whose outcome has been
+    /// unknown for longer than the configured stall threshold. This never
+    /// claims success — it only ever transitions `Unknown` -> `Failed` — so
+    /// it cannot corrupt history the way a mistaken admin `reconcile` call
+    /// claiming `Completed` could; that endpoint still exists for a human who
+    /// has actual evidence. Without this sweep, one lost job (this process
+    /// restarting mid-turn, or its worker panicking) permanently quarantines
+    /// every future job for the same Akh: `submit` below refuses to admit any
+    /// new job while any job on this runtime stays `Unknown`.
+    pub fn resolve_stale_unknown_jobs(&self) -> Result<Vec<String>> {
+        let active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        let threshold = self.config.session_stall_threshold_ms;
+        let now = now_ms();
+        self.store.transaction(|tx| {
+            let mut resolved = vec![];
+            for mut job in tx.scan::<RuntimeJob>("job/")? {
+                if job.status != TurnStatus::Unknown || active.contains_key(&job.request.id) {
+                    continue;
+                }
+                let Some(since) = tx.get::<u64>(&unknown_since_key(&job.request.id))? else {
+                    // No recorded clock (e.g. a record from before this sweep
+                    // existed): start the clock now rather than guessing.
+                    note_unknown_since(tx, &job.request.id)?;
+                    continue;
+                };
+                if now.saturating_sub(since) < threshold {
+                    continue;
+                }
+                job.status = TurnStatus::Failed;
+                job.error = Some(Fault::new(
+                    "unknown_outcome",
+                    "runtime automatically closed this job after its outcome stayed unknown past the reconciliation stall threshold; no completion was ever inferred",
+                ));
+                tx.put(&job_key(&job.request.id), &job)?;
+                resolved.push(job.request.id.clone());
+            }
+            Ok(resolved)
         })
     }
     pub fn get(&self, id: &str) -> Result<RuntimeJob> {
@@ -291,7 +349,11 @@ impl Runtime {
                         ));
                     }
                 }
-                tx.put(&job_key(&request.id), &job)
+                tx.put(&job_key(&request.id), &job)?;
+                if job.status == TurnStatus::Unknown {
+                    note_unknown_since(tx, &request.id)?;
+                }
+                Ok(())
             });
             if let Err(error) = saved {
                 tracing::error!(job=%request.id, code=%error.code, "failed to save runtime result");
@@ -470,5 +532,175 @@ impl akh_runtime::Host for RemoteHost {
     }
     fn question(&mut self, id: &str, questions: &Value) -> std::result::Result<Value, String> {
         self.callback("/v1/runtime/input", json!({"call":self.call(id, "question", questions.clone()),"kind":"question","prompt":questions}))?.response.ok_or_else(||"question has no answer".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(dir: &std::path::Path) -> Arc<Config> {
+        Arc::new(
+            serde_json::from_value(json!({
+                "service_id": "runtime-1",
+                "listen": "127.0.0.1:0",
+                "data_dir": dir,
+                "principals": [{"id": "sessions", "token_file": "/not-read-by-runtime-tests", "roles": ["session"], "akhs": []}],
+                "session_stall_threshold_ms": 1_000
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn request(id: &str) -> RuntimeJobRequest {
+        RuntimeJobRequest {
+            id: id.into(),
+            session_id: "session-1".into(),
+            turn_id: "turn-1".into(),
+            generation: 1,
+            binding: RuntimeBinding {
+                runtime: "runtime-1".into(),
+                profile: "claude".into(),
+                revision: "1".into(),
+                kind: RuntimeKind::Claude,
+                model: None,
+                execution_mode: ExecutionMode::Brokered,
+            },
+            workspace: WorkspaceBinding {
+                id: "workspace".into(),
+                sandbox_id: "sandbox".into(),
+                executor: "executor".into(),
+                generation: 1,
+                site: "test".into(),
+                root: "/workspaces/test".into(),
+                platform: "linux".into(),
+                confinement: "fixture".into(),
+            },
+            provider_session: None,
+            input: TurnInput {
+                origin: InputOrigin::Human {
+                    principal: "user".into(),
+                },
+                text: "hello".into(),
+                data: None,
+                artifacts: vec![],
+            },
+            instructions: "be useful".into(),
+            tools: vec![],
+            approval_policy: ApprovalPolicy::AskWrites,
+        }
+    }
+
+    fn unknown_job(id: &str) -> RuntimeJob {
+        RuntimeJob {
+            request: request(id),
+            status: TurnStatus::Unknown,
+            provider_session: None,
+            output: None,
+            error: None,
+            events: vec![],
+        }
+    }
+
+    /// The exact incident this sweep exists for: a job left `Running` when the
+    /// process died is marked `Unknown` at the next `Runtime::new`, and stays
+    /// that way — quarantining the whole runtime via `submit`'s check — until
+    /// this sweep closes it out, well past the stall threshold.
+    #[test]
+    fn restart_marks_running_jobs_unknown_and_the_sweep_leaves_them_alone_before_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(
+                    &job_key("job-1"),
+                    &RuntimeJob {
+                        request: request("job-1"),
+                        status: TurnStatus::Running,
+                        provider_session: None,
+                        output: None,
+                        error: None,
+                        events: vec![],
+                    },
+                )
+            })
+            .unwrap();
+        let runtime = Runtime::new(cfg, store).unwrap();
+        assert_eq!(runtime.get("job-1").unwrap().status, TurnStatus::Unknown);
+        assert!(
+            runtime.resolve_stale_unknown_jobs().unwrap().is_empty(),
+            "an unknown job younger than the stall threshold must not be force-closed"
+        );
+        assert_eq!(runtime.get("job-1").unwrap().status, TurnStatus::Unknown);
+    }
+
+    #[test]
+    fn sweep_closes_a_job_unknown_past_the_stall_threshold_and_only_that_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("stale"), &unknown_job("stale"))?;
+                tx.put(&unknown_since_key("stale"), &(now_ms() - 60_000))?;
+                tx.put(&job_key("fresh"), &unknown_job("fresh"))?;
+                tx.put(&unknown_since_key("fresh"), &now_ms())
+            })
+            .unwrap();
+        let runtime = Runtime::new(cfg, store).unwrap();
+        let resolved = runtime.resolve_stale_unknown_jobs().unwrap();
+        assert_eq!(resolved, vec!["stale".to_string()]);
+        assert_eq!(runtime.get("stale").unwrap().status, TurnStatus::Failed);
+        assert_eq!(runtime.get("fresh").unwrap().status, TurnStatus::Unknown);
+    }
+
+    #[test]
+    fn sweep_never_closes_a_job_whose_worker_is_still_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("live"), &unknown_job("live"))?;
+                tx.put(&unknown_since_key("live"), &(now_ms() - 60_000))
+            })
+            .unwrap();
+        let runtime = Runtime::new(cfg, store).unwrap();
+        runtime
+            .active
+            .lock()
+            .unwrap()
+            .insert("live".into(), Arc::new(AtomicBool::new(false)));
+        assert!(runtime.resolve_stale_unknown_jobs().unwrap().is_empty());
+        assert_eq!(runtime.get("live").unwrap().status, TurnStatus::Unknown);
+    }
+
+    /// A crash-looping runtime must not reset its own quarantined jobs' clocks
+    /// back to "just now" on every restart, or the stale-job sweep could never
+    /// catch up and the quarantine (see `submit`) would never clear.
+    #[test]
+    fn repeated_restarts_do_not_reset_the_unknown_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let store = Store::open(&dir.path().join("state.redb")).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("job-1"), &unknown_job("job-1"))?;
+                tx.put(&unknown_since_key("job-1"), &(now_ms() - 60_000))
+            })
+            .unwrap();
+        let store = {
+            // Simulate a second restart before reconciliation ever runs.
+            drop(Runtime::new(cfg.clone(), store).unwrap());
+            Store::open(&dir.path().join("state.redb")).unwrap()
+        };
+        let runtime = Runtime::new(cfg, store).unwrap();
+        let resolved = runtime.resolve_stale_unknown_jobs().unwrap();
+        assert_eq!(
+            resolved,
+            vec!["job-1".to_string()],
+            "the original unknown_since must survive repeated restarts"
+        );
     }
 }

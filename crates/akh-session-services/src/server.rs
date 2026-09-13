@@ -9,7 +9,7 @@ use crate::{config::Config, http, store::Store, types::SCHEMA_VERSION};
 use axum::routing::post;
 use axum::{Json, Router, extract::DefaultBodyLimit, routing::get};
 use serde_json::json;
-#[cfg(any(feature = "session", feature = "events"))]
+#[cfg(any(feature = "session", feature = "runtime", feature = "events"))]
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 #[cfg(feature = "session")]
@@ -88,6 +88,26 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         "akhrtd" => {
             let runtime = Runtime::new(config.clone(), store)?;
             runtime_cleanup = Some(runtime.clone());
+            let worker = runtime.clone();
+            let interval = Duration::from_millis(config.reconciliation_interval_ms);
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    match worker.resolve_stale_unknown_jobs() {
+                        Ok(resolved) => {
+                            for id in resolved {
+                                tracing::warn!(
+                                    job = %id,
+                                    "runtime automatically closed a job whose outcome stayed unknown past the reconciliation stall threshold"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(code=%error.code, "stale runtime job reconciliation failed")
+                        }
+                    }
+                    tokio::time::sleep(interval).await;
+                }
+            }));
             runtime_router(runtime)
         }
         #[cfg(feature = "executor")]

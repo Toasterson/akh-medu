@@ -77,6 +77,22 @@ fn authorize(session: &SessionRecord, principal: &Principal) -> Result<()> {
     Ok(())
 }
 
+/// Has this session gone dark for longer than the configured stall
+/// threshold? Pure so the boundary cases (exactly at the threshold, a clock
+/// that appears to have gone backwards) have unit tests independent of the
+/// store and the tokio dispatcher.
+pub fn is_stalled(last_progress_at_ms: u64, now_ms: u64, threshold_ms: u64) -> bool {
+    now_ms.saturating_sub(last_progress_at_ms) >= threshold_ms
+}
+
+/// Has enough time passed since retirement was requested that a still-
+/// unconfirmed cancellation should be treated as an unreachable runtime
+/// rather than one still in flight?
+pub fn should_force_cancel(retirement_at_ms: u64, now_ms: u64, grace_ms: u64) -> bool {
+    now_ms.saturating_sub(retirement_at_ms) >= grace_ms
+}
+
+
 /// Validate without writing. Only semantic failures from this phase may become
 /// negative receipts; a storage failure must roll the whole transaction back.
 fn prepare_response(
@@ -177,8 +193,39 @@ pub fn append_event(
         &key("event", &[&session.id, &format!("{:020}", event.sequence)]),
         &event,
     )?;
+    // Every durable mutation is witnessed here, so this is the single place
+    // that can prove a session is still moving. See `last_progress_at`.
+    session.last_progress_at = event.at;
     tx.put(&record_key(&session.id), session)?;
     Ok(event)
+}
+
+/// Shared tail of every retirement path (operator-requested or system-forced):
+/// record the intent and request cancellation of whatever turns are still
+/// outstanding. Queued turns have no provider to wait on, so they close
+/// immediately; anything already dispatched only gets `cancel_requested` and
+/// waits for `force_cancel_unreachable`/the runtime to confirm it.
+fn cancel_outstanding_turns(tx: &mut Transaction<'_>, session: &mut SessionRecord) -> Result<()> {
+    for index in 0..session.turns.len() {
+        let turn = &mut session.turns[index];
+        if turn.status.terminal() || turn.cancel_requested {
+            continue;
+        }
+        turn.cancel_requested = true;
+        if turn.status == TurnStatus::Queued {
+            turn.status = TurnStatus::Cancelled;
+        }
+        let id = turn.id.clone();
+        let status = turn.status;
+        append_event(
+            tx,
+            session,
+            Some(&id),
+            "cancel_requested",
+            json!({"status":status}),
+        )?;
+    }
+    Ok(())
 }
 
 impl Sessions {
@@ -224,27 +271,107 @@ impl Sessions {
                 "session_retiring",
                 encode(&retirement)?,
             )?;
-            for index in 0..session.turns.len() {
-                let turn = &mut session.turns[index];
-                if turn.status.terminal() || turn.cancel_requested {
-                    continue;
-                }
-                turn.cancel_requested = true;
-                if turn.status == TurnStatus::Queued {
-                    turn.status = TurnStatus::Cancelled;
-                }
-                let id = turn.id.clone();
-                let status = turn.status;
-                append_event(
-                    tx,
-                    &mut session,
-                    Some(&id),
-                    "cancel_requested",
-                    json!({"status":status}),
-                )?;
-            }
+            cancel_outstanding_turns(tx, &mut session)?;
             crate::session_publication::cancel_unsent(tx, id)?;
             Ok(retirement)
+        })
+    }
+
+    /// System-initiated retirement, used when akhsessd itself must guarantee a
+    /// terminal outcome even though no external caller (Anima, the relay) has
+    /// asked for one — a permanently expired workspace lease, or a session
+    /// that stopped making progress. Idempotent: a no-op once retirement (of
+    /// any kind) is already recorded, so it is safe to call on every
+    /// reconciliation pass.
+    pub fn force_retire(&self, id: &str, reason: &str) -> Result<()> {
+        self.store.transaction(|tx| {
+            let mut session = load(tx, id)?;
+            if session.closed_at.is_some() || session.retirement.is_some() {
+                return Ok(());
+            }
+            let retirement = SessionRetirement {
+                request: RetireSession {
+                    request_id: format!("system-retire-{}", new_id()),
+                    reason: reason.into(),
+                },
+                principal: "system".into(),
+                at: now_ms(),
+            };
+            session.retirement = Some(retirement.clone());
+            append_event(
+                tx,
+                &mut session,
+                None,
+                "session_retiring",
+                encode(&retirement)?,
+            )?;
+            cancel_outstanding_turns(tx, &mut session)?;
+            crate::session_publication::cancel_unsent(tx, id)?;
+            Ok(())
+        })
+    }
+
+    /// A turn that was asked to cancel but never confirmed terminal blocks
+    /// retirement forever if the runtime that owns it is unreachable (a
+    /// cross-cluster runner, a rescheduled pod, a severed WireGuard tunnel).
+    /// After a bounded grace period past the retirement request, treat "no
+    /// confirmation arrived" the same way the dispatch loop already treats a
+    /// runtime that lost a job: an explicit unknown-provider-outcome, closed
+    /// locally so the session is not held hostage by a runtime that may never
+    /// answer again.
+    pub fn force_cancel_unreachable(&self, id: &str, grace_ms: u64) -> Result<()> {
+        self.store.transaction(|tx| {
+            let mut session = load(tx, id)?;
+            if session.closed_at.is_some() {
+                return Ok(());
+            }
+            let Some(retirement) = session.retirement.clone() else {
+                return Ok(());
+            };
+            if !should_force_cancel(retirement.at, now_ms(), grace_ms) {
+                return Ok(());
+            }
+            for index in 0..session.turns.len() {
+                let turn = &mut session.turns[index];
+                if turn.status.terminal() || !turn.cancel_requested {
+                    continue;
+                }
+                turn.status = TurnStatus::Cancelled;
+                turn.error = Some(Fault::new(
+                    "unknown_outcome",
+                    "runtime did not confirm cancellation before the retirement grace period elapsed; ownership released locally",
+                ));
+                let turn_id = turn.id.clone();
+                append_event(tx, &mut session, Some(&turn_id), "cancel_forced", json!({}))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Close a retiring session once every turn has reached a terminal state,
+    /// without depending on whichever external caller requested retirement
+    /// still being reachable — the relay may never come back. Returns whether
+    /// this call is the one that closed it, so the dispatcher can log it.
+    pub fn finalize_retirement_if_ready(&self, id: &str) -> Result<bool> {
+        self.store.transaction(|tx| {
+            let mut session = load(tx, id)?;
+            if session.closed_at.is_some() || session.retirement.is_none() {
+                return Ok(false);
+            }
+            if session.turns.iter().any(|turn| !turn.status.terminal()) {
+                return Ok(false);
+            }
+            crate::session_publication::ensure_settled(tx, id)?;
+            session.closed_at = Some(now_ms());
+            session.controller = None;
+            append_event(
+                tx,
+                &mut session,
+                None,
+                "session_archived",
+                json!({"forced": true}),
+            )?;
+            Ok(true)
         })
     }
 
@@ -430,6 +557,8 @@ impl Sessions {
             provider_session: None,
             controller: None,
             created_at: now_ms(),
+            last_progress_at: now_ms(),
+            dispatch_failures: 0,
         };
         tx.put(
             &dedupe,
@@ -1360,5 +1489,30 @@ impl Sessions {
             )?;
             Ok(admission)
         })
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    #[test]
+    fn stall_threshold_is_inclusive_at_the_boundary() {
+        assert!(!is_stalled(1_000, 1_000 + 899_999, 900_000));
+        assert!(is_stalled(1_000, 1_000 + 900_000, 900_000));
+        assert!(is_stalled(1_000, 1_000 + 900_001, 900_000));
+    }
+
+    #[test]
+    fn stall_check_never_underflows_when_progress_is_after_now() {
+        // Clocks can appear to move backwards across a pod reschedule; the
+        // check must never panic or wrap around to "extremely stalled".
+        assert!(!is_stalled(10_000, 5_000, 900_000));
+    }
+
+    #[test]
+    fn force_cancel_waits_out_the_grace_period() {
+        assert!(!should_force_cancel(1_000, 1_000 + 119_999, 120_000));
+        assert!(should_force_cancel(1_000, 1_000 + 120_000, 120_000));
     }
 }
