@@ -2,7 +2,7 @@
 #
 # Data-only file (see memory_write.toml header for the rule this follows).
 #
-# Placeholders: {title} {due} {id} {priority}
+# Placeholders: {title} {due} {id} {priority} {grant_time} {revoke_time}
 schema_version = 1
 
 [[template]]
@@ -22,3 +22,31 @@ family = "structured_task_update"
 kind = "update_priority"
 language = "en"
 text = "The task \"{title}\" (id {id}) needs its priority changed to {priority}."
+
+# P6.5/E2: raw-events lists the raw open/close event timestamps (the E2
+# control); projection states the event-calculus `holds_at` current-truth
+# projection instead (the E2 treatment). Only English — this family has no
+# other language rows today (see `update_priority` above).
+[[template]]
+family = "structured_task_update"
+kind = "update_priority_raw_events_open"
+language = "en"
+text = "The task \"{title}\" (id {id}) was opened at t={grant_time} and never closed. Its priority needs changing to {priority}."
+
+[[template]]
+family = "structured_task_update"
+kind = "update_priority_raw_events_closed"
+language = "en"
+text = "The task \"{title}\" (id {id}) was opened at t={grant_time} and closed at t={revoke_time}. Its priority needs changing to {priority}."
+
+[[template]]
+family = "structured_task_update"
+kind = "update_priority_projection_open"
+language = "en"
+text = "The task \"{title}\" (id {id}) is currently open. Its priority needs changing to {priority}."
+
+[[template]]
+family = "structured_task_update"
+kind = "update_priority_projection_closed"
+language = "en"
+text = "The task \"{title}\" (id {id}) is currently closed. Its priority needs changing to {priority}."

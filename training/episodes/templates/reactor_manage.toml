@@ -7,7 +7,14 @@
 # 8k-lane failure was a malformed envelope on at least one non-English
 # request, not a translation problem.
 #
-# Placeholders: {name} {every_seconds}
+# Placeholders: {name} {every_seconds} {grant_time} {revoke_time}
+#
+# The `add_raw_events_*`/`add_projection_*` kinds are P6.5/E2: the raw-events
+# rows spell out the raw grant/(revoke) timestamps (the E2 control); the
+# projection rows state the event-calculus `holds_at` current-truth
+# projection instead (the E2 treatment). Both come in granted/revoked pairs
+# because the generator picks the row that matches the episode's actual
+# temporal-validity outcome — it never composes the sentence itself.
 schema_version = 1
 
 [[template]]
@@ -69,3 +76,123 @@ family = "reactor_manage"
 kind = "enable"
 language = "es"
 text = "Activa la programacion \"{name}\" ahora que la autorizacion ha sido confirmada."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_granted"
+language = "en"
+text = "Authorization for \"{name}\" was granted at t={grant_time}. Schedule it to run every {every_seconds} seconds starting now."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_granted"
+language = "de"
+text = "Die Genehmigung fuer \"{name}\" wurde bei t={grant_time} erteilt. Plane es so, dass es ab sofort alle {every_seconds} Sekunden laeuft."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_granted"
+language = "fr"
+text = "L'autorisation pour \"{name}\" a ete accordee a t={grant_time}. Planifie qu'il s'execute toutes les {every_seconds} secondes des maintenant."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_granted"
+language = "it"
+text = "L'autorizzazione per \"{name}\" e stata concessa a t={grant_time}. Pianifica in modo che venga eseguito ogni {every_seconds} secondi a partire da ora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_granted"
+language = "es"
+text = "La autorizacion para \"{name}\" fue concedida en t={grant_time}. Programa para que se ejecute cada {every_seconds} segundos a partir de ahora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_revoked"
+language = "en"
+text = "Authorization for \"{name}\" was granted at t={grant_time} and revoked at t={revoke_time}. Schedule it to run every {every_seconds} seconds starting now."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_revoked"
+language = "de"
+text = "Die Genehmigung fuer \"{name}\" wurde bei t={grant_time} erteilt und bei t={revoke_time} widerrufen. Plane es so, dass es ab sofort alle {every_seconds} Sekunden laeuft."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_revoked"
+language = "fr"
+text = "L'autorisation pour \"{name}\" a ete accordee a t={grant_time} et revoquee a t={revoke_time}. Planifie qu'il s'execute toutes les {every_seconds} secondes des maintenant."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_revoked"
+language = "it"
+text = "L'autorizzazione per \"{name}\" e stata concessa a t={grant_time} e revocata a t={revoke_time}. Pianifica in modo che venga eseguito ogni {every_seconds} secondi a partire da ora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_raw_events_revoked"
+language = "es"
+text = "La autorizacion para \"{name}\" fue concedida en t={grant_time} y revocada en t={revoke_time}. Programa para que se ejecute cada {every_seconds} segundos a partir de ahora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_granted"
+language = "en"
+text = "Authorization for \"{name}\" is currently granted. Schedule it to run every {every_seconds} seconds starting now."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_granted"
+language = "de"
+text = "Die Genehmigung fuer \"{name}\" ist derzeit erteilt. Plane es so, dass es ab sofort alle {every_seconds} Sekunden laeuft."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_granted"
+language = "fr"
+text = "L'autorisation pour \"{name}\" est actuellement accordee. Planifie qu'il s'execute toutes les {every_seconds} secondes des maintenant."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_granted"
+language = "it"
+text = "L'autorizzazione per \"{name}\" e attualmente concessa. Pianifica in modo che venga eseguito ogni {every_seconds} secondi a partire da ora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_granted"
+language = "es"
+text = "La autorizacion para \"{name}\" esta actualmente concedida. Programa para que se ejecute cada {every_seconds} segundos a partir de ahora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_revoked"
+language = "en"
+text = "Authorization for \"{name}\" is currently revoked. Schedule it to run every {every_seconds} seconds starting now."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_revoked"
+language = "de"
+text = "Die Genehmigung fuer \"{name}\" ist derzeit widerrufen. Plane es so, dass es ab sofort alle {every_seconds} Sekunden laeuft."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_revoked"
+language = "fr"
+text = "L'autorisation pour \"{name}\" est actuellement revoquee. Planifie qu'il s'execute toutes les {every_seconds} secondes des maintenant."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_revoked"
+language = "it"
+text = "L'autorizzazione per \"{name}\" e attualmente revocata. Pianifica in modo che venga eseguito ogni {every_seconds} secondi a partire da ora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add_projection_revoked"
+language = "es"
+text = "La autorizacion para \"{name}\" esta actualmente revocada. Programa para que se ejecute cada {every_seconds} segundos a partir de ahora."

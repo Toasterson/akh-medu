@@ -37,7 +37,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,8 +61,8 @@ use akh_medu::provenance::{DerivationKind, ProvenanceRecord};
 use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 use grug_data::{
-    KnowledgeAction, KnowledgeSftRecord, KnowledgeWorkflowError, ToolContractSnapshot,
-    WorkflowCitation, WorkflowLanguage, WorkflowStage,
+    KnowledgeAction, KnowledgeSftRecord, KnowledgeWorkflowError, REVISION_FAMILY,
+    ToolContractSnapshot, WorkflowCitation, WorkflowLanguage, WorkflowStage,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -202,6 +202,9 @@ enum Family {
     OracleAcquire,
     OracleRevise,
     OracleRepair,
+    /// P6.5/E4: sourced correction retracting an owned edge
+    /// (`Engine::retract_owned_rule_snapshot`) vs. an append-only control.
+    KnowledgeRevise,
 }
 
 impl Family {
@@ -217,6 +220,10 @@ impl Family {
             Self::OracleAcquire => "knowledge.oracle_acquire",
             Self::OracleRevise => "knowledge.oracle_revise",
             Self::OracleRepair => "knowledge.oracle_repair",
+            // Real grug-data family name (`crates/grug-data/src/
+            // knowledge_workflow.rs`), not a locally invented tag — E4's
+            // records are training data for that existing revision family.
+            Self::KnowledgeRevise => REVISION_FAMILY,
         }
     }
 
@@ -229,6 +236,7 @@ impl Family {
             Self::StructuredTaskUpdate => "structured_task_update",
             Self::ReactorManage => "reactor_manage",
             Self::OracleAcquire | Self::OracleRevise | Self::OracleRepair => "oracle",
+            Self::KnowledgeRevise => "knowledge_revise",
         }
     }
 }
@@ -320,6 +328,26 @@ struct EpisodeLabels {
     /// which were never actually applied to the graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     e3_causal_reward_raw: Option<f64>,
+    /// P6.5/E2: which `--e2-prompt` mode produced this record
+    /// (`none`/`raw-events`/`projection`) — carried per-record because a
+    /// single manifest-level value can't distinguish records once corpora
+    /// from different modes are concatenated for training.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e2_prompt_mode: Option<String>,
+    /// P6.5/E4: `"treatment"` (sourced correction through
+    /// `Engine::retract_owned_rule_snapshot`) or `"control"`
+    /// (append-only, no retraction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e4_role: Option<String>,
+    /// P6.5/E4: whether the stale owned edge was actually retracted from
+    /// the graph before the corrected target was executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e4_retraction_applied: Option<bool>,
+    /// P6.5/E4: whether the stale edge is still present in the graph after
+    /// the episode's action ran (`true` for the append-only control — the
+    /// unresolved contradiction that is the point of the control).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e4_stale_edge_still_present: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +406,77 @@ struct Args {
     /// description) makes every generated record collide. Repeatable.
     #[arg(long = "sentinel-baseline")]
     sentinel_baseline_paths: Vec<PathBuf>,
+
+    /// P6.5/E1 control: which target the `<family>/train.sft.jsonl`
+    /// steering sidecar carries. `completed` (default) is the P6.3
+    /// behavior — the engine-completed, schema-valid, value-exact target.
+    /// `raw-valid` swaps in `labels.e1_raw_target` and drops any record
+    /// whose raw target does not itself round-trip through
+    /// `KnowledgeAction::parse_runtime` (schema-invalid raw targets are not
+    /// a fair E1 control — the control must be schema-valid-but-wrong, so
+    /// the only difference from the treatment is symbolic completion, not
+    /// valid-vs-garbage).
+    #[arg(long = "e1-targets", value_enum, default_value_t = E1TargetsMode::Completed)]
+    e1_targets: E1TargetsMode,
+
+    /// P6.5/E2 treatment: what the user-turn prompt says about temporal
+    /// validity for `reactor_manage` (and `structured_task_update`).
+    /// `none` (default) is the P6.3 behavior — the prompt never mentions
+    /// the grant/revoke events. `raw-events` lists the raw event
+    /// name/timestamp pairs (the E2 control corpus). `projection` states
+    /// the event-calculus `holds_at` current-truth projection at decision
+    /// time (the E2 treatment). In both non-`none` modes the target
+    /// depends on validity: a revoked/closed precondition produces a
+    /// `KnowledgeAction::Gap` refusal instead of the normal tool call.
+    #[arg(long = "e2-prompt", value_enum, default_value_t = E2PromptMode::None)]
+    e2_prompt: E2PromptMode,
+
+    /// P6.5/E4 (stretch): also generate the revision-curriculum family —
+    /// paired episodes where a sourced correction retracts an owned edge
+    /// through `Engine::retract_owned_rule_snapshot` (treatment) vs. an
+    /// append-only sibling that never retracts (control). Off by default
+    /// since it is a stretch experiment layered on top of E1/E2.
+    #[arg(long = "e4-revision", default_value_t = false)]
+    e4_revision: bool,
+
+    /// Number of revision pairs (treatment + control each) to generate
+    /// when `--e4-revision` is set.
+    #[arg(long = "e4-count", default_value_t = 200)]
+    e4_count: usize,
+}
+
+/// P6.5/E1 control mode — see `Args::e1_targets`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum E1TargetsMode {
+    Completed,
+    RawValid,
+}
+
+impl std::fmt::Display for E1TargetsMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Completed => "completed",
+            Self::RawValid => "raw-valid",
+        })
+    }
+}
+
+/// P6.5/E2 prompt mode — see `Args::e2_prompt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum E2PromptMode {
+    None,
+    RawEvents,
+    Projection,
+}
+
+impl std::fmt::Display for E2PromptMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::RawEvents => "raw-events",
+            Self::Projection => "projection",
+        })
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -422,6 +521,7 @@ const TEMPLATE_FILES: &[&str] = &[
     "structured_task.toml",
     "reactor_manage.toml",
     "oracle.toml",
+    "knowledge_revise.toml",
 ];
 
 impl TemplateBook {
@@ -1073,6 +1173,7 @@ fn generate_memory_write(
                 e2_raw_events: Some(raw_events),
                 e3_causal_reward_completed: Some(reward_completed),
                 e3_causal_reward_raw: Some(reward_raw),
+                ..Default::default()
             }),
         });
     }
@@ -1095,6 +1196,7 @@ fn generate_structured_task(
     update_manifest: &ToolManifest,
     seed: Seed,
     count: usize,
+    e2_prompt_mode: E2PromptMode,
 ) -> GenResult<(Vec<EpisodeRecord>, Vec<EpisodeRecord>)> {
     let create_tool = StructuredTaskCreateTool::new(task_preds.clone(), agent_preds.clone());
     let update_tool = StructuredTaskUpdateTool::new(task_preds.clone());
@@ -1208,6 +1310,7 @@ fn generate_structured_task(
                 e2_raw_events: Some(create_events),
                 e3_causal_reward_completed: Some(reward_completed),
                 e3_causal_reward_raw: Some(reward_raw),
+                ..Default::default()
             }),
         });
 
@@ -1221,53 +1324,130 @@ fn generate_structured_task(
         let numeric_id = existing_task_id.get().to_string();
         let new_priority = if i % 2 == 0 { "high" } else { "low" };
         let update_id = format!("p6-3-structured_task_update-{seed_v}-{i:05}");
-        let update_request = book.render(
-            "structured_task_update",
-            "update_priority",
-            "en",
-            &[
-                ("title", &update_title),
-                ("id", &numeric_id),
-                ("priority", new_priority),
-            ],
+
+        // Decide + project validity *before* the prompt/target, same
+        // rationale as `generate_reactor_manage`'s E2 gating: in
+        // `raw-events`/`projection` mode the prompt actually carries the
+        // evidence, so the target must agree with it.
+        let is_closed = i % 5 == 4;
+        let grant_time: u64 = 0;
+        let revoke_time = if is_closed { Some(3) } else { None };
+        let decision_time = if is_closed { 10 } else { 5 };
+        let fluent_label = format!("task-open:{update_title}");
+        let (update_validity, update_events) = temporal_label(
+            ec,
+            engine,
+            &fluent_label,
+            grant_time,
+            revoke_time,
+            decision_time,
         )?;
+
+        let update_request = match e2_prompt_mode {
+            E2PromptMode::None => book.render(
+                "structured_task_update",
+                "update_priority",
+                "en",
+                &[
+                    ("title", &update_title),
+                    ("id", &numeric_id),
+                    ("priority", new_priority),
+                ],
+            )?,
+            E2PromptMode::RawEvents if is_closed => book.render(
+                "structured_task_update",
+                "update_priority_raw_events_closed",
+                "en",
+                &[
+                    ("title", &update_title),
+                    ("id", &numeric_id),
+                    ("priority", new_priority),
+                    ("grant_time", &grant_time.to_string()),
+                    ("revoke_time", &revoke_time.unwrap().to_string()),
+                ],
+            )?,
+            E2PromptMode::RawEvents => book.render(
+                "structured_task_update",
+                "update_priority_raw_events_open",
+                "en",
+                &[
+                    ("title", &update_title),
+                    ("id", &numeric_id),
+                    ("priority", new_priority),
+                    ("grant_time", &grant_time.to_string()),
+                ],
+            )?,
+            E2PromptMode::Projection if is_closed => book.render(
+                "structured_task_update",
+                "update_priority_projection_closed",
+                "en",
+                &[
+                    ("title", &update_title),
+                    ("id", &numeric_id),
+                    ("priority", new_priority),
+                ],
+            )?,
+            E2PromptMode::Projection => book.render(
+                "structured_task_update",
+                "update_priority_projection_open",
+                "en",
+                &[
+                    ("title", &update_title),
+                    ("id", &numeric_id),
+                    ("priority", new_priority),
+                ],
+            )?,
+        };
         // RAW: the naive proposal before graph lookup, carrying a
-        // placeholder id instead of the real numeric one.
+        // placeholder id instead of the real numeric one. Orthogonal to E2
+        // — always the E1 control regardless of mode.
         let raw_update_args = json!({"id": "<task-id>", "priority": new_priority});
         let raw_update_target = tool_call_target(
             &format!("{update_id}-raw"),
             "structured_task_update",
             raw_update_args.clone(),
         )?;
-        // COMPLETED: symbolic completion resolves the placeholder to the
-        // real numeric id from the graph, then the tool actually runs.
-        let completed_update_args = json!({"id": numeric_id, "priority": new_priority});
-        let completed_update_target = tool_call_target(
-            &format!("{update_id}-completed"),
-            "structured_task_update",
-            completed_update_args.clone(),
-        )?;
-        let update_output = update_tool.execute(
-            engine,
-            ToolInput::new()
-                .with_value("id", completed_update_args["id"].clone())
-                .with_value("priority", completed_update_args["priority"].clone()),
-        )?;
-        if !update_output.success {
-            return Err(GeneratorError::Agent(AgentError::ToolExecution {
-                tool_name: "structured_task_update".into(),
-                message: format!("completed update failed for {update_id}"),
-            }));
+
+        let gate_on_validity = e2_prompt_mode != E2PromptMode::None;
+        let stage;
+        let completed_update_target;
+        if gate_on_validity && !update_validity {
+            stage = "declare_gap";
+            completed_update_target = KnowledgeAction::Gap {
+                missing: vec!["task-open".into()],
+                reason: format!(
+                    "task {numeric_id} was closed before decision time; not updating its priority"
+                ),
+            }
+            .render_runtime()?;
+            // The priority-change effect must NOT have been applied — skip
+            // `update_tool.execute` entirely so the causal check below is a
+            // genuine negative signal, not a post-hoc label on an action
+            // that actually ran.
+        } else {
+            stage = "answer";
+            // COMPLETED: symbolic completion resolves the placeholder to the
+            // real numeric id from the graph, then the tool actually runs.
+            let completed_update_args = json!({"id": numeric_id, "priority": new_priority});
+            completed_update_target = tool_call_target(
+                &format!("{update_id}-completed"),
+                "structured_task_update",
+                completed_update_args.clone(),
+            )?;
+            let update_output = update_tool.execute(
+                engine,
+                ToolInput::new()
+                    .with_value("id", completed_update_args["id"].clone())
+                    .with_value("priority", completed_update_args["priority"].clone()),
+            )?;
+            if !update_output.success {
+                return Err(GeneratorError::Agent(AgentError::ToolExecution {
+                    tool_name: "structured_task_update".into(),
+                    message: format!("completed update failed for {update_id}"),
+                }));
+            }
         }
 
-        let fluent_label = format!("task-open:{update_title}");
-        let (update_validity, update_events) = if i % 5 == 4 {
-            // A cancelled-before-decision control: the correct behavior is
-            // to skip the update, which this label alone flags (E2 gate).
-            temporal_label(ec, engine, &fluent_label, 0, Some(3), 10)?
-        } else {
-            temporal_label(ec, engine, &fluent_label, 0, None, 5)?
-        };
         let priority_sym =
             engine.resolve_or_create_entity(&format!("task:priority:{new_priority}"))?;
         let update_reward_completed = causal_label(
@@ -1290,7 +1470,7 @@ fn generate_structured_task(
             id: update_id.clone(),
             episode_id: update_id.clone(),
             step: 0,
-            stage: "answer".into(),
+            stage: stage.into(),
             family: Family::StructuredTaskUpdate.tag().into(),
             difficulty: 1,
             language: "english".into(),
@@ -1308,11 +1488,13 @@ fn generate_structured_task(
                 e1_raw_target_runtime_valid: Some(
                     KnowledgeAction::parse_runtime(&raw_update_target).is_ok(),
                 ),
-                e1_completed_changed_from_raw: Some(raw_update_args != completed_update_args),
+                e1_completed_changed_from_raw: Some(true),
                 e2_temporal_validity: Some(update_validity),
                 e2_raw_events: Some(update_events),
+                e2_prompt_mode: Some(e2_prompt_mode.to_string()),
                 e3_causal_reward_completed: Some(update_reward_completed),
                 e3_causal_reward_raw: Some(update_reward_raw),
+                ..Default::default()
             }),
         });
     }
@@ -1340,6 +1522,7 @@ fn generate_reactor_manage(
     manifest: &ToolManifest,
     seed: Seed,
     count: usize,
+    e2_prompt_mode: E2PromptMode,
 ) -> GenResult<Vec<EpisodeRecord>> {
     let tools = vec![openai_tool_def(manifest)];
     let contract_hash = format!(
@@ -1357,15 +1540,76 @@ fn generate_reactor_manage(
         let every_seconds = 60 + (i % 3600);
         let id = format!("p6-3-reactor_manage-{seed_v}-{i:05}");
 
-        let request = book.render(
-            "reactor_manage",
-            "add",
-            lang_code,
-            &[
-                ("name", &name),
-                ("every_seconds", &every_seconds.to_string()),
-            ],
+        // Decide + project temporal validity *before* rendering the prompt
+        // or the target: in `raw-events`/`projection` mode both the prompt
+        // text and the target depend on this outcome (E2 gates the target,
+        // not just the label, once the prompt actually carries the
+        // evidence). In `none` mode this is unchanged from P6.3 — a label
+        // only, the target is always `add`.
+        let is_revoked = i % 6 == 5;
+        let grant_time: u64 = 0;
+        let revoke_time = if is_revoked { Some(20) } else { None };
+        let decision_time = if is_revoked { 30 } else { 5 };
+        let fluent_label = format!("authorized:{name}");
+        let (temporal_validity, raw_events) = temporal_label(
+            ec,
+            engine,
+            &fluent_label,
+            grant_time,
+            revoke_time,
+            decision_time,
         )?;
+
+        let request = match e2_prompt_mode {
+            E2PromptMode::None => book.render(
+                "reactor_manage",
+                "add",
+                lang_code,
+                &[
+                    ("name", &name),
+                    ("every_seconds", &every_seconds.to_string()),
+                ],
+            )?,
+            E2PromptMode::RawEvents if is_revoked => book.render(
+                "reactor_manage",
+                "add_raw_events_revoked",
+                lang_code,
+                &[
+                    ("name", &name),
+                    ("every_seconds", &every_seconds.to_string()),
+                    ("grant_time", &grant_time.to_string()),
+                    ("revoke_time", &revoke_time.unwrap().to_string()),
+                ],
+            )?,
+            E2PromptMode::RawEvents => book.render(
+                "reactor_manage",
+                "add_raw_events_granted",
+                lang_code,
+                &[
+                    ("name", &name),
+                    ("every_seconds", &every_seconds.to_string()),
+                    ("grant_time", &grant_time.to_string()),
+                ],
+            )?,
+            E2PromptMode::Projection if is_revoked => book.render(
+                "reactor_manage",
+                "add_projection_revoked",
+                lang_code,
+                &[
+                    ("name", &name),
+                    ("every_seconds", &every_seconds.to_string()),
+                ],
+            )?,
+            E2PromptMode::Projection => book.render(
+                "reactor_manage",
+                "add_projection_granted",
+                lang_code,
+                &[
+                    ("name", &name),
+                    ("every_seconds", &every_seconds.to_string()),
+                ],
+            )?,
+        };
 
         let schedule_value = json!({
             "id": name,
@@ -1379,46 +1623,64 @@ fn generate_reactor_manage(
         // (`release-v3-failure-analysis.md`) — free text outside the tags.
         // The envelope shape (tool name + argument nesting) offered is
         // identical to every other language row; only `request` differs.
+        // Orthogonal to E2: this is always the E1 control regardless of mode.
         let raw_target = malformed_envelope_target("reactor_manage", &completed_args);
         let raw_runtime_valid = KnowledgeAction::parse_runtime(&raw_target).is_ok();
 
-        let completed_target = tool_call_target(
-            &format!("{id}-completed"),
-            "reactor_manage",
-            completed_args.clone(),
-        )?;
-        let output = ReactorManageTool.execute(
-            engine,
-            ToolInput::new()
-                .with_param("operation", "add")
-                .with_value("schedule", schedule_value.clone()),
-        )?;
-        if !output.success {
-            return Err(GeneratorError::Agent(AgentError::ToolExecution {
-                tool_name: "reactor_manage".into(),
-                message: format!("completed add failed for {id}"),
-            }));
-        }
-        // Mirror the reactor's own (non-KG) meta-store mutation into the
-        // graph so CausalManager has something to verify against — the
-        // reactor's durable store is a separate KV namespace from the KG.
+        // In `none` mode the target is always `add`, unchanged from P6.3.
+        // In `raw-events`/`projection` mode a revoked authorization means the
+        // correct action is a refusal, not `add` — the prompt now actually
+        // says so, so the target must agree.
+        let gate_on_validity = e2_prompt_mode != E2PromptMode::None;
+        let stage;
+        let completed_target;
         let schedule_entity =
             engine.resolve_or_create_entity(&format!("reactor-schedule:{name}"))?;
-        let mut mirror = vec![Triple::new(
-            schedule_entity,
-            reactor_added_pred,
-            reactor_added,
-        )];
-        let mut prov =
-            ProvenanceRecord::new(schedule_entity, DerivationKind::Extracted).with_confidence(1.0);
-        engine.add_triples_with_provenance(&mut mirror, &mut prov)?;
 
-        let fluent_label = format!("authorized:{name}");
-        let (temporal_validity, raw_events) = if i % 6 == 5 {
-            temporal_label(ec, engine, &fluent_label, 0, Some(20), 30)?
+        if gate_on_validity && !temporal_validity {
+            stage = "declare_gap";
+            completed_target = KnowledgeAction::Gap {
+                missing: vec!["reactor-authorization".into()],
+                reason: format!(
+                    "authorization for schedule {name} was revoked before decision time; not adding it"
+                ),
+            }
+            .render_runtime()?;
+            // The add effect must NOT have been asserted — the schedule
+            // entity exists (resolved above for causal bookkeeping) but the
+            // `reactor:has-state` mirror triple was never written, so
+            // verify_prediction below genuinely returns false.
         } else {
-            temporal_label(ec, engine, &fluent_label, 0, None, 5)?
-        };
+            stage = "answer";
+            completed_target = tool_call_target(
+                &format!("{id}-completed"),
+                "reactor_manage",
+                completed_args.clone(),
+            )?;
+            let output = ReactorManageTool.execute(
+                engine,
+                ToolInput::new()
+                    .with_param("operation", "add")
+                    .with_value("schedule", schedule_value.clone()),
+            )?;
+            if !output.success {
+                return Err(GeneratorError::Agent(AgentError::ToolExecution {
+                    tool_name: "reactor_manage".into(),
+                    message: format!("completed add failed for {id}"),
+                }));
+            }
+            // Mirror the reactor's own (non-KG) meta-store mutation into the
+            // graph so CausalManager has something to verify against — the
+            // reactor's durable store is a separate KV namespace from the KG.
+            let mut mirror = vec![Triple::new(
+                schedule_entity,
+                reactor_added_pred,
+                reactor_added,
+            )];
+            let mut prov = ProvenanceRecord::new(schedule_entity, DerivationKind::Extracted)
+                .with_confidence(1.0);
+            engine.add_triples_with_provenance(&mut mirror, &mut prov)?;
+        }
 
         let reward_completed = causal_label(
             causal,
@@ -1439,7 +1701,7 @@ fn generate_reactor_manage(
             id: id.clone(),
             episode_id: id.clone(),
             step: 0,
-            stage: "answer".into(),
+            stage: stage.into(),
             family: Family::ReactorManage.tag().into(),
             difficulty: 1,
             language: lang_name.into(),
@@ -1455,8 +1717,10 @@ fn generate_reactor_manage(
                 e1_completed_changed_from_raw: Some(true),
                 e2_temporal_validity: Some(temporal_validity),
                 e2_raw_events: Some(raw_events),
+                e2_prompt_mode: Some(e2_prompt_mode.to_string()),
                 e3_causal_reward_completed: Some(reward_completed),
                 e3_causal_reward_raw: Some(reward_raw),
+                ..Default::default()
             }),
         });
     }
@@ -1577,6 +1841,7 @@ fn generate_oracle_acquire(book: &TemplateBook, seed: Seed, i: usize) -> GenResu
             e2_raw_events: Some(raw_events),
             e3_causal_reward_completed: Some(reward_completed),
             e3_causal_reward_raw: None,
+            ..Default::default()
         }),
     })
 }
@@ -1690,6 +1955,7 @@ fn generate_oracle_revise(
             e2_raw_events: Some(raw_events),
             e3_causal_reward_completed: Some(reward_completed),
             e3_causal_reward_raw: Some(reward_raw),
+            ..Default::default()
         }),
     })
 }
@@ -1768,6 +2034,7 @@ fn generate_oracle_repair(
             e2_raw_events: Some(raw_events),
             e3_causal_reward_completed: Some(reward_completed),
             e3_causal_reward_raw: None,
+            ..Default::default()
         }),
     })
 }
@@ -1813,6 +2080,247 @@ fn generate_oracle(book: &TemplateBook, seed: Seed, seeds: usize) -> GenResult<V
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Family: knowledge_revise (P6.5/E4 revision curriculum, stretch)
+//
+// Treatment: a sourced correction retracts the stale owned edge through the
+// engine's real revision path (`Engine::retract_owned_rule_snapshot`,
+// recovered P6.0, exercised by `tests/exact_owned_revision.rs`), then the
+// corrected fact is asserted and `memory_write` actually runs against the
+// revised graph. Control: the append-only sibling never retracts — the new
+// fact is asserted alongside the stale one, leaving both present (the
+// unresolved contradiction that is the point of the control). Distinct from
+// `oracle_revise` (P6.3), which uses a plain `remove_triple`, not the
+// exact-owned-edge path this experiment measures.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Shared setup for one revision-pair index: a fresh isolated engine with
+/// the stale `(job, current-worker, old_worker)` fact asserted and its exact
+/// live `Triple` (subject/predicate/object *and* metadata) resolved, which
+/// is what `retract_owned_rule_snapshot` requires to match.
+fn revision_pair_setup(
+    label: &str,
+    seed: Seed,
+    i: usize,
+) -> GenResult<(ScratchDir, Engine, String, String, String, Triple)> {
+    let scratch = ScratchDir::new(&format!("{label}-{}-{i}", seed.0))?;
+    let engine = build_engine(scratch.path())?;
+    let job = format!("p6-5-revise-job-{}-{i}", seed.0);
+    let old_worker = format!("p6-5-revise-worker-a-{}-{i}", seed.0);
+    let new_worker = format!("p6-5-revise-worker-b-{}-{i}", seed.0);
+
+    let job_id = engine.resolve_or_create_entity(&job)?;
+    let old_worker_id = engine.resolve_or_create_entity(&old_worker)?;
+    let current_worker = engine.resolve_or_create_relation("current-worker")?;
+    engine.add_triple(&Triple::new(job_id, current_worker, old_worker_id))?;
+    let stale = engine
+        .all_triples()
+        .into_iter()
+        .find(|t| t.subject == job_id && t.predicate == current_worker && t.object == old_worker_id)
+        .ok_or_else(|| {
+            GeneratorError::Agent(AgentError::ToolExecution {
+                tool_name: "memory_write".into(),
+                message: format!("stale fact not found before revision for {label}-{i}"),
+            })
+        })?;
+    Ok((scratch, engine, job, old_worker, new_worker, stale))
+}
+
+/// E4 treatment: sourced correction through `retract_owned_rule_snapshot`.
+fn generate_revision_treatment(
+    book: &TemplateBook,
+    seed: Seed,
+    i: usize,
+) -> GenResult<EpisodeRecord> {
+    let (_scratch, engine, job, old_worker, new_worker, stale) =
+        revision_pair_setup("revise-treatment", seed, i)?;
+    let id = format!("p6-5-knowledge_revise-treatment-{}-{i:05}", seed.0);
+
+    // The sourced correction: retract the exact owned edge through the
+    // engine's real revision path, not a bare `remove_triple`.
+    engine.retract_owned_rule_snapshot(&[stale], &[])?;
+
+    let job_id = engine.resolve_symbol(&job)?;
+    let old_worker_id = engine.resolve_symbol(&old_worker)?;
+    let current_worker = engine.resolve_or_create_relation("current-worker")?;
+
+    let agent_preds = AgentPredicates::init(&engine)?;
+    let mut causal = CausalManager::new(&engine)?;
+    let tool = MemoryWriteTool::new(agent_preds.clone());
+    let manifest = tool.manifest();
+    let tools = vec![openai_tool_def(&manifest)];
+    let contract_hash = format!(
+        "blake3:{}",
+        blake3::hash(manifest.description.as_bytes()).to_hex()
+    );
+
+    let request = book.render(
+        "knowledge_revise",
+        "revise",
+        "en",
+        &[
+            ("job", &job),
+            ("old_worker", &old_worker),
+            ("new_worker", &new_worker),
+        ],
+    )?;
+
+    let args = json!({
+        "summary": format!("Route correction for {job}"),
+        "facts": [{"subject": job, "predicate": "current-worker", "object": new_worker}],
+        "tags": ["route-correction", "revision"],
+        "source": job,
+    });
+    let target = tool_call_target(&format!("{id}-completed"), "memory_write", args.clone())?;
+    let output = tool.execute(
+        &engine,
+        ToolInput::new()
+            .with_value("summary", args["summary"].clone())
+            .with_value("facts", args["facts"].clone())
+            .with_value("tags", args["tags"].clone())
+            .with_value("source", args["source"].clone()),
+    )?;
+    if !output.success {
+        return Err(GeneratorError::Agent(AgentError::ToolExecution {
+            tool_name: "memory_write".into(),
+            message: format!("revision-treatment write failed for {id}"),
+        }));
+    }
+
+    let retraction_applied = !engine.has_triple(job_id, current_worker, old_worker_id);
+    let reward = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{id}:completed"),
+        (job_id, current_worker, engine.resolve_symbol(&new_worker)?),
+    )?;
+
+    Ok(EpisodeRecord {
+        schema_version: 1,
+        id: id.clone(),
+        episode_id: id.clone(),
+        step: 0,
+        stage: "answer".into(),
+        family: Family::KnowledgeRevise.tag().into(),
+        difficulty: 3,
+        language: "english".into(),
+        contract_hash,
+        tools: tools.clone(),
+        conversation: vec![json!({"role": "user", "content": request})],
+        system_context: None,
+        prompt: akh_prompt(&tools, &[json!({"role": "user", "content": request})]),
+        target,
+        labels: Some(EpisodeLabels {
+            e4_role: Some("treatment".into()),
+            e4_retraction_applied: Some(retraction_applied),
+            e4_stale_edge_still_present: Some(!retraction_applied),
+            e3_causal_reward_completed: Some(reward),
+            ..Default::default()
+        }),
+    })
+}
+
+/// E4 control: append-only sibling, the stale edge is never retracted.
+fn generate_revision_control(
+    book: &TemplateBook,
+    seed: Seed,
+    i: usize,
+) -> GenResult<EpisodeRecord> {
+    let (_scratch, engine, job, old_worker, new_worker, _stale) =
+        revision_pair_setup("revise-control", seed, i)?;
+    let id = format!("p6-5-knowledge_revise-control-{}-{i:05}", seed.0);
+
+    let job_id = engine.resolve_symbol(&job)?;
+    let old_worker_id = engine.resolve_symbol(&old_worker)?;
+    let current_worker = engine.resolve_or_create_relation("current-worker")?;
+
+    let agent_preds = AgentPredicates::init(&engine)?;
+    let mut causal = CausalManager::new(&engine)?;
+    let tool = MemoryWriteTool::new(agent_preds.clone());
+    let manifest = tool.manifest();
+    let tools = vec![openai_tool_def(&manifest)];
+    let contract_hash = format!(
+        "blake3:{}",
+        blake3::hash(manifest.description.as_bytes()).to_hex()
+    );
+
+    let request = book.render(
+        "knowledge_revise",
+        "revise",
+        "en",
+        &[
+            ("job", &job),
+            ("old_worker", &old_worker),
+            ("new_worker", &new_worker),
+        ],
+    )?;
+
+    // No `tags`/`source` and no prior retraction — the naive append-only
+    // proposal a model might emit without engaging the revision path.
+    let args = json!({
+        "summary": format!("Route correction for {job}"),
+        "facts": [{"subject": job, "predicate": "current-worker", "object": new_worker}],
+    });
+    let target = tool_call_target(&format!("{id}-completed"), "memory_write", args.clone())?;
+    let output = tool.execute(
+        &engine,
+        ToolInput::new()
+            .with_value("summary", args["summary"].clone())
+            .with_value("facts", args["facts"].clone()),
+    )?;
+    if !output.success {
+        return Err(GeneratorError::Agent(AgentError::ToolExecution {
+            tool_name: "memory_write".into(),
+            message: format!("revision-control write failed for {id}"),
+        }));
+    }
+
+    let stale_still_present = engine.has_triple(job_id, current_worker, old_worker_id);
+    let reward = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{id}:completed"),
+        (job_id, current_worker, engine.resolve_symbol(&new_worker)?),
+    )?;
+
+    Ok(EpisodeRecord {
+        schema_version: 1,
+        id: id.clone(),
+        episode_id: id.clone(),
+        step: 0,
+        stage: "answer".into(),
+        family: Family::KnowledgeRevise.tag().into(),
+        difficulty: 3,
+        language: "english".into(),
+        contract_hash,
+        tools: tools.clone(),
+        conversation: vec![json!({"role": "user", "content": request})],
+        system_context: None,
+        prompt: akh_prompt(&tools, &[json!({"role": "user", "content": request})]),
+        target,
+        labels: Some(EpisodeLabels {
+            e4_role: Some("control".into()),
+            e4_retraction_applied: Some(false),
+            e4_stale_edge_still_present: Some(stale_still_present),
+            e3_causal_reward_completed: Some(reward),
+            ..Default::default()
+        }),
+    })
+}
+
+fn generate_revision_pairs(
+    book: &TemplateBook,
+    seed: Seed,
+    count: usize,
+) -> GenResult<Vec<EpisodeRecord>> {
+    let mut out = Vec::with_capacity(count * 2);
+    for i in 0..count {
+        out.push(generate_revision_treatment(book, seed, i)?);
+        out.push(generate_revision_control(book, seed, i)?);
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Prompt rendering (local, mirrors grug_data::render_knowledge_prompt's
 // OpenAI-tool-call/<tool_call> convention without depending on its exact
 // system-prompt text, which is that crate's data to own)
@@ -1848,6 +2356,20 @@ struct Manifest {
     template_file_hashes: BTreeMap<String, String>,
     per_family_counts: BTreeMap<String, u64>,
     decontamination: DecontaminationSummary,
+    /// P6.5/E1: `--e1-targets` mode this run used (`completed`/`raw-valid`).
+    e1_targets_mode: String,
+    /// P6.5/E1: total records dropped from the *sidecar*
+    /// (`<family>/train.sft.jsonl`) across all four tool-contract families
+    /// because their raw target was not runtime-valid (`raw-valid` mode
+    /// only; always 0 in `completed` mode). The primary `<family>.jsonl`
+    /// files are never affected by this — only the steering sidecar is.
+    e1_raw_invalid_dropped_from_sidecar: u64,
+    /// P6.5/E2: `--e2-prompt` mode this run used (`none`/`raw-events`/
+    /// `projection`).
+    e2_prompt_mode: String,
+    /// P6.5/E4: whether the revision-curriculum family was generated this
+    /// run (`--e4-revision`).
+    e4_revision_enabled: bool,
 }
 
 fn git_hash() -> String {
@@ -1956,6 +2478,17 @@ struct SteeringManifest {
     source_exam_file_hash: String,
     source_exam_fingerprint: String,
     tool: String,
+    /// P6.5/E1: which `--e1-targets` mode produced `train.sft.jsonl`'s
+    /// `target` field for this family (`completed`/`raw-valid`). Additive —
+    /// `train_knowledge.rs`'s `TrainingSiblingManifest` reader has no
+    /// `deny_unknown_fields`, so this is silently ignored by that consumer.
+    #[serde(default)]
+    e1_targets_mode: String,
+    /// P6.5/E1: records dropped from this family's sidecar because
+    /// `labels.e1_raw_target_runtime_valid` was `false` (`raw-valid` mode
+    /// only; always 0 in `completed` mode).
+    #[serde(default)]
+    e1_raw_invalid_dropped: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1998,8 +2531,14 @@ fn workflow_language(language: &str) -> Option<WorkflowLanguage> {
 /// computed once in `run()`), not `record.contract_hash` — the primary
 /// `EpisodeRecord` uses its own lighter-weight ad-hoc hash (documented on
 /// that field), but the steering-sidecar `KnowledgeSftRecord`s must agree
-/// with the sidecar manifest's `contract_hash`.
-fn to_sft_record(record: &EpisodeRecord, contract_hash: &str) -> Option<KnowledgeSftRecord> {
+/// with the sidecar manifest's `contract_hash`. `target` is an explicit
+/// override rather than always `record.target` so the P6.5/E1 `raw-valid`
+/// mode can swap in `labels.e1_raw_target` without a second record shape.
+fn to_sft_record(
+    record: &EpisodeRecord,
+    contract_hash: &str,
+    target: &str,
+) -> Option<KnowledgeSftRecord> {
     Some(KnowledgeSftRecord {
         schema_version: record.schema_version,
         id: record.id.clone(),
@@ -2014,7 +2553,7 @@ fn to_sft_record(record: &EpisodeRecord, contract_hash: &str) -> Option<Knowledg
         conversation: record.conversation.clone(),
         system_context: record.system_context.clone(),
         prompt: record.prompt.clone(),
-        target: record.target.clone(),
+        target: target.to_string(),
     })
 }
 
@@ -2028,22 +2567,41 @@ fn file_blake3(path: &Path) -> GenResult<String> {
 
 /// Write `<out_dir>/<tool>/{train.sft.jsonl,manifest.json,separation.json}`
 /// for one tool-contract family from its already-decontaminated records.
+/// Returns `(records kept in the sidecar, records dropped because
+/// `--e1-targets raw-valid` found a non-runtime-valid raw target)`.
 fn write_steering_sidecar(
     out_dir: &Path,
     family_tag: &str,
     tool: &str,
     contract_hash: &str,
     records: &[EpisodeRecord],
-) -> GenResult<usize> {
+    e1_targets_mode: E1TargetsMode,
+) -> GenResult<(usize, u64)> {
     let dir = out_dir.join(tool);
     fs::create_dir_all(&dir).map_err(|source| GeneratorError::Io {
         path: dir.clone(),
         source,
     })?;
 
+    let mut e1_raw_invalid_dropped = 0u64;
     let sft: Vec<KnowledgeSftRecord> = records
         .iter()
-        .filter_map(|record| to_sft_record(record, contract_hash))
+        .filter_map(|record| match e1_targets_mode {
+            E1TargetsMode::Completed => to_sft_record(record, contract_hash, &record.target),
+            E1TargetsMode::RawValid => {
+                let labels = record.labels.as_ref()?;
+                let raw_target = labels.e1_raw_target.as_ref()?;
+                if labels.e1_raw_target_runtime_valid != Some(true) {
+                    // Schema-invalid raw target: not a fair E1 control (the
+                    // point is schema-valid-but-value-wrong vs.
+                    // schema-valid-and-value-exact), so this record is
+                    // dropped from the sidecar rather than swapped in.
+                    e1_raw_invalid_dropped += 1;
+                    return None;
+                }
+                to_sft_record(record, contract_hash, raw_target)
+            }
+        })
         .collect();
     let sft_path = dir.join("train.sft.jsonl");
     {
@@ -2132,6 +2690,8 @@ fn write_steering_sidecar(
         ),
         source_exam_fingerprint: format!("engine-generated-no-frontier-exam:{tool}"),
         tool: tool.to_string(),
+        e1_targets_mode: e1_targets_mode.to_string(),
+        e1_raw_invalid_dropped,
     };
     let manifest_path = dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -2141,7 +2701,7 @@ fn write_steering_sidecar(
         }
     })?;
 
-    Ok(sft.len())
+    Ok((sft.len(), e1_raw_invalid_dropped))
 }
 
 fn run(args: &Args) -> GenResult<()> {
@@ -2189,6 +2749,7 @@ fn run(args: &Args) -> GenResult<()> {
         &update_manifest,
         seed,
         args.count,
+        args.e2_prompt,
     )?;
     let reactor_records = generate_reactor_manage(
         &engine,
@@ -2198,8 +2759,14 @@ fn run(args: &Args) -> GenResult<()> {
         &reactor_manifest,
         seed,
         args.count,
+        args.e2_prompt,
     )?;
     let oracle_records = generate_oracle(&book, seed, args.oracle_seeds)?;
+    let revision_records = if args.e4_revision {
+        generate_revision_pairs(&book, seed, args.e4_count)?
+    } else {
+        Vec::new()
+    };
 
     engine.persist()?;
 
@@ -2237,6 +2804,7 @@ fn run(args: &Args) -> GenResult<()> {
     let contract_hash = contract_snapshot.manifest_hash.clone();
 
     let mut per_family = BTreeMap::new();
+    let mut e1_raw_invalid_dropped_from_sidecar = 0u64;
     let (kept, survivors) = write_family_jsonl(
         &args.out_dir,
         Family::MemoryWrite.file_stem(),
@@ -2244,13 +2812,15 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    write_steering_sidecar(
+    let (_, dropped) = write_steering_sidecar(
         &args.out_dir,
         Family::MemoryWrite.tag(),
         "memory_write",
         &contract_hash,
         &survivors,
+        args.e1_targets,
     )?;
+    e1_raw_invalid_dropped_from_sidecar += dropped;
     per_family.insert(Family::MemoryWrite.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2260,13 +2830,15 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    write_steering_sidecar(
+    let (_, dropped) = write_steering_sidecar(
         &args.out_dir,
         Family::StructuredTaskCreate.tag(),
         "structured_task_create",
         &contract_hash,
         &survivors,
+        args.e1_targets,
     )?;
+    e1_raw_invalid_dropped_from_sidecar += dropped;
     per_family.insert(Family::StructuredTaskCreate.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2276,13 +2848,15 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    write_steering_sidecar(
+    let (_, dropped) = write_steering_sidecar(
         &args.out_dir,
         Family::StructuredTaskUpdate.tag(),
         "structured_task_update",
         &contract_hash,
         &survivors,
+        args.e1_targets,
     )?;
+    e1_raw_invalid_dropped_from_sidecar += dropped;
     per_family.insert(Family::StructuredTaskUpdate.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2292,13 +2866,15 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    write_steering_sidecar(
+    let (_, dropped) = write_steering_sidecar(
         &args.out_dir,
         Family::ReactorManage.tag(),
         "reactor_manage",
         &contract_hash,
         &survivors,
+        args.e1_targets,
     )?;
+    e1_raw_invalid_dropped_from_sidecar += dropped;
     per_family.insert(Family::ReactorManage.file_stem().to_string(), kept);
 
     let (kept, _survivors) = write_family_jsonl(
@@ -2310,6 +2886,17 @@ fn run(args: &Args) -> GenResult<()> {
     )?;
     per_family.insert("oracle".to_string(), kept);
 
+    if args.e4_revision {
+        let (kept, _survivors) = write_family_jsonl(
+            &args.out_dir,
+            Family::KnowledgeRevise.file_stem(),
+            revision_records,
+            &sentinels,
+            &mut decon,
+        )?;
+        per_family.insert(Family::KnowledgeRevise.file_stem().to_string(), kept);
+    }
+
     let manifest = Manifest {
         schema_version: 1,
         generator: "akh_episode_generator/p6.3",
@@ -2318,6 +2905,10 @@ fn run(args: &Args) -> GenResult<()> {
         template_file_hashes: book.file_hashes.clone(),
         per_family_counts: per_family,
         decontamination: decon,
+        e1_targets_mode: args.e1_targets.to_string(),
+        e1_raw_invalid_dropped_from_sidecar,
+        e2_prompt_mode: args.e2_prompt.to_string(),
+        e4_revision_enabled: args.e4_revision,
     };
     let manifest_path = args.out_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -2414,6 +3005,7 @@ mod tests {
             &update_manifest,
             Seed(7),
             4,
+            E2PromptMode::None,
         )
         .unwrap();
         assert_eq!(creates.len(), 4);
@@ -2448,9 +3040,17 @@ mod tests {
         let book = test_book();
         let manifest = ReactorManageTool.manifest();
 
-        let records =
-            generate_reactor_manage(&engine, &mut causal, &mut ec, &book, &manifest, Seed(3), 5)
-                .unwrap();
+        let records = generate_reactor_manage(
+            &engine,
+            &mut causal,
+            &mut ec,
+            &book,
+            &manifest,
+            Seed(3),
+            5,
+            E2PromptMode::None,
+        )
+        .unwrap();
         assert_eq!(records.len(), 5);
         let languages: HashSet<_> = records.iter().map(|r| r.language.clone()).collect();
         assert_eq!(
@@ -2657,7 +3257,7 @@ mod tests {
         )
         .unwrap();
 
-        let sft = to_sft_record(&records[0], "blake3:test-contract-hash")
+        let sft = to_sft_record(&records[0], "blake3:test-contract-hash", &records[0].target)
             .expect("english record maps to KnowledgeSftRecord");
         // Round-trips through the exact grug_data type used by
         // `train_knowledge`'s plain --train-jsonl loader.
@@ -2700,15 +3300,17 @@ mod tests {
         )
         .unwrap();
 
-        let kept = write_steering_sidecar(
+        let (kept, dropped) = write_steering_sidecar(
             dir.path(),
             "tool_contract.memory_write",
             "memory_write",
             "blake3:abc",
             &records,
+            E1TargetsMode::Completed,
         )
         .unwrap();
         assert_eq!(kept, 4);
+        assert_eq!(dropped, 0);
         let family_dir = dir.path().join("memory_write");
         assert!(family_dir.join("train.sft.jsonl").exists());
         assert!(family_dir.join("manifest.json").exists());
@@ -2726,5 +3328,265 @@ mod tests {
         // exactly what `verify_steering_inputs` checks.
         let actual_hash = file_blake3(&family_dir.join("train.sft.jsonl")).unwrap();
         assert_eq!(manifest_json.sft_hash, actual_hash);
+    }
+
+    #[test]
+    fn e1_raw_valid_mode_drops_invalid_and_swaps_valid_targets() {
+        // memory_write's raw target is always runtime-valid (schema-valid,
+        // value-wrong): kept, with the sidecar target swapped to the raw one.
+        let (_scratch, engine) = fresh_engine();
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+        let mut causal = CausalManager::new(&engine).unwrap();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let book = test_book();
+        let mw_manifest = MemoryWriteTool::new(agent_preds.clone()).manifest();
+        let mw_records = generate_memory_write(
+            &engine,
+            &agent_preds,
+            &mut causal,
+            &mut ec,
+            &book,
+            &mw_manifest,
+            Seed(11),
+            3,
+        )
+        .unwrap();
+        for r in &mw_records {
+            assert_eq!(
+                r.labels.as_ref().unwrap().e1_raw_target_runtime_valid,
+                Some(true)
+            );
+        }
+        let dir = ScratchDir::new("e1-raw-valid-mw").unwrap();
+        let (kept, dropped) = write_steering_sidecar(
+            dir.path(),
+            "tool_contract.memory_write",
+            "memory_write",
+            "blake3:x",
+            &mw_records,
+            E1TargetsMode::RawValid,
+        )
+        .unwrap();
+        assert_eq!(kept, mw_records.len());
+        assert_eq!(dropped, 0);
+        let sft_lines: Vec<KnowledgeSftRecord> =
+            fs::read_to_string(dir.path().join("memory_write/train.sft.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        for (sft, record) in sft_lines.iter().zip(mw_records.iter()) {
+            let raw = record
+                .labels
+                .as_ref()
+                .unwrap()
+                .e1_raw_target
+                .clone()
+                .unwrap();
+            assert_eq!(
+                sft.target, raw,
+                "sidecar target must be swapped to the raw target"
+            );
+            assert_ne!(
+                sft.target, record.target,
+                "raw-valid mode must not carry the completed target"
+            );
+        }
+
+        // reactor_manage's raw target is a deliberately malformed envelope:
+        // always dropped, regardless of count.
+        let mut causal2 = CausalManager::new(&engine).unwrap();
+        let mut ec2 = EventCalculusEngine::new(&engine).unwrap();
+        let reactor_manifest = ReactorManageTool.manifest();
+        let reactor_records = generate_reactor_manage(
+            &engine,
+            &mut causal2,
+            &mut ec2,
+            &book,
+            &reactor_manifest,
+            Seed(12),
+            4,
+            E2PromptMode::None,
+        )
+        .unwrap();
+        for r in &reactor_records {
+            assert_eq!(
+                r.labels.as_ref().unwrap().e1_raw_target_runtime_valid,
+                Some(false)
+            );
+        }
+        let dir2 = ScratchDir::new("e1-raw-valid-reactor").unwrap();
+        let (kept2, dropped2) = write_steering_sidecar(
+            dir2.path(),
+            "tool_contract.reactor_manage",
+            "reactor_manage",
+            "blake3:y",
+            &reactor_records,
+            E1TargetsMode::RawValid,
+        )
+        .unwrap();
+        assert_eq!(
+            kept2, 0,
+            "every reactor_manage raw target is schema-invalid"
+        );
+        assert_eq!(dropped2, reactor_records.len() as u64);
+    }
+
+    #[test]
+    fn e2_raw_events_and_projection_prompts_differ_and_gate_the_target() {
+        let book = test_book();
+        let manifest = ReactorManageTool.manifest();
+
+        let run_mode = |seed: u64, mode: E2PromptMode| {
+            let (_scratch, engine) = fresh_engine();
+            let mut causal = CausalManager::new(&engine).unwrap();
+            let mut ec = EventCalculusEngine::new(&engine).unwrap();
+            generate_reactor_manage(
+                &engine,
+                &mut causal,
+                &mut ec,
+                &book,
+                &manifest,
+                Seed(seed),
+                6,
+                mode,
+            )
+            .unwrap()
+        };
+
+        let none_records = run_mode(30, E2PromptMode::None);
+        let raw_events_records = run_mode(30, E2PromptMode::RawEvents);
+        let projection_records = run_mode(30, E2PromptMode::Projection);
+
+        // Index 5 is the revoked case (`i % 6 == 5`) in every mode — the
+        // engine-computed validity itself must not depend on the prompt mode.
+        assert_eq!(
+            none_records[5]
+                .labels
+                .as_ref()
+                .unwrap()
+                .e2_temporal_validity,
+            Some(false)
+        );
+        assert_eq!(
+            raw_events_records[5]
+                .labels
+                .as_ref()
+                .unwrap()
+                .e2_temporal_validity,
+            Some(false)
+        );
+        assert_eq!(
+            projection_records[5]
+                .labels
+                .as_ref()
+                .unwrap()
+                .e2_temporal_validity,
+            Some(false)
+        );
+
+        // The prompt text itself differs across the three modes for the
+        // same underlying episode.
+        let none_prompt = &none_records[5].conversation[0]["content"];
+        let raw_prompt = &raw_events_records[5].conversation[0]["content"];
+        let proj_prompt = &projection_records[5].conversation[0]["content"];
+        assert_ne!(
+            none_prompt, raw_prompt,
+            "none vs raw-events prompt must differ"
+        );
+        assert_ne!(
+            none_prompt, proj_prompt,
+            "none vs projection prompt must differ"
+        );
+        assert_ne!(
+            raw_prompt, proj_prompt,
+            "raw-events vs projection prompt must differ"
+        );
+
+        // `none` mode: target is always `add`, unaffected by validity — the
+        // P6.3 behavior, unchanged.
+        assert!(matches!(
+            KnowledgeAction::parse_runtime(&none_records[5].target).unwrap(),
+            KnowledgeAction::ToolCall { .. }
+        ));
+
+        // `raw-events`/`projection` modes: revoked ⇒ a refusal, never `add`.
+        for (records, mode) in [
+            (&raw_events_records, E2PromptMode::RawEvents),
+            (&projection_records, E2PromptMode::Projection),
+        ] {
+            let revoked_action = KnowledgeAction::parse_runtime(&records[5].target).unwrap();
+            assert!(
+                matches!(revoked_action, KnowledgeAction::Gap { .. }),
+                "revoked episode in {mode} mode must not target `add`, got {revoked_action:?}"
+            );
+            assert_eq!(
+                records[5]
+                    .labels
+                    .as_ref()
+                    .unwrap()
+                    .e2_prompt_mode
+                    .as_deref(),
+                Some(mode.to_string()).as_deref()
+            );
+        }
+
+        // Valid (i=0) ⇒ `add` target in every mode.
+        for records in [&none_records, &raw_events_records, &projection_records] {
+            match KnowledgeAction::parse_runtime(&records[0].target).unwrap() {
+                KnowledgeAction::ToolCall { tool, arguments } => {
+                    assert_eq!(tool, "reactor_manage");
+                    assert_eq!(
+                        arguments.get("operation").and_then(Value::as_str),
+                        Some("add")
+                    );
+                }
+                other => panic!("expected an `add` tool call for the valid episode, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn e4_revised_graph_target_differs_from_append_only_control() {
+        let book = test_book();
+        let treatment = generate_revision_treatment(&book, Seed(40), 0).unwrap();
+        let control = generate_revision_control(&book, Seed(40), 0).unwrap();
+
+        assert_ne!(
+            treatment.target, control.target,
+            "the revised-graph target must differ from the append-only control"
+        );
+        let t_labels = treatment.labels.as_ref().unwrap();
+        let c_labels = control.labels.as_ref().unwrap();
+        assert_eq!(t_labels.e4_role.as_deref(), Some("treatment"));
+        assert_eq!(t_labels.e4_retraction_applied, Some(true));
+        assert_eq!(t_labels.e4_stale_edge_still_present, Some(false));
+        assert_eq!(c_labels.e4_role.as_deref(), Some("control"));
+        assert_eq!(c_labels.e4_retraction_applied, Some(false));
+        assert_eq!(
+            c_labels.e4_stale_edge_still_present,
+            Some(true),
+            "the append-only control must leave the stale edge unresolved"
+        );
+    }
+
+    #[test]
+    fn generate_revision_pairs_produces_treatment_and_control_siblings() {
+        let book = test_book();
+        let records = generate_revision_pairs(&book, Seed(41), 3).unwrap();
+        assert_eq!(records.len(), 6);
+        let treatments = records
+            .iter()
+            .filter(|r| r.labels.as_ref().unwrap().e4_role.as_deref() == Some("treatment"))
+            .count();
+        let controls = records
+            .iter()
+            .filter(|r| r.labels.as_ref().unwrap().e4_role.as_deref() == Some("control"))
+            .count();
+        assert_eq!(treatments, 3);
+        assert_eq!(controls, 3);
+        for r in &records {
+            assert_eq!(r.family, Family::KnowledgeRevise.tag());
+        }
     }
 }

@@ -163,3 +163,108 @@ zero conversion.
   new `[[bin]]` Cargo.toml entry, touching no existing source file); `cargo test --bin
   akh_episode_generator --features daemon` (12/12) and `cargo clippy --bin akh_episode_generator --features
   daemon` (clean) are the verification performed.
+
+## Phase 51 P6.5 — experiment corpora: E1 raw-valid control, E2 prompt modes, E4 revision curriculum (2026-09-13)
+
+Scope: `docs/ai/plans/2026-09-13-phase51-p6-local-training-neurosymbolic.md` §Experiments, Anima WI
+`01a09ac7-f938-7e43-9044-94cdbebbc14e` (P6.5). Extends the P6.3 generator so the same engine-generated
+corpus can serve E1, E2 and (as a stretch) E4 with real controls, rather than only carrying E1-E3 as
+labels on a single always-completed corpus.
+
+### E1 — `--e1-targets completed|raw-valid` (default `completed`)
+
+The sidecar (`<family>/train.sft.jsonl`) target now swaps to `labels.e1_raw_target` under `raw-valid`, and
+any record whose raw target is not runtime-valid (`e1_raw_target_runtime_valid == false`) is dropped from
+the sidecar rather than swapped in — the control must be schema-valid-but-value-wrong, not
+schema-invalid-garbage, so the treatment/control difference is exactly symbolic completion. Both the
+per-family sidecar `manifest.json` (`e1_targets_mode`, `e1_raw_invalid_dropped`) and the top-level run
+manifest (`e1_targets_mode`, `e1_raw_invalid_dropped_from_sidecar`) record the mode and the drop count.
+The primary `<family>.jsonl` files are never affected — only the sidecar.
+
+Measured (`--count 200`, seed 20260913, `--e1-targets raw-valid`): `memory_write` /
+`structured_task_create` / `structured_task_update` keep all 200 (their raw targets are schema-valid,
+value-wrong echoes/placeholders); `reactor_manage` drops all 200 (its raw target is the documented
+malformed-envelope failure — free text outside `<tool_call>` tags — which is deliberately never
+runtime-valid). Verified directly: the sidecar's `target` field equals `labels.e1_raw_target` and differs
+from the primary record's completed `target` for every kept record (spot-checked programmatically, not
+just asserted in a unit test).
+
+### E2 — `--e2-prompt none|raw-events|projection` (default `none`)
+
+`none` is byte-for-byte the P6.3 behavior (prompt never mentions temporal evidence, target is always
+`add`/`update`). `raw-events` adds a template row (all 5 languages for `reactor_manage`; English-only for
+`structured_task_update`, matching that family's existing single-language scope) that states the raw
+grant/revoke event timestamps; `projection` instead states the event-calculus `holds_at` current-truth
+projection. Both non-`none` modes gate the *target* on validity, not just the label: a revoked
+authorization (`reactor_manage`, `i % 6 == 5`) or a closed task (`structured_task_update`, `i % 5 == 4`)
+now produces a `KnowledgeAction::Gap` refusal — the same refusal envelope already proven runtime-accepted
+by P6.3's `oracle_repair` episodes — instead of `add`/`update`, and the tool is never actually executed in
+that branch (so the E3 causal-reward check on the same triple is a genuine negative signal, not a
+post-hoc label on an action that ran anyway). Every reactor_manage/structured_task_update record now also
+carries `labels.e2_prompt_mode` recording which mode produced it. New template kinds:
+`add_raw_events_granted/revoked` and `add_projection_granted/revoked` (5 languages) in
+`reactor_manage.toml`; `update_priority_raw_events_open/closed` and
+`update_priority_projection_open/closed` (English) in `structured_task.toml`.
+
+Measured (`--count 200`, seed 20260913): `--e2-prompt raw-events` on `reactor_manage` produced 33/200
+revoked records (`i % 6 == 5` over 200) with `stage: "declare_gap"` and a target starting `Knowledge gap:
+reactor-authorization` — confirmed programmatically that every revoked record's target does **not**
+parse as a `ToolCall`, and every valid record's target does parse as a `ToolCall` with
+`operation: "add"`. `--e2-prompt projection` shows the same split (same `i % 6` seed determinism). `none`
+mode's target is `add` in both the valid and the revoked case (unchanged P6.3 behavior — confirmed the
+`none`/`raw-events`/`projection` prompt texts for the same episode index are all mutually distinct).
+
+### E4 (stretch) — `--e4-revision --e4-count N`, family `knowledge_revise`
+
+Implemented and green. New family `knowledge_revise` (file stem, real grug-data family tag
+`grug_data::REVISION_FAMILY` = `"knowledge.revise_from_new_edition"` — checked, not invented) generates
+paired episodes per index: **treatment** builds an owned `(job, current-worker, old_worker)` fact, applies
+the sourced correction through the engine's real exact-owned-edge revision path
+(`Engine::retract_owned_rule_snapshot`, recovered P6.0, the same primitive `tests/exact_owned_revision.rs`
+exercises — not `oracle_revise`'s plain `remove_triple`), then asserts the corrected fact and actually runs
+`memory_write` against the revised graph (`tags: ["route-correction", "revision"]`, `source: job`);
+**control** is append-only — the new fact is asserted via the same tool without ever retracting the stale
+one, leaving both present (the unresolved contradiction that is the point of the control; no `tags`/
+`source`, so the target text itself differs). Each pair runs in its own isolated engine (`ScratchDir` +
+`build_engine`, mirroring the existing `generate_oracle_acquire` per-episode pattern) so
+`retract_owned_rule_snapshot`'s exact-metadata match against `Engine::all_triples()` stays cheap
+regardless of total corpus size. Prompt: new `training/episodes/templates/knowledge_revise.toml`
+(English; distinct from `oracle.toml`'s `oracle_revise` row).
+
+Measured (`--e4-revision --e4-count 200 --count 200`, seed 20260913): 400 `knowledge_revise` records (200
+treatment + 200 control). Confirmed programmatically: every treatment record has
+`e4_retraction_applied: true` / `e4_stale_edge_still_present: false`; every control record has the
+reverse; every treatment/control pair's `target` differs; `family` is the real
+`knowledge.revise_from_new_edition` tag on every record. Scope: `memory_write` only — a
+`knowledge.revise`-family (data-to-text) episode was judged out of scope for this pass (`grug-data`'s
+`WorkflowStage`/`KnowledgeAction` types have no dedicated revision-narration action beyond `ToolCall`/
+`Answer`/`Gap`, and inventing one would be exactly the kind of unrequested new type CLAUDE.md's "strongly
+typed idiomatic Rust" guidance argues against without a driving consumer). Not attempted: a
+`structured_task_update`-after-close-and-owned-retraction variant, or multi-hop revision chains — both are
+natural P6.6+ follow-ups if E4 shows a training effect worth deepening.
+
+### Tests, lint, determinism
+
+Five new unit tests (17/17 total): `e1_raw_valid_mode_drops_invalid_and_swaps_valid_targets`,
+`e2_raw_events_and_projection_prompts_differ_and_gate_the_target`,
+`e4_revised_graph_target_differs_from_append_only_control`,
+`generate_revision_pairs_produces_treatment_and_control_siblings`, plus the pre-existing 12 all still
+green. `cargo clippy --bin akh_episode_generator --features daemon` clean (one duplicate
+`#[allow(clippy::too_many_arguments)]` introduced and immediately removed during development).
+`cargo fmt` applied to this file only. All four `--count 200` smoke runs above used the same seed
+(20260913, the CLI default) and reran once with `rm -rf` between runs on the `e1-raw-valid` output
+directory with byte-identical resulting counts, confirming same-seed determinism holds under the new
+modes.
+
+### Deviations from the brief
+
+- The brief's "least-privileged valid operation (e.g. `reactor_manage` `list`/no-op)" alternative was not
+  used; `KnowledgeAction::Gap` was chosen instead because P6.3 already established it as the runtime's
+  accepted refusal envelope (`oracle_repair`), so E2's revoked case is structurally identical to a case the
+  training corpus and runtime already handle, rather than introducing a second refusal shape.
+- New `reactor_manage.toml` translations (German/French/Italian/Spanish) for the four new
+  `add_raw_events_*`/`add_projection_*` kinds are direct, non-professionally-reviewed translations
+  following the vocabulary already established by the existing `add`/`enable` rows in the same file, not
+  independently verified by a native speaker.
+- `structured_task_create` was not E2-gated (only `structured_task_update`, per the brief's "and, if the
+  engine state supports it cheaply, `structured_task_update`" — create has no precondition to revoke).
