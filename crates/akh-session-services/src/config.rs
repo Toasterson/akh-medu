@@ -407,9 +407,34 @@ pub struct Config {
     pub git_publication: Vec<GitPublicationProfile>,
     #[serde(default = "unconfined")]
     pub confinement: String,
+    /// How often akhsessd's dispatcher re-checks each session for stalled
+    /// progress or a retirement that can now be finalized. Throttles the
+    /// reconciliation *decision*, not the fast per-session dispatch retry.
+    #[serde(default = "default_reconciliation_interval_ms")]
+    pub reconciliation_interval_ms: u64,
+    /// A session (provisioning or mid-turn) with no durable progress for
+    /// this long is force-retired so its caller gets a terminal status
+    /// instead of an indefinite "provisioning".
+    #[serde(default = "default_session_stall_threshold_ms")]
+    pub session_stall_threshold_ms: u64,
+    /// How long to wait, after retirement is requested, for the owning
+    /// runtime to confirm a turn's cancellation before closing it locally as
+    /// an unknown outcome. Bounds how long "pending retirement" can persist
+    /// when the runtime is unreachable.
+    #[serde(default = "default_retirement_cancel_grace_ms")]
+    pub retirement_cancel_grace_ms: u64,
 }
 fn unconfined() -> String {
     "unconfined".into()
+}
+fn default_reconciliation_interval_ms() -> u64 {
+    5 * 60_000
+}
+fn default_session_stall_threshold_ms() -> u64 {
+    15 * 60_000
+}
+fn default_retirement_cancel_grace_ms() -> u64 {
+    2 * 60_000
 }
 
 impl Config {

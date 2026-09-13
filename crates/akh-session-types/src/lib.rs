@@ -255,6 +255,19 @@ pub struct SessionRecord {
     pub provider_session: Option<String>,
     pub controller: Option<ControllerLease>,
     pub created_at: u64,
+    /// Wall-clock time of the most recent durable event on this session
+    /// (bumped by every `append_event`). Used to detect a session that was
+    /// admitted, possibly had a sandbox allocated, and then never moved
+    /// again — the "provisioning forever" failure mode. Defaults to "now" on
+    /// deserialization of pre-existing records so an upgrade never makes an
+    /// old, merely-quiet session look instantly stale.
+    #[serde(default = "now_ms")]
+    pub last_progress_at: u64,
+    /// Consecutive dispatch failures since the last successful reconciliation
+    /// pass, used to back off the retry cadence instead of retrying a broken
+    /// downstream at a fixed sub-second rate forever.
+    #[serde(default)]
+    pub dispatch_failures: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
