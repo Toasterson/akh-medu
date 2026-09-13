@@ -1,0 +1,66 @@
+{
+  "stage": "completed",
+  "pid": 1171,
+  "started_at": "2026-09-12T08:14:42.436149+00:00",
+  "updated_at": "2026-09-12T08:22:01.055308+00:00",
+  "plan_sha256": "cecf0357df56fd874cd45b09837e776f105fd3f20eee15ea962a9a31485059b9",
+  "completed_steps": [
+    {
+      "id": "familiar-sampled",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 21,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:16:33.264951+00:00"
+    },
+    {
+      "id": "familiar-greedy",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 24,
+        "argument_matches": 22,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:18:22.592943+00:00"
+    },
+    {
+      "id": "heldout-sampled",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 17,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:20:12.383543+00:00"
+    },
+    {
+      "id": "heldout-greedy",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 17,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:22:00.889604+00:00"
+    }
+  ],
+  "release_certification": false,
+  "active_step": null,
+  "kind": "probe",
+  "output": "/Users/toasty/ws/akh-medu/runs/akh-r1-registry-context-20260912-v1/heldout-greedy",
+  "free_bytes": 41640890368
+}

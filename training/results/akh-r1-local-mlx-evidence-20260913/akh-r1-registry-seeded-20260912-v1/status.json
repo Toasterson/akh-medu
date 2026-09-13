@@ -1,0 +1,37 @@
+{
+  "stage": "completed",
+  "pid": 59403,
+  "started_at": "2026-09-12T05:24:39.752597+00:00",
+  "updated_at": "2026-09-12T05:25:01.645423+00:00",
+  "completed": [
+    {
+      "restored": false,
+      "correct_target": true,
+      "no_restarts": true,
+      "archives_preserved": true,
+      "other_jobs_unchanged": true,
+      "verified_after_action": false,
+      "successful_graph_reads": 0,
+      "mutation_count": 0,
+      "effect_success": false,
+      "valid_json_turns": 11,
+      "turns": 11,
+      "pipeline_calls": 0,
+      "graph_semantic_precision": null,
+      "dojo_judgment": null,
+      "nonempty_registry_reads": 2,
+      "registry_mutation": false,
+      "registry_verification": false,
+      "retrieval_before_mutation": true,
+      "registry_effect_success": false,
+      "certification": false,
+      "phase": "cold_graph",
+      "created_at": "2026-09-12T05:25:00.947833+00:00",
+      "records": 4,
+      "peak_mlx_bytes": 1669929244,
+      "cold_process_pid": 59405,
+      "assistance": "Oracle-prepared exact registry records, stored before a fresh conversation. Candidate must retrieve, observe actual targets and choose actions. Not candidate acquisition."
+    }
+  ],
+  "phase": null
+}

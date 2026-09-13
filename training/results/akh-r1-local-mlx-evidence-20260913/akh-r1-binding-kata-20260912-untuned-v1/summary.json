@@ -1,0 +1,45 @@
+{
+  "completed_at": "2026-09-12T03:29:02.338748+00:00",
+  "assisted": true,
+  "certification": false,
+  "conditions": {
+    "untuned/prose_raw": {
+      "total": 6,
+      "passed": 1,
+      "parsed_requests": 6,
+      "executed_candidate_commands": 5
+    },
+    "untuned/structured_raw": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 5,
+      "executed_candidate_commands": 5
+    },
+    "untuned/prose_template": {
+      "total": 6,
+      "passed": 1,
+      "parsed_requests": 4,
+      "executed_candidate_commands": 1
+    },
+    "untuned/structured_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 3,
+      "executed_candidate_commands": 1
+    },
+    "untuned/prose_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 6,
+      "executed_candidate_commands": 4
+    },
+    "untuned/structured_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 5,
+      "executed_candidate_commands": 3
+    }
+  },
+  "audit_checks": 104,
+  "all_checks_passed": true
+}

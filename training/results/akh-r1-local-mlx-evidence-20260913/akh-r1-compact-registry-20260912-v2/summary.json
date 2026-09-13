@@ -1,0 +1,204 @@
+{
+  "completed_at": "2026-09-12T10:23:32.332744+00:00",
+  "phases": {
+    "acquire": {
+      "turns": 24,
+      "records": 0,
+      "parsed": 24,
+      "effect_success": false,
+      "registry_effect_success": false,
+      "mutations": 0,
+      "nonempty_registry_reads": 0,
+      "verification": false,
+      "correct_target": true,
+      "learn_attempts": 0,
+      "learn_successes": 0,
+      "generic_finish": false,
+      "candidate_claims_scored": false,
+      "tools": {
+        "list_commands": 21,
+        "terminal": 3
+      },
+      "repeated_calls": [
+        {
+          "request": {
+            "arguments": {},
+            "tool": "list_commands"
+          },
+          "count": 21
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "fano --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 3
+        }
+      ],
+      "context_limit": null,
+      "prompt_tokens_sum": 45282,
+      "prompt_tokens_max": 2566,
+      "same_trajectory_history_tokens_sum": 47126,
+      "same_trajectory_history_tokens_max": 2848,
+      "seeded_assistance": null
+    },
+    "cold_graph": {
+      "turns": 24,
+      "records": 0,
+      "parsed": 24,
+      "effect_success": false,
+      "registry_effect_success": false,
+      "mutations": 0,
+      "nonempty_registry_reads": 0,
+      "verification": false,
+      "correct_target": true,
+      "learn_attempts": 0,
+      "learn_successes": 0,
+      "generic_finish": false,
+      "candidate_claims_scored": false,
+      "tools": {
+        "list_commands": 21,
+        "terminal": 3
+      },
+      "repeated_calls": [
+        {
+          "request": {
+            "arguments": {},
+            "tool": "list_commands"
+          },
+          "count": 21
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "fano --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 2
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "zuri --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 1
+        }
+      ],
+      "context_limit": null,
+      "prompt_tokens_sum": 45892,
+      "prompt_tokens_max": 2573,
+      "same_trajectory_history_tokens_sum": 46758,
+      "same_trajectory_history_tokens_max": 2793,
+      "seeded_assistance": null
+    },
+    "cold_empty": {
+      "turns": 24,
+      "records": 0,
+      "parsed": 24,
+      "effect_success": false,
+      "registry_effect_success": false,
+      "mutations": 0,
+      "nonempty_registry_reads": 0,
+      "verification": false,
+      "correct_target": true,
+      "learn_attempts": 0,
+      "learn_successes": 0,
+      "generic_finish": false,
+      "candidate_claims_scored": false,
+      "tools": {
+        "list_commands": 22,
+        "terminal": 2
+      },
+      "repeated_calls": [
+        {
+          "request": {
+            "arguments": {},
+            "tool": "list_commands"
+          },
+          "count": 22
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "fano --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 1
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "zuri --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 1
+        }
+      ],
+      "context_limit": null,
+      "prompt_tokens_sum": 45748,
+      "prompt_tokens_max": 2596,
+      "same_trajectory_history_tokens_sum": 46755,
+      "same_trajectory_history_tokens_max": 2785,
+      "seeded_assistance": null
+    },
+    "seeded_cold": {
+      "turns": 24,
+      "records": 4,
+      "parsed": 24,
+      "effect_success": false,
+      "registry_effect_success": false,
+      "mutations": 0,
+      "nonempty_registry_reads": 21,
+      "verification": false,
+      "correct_target": true,
+      "learn_attempts": 0,
+      "learn_successes": 0,
+      "generic_finish": false,
+      "candidate_claims_scored": false,
+      "tools": {
+        "list_commands": 21,
+        "terminal": 3
+      },
+      "repeated_calls": [
+        {
+          "request": {
+            "arguments": {},
+            "tool": "list_commands"
+          },
+          "count": 21
+        },
+        {
+          "request": {
+            "arguments": {
+              "command": "fano --version"
+            },
+            "tool": "terminal"
+          },
+          "count": 3
+        }
+      ],
+      "context_limit": null,
+      "prompt_tokens_sum": 57362,
+      "prompt_tokens_max": 3058,
+      "same_trajectory_history_tokens_sum": 150222,
+      "same_trajectory_history_tokens_max": 11093,
+      "seeded_assistance": "Separate oracle-prepared persisted records in a fresh process; not candidate-acquired knowledge."
+    }
+  },
+  "all_checks_passed": true,
+  "audit_checks": 758,
+  "training_updates": 0,
+  "assistance": "Finite canonical calls and token-prefix constraints from public goal IDs, successful help/version receipts, candidate-retrieved or registered command records and observed identifier fields. Only documented discovery and registry invocation; no arbitrary terminal composition. Generic report/finish text. The candidate selects every operation, source line, target and stopping point. Combined typed-menu and constrained-decoding diagnostic, not independent release certification.",
+  "certification": false,
+  "context_mode": "compact",
+  "context_assistance": "Deduplicated reconstructible tool receipts plus literal relation index; all operator messages retained. Not a High Grug implementation.",
+  "baseline": "/Users/toasty/ws/akh-medu/runs/akh-r1-typed-registry-20260912-v1",
+  "automatic_promotion": false
+}

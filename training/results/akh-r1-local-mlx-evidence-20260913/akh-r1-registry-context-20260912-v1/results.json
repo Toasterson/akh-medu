@@ -1,0 +1,60 @@
+{
+  "completed_at": "2026-09-12T08:22:01.055003+00:00",
+  "steps": [
+    {
+      "id": "familiar-sampled",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 21,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:16:33.264951+00:00"
+    },
+    {
+      "id": "familiar-greedy",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 24,
+        "argument_matches": 22,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:18:22.592943+00:00"
+    },
+    {
+      "id": "heldout-sampled",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 17,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:20:12.383543+00:00"
+    },
+    {
+      "id": "heldout-greedy",
+      "result": {
+        "decisions": 26,
+        "tool_matches": 23,
+        "argument_matches": 17,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T08:22:00.889604+00:00"
+    }
+  ],
+  "input_hashes_unchanged": true,
+  "certification": false,
+  "automatic_promotion": false
+}

@@ -1,0 +1,10 @@
+{
+  "stage": "prepared",
+  "updated_at": "2026-09-12T04:21:08.657573+00:00",
+  "oracle_effects": 60,
+  "binding_rows": {
+    "train": 96,
+    "valid": 12,
+    "test": 12
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "stage": "completed",
+  "completed_at": "2026-09-13T05:37:06.426679+00:00",
+  "report": "/Users/toasty/ws/akh-medu-r1-exam/training/results/akh-r1-four-selector-freeze-20260913-RESULT.md",
+  "cases_frozen": 4,
+  "native_execution": false,
+  "next_action": "Execute the frozen four-mechanism native selector integration at /Users/toasty/ws/akh-medu/runs/akh-r1-four-selector-integration-20260913-v1 under allowance.json: verify manifest/runtime/input/binary hashes and disk>=5GiB, consume once, max8native sessions/16calls per phase/180seconds with process-group cleanup and no retries/builds. Independently audit all eight phase outcomes, cold source-group identity and current-witness behavior. Preserve failures and stop on mismatch; no fixtures,models,OCR,training,downloads,cloud,quota or gates.",
+  "hypothesis_change": "Four retained native selector mechanisms are pinned for grouped integration; behavior remains unverified."
+}

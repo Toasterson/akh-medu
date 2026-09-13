@@ -1,0 +1,40 @@
+{
+  "stage": "completed",
+  "pid": 12517,
+  "started_at": "2026-09-12T02:15:51.843499+00:00",
+  "updated_at": "2026-09-12T02:20:02.214438+00:00",
+  "plan_sha256": "f9b67f2dea261012ab231bd0a816b03af119cbb60ddf1042662b9ada2d525947",
+  "completed_steps": [
+    {
+      "id": "base_transfer",
+      "result": {
+        "decisions": 32,
+        "tool_matches": 31,
+        "argument_matches": 22,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T02:17:56.090179+00:00"
+    },
+    {
+      "id": "repair_transfer",
+      "result": {
+        "decisions": 32,
+        "tool_matches": 30,
+        "argument_matches": 21,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T02:20:02.042020+00:00"
+    }
+  ],
+  "release_certification": false,
+  "active_step": null,
+  "kind": "probe",
+  "output": "/Users/toasty/ws/akh-medu/runs/akh-r1-context-transfer-20260912-v1/repair",
+  "free_bytes": 66181480448
+}

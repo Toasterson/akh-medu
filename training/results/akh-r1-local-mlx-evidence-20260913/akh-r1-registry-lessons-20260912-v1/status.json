@@ -1,0 +1,10 @@
+{
+  "stage": "prepared",
+  "updated_at": "2026-09-12T06:18:45.699752+00:00",
+  "episodes": 24,
+  "registry_rows": {
+    "train": 104,
+    "valid": 52,
+    "test": 52
+  }
+}

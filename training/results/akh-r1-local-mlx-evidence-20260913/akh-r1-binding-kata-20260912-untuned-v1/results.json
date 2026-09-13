@@ -1,0 +1,4398 @@
+{
+  "completed_at": "2026-09-12T03:29:02.336106+00:00",
+  "decisions": [
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"kata:named_flags_tsv-131-status/ravu--help line 4\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "kata:named_flags_tsv-131-status/ravu--help line 4"
+        }
+      },
+      "stages": [
+        [
+          "kata:named_flags_tsv-131-status/ravu--help",
+          "line",
+          "4"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Invalid argv or executable outside the fixture tool set"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 646,
+      "peak_mlx_bytes": 958434096,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:02.205747+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"tepo resume --worker unit-620\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "tepo resume --worker unit-620"
+        }
+      },
+      "stages": [
+        [
+          "tepo",
+          "resume",
+          "--worker",
+          "unit-620"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": true,
+        "exit_code": 0,
+        "stage_exit_codes": [
+          0
+        ],
+        "stdout": "{\"worker\": \"unit-620\", \"mode\": \"flowing\", \"restarts\": 0}\n",
+        "stderr": ""
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183683.6512957
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": true,
+        "desired_observation_or_effect": true,
+        "bounded": true,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 654,
+      "peak_mlx_bytes": 965087552,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:03.650717+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"ravu observe --job {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "ravu observe --job {job}"
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "{job}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 710,
+      "peak_mlx_bytes": 1013109056,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:05.156768+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"pemu worker inspect {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "pemu worker inspect {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "inspect",
+          "{worker}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 632,
+      "peak_mlx_bytes": 1013109056,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:06.563385+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"pemu worker continue {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "pemu worker continue {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "continue",
+          "{worker}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 639,
+      "peak_mlx_bytes": 1013109056,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:07.996687+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_raw",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"nali job show {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "nali job show {job}"
+        }
+      },
+      "stages": [
+        [
+          "nali",
+          "job",
+          "show",
+          "{job}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 695,
+      "peak_mlx_bytes": 1013109056,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:28:09.471453+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"ravu observe --job {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "ravu observe --job {job}"
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "{job}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 840,
+      "peak_mlx_bytes": 1144607040,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:11.007487+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"ravu observe --job {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "ravu observe --job {job}"
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "{job}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 848,
+      "peak_mlx_bytes": 1151275328,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:12.550940+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"ravu--observe\", \"arguments\": {\"command\": \"ravu--observe\", \"arguments\": {\"--job\", \"{job}\"}})\n</tool_call>",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expecting ':' delimiter: line 1 column 90 (char 89)"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 904,
+      "peak_mlx_bytes": 1151275328,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:14.336770+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"pemu worker inspect {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "pemu worker inspect {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "inspect",
+          "{worker}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 816,
+      "peak_mlx_bytes": 1151275328,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:15.836297+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"pemu worker continue {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "pemu worker continue {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "continue",
+          "{worker}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 823,
+      "peak_mlx_bytes": 1151275328,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:17.383996+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_raw",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"terminal\", \"arguments\": {\"command\": \"nali job show {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "terminal",
+        "arguments": {
+          "command": "nali job show {job}"
+        }
+      },
+      "stages": [
+        [
+          "nali",
+          "job",
+          "show",
+          "{job}"
+        ]
+      ],
+      "execution": null,
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 879,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:28:18.961435+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-4\", \"bindings\": {\"worker\": \"unit-620\"}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-4",
+          "bindings": {
+            "worker": "unit-620"
+          }
+        }
+      },
+      "stages": [
+        [
+          "tepo",
+          "status",
+          "--worker",
+          "unit-620"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "tepo",
+          "status",
+          "--worker",
+          "unit-620"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "tepo 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "{\"worker\": \"unit-620\", \"mode\": \"paused\", \"restarts\": 0}\n",
+          "stderr": ""
+        }
+      },
+      "response": {
+        "success": true,
+        "exit_code": 0,
+        "stage_exit_codes": [
+          0
+        ],
+        "stdout": "{\"worker\": \"unit-620\", \"mode\": \"paused\", \"restarts\": 0}\n",
+        "stderr": ""
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": true,
+        "desired_observation_or_effect": true,
+        "bounded": true,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 706,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:20.622382+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"job\": \"job-423\", \"worker\": \"unit-620\"}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "bindings": {
+            "job": "job-423",
+            "worker": "unit-620"
+          }
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Supply exactly the required nonempty bindings"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 714,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:22.271632+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"subject\": \"",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expected exactly one native tool_call block"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 770,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:24.798225+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"job-174\", \"bindings\": {\"observed_at\": \"1789183299.8391705\", \"stage_exit_codes\": [0], \"stdout\": \"{\\\"job\\\": \\\"job-174\\\", \\\"worker\\\": \\\"unit-433\\\", \\\"pending\\\": 11, \\\"archives\\\": 41, \\\"observed_at\\\": 1789183299.8391705}\\n\", \"stderr\": \"\"}}}",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expected exactly one native tool_call block"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 692,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:26.996633+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": \"pemu 1 command pemu worker continue {worker}\"}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "bindings": {
+            "command-3": "pemu 1 command pemu worker continue {worker}"
+          }
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Supply exactly the required nonempty bindings"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 699,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:28.589374+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_template",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-2\", \"bindings\": {\"job\": {\"pending\": 11, \"archives\": 41, \"observed_at\": 1789183303.5682607}}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-2",
+          "bindings": {
+            "job": {
+              "pending": 11,
+              "archives": 41,
+              "observed_at": 1789183303.5682607
+            }
+          }
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Supply exactly the required nonempty bindings"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 755,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:28:30.269809+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-4\", \"bindings\": {\"worker\": \"unit-620\"}}\n</tool_call>",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expecting ',' delimiter: line 1 column 101 (char 100)"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 900,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:31.892153+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"job\": \"job-423\"}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "bindings": {
+            "job": "job-423"
+          }
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "job-423"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "ravu",
+          "observe",
+          "--job",
+          "job-423"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "ravu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "{\"job\": \"job-423\", \"worker\": \"unit-620\", \"pending\": 11, \"archives\": 41, \"observed_at\": 1789183713.6761405}\n",
+          "stderr": ""
+        }
+      },
+      "response": {
+        "success": true,
+        "exit_code": 0,
+        "stage_exit_codes": [
+          0
+        ],
+        "stdout": "{\"job\": \"job-423\", \"worker\": \"unit-620\", \"pending\": 11, \"archives\": 41, \"observed_at\": 1789183713.6761405}\n",
+        "stderr": ""
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 908,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:33.681144+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"ravu\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"job\": {\"observed_at\": \"1789183297.9009156\", \"pending\": 11, \"archives\": 41, \"stdout\": \"{\\\"job\\\": \\\"job-423\\\", \\\"worker\\\": \\\"unit-620\\\", \\\"pending\\\": 11, \\\"archives\\\": 41, \\\"observed_at\\\": 1789183297.9009156}\\n\", \"stderr\": \"\"}, \"worker\": {\"observed_at\": \"1789183297.90091",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expected exactly one native tool_call block"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 964,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:36.339974+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"worker\": \"unit-433\", \"mode\": \"paused\"}}\n\"}\n</tool_call>",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expecting ',' delimiter: line 2 column 1 (char 119)"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 876,
+      "peak_mlx_bytes": 1156911400,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:37.984296+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"bindings\": {\"command-3\": {\"argv\": [\"pemu\", \"worker\", \"continue\", \"{worker}\"]}}}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "bindings": {
+            "command-3": {
+              "argv": [
+                "pemu",
+                "worker",
+                "continue",
+                "{worker}"
+              ]
+            }
+          }
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Supply exactly the required nonempty bindings"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 883,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:39.732859+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_template",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"command-2\", \"arguments\": {\"subject\": \"job-174\", \"bindings\": {\"job\": {\"pending\": 11, \"archives\": 41, \"observed_at\": \"1789183303.5682607\"}}}}\n</tool_call>",
+      "request": {
+        "tool": "command-2",
+        "arguments": {
+          "subject": "job-174",
+          "bindings": {
+            "job": {
+              "pending": 11,
+              "archives": 41,
+              "observed_at": "1789183303.5682607"
+            }
+          }
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Tool is outside the supplied interface"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 939,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:28:41.648156+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"tepo status --worker {worker}\", \"argument\": \"worker\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "tepo status --worker {worker}",
+          "argument": "worker"
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Select one unambiguous stored command subject"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 718,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:43.165834+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-4\", \"argument\": \"status --worker {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-4",
+          "argument": "status --worker {worker}"
+        }
+      },
+      "stages": [
+        [
+          "tepo",
+          "status",
+          "--worker",
+          "status --worker {worker}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "tepo",
+          "status",
+          "--worker",
+          "status --worker {worker}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "tepo 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown worker\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 726,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:44.899539+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"argument\": \"observe --job job-423\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "argument": "observe --job job-423"
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "observe --job job-423"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "ravu",
+          "observe",
+          "--job",
+          "observe --job job-423"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "ravu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown job\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 782,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:46.595495+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"read_mode\", \"argument\": \"worker\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "read_mode",
+          "argument": "worker"
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Select one unambiguous stored command subject"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 704,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:48.007738+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"argument\": \"pemu worker continue {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "argument": "pemu worker continue {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "continue",
+          "pemu worker continue {worker}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "pemu",
+          "worker",
+          "continue",
+          "pemu worker continue {worker}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "pemu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown worker\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 711,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:49.684178+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "prose_flat_template",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-2\", \"argument\": \"nali job show {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-2",
+          "argument": "nali job show {job}"
+        }
+      },
+      "stages": [
+        [
+          "nali",
+          "job",
+          "show",
+          "nali job show {job}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "nali",
+          "job",
+          "show",
+          "nali job show {job}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "nali 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown job\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 767,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:28:51.423117+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "named_flags_tsv-131-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-4\", \"argument\": \"{worker}\"}\n</tool_call>",
+      "request": null,
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Expecting ',' delimiter: line 1 column 89 (char 88)"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 912,
+      "peak_mlx_bytes": 1160958248,
+      "expected_argv": [
+        "tepo",
+        "status",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:52.966389+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "named_flags_tsv-131-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"argument\": \"ravu observe --job {job}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "argument": "ravu observe --job {job}"
+        }
+      },
+      "stages": [
+        [
+          "ravu",
+          "observe",
+          "--job",
+          "ravu observe --job {job}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "ravu",
+          "observe",
+          "--job",
+          "ravu observe --job {job}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "ravu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown job\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown job\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 920,
+      "peak_mlx_bytes": 1162301748,
+      "expected_argv": [
+        "tepo",
+        "resume",
+        "--worker",
+        "unit-620"
+      ],
+      "created_at": "2026-09-12T03:28:54.847921+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "named_flags_tsv-131-watch",
+      "raw": "<tool_call>\n{\"name\": \"ravu\", \"arguments\": {\"subject\": \"command-3\", \"argument\": \"job-423\"}}\n</tool_call>",
+      "request": {
+        "tool": "ravu",
+        "arguments": {
+          "subject": "command-3",
+          "argument": "job-423"
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Tool is outside the supplied interface"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-423": {
+            "worker": "unit-620",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-481": {
+            "worker": "unit-189",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-888": {
+            "worker": "unit-502",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-620": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-189": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-502": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-620",
+            "argv": [
+              "tepo",
+              "resume",
+              "--worker",
+              "unit-620"
+            ],
+            "at": 1789183298.0277846
+          }
+        ],
+        "contract": {
+          "observer": "ravu",
+          "controller": "tepo",
+          "delimiter": "\t",
+          "columns": [
+            "job",
+            "worker",
+            "pending",
+            "archives"
+          ],
+          "argv": {
+            "catalog": [
+              "inventory",
+              "--format",
+              "tsv"
+            ],
+            "watch": [
+              "observe",
+              "--job",
+              "{job}"
+            ],
+            "status": [
+              "status",
+              "--worker",
+              "{worker}"
+            ],
+            "resume": [
+              "resume",
+              "--worker",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 976,
+      "peak_mlx_bytes": 1162301748,
+      "expected_argv": [
+        "ravu",
+        "observe",
+        "--job",
+        "job-423"
+      ],
+      "created_at": "2026-09-12T03:28:56.494044+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "positional_csv-137-status",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-1\", \"argument\": \"pemu worker inspect {worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-1",
+          "argument": "pemu worker inspect {worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "inspect",
+          "pemu worker inspect {worker}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "pemu",
+          "worker",
+          "inspect",
+          "pemu worker inspect {worker}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "pemu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown worker\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 888,
+      "peak_mlx_bytes": 1162301748,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "inspect",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:28:58.324420+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "positional_csv-137-resume",
+      "raw": "<tool_call>\n{\"name\": \"invoke_command\", \"arguments\": {\"subject\": \"command-3\", \"argument\": \"{worker}\"}}\n</tool_call>",
+      "request": {
+        "tool": "invoke_command",
+        "arguments": {
+          "subject": "command-3",
+          "argument": "{worker}"
+        }
+      },
+      "stages": [
+        [
+          "pemu",
+          "worker",
+          "continue",
+          "{worker}"
+        ]
+      ],
+      "execution": {
+        "argv": [
+          "pemu",
+          "worker",
+          "continue",
+          "{worker}"
+        ],
+        "version_check": {
+          "success": true,
+          "exit_code": 0,
+          "stage_exit_codes": [
+            0
+          ],
+          "stdout": "pemu 1\n",
+          "stderr": ""
+        },
+        "response": {
+          "success": false,
+          "exit_code": 66,
+          "stage_exit_codes": [
+            66
+          ],
+          "stdout": "",
+          "stderr": "Unknown worker\n"
+        }
+      },
+      "response": {
+        "success": false,
+        "exit_code": 66,
+        "stage_exit_codes": [
+          66
+        ],
+        "stdout": "",
+        "stderr": "Unknown worker\n"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 11,
+            "archives": 41
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "paused",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 895,
+      "peak_mlx_bytes": 1162301748,
+      "expected_argv": [
+        "pemu",
+        "worker",
+        "continue",
+        "unit-433"
+      ],
+      "created_at": "2026-09-12T03:29:00.124010+00:00",
+      "assisted": true
+    },
+    {
+      "model": "untuned",
+      "arm": "structured_flat_template",
+      "case": "positional_csv-137-watch",
+      "raw": "<tool_call>\n{\"name\": \"command-2\", \"arguments\": {\"subject\": \"job-174\", \"argument\": \"show\"}}\n</tool_call>",
+      "request": {
+        "tool": "command-2",
+        "arguments": {
+          "subject": "job-174",
+          "argument": "show"
+        }
+      },
+      "stages": null,
+      "execution": null,
+      "response": {
+        "success": false,
+        "error": "Tool is outside the supplied interface"
+      },
+      "after": {
+        "version": 1,
+        "docs_available": false,
+        "jobs": {
+          "job-174": {
+            "worker": "unit-433",
+            "pending": 0,
+            "archives": 52
+          },
+          "job-285": {
+            "worker": "unit-297",
+            "pending": 0,
+            "archives": 42
+          },
+          "job-519": {
+            "worker": "unit-336",
+            "pending": 0,
+            "archives": 43
+          }
+        },
+        "workers": {
+          "unit-433": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-297": {
+            "mode": "flowing",
+            "restarts": 0
+          },
+          "unit-336": {
+            "mode": "flowing",
+            "restarts": 0
+          }
+        },
+        "audit": [
+          {
+            "operation": "resume",
+            "worker": "unit-433",
+            "argv": [
+              "pemu",
+              "worker",
+              "continue",
+              "unit-433"
+            ],
+            "at": 1789183303.6941485
+          }
+        ],
+        "contract": {
+          "observer": "nali",
+          "controller": "pemu",
+          "delimiter": ",",
+          "columns": [
+            "pending",
+            "worker",
+            "archives",
+            "job"
+          ],
+          "argv": {
+            "catalog": [
+              "jobs",
+              "list"
+            ],
+            "watch": [
+              "job",
+              "show",
+              "{job}"
+            ],
+            "status": [
+              "worker",
+              "inspect",
+              "{worker}"
+            ],
+            "resume": [
+              "worker",
+              "continue",
+              "{worker}"
+            ]
+          },
+          "version": 1
+        }
+      },
+      "score": {
+        "kata_effect_pass": false,
+        "desired_observation_or_effect": false,
+        "bounded": false,
+        "full_episode_success": null,
+        "certification": false
+      },
+      "prompt_tokens": 951,
+      "peak_mlx_bytes": 1162301748,
+      "expected_argv": [
+        "nali",
+        "job",
+        "show",
+        "job-174"
+      ],
+      "created_at": "2026-09-12T03:29:01.696106+00:00",
+      "assisted": true
+    }
+  ],
+  "input_hashes_unchanged": true,
+  "certification": false,
+  "assistance": "One-action diagnostic with oracle-prepared cold KG and observations. Not full episodes or autonomous KG learning."
+}

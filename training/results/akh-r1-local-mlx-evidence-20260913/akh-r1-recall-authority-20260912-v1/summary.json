@@ -1,0 +1,47 @@
+{
+  "all_passed": true,
+  "rows": [
+    {
+      "split": "validation",
+      "phase": "learn",
+      "checks": {
+        "status": true,
+        "effect": true,
+        "actions": true
+      },
+      "passed": true
+    },
+    {
+      "split": "validation",
+      "phase": "cold",
+      "checks": {
+        "status": true,
+        "effect": true,
+        "actions": true
+      },
+      "passed": true
+    },
+    {
+      "split": "validation",
+      "phase": "stale",
+      "checks": {
+        "status": true,
+        "effect": true,
+        "actions": true
+      },
+      "passed": true
+    },
+    {
+      "split": "validation",
+      "phase": "missing-witness",
+      "checks": {
+        "status": true,
+        "effect": true,
+        "actions": true
+      },
+      "passed": true
+    }
+  ],
+  "model_used": false,
+  "new_independent_worlds": 0
+}

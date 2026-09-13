@@ -1,0 +1,11 @@
+{
+  "stage": "superseded_before_training_or_model_evaluation",
+  "updated_at": "2026-09-12T04:19:25.128265+00:00",
+  "oracle_effects": 60,
+  "binding_rows": {
+    "train": 96,
+    "valid": 12,
+    "test": 12
+  },
+  "reason": "Source receipt namespace included examiner operation in case ID. New corpus uses opaque receipt IDs. Original oracle artifacts retained."
+}

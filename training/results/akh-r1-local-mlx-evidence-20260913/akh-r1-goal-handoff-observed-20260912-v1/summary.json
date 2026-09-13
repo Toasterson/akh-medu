@@ -1,0 +1,55 @@
+{
+  "completed_at": "2026-09-12T15:15:44.039891+00:00",
+  "groups": {
+    "history": {
+      "total": 18,
+      "correct_intent": 10,
+      "effects": 10,
+      "by_operation": {
+        "status": {
+          "total": 6,
+          "correct_intent": 5,
+          "effects": 5
+        },
+        "resume": {
+          "total": 6,
+          "correct_intent": 0,
+          "effects": 0
+        },
+        "watch": {
+          "total": 6,
+          "correct_intent": 5,
+          "effects": 5
+        }
+      }
+    },
+    "compact": {
+      "total": 18,
+      "correct_intent": 9,
+      "effects": 9,
+      "by_operation": {
+        "status": {
+          "total": 6,
+          "correct_intent": 6,
+          "effects": 6
+        },
+        "resume": {
+          "total": 6,
+          "correct_intent": 0,
+          "effects": 0
+        },
+        "watch": {
+          "total": 6,
+          "correct_intent": 3,
+          "effects": 3
+        }
+      }
+    }
+  },
+  "evidence": "supplied_observations",
+  "all_checks_passed": true,
+  "audit_checks": 171,
+  "training_updates": 0,
+  "full_episode_success": null,
+  "certification": false
+}

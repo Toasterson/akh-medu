@@ -1,0 +1,7 @@
+{
+  "stage": "preparation_failed",
+  "updated_at": "2026-09-12T10:19:38.077935+00:00",
+  "reason": "Preflight caught Transformers BatchEncoding dictionary length instead of token IDs. Corrected preflight passes 95 checks; v1 was never launched. Fresh v2 will freeze corrected code.",
+  "training_updates": 0,
+  "inference_started": false
+}

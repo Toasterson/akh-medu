@@ -1,0 +1,33 @@
+{
+  "completed_at": "2026-09-12T03:26:33.904619+00:00",
+  "assisted": true,
+  "certification": false,
+  "conditions": {
+    "base/prose_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 6,
+      "executed_candidate_commands": 3
+    },
+    "base/structured_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 5,
+      "executed_candidate_commands": 1
+    },
+    "repair/prose_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 6,
+      "executed_candidate_commands": 0
+    },
+    "repair/structured_flat_template": {
+      "total": 6,
+      "passed": 0,
+      "parsed_requests": 3,
+      "executed_candidate_commands": 0
+    }
+  },
+  "audit_checks": 92,
+  "all_checks_passed": true
+}

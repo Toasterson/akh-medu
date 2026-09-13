@@ -1,0 +1,72 @@
+{
+  "schema": "akh-r1-development-summary-v1",
+  "conditions": [
+    {
+      "run": "base-v1",
+      "label": "Cached 0.6B affine-4-bit, custom JSON, greedy",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 0,
+      "turns": 72
+    },
+    {
+      "run": "base-native-v1",
+      "label": "Cached 0.6B, native nested arguments, greedy",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 51,
+      "turns": 72
+    },
+    {
+      "run": "base-flat-v1",
+      "label": "Cached 0.6B, flat interface, greedy",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 8,
+      "turns": 72
+    },
+    {
+      "run": "dojo-flat-v1",
+      "label": "Cached 0.6B + existing White-belt Dojo adapter, flat, greedy",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 0,
+      "turns": 72
+    },
+    {
+      "run": "base-flat-demonstration-v1",
+      "label": "Cached 0.6B, flat + unrelated interface lesson, greedy",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 68,
+      "turns": 72
+    },
+    {
+      "run": "base-flat-sampling-v1",
+      "label": "Cached 0.6B, flat, recommended non-thinking sampler",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 26,
+      "turns": 72
+    },
+    {
+      "run": "unquantized-flat-sampling-v1",
+      "label": "Upstream 0.6B BF16, flat, recommended non-thinking sampler",
+      "effect_success": 0,
+      "phases": 4,
+      "parsed_envelopes": 11,
+      "turns": 51
+    },
+    {
+      "run": "base-flat-reasoning-sampling-v1",
+      "label": "Cached 0.6B, flat, recommended reasoning sampler",
+      "effect_success": 0,
+      "phases": 1,
+      "parsed_envelopes": 18,
+      "turns": 18
+    }
+  ],
+  "learned_model_success": false,
+  "release_certification": false,
+  "next_stage": "whole_episode_curriculum_and_foundation_controls"
+}

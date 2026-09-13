@@ -1,0 +1,84 @@
+{
+  "stage": "completed",
+  "pid": 71866,
+  "started_at": "2026-09-12T11:56:32.002138+00:00",
+  "updated_at": "2026-09-12T11:58:30.390026+00:00",
+  "plan_sha256": "e9311498c1b808404fd889d9b789d04e5d9a58a81b9c67103904d9e735d0a75c",
+  "completed_steps": [
+    {
+      "id": "history",
+      "result": {
+        "updates": 2,
+        "adapter_files": {
+          "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/history/pilot/adapter/adapters.safetensors": "c9992f7ae6e477e4a4c1f8d48c52d1cb434f1807656f31f24abd2c4688b2b0ed",
+          "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/history/pilot/adapter/adapter_config.json": "e6e6eaabc03df2792ce5f8ed686f2f909c8b1bed28900f1cbd9ec75cc5ae9cd1"
+        },
+        "finished_at": "2026-09-12T11:57:26.896994+00:00",
+        "initialization": {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/history/pilot/initial-adapter.safetensors",
+          "sha256": "4a5aef5347aa8cac50848cc810d4c55a52fbd0e7a67bceb078f6b8205cd069f7",
+          "bytes": 11558216,
+          "seed": 83,
+          "trainable_parameters": 2883584,
+          "device": {
+            "device_name": "Apple M2",
+            "max_recommended_working_set_size": 12713115648,
+            "memory_size": 17179869184,
+            "architecture": "applegpu_g14g",
+            "max_buffer_length": 9534832640,
+            "resource_limit": 499000
+          }
+        },
+        "cost": {
+          "completed": true,
+          "elapsed_seconds": 52.11621424998157,
+          "peak_mlx_bytes": 8697901980,
+          "peak_process_rss_bytes": 690061312,
+          "initialization_sha256": "4a5aef5347aa8cac50848cc810d4c55a52fbd0e7a67bceb078f6b8205cd069f7",
+          "iterations": 2
+        }
+      },
+      "finished_at": "2026-09-12T11:57:27.181068+00:00"
+    },
+    {
+      "id": "compact",
+      "result": {
+        "updates": 2,
+        "adapter_files": {
+          "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/compact/pilot/adapter/adapters.safetensors": "2868a543f3fc2bb0eff4dbf2d8471bb4b6a719687f8ce7cbeaa0d7217167b74f",
+          "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/compact/pilot/adapter/adapter_config.json": "3312863cdd141489d7456ec6a61401bd36a4a86cffb0c6b1c5bc95da51a4058e"
+        },
+        "finished_at": "2026-09-12T11:58:29.526335+00:00",
+        "initialization": {
+          "path": "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/compact/pilot/initial-adapter.safetensors",
+          "sha256": "4a5aef5347aa8cac50848cc810d4c55a52fbd0e7a67bceb078f6b8205cd069f7",
+          "bytes": 11558216,
+          "seed": 83,
+          "trainable_parameters": 2883584,
+          "device": {
+            "device_name": "Apple M2",
+            "max_recommended_working_set_size": 12713115648,
+            "memory_size": 17179869184,
+            "architecture": "applegpu_g14g",
+            "max_buffer_length": 9534832640,
+            "resource_limit": 499000
+          }
+        },
+        "cost": {
+          "completed": true,
+          "elapsed_seconds": 59.633274333085865,
+          "peak_mlx_bytes": 9665383230,
+          "peak_process_rss_bytes": 689881088,
+          "initialization_sha256": "4a5aef5347aa8cac50848cc810d4c55a52fbd0e7a67bceb078f6b8205cd069f7",
+          "iterations": 2
+        }
+      },
+      "finished_at": "2026-09-12T11:58:29.778476+00:00"
+    }
+  ],
+  "release_certification": false,
+  "active_step": null,
+  "kind": "train",
+  "output": "/Users/toasty/ws/akh-medu/runs/akh-r1-memory-action-profile-20260912-v1/compact/pilot",
+  "free_bytes": 36517253120
+}

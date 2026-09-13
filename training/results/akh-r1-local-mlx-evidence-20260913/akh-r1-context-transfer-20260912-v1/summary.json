@@ -1,0 +1,703 @@
+{
+  "completed_at": "2026-09-12T02:20:02.214438+00:00",
+  "teacher_context": true,
+  "actual_tools_executed": false,
+  "weight_updates": 0,
+  "certification": false,
+  "conditions": {
+    "base": {
+      "results": {
+        "decisions": 32,
+        "tool_matches": 31,
+        "argument_matches": 22,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "by_tool": {
+        "report": {
+          "total": 6,
+          "tool_matches": 6,
+          "exact_arguments": 6
+        },
+        "terminal": {
+          "total": 14,
+          "tool_matches": 14,
+          "exact_arguments": 7
+        },
+        "remember": {
+          "total": 6,
+          "tool_matches": 6,
+          "exact_arguments": 4
+        },
+        "kg_query": {
+          "total": 4,
+          "tool_matches": 3,
+          "exact_arguments": 3
+        },
+        "finish": {
+          "total": 2,
+          "tool_matches": 2,
+          "exact_arguments": 2
+        }
+      },
+      "terminal_argv_equal": 7,
+      "terminal_total": 14,
+      "repair_command_argv_equal": 0,
+      "repair_command_total": 2,
+      "terminal_cases": [
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e002",
+          "expected_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e004",
+          "expected_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e006",
+          "expected_argv": [
+            [
+              "fano",
+              "--help"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--help"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e010",
+          "expected_argv": [
+            [
+              "zuri",
+              "--help"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "--help"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e021",
+          "expected_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-431\" {print $3}"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$4==\"job\" {print $2}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e025",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "inspect"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"worker\" {print $3}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e029",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "state",
+              "set",
+              "flowing"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "inspect"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-431\" {print $3}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e031",
+          "expected_argv": [
+            [
+              "fano",
+              "job",
+              "job-431",
+              "read"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "job",
+              "job-431",
+              "read"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e002",
+          "expected_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e004",
+          "expected_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e013",
+          "expected_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-620\" {print $3}"
+            ]
+          ],
+          "actual_argv": null,
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e017",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "inspect"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e021",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "state",
+              "set",
+              "flowing"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "inspect"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-620\" {print $3}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e023",
+          "expected_argv": [
+            [
+              "fano",
+              "job",
+              "job-620",
+              "read"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "job",
+              "{job>}",
+              "read"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-620\" {print $3}"
+            ]
+          ],
+          "argv_equal": false
+        }
+      ]
+    },
+    "repair": {
+      "results": {
+        "decisions": 32,
+        "tool_matches": 30,
+        "argument_matches": 21,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "by_tool": {
+        "report": {
+          "total": 6,
+          "tool_matches": 6,
+          "exact_arguments": 6
+        },
+        "terminal": {
+          "total": 14,
+          "tool_matches": 14,
+          "exact_arguments": 6
+        },
+        "remember": {
+          "total": 6,
+          "tool_matches": 5,
+          "exact_arguments": 4
+        },
+        "kg_query": {
+          "total": 4,
+          "tool_matches": 3,
+          "exact_arguments": 3
+        },
+        "finish": {
+          "total": 2,
+          "tool_matches": 2,
+          "exact_arguments": 2
+        }
+      },
+      "terminal_argv_equal": 6,
+      "terminal_total": 14,
+      "repair_command_argv_equal": 1,
+      "repair_command_total": 2,
+      "terminal_cases": [
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e002",
+          "expected_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e004",
+          "expected_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e006",
+          "expected_argv": [
+            [
+              "fano",
+              "--help"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--help"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e010",
+          "expected_argv": [
+            [
+              "zuri",
+              "--help"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$4==\"fano\" {print $2}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e021",
+          "expected_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-431\" {print $3}"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$4==\"fano\" {print $2}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e025",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "inspect"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e029",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "state",
+              "set",
+              "flowing"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-917",
+              "state",
+              "set",
+              "flowing"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-acquire",
+          "decision_id": "e031",
+          "expected_argv": [
+            [
+              "fano",
+              "job",
+              "job-431",
+              "read"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "job",
+              "job-431"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e002",
+          "expected_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e004",
+          "expected_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "--version"
+            ]
+          ],
+          "argv_equal": true
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e013",
+          "expected_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ":",
+              "$2==\"job-620\" {print $3}"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "jobs",
+              "export"
+            ],
+            [
+              "awk",
+              "-F",
+              ",",
+              "$4==\"job-620\" {print $2}"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e017",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "inspect"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e021",
+          "expected_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "state",
+              "set",
+              "flowing"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "zuri",
+              "worker",
+              "unit-108",
+              "resume"
+            ]
+          ],
+          "argv_equal": false
+        },
+        {
+          "episode_id": "subject_first_colon-71-cold_graph",
+          "decision_id": "e023",
+          "expected_argv": [
+            [
+              "fano",
+              "job",
+              "job-620",
+              "read"
+            ]
+          ],
+          "actual_argv": [
+            [
+              "fano",
+              "job",
+              "jobs",
+              "export"
+            ]
+          ],
+          "argv_equal": false
+        }
+      ]
+    }
+  },
+  "artifact_checks": 127,
+  "all_checks_passed": true
+}

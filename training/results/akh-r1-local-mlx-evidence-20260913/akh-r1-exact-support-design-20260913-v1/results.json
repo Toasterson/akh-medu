@@ -1,0 +1,9 @@
+{
+  "stage": "completed",
+  "completed_at": "2026-09-13T05:07:48.956706+00:00",
+  "design": "/Users/toasty/ws/akh-medu-r1-exam/docs/ai/plans/2026-09-13-akh-exact-support-revision.md",
+  "native_builds": 0,
+  "native_tests": 0,
+  "hypothesis_change": "Exact V2 provenance can support ownership-checked native recomputation, but current inference suppresses alternative derivation records; incremental TMS support claims are unjustified.",
+  "next_action": "Implement the bounded exact-owned-edge native revision design at /Users/toasty/ws/akh-medu-r1-exam/docs/ai/plans/2026-09-13-akh-exact-support-revision.md. Preserve existing symbol TMS and use linked V2 provenance plus host ownership, conservative invalidation and native rule recomputation. Freeze changed source/test names before the one-build/eight-test/600second offline allowance in /Users/toasty/ws/akh-medu/runs/akh-r1-exact-support-design-20260913-v1/next-native-budget.json. Stop on failure; no episodes,fixtures,OCR,models,downloads,cloud,quota or gate changes. Then review full-pack integration priority."
+}

@@ -1,0 +1,34 @@
+{
+  "completed_at": "2026-09-12T02:20:02.214097+00:00",
+  "steps": [
+    {
+      "id": "base_transfer",
+      "result": {
+        "decisions": 32,
+        "tool_matches": 31,
+        "argument_matches": 22,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T02:17:56.090179+00:00"
+    },
+    {
+      "id": "repair_transfer",
+      "result": {
+        "decisions": 32,
+        "tool_matches": 30,
+        "argument_matches": 21,
+        "all_tokenization_checks_pass": true,
+        "certification": false,
+        "teacher_context": true,
+        "actual_tools_executed": false
+      },
+      "finished_at": "2026-09-12T02:20:02.042020+00:00"
+    }
+  ],
+  "input_hashes_unchanged": true,
+  "certification": false,
+  "automatic_promotion": false
+}
