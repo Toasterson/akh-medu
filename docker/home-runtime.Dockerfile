@@ -10,11 +10,11 @@ ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,id=akh-home-runtime-${TARGETPLATFORM},sharing=locked \
     cargo build --locked --release -p akh-session-services --no-default-features \
-      --features runtime,events,executor,helpers \
-      --bin akhrtd --bin akheventd --bin akhexecd --bin akh-runtime-profile --bin akh-service \
+      --features runtime,events,executor,helpers,session \
+      --bin akhrtd --bin akheventd --bin akhsessd --bin akhexecd --bin akh-runtime-profile --bin akh-service \
       --example native-provider-probe && \
     mkdir -p /out/examples && \
-    cp target/release/akhrtd target/release/akheventd target/release/akhexecd target/release/akh-runtime-profile target/release/akh-service /out/ && \
+    cp target/release/akhrtd target/release/akheventd target/release/akhsessd target/release/akhexecd target/release/akh-runtime-profile target/release/akh-service /out/ && \
     cp target/release/examples/native-provider-probe /out/examples/
 
 FROM node:22-bookworm-slim AS runtime
@@ -44,13 +44,19 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/usr/local/bin/akhrtd", "--config", "/config/service.json"]
 
 # Open-model workers and event ingress do not need provider CLIs or their SDKs.
-FROM debian:bookworm-slim AS services
+FROM debian:bookworm-slim AS services-base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini python3 && \
     rm -rf /var/lib/apt/lists/* && groupadd --gid 10001 akh && \
     useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home akh && \
     mkdir -p /data /config && chown akh:akh /data
-COPY --from=build /out/ /usr/local/bin/
 USER 10001:10001
 WORKDIR /data
 ENTRYPOINT ["/usr/bin/tini", "--"]
+
+FROM services-base AS control
+COPY --from=build /out/akhsessd /out/akheventd /usr/local/bin/
+CMD ["/usr/local/bin/akhsessd", "--config", "/config/service.json"]
+
+FROM services-base AS services
+COPY --from=build /out/ /usr/local/bin/
 CMD ["/usr/local/bin/akhrtd", "--config", "/config/service.json"]

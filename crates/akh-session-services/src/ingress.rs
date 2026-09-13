@@ -144,6 +144,21 @@ impl Events {
         Ok(())
     }
     pub fn sources(&self) {
+        for source in self.config.djehuty_inboxes.clone() {
+            if !source.enabled {
+                continue;
+            }
+            let service = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Err(error) = crate::djehuty_inbox::poll(&service, &source).await {
+                        tracing::warn!(source=%source.source,code=%error.code,"Djehuty inbox ingestion deferred");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(source.interval_secs.max(1)))
+                        .await;
+                }
+            });
+        }
         for source in self.config.djehuty.clone() {
             for thread in source.threads.clone() {
                 let service = self.clone();

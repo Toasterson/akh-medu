@@ -348,9 +348,7 @@ impl Sessions {
         }
         let profile = self
             .config
-            .akhs
-            .get(&request.akh)
-            .ok_or_else(|| Fault::missing("Akh profile not found"))?;
+            .session_profile(&request.akh, &request.workspace_profile)?;
         if !profile
             .workspace_profiles
             .contains(&request.workspace_profile)
@@ -410,7 +408,7 @@ impl Sessions {
             }
         }
         let mut session = SessionRecord {
-            repository_bootstrap: crate::session_bootstrap::initial(profile)?,
+            repository_bootstrap: crate::session_bootstrap::initial(&profile)?,
             required_mcp_credentials: self.required_mcp_credentials(&profile.tools)?,
             retirement: None,
             closed_at: None,

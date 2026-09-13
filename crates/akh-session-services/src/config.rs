@@ -122,6 +122,10 @@ impl Principal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AkhProfile {
+    /// Explicit, narrower tool/repository grants for an authorized workspace profile.
+    /// This lets coordination sessions keep the Akh identity without Anima assignment credentials.
+    #[serde(default)]
+    pub session_grants: BTreeMap<String, SessionGrants>,
     /// Nonempty requires immutable repository bootstrap before allocation.
     #[serde(default)]
     pub bootstrap_repositories: Vec<String>,
@@ -133,6 +137,14 @@ pub struct AkhProfile {
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub approval_policy: ApprovalPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionGrants {
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub bootstrap_repositories: Vec<String>,
 }
 
 pub use akh_session_types::ProviderConfig as RuntimeProfile;
@@ -331,6 +343,26 @@ pub struct DjehutySource {
     #[serde(default = "djehuty_page_size")]
     pub page_size: u16,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DjehutyInbox {
+    #[serde(default = "inbox_enabled")]
+    pub enabled: bool,
+    pub endpoint: String,
+    pub source: String,
+    pub recipient_id: String,
+    #[serde(default)]
+    pub allowed_authors: Vec<String>,
+    pub message_types: Vec<String>,
+    #[serde(default = "board_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "djehuty_page_size")]
+    pub page_size: u16,
+}
+fn inbox_enabled() -> bool {
+    true
+}
 fn djehuty_page_size() -> u16 {
     50
 }
@@ -364,6 +396,8 @@ pub struct Config {
     pub boards: Vec<BoardSource>,
     #[serde(default)]
     pub djehuty: Vec<DjehutySource>,
+    #[serde(default)]
+    pub djehuty_inboxes: Vec<DjehutyInbox>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     pub workspace_root: Option<PathBuf>,
@@ -457,6 +491,27 @@ impl Config {
                 ));
             }
         }
+        for source in &self.djehuty_inboxes {
+            validate_key(&source.source)?;
+            self.endpoint(&source.endpoint)?;
+            for id in std::iter::once(&source.recipient_id).chain(&source.allowed_authors) {
+                uuid::Uuid::parse_str(id)
+                    .map_err(|_| Fault::invalid("invalid Djehuty inbox UUID"))?;
+            }
+            for kind in &source.message_types {
+                validate_key(kind)?;
+            }
+            if !sources.insert(&source.source)
+                || source.message_types.is_empty()
+                || source.page_size == 0
+                || source.page_size > 200
+                || source.interval_secs == 0
+            {
+                return Err(Fault::invalid(
+                    "Djehuty inboxes require unique sources, protocols and positive bounded polling",
+                ));
+            }
+        }
         for (id, automation) in &self.automations {
             validate_key(id)?;
             let owner = self
@@ -495,6 +550,9 @@ impl Config {
             for repository in &profile.bootstrap_repositories {
                 validate_repository(repository)?;
             }
+            for workspace in profile.session_grants.keys() {
+                self.session_profile(name, workspace)?;
+            }
             let mut tools = std::collections::HashSet::new();
             for tool in &profile.tools {
                 validate_key(&tool.name)?;
@@ -527,6 +585,39 @@ impl Config {
             }
         }
         Ok(())
+    }
+    pub fn session_profile(&self, akh: &str, workspace: &str) -> Result<AkhProfile> {
+        let mut profile = self
+            .akhs
+            .get(akh)
+            .ok_or_else(|| Fault::missing("Akh profile not found"))?
+            .clone();
+        if !profile.workspace_profiles.iter().any(|p| p == workspace) {
+            return Err(Fault::new(
+                "forbidden",
+                "workspace profile is not granted to this Akh",
+            ));
+        }
+        if let Some(grants) = profile.session_grants.get(workspace) {
+            let names: std::collections::HashSet<_> = grants.tools.iter().collect();
+            if names.len() != grants.tools.len()
+                || grants
+                    .tools
+                    .iter()
+                    .any(|n| !profile.tools.iter().any(|t| &t.name == n))
+                || grants
+                    .bootstrap_repositories
+                    .iter()
+                    .any(|r| !profile.bootstrap_repositories.contains(r))
+            {
+                return Err(Fault::invalid(
+                    "workspace session grants must narrow existing Akh tools and repositories",
+                ));
+            }
+            profile.tools.retain(|t| names.contains(&t.name));
+            profile.bootstrap_repositories = grants.bootstrap_repositories.clone();
+        }
+        Ok(profile)
     }
     pub fn endpoint(&self, id: &str) -> Result<&Endpoint> {
         self.endpoints
