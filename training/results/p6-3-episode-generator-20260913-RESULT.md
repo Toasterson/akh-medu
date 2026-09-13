@@ -38,6 +38,24 @@ word normalization, exact-text BLAKE3 hash, and 13-word shingle BLAKE3 hashes, c
 record's `prompt` and `target`. Two unit tests (`sentinel_exact_text_is_excluded`,
 `sentinel_thirteen_word_shingle_is_excluded`) prove both paths reject a synthetic sentinel.
 
+## Decontamination against the real sentinels (architect session, after merge)
+
+The quarantined release-gate exam sets are on this Mac since P6.4a (`runs/checkpoints/adaptive-loop-v9-release-recovery-20260910/sentinels/`).
+They were flattened to `runs/p6-3-sentinels-20260913.jsonl` (1,272 tool cases + 800 knowledge episodes = 2,072 lines, 3,344 texts).
+A first run with `--sentinel` alone dropped **all 2,000 `memory_write` records** on the 13-word shingle — the collision was the
+`memory_write` tool's own description ("…the typed replacement for raw text journal ingestion in an LLM session"), which every one of
+the 24 sentinel cases and every base-corpus record carries. That is contract boilerplate, not held-out content. The generator gained
+`--sentinel-baseline <jsonl>` (repeatable): shingles/exact texts that also occur in a baseline file (the base SFT corpus
+`local-curricula-v3-8k/sft/{tools,knowledge}.train.sft.jsonl`, 86,732 texts) are removed from the sentinel index first, so only
+sentinel-private shingles remain. Result (`training/episodes/p6-3-20260913-decontaminated/manifest.json`):
+
+| sentinel texts indexed | baseline texts | shingles removed as boilerplate | records checked | dropped exact | dropped shingle |
+|---:|---:|---:|---:|---:|---:|
+| 3,344 | 86,732 | 2,338 | 8,024 | 0 | 0 |
+
+Determinism: regenerating in a second worktree gave byte-identical `*.jsonl` for every family; only `manifest.json` differs
+(`generator_git_hash`). The decontaminated corpus is the one P6.4 trains on.
+
 ## Record schema
 
 Primary per-family files (`<family>.jsonl`) use a local `EpisodeRecord` type whose base fields mirror

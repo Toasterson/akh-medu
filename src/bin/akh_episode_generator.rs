@@ -369,6 +369,15 @@ struct Args {
     /// loaded; the manifest records that honestly.
     #[arg(long = "sentinel")]
     sentinel_paths: Vec<PathBuf>,
+
+    /// Optional baseline JSONL file(s) whose texts are NOT held out: any
+    /// 13-word shingle or exact text that also occurs in a baseline file
+    /// (tool-contract descriptions, the base SFT corpus) is removed from the
+    /// sentinel index before decontamination. Without this, boilerplate the
+    /// sentinels share with every training record (e.g. a tool's own
+    /// description) makes every generated record collide. Repeatable.
+    #[arg(long = "sentinel-baseline")]
+    sentinel_baseline_paths: Vec<PathBuf>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -553,6 +562,10 @@ struct DecontaminationSummary {
     word_ngram_size: usize,
     sentinel_files: usize,
     sentinel_texts_indexed: usize,
+    baseline_files: usize,
+    baseline_texts_indexed: usize,
+    sentinel_ngrams_removed_by_baseline: usize,
+    sentinel_exact_removed_by_baseline: usize,
     records_checked: u64,
     records_dropped_exact: u64,
     records_dropped_ngram: u64,
@@ -563,6 +576,11 @@ struct SentinelIndex {
     ngram: HashSet<[u8; 32]>,
     files: usize,
     texts: usize,
+    /// Baseline files consulted (see [`SentinelIndex::subtract_baseline`]).
+    baseline_files: usize,
+    baseline_texts: usize,
+    ngrams_removed_by_baseline: usize,
+    exact_removed_by_baseline: usize,
 }
 
 impl SentinelIndex {
@@ -572,7 +590,32 @@ impl SentinelIndex {
             ngram: HashSet::new(),
             files: 0,
             texts: 0,
+            baseline_files: 0,
+            baseline_texts: 0,
+            ngrams_removed_by_baseline: 0,
+            exact_removed_by_baseline: 0,
         }
+    }
+
+    /// Removes from this index every exact-text and 13-word-shingle hash that
+    /// also occurs in `baseline_paths`. Baseline text is, by definition, not
+    /// held out (tool descriptions repeated in every contract prompt, the base
+    /// SFT corpus the model already trains on), so a collision with it is not
+    /// sentinel leakage. Only the genuinely sentinel-private shingles survive.
+    fn subtract_baseline(mut self, baseline_paths: &[PathBuf]) -> GenResult<Self> {
+        if baseline_paths.is_empty() {
+            return Ok(self);
+        }
+        let baseline = Self::load(baseline_paths)?;
+        let before_ngram = self.ngram.len();
+        let before_exact = self.exact.len();
+        self.ngram.retain(|hash| !baseline.ngram.contains(hash));
+        self.exact.retain(|hash| !baseline.exact.contains(hash));
+        self.ngrams_removed_by_baseline = before_ngram - self.ngram.len();
+        self.exact_removed_by_baseline = before_exact - self.exact.len();
+        self.baseline_files = baseline.files;
+        self.baseline_texts = baseline.texts;
+        Ok(self)
     }
 
     fn load(paths: &[PathBuf]) -> GenResult<Self> {
@@ -2103,7 +2146,8 @@ fn write_steering_sidecar(
 
 fn run(args: &Args) -> GenResult<()> {
     let book = TemplateBook::load(&args.templates_dir)?;
-    let sentinels = SentinelIndex::load(&args.sentinel_paths)?;
+    let sentinels = SentinelIndex::load(&args.sentinel_paths)?
+        .subtract_baseline(&args.sentinel_baseline_paths)?;
     fs::create_dir_all(&args.out_dir).map_err(|source| GeneratorError::Io {
         path: args.out_dir.clone(),
         source,
@@ -2164,6 +2208,10 @@ fn run(args: &Args) -> GenResult<()> {
         word_ngram_size: SENTINEL_WORD_NGRAM_SIZE,
         sentinel_files: sentinels.files,
         sentinel_texts_indexed: sentinels.texts,
+        baseline_files: sentinels.baseline_files,
+        baseline_texts_indexed: sentinels.baseline_texts,
+        sentinel_ngrams_removed_by_baseline: sentinels.ngrams_removed_by_baseline,
+        sentinel_exact_removed_by_baseline: sentinels.exact_removed_by_baseline,
         ..Default::default()
     };
 
@@ -2468,6 +2516,31 @@ mod tests {
         let index = SentinelIndex::load(&[sentinel_path]).unwrap();
         assert_eq!(index.collision("The Quick Brown Fox"), Some("exact"));
         assert_eq!(index.collision("totally unrelated text"), None);
+    }
+
+    #[test]
+    fn baseline_shingles_are_subtracted_from_the_sentinel_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel_path = dir.path().join("sentinel.jsonl");
+        let baseline_path = dir.path().join("baseline.jsonl");
+        let boilerplate = "one two three four five six seven eight nine ten eleven twelve thirteen";
+        let private = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu";
+        std::fs::write(
+            &sentinel_path,
+            format!("{{\"text\":\"{boilerplate} {private}\"}}\n"),
+        )
+        .unwrap();
+        std::fs::write(&baseline_path, format!("{{\"text\":\"{boilerplate}\"}}\n")).unwrap();
+        let index = SentinelIndex::load(std::slice::from_ref(&sentinel_path))
+            .unwrap()
+            .subtract_baseline(std::slice::from_ref(&baseline_path))
+            .unwrap();
+        assert_eq!(index.ngrams_removed_by_baseline, 1);
+        assert!(
+            index.collision(boilerplate).is_none(),
+            "shared boilerplate must not collide"
+        );
+        assert_eq!(index.collision(private), Some("13-word-shingle"));
     }
 
     #[test]
