@@ -22,6 +22,7 @@ use grug_data::{KnowledgeAction, KnowledgeSftRecord};
 use crate::error::{GrugError, GrugResult};
 use crate::foundation::FoundationLineage;
 use crate::generate::{GenerateConfig, generate_from_prompt_ids_cached};
+use crate::remediation::RemediationLineage;
 use crate::tokenizer::Vocab;
 use crate::train::{Batch, Encoded};
 use crate::transformer::AttentionBackend;
@@ -347,6 +348,14 @@ pub struct KnowledgeModelArtifact {
     /// unpromoted candidate and its optimizer state is continued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steered_from: Option<KnowledgeSteeringLineage>,
+    /// Present on a new segment continuing an uncertified candidate's
+    /// retained Adam state on its base corpus plus one or more
+    /// engine-generated supplemental siblings (P6.4,
+    /// `train_knowledge --remediate-from-bundle`). Unlike `adapted_from`,
+    /// Adam is retained rather than reset; unlike `steered_from`, the parent
+    /// mixture is not authorized by a live adaptive-controller decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediated_from: Option<RemediationLineage>,
     /// Absent on ordinary training checkpoints. `certify_knowledge_model`
     /// populates it only after checkpoint-bound, quarantined exams cover every
     /// required knowledge workflow and every captured runtime tool contract.
@@ -446,7 +455,10 @@ impl KnowledgeModelArtifact {
                 );
             }
         }
-        if self.adapted_from.is_some() && self.steered_from.is_some() {
+        let immediate_parents = usize::from(self.adapted_from.is_some())
+            + usize::from(self.steered_from.is_some())
+            + usize::from(self.remediated_from.is_some());
+        if immediate_parents > 1 {
             return Err("artifact cannot have two immediate knowledge-model parents".into());
         }
         if let Some(parent) = &self.steered_from {
@@ -471,6 +483,17 @@ impl KnowledgeModelArtifact {
             }
             if !self.capability_families.contains(&parent.family) {
                 return Err("steered training sibling family is absent from the new corpus".into());
+            }
+        }
+        if let Some(parent) = &self.remediated_from {
+            parent.verify()?;
+            if parent.contract_hash != self.contract_hash
+                || parent.tokenizer_hash != self.tokenizer_hash
+            {
+                return Err(
+                    "remediated knowledge segment changed the parent tokenizer or tool contract"
+                        .into(),
+                );
             }
         }
         if let Some(certification) = &self.certification {
@@ -1263,6 +1286,7 @@ mod tests {
             context_extended_from: None,
             adapted_from: None,
             steered_from: None,
+            remediated_from: None,
             certification: None,
         };
         artifact.verify().unwrap();
@@ -1310,6 +1334,7 @@ mod tests {
             context_extended_from: None,
             adapted_from: None,
             steered_from: None,
+            remediated_from: None,
             certification: None,
         };
         assert!(artifact.verify().unwrap_err().contains("tokenizer differs"));
@@ -1504,6 +1529,7 @@ mod tests {
             context_extended_from: None,
             adapted_from: None,
             steered_from: None,
+            remediated_from: None,
             certification: Some(certification),
         };
         artifact.verify().unwrap();
@@ -1690,6 +1716,7 @@ mod tests {
             context_extended_from: Some(foundation_shape.max_seq_len),
             adapted_from: None,
             steered_from: None,
+            remediated_from: None,
             certification: None,
         };
         // `matches_canonical_shape` tolerates exactly this -- the `scale`
@@ -1852,6 +1879,7 @@ mod tests {
             context_extended_from: Some(4096),
             adapted_from: None,
             steered_from: None,
+            remediated_from: None,
             certification: None,
         };
         assert_eq!(artifact.verify(), Ok(()));

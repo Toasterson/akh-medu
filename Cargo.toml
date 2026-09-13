@@ -343,6 +343,19 @@ chrono = { version = "0.4", features = ["serde"] }
 [profile.dev.package.sha2]
 opt-level = 3
 
+# Phase 51 (grug-train): an unoptimized `matrixmultiply`/`ndarray` build makes
+# even a tiny (~27M parameter, `KnowledgeModelSize::Small`) real transformer
+# step take minutes on CPU -- a `cargo test` integration test that trains a
+# handful of real steps (e.g. `train_knowledge --remediate-from-bundle`)
+# would otherwise be impractically slow. Same rationale as the `sha2`
+# override above: keep the hot numeric kernels optimized in the dev/test
+# profile while `grug-train`'s own code stays unoptimized (debuggable).
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+
+[profile.dev.package.ndarray]
+opt-level = 3
+
 [[bin]]
 name = "akh"
 path = "src/main.rs"
