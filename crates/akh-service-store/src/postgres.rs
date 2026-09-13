@@ -195,31 +195,77 @@ pub(crate) fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// `advisory_lock`'s `seed` for the per-`kind` transaction lock (see
+/// [`PostgresInner::begin`] and [`migrate_from_redb_if_needed`]).
+const KIND_TRANSACTION_LOCK_SEED: i64 = 0;
+/// `advisory_lock`'s `seed` for the schema-bootstrap lock (see
+/// [`ensure_schema`]). Distinct from the per-`kind` seed above so a `kind`
+/// string that happened to equal the schema name would not contend for the
+/// same lock as an unrelated bootstrap.
+const SCHEMA_BOOTSTRAP_LOCK_SEED: i64 = 1;
+
+/// Every daemon (akhsessd, akheventd, akhrtd, akhexecd, akhsbxd) opens its
+/// store — and therefore calls this — concurrently right after a rollout,
+/// all against the same shared `schema`. Without serializing it, two
+/// connections can both pass `CREATE SCHEMA IF NOT EXISTS`/`CREATE TABLE IF
+/// NOT EXISTS`'s existence check before either commits, and one loses with a
+/// duplicate-key error against the catalog (`pg_namespace_nspname_index` or
+/// `pg_type_typname_nsp_index`). Taking a dedicated advisory lock keyed by
+/// the schema name — so every daemon contends for the exact same lock,
+/// regardless of `kind` — serializes the bootstrap; the 23505 retry is a
+/// belt-and-braces fallback for any interleaving the lock doesn't cover.
 async fn ensure_schema(pool: &PgPool, schema: &str, table: &str) -> sqlx::Result<()> {
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(pool)
-        .await?;
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {table} (\
-            kind TEXT NOT NULL, \
-            key BYTEA NOT NULL, \
-            value BYTEA NOT NULL, \
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
-            PRIMARY KEY (kind, key))"
-    ))
-    .execute(pool)
-    .await?;
-    Ok(())
+    for attempt in 0..2 {
+        let mut tx = pool.begin().await?;
+        advisory_lock(&mut tx, schema, SCHEMA_BOOTSTRAP_LOCK_SEED).await?;
+        let bootstrap: sqlx::Result<()> = async {
+            sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (\
+                    kind TEXT NOT NULL, \
+                    key BYTEA NOT NULL, \
+                    value BYTEA NOT NULL, \
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                    PRIMARY KEY (kind, key))"
+            ))
+            .execute(&mut *tx)
+            .await?;
+            Ok(())
+        }
+        .await;
+        match bootstrap {
+            Ok(()) => {
+                tx.commit().await?;
+                return Ok(());
+            }
+            Err(sqlx::Error::Database(ref db_error))
+                if attempt == 0 && db_error.code().as_deref() == Some("23505") =>
+            {
+                let _ = tx.rollback().await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Unreachable in practice (the loop above always returns from its first
+    // iteration unless it hits a retryable 23505, and the second iteration
+    // always returns), spelled out so a future edit that changes the retry
+    // count can't silently fall through without a result.
+    unreachable!("ensure_schema either returns Ok or propagates an error within two attempts")
 }
 
 async fn advisory_lock(
     tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
-    kind: &str,
+    key: &str,
+    seed: i64,
 ) -> sqlx::Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(kind)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(&format!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, {seed}))"
+    ))
+    .bind(key)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -230,7 +276,7 @@ async fn migrate_from_redb_if_needed(
     legacy_path: Option<&Path>,
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    advisory_lock(&mut tx, kind).await?;
+    advisory_lock(&mut tx, kind, KIND_TRANSACTION_LOCK_SEED).await?;
     let already_migrated: Option<i32> = sqlx::query_scalar(&format!(
         "SELECT 1 FROM {table} WHERE kind = $1 AND key = $2"
     ))
@@ -379,7 +425,7 @@ impl PostgresInner {
         let tx = pg_runtime()
             .block_on(async {
                 let mut tx = self.pool.begin().await?;
-                advisory_lock(&mut tx, &self.kind).await?;
+                advisory_lock(&mut tx, &self.kind, KIND_TRANSACTION_LOCK_SEED).await?;
                 Ok::<_, sqlx::Error>(tx)
             })
             .map_err(failure)?;
