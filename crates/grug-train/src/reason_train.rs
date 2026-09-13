@@ -12,7 +12,7 @@
 //! plain-text prompt (fact lines + a `goal` line) and target (a High-Grug v1
 //! trace or an answer-only line) directly.
 
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::reason::ReasonExample;
@@ -21,7 +21,7 @@ use crate::error::GrugResult;
 use crate::generate::{GenerateConfig, generate};
 use crate::tokenizer::Vocab;
 use crate::train::{Batch, Encoded};
-use crate::transformer::TinyTransformer;
+use crate::transformer::{AttentionBackend, TinyTransformer};
 
 /// The prompt half of the training sequence for a [`ReasonExample`] --
 /// exactly `example.prompt`. Named to mirror `crate::train::format_prompt`'s
@@ -118,7 +118,7 @@ pub fn build_reason_batch<B: AutodiffBackend, V: Vocab>(
 /// Greedy-generate on every [`ReasonExample`] in `examples`, returning the raw
 /// output strings in the same order -- feed straight to
 /// `grug_data::reason::score_reason_outputs(examples, &outputs)`.
-pub fn generate_reason_outputs<B: Backend, V: Vocab>(
+pub fn generate_reason_outputs<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     examples: &[ReasonExample],

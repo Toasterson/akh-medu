@@ -6,7 +6,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use burn::tensor::backend::Backend;
+use crate::transformer::AttentionBackend;
 use grug_data::constrain::{DecodeReport, RuntimeCallGrammar, ToolCallGrammarError};
 use grug_data::{KnowledgeSftRecord, ToolContractSnapshot, render_knowledge_prompt_with_system};
 use serde_json::Value;
@@ -55,7 +55,7 @@ pub enum KnowledgeRuntimeError {
 /// exam binaries use the same loader and methods with the configured GPU
 /// backend so release matrices do not take days merely because decoding is
 /// checkpoint-bound.
-pub struct KnowledgeModel<B: Backend> {
+pub struct KnowledgeModel<B: AttentionBackend> {
     artifact: KnowledgeModelArtifact,
     contracts: ToolContractSnapshot,
     tokenizer: BpeTokenizer,
@@ -131,7 +131,7 @@ impl VerifiedKnowledgeBundle {
         Ok(lineage)
     }
 
-    pub fn load_model_only<B: Backend>(
+    pub fn load_model_only<B: AttentionBackend>(
         &self,
         device: &B::Device,
     ) -> Result<TinyTransformer<B>, KnowledgeRuntimeError> {
@@ -210,7 +210,7 @@ impl KnowledgeModel<crate::GpuBackend> {
     }
 }
 
-impl<B: Backend> KnowledgeModel<B> {
+impl<B: AttentionBackend> KnowledgeModel<B> {
     fn load_manifest_with_device(
         bundle: &Path,
         manifest_name: &str,

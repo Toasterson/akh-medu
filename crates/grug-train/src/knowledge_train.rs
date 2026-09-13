@@ -24,6 +24,7 @@ use crate::foundation::FoundationLineage;
 use crate::generate::{GenerateConfig, generate_from_prompt_ids_cached};
 use crate::tokenizer::Vocab;
 use crate::train::{Batch, Encoded};
+use crate::transformer::AttentionBackend;
 use crate::transformer::PositionalEncoding;
 use crate::transformer::TinyTransformer;
 use crate::transformer::TinyTransformerConfig;
@@ -1107,7 +1108,7 @@ fn fit_target_preserving(encoded: Encoded, max_seq_len: usize) -> Encoded {
     Encoded { ids, target_start }
 }
 
-pub fn generate_knowledge_outputs<B: Backend, V: Vocab>(
+pub fn generate_knowledge_outputs<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     records: &[KnowledgeSftRecord],

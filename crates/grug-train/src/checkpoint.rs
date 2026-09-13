@@ -28,12 +28,12 @@ use burn::module::Module;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, Optimizer};
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder};
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::backend::AutodiffBackend;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GrugError, GrugResult};
 use crate::pointer::PointerTransformer;
-use crate::transformer::TinyTransformer;
+use crate::transformer::{AttentionBackend, TinyTransformer};
 
 type TinyCheckpoint<B> = (
     TinyTransformer<B>,
@@ -195,12 +195,15 @@ fn verify_checkpoint_file(dir: &Path, path: &Path, expected: &str, label: &str) 
 /// Save `model` + `optim`'s state to a new immutable `dir`, tagging the
 /// checkpoint with `step` and both content hashes. The directory becomes
 /// visible through one same-filesystem rename only after every file exists.
-pub fn save_checkpoint<B: AutodiffBackend>(
+pub fn save_checkpoint<B: AutodiffBackend + AttentionBackend>(
     dir: impl AsRef<Path>,
     step: usize,
     model: &TinyTransformer<B>,
     optim: &OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
-) -> GrugResult<()> {
+) -> GrugResult<()>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let dir = dir.as_ref();
     let temporary = prepare_checkpoint_directory(dir)?;
 
@@ -269,12 +272,15 @@ pub fn save_checkpoint<B: AutodiffBackend>(
 /// checkpoint was saved from -- shape mismatches surface as a
 /// [`GrugError::CheckpointReadFailed`] from the underlying recorder rather
 /// than a silent corrupt load.
-pub fn load_checkpoint<B: AutodiffBackend>(
+pub fn load_checkpoint<B: AutodiffBackend + AttentionBackend>(
     dir: impl AsRef<Path>,
     model: TinyTransformer<B>,
     optim: OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
     device: &B::Device,
-) -> GrugResult<TinyCheckpoint<B>> {
+) -> GrugResult<TinyCheckpoint<B>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let dir = dir.as_ref();
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
 
@@ -323,7 +329,7 @@ pub fn load_checkpoint<B: AutodiffBackend>(
 ///
 /// `model` should be freshly initialized with the *same architecture config*
 /// the checkpoint was saved from, exactly as [`load_checkpoint`] requires.
-pub fn load_model_only<B: Backend>(
+pub fn load_model_only<B: AttentionBackend>(
     dir: impl AsRef<Path>,
     model: TinyTransformer<B>,
     device: &B::Device,
@@ -357,12 +363,15 @@ pub fn load_model_only<B: Backend>(
 /// Same on-disk layout (`model`/`optim`/`meta.json`); a separate function
 /// rather than a generic one to keep the proven `TinyTransformer` path
 /// untouched.
-pub fn save_checkpoint_ptr<B: AutodiffBackend>(
+pub fn save_checkpoint_ptr<B: AutodiffBackend + AttentionBackend>(
     dir: impl AsRef<Path>,
     step: usize,
     model: &PointerTransformer<B>,
     optim: &OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
-) -> GrugResult<()> {
+) -> GrugResult<()>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let dir = dir.as_ref();
     let temporary = prepare_checkpoint_directory(dir)?;
 
@@ -419,12 +428,15 @@ pub fn save_checkpoint_ptr<B: AutodiffBackend>(
 }
 
 /// [`load_checkpoint`] for a [`PointerTransformer`] (Phase 51 P1a-4 Step B).
-pub fn load_checkpoint_ptr<B: AutodiffBackend>(
+pub fn load_checkpoint_ptr<B: AutodiffBackend + AttentionBackend>(
     dir: impl AsRef<Path>,
     model: PointerTransformer<B>,
     optim: OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
     device: &B::Device,
-) -> GrugResult<PointerCheckpoint<B>> {
+) -> GrugResult<PointerCheckpoint<B>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let dir = dir.as_ref();
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
 

@@ -10,7 +10,7 @@
 //! piece is turning those two strings into an [`Encoded`]/[`Batch`] with the
 //! shared `BOS <prompt> SEP <target> EOS` framing and target-only loss mask.
 
-use burn::tensor::backend::{AutodiffBackend, Backend};
+use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::RuleExample;
@@ -19,7 +19,7 @@ use crate::error::GrugResult;
 use crate::generate::{GenerateConfig, generate};
 use crate::tokenizer::Vocab;
 use crate::train::{Batch, Encoded};
-use crate::transformer::TinyTransformer;
+use crate::transformer::{AttentionBackend, TinyTransformer};
 
 /// The prompt half of the training sequence for a [`RuleExample`] — exactly
 /// `example.prompt` (fact/rule lines + a `goal` line). A plain pass-through,
@@ -103,7 +103,7 @@ pub fn build_rule_batch<B: AutodiffBackend, V: Vocab>(
 /// Greedy-generate on every [`RuleExample`] in `examples`, returning the raw
 /// output strings in order — feed straight to
 /// `grug_data::score_rule_outputs(examples, &outputs)`.
-pub fn generate_rule_outputs<B: Backend, V: Vocab>(
+pub fn generate_rule_outputs<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     examples: &[RuleExample],

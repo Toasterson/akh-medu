@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tokenizer::Vocab;
 use crate::train::Batch;
-use crate::transformer::{TinyTransformer, TinyTransformerConfig};
+use crate::transformer::{AttentionBackend, TinyTransformer, TinyTransformerConfig};
 
 pub const OCR_PROMPT: &str = "transcribe image exactly";
 
@@ -553,7 +553,7 @@ pub struct NativeVisionTransformerConfig {
 }
 
 impl NativeVisionTransformerConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> NativeVisionTransformer<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> NativeVisionTransformer<B> {
         assert_eq!(
             self.transformer.d_model, self.vision.d_model,
             "vision and transformer widths must match"
@@ -568,12 +568,12 @@ impl NativeVisionTransformerConfig {
 /// Shared-decoder multimodal model. The visual stem is deliberately exposed
 /// as a first-class module so checkpoints include and train its parameters.
 #[derive(Module, Debug)]
-pub struct NativeVisionTransformer<B: Backend> {
+pub struct NativeVisionTransformer<B: AttentionBackend> {
     transformer: TinyTransformer<B>,
     vision: VisionPatchStem<B>,
 }
 
-impl<B: Backend> NativeVisionTransformer<B> {
+impl<B: AttentionBackend> NativeVisionTransformer<B> {
     pub fn forward(
         &self,
         patches: Tensor<B, 3>,
@@ -623,7 +623,7 @@ pub struct CompactVisionTransformerConfig {
 }
 
 impl CompactVisionTransformerConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CompactVisionTransformer<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> CompactVisionTransformer<B> {
         assert_eq!(
             self.transformer.d_model, self.vision.d_model,
             "vision and transformer widths must match"
@@ -637,7 +637,7 @@ impl CompactVisionTransformerConfig {
     /// Attach a fresh compact visual stem to an already trained textual trunk.
     /// The caller reconstructs and verifies the trunk from its artifact before
     /// calling this method; no textual parameter is reinitialized here.
-    pub fn init_with_transformer<B: Backend>(
+    pub fn init_with_transformer<B: AttentionBackend>(
         &self,
         transformer: TinyTransformer<B>,
         device: &B::Device,
@@ -654,12 +654,12 @@ impl CompactVisionTransformerConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct CompactVisionTransformer<B: Backend> {
+pub struct CompactVisionTransformer<B: AttentionBackend> {
     transformer: TinyTransformer<B>,
     vision: CompactConvVisionStem<B>,
 }
 
-impl<B: Backend> CompactVisionTransformer<B> {
+impl<B: AttentionBackend> CompactVisionTransformer<B> {
     pub fn forward(&self, images: Tensor<B, 4>, input_ids: Tensor<B, 2, Int>) -> Tensor<B, 3> {
         let prefix = self.vision.forward(images);
         self.transformer
@@ -699,13 +699,16 @@ impl<B: Backend> CompactVisionTransformer<B> {
 /// Initialize the native vision model and the same clipped Adam family used by
 /// the text trunk. This is the runnable V0/V1 training boundary: data code can
 /// build ordinary text targets and supply one patch tensor.
-pub fn init_vision_training<B: AutodiffBackend>(
+pub fn init_vision_training<B: AutodiffBackend + AttentionBackend>(
     config: &NativeVisionTransformerConfig,
     device: &B::Device,
 ) -> (
     NativeVisionTransformer<B>,
     OptimizerAdaptor<Adam, NativeVisionTransformer<B>, B>,
-) {
+)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let model = config.init::<B>(device);
     let optimizer = AdamConfig::new()
         .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
@@ -713,13 +716,16 @@ pub fn init_vision_training<B: AutodiffBackend>(
     (model, optimizer)
 }
 
-pub fn init_compact_vision_training<B: AutodiffBackend>(
+pub fn init_compact_vision_training<B: AutodiffBackend + AttentionBackend>(
     config: &CompactVisionTransformerConfig,
     device: &B::Device,
 ) -> (
     CompactVisionTransformer<B>,
     OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
-) {
+)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let model = config.init::<B>(device);
     let optimizer = AdamConfig::new()
         .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
@@ -730,7 +736,7 @@ pub fn init_compact_vision_training<B: AutodiffBackend>(
 /// One teacher-forced multimodal optimization step. Loss is evaluated only at
 /// textual positions selected by `batch.loss_mask`; gradients still flow
 /// through the preceding visual prefix and patch projection.
-pub fn train_vision_step<B: AutodiffBackend>(
+pub fn train_vision_step<B: AutodiffBackend + AttentionBackend>(
     model: NativeVisionTransformer<B>,
     optimizer: &mut OptimizerAdaptor<Adam, NativeVisionTransformer<B>, B>,
     patches: Tensor<B, 3>,
@@ -738,7 +744,10 @@ pub fn train_vision_step<B: AutodiffBackend>(
     columns: usize,
     batch: &Batch<B>,
     learning_rate: f64,
-) -> (NativeVisionTransformer<B>, f32) {
+) -> (NativeVisionTransformer<B>, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let mask: Vec<i64> = batch
         .loss_mask
@@ -757,13 +766,16 @@ pub fn train_vision_step<B: AutodiffBackend>(
     (model, loss_value)
 }
 
-pub fn train_compact_vision_step<B: AutodiffBackend>(
+pub fn train_compact_vision_step<B: AutodiffBackend + AttentionBackend>(
     model: CompactVisionTransformer<B>,
     optimizer: &mut OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
     images: Tensor<B, 4>,
     batch: &Batch<B>,
     learning_rate: f64,
-) -> (CompactVisionTransformer<B>, f32) {
+) -> (CompactVisionTransformer<B>, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let (model, loss, _grad_norm) = train_compact_vision_step_guarded(
         model,
         optimizer,
@@ -778,7 +790,7 @@ pub fn train_compact_vision_step<B: AutodiffBackend>(
 
 /// Forward-only OCR loss on the shared decoder, suitable for an inner backend
 /// evaluation pass that does not retain gradients.
-pub fn compact_vision_batch_loss<B: Backend>(
+pub fn compact_vision_batch_loss<B: AttentionBackend>(
     model: &CompactVisionTransformer<B>,
     images: Tensor<B, 4>,
     batch: &Batch<B>,
@@ -806,7 +818,7 @@ pub fn compact_vision_batch_loss<B: Backend>(
 /// returns the model untouched, preventing one hard OCR batch from poisoning
 /// the shared text trunk or Adam state.
 #[allow(clippy::too_many_arguments)]
-pub fn train_compact_vision_step_guarded<B: AutodiffBackend>(
+pub fn train_compact_vision_step_guarded<B: AutodiffBackend + AttentionBackend>(
     model: CompactVisionTransformer<B>,
     optimizer: &mut OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
     images: Tensor<B, 4>,
@@ -814,7 +826,10 @@ pub fn train_compact_vision_step_guarded<B: AutodiffBackend>(
     learning_rate: f64,
     loss_cap: f32,
     grad_norm_cap: f32,
-) -> (CompactVisionTransformer<B>, f32, f32) {
+) -> (CompactVisionTransformer<B>, f32, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let mask: Vec<i64> = batch
         .loss_mask
@@ -843,14 +858,17 @@ pub fn train_compact_vision_step_guarded<B: AutodiffBackend>(
 /// Guarded text-only retention update through the exact same shared trunk and
 /// optimizer as visual training. This enables an explicit interleaved mixture
 /// instead of hoping OCR-only updates preserve tool/language behavior.
-pub fn train_compact_text_step_guarded<B: AutodiffBackend>(
+pub fn train_compact_text_step_guarded<B: AutodiffBackend + AttentionBackend>(
     model: CompactVisionTransformer<B>,
     optimizer: &mut OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
     batch: &Batch<B>,
     learning_rate: f64,
     loss_cap: f32,
     grad_norm_cap: f32,
-) -> (CompactVisionTransformer<B>, f32, f32) {
+) -> (CompactVisionTransformer<B>, f32, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let mask: Vec<i64> = batch
         .loss_mask
@@ -877,15 +895,21 @@ pub fn train_compact_text_step_guarded<B: AutodiffBackend>(
 }
 
 /// Project a training model into its non-autodiff inference form.
-pub fn to_eval_vision_model<B: AutodiffBackend>(
+pub fn to_eval_vision_model<B: AutodiffBackend + AttentionBackend>(
     model: &NativeVisionTransformer<B>,
-) -> NativeVisionTransformer<B::InnerBackend> {
+) -> NativeVisionTransformer<B::InnerBackend>
+where
+    B::InnerBackend: AttentionBackend,
+{
     model.valid()
 }
 
-pub fn to_eval_compact_vision_model<B: AutodiffBackend>(
+pub fn to_eval_compact_vision_model<B: AutodiffBackend + AttentionBackend>(
     model: &CompactVisionTransformer<B>,
-) -> CompactVisionTransformer<B::InnerBackend> {
+) -> CompactVisionTransformer<B::InnerBackend>
+where
+    B::InnerBackend: AttentionBackend,
+{
     model.valid()
 }
 
@@ -893,7 +917,7 @@ pub fn to_eval_compact_vision_model<B: AutodiffBackend>(
 /// [`build_vision_ocr_batch`]. The visual prefix stays fixed while generated
 /// text is appended autoregressively.
 #[allow(clippy::too_many_arguments)] // grid geometry belongs to the patch tensor contract
-pub fn generate_vision_ocr<B: Backend, V: Vocab>(
+pub fn generate_vision_ocr<B: AttentionBackend, V: Vocab>(
     model: &NativeVisionTransformer<B>,
     patches: Tensor<B, 3>,
     rows: usize,
@@ -951,7 +975,7 @@ pub fn generate_vision_ocr<B: Backend, V: Vocab>(
     })
 }
 
-pub fn generate_compact_vision_ocr<B: Backend, V: Vocab>(
+pub fn generate_compact_vision_ocr<B: AttentionBackend, V: Vocab>(
     model: &CompactVisionTransformer<B>,
     images: Tensor<B, 4>,
     tokenizer: &V,

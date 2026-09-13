@@ -9,8 +9,8 @@ use std::time::Instant;
 use burn::tensor::backend::Backend;
 use clap::Parser;
 use grug_train::{
-    BpeTokenizer, GenerateConfig, generate_from_prompt_ids, generate_from_prompt_ids_cached,
-    verify_foundation_bundle,
+    AttentionBackend, BpeTokenizer, GenerateConfig, generate_from_prompt_ids,
+    generate_from_prompt_ids_cached, verify_foundation_bundle,
 };
 
 #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     run::<ActiveBackend>(args, device)
 }
 
-fn run<B: Backend>(args: Args, device: B::Device) -> Result<(), Box<dyn Error>> {
+fn run<B: Backend + AttentionBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn Error>> {
     let verified = verify_foundation_bundle(&args.bundle)?;
     let tokenizer = BpeTokenizer::load(verified.tokenizer_path())?;
     let model = verified.load_model_only::<B>(&device)?;

@@ -40,9 +40,10 @@ use grug_train::knowledge_train::{
 };
 use grug_train::train::{init_training, to_eval_model, train_step_guarded};
 use grug_train::{
-    BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding, VerifiedFoundationBundle,
-    VerifiedKnowledgeBundle, build_knowledge_batch, checkpoint, validate_knowledge_steering_share,
-    verify_active_knowledge_bundle, verify_candidate_knowledge_bundle, verify_foundation_bundle,
+    AttentionBackend, BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding,
+    VerifiedFoundationBundle, VerifiedKnowledgeBundle, build_knowledge_batch, checkpoint,
+    validate_knowledge_steering_share, verify_active_knowledge_bundle,
+    verify_candidate_knowledge_bundle, verify_foundation_bundle,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -323,7 +324,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     run::<ActiveBackend>(args, device)
 }
 
-fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn Error>> {
+fn run<B: AutodiffBackend + AttentionBackend>(
+    args: Args,
+    device: B::Device,
+) -> Result<(), Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     std::fs::create_dir_all(&args.artifacts_dir)?;
 
     for (label, parent) in [
@@ -1655,7 +1662,7 @@ fn install_verified_tokenizer(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_and_log<B: AutodiffBackend>(
+fn evaluate_and_log<B: AutodiffBackend + AttentionBackend>(
     model: &grug_train::TinyTransformer<B>,
     tokenizer: &BpeTokenizer,
     records: &[KnowledgeSftRecord],
@@ -1666,7 +1673,10 @@ fn evaluate_and_log<B: AutodiffBackend>(
     device: &B::Device,
     artifacts_dir: &Path,
     eval_log: &Path,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let eval_model = to_eval_model(model);
     let outputs = generate_knowledge_outputs(
         &eval_model,

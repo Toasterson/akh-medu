@@ -27,7 +27,7 @@ use grug_train::eval::FrozenTwoAxisHoldout;
 use grug_train::tokenizer::Vocab;
 use grug_train::train::{encode_example, init_training_ptr, to_eval_model_ptr};
 use grug_train::transformer::TinyTransformerConfig;
-use grug_train::{BpeTokenizer, PointerTransformerConfig, checkpoint};
+use grug_train::{AttentionBackend, BpeTokenizer, PointerTransformerConfig, checkpoint};
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
@@ -59,7 +59,7 @@ struct Args {
 
 /// Mean p_gen and the fraction of target positions with p_gen > 0.9, over a
 /// set of examples, computed by teacher-forcing each full sequence.
-fn pgen_stats<B: Backend, V: Vocab>(
+fn pgen_stats<B: Backend + AttentionBackend, V: Vocab>(
     model: &grug_train::PointerTransformer<B>,
     tokenizer: &V,
     examples: &[grug_data::schema::Example],

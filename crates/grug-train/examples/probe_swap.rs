@@ -45,7 +45,7 @@ use grug_train::generate::{GenerateConfig, generate};
 use grug_train::tokenizer::Vocab;
 use grug_train::train::format_prompt_fmt;
 use grug_train::transformer::{TinyTransformer, TinyTransformerConfig};
-use grug_train::{BpeTokenizer, checkpoint};
+use grug_train::{AttentionBackend, BpeTokenizer, checkpoint};
 
 // Inference-only probe: a plain (non-autodiff) backend, same rationale as
 // `probe_lens.rs`.
@@ -383,7 +383,7 @@ fn splice_hidden<B: Backend>(
 /// suffix is never patched), then resume the trunk from that spliced state via
 /// `hidden_from` and take the next-token argmax from the last position --
 /// exactly [`grug_train::generate::generate`]'s unpatched decode rule.
-fn generate_patched<B: Backend, V: Vocab>(
+fn generate_patched<B: Backend + AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     member: &FamilyMember,

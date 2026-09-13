@@ -46,7 +46,7 @@ use burn::tensor::activation::{sigmoid, softmax};
 use burn::tensor::backend::Backend;
 use burn::tensor::{IndexingUpdateOp, Int, Tensor};
 
-use crate::transformer::{TinyTransformer, TinyTransformerConfig};
+use crate::transformer::{AttentionBackend, TinyTransformer, TinyTransformerConfig};
 
 /// Configuration for [`PointerTransformer`]: the trunk config plus the
 /// copy-attention width (defaults to `d_model`).
@@ -58,7 +58,7 @@ pub struct PointerTransformerConfig {
 impl PointerTransformerConfig {
     /// Build a pointer-generator model: a [`TinyTransformer`] trunk plus the
     /// copy-attention projections and `p_gen` gate.
-    pub fn init<B: Backend>(&self, device: &B::Device) -> PointerTransformer<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> PointerTransformer<B> {
         let d = self.transformer.d_model;
         PointerTransformer {
             trunk: self.transformer.init(device),
@@ -75,7 +75,7 @@ impl PointerTransformerConfig {
 /// A [`TinyTransformer`] with a pointer-generator copy head (Phase 51 P1a-4
 /// Step B). See the module docs for the mechanism.
 #[derive(Module, Debug)]
-pub struct PointerTransformer<B: Backend> {
+pub struct PointerTransformer<B: AttentionBackend> {
     trunk: TinyTransformer<B>,
     copy_query: Linear<B>,
     copy_key: Linear<B>,
@@ -95,7 +95,7 @@ pub struct PointerParts<B: Backend> {
     pub p_copy: Tensor<B, 3>,
 }
 
-impl<B: Backend> PointerTransformer<B> {
+impl<B: AttentionBackend> PointerTransformer<B> {
     /// Full forward pass returning the mixed log-probs plus the intermediate
     /// `p_gen` gate and copy distribution (`PointerParts`). [`log_probs`] is a
     /// thin wrapper that keeps only `log_probs`; the copy-supervision loss and

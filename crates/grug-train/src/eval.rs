@@ -30,7 +30,6 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use burn::tensor::backend::Backend;
 use grug_data::schema::Example;
 use grug_data::{Dataset, DiversityReport, EvalAxis, EvalReport};
 use serde::Serialize;
@@ -44,7 +43,7 @@ use crate::generate::{
 use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
 use crate::train::format_prompt;
-use crate::transformer::TinyTransformer;
+use crate::transformer::{AttentionBackend, TinyTransformer};
 
 /// A holdout batch drawn once and reused for every eval call in a training
 /// run, so the time series is measuring model improvement, not batch
@@ -97,7 +96,7 @@ impl EvalLogRow {
 /// with `grug_data::eval`, and return the `(EvalReport, DiversityReport)`
 /// pair -- without writing anything to disk (see [`run_eval_and_log`] for
 /// the disk-writing wrapper used by the continuous-eval loop).
-pub fn run_eval<B: Backend, V: Vocab>(
+pub fn run_eval<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenHoldout,
@@ -112,7 +111,7 @@ pub fn run_eval<B: Backend, V: Vocab>(
 
 /// Run one eval pass and append its result as one JSON line to `log_path`
 /// (created if it does not exist, appended to otherwise).
-pub fn run_eval_and_log<B: Backend, V: Vocab>(
+pub fn run_eval_and_log<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenHoldout,
@@ -130,7 +129,7 @@ pub fn run_eval_and_log<B: Backend, V: Vocab>(
 /// Greedy-generate on every example in `examples`, pairing each raw output
 /// with its source `Example` -- the shared inner loop [`run_eval`] and the
 /// two-axis eval below both build on.
-fn generate_outputs<B: Backend, V: Vocab>(
+fn generate_outputs<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     examples: &[Example],
@@ -151,7 +150,7 @@ fn generate_outputs<B: Backend, V: Vocab>(
 /// is rendered with `format_prompt_fmt` and outputs scored with
 /// `Dataset::score_axis_fmt`, so a JSON-vs-Grug A/B is a pure format swap on an
 /// otherwise-identical harness. Plain greedy decoding (`generate`).
-pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_fmt<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenTwoAxisHoldout,
@@ -188,7 +187,7 @@ pub fn run_two_axis_eval_fmt<B: Backend, V: Vocab>(
 /// KG-repaired** (Phase 51 P3b): returns `((raw_b, raw_a), (repaired_b,
 /// repaired_a))`. The raw→repaired delta is what the symbolic grounding/repair
 /// layer (`grug_data::repair`) recovers on top of the neural proposal.
-pub fn run_two_axis_eval_raw_and_repaired_fmt<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_raw_and_repaired_fmt<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenTwoAxisHoldout,
@@ -230,7 +229,7 @@ pub fn run_two_axis_eval_raw_and_repaired_fmt<B: Backend, V: Vocab>(
 /// per-example [`ToolCallGrammar`] over the offered tools and calls
 /// [`generate_constrained`]. `pieces` is the tokenizer's per-id byte table
 /// ([`Vocab::token_pieces`]), built once by the caller.
-fn generate_outputs_constrained<B: Backend, V: Vocab>(
+fn generate_outputs_constrained<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     pieces: &[Option<Vec<u8>>],
@@ -257,7 +256,7 @@ fn generate_outputs_constrained<B: Backend, V: Vocab>(
 /// frozen holdout is the Phase 51 P1a-4 Step A experiment (does forcing valid,
 /// schema-consistent parameter names lift schema-adherence — especially the
 /// zero-shot whole-tool axis — and how far does argument-correctness follow?).
-pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_constrained<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     pieces: &[Option<Vec<u8>>],
@@ -293,7 +292,7 @@ pub fn run_two_axis_eval_constrained<B: Backend, V: Vocab>(
 /// from the pointer-generator's mixed distribution (`generate_ptr`). Comparing
 /// this to the non-pointer baseline (plain greedy: axis-B arg 0.78 / axis-A
 /// schema 0.03) isolates the copy mechanism's contribution.
-pub fn run_two_axis_eval_ptr<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_ptr<B: AttentionBackend, V: Vocab>(
     model: &PointerTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenTwoAxisHoldout,
@@ -321,7 +320,7 @@ pub fn run_two_axis_eval_ptr<B: Backend, V: Vocab>(
 /// Two-axis eval for the [`PointerTransformer`] under **schema-constrained**
 /// decoding (Phase 51 P1a-4 Step B): pointer copy mechanism *and* the Step A
 /// grammar mask together (`generate_ptr_constrained`).
-pub fn run_two_axis_eval_ptr_constrained<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_ptr_constrained<B: AttentionBackend, V: Vocab>(
     model: &PointerTransformer<B>,
     tokenizer: &V,
     pieces: &[Option<Vec<u8>>],
@@ -393,7 +392,7 @@ impl FrozenAbstentionHoldout {
 /// should-call and should-abstain frozen batches under `fmt`, then score the
 /// combined confusion matrix. The two headline rates are `abstain_recall` (on
 /// the abstain batch) and `false_abstention_rate` (on the call batch).
-pub fn run_abstention_eval_fmt<B: Backend, V: Vocab>(
+pub fn run_abstention_eval_fmt<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenAbstentionHoldout,
@@ -490,7 +489,7 @@ pub struct RetrievalEval {
 /// scoped + novelty holdouts under `fmt`, then score registry-wide call
 /// reliability (call-labelled subset, **raw and M2-repaired**) and the gap
 /// confusion matrix (all).
-pub fn run_retrieval_eval_fmt<B: Backend, V: Vocab>(
+pub fn run_retrieval_eval_fmt<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenRetrievalHoldout,
@@ -665,7 +664,7 @@ impl FrozenTwoAxisHoldout {
 /// `AxisReport` pair -- without writing anything to disk (see
 /// [`run_two_axis_eval_and_log`] for the disk-writing wrapper the P1a
 /// training loop uses).
-pub fn run_two_axis_eval<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenTwoAxisHoldout,
@@ -692,7 +691,7 @@ pub fn run_two_axis_eval<B: Backend, V: Vocab>(
 /// paths) keeps a single time-series artifact per run; callers that prefer
 /// split files can pass a different `log_path` per axis by calling
 /// [`run_two_axis_eval`] directly and using [`AxisEvalLogRow`] themselves.
-pub fn run_two_axis_eval_and_log<B: Backend, V: Vocab>(
+pub fn run_two_axis_eval_and_log<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     holdout: &FrozenTwoAxisHoldout,

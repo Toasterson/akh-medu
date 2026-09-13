@@ -17,10 +17,10 @@ use grug_data::{
 };
 use grug_train::train::to_eval_model;
 use grug_train::{
-    BpeTokenizer, CompactConvVisionStemConfig, CompactVisionShape, CompactVisionTransformer,
-    CompactVisionTransformerConfig, GenerateConfig, KnowledgeModelArtifact,
-    MULTIMODAL_MODEL_ARTIFACT_SCHEMA_VERSION, MultimodalModelArtifact, VisionCorpusLineage,
-    build_knowledge_batch, build_vision_ocr_batch, fingerprint_artifact_file,
+    AttentionBackend, BpeTokenizer, CompactConvVisionStemConfig, CompactVisionShape,
+    CompactVisionTransformer, CompactVisionTransformerConfig, GenerateConfig,
+    KnowledgeModelArtifact, MULTIMODAL_MODEL_ARTIFACT_SCHEMA_VERSION, MultimodalModelArtifact,
+    VisionCorpusLineage, build_knowledge_batch, build_vision_ocr_batch, fingerprint_artifact_file,
     fingerprint_knowledge_records, generate_compact_vision_ocr, generate_knowledge_outputs,
     load_model_only, rgb_batch_to_nchw, score_knowledge_outputs, to_eval_compact_vision_model,
     train_compact_text_step_guarded, train_compact_vision_step_guarded,
@@ -1239,7 +1239,10 @@ fn evenly_spaced(records: &[KnowledgeSftRecord], limit: usize) -> Vec<KnowledgeS
         .collect()
 }
 
-fn compact_optimizer<B: AutodiffBackend>() -> OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>
+fn compact_optimizer<B: AutodiffBackend + AttentionBackend>()
+-> OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>
+where
+    B::InnerBackend: AttentionBackend,
 {
     AdamConfig::new()
         .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
@@ -1269,7 +1272,7 @@ fn log_update(path: &Path, row: &UpdateLog<'_>) -> Result<(), Box<dyn Error>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn maybe_checkpoint<B: AutodiffBackend>(
+fn maybe_checkpoint<B: AutodiffBackend + AttentionBackend>(
     args: &Args,
     model: &CompactVisionTransformer<B>,
     optimizer: &OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
@@ -1281,7 +1284,10 @@ fn maybe_checkpoint<B: AutodiffBackend>(
     skipped_updates: usize,
     parameter_count: usize,
     complete: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     if !complete && update % args.checkpoint_every != 0 {
         return Ok(());
     }
@@ -1417,7 +1423,7 @@ fn validate_checkpoint_counters(
     Ok(())
 }
 
-fn load_multimodal_checkpoint<B: AutodiffBackend>(
+fn load_multimodal_checkpoint<B: AutodiffBackend + AttentionBackend>(
     directory: &Path,
     model: CompactVisionTransformer<B>,
     optimizer: OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
@@ -1429,7 +1435,10 @@ fn load_multimodal_checkpoint<B: AutodiffBackend>(
         OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
     ),
     Box<dyn Error>,
-> {
+>
+where
+    B::InnerBackend: AttentionBackend,
+{
     verify_hash(&directory.join("model.mpk"), &metadata.model_hash)?;
     verify_hash(&directory.join("optim.mpk"), &metadata.optimizer_hash)?;
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
@@ -1439,7 +1448,7 @@ fn load_multimodal_checkpoint<B: AutodiffBackend>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn save_checkpoint<B: AutodiffBackend>(
+fn save_checkpoint<B: AutodiffBackend + AttentionBackend>(
     args: &Args,
     model: &CompactVisionTransformer<B>,
     optimizer: &OptimizerAdaptor<Adam, CompactVisionTransformer<B>, B>,
@@ -1451,7 +1460,10 @@ fn save_checkpoint<B: AutodiffBackend>(
     skipped_updates: usize,
     parameter_count: usize,
     complete: bool,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<PathBuf, Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     let directory = args.artifacts_dir.join("checkpoints").join(if complete {
         format!("candidate_update_{update:08}")
     } else {
