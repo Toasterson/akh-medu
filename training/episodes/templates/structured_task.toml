@@ -1,0 +1,24 @@
+# Phase 51 P6.3 — structured_task_create / structured_task_update phrasing.
+#
+# Data-only file (see memory_write.toml header for the rule this follows).
+#
+# Placeholders: {title} {due} {id} {priority}
+schema_version = 1
+
+[[template]]
+family = "structured_task_create"
+kind = "create_plain"
+language = "en"
+text = "Please add a new task: \"{title}\"."
+
+[[template]]
+family = "structured_task_create"
+kind = "create_due"
+language = "en"
+text = "Create a task titled \"{title}\", due {due}."
+
+[[template]]
+family = "structured_task_update"
+kind = "update_priority"
+language = "en"
+text = "The task \"{title}\" (id {id}) needs its priority changed to {priority}."

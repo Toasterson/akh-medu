@@ -360,6 +360,14 @@ path = "src/bin/generate_qa_dataset.rs"
 # with `cargo build --features training-data --bin generate_qa_dataset`.
 required-features = ["training-data"]
 
+[[bin]]
+name = "akh_episode_generator"
+path = "src/bin/akh_episode_generator.rs"
+# Phase 51 P6.3: engine-in-the-loop episode generator. Needs the `daemon`
+# feature for `agent::reactor`/`ReactorManageTool` (the reactor_manage
+# blocker family). Training-data tooling, not a shipped binary.
+required-features = ["daemon"]
+
 [[bench]]
 name = "vsa_ops"
 harness = false

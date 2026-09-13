@@ -1,0 +1,28 @@
+# Phase 51 P6.3 — oracle (knowledge-family) episode phrasing.
+#
+# Data-only file (see memory_write.toml header for the rule this follows).
+# These three templates mirror the three R0 reference worlds
+# (docs/ai/plans/2026-09-12-akh-R0-episode-contract.md): acquire/act/
+# restart/reuse, revise-graph-change-action, and repair-interaction through
+# changed authority.
+#
+# Placeholders: {command} {syntax} {job} {old_worker} {new_worker} {target}
+schema_version = 1
+
+[[template]]
+family = "oracle_acquire"
+kind = "acquire"
+language = "en"
+text = "A new versioned command \"{command}\" was documented with syntax \"{syntax}\". Learn it, then confirm you can recall it after a restart."
+
+[[template]]
+family = "oracle_revise"
+kind = "revise"
+language = "en"
+text = "The current route for \"{job}\" changed from \"{old_worker}\" to \"{new_worker}\". Update the current route while preserving the prior assignment as history."
+
+[[template]]
+family = "oracle_repair"
+kind = "repair"
+language = "en"
+text = "Authorization for the repair on \"{target}\" was revoked. Do not proceed until re-authorized, then complete the repair once authorization is restored."

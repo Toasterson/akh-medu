@@ -1,0 +1,22 @@
+# Phase 51 P6.3 — memory_write prompt phrasing.
+#
+# Data-only file: natural-language phrasing lives here, never as a Rust
+# string constant (repo hard rule — see CLAUDE.md / MEMORY.md). The
+# generator (src/bin/akh_episode_generator.rs) only substitutes the
+# placeholders below; it never composes or edits the surrounding words.
+#
+# Placeholders: {doc_label} {source_excerpt} {predicate}
+schema_version = 1
+
+[[template]]
+family = "memory_write"
+kind = "record_field"
+language = "en"
+text = "Source note observed for {doc_label}: \"{source_excerpt}\". Record this as a fact where {doc_label} {predicate} the value, copied exactly as shown, including punctuation, casing and spacing."
+
+# Copy-fidelity stress content: individual code points/short tokens used to
+# build nested-value and unicode source excerpts, not authored phrases — kept
+# here rather than in Rust source per the same data-file rule.
+[stress]
+unicode_chars = ["é", "ü", "ñ", "ç", "中", "文", "→", "€", "Ω", "\U0001F600", "ß", "ø"]
+json_tags = ["prod", "staging", "edge", "canary", "eu-west", "apac"]

@@ -1,0 +1,71 @@
+# Phase 51 P6.3 — reactor_manage multilingual phrasing.
+#
+# Data-only file (see memory_write.toml header for the rule this follows).
+# The tool-call envelope (name + argument shape) the generator produces from
+# these prompts is identical across every language row below — only this
+# natural-language surface differs. That is the point of this family: the
+# 8k-lane failure was a malformed envelope on at least one non-English
+# request, not a translation problem.
+#
+# Placeholders: {name} {every_seconds}
+schema_version = 1
+
+[[template]]
+family = "reactor_manage"
+kind = "add"
+language = "en"
+text = "Schedule \"{name}\" to run every {every_seconds} seconds starting now."
+
+[[template]]
+family = "reactor_manage"
+kind = "add"
+language = "de"
+text = "Plane \"{name}\" so, dass es ab sofort alle {every_seconds} Sekunden laeuft."
+
+[[template]]
+family = "reactor_manage"
+kind = "add"
+language = "fr"
+text = "Planifie \"{name}\" pour qu'il s'execute toutes les {every_seconds} secondes des maintenant."
+
+[[template]]
+family = "reactor_manage"
+kind = "add"
+language = "it"
+text = "Pianifica \"{name}\" in modo che venga eseguito ogni {every_seconds} secondi a partire da ora."
+
+[[template]]
+family = "reactor_manage"
+kind = "add"
+language = "es"
+text = "Programa \"{name}\" para que se ejecute cada {every_seconds} segundos a partir de ahora."
+
+[[template]]
+family = "reactor_manage"
+kind = "enable"
+language = "en"
+text = "Enable the \"{name}\" schedule now that authorization has been confirmed."
+
+[[template]]
+family = "reactor_manage"
+kind = "enable"
+language = "de"
+text = "Aktiviere den Zeitplan \"{name}\", jetzt wo die Genehmigung bestaetigt ist."
+
+[[template]]
+family = "reactor_manage"
+kind = "enable"
+language = "fr"
+text = "Active le planning \"{name}\" maintenant que l'autorisation est confirmee."
+
+[[template]]
+family = "reactor_manage"
+kind = "enable"
+language = "it"
+text = "Attiva la pianificazione \"{name}\" ora che l'autorizzazione e stata confermata."
+
+[[template]]
+family = "reactor_manage"
+kind = "enable"
+language = "es"
+text = "Activa la programacion \"{name}\" ahora que la autorizacion ha sido confirmada."

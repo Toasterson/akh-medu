@@ -14,6 +14,12 @@ eval_timeseries.jsonl
 # an absolute path (/home/toasty/ws/agi/akh-medu/runs/), never committed.
 runs/
 
+# Phase 51 P6.3: akh_episode_generator output (JSONL corpora, tens of MB,
+# fully regeneratable from the generator + `--seed`). The generator itself
+# and its training/episodes/templates/*.toml inputs are committed; the
+# generated training/episodes/<run>/ directories are not.
+training/episodes/p6-3-20260913/
+
 # Python bytecode caches (scripts/, benchmarks/*.py harness drivers).
 __pycache__/
 *.pyc
