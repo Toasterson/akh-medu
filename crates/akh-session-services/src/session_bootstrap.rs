@@ -62,10 +62,8 @@ impl Sessions {
             }
             let profile = self
                 .config
-                .akhs
-                .get(&session.akh)
-                .ok_or_else(|| Fault::missing("Akh profile not found"))?;
-            if initial(profile)?.as_ref().map(|s| &s.policy_sha256) != Some(&slot.policy_sha256)
+                .session_profile(&session.akh, &session.workspace_profile)?;
+            if initial(&profile)?.as_ref().map(|s| &s.policy_sha256) != Some(&slot.policy_sha256)
                 || !profile
                     .bootstrap_repositories
                     .contains(&request.checkout.repository)
@@ -106,10 +104,8 @@ impl Sessions {
     ) -> Result<Option<BootstrapRepository>> {
         let profile = self
             .config
-            .akhs
-            .get(&session.akh)
-            .ok_or_else(|| Fault::missing("Akh profile not found"))?;
-        if initial(profile)?.as_ref().map(|s| &s.policy_sha256)
+            .session_profile(&session.akh, &session.workspace_profile)?;
+        if initial(&profile)?.as_ref().map(|s| &s.policy_sha256)
             != session
                 .repository_bootstrap
                 .as_ref()

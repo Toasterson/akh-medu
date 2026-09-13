@@ -18,17 +18,17 @@ struct Cursor {
     position: Option<(u64, String)>,
 }
 
-fn uuid(value: &str) -> Result<String> {
+pub(crate) fn uuid(value: &str) -> Result<String> {
     uuid::Uuid::parse_str(value)
         .map(|id| id.to_string())
         .map_err(|_| Fault::invalid("invalid Djehuty UUID"))
 }
-fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
+pub(crate) fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value[key]
         .as_str()
         .ok_or_else(|| Fault::invalid(format!("Djehuty message lacks {key}")))
 }
-fn timestamp(value: &str) -> Result<u64> {
+pub(crate) fn timestamp(value: &str) -> Result<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .map_err(|_| Fault::invalid("Djehuty timestamp is not RFC3339"))?
         .timestamp_millis()

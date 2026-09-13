@@ -1640,3 +1640,71 @@ fn selected_archive_fences_late_turns_and_replays_only_the_original_decision() {
     assert_eq!(event.kind, "session_archived");
     assert_eq!(event.data["selection"], json!(selected));
 }
+
+#[test]
+fn coordination_workspace_narrows_tools_without_changing_akh_identity() {
+    let (_dir, old, owner) = scoped_setup("https://anima.example/mcp");
+    let mut config = (*old.config).clone();
+    let profile = config.akhs.get_mut("thoth").unwrap();
+    profile.bootstrap_repositories = vec!["https://git.example/team/project.git".into()];
+    profile.workspace_profiles.push("coordination".into());
+    profile.tools.push(serde_json::from_value(json!({"name":"read","description":"Read workspace", "read_only":true,"input_schema":{"type":"object"},"destination":{"kind":"workspace","operation":"read"}})).unwrap());
+    profile.session_grants.insert(
+        "coordination".into(),
+        serde_json::from_value(json!({"tools":["read"]})).unwrap(),
+    );
+    config.validate().unwrap();
+    let sessions = Sessions::new(old.store.clone(), Arc::new(config.clone()));
+    let normal = create(&sessions, &owner);
+    assert!(normal.repository_bootstrap.is_some());
+    assert!(!normal.required_mcp_credentials.is_empty());
+    let coordination = sessions
+        .create(
+            &owner,
+            &NewSession {
+                request_id: "coordinate".into(),
+                akh: "thoth".into(),
+                workspace_profile: "coordination".into(),
+                conversation_key: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(coordination.akh, normal.akh);
+    assert_eq!(coordination.runtime, normal.runtime);
+    assert!(coordination.repository_bootstrap.is_none());
+    assert!(coordination.required_mcp_credentials.is_empty());
+    assert_eq!(
+        coordination
+            .tools
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read"]
+    );
+    let grants = config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("coordination")
+        .unwrap();
+    grants.tools.push("not-granted".into());
+    assert!(config.validate().is_err());
+    config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("coordination")
+        .unwrap()
+        .tools = vec!["read".into()];
+    config
+        .akhs
+        .get_mut("thoth")
+        .unwrap()
+        .session_grants
+        .get_mut("coordination")
+        .unwrap()
+        .bootstrap_repositories = vec!["https://elsewhere.example/unauthorized.git".into()];
+    assert!(config.validate().is_err());
+}

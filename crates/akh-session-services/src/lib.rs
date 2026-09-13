@@ -11,6 +11,8 @@ pub mod config;
 pub mod connect;
 #[cfg(feature = "events")]
 pub mod djehuty;
+#[cfg(feature = "events")]
+pub mod djehuty_inbox;
 #[cfg(feature = "executor")]
 pub mod executor;
 #[cfg(feature = "executor")]
