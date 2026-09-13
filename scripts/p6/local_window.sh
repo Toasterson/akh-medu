@@ -51,12 +51,12 @@ EOF
 board() { # state summary detail
   [ -n "$THREAD" ] || return 0
   python3 - "$1" "$2" "$3" "$WINDOW" > /tmp/p6-board-msg.json <<'EOF'
-import json, sys, time
+import json, re, sys, time
 state, summary, detail, window = sys.argv[1:5]
 print(json.dumps({"message_type": "coordination/status@v1",
   "payload": {"state": state, "detail": detail},
   "summary": summary, "retention": {"kind": "durable"}, "reply_to": None,
-  "idempotency_key": f"status:p6-local-window:{window}:{state}:{int(time.time())}"}))
+  "idempotency_key": "status:p6-local-window:" + re.sub(r"[^A-Za-z0-9._-]+", "-", window).strip("-") + f":{state}:{int(time.time())}"}))
 EOF
   python3 "$BOARD" post "/v1/threads/$THREAD/messages" @/tmp/p6-board-msg.json >/dev/null 2>&1 || echo "board post failed (non-fatal)" | tee -a "$LOG"
 }
