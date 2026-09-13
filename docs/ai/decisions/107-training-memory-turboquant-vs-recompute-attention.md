@@ -57,12 +57,15 @@ the loss lags. f16 *activations* are fine; f16 *optimizer state* is not.
 - **Activation-compressed training** is a different lineage: ActNN (2104.14129) / GACT (2206.11357) quantize
   saved-for-backward activations to ~2 bits with *stochastic* (unbiased) rounding — the gradient stays an
   unbiased estimator — at <1 pt accuracy cost. They compress generic per-layer activations; neither targets
-  the O(L²) score tensor, and the review could not confirm any 2024–26 work that does. (Section flagged by
-  the reviewer as recalled, not re-read this session.)
+  the O(L²) score tensor, and the review could not confirm any 2024–26 work that does. (This bullet is the
+  one part of the review that was recalled rather than re-read in full text on 2026-09-13.)
 - **Removing the quadratic term**: FlashAttention (2205.14135) stores only O and the row logsumexp and
   recomputes P in backward → memory O(L·d) per layer instead of O(L²); Blockwise Parallel Transformer
-  (2305.19370) fuses attention + FFN blockwise for the same asymptotics; Mini-Sequence Transformer
-  (2407.15892) cuts MLP/logit memory by 1/M — irrelevant for us (non-attention activations are 2.7 GB at 8192).
+  (2305.19370) fuses attention + FFN blockwise: per layer 2·b·s·h instead of FlashAttention's 8·b·s·h FFN
+  floor, i.e. the follow-up if non-attention activations ever matter; Mini-Sequence Transformer (2407.15892)
+  explicitly leaves attention alone and cuts MLP/LM-head memory by 1/M — irrelevant for us (non-attention
+  activations are 2.7 GB at 8192). All three read in full text on 2026-09-13; at our shape FlashAttention-style
+  recomputation replaces ≈2 GiB of scores per layer with ≈512 KiB of row statistics.
 
 Burn 0.21 ships a CubeCL flash-attention kernel (`burn::tensor::module::attention`, wgpu/Metal) — but the
 `Autodiff` backend routes `attention` to `attention_fallback` (naive matmul/softmax), so **training through
