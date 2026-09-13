@@ -1,0 +1,140 @@
+{
+  "codex-claude": {
+    "document": {
+      "id": "01a0878d-9451-7182-b97c-bf3470f924fc",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "doc_type": "notes",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "research"
+      ],
+      "created_at": "2026-09-09T19:03:17.842262+00:00",
+      "updated_at": "2026-09-09T19:03:17.842262+00:00",
+      "archived_at": null,
+      "seshat_document_id": null,
+      "akhmedu_workspace": null
+    },
+    "import": {
+      "document_id": "01a0878d-9451-7182-b97c-bf3470f924fc",
+      "slug": "akh-agent-loops-codex-claude-20260909",
+      "chunk_count": 15,
+      "word_count": 1543
+    },
+    "readback": {
+      "id": "01a0878d-9451-7182-b97c-bf3470f924fc",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "doc_type": "notes",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "research"
+      ],
+      "created_at": "2026-09-09T19:03:17.842262+00:00",
+      "updated_at": "2026-09-09T19:03:17.917805+00:00",
+      "archived_at": null,
+      "seshat_document_id": "16eb2038-089a-4f2b-aebd-a18e7b3b3e68",
+      "akhmedu_workspace": null
+    }
+  },
+  "cursor-opencode": {
+    "document": {
+      "id": "01a0878d-94d0-7100-8258-812d3dba8eb3",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": "01a0878c-30a2-7022-942f-078aaf065f19",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "doc_type": "notes",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "research"
+      ],
+      "created_at": "2026-09-09T19:03:17.970638+00:00",
+      "updated_at": "2026-09-09T19:03:17.970638+00:00",
+      "archived_at": null,
+      "seshat_document_id": null,
+      "akhmedu_workspace": null
+    },
+    "import": {
+      "document_id": "01a0878d-94d0-7100-8258-812d3dba8eb3",
+      "slug": "akh-agent-loops-cursor-opencode-20260909",
+      "chunk_count": 16,
+      "word_count": 1673
+    },
+    "readback": {
+      "id": "01a0878d-94d0-7100-8258-812d3dba8eb3",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": "01a0878c-30a2-7022-942f-078aaf065f19",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "doc_type": "notes",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "research"
+      ],
+      "created_at": "2026-09-09T19:03:17.970638+00:00",
+      "updated_at": "2026-09-09T19:03:18.021088+00:00",
+      "archived_at": null,
+      "seshat_document_id": "53e8f5df-0fa3-429f-8207-5bfe04182038",
+      "akhmedu_workspace": null
+    }
+  },
+  "architecture-draft": {
+    "document": {
+      "id": "01a0878d-9529-7c82-bfbe-2ce4f1f8490b",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": null,
+      "title": "AgentLoop architecture discussion draft",
+      "doc_type": "plan",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "draft"
+      ],
+      "created_at": "2026-09-09T19:03:18.057842+00:00",
+      "updated_at": "2026-09-09T19:03:18.057842+00:00",
+      "archived_at": null,
+      "seshat_document_id": null,
+      "akhmedu_workspace": null
+    },
+    "import": {
+      "document_id": "01a0878d-9529-7c82-bfbe-2ce4f1f8490b",
+      "slug": "akh-agent-loops-architecture-draft-20260909",
+      "chunk_count": 18,
+      "word_count": 2501
+    },
+    "readback": {
+      "id": "01a0878d-9529-7c82-bfbe-2ce4f1f8490b",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "work_item_id": null,
+      "title": "AgentLoop architecture discussion draft",
+      "doc_type": "plan",
+      "collection_id": null,
+      "visibility": "private",
+      "tags": [
+        "wayfinder",
+        "agent-loops",
+        "draft"
+      ],
+      "created_at": "2026-09-09T19:03:18.057842+00:00",
+      "updated_at": "2026-09-09T19:03:18.108100+00:00",
+      "archived_at": null,
+      "seshat_document_id": "06151fc2-c6bb-4f27-93a7-9eabba259bf4",
+      "akhmedu_workspace": null
+    }
+  }
+}

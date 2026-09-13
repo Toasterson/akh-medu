@@ -418,6 +418,10 @@ impl OpenAiClient {
     ) -> OpenAiResult<AssistantTurn> {
         let url = self.config.url("chat/completions");
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let body = self.build_body(system_prompt, conversation, tools, false);
 
@@ -497,6 +501,10 @@ impl OpenAiClient {
 
         let url = self.config.url("chat/completions");
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let body = self.build_body(system_prompt, conversation, tools, true);
         let key = self

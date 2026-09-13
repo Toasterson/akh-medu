@@ -231,7 +231,9 @@ enum SchemaKind {
     Number,
     Boolean,
     Null,
-    Array { items: SchemaRef },
+    Array {
+        items: SchemaRef,
+    },
     Object(Rc<ObjectSchema>),
     /// No usable `items`/`properties` (or no recognized `type` at all): see
     /// the module-level fallback note above.
@@ -294,7 +296,10 @@ enum Frame {
     /// A schema-typed object; `seen` are the property indices already typed
     /// (into `obj.props`), used to gate `}` on required-property coverage
     /// and to reject re-typing an already-seen key.
-    Object { obj: Rc<ObjectSchema>, seen: Vec<u16> },
+    Object {
+        obj: Rc<ObjectSchema>,
+        seen: Vec<u16>,
+    },
     /// An `Any`-typed object (no `properties` schema): free-form keys/values.
     AnyObject,
 }
@@ -680,7 +685,11 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 }))
             }
         },
-        Leaf::Str { schema, escape, uri } => match escape {
+        Leaf::Str {
+            schema,
+            escape,
+            uri,
+        } => match escape {
             EscapeState::Pending => match byte {
                 // Whitespace escapes are illegal once the value has
                 // committed to a URI scheme prefix -- see [`UriGuard`] and
@@ -829,7 +838,9 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             Some(Frame::AnyObject) => match byte {
                 b'"' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                    leaf: Leaf::AnyKey {
+                        escape: EscapeState::Plain,
+                    },
                 })),
                 b'}' => {
                     let mut stack = stack.clone();
@@ -873,7 +884,9 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             Some(Frame::AnyObject) => match byte {
                 b'"' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                    leaf: Leaf::AnyKey {
+                        escape: EscapeState::Plain,
+                    },
                 })),
                 _ => None,
             },
@@ -992,12 +1005,16 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {
                     Some(ValueOutcome::Continue(ValueParser {
                         stack: stack.clone(),
-                        leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                        leaf: Leaf::AnyKey {
+                            escape: EscapeState::Plain,
+                        },
                     }))
                 }
                 b'u' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escape: EscapeState::Unicode(4) },
+                    leaf: Leaf::AnyKey {
+                        escape: EscapeState::Unicode(4),
+                    },
                 })),
                 _ => None,
             },
@@ -1019,7 +1036,9 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
             EscapeState::Plain => match byte {
                 b'\\' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escape: EscapeState::Pending },
+                    leaf: Leaf::AnyKey {
+                        escape: EscapeState::Pending,
+                    },
                 })),
                 b'"' => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
@@ -1028,7 +1047,9 @@ fn step_value(parser: &ValueParser, byte: u8) -> Option<ValueOutcome> {
                 0x00..=0x1f => None,
                 _ => Some(ValueOutcome::Continue(ValueParser {
                     stack: stack.clone(),
-                    leaf: Leaf::AnyKey { escape: EscapeState::Plain },
+                    leaf: Leaf::AnyKey {
+                        escape: EscapeState::Plain,
+                    },
                 })),
             },
         },
@@ -2843,7 +2864,10 @@ impl ConstrainedDecodeState {
         let mut value_bytes = self.value_bytes.clone();
         let schema_locked = matches!(
             active,
-            Some((ValueConstraint::Enum { .. } | ValueConstraint::Copy { .. }, _))
+            Some((
+                ValueConstraint::Enum { .. } | ValueConstraint::Copy { .. },
+                _
+            ))
         );
         match active {
             Some((ValueConstraint::Enum { .. } | ValueConstraint::Copy { .. }, Some(trie))) => {
@@ -2865,7 +2889,13 @@ impl ConstrainedDecodeState {
             }
         }
 
-        let copy = self.step_copy(copy_constraints, schema_locked, was_in_string, now_in_string, byte)?;
+        let copy = self.step_copy(
+            copy_constraints,
+            schema_locked,
+            was_in_string,
+            now_in_string,
+            byte,
+        )?;
 
         Some(Self {
             frontier: next_frontier,
@@ -2994,9 +3024,7 @@ impl ConstrainedDecodeState {
                 Some(byte)
             };
 
-            if identifier_copy
-                && let Some(sem) = semantic
-            {
+            if identifier_copy && let Some(sem) = semantic {
                 let context: &[u8] = &copy_constraints.suffix.context;
                 if is_identifier_run_byte(sem) {
                     // Left-anchored run start (Phase 51 / ADR 104 D2 v7,
@@ -3032,8 +3060,9 @@ impl ConstrainedDecodeState {
                         let excluded = identifiers.tokens_already_written(before_run);
                         run_trie_override = identifiers.trie_excluding(&excluded).map(Rc::new);
                     }
-                    let active_trie: &CopyTrie =
-                        run_trie_override.as_deref().unwrap_or_else(|| identifiers.trie());
+                    let active_trie: &CopyTrie = run_trie_override
+                        .as_deref()
+                        .unwrap_or_else(|| identifiers.trie());
                     anchor = match anchor.take() {
                         None => None,
                         Some(active) if active.consumed >= MAX_ANCHORED_RUN_BYTES => None,
@@ -3086,7 +3115,8 @@ impl ConstrainedDecodeState {
                         }
                     } else {
                         // Not (yet) engaged: track passively, never reject.
-                        run_prefix_node = identifiers.advance_prefix(active_trie, run_prefix_node, sem);
+                        run_prefix_node =
+                            identifiers.advance_prefix(active_trie, run_prefix_node, sem);
                     }
                     run_len += 1;
                     run_has_digit = run_has_digit || sem.is_ascii_digit();
@@ -3158,14 +3188,16 @@ impl ConstrainedDecodeState {
                 // all self-reference-excluded (Phase 51 / ADR 104 D1 bug fix)
                 // is correctly treated as not engaged, exactly like a run
                 // with no candidates at all.
-                let active_trie: &CopyTrie =
-                    run_trie_override.as_deref().unwrap_or_else(|| identifiers.trie());
+                let active_trie: &CopyTrie = run_trie_override
+                    .as_deref()
+                    .unwrap_or_else(|| identifiers.trie());
                 engaged = if run_after_colon_slash {
                     run_prefix_node.is_some_and(|node| identifiers.extendable(active_trie, node))
                 } else {
                     run_len >= MIN_IDENTIFIER_RUN_LEN
                         && run_has_digit
-                        && run_prefix_node.is_some_and(|node| identifiers.extendable(active_trie, node))
+                        && run_prefix_node
+                            .is_some_and(|node| identifiers.extendable(active_trie, node))
                 };
             }
 
@@ -3214,7 +3246,13 @@ impl ConstrainedDecodeState {
     /// [`Self::identifier_lock_engaged`], since the anchor can force a byte
     /// before the trie lock has even engaged (the run's first 1-2 bytes).
     pub fn identifier_anchor_active(&self) -> bool {
-        matches!(&self.copy, CopyState::Active { anchor: Some(_), .. })
+        matches!(
+            &self.copy,
+            CopyState::Active {
+                anchor: Some(_),
+                ..
+            }
+        )
     }
 
     /// How many run bytes the left anchor has force-matched so far in the
@@ -4007,8 +4045,9 @@ mod tests {
 
         let out = adversarial_drive(&grammar, hint);
 
-        let value: Value = serde_json::from_str(&out)
-            .unwrap_or_else(|error| panic!("mask-forced output was not valid JSON: {error}\n{out}"));
+        let value: Value = serde_json::from_str(&out).unwrap_or_else(|error| {
+            panic!("mask-forced output was not valid JSON: {error}\n{out}")
+        });
         let name = value["name"]
             .as_str()
             .expect("accepted call must carry a string tool name");
@@ -4038,11 +4077,13 @@ mod tests {
         let hint = r#"{"arguments":{"body":"b","citations":[{"locator":"l","quote":"q","source_id":"s"}],"frontmatter":{"status":"active","tags":["x","y"]},"tags":["alpha","beta","gamma"],"title":"t"},"name":"study_note_append"}"#;
 
         let out = adversarial_drive(&grammar, hint);
-        let value: Value = serde_json::from_str(&out)
-            .unwrap_or_else(|error| panic!("mask-forced output was not valid JSON: {error}\n{out}"));
+        let value: Value = serde_json::from_str(&out).unwrap_or_else(|error| {
+            panic!("mask-forced output was not valid JSON: {error}\n{out}")
+        });
         let name = value["name"].as_str().unwrap();
         let arguments = value.get("arguments").cloned().unwrap();
-        let contracts = crate::tool_contract::ToolContractSnapshot::from_openai_tools(&tools).unwrap();
+        let contracts =
+            crate::tool_contract::ToolContractSnapshot::from_openai_tools(&tools).unwrap();
         let validation = contracts.validate_call(name, &arguments);
         assert!(validation.valid, "{:?}\n{out}", validation.issues);
     }
@@ -4219,8 +4260,9 @@ mod tests {
             );
         }
 
-        let value: Value = serde_json::from_str(&out)
-            .unwrap_or_else(|error| panic!("mask-forced output was not valid JSON: {error}\n{out}"));
+        let value: Value = serde_json::from_str(&out).unwrap_or_else(|error| {
+            panic!("mask-forced output was not valid JSON: {error}\n{out}")
+        });
         let name = value["name"]
             .as_str()
             .expect("accepted call must carry a string tool name");
@@ -4327,8 +4369,9 @@ mod tests {
     fn identifier_hard_copy_reproduces_the_exact_context_id_and_rejects_a_doubled_run() {
         let id = "textbook:484a5a7ec4e0ae11:edition-2";
         let corrupted_id = "textbook:484a5a7a5a7ec4e0ae11:edition-2";
-        let context =
-            format!("<tool_response>\n{{\"source_id\":\"{id}\",\"locator\":\"p.1\"}}\n</tool_response>");
+        let context = format!(
+            "<tool_response>\n{{\"source_id\":\"{id}\",\"locator\":\"p.1\"}}\n</tool_response>"
+        );
         let tools = vec![cite_source_tool()];
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
@@ -4343,9 +4386,7 @@ mod tests {
             .expect("the exact context identifier must be a legal decode path");
         assert!(grammar.accepts_eos(&end.frontier));
 
-        let corrupted = format!(
-            "<tool_call>\n{{\"arguments\":{{\"source_id\":\"{corrupted_id}\""
-        );
+        let corrupted = format!("<tool_call>\n{{\"arguments\":{{\"source_id\":\"{corrupted_id}\"");
         assert_eq!(
             advance_constrained(&grammar, &copy, &corrupted),
             None,
@@ -4528,7 +4569,8 @@ mod tests {
 
         // The rest of the call (second tag, title) must decode normally,
         // proving the array was never derailed by a stuck lock.
-        let rest = ",\"keph-index\"],\"title\":\"t\"},\"name\":\"study_note_append\"}\n</tool_call>";
+        let rest =
+            ",\"keph-index\"],\"title\":\"t\"},\"name\":\"study_note_append\"}\n</tool_call>";
         let end = closed
             .advance(&grammar, &copy, rest.as_bytes())
             .expect("the rest of the call must decode to completion");
@@ -4565,9 +4607,8 @@ mod tests {
         let correct = format!(
             "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:edition-2\"}},\"name\":\"cite_source_path\"}}\n</tool_call>"
         );
-        let end = advance_constrained(&grammar, &copy, &correct).expect(
-            "a value composed around a verbatim context id must be a legal decode path",
-        );
+        let end = advance_constrained(&grammar, &copy, &correct)
+            .expect("a value composed around a verbatim context id must be a legal decode path");
         assert!(grammar.accepts_eos(&end.frontier));
 
         // The measured corruption: the argmax wants to insert an extra
@@ -4664,7 +4705,8 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, context);
 
-        let up_to_run = "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:edition-2";
+        let up_to_run =
+            "<tool_call>\n{\"arguments\":{\"source_path\":\"synthetic://textbook:edition-2";
         let state = advance_constrained(&grammar, &copy, up_to_run)
             .expect("a real context token must be a legal decode path");
         assert!(
@@ -4819,7 +4861,10 @@ mod tests {
             .step(&grammar, &copy, b'u')
             .unwrap()
             .step(&grammar, &copy, b'g');
-        assert!(non_hex.is_none(), "a non-hex byte inside \\u must be rejected");
+        assert!(
+            non_hex.is_none(),
+            "a non-hex byte inside \\u must be rejected"
+        );
 
         // The measured regression: `\?` is not valid JSON.
         let state = advance_constrained(&grammar, &copy, prefix).unwrap();
@@ -5235,9 +5280,8 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
 
-        let up_to_edition_first_byte = format!(
-            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:e"
-        );
+        let up_to_edition_first_byte =
+            format!("<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:e");
         let state = advance_constrained(&grammar, &copy, &up_to_edition_first_byte)
             .expect("the real first byte of the 'edition-2' run must be legal");
         assert!(
@@ -5591,9 +5635,8 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
 
-        let up_to_id_and_second_colon = format!(
-            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:"
-        );
+        let up_to_id_and_second_colon =
+            format!("<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:");
         let state = advance_constrained(&grammar, &copy, &up_to_id_and_second_colon)
             .expect("the composed prefix up to and including the id must be legal");
 
@@ -5647,8 +5690,7 @@ mod tests {
     /// this test is the same shape but with the actually-measured wrong byte,
     /// a space.
     #[test]
-    fn anchor_rejects_a_stray_space_right_after_the_delimiter_and_accepts_the_real_continuation()
-     {
+    fn anchor_rejects_a_stray_space_right_after_the_delimiter_and_accepts_the_real_continuation() {
         let id = "e2d9be435b4474a6";
         let context = format!(
             "<tool_response>\n{{\"source_id\":\"textbook:{id}:edition-2\"}}\n</tool_response>\nSynthetic Keph Manual {id}, edition 2"
@@ -5657,9 +5699,8 @@ mod tests {
         let grammar = RuntimeCallGrammar::from_openai_tools(&tools).unwrap();
         let copy = copy_constraints(&grammar, &context);
 
-        let up_to_id_and_second_colon = format!(
-            "<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:"
-        );
+        let up_to_id_and_second_colon =
+            format!("<tool_call>\n{{\"arguments\":{{\"source_path\":\"synthetic://textbook:{id}:");
         let state = advance_constrained(&grammar, &copy, &up_to_id_and_second_colon)
             .expect("the composed prefix up to and including the id must be legal");
         assert!(

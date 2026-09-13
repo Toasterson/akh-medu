@@ -38,6 +38,11 @@ pub struct Psyche {
     /// Written alongside the `ennead-role` file for inter-agent discovery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ennead_role: Option<String>,
+    /// BLAKE3 hash of the akh's avatar bytes. Bytes-on-change: updated
+    /// whenever the avatar image changes. Advertised via the power-state
+    /// contract (Wave R3 / ticket 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_hash: Option<String>,
 }
 
 /// Persona — the mask the agent presents outward.
@@ -235,6 +240,7 @@ impl Default for Psyche {
             awakened: false,
             ocean: None,
             ennead_role: None,
+            avatar_hash: None,
         }
     }
 }
@@ -319,6 +325,31 @@ impl Psyche {
         }
         self.ennead_role = Some(role.to_string());
         None
+    }
+
+    /// Set the akh's avatar from raw image bytes (bytes-on-change, ticket 12).
+    ///
+    /// Computes the BLAKE3 hash of `bytes` and stores it in `avatar_hash`
+    /// (prefixed `blake3:`). Returns `true` when the hash actually changed —
+    /// callers persist + re-advertise only on change, and clearing (`None`)
+    /// after an avatar was set also counts as a change.
+    ///
+    /// NB: the write-path caller (the avatar-update RPC of ticket 12's slice)
+    /// has not landed yet — until it does, `avatar_hash` stays `None` and
+    /// `avatar_ref` advertises `None` for every akh. Kept intentionally so the
+    /// advertisement read path could ship against its final shape.
+    pub fn set_avatar(&mut self, bytes: Option<&[u8]>) -> bool {
+        let new_hash = bytes.map(|b| format!("blake3:{}", blake3::hash(b).to_hex()));
+        if self.avatar_hash == new_hash {
+            return false;
+        }
+        self.avatar_hash = new_hash;
+        true
+    }
+
+    /// The avatar reference advertised in the power-state contract.
+    pub fn avatar_ref(&self) -> Option<&str> {
+        self.avatar_hash.as_deref()
     }
 
     /// Returns the name of the highest-weighted archetype.

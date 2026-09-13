@@ -8,7 +8,8 @@ export async function run(start, sdk, z, send, request, abortController) {
     const schema = z.fromJSONSchema(spec.parameters);
     return sdk.tool(spec.name, spec.description, schema.shape, async (arguments_) => {
       const result = await request("tool", { name: spec.name, arguments: arguments_ });
-      return { content: [{ type: "text", text: result.text }], isError: !result.success };
+      const text = result.data == null ? result.text : JSON.stringify(result);
+      return { content: [{ type: "text", text }], isError: !result.success };
     });
   });
   const mcpServer = sdk.createSdkMcpServer({ name: "akh", version: "1.0.0", tools: definitions });
@@ -16,15 +17,28 @@ export async function run(start, sdk, z, send, request, abortController) {
     cwd: start.cwd,
     abortController,
     includePartialMessages: true,
-    // Project/user settings stay with the installed CLI. Akh never reads or
-    // copies its OAuth tokens, and never changes HOME or provider config dirs.
-    settingSources: ["user", "project", "local"],
+    // Credential/profile scope comes from the runtime's configured environment.
+    // Brokered turns exclude ambient settings; no OAuth cache is copied here.
+    settingSources: start.brokered ? [] : ["user", "project", "local"],
     systemPrompt: { type: "preset", preset: "claude_code", append: start.instructions },
     permissionMode: start.plan ? "plan" : "default",
     mcpServers: { akh: mcpServer },
+    ...(start.brokered ? {
+      tools: ["AskUserQuestion"],
+      strictMcpConfig: true,
+      settings: { disableAllHooks: true },
+      disallowedTools: ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Task", "Skill", "NotebookEdit", "WebFetch", "WebSearch"],
+      ...(Object.keys(start.aliases ?? {}).length ? { toolAliases: start.aliases } : {}),
+    } : {}),
     // This namespaced server executes through Akh's own permission gate.
     allowedTools: start.tools.map(({ function: spec }) => `mcp__akh__${spec.name}`),
     canUseTool: async (name, input) => {
+      if (name === "AskUserQuestion") {
+        const result = await request("question", { questions: input });
+        if (result.cancelled === true) return { behavior: "deny", message: "The user skipped these questions." };
+        return { behavior: "allow", updatedInput: { ...input, answers: result.answers } };
+      }
+      if (start.brokered) return { behavior: "deny", message: `Native ${name} is disabled. Use the provided mcp__akh__ tools in the bound workspace. Nothing ran.` };
       if (start.plan) return { behavior: "deny", message: "Akh is in plan mode" };
       const { allow } = await request("approval", { name, arguments: input });
       return allow
@@ -60,7 +74,7 @@ export async function run(start, sdk, z, send, request, abortController) {
         }
       } else if (message.type === "user" && Array.isArray(message.message.content)) {
         for (const block of message.message.content) {
-          if (block.type === "tool_result") send({ type: "tool_completed", id: block.tool_use_id, success: !block.is_error });
+          if (block.type === "tool_result") send({ type: "tool_completed", id: block.tool_use_id, success: !block.is_error, details: block });
         }
       } else if (message.type === "result") {
         completed = true;

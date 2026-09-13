@@ -141,3 +141,27 @@ impl Drop for Process {
         let _ = self.child.wait();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn timeout_still_fires_when_provider_never_reads_large_input() {
+        let mut command = std::process::Command::new("python3");
+        command.args(["-c", "import time; time.sleep(90)"]);
+        let mut child = Process::spawn(command, 1).unwrap();
+        let start = Instant::now();
+        child
+            .send(&json!({"input":"x".repeat(1024 * 1024)}))
+            .unwrap();
+        assert!(
+            child
+                .recv(&AtomicBool::new(false))
+                .unwrap_err()
+                .contains("timed out")
+        );
+        drop(child);
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+}

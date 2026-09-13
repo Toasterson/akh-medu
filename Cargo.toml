@@ -3,12 +3,17 @@ members = [
     ".",
     "crates/seshat",
     "crates/heka",
+    "crates/shend",
     "crates/anima-ai",
     "crates/akhomed-store",
     "crates/akh-egraph-bench",
     "crates/grug-data",
     "crates/grug-train",
     "benchmarks/harness-core",
+    "crates/akh-session-types",
+    "crates/akh-service-store",
+    "crates/akh-runtime",
+    "crates/akh-session-services",
 ]
 resolver = "3"
 
@@ -115,18 +120,22 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.5", features = ["derive"] }
 
-# Phase 38i: OpenTelemetry OTLP tracing skeleton. Exact-pinned per research
-# §2.1 so all five crates move in lockstep on Renovate bumps (no double-versions).
-# Optional + feature-gated so the lean `akh` client binary (default-features
-# build) links zero OTel crates.
+# Phase 38i/38j.1: OpenTelemetry OTLP tracing + metrics skeleton. Exact-pinned
+# per research §2.1 so all five crates move in lockstep on Renovate bumps
+# (no double-versions). Optional + feature-gated so the lean `akh` client
+# binary (default-features build) links zero OTel crates.
 opentelemetry = { version = "=0.27", optional = true }
-opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio", "metrics"], optional = true }
+opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "=0.28", optional = true }
 opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_experimental"], optional = true }
 
 # Async runtime (feature-gated; shared by the daemon and the ACP server)
 tokio = { version = "1", features = ["full"], optional = true }
+akh-session-types = { path = "crates/akh-session-types" }
+akh-runtime = { path = "crates/akh-runtime", optional = true }
+akh-service-store = { path = "crates/akh-service-store", optional = true }
+axum = { version = "0.8", optional = true }
 
 # Stream combinators for the oxifed federation channel (feature-gated)
 futures-util = { version = "0.3", optional = true }
@@ -226,13 +235,28 @@ russh = { version = "0.62.1", default-features = false, features = ["ring", "rsa
 base64 = { version = "0.22.1", optional = true }
 
 [features]
-default = ["nlu-candle", "acp"]
+# WI-339: the default set is deliberately LEAN (no `nlu-candle`). Before this
+# item, `default = ["nlu-candle", "acp"]` dragged the vendored Candle stack,
+# tokenizers, and safetensors into every ordinary `cargo test`/`cargo build` —
+# including akhs whose inference runs entirely on Ollama/OpenAI-compatible
+# remote backends. Candle is now opt-in:
+#   * local inference / Candle token counter → `nlu-candle` (or the
+#     `server-candle` composite, defined below, for an akhomed daemon), and
+#   * a lean-built akhomed REFUSES to start an akh whose akh.toml selects
+#     `backend = "candle"` rather than silently re-routing it (see the
+#     `cfg(not(feature = "candle-backend"))` arm in src/bin/akhomed.rs).
+# Per-artifact profiles are documented in docs/ops/akhomed-feature-profiles.md.
+default = ["acp", "embedded-runtime"]
+# Compatibility for existing embedded chat; specialized core builds omit providers.
+embedded-runtime = ["dep:akh-runtime"]
+# Cognitive/config/storage owner only: no client ACP, external provider or executor dependency.
+core-server = ["daemon", "postgres", "tracing-otel", "dep:axum", "dep:akh-service-store"]
 daemon = ["tokio", "dep:chrono", "dep:cron"]
 # `server` = the akhomed daemon feature set: workspace daemons + the ACP
 # inbound transport. (Pre-ADR-061 it pulled axum/tower-http for REST/WS;
 # those surfaces are gone, so it now just means daemon + acp.) Phase 38 folds
 # in the Postgres backing store.
-server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor"]
+server = ["daemon", "acp", "postgres", "tracing-otel", "remote-executor", "embedded-runtime"]
 # Phase 38i: OTLP tracing skeleton. Default-on under `server` so akhomed
 # gets the OTLP layer; the lean `akh` client binary (no `server`) stays lean.
 tracing-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry", "dep:opentelemetry-semantic-conventions"]
@@ -247,9 +271,19 @@ wasm-tools = ["wasmtime"]
 nlu-ml = ["ort", "tokenizers"]
 nlu-llm = ["llama-cpp-2", "encoding_rs"]
 nlu-full = ["nlu-ml", "nlu-llm"]
-delegation = ["daemon"]
+# WI-222: peer dispatch rides ACP (ADR-061 — the daemon is ACP-only over
+# Unix socket/TCP; there is no HTTP surface). reqwest is dropped entirely:
+# after this change nothing in the workspace references it.
+delegation = ["daemon", "acp"]
 candle-backend = ["candle-core", "candle-nn", "candle-transformers", "safetensors", "tokenizers"]
 nlu-candle = ["candle-backend"]
+# WI-339: composite daemon profile for akhomed hosts that serve Candle-backed
+# akhs (in-process GGUF inference + the Candle token counter). This is THE
+# artifact profile for those hosts: release.yml and
+# docs/ops/akhomed-feature-profiles.md reference `server-candle`, and the lean
+# `server` build refuses to start a `backend = "candle"` akh (see the
+# `cfg(not(feature = "candle-backend"))` arm in src/bin/akhomed.rs).
+server-candle = ["server", "candle-backend"]
 # AMD GPU acceleration for the Candle backend (ADR 068). Opt-in: requires the
 # ROCm toolchain to build the HIP kernel (build.rs degrades gracefully if absent)
 # and an AMD GPU at runtime. Off by default — Candle runs CPU-only without it.
@@ -292,6 +326,7 @@ client = ["acp"]
 remote-executor = ["dep:russh", "dep:base64", "tokio"]
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 sha2 = "0.10"
@@ -315,7 +350,7 @@ path = "src/main.rs"
 [[bin]]
 name = "akhomed"
 path = "src/bin/akhomed.rs"
-required-features = ["server"]
+required-features = ["daemon", "postgres"]
 
 [[bin]]
 name = "generate_qa_dataset"

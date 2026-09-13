@@ -16,7 +16,7 @@ use seshat::migration::Migrator;
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     // Initialize tracing.
-    let _tracer_guard = seshat::observability::init_tracing("seshd");
+    let _obs_guard = seshat::observability::init_observability("seshd");
 
     // Parse CLI arguments.
     let args: Vec<String> = std::env::args().collect();
@@ -79,6 +79,14 @@ async fn main() -> miette::Result<()> {
 
     let db = Arc::new(db);
 
+    // WI-326: build the typed instrument registry once and share it. When
+    // OTLP export is unconfigured the meter is the SDK no-op, so emission is
+    // a cheap no-op rather than a permanently absent handle.
+    #[cfg(feature = "tracing-otel")]
+    let metrics = Arc::new(seshat::metrics::SeshatMetrics::new(
+        seshat::observability::global_meter("seshd"),
+    ));
+
     // Load embedding model (if feature enabled).
     #[cfg(feature = "embedding")]
     let embedder = {
@@ -110,8 +118,20 @@ async fn main() -> miette::Result<()> {
         let db_clone = Arc::clone(&db);
         let emb_clone = Arc::clone(emb);
         let embed_config = config.embedding.clone();
+        // WI-326: wire the shared metrics registry into the worker so every
+        // tick emits `record_embed_batch`. `None`-safe: the worker treats a
+        // missing handle as a no-op.
+        #[cfg(feature = "tracing-otel")]
+        let metrics_clone = Some(Arc::clone(&metrics));
         tokio::spawn(async move {
-            seshat::embed_worker::run_embed_worker(db_clone, emb_clone, embed_config).await;
+            seshat::embed_worker::run_embed_worker(
+                db_clone,
+                emb_clone,
+                embed_config,
+                #[cfg(feature = "tracing-otel")]
+                metrics_clone,
+            )
+            .await;
         });
         tracing::info!("embedding worker started");
     }
@@ -120,6 +140,9 @@ async fn main() -> miette::Result<()> {
     let state = Arc::new(SeshatMcpState {
         db: Arc::clone(&db),
         embedder,
+        // WI-326: same registry handle feeds the MCP tool-call metrics.
+        #[cfg(feature = "tracing-otel")]
+        metrics: Some(metrics),
     });
 
     let mcp_server = SeshatMcpServer::new(state);

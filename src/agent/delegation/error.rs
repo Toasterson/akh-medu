@@ -103,6 +103,21 @@ pub enum DelegationError {
     )]
     PeerUnreachable { endpoint: String },
 
+    /// The peer accepted the ACP connection but the prompt turn itself
+    /// failed (timeout, protocol error, or an empty response). Distinct from
+    /// [`DelegationError::PeerUnreachable`] so a dead peer and a broken turn
+    /// are diagnosable apart.
+    #[error("peer ACP turn failed at {endpoint}: {reason}")]
+    #[diagnostic(
+        code(akh::delegation::peer_turn_failed),
+        help(
+            "The peer accepted the ACP connection but the prompt turn failed \
+             (timeout, protocol error, or empty response). Check the peer \
+             daemon's logs for the failing session."
+        )
+    )]
+    PeerTurnFailed { endpoint: String, reason: String },
+
     #[error("remote trigger API is not yet available")]
     #[diagnostic(
         code(akh::delegation::remote_unavailable),

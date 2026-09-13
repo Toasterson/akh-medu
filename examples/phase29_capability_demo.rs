@@ -28,7 +28,7 @@ fn main() -> miette::Result<()> {
     use akh_medu::engine::{Engine, EngineConfig};
     use akh_medu::nlu::NluPipeline;
     use akh_medu::vsa::Dimension;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -77,7 +77,7 @@ fn main() -> miette::Result<()> {
         let processor = ChatProcessor::new(&engine, NluPipeline::new());
         let mut agent = Agent::new(Arc::clone(&engine), AgentConfig::default())?;
         agent.force_set_psyche(akh_medu::compartment::psyche::Psyche::default());
-        let me = AkhAcpAgent::new(engine, Arc::new(Mutex::new(agent)), processor);
+        let me = AkhAcpAgent::new(engine, Arc::new(RwLock::new(agent)), processor);
 
         // ── Serve over ACP/TCP (the same loop the daemon runs). ──
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

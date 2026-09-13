@@ -76,6 +76,7 @@ impl Tool for DelegateTool {
 
         #[cfg(feature = "delegation")]
         {
+            let target_workspace = input.get("workspace").map(str::to_string);
             let task = DelegationTask {
                 description: task_desc.to_string(),
                 context_triples: Vec::new(),
@@ -83,6 +84,7 @@ impl Tool for DelegateTool {
                 goal_id: 0,
                 priority: 0.5,
                 target_hint: target_hint.clone(),
+                target_workspace,
             };
             if let Ok(mut q) = self.pending.lock() {
                 q.push(task);
@@ -108,6 +110,10 @@ impl Tool for DelegateTool {
             parameters: vec![
                 ToolParamSchema::required("task", "Description of the task to delegate"),
                 ToolParamSchema::optional("target", "Target hint: 'local', 'remote', or 'peer'"),
+                ToolParamSchema::optional(
+                    "workspace",
+                    "Target workspace for peer delegation (the peer's default when omitted)",
+                ),
             ],
             danger: DangerInfo {
                 level: DangerLevel::Dangerous,

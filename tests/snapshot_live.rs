@@ -17,8 +17,8 @@ use akh_medu::provenance::{
     RULE_SUPPORT_TRIPLES_V1_SENTINEL,
 };
 use akh_medu::snapshot::{
-    capture_snapshot_at_fence, capture_snapshot_at_watermark, persist_snapshot, wake,
-    write_snapshot,
+    capture_snapshot_at_fence, capture_snapshot_at_watermark, persist_snapshot,
+    repair_duplicate_symbols, wake, write_snapshot,
 };
 use akh_medu::symbol::SymbolKind;
 use akhomed_store::sea_orm::{self, ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -38,6 +38,10 @@ async fn exec(db: &sea_orm::DatabaseConnection, sql: &str) {
     db.execute(Statement::from_string(DbBackend::Postgres, sql.to_owned()))
         .await
         .unwrap();
+}
+
+async fn exec_batch(db: &sea_orm::DatabaseConnection, sql: &str) {
+    db.execute_unprepared(sql).await.unwrap();
 }
 
 async fn waiting_advisory_locks(db: &sea_orm::DatabaseConnection) -> i64 {
@@ -911,5 +915,471 @@ async fn equal_watermark_snapshot_from_previous_residency_is_rejected() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// WI-338 acceptance: a legacy duplicate blocks ordinary hydration, dry-run is
+/// inert, apply rewrites/collapses every relational reference, records an audit,
+/// remains idempotent, and the existing fail-closed wake validator then passes.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn duplicate_symbol_repair_restores_wake_and_all_reference_tables() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
+    run_migrations(&db).await.unwrap();
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    ensure_akh(&db, akh_id, "wi-338-repair-live", None)
+        .await
+        .unwrap();
+
+    let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+    let canonical = engine.create_symbol(SymbolKind::Entity, "OReilly").unwrap();
+    let duplicate = engine
+        .create_symbol(SymbolKind::Entity, "O’ReillyLegacy")
+        .unwrap();
+    let predicate = engine
+        .create_symbol(SymbolKind::Relation, "wi-338-relation")
+        .unwrap();
+    let object = engine
+        .create_symbol(SymbolKind::Entity, "wi-338-object")
+        .unwrap();
+    engine
+        .add_triple(&Triple::new(canonical.id, predicate.id, object.id))
+        .unwrap();
+    engine
+        .add_triple(&Triple::new(duplicate.id, predicate.id, object.id))
+        .unwrap();
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .unwrap();
+
+    let canonical_id = canonical.id.get() as i64;
+    let duplicate_id = duplicate.id.get() as i64;
+    let predicate_id = predicate.id.get() as i64;
+    let foreign_akh_id = Uuid::new_v4();
+    ensure_akh(&db, foreign_akh_id, "wi-338-shared-fact-writer", None)
+        .await
+        .unwrap();
+    // This replay-complete post-watermark record predates the merge audit which
+    // repair appends. It deliberately encloses the soon-to-be-deleted symbol,
+    // so the first wake after repair must canonicalize both the triple and its
+    // metadata before fail-closed tail validation, without waiting for a fresh
+    // snapshot to be published.
+    append_mutations(
+        &db,
+        akh_id,
+        workspace_id,
+        &[MutationRow {
+            kind: "assert".into(),
+            payload: serde_json::json!({
+                "v": akh_medu::mutation::ASSERT_MUTATION_VERSION,
+                "subject": duplicate_id,
+                "predicate": predicate_id,
+                "object": object.id.get(),
+                "confidence": 0.95,
+                "timestamp": 42,
+                "compartment": null,
+                "provenance_id": null,
+                "provenance": null,
+                "symbols": [duplicate.clone(), predicate.clone(), object.clone()],
+            }),
+        }],
+    )
+    .await
+    .unwrap();
+    let provenance_id = (i64::from_be_bytes(akh_id.as_bytes()[0..8].try_into().unwrap())
+        & 0x3fff_ffff_ffff_ffff)
+        .max(1);
+    let episode_id = provenance_id + 1;
+    exec_batch(
+        &db,
+        &format!(
+            "UPDATE akhomed_symbols SET label = 'O’Reilly' \
+             WHERE akh_id = '{akh_id}' AND id = {duplicate_id};
+             UPDATE akhomed_facts SET confidence = 0.25 \
+             WHERE workspace_id = '{workspace_id}' AND subject = {canonical_id};
+             UPDATE akhomed_facts SET confidence = 0.90, akh_id = '{foreign_akh_id}' \
+             WHERE workspace_id = '{workspace_id}' AND subject = {duplicate_id};
+             INSERT INTO akhomed_agenda (akh_id, project_id, priority, is_active)
+             VALUES ('{akh_id}', {duplicate_id}, 1, true);
+             INSERT INTO akhomed_goals
+               (akh_id,id,description,status,priority,success_criteria,parent,created_at,
+                cycles_worked,last_progress_cycle,source,detail)
+             VALUES ('{akh_id}', {duplicate_id}, 'repair goal', 'pending', 1, 'done',
+                     {duplicate_id}, 7, 0, 0, NULL,
+                     jsonb_build_object('symbol_id',{duplicate_id},'parent',{duplicate_id},
+                                        'children',jsonb_build_array({duplicate_id}),
+                                        'created_at',{duplicate_id}));
+             INSERT INTO akhomed_goal_hierarchy (akh_id,parent_id,child_id,position)
+             VALUES ('{akh_id}', {duplicate_id}, {duplicate_id}, 0);
+             INSERT INTO akhomed_goal_dependencies (akh_id,goal_id,blocking_goal_id)
+             VALUES ('{akh_id}', {duplicate_id}, {duplicate_id});
+             INSERT INTO akhomed_learned_methods
+               (akh_id,id,name,precondition_pattern,precondition_vector,confidence,usage_count,
+                success_count,failure_count,learned_at,last_used,source_goal_description)
+             VALUES ('{akh_id}', {duplicate_id}, 'repair method', '', decode('', 'hex'),
+                     1, 0, 0, 0, 0, 0, 'repair goal');
+             INSERT INTO akhomed_learned_method_step
+               (akh_id,method_id,step_index,tool,arg_pattern,expected_outcome)
+             VALUES ('{akh_id}', {duplicate_id}, 0, 'tool', '{{}}', 'ok');
+             INSERT INTO akhomed_provenance_snapshot
+               (akh_id,provenance_id,workspace_id,derived_symbol,sources,derivation,
+                confidence,depth,created_at)
+             VALUES ('{akh_id}', {provenance_id}, '{workspace_id}', {duplicate_id},
+                     jsonb_build_array({duplicate_id}),
+                     jsonb_build_object('GraphEdge',
+                       jsonb_build_object('from',{duplicate_id},'predicate',{predicate_id})),
+                     1, 0, now());
+             INSERT INTO akhomed_provenance
+               (provenance_id,akh_id,workspace_id,subject,derivation,confidence,created_at)
+             VALUES ({provenance_id}, '{akh_id}', '{workspace_id}', {duplicate_id},
+                     jsonb_build_object('GraphEdge',
+                       jsonb_build_object('from',{duplicate_id},'predicate',{predicate_id})),
+                     1, now());
+             INSERT INTO akhomed_provenance_input (provenance_id,position,input_symbol_id)
+             VALUES ({provenance_id}, 0, {duplicate_id});
+             INSERT INTO akhomed_episodes
+               (episode_id,akh_id,workspace_id,started_at,ended_at,payload)
+             VALUES ({episode_id}, '{akh_id}', '{workspace_id}', now(), NULL,
+                     jsonb_build_object('symbol_id',{duplicate_id},'created_at',{duplicate_id}));
+             INSERT INTO akhomed_episodes
+               (episode_id,akh_id,workspace_id,started_at,ended_at,payload)
+             VALUES ({canonical_id}, '{akh_id}', '{workspace_id}', now(), NULL,
+                     jsonb_build_object('marker','canonical')),
+                    ({duplicate_id}, '{akh_id}', '{workspace_id}', now(), NULL,
+                     jsonb_build_object('marker','duplicate'));"
+        ),
+    )
+    .await;
+
+    let blocked_dir = tempfile::tempdir().unwrap();
+    let blocked = wake(blocked_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect_err("ordinary wake must still fail closed before repair");
+    assert!(
+        blocked.to_string().contains("duplicate symbol label"),
+        "{blocked}"
+    );
+
+    let allocator_before = count(
+        &db,
+        &format!("SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"),
+    )
+    .await;
+    let dry_run = repair_duplicate_symbols(&db, akh_id, workspace_id, true)
+        .await
+        .unwrap();
+    assert!(!dry_run.applied);
+    assert_eq!(dry_run.plan.duplicate_groups, 1);
+    assert_eq!(dry_run.plan.extra_symbols, 1);
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_symbols \
+                 WHERE akh_id = '{akh_id}' AND id = {duplicate_id}"
+            ),
+        )
+        .await,
+        1,
+        "dry-run must not delete the loser",
+    );
+
+    let repaired = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(repaired.applied);
+    assert_eq!(repaired.counts.symbols_deleted, 1);
+    assert_eq!(repaired.counts.facts_collapsed, 1);
+    assert_eq!(repaired.counts.episodes_collapsed, 1);
+    assert_eq!(repaired.counts.wal_records, 1);
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT round(confidence * 100)::bigint AS c FROM akhomed_facts \
+                 WHERE workspace_id = '{workspace_id}' AND subject = {canonical_id} \
+                   AND predicate = {predicate_id}"
+            ),
+        )
+        .await,
+        90,
+        "fact-key collisions preserve the maximum confidence even when that row was asserted by another Akh",
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"),
+        )
+        .await,
+        allocator_before,
+        "repair leaves the allocator high-water mark alone",
+    );
+
+    for (table, predicate) in [
+        (
+            "akhomed_facts",
+            format!(
+                "workspace_id = '{workspace_id}' AND ({duplicate_id} IN (subject,predicate,object))"
+            ),
+        ),
+        (
+            "akhomed_agenda",
+            format!("akh_id = '{akh_id}' AND project_id = {duplicate_id}"),
+        ),
+        (
+            "akhomed_goals",
+            format!("akh_id = '{akh_id}' AND (id = {duplicate_id} OR parent = {duplicate_id})"),
+        ),
+        (
+            "akhomed_goal_hierarchy",
+            format!("akh_id = '{akh_id}' AND ({duplicate_id} IN (parent_id,child_id))"),
+        ),
+        (
+            "akhomed_goal_dependencies",
+            format!("akh_id = '{akh_id}' AND ({duplicate_id} IN (goal_id,blocking_goal_id))"),
+        ),
+        (
+            "akhomed_learned_methods",
+            format!("akh_id = '{akh_id}' AND id = {duplicate_id}"),
+        ),
+        (
+            "akhomed_learned_method_step",
+            format!("akh_id = '{akh_id}' AND method_id = {duplicate_id}"),
+        ),
+        (
+            "akhomed_provenance",
+            format!("akh_id = '{akh_id}' AND subject = {duplicate_id}"),
+        ),
+        (
+            "akhomed_provenance_input",
+            format!("provenance_id = {provenance_id} AND input_symbol_id = {duplicate_id}"),
+        ),
+        (
+            "akhomed_provenance_snapshot",
+            format!("akh_id = '{akh_id}' AND derived_symbol = {duplicate_id}"),
+        ),
+        (
+            "akhomed_goals",
+            format!("akh_id = '{akh_id}' AND detail->>'symbol_id' = '{duplicate_id}'"),
+        ),
+        (
+            "akhomed_provenance",
+            format!("akh_id = '{akh_id}' AND derivation::text LIKE '%{duplicate_id}%'"),
+        ),
+        (
+            "akhomed_provenance_snapshot",
+            format!(
+                "akh_id = '{akh_id}' AND (sources::jsonb @> '[{duplicate_id}]'::jsonb OR derivation::text LIKE '%{duplicate_id}%')"
+            ),
+        ),
+        (
+            "akhomed_episodes",
+            format!("akh_id = '{akh_id}' AND payload->>'symbol_id' = '{duplicate_id}'"),
+        ),
+        (
+            "akhomed_episodes",
+            format!("akh_id = '{akh_id}' AND episode_id = {duplicate_id}"),
+        ),
+    ] {
+        assert_eq!(
+            count(
+                &db,
+                &format!("SELECT count(*)::bigint AS c FROM {table} WHERE {predicate}")
+            )
+            .await,
+            0,
+            "loser reference remains in {table}",
+        );
+    }
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_episodes \
+                 WHERE akh_id = '{akh_id}' AND episode_id = {canonical_id} \
+                   AND payload->>'marker' = 'canonical'"
+            ),
+        )
+        .await,
+        1,
+        "episode ID collisions keep the deterministic canonical-ID row",
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT (payload->>'created_at')::bigint AS c FROM akhomed_episodes \
+                 WHERE akh_id = '{akh_id}' AND episode_id = {episode_id}"
+            ),
+        )
+        .await,
+        duplicate_id,
+        "field-aware JSON repair must not rewrite unrelated numeric timestamps",
+    );
+    assert_eq!(
+        count(
+            &db,
+            &format!(
+                "SELECT count(*)::bigint AS c FROM akhomed_mutation_log \
+                 WHERE akh_id = '{akh_id}' AND kind = 'symbol_merge' \
+                   AND (payload::jsonb->'triple_identity_changes'->0) ? 'before_identity' \
+                   AND (payload::jsonb->'triple_identity_changes'->0) ? 'after_identity'"
+            ),
+        )
+        .await,
+        1,
+    );
+
+    let second = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(!second.applied);
+    assert_eq!(second.plan.extra_symbols, 0);
+
+    let wake_dir = tempfile::tempdir().unwrap();
+    let woken = wake(wake_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect("fail-closed validator accepts repaired registry");
+    assert_eq!(
+        woken
+            .all_triples()
+            .iter()
+            .filter(|triple| triple.predicate == predicate.id)
+            .count(),
+        1,
+        "colliding facts keep one row",
+    );
+    assert_eq!(
+        woken
+            .all_triples()
+            .iter()
+            .find(|triple| triple.predicate == predicate.id)
+            .unwrap()
+            .confidence,
+        0.95,
+        "the pre-repair WAL assertion is replayed through the merge map",
+    );
+    assert_eq!(woken.resolve_label(canonical.id), "OReilly");
+    assert!(woken.get_symbol_meta(duplicate.id).is_err());
+    assert_eq!(predicate_id, predicate.id.get() as i64);
+    assert_eq!(canonical_id, canonical.id.get() as i64);
+}
+
+/// WI-359 production regression: a previously committed duplicate repair can
+/// leave no merge work while the relational allocator still trails a surviving
+/// restored symbol. Repair must advance 2826/6558 to 6559 and make wake viable.
+#[tokio::test]
+#[ignore = "requires AKH_TEST_PG_URL"]
+async fn stale_allocator_only_repair_restores_wake_and_is_idempotent() {
+    let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
+        eprintln!("skipping: set AKH_TEST_PG_URL");
+        return;
+    };
+    let db = connect(&akhomed_store::PoolOptions::new(url))
+        .await
+        .unwrap();
+    run_migrations(&db).await.unwrap();
+    let akh_id = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+    ensure_akh(&db, akh_id, "wi-359-allocator-repair-live", None)
+        .await
+        .unwrap();
+
+    let engine = Arc::new(Engine::new(EngineConfig::default()).unwrap());
+    engine
+        .create_symbol(SymbolKind::Entity, "wi-359-existing")
+        .unwrap();
+    let agent = Agent::new(Arc::clone(&engine), AgentConfig::default()).unwrap();
+    write_snapshot(&agent, akh_id, workspace_id, &db)
+        .await
+        .unwrap();
+
+    exec_batch(
+        &db,
+        &format!(
+            "INSERT INTO akhomed_symbols (akh_id,id,kind,glyph_codepoint,label)
+             VALUES ('{akh_id}', 6558, 'Entity', NULL, 'wi-359-restored-max');
+             UPDATE akhomed_akh_state SET allocator_next = 2826
+             WHERE akh_id = '{akh_id}';"
+        ),
+    )
+    .await;
+
+    let blocked_dir = tempfile::tempdir().unwrap();
+    let blocked = wake(blocked_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect_err("ordinary wake must fail closed on the stale allocator");
+    assert!(
+        blocked
+            .to_string()
+            .contains("allocator next ID 2826 collides with restored symbol 6558"),
+        "{blocked}"
+    );
+
+    let dry_run = repair_duplicate_symbols(&db, akh_id, workspace_id, true)
+        .await
+        .unwrap();
+    assert!(!dry_run.applied);
+    assert_eq!(dry_run.plan.duplicate_groups, 0);
+    assert_eq!(dry_run.plan.extra_symbols, 0);
+    assert_eq!(dry_run.plan.allocator.allocator_next_before, 2826);
+    assert_eq!(dry_run.plan.allocator.max_surviving_symbol_id, Some(6558));
+    assert_eq!(dry_run.plan.allocator.required_allocator_next, 6559);
+    assert_eq!(dry_run.plan.allocator.allocator_next_after, 6559);
+    assert!(dry_run.plan.allocator.advanced);
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"),
+        )
+        .await,
+        2826,
+        "dry-run must not change allocator state",
+    );
+
+    let repaired = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(repaired.applied);
+    assert_eq!(repaired.plan.extra_symbols, 0);
+    assert!(repaired.plan.allocator.advanced);
+    assert_eq!(repaired.plan.allocator.allocator_next_after, 6559);
+    assert_eq!(
+        count(
+            &db,
+            &format!("SELECT allocator_next AS c FROM akhomed_akh_state WHERE akh_id = '{akh_id}'"),
+        )
+        .await,
+        6559,
+    );
+
+    let second = repair_duplicate_symbols(&db, akh_id, workspace_id, false)
+        .await
+        .unwrap();
+    assert!(!second.applied);
+    assert_eq!(second.plan.extra_symbols, 0);
+    assert!(!second.plan.allocator.advanced);
+    assert_eq!(second.plan.allocator.allocator_next_before, 6559);
+    assert_eq!(second.plan.allocator.allocator_next_after, 6559);
+
+    let wake_dir = tempfile::tempdir().unwrap();
+    let woken = wake(wake_dir.path(), akh_id, workspace_id, &db)
+        .await
+        .expect("allocator-only repair makes the legacy snapshot hydratable");
+    assert_eq!(
+        woken
+            .create_symbol(SymbolKind::Entity, "wi-359-first-new-symbol")
+            .unwrap()
+            .id
+            .get(),
+        6559,
     );
 }

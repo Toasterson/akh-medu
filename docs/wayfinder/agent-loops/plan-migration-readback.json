@@ -1,0 +1,91 @@
+{
+  "checked_at": "2026-09-09",
+  "plan_created": false,
+  "blocker": "token missing required scope: plan.write",
+  "work_items": [
+    {
+      "id": "01a086ef-8032-7e63-be25-1574988ed23d",
+      "title": "Session ownership and loop selection",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": []
+    },
+    {
+      "id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": []
+    },
+    {
+      "id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": []
+    },
+    {
+      "id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+      "title": "Tool execution ownership and workspace location",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d"
+      ]
+    },
+    {
+      "id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+      "title": "AgentLoop contract and lifecycle events",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-8032-7e63-be25-1574988ed23d",
+        "01a086ef-818e-7141-91f4-43de3d44d5d3"
+      ]
+    },
+    {
+      "id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+      "title": "Memory, transcript continuity and provider usage",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ]
+    },
+    {
+      "id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+      "title": "Akh and external clients attach to the same session service",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6"
+      ]
+    },
+    {
+      "id": "01a086ef-8343-7963-85de-93d3342b66c1",
+      "title": "Different loop strategies and composition",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ]
+    },
+    {
+      "id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+      "title": "Migration path and provider conformance gates",
+      "plan_id": null,
+      "phase": "draft",
+      "depends_on_ids": [
+        "01a086ef-818e-7141-91f4-43de3d44d5d3",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+        "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+        "01a086ef-8343-7963-85de-93d3342b66c1"
+      ]
+    }
+  ]
+}

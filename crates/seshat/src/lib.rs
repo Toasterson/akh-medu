@@ -18,11 +18,17 @@ pub mod entity;
 pub mod error;
 pub mod ingest;
 pub mod mcp;
+/// Phase 38j.1: typed metric-instrument registry for seshd.
+/// Available only when the `tracing-otel` feature is enabled (the OTel
+/// `Meter` type is required).
+#[cfg(feature = "tracing-otel")]
+pub mod metrics;
 pub mod migration;
 /// Phase 38i: OTLP tracing skeleton for seshd.
 pub mod observability;
 pub mod query;
 pub mod scripts;
+pub mod transcript;
 
 pub use config::SeshatConfig;
 pub use error::{SeshatError, SeshatResult};

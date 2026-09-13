@@ -1,0 +1,602 @@
+[
+  {
+    "work_item": {
+      "id": "01a086ef-8032-7e63-be25-1574988ed23d",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Session ownership and loop selection",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/session-ownership.md\n\n## Question\n\nIs loop selection per Akh or per session, and which session properties remain stable across reconnects? Distinguish reconnecting a client, resuming a provider thread, and handing off to another loop. What are the client controller and observer rules?\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Accepted selection decision\n\nThe user chose: **\u201cOne loop fixed for each Akh.\u201d**\n\nLoop implementation selection belongs to the Akh configuration. All sessions\nof that Akh use that implementation, with separate conversation and provider\nsession state. A client cannot select another loop for an individual session.\nDifferent Akhs may use different implementations.\n\n## Remaining lifecycle question\n\nWhen changing an Akh's loop, must all its sessions be closed first?\nRecommendation pending user: yes, so one Akh never has sessions running different\nloop implementations at the same time. Reconnect, controller and observer rules\nremain covered by the loop-contract and client-contract decisions. This ticket\nremains open; its selection subdecision is accepted.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-408",
+      "depends_on_ids": [],
+      "dependency_edges": [],
+      "blocked_by": [],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.004275+00:00",
+      "updated_at": "2026-09-09T18:43:20.169924+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Codex and Claude integration contracts and subscription boundaries",
+      "description": "Wayfinder type: research\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed; research findings available\nLocal path: docs/wayfinder/agent-loops/tickets/codex-claude.md\n\n## Question\n\nWhich current official interfaces support user-owned subscription authentication, Akh custom tools, cancellation, approvals, session resume and disabling native execution? For each claim cite primary sources and version/date. Separate technical interoperability, documented support and unresolved restrictions. Can all filesystem, command, hook, MCP and subagent execution remain under Akh control without modifying provider authentication? No live model calls or credential reads are needed. Capture findings in assets/codex-claude.md.\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\nResearch branch: research/akh-agent-loops-codex-claude\nFindings asset: docs/wayfinder/agent-loops/assets/codex-claude.md\n\n## Research findings available\n\nCodex App Server and Claude SDK expose host tool callbacks. Codex hooks expressly do not form a complete execution boundary; Claude tool exclusion, strict MCP and aliases are promising but untested together. User sign-in to unmodified Claude Code and SDK product authentication have distinct published guidance. No exclusive Akh/SSH conformance claim.\n\nPrimary sources:\n- https://learn.chatgpt.com/docs/app-server\n- https://learn.chatgpt.com/docs/hooks#tool-coverage\n- https://code.claude.com/docs/en/legal-and-compliance\n- https://code.claude.com/docs/en/agent-sdk/overview\n\nFull asset: docs/wayfinder/agent-loops/assets/codex-claude.md\nLocal research branch: research/akh-agent-loops-codex-claude\nResearch commit: 2ab0b7704b53b8698d8a13d05dfbf013ced813d5\n\nNo model calls, credential reads, adapter implementation or deployment. Native Anima findings-document ingestion and terminal resolution are still pending; current_phase remains draft. The local research commit has not been published.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-409",
+      "depends_on_ids": [],
+      "dependency_edges": [],
+      "blocked_by": [],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.124439+00:00",
+      "updated_at": "2026-09-09T18:43:20.344230+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Cursor and OpenCode integration contracts and execution control",
+      "description": "Wayfinder type: research\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed; research findings available\nLocal path: docs/wayfinder/agent-loops/tickets/cursor-opencode.md\n\n## Question\n\nWhich current official interfaces can implement AgentLoop for Cursor and OpenCode? Compare server/SDK, CLI, ACP, custom tools/MCP, subscription authentication, streamed events, approvals, cancellation, resume and reliable exclusion of native execution. Do not assume that supporting MCP gives full execution interception or that OpenCode can reuse another vendor subscription. Cite primary sources and explicitly record unknown capabilities. No live model calls or credential reads. Capture assets/cursor-opencode.md.\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\nResearch branch: research/akh-agent-loops-cursor-opencode\nFindings asset: docs/wayfinder/agent-loops/assets/cursor-opencode.md\n\n## Research findings available\n\nCursor has ACP and an official SDK Bridge with local tool allowlisting and custom callbacks; restrictions must be reapplied on resume. OpenCode has server/ACP integration, but pinned source registers MCP by directory/name rather than session identity. Treat dedicated instances as a candidate until isolation tests pass. OpenCode documents ChatGPT access but rejects Claude subscription plugins. Neither adapter has proven exclusive Akh/SSH execution.\n\nPrimary sources:\n- https://cursor.com/docs/sdk/bridge\n- https://cursor.com/docs/sdk/typescript\n- https://opencode.ai/docs/providers/\n- https://github.com/anomalyco/opencode/blob/f69beceaffca94bed05a7669af93602125c37248/packages/opencode/src/acp/service.ts\n\nFull asset: docs/wayfinder/agent-loops/assets/cursor-opencode.md\nLocal research branch: research/akh-agent-loops-cursor-opencode\nResearch commit: 3740efb4eb526ffc650c57c7696657fe9223d5cd\n\nNo model calls, credential reads, adapter implementation or deployment. Native Anima findings-document ingestion and terminal resolution are still pending; current_phase remains draft. The local research commit has not been published.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-410",
+      "depends_on_ids": [],
+      "dependency_edges": [],
+      "blocked_by": [],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.242940+00:00",
+      "updated_at": "2026-09-09T18:43:20.502251+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Tool execution ownership and workspace location",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/execution-boundary.md\n\n## Question\n\nWhat does Akh owns everything else require for file reads, writes, commands, hooks, subagents and provider extensions? Choose between verified exclusive Akh execution and any explicitly offered weaker mode. How do daemon cwd, provider process cwd and executor workspace differ? How is an incompatible provider/backend combination rejected before a turn, and what evidence proves SSH execution with no local bypass?\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-411",
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+          "depends_on_id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:38.975828+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+          "depends_on_id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.055501+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.352005+00:00",
+      "updated_at": "2026-09-09T18:43:20.717668+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "AgentLoop contract and lifecycle events",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/loop-contract.md\n\n## Question\n\nWhat minimal object-safe Rust contract represents a complete loop session while leaving ChatBackend below InternalLoop and Backend below tools? Specify commands/events for start, submit, interrupt, approvals/input, finish, reconnect and close; typed outcomes/capabilities; backpressure and single-turn ownership. Account for existing synchronous tools and thread-local session context without assuming async callbacks preserve it.\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-412",
+      "depends_on_ids": [
+        "01a086ef-8032-7e63-be25-1574988ed23d",
+        "01a086ef-818e-7141-91f4-43de3d44d5d3"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "depends_on_id": "01a086ef-8032-7e63-be25-1574988ed23d",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.144639+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "depends_on_id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.229642+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-8032-7e63-be25-1574988ed23d",
+        "01a086ef-818e-7141-91f4-43de3d44d5d3"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.454271+00:00",
+      "updated_at": "2026-09-09T18:43:20.923016+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Memory, transcript continuity and provider usage",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/context-continuity.md\n\n## Question\n\nWhich state is Akh authoritative for and which is provider-private? Define memory injection, retrieval and accepted-answer recording, opaque resume handles, missing-provider-state recovery, loop/model changes, redaction and usage reporting. How does Akh handle auth expiry or quota exhaustion without changing identity or billing silently?\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-413",
+      "depends_on_ids": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+          "depends_on_id": "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.318696+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+          "depends_on_id": "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.471669+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+          "depends_on_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.576095+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-80ab-76f1-a356-37e6c23a4db7",
+        "01a086ef-8121-7a33-b729-1ddb28b6c15d",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.556608+00:00",
+      "updated_at": "2026-09-09T18:43:21.100310+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Akh and external clients attach to the same session service",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/client-contract.md\n\n## Question\n\nHow do the lean akh binary and other ACP clients create, control, observe and reconnect to Akh-owned sessions? Separate provider runtime transport from client ACP, and inbound client-supplied MCP from outbound provider tool bridges. Which authenticated session extensions advertise loop choices, capabilities, execution locus, approvals and replay cursors?\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-414",
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+          "depends_on_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.661387+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+          "depends_on_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.752054+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.667934+00:00",
+      "updated_at": "2026-09-09T18:43:21.299017+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-8343-7963-85de-93d3342b66c1",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Different loop strategies and composition",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/loop-strategies.md\n\n## Question\n\nHow do reactive tool loops, plan-and-execute, iterative research, deterministic workflows and delegated multi-loop work fit the same session/event contract? Distinguish runtime implementation from strategy and persona. Which are InternalLoop policies versus separate AgentLoop implementors or outer coordinators? Avoid promising strategy control inside opaque provider loops or nested-loop delegation without bounded authority.\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-415",
+      "depends_on_ids": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-8343-7963-85de-93d3342b66c1",
+          "depends_on_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.869714+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.789635+00:00",
+      "updated_at": "2026-09-09T18:43:21.475363+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  },
+  {
+    "work_item": {
+      "id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+      "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+      "plan_id": null,
+      "title": "Migration path and provider conformance gates",
+      "description": "Wayfinder type: grilling\nWayfinder status: open\nWayfinder Plan: pending native creation; the former map Work Item was incorrect\nWayfinder claim: unclaimed\nLocal path: docs/wayfinder/agent-loops/tickets/handoff.md\n\n## Question\n\nWhat dependency-ordered implementation work follows the locked decisions? Preserve existing internal behavior, ACP clients, permissions, workspace consistency, evidence gates and configuration compatibility. Set provider-specific gates for concurrent session isolation, SSH execution, interrupted operations, restart/reconnect, and auth/usage errors. Keep unsupported adapters discoverable but unavailable until evidence passes.\n\nThese are decision/research questions, not implementation assignments. Keep current_phase=draft.\n\n## Plan membership correction\n\nThis individual Wayfinder item belongs in the native agent-loop Plan. Native plan_id is currently unset; assignment is pending Plan creation and a supported native assignment operation. Its question, findings and dependencies are unchanged.\n",
+      "status": "open",
+      "priority": "medium",
+      "current_phase": "draft",
+      "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+      "graph_version_ref": null,
+      "kind": "analysis",
+      "executor": "tecton",
+      "parked_reason": null,
+      "code": "WI-416",
+      "depends_on_ids": [
+        "01a086ef-818e-7141-91f4-43de3d44d5d3",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+        "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+        "01a086ef-8343-7963-85de-93d3342b66c1"
+      ],
+      "dependency_edges": [
+        {
+          "work_item_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+          "depends_on_id": "01a086ef-818e-7141-91f4-43de3d44d5d3",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:39.965659+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+          "depends_on_id": "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:40.055769+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+          "depends_on_id": "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:40.137944+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+          "depends_on_id": "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:40.230953+00:00"
+        },
+        {
+          "work_item_id": "01a086ef-83a6-77f3-89c8-fc80bb2f9cfe",
+          "depends_on_id": "01a086ef-8343-7963-85de-93d3342b66c1",
+          "kind": "blocks",
+          "state": "pending",
+          "satisfied_at": null,
+          "created_at": "2026-09-09T16:10:40.313194+00:00"
+        }
+      ],
+      "blocked_by": [
+        "01a086ef-818e-7141-91f4-43de3d44d5d3",
+        "01a086ef-81f4-7512-a4e0-062e0ea473d8",
+        "01a086ef-825b-7100-9c2b-f0dfb83bf2c6",
+        "01a086ef-82ca-7d10-87d1-5ec5ae0f77a1",
+        "01a086ef-8343-7963-85de-93d3342b66c1"
+      ],
+      "external_url": null,
+      "external_ref": null,
+      "external_state": null,
+      "source": null,
+      "failed_dispatch_count": 0,
+      "ci_retry_count": 0,
+      "ci_next_retry_at": null,
+      "phase_entered_at": null,
+      "created_at": "2026-09-09T16:10:38.887860+00:00",
+      "updated_at": "2026-09-09T18:43:21.640264+00:00"
+    },
+    "prs": [],
+    "ci_runs": [],
+    "exit_bars": [],
+    "completion_conditions": [],
+    "change_history": [],
+    "thread_messages": [],
+    "thread_messages_elided": false,
+    "session_costs": {
+      "implementation_sessions": 0,
+      "review_sessions": 0,
+      "total_sessions": 0,
+      "total_input_tokens": null,
+      "total_output_tokens": null,
+      "total_tokens": null,
+      "total_activity_events": 0,
+      "models_used": []
+    }
+  }
+]

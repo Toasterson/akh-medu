@@ -19,7 +19,7 @@ pub struct Model {
     /// Original file path or URL.
     pub source_path: Option<String>,
 
-    /// Document format: "pdf", "epub", "mobi", "text", "html".
+    /// Document format, including "agent_session_transcript" for Anima JSONL.
     pub format: String,
 
     /// Domain tags for categorization (stored as JSONB).

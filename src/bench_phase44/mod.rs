@@ -22,6 +22,8 @@
 
 use serde::Serialize;
 
+pub mod rot;
+
 use crate::agent::context::{
     CompactingManager, ContextManager, ContextWindowStats, EpisodeState, HeuristicTokenCounter,
     PassiveManager, SafetyEnforced, TokenBudget, VirtualContextManager, core_memory,

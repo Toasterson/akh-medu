@@ -1,0 +1,30 @@
+# Services are explicitly enabled by supplying a complete entry. Runtime provider
+# binaries and editor images are operator-selected, digest-pinned artifacts.
+# TLS terminates at your existing ingress/service mesh; keep backend ports private.
+services: {}
+# Example shape (see examples/session-platform/ for contracts):
+# services:
+#   sessions:
+#     daemon: akhsessd
+#     image: registry/akhsessd@sha256:...
+#     storage: 10Gi
+#     storageClass: fast
+#     secretName: akh-sessions-credentials
+#     config: { service_id: sessions, public_url: "https://sessions.example", principals: [], akhs: {}, endpoints: {} }
+#     nodeSelector: {}
+#     resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }
+
+# Optional stateless facade deployed by the released kagent v1alpha2 BYO controller.
+# One facade and dedicated central principal per explicitly configured kagent user.
+kagent:
+  enabled: false
+  name: akh-byo
+  akh: thoth
+  image: ""
+  sessionsUrl: ""
+  secretName: ""
+  controllerUrl: ""
+  userId: ""
+  workspaceProfile: ""
+  # Set to your controller/client workload labels; never expose this Service publicly.
+  allowedCallerLabels: {}

@@ -34,9 +34,11 @@ def codex():
     state_file = pathlib.Path("fake-provider-state.json")
     state = json.loads(state_file.read_text()) if state_file.exists() else {}
     if start["method"] == "thread/start":
-        assert params["dynamicTools"][0]["name"] == "akh"
-        assert params["dynamicTools"][0]["type"] == "namespace"
-        assert all(t["type"] == "function" for t in params["dynamicTools"][0]["tools"])
+        if params["dynamicTools"]:
+            assert params["dynamicTools"][0]["name"] == "akh"
+            assert params["dynamicTools"][0]["type"] == "namespace"
+            assert params["dynamicTools"][0]["tools"], "upstream rejects empty namespaces"
+            assert all(t["type"] == "function" for t in params["dynamicTools"][0]["tools"])
         assert params["allowProviderModelFallback"] is False
         thread = str(uuid.uuid4())
         state[thread] = []

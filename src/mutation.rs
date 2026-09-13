@@ -74,6 +74,11 @@ pub enum MutationKind {
     /// turn (if any) get their own `assert` rows. A dropped turn is silent
     /// memory loss, so it is protected on overflow just like `Assert`.
     Turn,
+    /// Auditable, non-replayable merge of one legacy duplicate symbol into
+    /// its canonical ID (WI-338). The payload carries before/after
+    /// TripleIdentity values and affected provenance IDs; the repaired
+    /// relational snapshot is authoritative.
+    SymbolMerge,
 }
 
 impl MutationKind {
@@ -89,6 +94,7 @@ impl MutationKind {
             MutationKind::CompartmentCreate => "compartment_create",
             MutationKind::CompartmentDestroy => "compartment_destroy",
             MutationKind::Turn => "turn",
+            MutationKind::SymbolMerge => "symbol_merge",
         }
     }
 
@@ -104,6 +110,7 @@ impl MutationKind {
                 | MutationKind::RetractBatch
                 | MutationKind::Replace
                 | MutationKind::Turn
+                | MutationKind::SymbolMerge
         )
     }
 }
@@ -167,6 +174,7 @@ mod tests {
             "compartment_destroy"
         );
         assert_eq!(MutationKind::Turn.as_str(), "turn");
+        assert_eq!(MutationKind::SymbolMerge.as_str(), "symbol_merge");
     }
 
     #[test]

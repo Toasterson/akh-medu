@@ -22,6 +22,11 @@ pub struct Model {
     /// Avatar URL (optional).
     pub avatar_url: Option<String>,
 
+    /// SHA-256 hex digest of the akh's MCP bearer token. The plaintext token
+    /// is never stored; it is shown to the operator once at mint time. NULL
+    /// means the akh has no credential yet and cannot authenticate.
+    pub token_hash: Option<String>,
+
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

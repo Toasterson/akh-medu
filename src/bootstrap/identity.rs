@@ -992,6 +992,7 @@ pub fn build_psyche(
         awakened: false, // will be marked true by ritual_of_awakening
         ocean: None,     // derived from archetypes by psyche_compiler when needed
         ennead_role: None,
+        avatar_hash: None,
     };
 
     // Validate: domain should match purpose.

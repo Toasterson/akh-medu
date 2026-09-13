@@ -420,6 +420,10 @@ impl Agent {
     /// Image-aware form used by ACP. Images are grounded once through the
     /// selected backend and inserted as untrusted evidence before the tool
     /// loop; ordinary callers retain the text-only API above.
+    ///
+    /// Runtime-backed agents (Codex/Claude, via `akhrtd`) do not currently
+    /// accept inline images, so `prompt_images` only reaches the
+    /// ChatBackend (Ollama/Candle) path below.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_agentic_turn_with_conversation_state_and_images(
         &self,
@@ -438,7 +442,6 @@ impl Agent {
                 engine,
                 agent_id,
                 user_prompt,
-                prompt_images,
                 sink,
                 cancel,
                 is_autonomous_dispatch,

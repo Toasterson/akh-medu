@@ -1,0 +1,4 @@
+{
+  "error": "{'code': -32602, 'message': 'draft floor blocks transition: draft is an operator gate; explicitly promote it to ready before transitioning to \"done\"'}",
+  "action": "No promotion performed; draft state retained."
+}

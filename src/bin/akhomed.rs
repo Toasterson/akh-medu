@@ -353,6 +353,11 @@ struct WorkspaceDaemon {
     status: Arc<tokio::sync::Mutex<DaemonStatus>>,
 }
 
+#[cfg(not(test))]
+const DAEMON_STOP_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const DAEMON_STOP_GRACE: Duration = Duration::from_millis(25);
+
 /// Dedicated session-lock connection plus the durable fencing generation
 /// acquired by that residency. Eviction explicitly unlocks and clears the
 /// session's local ownership marker; dropping the final session Arc is the
@@ -719,6 +724,7 @@ impl ServerState {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .remove(&name);
+                        #[cfg(not(feature = "core-server"))]
                         match self.get_agent(&name).await {
                             Ok(_) => {
                                 tracing::info!(workspace = %name, residency_epoch, "claimed and hydrated durable state after reconnect")
@@ -1135,9 +1141,33 @@ impl ServerState {
     /// Wake a cold workspace from its Postgres snapshot (control-plane
     /// `_akh/akh/wake`). Populates the local redb, then routes through the normal
     /// lazy `get_agent` path so resume + model-manager + WAL wiring all apply.
-    async fn wake_workspace(&self, name: &str) -> Result<serde_json::Value, String> {
-        if self.pg_pool().is_none() {
+    async fn wake_workspace(
+        &self,
+        name: &str,
+        repair: bool,
+        dry_run: bool,
+    ) -> Result<serde_json::Value, String> {
+        let Some(pool) = self.pg_pool() else {
             return Err("no Postgres backing store configured (no [postgres] section)".into());
+        };
+        if dry_run && !repair {
+            return Err("dry_run requires repair=true".into());
+        }
+        let akh_id = akh_medu::wal::akh_id_for(name);
+        let workspace_id = akh_medu::wal::workspace_id_for(name);
+
+        // Planning is read-only and intentionally does not acquire residency or
+        // quarantine local state. This makes `akh wake --repair --dry-run` a
+        // safe fleet-audit command, even when the target remains cold elsewhere.
+        if dry_run {
+            let report =
+                akh_medu::snapshot::repair_duplicate_symbols(&pool, akh_id, workspace_id, true)
+                    .await
+                    .map_err(|error| {
+                        format!("could not plan symbol repair for \"{name}\": {error}")
+                    })?;
+            return serde_json::to_value(report)
+                .map_err(|error| format!("could not encode symbol repair plan: {error}"));
         }
         // Single-flight: refuse a second concurrent wake of the same workspace
         // (otherwise both would open the same redb and one fails confusingly).
@@ -1163,13 +1193,32 @@ impl ServerState {
             ));
         }
 
-        let akh_id = akh_medu::wal::akh_id_for(name);
         // 38g split-brain guard: a cold akh may live on another host. Acquire its
         // Postgres advisory lock before touching state so two hosts can't wake the
         // same akh concurrently; refuse fast (non-zero CLI exit) if it's held.
         let residency_epoch = self
             .acquire_akh_lock_or_refuse(name, akh_id, "wake")
             .await?;
+
+        let repair_report = if repair {
+            let plan = akh_medu::snapshot::plan_duplicate_symbol_repair(&pool, akh_id)
+                .await
+                .map_err(|error| format!("could not plan symbol repair for \"{name}\": {error}"))?;
+            tracing::info!(
+                workspace = %name,
+                duplicate_groups = plan.duplicate_groups,
+                extra_symbols = plan.extra_symbols,
+                plan = %serde_json::to_string(&plan).unwrap_or_else(|_| "<unencodable>".into()),
+                "WI-338 symbol merge plan"
+            );
+            Some(
+                akh_medu::snapshot::repair_duplicate_symbols(&pool, akh_id, workspace_id, false)
+                    .await
+                    .map_err(|error| format!("symbol repair failed for \"{name}\": {error}"))?,
+            )
+        } else {
+            None
+        };
 
         let ws_paths = self.paths.workspace(name);
         let (triples, symbols) = self
@@ -1185,11 +1234,21 @@ impl ServerState {
         // wake just populated; this also wires the WAL + snapshot ticker).
         self.get_agent(name).await?;
 
+        // Publish a fresh snapshot immediately after an applied repair. This
+        // advances the snapshot watermark over the symbol_merge audit rows and
+        // leaves no interval where a later wake depends on replaying repair WAL.
+        let repaired = repair_report.as_ref().is_some_and(|report| report.applied);
+        if repaired {
+            self.snapshot_workspace(name).await?;
+        }
+
         tracing::info!(workspace = %name, %akh_id, triples, symbols, "woke akh from Postgres");
         Ok(serde_json::json!({
             "woke": name,
             "triples": triples,
             "symbols": symbols,
+            "repair": repair_report,
+            "repair_snapshotted": repaired,
         }))
     }
 
@@ -2829,6 +2888,22 @@ impl ServerState {
                 }
             }
         }
+        // WI-339 scope item 4: this akhomed was built WITHOUT `candle-backend`
+        // but the akh's config selects it. Refuse to start the akh rather than
+        // silently routing it to Ollama/symbolic — the same fail-loud invariant
+        // as the `remote-executor` refusal above, and the same "which model
+        // answered this stays answerable" reasoning as the OpenAI branch below.
+        #[cfg(not(feature = "candle-backend"))]
+        if akh_config.backend == akh_medu::akh_config::ChatBacking::Candle {
+            return Err(format!(
+                "workspace {name}: akh.toml selects backend = \"candle\" but this akhomed \
+                 was built without the `candle-backend` feature; rebuild with \
+                 `--features server-candle` (the Candle-enabled daemon profile — see \
+                 docs/ops/akhomed-feature-profiles.md), or host this akh on a \
+                 Candle-enabled akhomed. Refusing to fall back to Ollama/symbolic: that \
+                 would answer from a different model than the operator configured."
+            ));
+        }
 
         // ADR 070 third peer: an OpenAI-compatible backing (vLLM/SGLang/OpenRouter/
         // DeepSeek/Hetzner inference). Unlike the Candle branch above, a failure
@@ -2854,6 +2929,26 @@ impl ServerState {
             }
             Ok(None) => {}
             Err(e) => return Err(format!("workspace {name}: {e}")),
+        }
+
+        if let Some(kind) = akh_medu::agent::runtime::RuntimeKind::from_backing(akh_config.backend)
+        {
+            let config = akh_config.agent_runtime.clone().ok_or_else(|| {
+                format!(
+                    "workspace {name}: backend {} requires [agent_runtime]",
+                    kind.label()
+                )
+            })?;
+            let runtime = akh_medu::agent::runtime::AgentRuntime::new(
+                kind,
+                config,
+                akh_config.model.clone(),
+                akh_config.reasoning_effort.clone(),
+                akh_config.system_prompt.clone(),
+            )
+            .map_err(|e| format!("workspace {name}: {e}"))?;
+            agent.set_agent_runtime(runtime);
+            tracing::info!(workspace = %name, backend = kind.label(), "coding-agent runtime attached");
         }
 
         if let Some(kind) = akh_medu::agent::runtime::RuntimeKind::from_backing(akh_config.backend)
@@ -3221,11 +3316,32 @@ impl ServerState {
     /// Stop a workspace's background daemon. Returns `true` if one was running,
     /// `false` if there was nothing to stop.
     async fn stop_workspace_daemon(&self, ws_name: &str) -> bool {
-        let mut daemons = self.daemons.write().await;
-        if let Some(d) = daemons.remove(ws_name) {
+        let daemon = self.daemons.write().await.remove(ws_name);
+        if let Some(mut d) = daemon {
             let _ = d.shutdown_tx.send(true);
-            // Give the task a moment to finish.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), d.handle).await;
+            // Give cooperative shutdown a moment to finish. A timed-out
+            // JoinHandle must not simply be dropped: dropping detaches the
+            // task, and run_daemon_task owns an Arc<Agent> which in turn owns
+            // the Engine and its redb Database. That detached reference made
+            // a successful sleep leave the redb lock held in-process, so wake
+            // could not open the newly hydrated store until akhomed restarted.
+            if tokio::time::timeout(DAEMON_STOP_GRACE, &mut d.handle)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    workspace = %ws_name,
+                    "workspace daemon did not stop within the grace period; aborting before eviction"
+                );
+                d.handle.abort();
+                // Joining after abort is the ownership barrier: when this
+                // returns, the task future (and its Agent/Engine Arcs) have
+                // definitely been dropped. A task currently inside
+                // block_in_place is allowed to finish that synchronous unit
+                // before cancellation is observed; sleep must wait for it
+                // rather than claim that the redb handle was freed.
+                let _ = d.handle.await;
+            }
             true
         } else {
             false
@@ -3262,34 +3378,81 @@ impl ServerState {
         }
     }
 
-    /// The akhs this daemon currently owns + has awake, as JSON
-    /// `[{ name, awake, owned_here, model }]`.
+    /// Build the `_akh/daemon/akhs` envelope from real daemon state.
     ///
-    /// The live in-memory agent set IS this host's owned+awake set: `wake` loads
-    /// an akh's agent here and takes its Postgres advisory lock; `sleep`/
-    /// `relocate` evict the agent and release the lock (so `last_seen` +
-    /// `pg_try_advisory_lock` keep ownership single-writer, 38g). A dynamic akh
-    /// gateway mirrors exactly this set to advertise routing — it must reflect
-    /// what is *awake here*, not what is merely configured on disk. Side-effect
-    /// free: reads caches only, never lazily loads a workspace. The pinned model
-    /// comes from the cached `akh.toml` when known (`null` otherwise).
-    async fn owned_awake_akhs(&self) -> Vec<serde_json::Value> {
-        let names: Vec<String> = self.agents.read().await.keys().cloned().collect();
+    /// The live in-memory agent set IS this host's owned+awake set: `wake`
+    /// loads an akh's agent here and takes its Postgres advisory lock;
+    /// `sleep`/`relocate` evict the agent and release the lock (so
+    /// `last_seen` + `pg_try_advisory_lock` keep ownership single-writer,
+    /// 38g). Side-effect free: reads caches + on-disk configs only, never
+    /// lazily opens a workspace engine.
+    ///
+    /// * Owned/awake akhs → `POWER_STATE_AWAKE` (model from cached
+    ///   `akh.toml`, nickname + avatar_ref from the psyche snapshot).
+    /// * `include_unowned: true` additionally enumerates every configured
+    ///   workspace on disk that is not awake: config loads →
+    ///   `POWER_STATE_ASLEEP`; config/parse failure → `POWER_STATE_ERRORED`
+    ///   with the error text (ticket 10: fail-closed akhs are advertised as
+    ///   errored, never silently asleep).
+    /// * `enabled` comes from `WorkspaceConfig.enabled` for both.
+    async fn akhs_envelope(
+        &self,
+        query: &akh_medu::advertise::AkhsQuery,
+    ) -> akh_medu::advertise::AkhsEnvelope {
+        use akh_medu::advertise::{AkhAdvertisement, PowerState};
+
+        let awake_names: Vec<String> = self.agents.read().await.keys().cloned().collect();
         let configs = self.akh_configs.read().await;
-        let mut out: Vec<serde_json::Value> = names
-            .into_iter()
-            .map(|name| {
-                let model = configs.get(&name).and_then(|c| c.model.clone());
-                serde_json::json!({
-                    "name": name,
-                    "awake": true,
-                    "owned_here": true,
-                    "model": model,
-                })
-            })
-            .collect();
-        out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        out
+        let mut akhs: Vec<AkhAdvertisement> = Vec::new();
+
+        // Owned + awake set.
+        for name in &awake_names {
+            let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Awake, true);
+            ad.model = configs.get(name).and_then(|c| c.model.clone());
+            if let Some(psyche) = self
+                .psyche_snapshots
+                .read()
+                .await
+                .get(name)
+                .and_then(|s| s.read().ok().and_then(|g| g.clone()))
+            {
+                ad.nickname = Some(psyche.persona.name.clone());
+                ad.avatar_ref = psyche.avatar_ref().map(str::to_string);
+            }
+            // enabled flag from the on-disk workspace config (best-effort).
+            if let Ok(cfg) = WorkspaceManager::new(self.paths.clone()).info(name) {
+                ad.enabled = cfg.enabled;
+            }
+            akhs.push(ad);
+        }
+        drop(configs);
+
+        // Optionally reveal the unowned / cold-configured akhs.
+        if query.include_unowned {
+            let wm = WorkspaceManager::new(self.paths.clone());
+            let awake: std::collections::HashSet<&str> =
+                awake_names.iter().map(String::as_str).collect();
+            for name in wm.list() {
+                if awake.contains(name.as_str()) {
+                    continue; // already advertised as awake
+                }
+                match wm.info(&name) {
+                    Ok(cfg) => {
+                        let ad =
+                            AkhAdvertisement::new(name.clone(), PowerState::Asleep, cfg.enabled);
+                        akhs.push(ad);
+                    }
+                    Err(e) => {
+                        // Fail-closed: advertised as errored with detail.
+                        let mut ad = AkhAdvertisement::new(name.clone(), PowerState::Errored, true);
+                        ad.error = Some(format!("workspace config load failed: {e}"));
+                        akhs.push(ad);
+                    }
+                }
+            }
+        }
+
+        akh_medu::advertise::AkhsEnvelope::new(akhs)
     }
 }
 
@@ -3379,6 +3542,7 @@ async fn run_daemon_task(
 /// Daemon ops take an explicit `workspace` param (the control-plane is flat,
 /// not bound to one akh); `config/{get,set}` operate on the global
 /// `AkhomedConfig`. Errors collapse to a string surfaced as a JSON-RPC error.
+#[cfg(feature = "acp")]
 #[cfg(feature = "acp")]
 impl akh_medu::acp::ServerControl for ServerState {
     /// Resolve a workspace's engine + agent + a fresh chat processor (built from
@@ -3510,12 +3674,25 @@ impl akh_medu::acp::ServerControl for ServerState {
                     let st = self.daemon_status_snapshot(ws).await;
                     serde_json::to_value(st).map_err(|e| e.to_string())
                 }
-                // The akhs this daemon currently owns + has awake — the live set
-                // an akh gateway mirrors to advertise routing (ADR-061: akhomed is
-                // the only inbound surface; the gateway never reads akh-pg).
-                "daemon/akhs" => Ok(serde_json::json!({
-                    "akhs": self.owned_awake_akhs().await,
-                })),
+                // The akhs this daemon advertises — owned/awake by default,
+                // plus cold/configured when `include_unowned` is set. Serves the
+                // proto3-JSON versioned envelope `{"v": 1, "akhs": [...]}` that
+                // the gateway pipes field-for-field (ADR-061: akhomed is the only
+                // inbound surface; the gateway never reads akh-pg).
+                "daemon/akhs" => {
+                    // `params: null` (or omitted) means the default query —
+                    // owned/awake akhs only. Serde can't build a struct from
+                    // Null, so map it onto the default explicitly rather than
+                    // erroring on callers that pass no params at all.
+                    let query: akh_medu::advertise::AkhsQuery = if params.is_null() {
+                        Default::default()
+                    } else {
+                        serde_json::from_value(params.clone())
+                            .map_err(|e| format!("invalid daemon/akhs params: {e}"))?
+                    };
+                    let envelope = self.akhs_envelope(&query).await;
+                    serde_json::to_value(envelope).map_err(|e| e.to_string())
+                }
 
                 // ── config group (global AkhomedConfig) ──────────────────
                 "config/get" => {
@@ -3768,7 +3945,15 @@ impl akh_medu::acp::ServerControl for ServerState {
                         .get("workspace")
                         .and_then(serde_json::Value::as_str)
                         .ok_or_else(|| "missing required param: workspace".to_string())?;
-                    self.wake_workspace(ws).await
+                    let repair = params
+                        .get("repair")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let dry_run = params
+                        .get("dry_run")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    self.wake_workspace(ws, repair, dry_run).await
                 }
                 "akh/sleep" => {
                     let ws = params
@@ -4178,7 +4363,7 @@ fn raise_nofile_limit() {
 
 #[tokio::main]
 async fn main() {
-    let _tracer_guard = akh_medu::observability::init_tracing("akhomed");
+    let _obs_guard = akh_medu::observability::init_observability("akhomed");
 
     #[cfg(unix)]
     raise_nofile_limit();
@@ -4326,7 +4511,8 @@ async fn main() {
         tracing::warn!("failed to write PID file: {e}");
     }
 
-    // Auto-start workspace daemons from config (or AKH_AUTO_START override).
+    // Session and automation execution is owned by akhsessd/akhrtd in core mode.
+    #[cfg(not(feature = "core-server"))]
     if !auto_start.is_empty() {
         let daemon_config = state.config.read().await.daemon.to_daemon_config();
         for ws_name in &auto_start {
@@ -4418,7 +4604,7 @@ async fn main() {
     // workspace — so ensure the one it will bind exists before starting it. The
     // resolution here must match `start_acp_server`'s (acp.workspace → first
     // auto_start → "default").
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     {
         let acp_ws = state
             .config
@@ -4467,7 +4653,7 @@ async fn main() {
     // inbound surface after ADR-061 P8.5 (REST/WS/web-UI/inbound-MCP retired).
     // Behind the `acp` feature; with it off the daemon has no inbound surface
     // and simply runs its workspace daemons until signalled.
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     let (acp_shutdown_tx, acp_handles, acp_socket_path) = {
         let acp_cfg = state.config.read().await.acp.clone();
         let fallback_ws = auto_start
@@ -4494,6 +4680,48 @@ async fn main() {
     // transport. Hold the process open until SIGTERM/SIGINT, then drain the ACP
     // accept loops and workspace daemons. The ACP listeners and workspace
     // daemons run as their own spawned tasks; main just waits and tears down.
+    #[cfg(feature = "core-server")]
+    let (core_shutdown_tx, core_handle) = {
+        let path = std::env::var_os("AKH_CORE_CONFIG")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                tracing::error!(
+                    "core-server requires AKH_CORE_CONFIG pointing to its scoped service config"
+                );
+                std::process::exit(1);
+            });
+        let config = akh_medu::core_service::CoreConfig::load(&path).unwrap_or_else(|error| {
+            tracing::error!(%error,"invalid cognitive service config");
+            std::process::exit(1)
+        });
+        let address = config.listen;
+        let backend: Arc<dyn akh_medu::core_service::CoreBackend> = state.clone();
+        let app = akh_medu::core_service::CoreApp::new(config, backend).unwrap_or_else(|error| {
+            tracing::error!(%error,"cognitive service initialization failed");
+            std::process::exit(1)
+        });
+        let router = akh_medu::core_service::router(app);
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::error!(%error,"cognitive listener bind failed");
+                std::process::exit(1)
+            });
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = rx.await;
+                })
+                .await
+            {
+                tracing::error!(%error,"cognitive listener failed");
+            }
+        });
+        tracing::info!(%address,"cognitive service ready; sessions and provider loops are external");
+        (tx, handle)
+    };
+
     let paths_for_shutdown = paths.clone();
     let state_for_shutdown = state;
 
@@ -4514,7 +4742,7 @@ async fn main() {
     tracing::info!("akhomed shutting down — draining workspace daemons");
 
     // Stop ACP accept loops first so no new sessions start mid-drain.
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", not(feature = "core-server")))]
     {
         tracing::info!("stopping ACP listeners");
         let _ = acp_shutdown_tx.send(true);
@@ -4536,6 +4764,12 @@ async fn main() {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "core-server")]
+    {
+        let _ = core_shutdown_tx.send(());
+        let _ = core_handle.await;
     }
 
     // Signal all workspace daemons to stop, then join with timeout.
@@ -4614,6 +4848,51 @@ mod control_plane_tests {
         paths.ensure_dirs().expect("ensure dirs");
         let state = ServerState::new(paths, AkhomedConfig::default(), None);
         (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn malformed_provider_config_refuses_instead_of_using_defaults() {
+        let (_tmp, state) = temp_state();
+        let path = state.paths.workspace_config_file("codex-test");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "name = 'codex-test'\nbackend = 'codex'\n[agent_runtime]\nworking_dir = 42\n",
+        )
+        .unwrap();
+        assert!(state.get_akh_config("codex-test").await.is_err());
+        assert!(!state.akh_configs.read().await.contains_key("codex-test"));
+    }
+
+    async fn install_non_cooperative_daemon_owner(state: &ServerState, name: &str) {
+        // A production WorkspaceDaemon owns an Agent (and therefore its
+        // Engine). Reuse that exact chain when an agent is already resident;
+        // otherwise retaining the cached Engine directly exercises the same
+        // redb ownership boundary without paying Agent::resume's heavy setup
+        // cost in this focused lifecycle test.
+        let retained_agent = state.resident_agent(name).await;
+        let retained_engine = if retained_agent.is_none() {
+            Some(state.get_engine(name).await.expect("load engine"))
+        } else {
+            None
+        };
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let status = Arc::new(tokio::sync::Mutex::new(
+            state.daemon_status_snapshot(name).await,
+        ));
+        let handle = tokio::spawn(async move {
+            let _retained_agent = retained_agent;
+            let _retained_engine = retained_engine;
+            std::future::pending::<()>().await;
+        });
+        state.daemons.write().await.insert(
+            name.to_string(),
+            WorkspaceDaemon {
+                handle,
+                shutdown_tx,
+                status,
+            },
+        );
     }
 
     #[tokio::test]
@@ -4756,7 +5035,7 @@ mod control_plane_tests {
 
     #[tokio::test]
     #[ignore = "requires AKH_TEST_PG_URL"]
-    async fn control_wake_quarantines_stale_graph_and_optional_metadata() {
+    async fn control_wake_quarantines_stale_graph_and_round_trips_in_process() {
         let Ok(url) = std::env::var("AKH_TEST_PG_URL") else {
             eprintln!("skipping: set AKH_TEST_PG_URL");
             return;
@@ -4896,6 +5175,20 @@ mod control_plane_tests {
                 quarantined.store().get_meta(key).unwrap().as_deref(),
                 Some(sentinel)
             );
+        }
+
+        drop(quarantined);
+        drop(restored);
+        for _ in 0..2 {
+            install_non_cooperative_daemon_owner(&second, &workspace).await;
+            second
+                .sleep_workspace(&workspace)
+                .await
+                .expect("production sleep must release every redb owner");
+            second
+                .wake_workspace(&workspace)
+                .await
+                .expect("production wake must reopen redb in the same process");
         }
         second.evict_workspace(&workspace).await.unwrap();
     }
@@ -5206,6 +5499,75 @@ mod control_plane_tests {
             0,
             "a daemon with no awake agents reports an empty set: {res}"
         );
+
+        // Envelope shape is exactly {"v": 1, "akhs": [...]} — no extras.
+        let obj = res.as_object().expect("envelope is an object");
+        assert_eq!(obj.len(), 2, "envelope carries only v + akhs: {res}");
+        assert_eq!(res["v"], 1);
+
+        // `params: null` (JSON-RPC params omitted → Value::Null) is the
+        // default query, not an error.
+        let null_res = state
+            .dispatch("_akh/daemon/akhs", &serde_json::Value::Null)
+            .await
+            .expect("daemon/akhs with null params must default, not error");
+        assert_eq!(null_res, res, "null params == default query");
+    }
+
+    #[tokio::test]
+    async fn control_daemon_akhs_include_unowned_enumerates_configured() {
+        use akh_medu::workspace::{WorkspaceConfig, WorkspaceManager};
+
+        let (_tmp, state) = temp_state();
+        let wm = WorkspaceManager::new(state.paths.clone());
+        wm.create(WorkspaceConfig::with_name("cold-one"))
+            .expect("create cold-one");
+        wm.create(WorkspaceConfig::with_name("cold-two"))
+            .expect("create cold-two");
+
+        // Default: owned/awake only — configured-but-cold akhs are hidden.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({}))
+            .await
+            .expect("daemon/akhs ok");
+        assert_eq!(res["akhs"].as_array().unwrap().len(), 0);
+
+        // include_unowned reveals the cold workspaces as POWER_STATE_ASLEEP.
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        assert_eq!(akhs.len(), 2, "both cold workspaces advertised: {res}");
+        let names: Vec<&str> = akhs.iter().map(|a| a["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["cold-one", "cold-two"], "sorted by name");
+        for entry in akhs {
+            assert_eq!(entry["power_state"], "POWER_STATE_ASLEEP");
+            assert_eq!(entry["enabled"], true, "enabled defaults true");
+        }
+
+        // A malformed workspace config surfaces as POWER_STATE_ERRORED with
+        // the failure detail (ticket 10: fail-closed), never silently asleep.
+        let broken = state.paths.workspace_config_file("cold-two");
+        std::fs::write(&broken, "name = 7\nthis is not = = valid toml [[[\n")
+            .expect("write broken config");
+        let res = state
+            .dispatch("_akh/daemon/akhs", &json!({ "include_unowned": true }))
+            .await
+            .expect("daemon/akhs include_unowned ok");
+        let akhs = res["akhs"].as_array().expect("akhs is an array");
+        let errored = akhs
+            .iter()
+            .find(|a| a["name"] == "cold-two")
+            .expect("broken workspace still advertised");
+        assert_eq!(errored["power_state"], "POWER_STATE_ERRORED");
+        assert!(
+            errored["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("workspace config load failed"),
+            "errored entry carries the load failure detail: {errored}"
+        );
     }
 
     #[tokio::test]
@@ -5369,6 +5731,43 @@ mod control_plane_tests {
                 .is_err(),
             "a handle retained across handoff must be quiesced"
         );
+    }
+
+    #[tokio::test]
+    async fn sleep_joins_daemon_owner_before_in_process_redb_reopen() {
+        let (_tmp, state) = temp_state();
+        for name in ["alpha", "beta"] {
+            state
+                .dispatch("_akh/workspace/create", &json!({ "name": name }))
+                .await
+                .expect("create workspace");
+        }
+
+        // A/B/A catches both per-workspace cleanup and a second lifecycle on
+        // the same redb path. The synthetic daemon deliberately ignores its
+        // cooperative shutdown channel, forcing stop_workspace_daemon through
+        // the timeout path that previously detached the task and leaked this
+        // runtime owner -> Engine -> redb ownership chain.
+        for name in ["alpha", "beta", "alpha"] {
+            install_non_cooperative_daemon_owner(&state, name).await;
+
+            state
+                .sleep_workspace(name)
+                .await
+                .expect("sleep must fully release daemon-owned redb handles");
+            assert!(!state.daemons.read().await.contains_key(name));
+            assert!(!state.workspaces.read().await.contains_key(name));
+            assert!(!state.agents.read().await.contains_key(name));
+
+            let reopened = state
+                .get_engine(name)
+                .await
+                .expect("wake-style in-process reopen must reacquire redb");
+            reopened
+                .resolve_or_create_entity(&format!("reopened-{name}"))
+                .expect("reopened store is writable");
+            drop(reopened);
+        }
     }
 
     #[tokio::test]
@@ -6019,5 +6418,18 @@ mod control_plane_tests {
             "a rejected status update must not mutate the resident agent's goal, got {:?}",
             g.status,
         );
+    }
+}
+
+#[cfg(feature = "core-server")]
+impl akh_medu::core_service::CoreBackend for ServerState {
+    fn engine<'a>(&'a self, akh: &'a str) -> akh_medu::core_service::CoreFuture<'a, Arc<Engine>> {
+        Box::pin(async move { self.get_engine(akh).await })
+    }
+    fn config<'a>(
+        &'a self,
+        akh: &'a str,
+    ) -> akh_medu::core_service::CoreFuture<'a, Arc<AkhConfig>> {
+        Box::pin(async move { self.get_akh_config(akh).await })
     }
 }

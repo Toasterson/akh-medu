@@ -11,3 +11,7 @@ docker/
 .vscode/
 *.txt
 *.swp
+
+.git
+**/node_modules/
+**/__pycache__/

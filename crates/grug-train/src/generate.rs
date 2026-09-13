@@ -573,7 +573,8 @@ pub fn select_next_token_with_copy_bias(
             .and_then(|bytes| bytes.first())
             .is_some_and(|byte| continuations.contains(byte))
     };
-    let is_closing_quote = |id: usize| piece_bytes(id).is_some_and(|bytes| bytes.as_slice() == b"\"");
+    let is_closing_quote =
+        |id: usize| piece_bytes(id).is_some_and(|bytes| bytes.as_slice() == b"\"");
     let would_repeat = |id: usize| {
         piece_bytes(id)
             .and_then(|bytes| bytes.first())
@@ -1071,7 +1072,10 @@ mod tests {
         let (id, overridden) =
             select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("some legal id must be selected");
-        assert_eq!(id, 0, "a far-outside-margin alternative must not override argmax");
+        assert_eq!(
+            id, 0,
+            "a far-outside-margin alternative must not override argmax"
+        );
         assert!(!overridden);
     }
 
@@ -1105,7 +1109,10 @@ mod tests {
         let (id, overridden) =
             select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("the one legal id must still be selected");
-        assert_eq!(id, 0, "an illegal id must never be picked regardless of margin or logit");
+        assert_eq!(
+            id, 0,
+            "an illegal id must never be picked regardless of margin or logit"
+        );
         assert!(!overridden);
     }
 
@@ -1143,7 +1150,10 @@ mod tests {
         let (id, overridden) =
             select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, content, 4.0)
                 .expect("some legal id must be selected");
-        assert_eq!(id, 1, "the within-margin, whole-value-continuing digit must win");
+        assert_eq!(
+            id, 1,
+            "the within-margin, whole-value-continuing digit must win"
+        );
         assert!(overridden);
     }
 
@@ -1166,7 +1176,8 @@ mod tests {
         // A scripted argmax that strongly prefers ':' (id 0) within margin
         // of 'x' (id 1) -- exactly what would restart the
         // `": keph index"` cycle if the bias engaged.
-        let logits = Tensor::<CpuBackend, 1>::from_data(TensorData::new(vec![10.0f32, 9.0], [2]), &device);
+        let logits =
+            Tensor::<CpuBackend, 1>::from_data(TensorData::new(vec![10.0f32, 9.0], [2]), &device);
         let mut global_overrides = 0u32;
         let mut value_overrides = 0u32;
 
@@ -1223,7 +1234,10 @@ mod tests {
         let (id, overridden) =
             select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, b"", 4.0)
                 .expect("some legal id must be selected");
-        assert_eq!(id, 0, "an argmax that already wants to close must never be overridden");
+        assert_eq!(
+            id, 0,
+            "an argmax that already wants to close must never be overridden"
+        );
         assert!(!overridden);
     }
 
@@ -1244,15 +1258,9 @@ mod tests {
         let mask = vec![0.0, 0.0, 0.0];
         let continuations = std::collections::HashSet::from(*b":");
         let logits = vec![10.0, 9.0, 0.0]; // ':' within margin of argmax 'z'
-        let (id, overridden) = select_next_token_with_copy_bias(
-            &logits,
-            &mask,
-            &pieces,
-            &continuations,
-            content,
-            4.0,
-        )
-        .expect("some legal id must be selected");
+        let (id, overridden) =
+            select_next_token_with_copy_bias(&logits, &mask, &pieces, &continuations, content, 4.0)
+                .expect("some legal id must be selected");
         assert_eq!(id, 0, "a self-repeating override must be refused");
         assert!(!overridden);
     }
@@ -1388,8 +1396,14 @@ mod tests {
         let mut any_allowed = locked_any;
         if (state.identifier_lock_engaged() || state.identifier_anchor_active()) && !locked_any {
             let released_state = state.with_identifier_lock_released();
-            let (released_mask, released_any) =
-                build_copy_mask(&released_state, &grammar, &copy, &pieces, vocab_size, eos_id);
+            let (released_mask, released_any) = build_copy_mask(
+                &released_state,
+                &grammar,
+                &copy,
+                &pieces,
+                vocab_size,
+                eos_id,
+            );
             active_state = released_state;
             mask = released_mask;
             any_allowed = released_any;
@@ -1400,7 +1414,10 @@ mod tests {
             identifier_copy_releases, 1,
             "the deadlock release must fire exactly once and be countable"
         );
-        assert!(any_allowed, "releasing the lock must open up some legal continuation");
+        assert!(
+            any_allowed,
+            "releasing the lock must open up some legal continuation"
+        );
         assert!(
             !active_state.identifier_lock_engaged(),
             "the released state must no longer report the lock as engaged"
@@ -1479,7 +1496,8 @@ mod tests {
         };
         let identifier_str = String::from_utf8(identifier.clone()).unwrap();
 
-        let filler = "the retrieved evidence discusses unrelated background material and prior context. ";
+        let filler =
+            "the retrieved evidence discusses unrelated background material and prior context. ";
         let mut context = String::new();
         while context.len() < 1400 {
             context.push_str(filler);
@@ -1539,7 +1557,8 @@ mod tests {
 
         for &byte in &identifier {
             let mask_start = std::time::Instant::now();
-            let (_mask, _any) = build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
+            let (_mask, _any) =
+                build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
             mask_build_total += mask_start.elapsed();
 
             if let Some(content) = state.active_string_content() {
@@ -1593,7 +1612,13 @@ mod tests {
             let step_start = std::time::Instant::now();
 
             let logits_vec: Vec<f32> = (0..vocab_size)
-                .map(|id| if id as u32 == u32::from(byte) { 2.0 } else { 1.0 })
+                .map(|id| {
+                    if id as u32 == u32::from(byte) {
+                        2.0
+                    } else {
+                        1.0
+                    }
+                })
                 .collect();
             let last_logits = Tensor::<CpuBackend, 1>::from_data(
                 TensorData::new(logits_vec, [vocab_size]),
@@ -1604,8 +1629,7 @@ mod tests {
                 build_copy_mask(&state, &grammar, &copy, &pieces, vocab_size, eos_id);
             let mut mask = locked_mask;
             let mut active_state = state.clone();
-            if (state.identifier_lock_engaged() || state.identifier_anchor_active())
-                && !locked_any
+            if (state.identifier_lock_engaged() || state.identifier_anchor_active()) && !locked_any
             {
                 let released_state = state.with_identifier_lock_released();
                 let (released_mask, _released_any) = build_copy_mask(

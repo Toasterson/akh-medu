@@ -162,17 +162,30 @@ the pattern). See [ADR 080](../ai/decisions/080-lean-akh-client-binstall-remote.
 
 ## Building artifacts by hand
 
+WI-339 made Candle opt-in: the root default features no longer include
+`nlu-candle`, so `--features server` now builds a **lean** akhomed with no local
+GGUF inference (that build *refuses* to start a `backend = "candle"` akh). Pick
+the profile to match the host — see
+[`docs/ops/akhomed-feature-profiles.md`](akhomed-feature-profiles.md):
+
+* **`server-candle`** = `server` + `candle-backend` → the Candle-enabled daemon
+  (release-equivalent; what the shipped images/tarball/IPS package use). Use it
+  for any host that serves a `backend = "candle"` akh.
+* **`server`** → the lean daemon for akhs whose inference is entirely remote
+  (Ollama / OpenAI-compatible). No candle/tokenizers/safetensors.
+* Add `metal` (Apple Silicon) or `rocm`/`hip` (AMD) for GPU acceleration.
+
 ```sh
 # Linux tarball from a local release build (needs a roomy machine):
 cargo build --release --bin akh
-cargo build --release --features server --bin akhomed
+cargo build --release --features server-candle --bin akhomed   # lean: --features server
 cargo build --release -p seshat --bin seshd --features embedding,synthesis
 packaging/build-linux-tarball.sh --version X.Y.Z --bindir target/release \
   --libdir /usr/local/lib   # if you have onnxruntime to bundle
 
-# illumos IPS (on an illumos host):
+# illumos IPS (on an illumos host; matches .forgejo/workflows/release.yml):
 cargo build --release --bin akh
-cargo build --release --features server --bin akhomed
+cargo build --release --features server-candle --bin akhomed   # lean: --features server
 cargo build --release -p seshat --bin seshd --no-default-features --features synthesis
 packaging/illumos/build-ips.sh --version X.Y.Z --bindir target/release
 ```

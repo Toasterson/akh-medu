@@ -953,6 +953,9 @@ impl ChatBackend for CandleChatBackend {
     ) -> Result<AssistantTurn, ChatBackendError> {
         // Metrics: track this Candle request (non-streaming).
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span = super::llm_metrics::LlmRequestMetrics::request_span("candle", request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let mut be = self
             .backend
@@ -1312,6 +1315,9 @@ mod prompt_isolation_tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): this mock still uses a
+    // real loopback socket, so it belongs to the manual Ollama suite.
+    #[ignore = "WI-306: manual Ollama suite uses real loopback TCP"]
     fn ollama_prepared_prompt_and_catalog_survive_cross_session_refreshes() {
         let (base_url, captured, server) = spawn_ollama_capture();
         let manager = Arc::new(AgentModelManager::new(ModelManagerConfig {

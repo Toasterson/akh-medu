@@ -35,6 +35,7 @@ test("SDK receives resume, persona, tools and approval callbacks; streamed text 
           yield { type: "system", subtype: "init", session_id: "session-a" };
           yield { type: "stream_event", event: { delta: { type: "text_delta", text: "hello" } } };
           yield { type: "assistant", message: { content: [{ type: "text", text: "hello" }] } };
+          yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "native-read", content: "file content", is_error: false }] } };
           yield { type: "result", subtype: "success", is_error: false, result: "hello" };
         },
       };
@@ -47,6 +48,7 @@ test("SDK receives resume, persona, tools and approval callbacks; streamed text 
   assert.equal(closed, true);
   assert.deepEqual(emitted.filter((m) => m.type === "text"), [{ type: "text", text: "hello" }]);
   assert.equal(emitted.at(-1).success, true);
+  assert.equal(emitted.find((m) => m.type === "tool_completed").details.content, "file content");
   assert.deepEqual(requests[0], { type: "tool", name: "lookup", arguments: { ids: [7] } });
 });
 
@@ -70,4 +72,47 @@ test("plan mode denies a provider approval without asking the client", async () 
   const emitted = [];
   await run({ ...start, plan: true }, sdk, z, (m) => emitted.push(m), () => assert.fail("approval bypass"), new AbortController());
   assert.equal(emitted.at(-1).success, false);
+});
+
+test("brokered profile removes native tools and settings while supplied MCP tools still execute", async () => {
+  const sdk = { tool: (name, description, shape, handler) => ({ name, handler }), createSdkMcpServer: (config) => config,
+    query: ({ options }) => ({ close() {}, async *[Symbol.asyncIterator]() {
+      assert.deepEqual(options.tools, ["AskUserQuestion"]);
+      assert.deepEqual(options.settingSources, []);
+      assert.equal(options.strictMcpConfig, true);
+      assert.equal(options.settings.disableAllHooks, true);
+      assert.ok(options.disallowedTools.includes("Bash"));
+      const denial = await options.canUseTool("Bash", { command: "touch escaped" });
+      assert.equal(denial.behavior, "deny");
+      assert.match(denial.message, /provided mcp__akh__/);
+      const toolResult = await options.mcpServers.akh.tools[0].handler({ ids: [7] });
+      assert.equal(toolResult.isError, false);
+      const result = JSON.parse(toolResult.content[0].text);
+      assert.equal(result.text, "executor result");
+      assert.equal(result.data.process_id, "remote-process");
+      assert.equal(result.receipt, "receipt");
+      yield { type: "result", subtype: "success", result: "done" };
+    } }),
+  };
+  await run({ ...start, brokered: true }, sdk, z, () => {}, async (type) => {
+    assert.equal(type, "tool");
+    return { success: true, text: "executor result", data: { process_id: "remote-process", status: "running" }, receipt: "receipt" };
+  }, new AbortController());
+});
+
+
+test("brokered and plan questions preserve native answers and explicit skips without allowing workspace calls", async () => {
+  for (const cancelled of [false,true]) {
+    const input={questions:[{question:"Which?",header:"Choice",options:[{label:"A",description:"Alpha"}],multiSelect:false}]};
+    const sdk={tool:()=>({}),createSdkMcpServer:()=>({}),query:({options})=>({close(){},async *[Symbol.asyncIterator](){
+      const result=await options.canUseTool("AskUserQuestion",input);
+      assert.equal(result.behavior,cancelled?"deny":"allow");
+      if (!cancelled) assert.deepEqual(result.updatedInput,{...input,answers:{"Which?":"A"}});
+      assert.equal((await options.canUseTool("Write",{file_path:"escape"})).behavior,"deny");
+      yield {type:"result",subtype:"success",result:"done"};
+    }})};
+    await run({...start,brokered:true,plan:true},sdk,z,()=>{},async(type,fields)=>{
+      assert.equal(type,"question");assert.deepEqual(fields.questions,input);return {cancelled,answers:cancelled?{}:{"Which?":"A"}};
+    },new AbortController());
+  }
 });

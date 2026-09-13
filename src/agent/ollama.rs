@@ -209,6 +209,18 @@ pub enum OllamaError {
 /// Convenience alias.
 pub type OllamaResult<T> = std::result::Result<T, OllamaError>;
 
+/// Result of a [`OllamaClient::generate_with_options`] call: the generated text
+/// plus the actual prompt token count Ollama reported (`prompt_eval_count`).
+/// The context-rot bench needs the real count to detect silent truncation of
+/// long prompts (Ollama's default `num_ctx` drops turns, faking edge recall).
+#[derive(Debug, Clone)]
+pub struct GenerateResult {
+    /// The generated text (`message.content`).
+    pub text: String,
+    /// Actual prompt tokens evaluated. `0` when the server does not report it.
+    pub prompt_tokens: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Response shapes
 // ---------------------------------------------------------------------------
@@ -343,6 +355,11 @@ impl OllamaClient {
             config,
             capabilities: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The configuration this client was built with.
+    pub fn config(&self) -> &OllamaConfig {
+        &self.config
     }
 
     /// HTTP agent for chat/generate requests: a short **connect** timeout (fail
@@ -532,6 +549,73 @@ impl OllamaClient {
             })
     }
 
+    /// Like [`generate`], but sets Ollama's per-request `options.num_ctx` and
+    /// returns the actual prompt token count (`prompt_eval_count`).
+    ///
+    /// The context-rot bench (WI-386) sweeps prompt lengths up to a model's
+    /// advertised window; Ollama's default `num_ctx` is small, and a prompt
+    /// longer than it is **silently truncated**, which the bench's truncation
+    /// detector must catch via the returned real count. Setting `num_ctx`
+    /// explicitly per probe keeps that honest instead of faking good edge
+    /// recall on a prompt the model never fully saw.
+    pub fn generate_with_options(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        num_ctx: usize,
+    ) -> OllamaResult<GenerateResult> {
+        let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
+
+        let body = serde_json::json!({
+            "model": self.config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt}
+            ],
+            "stream": false,
+            "keep_alive": self.config.keep_alive,
+            "options": { "num_ctx": num_ctx },
+        });
+
+        let mut req = self
+            .chat_agent()
+            .post(&url)
+            .set("Content-Type", "application/json");
+        if let Some(key) = self.config.resolved_api_key() {
+            req = req.set("Authorization", &format!("Bearer {key}"));
+        }
+        let response = req.send_json(&body).map_err(|e| match e {
+            ureq::Error::Status(status, resp) => OllamaError::RequestFailed {
+                url: url.clone(),
+                status,
+                body: resp.into_string().unwrap_or_default(),
+                model: self.config.model.clone(),
+            },
+            other => OllamaError::Unreachable {
+                url: url.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+
+        let chat_resp: ChatResponse =
+            response.into_json().map_err(|e| OllamaError::ParseFailed {
+                reason: format!("JSON decode failed: {e}"),
+            })?;
+
+        let text = chat_resp
+            .message
+            .and_then(|m| m.content)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| OllamaError::ParseFailed {
+                reason: "message.content missing or empty in Ollama response".into(),
+            })?;
+
+        Ok(GenerateResult {
+            text,
+            prompt_tokens: chat_resp.prompt_eval_count,
+        })
+    }
+
     /// Run one tool-enabled `/api/chat` turn.
     ///
     /// `messages` is the full conversation so far — each a JSON object with at
@@ -554,6 +638,10 @@ impl OllamaClient {
 
         // Metrics: track this non-streaming request.
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -717,6 +805,10 @@ impl OllamaClient {
         // Metrics: track per-request counters (chunks, bytes, deltas) for diagnosing
         // "turns die quietly" (work item ask 1-4).
         let mut metrics = super::llm_metrics::LlmRequestMetrics::new(request_seq);
+        let span =
+            super::llm_metrics::LlmRequestMetrics::request_span(&self.config.model, request_seq);
+        metrics.attach_span(span.clone());
+        let _request_guard = span.entered();
         let url = format!("{}/api/chat", self.config.base_url.trim_end_matches('/'));
 
         let mut body = serde_json::json!({
@@ -802,15 +894,21 @@ impl OllamaClient {
 
         // Heartbeat thread: emit Keepalive on a timer.
         let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel::<StreamEvent>();
+        let (heartbeat_stop_tx, heartbeat_stop_rx) = std::sync::mpsc::channel::<()>();
         let heartbeat_alive = Arc::clone(&request_alive);
         let heartbeat_thread = std::thread::spawn(move || {
             while heartbeat_alive.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-                if heartbeat_alive.load(Ordering::Relaxed) {
-                    if heartbeat_tx.send(StreamEvent::Keepalive).is_err() {
-                        // Receiver dropped.
-                        break;
-                    }
+                match heartbeat_stop_rx
+                    .recv_timeout(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS))
+                {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if heartbeat_alive.load(Ordering::Relaxed)
+                    && heartbeat_tx.send(StreamEvent::Keepalive).is_err()
+                {
+                    // Receiver dropped.
+                    break;
                 }
             }
         });
@@ -941,6 +1039,7 @@ impl OllamaClient {
 
         // Signal both threads to stop.
         request_alive.store(false, Ordering::Relaxed);
+        let _ = heartbeat_stop_tx.send(());
         let _ = reader_thread.join();
         let _ = heartbeat_thread.join();
 
@@ -1002,13 +1101,67 @@ impl OllamaClient {
 mod tests {
     use super::*;
 
+    /// Consume the complete HTTP request before the mock peer responds. On
+    /// macOS, closing a socket with unread request-body bytes can turn a valid
+    /// response into `ECONNRESET` at the client.
+    fn drain_http_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read as _;
+
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        let header_end = loop {
+            let read = match stream.read(&mut buffer) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("read mock Ollama request: {error}"),
+            };
+            assert!(read > 0, "mock Ollama request ended before its headers");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(offset) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break offset + 4;
+            }
+            assert!(
+                request.len() <= 64 * 1024,
+                "mock Ollama request headers are too large"
+            );
+        };
+
+        let headers = std::str::from_utf8(&request[..header_end]).expect("ASCII HTTP headers");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length").then(|| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .expect("numeric Content-Length")
+                })
+            })
+            .expect("mock request includes Content-Length");
+        let mut remaining = content_length.saturating_sub(request.len() - header_end);
+        while remaining > 0 {
+            let limit = remaining.min(buffer.len());
+            let read = match stream.read(&mut buffer[..limit]) {
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => panic!("read mock Ollama request body: {error}"),
+            };
+            assert!(read > 0, "mock Ollama request body ended early");
+            remaining -= read;
+        }
+    }
+
     /// `chat_stream` parses Ollama's newline-delimited streaming response:
     /// content deltas concatenate into `AssistantTurn.content` and arrive as
     /// `Content` events in order, `thinking` deltas arrive as `Thinking` events
     /// (and are NOT folded into content), and `tool_calls` are collected.
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): real socket transport is
+    // quarantined from CI; run it through the documented manual Ollama suite.
+    #[ignore = "WI-306: manual Ollama suite uses real loopback TCP"]
     fn chat_stream_parses_ndjson_deltas_and_tool_calls() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         // NDJSON body: two content chunks, a thinking chunk, a tool call, done.
@@ -1028,12 +1181,21 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf); // drain request (best-effort)
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("accept mock Ollama connection: {error}"),
+                }
+            };
+            drain_http_request(&mut stream);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            // Keep the peer alive briefly after flushing. Dropping immediately
+            // can turn an otherwise complete response into a reset/EINVAL on
+            // heavily parallel CI hosts before the client drains its buffer.
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
         let client = OllamaClient::new(OllamaConfig {
@@ -1083,8 +1245,11 @@ mod tests {
     /// tool_calls payload. The client-side heartbeat (emitting Keepalive on a
     /// 10s timer) must keep the idle watchdog alive through the silent phase.
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): real socket transport is
+    // quarantined from CI; run it through the documented manual Ollama suite.
+    #[ignore = "WI-306: manual Ollama suite uses real loopback TCP"]
     fn long_tool_call_generation_survives_via_heartbeat() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
         use std::time::Instant;
@@ -1112,31 +1277,36 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                // Write header
-                let _ = stream.write_all(response.as_bytes());
-                // Write first 43 chunks fast
-                for i in 0..43 {
-                    let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
-                    let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
-                    let _ = stream.write_all(chunk.as_bytes());
-                    let _ = stream.write_all(b"\r\n");
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("accept mock Ollama connection: {error}"),
                 }
-                // 12s gap simulating tool-call generation (no chunks)
-                std::thread::sleep(std::time::Duration::from_secs(12));
-                // Tool call chunk
-                let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
-                let _ = stream.write_all(tool_call_chunk.as_bytes());
+            };
+            drain_http_request(&mut stream);
+            // Write header
+            let _ = stream.write_all(response.as_bytes());
+            // Write first 43 chunks fast
+            for i in 0..43 {
+                let chunk = format!("{{\"message\":{{\"thinking\":\"step {i}\"}}}}\n");
+                let _ = stream.write_all(format!("{:x}\r\n", chunk.len()).as_bytes());
+                let _ = stream.write_all(chunk.as_bytes());
                 let _ = stream.write_all(b"\r\n");
-                // Done chunk
-                let done = "{\"done\":true}\n";
-                let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
-                let _ = stream.write_all(done.as_bytes());
-                let _ = stream.write_all(b"\r\n0\r\n\r\n");
-                let _ = stream.flush();
             }
+            // 12s gap simulating tool-call generation (no chunks)
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            // Tool call chunk
+            let _ = stream.write_all(format!("{:x}\r\n", tool_call_chunk.len()).as_bytes());
+            let _ = stream.write_all(tool_call_chunk.as_bytes());
+            let _ = stream.write_all(b"\r\n");
+            // Done chunk
+            let done = "{\"done\":true}\n";
+            let _ = stream.write_all(format!("{:x}\r\n", done.len()).as_bytes());
+            let _ = stream.write_all(done.as_bytes());
+            let _ = stream.write_all(b"\r\n0\r\n\r\n");
+            let _ = stream.flush();
+            let _ = stream.shutdown(std::net::Shutdown::Write);
         });
 
         let client = OllamaClient::new(OllamaConfig {
@@ -1145,8 +1315,12 @@ mod tests {
             ..OllamaConfig::default()
         });
 
+        // Exercise one transport attempt directly. This regression is about
+        // heartbeat delivery during provider silence, not retry policy; a
+        // retry would need a second mock connection and can hide which stream
+        // attempt actually produced the heartbeat.
         let turn = client
-            .chat_stream(
+            .chat_stream_once(
                 &[serde_json::json!({"role": "user", "content": "hi"})],
                 &[serde_json::json!({"name": "write_file", "parameters": {}})],
                 0,
@@ -1311,6 +1485,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): even negative transport
+    // checks are kept in the manual suite so default CI never opens Ollama TCP.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn list_models_returns_error_when_unreachable() {
         let cfg = OllamaConfig {
             base_url: "http://127.0.0.1:19999".into(),
@@ -1324,6 +1501,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): even negative transport
+    // checks are kept in the manual suite so default CI never opens Ollama TCP.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn health_check_returns_false_when_unreachable() {
         let cfg = OllamaConfig {
             base_url: "http://127.0.0.1:19999".into(), // nothing listening here

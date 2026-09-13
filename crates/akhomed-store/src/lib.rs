@@ -20,6 +20,7 @@ pub mod memberships;
 pub mod migration;
 pub mod mutations;
 mod pool;
+pub mod repair;
 pub mod schema_registry;
 pub mod snapshots;
 

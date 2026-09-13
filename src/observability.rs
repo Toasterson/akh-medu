@@ -1,11 +1,10 @@
-//! Phase 38i — OTLP tracing skeleton.
+//! Phase 38i/38j.1 — OTLP observability bootstrap (tracing + metrics).
 //!
-//! `init_tracing(service_name)` installs a `tracing_subscriber` stack that,
-//! when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, layers a
-//! `tracing-opentelemetry` OTLP exporter on top of the existing `fmt()`
-//! layer. When the env var is unset, it falls back to plain `fmt().init()`
-//! behaviour — keeping local-dev offline-friendly (acceptance: "no
-//! behavioural change vs today" when unset).
+//! `init_observability(service_name)` installs a `tracing_subscriber` stack and,
+//! when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, an OTLP metrics pipeline in
+//! addition to the existing `tracing-opentelemetry` layer. When the env var
+//! is unset, it falls back to plain `fmt().init()` behaviour — keeping
+//! local-dev offline-friendly.
 //!
 //! Sampling: head sampling 10 % via `parentbased_traceidratio` on akhomed,
 //! accept-parent on seshd (seshd is a child of akhomed's trace context —
@@ -13,21 +12,25 @@
 //! env-driven (`OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`), defaulting
 //! to `ParentBased(TraceIdRatioBased(0.1))`.
 //!
-//! The returned `TracerShutdown` guard flushes the batch span processor on
-//! drop. Callers must hold it alive until process exit.
+//! The returned `ObservabilityShutdown` guard flushes both the batch span
+//! processor and the periodic metric reader on drop. Callers must hold it alive
+//! until process exit.
+//!
+//! OTLP push only; no Prometheus exporter is installed.
 
 use std::env;
 use std::sync::Arc;
 
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Tracer shutdown guard. Drop flushes the batch span processor so in-flight
-/// spans reach the collector before the process exits.
+/// Combined observability shutdown guard. Drop flushes, in order, the tracer
+/// provider then the meter provider so both in-flight spans and the last
+/// periodic metrics push reach the collector before the process exits.
 ///
-/// Under the `tracing-otel` feature, the inner provider is held in an `Arc`
-/// shared with the global provider; on drop we shut it down. Without the
+/// Under the `tracing-otel` feature, the inner providers are held in `Arc`s
+/// shared with the global providers; on drop we shut them down. Without the
 /// feature, this is a zero-sized unit — no OTel deps in the link.
-pub struct TracerShutdown {
+pub struct ObservabilityShutdown {
     #[cfg(feature = "tracing-otel")]
     inner: Option<InnerShutdown>,
 }
@@ -37,10 +40,13 @@ struct InnerShutdown {
     /// Shared handle to the tracer provider we installed globally. Cloned
     /// *before* `set_tracer_provider` so the guard flushes the *correct*
     /// provider, not whatever no-op was there before (review round 1 fix).
-    provider: Arc<opentelemetry_sdk::trace::TracerProvider>,
+    tracer: Arc<opentelemetry_sdk::trace::TracerProvider>,
+    /// Shared handle to the meter provider we installed globally. Cloned
+    /// before `set_meter_provider` for the same reason.
+    meter: Arc<opentelemetry_sdk::metrics::SdkMeterProvider>,
 }
 
-impl TracerShutdown {
+impl ObservabilityShutdown {
     /// Construct a no-op shutdown (used when OTLP is not configured).
     #[inline]
     pub fn empty() -> Self {
@@ -51,25 +57,27 @@ impl TracerShutdown {
     }
 }
 
-impl Drop for TracerShutdown {
+impl Drop for ObservabilityShutdown {
     fn drop(&mut self) {
         #[cfg(feature = "tracing-otel")]
         if let Some(inner) = self.inner.take() {
-            // Shut down the provider to flush the batch span processor so
-            // in-flight spans reach the collector before the process exits.
-            let _ = inner.provider.shutdown();
+            // Flush traces first, then metrics, so span data is exported
+            // before the final metric shutdown.
+            let _ = inner.tracer.shutdown();
+            let _ = inner.meter.shutdown();
         }
     }
 }
 
-/// Initialise the tracing subscriber. Returns a `TracerShutdown` guard that
-/// the caller must hold alive until process exit.
+/// Initialise the observability subscriber and, when configured, the OTLP
+/// metrics pipeline. Returns an `ObservabilityShutdown` guard that the caller
+/// must hold alive until process exit.
 ///
-/// - If `OTEL_EXPORTER_OTLP_ENDPOINT` is set → install OTLP exporter +
-///   `parentbased_traceidratio(0.1)` sampler + `tracing-opentelemetry` layer
+/// - If `OTEL_EXPORTER_OTLP_ENDPOINT` is set → install OTLP span exporter,
+///   OTLP metric exporter, W3C propagator, and `tracing-opentelemetry` layer
 ///   on top of the existing `fmt()` layer.
 /// - If unset → fall back to today's plain `fmt()` behaviour.
-pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
+pub fn init_observability(service_name: &'static str) -> ObservabilityShutdown {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,egg=warn,hnsw_rs=warn"));
 
@@ -77,7 +85,7 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
     {
         let _ = service_name;
         tracing_subscriber::fmt().with_env_filter(filter).init();
-        return TracerShutdown::empty();
+        return ObservabilityShutdown::empty();
     }
 
     #[cfg(feature = "tracing-otel")]
@@ -86,7 +94,7 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
         if endpoint.is_err() {
             // No collector configured → offline-friendly fallback.
             tracing_subscriber::fmt().with_env_filter(filter).init();
-            return TracerShutdown::empty();
+            return ObservabilityShutdown::empty();
         }
 
         match init_otel(service_name, endpoint.unwrap(), filter) {
@@ -100,10 +108,18 @@ pub fn init_tracing(service_name: &'static str) -> TracerShutdown {
                             .unwrap_or_else(|_| EnvFilter::new("info,egg=warn,hnsw_rs=warn")),
                     )
                     .init();
-                TracerShutdown::empty()
+                ObservabilityShutdown::empty()
             }
         }
     }
+}
+
+/// Backwards-compatible alias for the tracing-only era. Prefer
+/// `init_observability` in new call sites; this alias is deprecated and may be
+/// removed once downstream branches have migrated.
+#[deprecated(since = "0.7.2", note = "use init_observability instead")]
+pub fn init_tracing(service_name: &'static str) -> ObservabilityShutdown {
+    init_observability(service_name)
 }
 
 #[cfg(feature = "tracing-otel")]
@@ -111,14 +127,12 @@ fn init_otel(
     service_name: &'static str,
     endpoint: String,
     filter: EnvFilter,
-) -> Result<TracerShutdown, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ObservabilityShutdown, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::{KeyValue, trace::TracerProvider as _};
+    use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
     use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
     use opentelemetry_sdk::{
-        Resource,
-        propagation::TraceContextPropagator,
-        runtime::Tokio,
-        trace::{Sampler, TracerProvider},
+        Resource, propagation::TraceContextPropagator, runtime::Tokio, trace::TracerProvider,
     };
 
     // Resource: service.name, service.namespace, deployment.environment,
@@ -143,10 +157,10 @@ fn init_otel(
     }
     let resource = Resource::new(resource_kv);
 
-    // OTLP gRPC exporter. The endpoint env var is plumbed into the exporter
+    // OTLP gRPC span exporter. The endpoint env var is plumbed into the exporter
     // (review round 1 fix — previously used only as a boolean gate and the
     // exporter targeted localhost:4317).
-    let exporter = SpanExporter::builder()
+    let span_exporter = SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
         .with_protocol(Protocol::Grpc)
@@ -155,9 +169,25 @@ fn init_otel(
     // Env-driven sampler. Defaults to ParentBased(TraceIdRatioBased(0.1)).
     let sampler = build_sampler();
 
-    let provider = TracerProvider::builder()
-        .with_batch_exporter(exporter, Tokio)
+    let tracer_provider = TracerProvider::builder()
+        .with_batch_exporter(span_exporter, Tokio)
         .with_sampler(sampler)
+        .with_resource(resource.clone())
+        .build();
+
+    // OTLP gRPC metric exporter using the same endpoint and resource.
+    let metric_exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .with_protocol(Protocol::Grpc)
+        .build()?;
+
+    let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metric_exporter, Tokio)
+        .with_interval(std::time::Duration::from_secs(60))
+        .build();
+
+    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader)
         .with_resource(resource)
         .build();
 
@@ -165,10 +195,18 @@ fn init_otel(
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
     // Get the tracer from the provider before wrapping in Arc.
-    let tracer = provider.tracer(service_name);
+    let tracer = tracer_provider.tracer(service_name);
 
-    // Set the global provider.
-    opentelemetry::global::set_tracer_provider(provider.clone());
+    // Install the global providers.
+    opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+    opentelemetry::global::set_meter_provider(meter_provider.clone());
+
+    // WI-325: install the global akhomed metrics registry so turn telemetry
+    // (`acp_turns_total`, `acp_turn_duration_seconds`) records against the
+    // same meter provider. Identity stays on spans; labels stay bounded.
+    crate::metrics::install_global(std::sync::Arc::new(crate::metrics::AkhomedMetrics::new(
+        opentelemetry::global::meter(service_name),
+    )));
 
     // Install the OpenTelemetry layer on top of the fmt layer.
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -179,12 +217,14 @@ fn init_otel(
         .with(otel_layer)
         .init();
 
-    // Keep an Arc to the provider for the shutdown guard.
-    let provider_arc = Arc::new(provider);
+    // Keep Arcs to the providers for the shutdown guard.
+    let tracer_arc = Arc::new(tracer_provider);
+    let meter_arc = Arc::new(meter_provider);
 
-    Ok(TracerShutdown {
+    Ok(ObservabilityShutdown {
         inner: Some(InnerShutdown {
-            provider: provider_arc,
+            tracer: tracer_arc,
+            meter: meter_arc,
         }),
     })
 }
@@ -207,4 +247,82 @@ fn build_sampler() -> opentelemetry_sdk::trace::Sampler {
         "always_off" => Sampler::AlwaysOff,
         _ => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(ratio))),
     }
+}
+
+#[cfg(all(test, feature = "tracing-otel"))]
+mod tests {
+    use super::*;
+    use opentelemetry::metrics::MeterProvider;
+
+    /// The offline path must return an empty guard and not panic.
+    #[test]
+    fn fallback_when_endpoint_unset() {
+        let prev = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        unsafe {
+            env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        }
+        // Cannot init a tracing subscriber twice in the same process, but we
+        // can still exercise the endpoint gate if a subscriber is already set.
+        // This test is therefore a smoke test of env handling: no endpoint
+        // means no OTLP inner.
+        let _guard = init_observability("akh-test-fallback");
+        // No panic and guard is empty.
+        assert!(_guard.inner.is_none());
+        if let Some(v) = prev {
+            unsafe {
+                env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", v);
+            }
+        }
+    }
+
+    /// Resource attributes from the env are parsed into the expected keys.
+    #[test]
+    fn resource_parsing() {
+        let attrs = "deployment.environment=test,service.namespace=unit";
+        let mut resource_kv = vec![KeyValue::new(
+            opentelemetry_semantic_conventions::resource::SERVICE_NAME,
+            "akh-test",
+        )];
+        for pair in attrs.split(',') {
+            let mut it = pair.splitn(2, '=');
+            if let (Some(k), Some(v)) = (it.next(), it.next()) {
+                resource_kv.push(KeyValue::new(k.trim().to_string(), v.trim().to_string()));
+            }
+        }
+        let resource = opentelemetry_sdk::Resource::new(resource_kv);
+        let got: Vec<_> = resource
+            .iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v.to_string()))
+            .collect();
+        assert!(got.contains(&("service.name".to_string(), "akh-test".to_string())));
+        assert!(got.contains(&("deployment.environment".to_string(), "test".to_string())));
+        assert!(got.contains(&("service.namespace".to_string(), "unit".to_string())));
+    }
+
+    /// Instruments can be constructed from a no-op ManualReader provider
+    /// without a live collector.
+    #[test]
+    fn metrics_registry_constructs_offline() {
+        use opentelemetry_sdk::metrics::{ManualReader, SdkMeterProvider};
+
+        let reader = ManualReader::builder().build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("akh-test");
+
+        let _counter = meter
+            .u64_counter("akh_ooda_cycles_total")
+            .with_description("OODA cycle count")
+            .with_unit("cycle")
+            .build();
+        let _histogram = meter
+            .f64_histogram("akh_ooda_cycle_duration_seconds")
+            .with_description("OODA phase duration")
+            .with_unit("s")
+            .build();
+
+        // No collector required; just confirm construction succeeds.
+        drop(provider);
+    }
+
+    use opentelemetry::KeyValue;
 }

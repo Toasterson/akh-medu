@@ -31,6 +31,7 @@
 
 #[cfg(feature = "acp")]
 pub mod acp;
+pub mod advertise;
 pub mod agent;
 pub mod akh_config;
 pub mod argumentation;
@@ -46,6 +47,8 @@ pub mod cluster;
 pub mod compartment;
 #[cfg(feature = "daemon")]
 pub mod config;
+#[cfg(feature = "core-server")]
+pub mod core_service;
 pub mod dispatch;
 pub mod eliza;
 #[cfg(feature = "email")]
@@ -77,6 +80,12 @@ pub mod provenance;
 pub mod reason;
 pub mod reasoning;
 pub mod registry;
+
+/// Phase 38j.1: typed metric-instrument registry for the akhomed daemon.
+/// Available only when the `tracing-otel` feature is enabled (the OTel
+/// `Meter` type is required).
+#[cfg(feature = "tracing-otel")]
+pub mod metrics;
 pub mod rule_macro;
 /// ADR 081: schema packs — the installable type system for Akh memory
 /// (stable triple identity lives in `graph::identity`).

@@ -145,7 +145,23 @@ pub(super) fn assemble_with_cap(
         ContextSection::Tools,
     ]);
 
-    // ── Candidate atomic blocks (each → one leading `system` message) ──
+    // ── Candidate atomic blocks (each → one `system` message) ──
+    //
+    // WI-357 (KV-cache prefix stability): blocks are partitioned by
+    // *variance*, not by priority. `stable` blocks (continuity seed,
+    // schema digest, active-note frontmatter) change rarely within a
+    // session and render LEADING, so they stay inside the immutable
+    // prefix. `tail` blocks (KG context, recent-note frontmatter,
+    // recalled episodes) are recomputed from the current prompt on every
+    // turn, so they render AFTER the history, immediately before the
+    // final user turn — then the history is an append-only byte-stable
+    // prefix the provider's KV cache (Ollama `prompt_eval_count` reuse)
+    // can hit every turn, and only the short tail re-prefills. Budget
+    // accounting is positional-independent: the `requested` map, the
+    // allocator, the `granted` map, and the `dropped` bookkeeping are
+    // byte-identical to a leading render, so `SafetyEnforced` (which
+    // inspects `dropped`, not positions) and every section-inclusion
+    // invariant are unchanged.
     let make_block = |section: ContextSection,
                       header: &str,
                       body: &str|
@@ -269,26 +285,60 @@ pub(super) fn assemble_with_cap(
     ];
     let granted = allocator.allocate_keep_first(available, &requested, &atomic);
 
-    // ── Render ──
-    let mut messages: Vec<serde_json::Value> = Vec::new();
-    let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
-    let mut dropped: Vec<DroppedSpan> = Vec::new();
-
-    // Leading atomic blocks, in render order (seed → kg → recalled). A block
-    // that didn't win its grant is recorded as dropped (safety can veto).
-    for (section, content, tokens) in &blocks {
-        let grant = granted.get(section).copied().unwrap_or(0);
-        if *tokens > 0 && grant >= *tokens {
+    // WI-357: split by variance for render position. Allocation priority and
+    // render position are orthogonal axes — the allocator still funds these
+    // sections in keep-first order (conflating the two was the original
+    // prefix-breaking bug); only the render slot changes.
+    let (tail_blocks, stable_blocks): (
+        Vec<&(ContextSection, String, usize)>,
+        Vec<&(ContextSection, String, usize)>,
+    ) = blocks.iter().partition(|(section, _, _)| {
+        matches!(
+            section,
+            ContextSection::KnowledgeGraph
+                | ContextSection::RecentNotes
+                | ContextSection::RecalledEpisodes
+        )
+    });
+    // Render one dynamic block via this closure, shared by the leading
+    // (stable) loop and the tail loop: grant-or-drop semantics identical.
+    let render_block = |messages: &mut Vec<serde_json::Value>,
+                        section_tokens: &mut BTreeMap<ContextSection, usize>,
+                        dropped: &mut Vec<DroppedSpan>,
+                        section: ContextSection,
+                        content: &String,
+                        tokens: usize| {
+        let grant = granted.get(&section).copied().unwrap_or(0);
+        if tokens > 0 && grant >= tokens {
             messages.push(json!({ "role": "system", "content": content }));
-            *section_tokens.entry(*section).or_insert(0) += *tokens;
+            *section_tokens.entry(section).or_insert(0) += tokens;
         } else {
             dropped.push(DroppedSpan::with_reason(
-                *section,
+                section,
                 content.clone(),
                 None,
                 DropReason::Budget,
             ));
         }
+    };
+
+    // ── Render ──
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    let mut section_tokens: BTreeMap<ContextSection, usize> = BTreeMap::new();
+    let mut dropped: Vec<DroppedSpan> = Vec::new();
+
+    // Leading STABLE atomic blocks, in render order (seed → schema →
+    // active notes — the session-invariant head). A block that didn't win
+    // its grant is recorded as dropped (safety can veto).
+    for (section, content, tokens) in &stable_blocks {
+        render_block(
+            &mut messages,
+            &mut section_tokens,
+            &mut dropped,
+            *section,
+            content,
+            *tokens,
+        );
     }
 
     // History within its grant: 44e discourse selection chooses *which* turns
@@ -367,6 +417,37 @@ pub(super) fn assemble_with_cap(
             ContextSection::UserPrompt,
             counter.count(episode.user_prompt),
         );
+    }
+
+    // ── Dynamic per-turn blocks, rendered at the tail (WI-357) ──
+    //
+    // KG context, recent-note frontmatter, and recalled episodes are
+    // recomputed from the CURRENT prompt every turn, so they sit after
+    // the history and immediately before the final user turn. The prefix
+    // (stable blocks + history) is then append-only across turns and the
+    // provider's KV cache reuses it intact. The last message at this
+    // point is guaranteed to be the current user turn (the conversation
+    // invariant requires the current prompt be the last recorded turn;
+    // the no-conversation branch pushes it directly). We pop it,
+    // render the tail blocks, and re-push it so the prompt stays last,
+    // closest to the generation point.
+    let current_turn = if tail_blocks.is_empty() {
+        None
+    } else {
+        messages.pop()
+    };
+    for (section, content, tokens) in &tail_blocks {
+        render_block(
+            &mut messages,
+            &mut section_tokens,
+            &mut dropped,
+            *section,
+            content,
+            *tokens,
+        );
+    }
+    if let Some(turn) = current_turn {
+        messages.push(turn);
     }
 
     // Tools within their grant: keep whole tools in catalog order until full

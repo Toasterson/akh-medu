@@ -1,0 +1,610 @@
+{
+  "verified_at": "2026-09-09T19:06:03.540923+00:00",
+  "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+  "member_count": 9,
+  "dependency_count": 15,
+  "all_draft": true,
+  "total_sessions": 0,
+  "items": [
+    {
+      "work_item": {
+        "id": "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Session ownership and loop selection",
+        "description": "# Session ownership and loop selection\n\n## Question\n\nIs loop selection per Akh or per session, and which session properties remain stable across reconnects? Distinguish reconnecting a client, resuming a provider thread, and handing off to another loop. What are the client controller and observer rules?\n\n## Accepted selection decision\n\nThe user chose: **\u201cOne loop fixed for each Akh.\u201d**\n\nLoop implementation selection belongs to the Akh configuration. All sessions\nof that Akh use that implementation, with separate conversation and provider\nsession state. A client cannot select another loop for an individual session.\nDifferent Akhs may use different implementations.\n\n## Remaining lifecycle question\n\nWhen changing an Akh's loop, must all its sessions be closed first?\nRecommendation pending user: yes, so one Akh never has sessions running different\nloop implementations at the same time. Reconnect, controller and observer rules\nremain covered by the loop-contract and client-contract decisions. This ticket\nremains open; its selection subdecision is accepted.\n\n## Tracker membership\n\nCanonical item: [Session ownership and loop selection](https://anima.wegmueller.it/work-items/01a0878c-2fde-7ac1-9806-ea1a74edc799).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-417",
+        "depends_on_ids": [],
+        "dependency_edges": [],
+        "blocked_by": [],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:46.591640+00:00",
+        "updated_at": "2026-09-09T19:05:26.163842+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Codex and Claude integration contracts and subscription boundaries",
+        "description": "# Codex and Claude integration contracts and subscription boundaries\n\n## Question\n\nWhich current official interfaces support user-owned subscription authentication, Akh custom tools, cancellation, approvals, session resume and disabling native execution? For each claim cite primary sources and version/date. Separate technical interoperability, documented support and unresolved restrictions. Can all filesystem, command, hook, MCP and subagent execution remain under Akh control without modifying provider authentication? No live model calls or credential reads are needed. Capture findings in assets/codex-claude.md.\n\nResearch branch: `research/akh-agent-loops-codex-claude`.\n\n## Research findings available\n\nCodex App Server and Claude SDK expose host tool callbacks. Codex hooks expressly do not form a complete execution boundary; Claude tool exclusion, strict MCP and aliases are promising but untested together. User sign-in to unmodified Claude Code and SDK product authentication have distinct published guidance. No exclusive Akh/SSH conformance claim.\n\n[Full research asset](https://anima.wegmueller.it/documents/01a0878d-9451-7182-b97c-bf3470f924fc).\n\nResearch commit: `2ab0b7704b53b8698d8a13d05dfbf013ced813d5` on `research/akh-agent-loops-codex-claude`.\n\nStatus: findings are ingested and linked to this Work Item. Anima rejects draft \u2192 done without promotion to ready. Retain the planning draft; do not rerun this completed research or promote it merely to close it.\n\n## Tracker membership\n\nCanonical item: [Codex and Claude integration contracts and subscription boundaries](https://anima.wegmueller.it/work-items/01a0878c-304f-79f2-b81a-e2d583ee5735).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.\n\n[Native research Document](https://anima.wegmueller.it/documents/01a0878d-9451-7182-b97c-bf3470f924fc).",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-418",
+        "depends_on_ids": [],
+        "dependency_edges": [],
+        "blocked_by": [],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:46.704750+00:00",
+        "updated_at": "2026-09-09T19:05:26.306067+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-30a2-7022-942f-078aaf065f19",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Cursor and OpenCode integration contracts and execution control",
+        "description": "# Cursor and OpenCode integration contracts and execution control\n\n## Question\n\nWhich current official interfaces can implement AgentLoop for Cursor and OpenCode? Compare server/SDK, CLI, ACP, custom tools/MCP, subscription authentication, streamed events, approvals, cancellation, resume and reliable exclusion of native execution. Do not assume that supporting MCP gives full execution interception or that OpenCode can reuse another vendor subscription. Cite primary sources and explicitly record unknown capabilities. No live model calls or credential reads. Capture assets/cursor-opencode.md.\n\nResearch branch: `research/akh-agent-loops-cursor-opencode`.\n\n## Research findings available\n\nCursor has ACP and an official SDK Bridge with local tool allowlisting and custom callbacks; restrictions must be reapplied on resume. OpenCode has server/ACP integration, but pinned source registers MCP by directory/name rather than session identity. Treat dedicated instances as a candidate until isolation tests pass. OpenCode documents ChatGPT access but rejects Claude subscription plugins. Neither adapter has proven exclusive Akh/SSH execution.\n\n[Full research asset](https://anima.wegmueller.it/documents/01a0878d-94d0-7100-8258-812d3dba8eb3).\n\nResearch commit: `3740efb4eb526ffc650c57c7696657fe9223d5cd` on `research/akh-agent-loops-cursor-opencode`.\n\nStatus: findings are ingested and linked to this Work Item. Anima rejects draft \u2192 done without promotion to ready. Retain the planning draft; do not rerun this completed research or promote it merely to close it.\n\n## Tracker membership\n\nCanonical item: [Cursor and OpenCode integration contracts and execution control](https://anima.wegmueller.it/work-items/01a0878c-30a2-7022-942f-078aaf065f19).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.\n\n[Native research Document](https://anima.wegmueller.it/documents/01a0878d-94d0-7100-8258-812d3dba8eb3).",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-419",
+        "depends_on_ids": [],
+        "dependency_edges": [],
+        "blocked_by": [],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:46.787344+00:00",
+        "updated_at": "2026-09-09T19:05:26.453803+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Tool execution ownership and workspace location",
+        "description": "# Tool execution ownership and workspace location\n\n## Question\n\nWhat does Akh owns everything else require for file reads, writes, commands, hooks, subagents and provider extensions? Choose between verified exclusive Akh execution and any explicitly offered weaker mode. How do daemon cwd, provider process cwd and executor workspace differ? How is an incompatible provider/backend combination rejected before a turn, and what evidence proves SSH execution with no local bypass?\n\n## Tracker membership\n\nCanonical item: [Tool execution ownership and workspace location](https://anima.wegmueller.it/work-items/01a0878c-310a-7340-8ff9-e39bfec1551e).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-420",
+        "depends_on_ids": [
+          "01a0878c-304f-79f2-b81a-e2d583ee5735",
+          "01a0878c-30a2-7022-942f-078aaf065f19"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+            "depends_on_id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.282008+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+            "depends_on_id": "01a0878c-30a2-7022-942f-078aaf065f19",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.338610+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-304f-79f2-b81a-e2d583ee5735",
+          "01a0878c-30a2-7022-942f-078aaf065f19"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:46.890783+00:00",
+        "updated_at": "2026-09-09T19:05:26.599829+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "AgentLoop contract and lifecycle events",
+        "description": "# AgentLoop contract and lifecycle events\n\n## Question\n\nWhat minimal object-safe Rust contract represents a complete loop session while leaving ChatBackend below InternalLoop and Backend below tools? Specify commands/events for start, submit, interrupt, approvals/input, finish, reconnect and close; typed outcomes/capabilities; backpressure and single-turn ownership. Account for existing synchronous tools and thread-local session context without assuming async callbacks preserve it.\n\n## Tracker membership\n\nCanonical item: [AgentLoop contract and lifecycle events](https://anima.wegmueller.it/work-items/01a0878c-315a-73b3-bc8c-d16e006934de).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-421",
+        "depends_on_ids": [
+          "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+          "01a0878c-310a-7340-8ff9-e39bfec1551e"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "depends_on_id": "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.398833+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "depends_on_id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.470954+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-2fde-7ac1-9806-ea1a74edc799",
+          "01a0878c-310a-7340-8ff9-e39bfec1551e"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:46.971417+00:00",
+        "updated_at": "2026-09-09T19:05:26.793575+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Memory, transcript continuity and provider usage",
+        "description": "# Memory, transcript continuity and provider usage\n\n## Question\n\nWhich state is Akh authoritative for and which is provider-private? Define memory injection, retrieval and accepted-answer recording, opaque resume handles, missing-provider-state recovery, loop/model changes, redaction and usage reporting. How does Akh handle auth expiry or quota exhaustion without changing identity or billing silently?\n\n## Tracker membership\n\nCanonical item: [Memory, transcript continuity and provider usage](https://anima.wegmueller.it/work-items/01a0878c-31b2-78f1-87a9-e194ae8ebb1c).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-422",
+        "depends_on_ids": [
+          "01a0878c-304f-79f2-b81a-e2d583ee5735",
+          "01a0878c-30a2-7022-942f-078aaf065f19",
+          "01a0878c-315a-73b3-bc8c-d16e006934de"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+            "depends_on_id": "01a0878c-304f-79f2-b81a-e2d583ee5735",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.533318+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+            "depends_on_id": "01a0878c-30a2-7022-942f-078aaf065f19",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.579449+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+            "depends_on_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.629874+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-304f-79f2-b81a-e2d583ee5735",
+          "01a0878c-30a2-7022-942f-078aaf065f19",
+          "01a0878c-315a-73b3-bc8c-d16e006934de"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:47.058551+00:00",
+        "updated_at": "2026-09-09T19:05:26.940203+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Akh and external clients attach to the same session service",
+        "description": "# Akh and external clients attach to the same session service\n\n## Question\n\nHow do the lean akh binary and other ACP clients create, control, observe and reconnect to Akh-owned sessions? Separate provider runtime transport from client ACP, and inbound client-supplied MCP from outbound provider tool bridges. Which authenticated session extensions advertise loop choices, capabilities, execution locus, approvals and replay cursors?\n\n## Tracker membership\n\nCanonical item: [Akh and external clients attach to the same session service](https://anima.wegmueller.it/work-items/01a0878c-31ed-7d42-a7d5-f655dc8b5b44).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-423",
+        "depends_on_ids": [
+          "01a0878c-315a-73b3-bc8c-d16e006934de",
+          "01a0878c-31b2-78f1-87a9-e194ae8ebb1c"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+            "depends_on_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.687653+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+            "depends_on_id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:47.753053+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-315a-73b3-bc8c-d16e006934de",
+          "01a0878c-31b2-78f1-87a9-e194ae8ebb1c"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:47.118361+00:00",
+        "updated_at": "2026-09-09T19:05:27.081595+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-3228-79f1-a997-8c8d38896bc1",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Different loop strategies and composition",
+        "description": "# Different loop strategies and composition\n\n## Question\n\nHow do reactive tool loops, plan-and-execute, iterative research, deterministic workflows and delegated multi-loop work fit the same session/event contract? Distinguish runtime implementation from strategy and persona. Which are InternalLoop policies versus separate AgentLoop implementors or outer coordinators? Avoid promising strategy control inside opaque provider loops or nested-loop delegation without bounded authority.\n\n## Tracker membership\n\nCanonical item: [Different loop strategies and composition](https://anima.wegmueller.it/work-items/01a0878c-3228-79f1-a997-8c8d38896bc1).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-424",
+        "depends_on_ids": [
+          "01a0878c-315a-73b3-bc8c-d16e006934de"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-3228-79f1-a997-8c8d38896bc1",
+            "depends_on_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.034977+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-315a-73b3-bc8c-d16e006934de"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:47.177140+00:00",
+        "updated_at": "2026-09-09T19:05:27.228945+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    },
+    {
+      "work_item": {
+        "id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+        "project_id": "019d9844-ce74-7993-a9f0-c953b8f04a4e",
+        "plan_id": "01a0878b-aa4a-72d1-a8cf-7915bd279615",
+        "title": "Migration path and provider conformance gates",
+        "description": "# Migration path and provider conformance gates\n\n## Question\n\nWhat dependency-ordered implementation work follows the locked decisions? Preserve existing internal behavior, ACP clients, permissions, workspace consistency, evidence gates and configuration compatibility. Set provider-specific gates for concurrent session isolation, SSH execution, interrupted operations, restart/reconnect, and auth/usage errors. Keep unsupported adapters discoverable but unavailable until evidence passes.\n\n## Tracker membership\n\nCanonical item: [Migration path and provider conformance gates](https://anima.wegmueller.it/work-items/01a0878c-325d-74d3-9f45-1b47e9c6c044).\nMember of [the agent-loop Wayfinder Plan](https://anima.wegmueller.it/plans/01a0878b-aa4a-72d1-a8cf-7915bd279615). The previous\norphan record remains cancelled; this replacement is an analysis item in draft.",
+        "status": "open",
+        "priority": "medium",
+        "current_phase": "draft",
+        "current_phase_id": "0ffd9acd-fbeb-5aef-a655-4a504191716b",
+        "graph_version_ref": null,
+        "kind": "analysis",
+        "executor": "tecton",
+        "parked_reason": null,
+        "code": "WI-425",
+        "depends_on_ids": [
+          "01a0878c-310a-7340-8ff9-e39bfec1551e",
+          "01a0878c-315a-73b3-bc8c-d16e006934de",
+          "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+          "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+          "01a0878c-3228-79f1-a997-8c8d38896bc1"
+        ],
+        "dependency_edges": [
+          {
+            "work_item_id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+            "depends_on_id": "01a0878c-310a-7340-8ff9-e39bfec1551e",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.075527+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+            "depends_on_id": "01a0878c-315a-73b3-bc8c-d16e006934de",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.135735+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+            "depends_on_id": "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.186949+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+            "depends_on_id": "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.247226+00:00"
+          },
+          {
+            "work_item_id": "01a0878c-325d-74d3-9f45-1b47e9c6c044",
+            "depends_on_id": "01a0878c-3228-79f1-a997-8c8d38896bc1",
+            "kind": "blocks",
+            "state": "pending",
+            "satisfied_at": null,
+            "created_at": "2026-09-09T19:01:48.294498+00:00"
+          }
+        ],
+        "blocked_by": [
+          "01a0878c-310a-7340-8ff9-e39bfec1551e",
+          "01a0878c-315a-73b3-bc8c-d16e006934de",
+          "01a0878c-31b2-78f1-87a9-e194ae8ebb1c",
+          "01a0878c-31ed-7d42-a7d5-f655dc8b5b44",
+          "01a0878c-3228-79f1-a997-8c8d38896bc1"
+        ],
+        "external_url": null,
+        "external_ref": null,
+        "external_state": null,
+        "source": null,
+        "failed_dispatch_count": 0,
+        "ci_retry_count": 0,
+        "ci_next_retry_at": null,
+        "phase_entered_at": null,
+        "created_at": "2026-09-09T19:01:47.229773+00:00",
+        "updated_at": "2026-09-09T19:05:27.362568+00:00"
+      },
+      "prs": [],
+      "ci_runs": [],
+      "exit_bars": [],
+      "completion_conditions": [],
+      "change_history": [],
+      "thread_messages": [],
+      "thread_messages_elided": false,
+      "session_costs": {
+        "implementation_sessions": 0,
+        "review_sessions": 0,
+        "total_sessions": 0,
+        "total_input_tokens": null,
+        "total_output_tokens": null,
+        "total_tokens": null,
+        "total_activity_events": 0,
+        "models_used": []
+      }
+    }
+  ]
+}

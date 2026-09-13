@@ -346,8 +346,10 @@ impl AgentModelManager {
 
     /// Register (or refresh) an agent with its Psyche encoding.
     ///
-    /// Idempotent: if the agent is already loaded, its system prompt is
-    /// refreshed from the new psyche and `last_used` is bumped.
+    /// Idempotent: if the agent is already loaded, its system prompt is FROZEN
+    /// (WI-357 — the psyche snapshot from first load is reused so mid-session
+    /// psyche drift cannot break the provider KV-cache prefix) and `last_used`
+    /// is bumped. Call `unload_agent` + `load_agent` to force a re-render.
     ///
     /// Callers can pass `None` for `psyche` to get a generic system prompt
     /// keyed only on the agent's name.
@@ -366,6 +368,16 @@ impl AgentModelManager {
 
     /// Refresh the workspace cache and return the exact prompt stored there so
     /// an agentic caller can retain an immutable turn-local snapshot.
+    ///
+    /// WI-357 (KV-cache prefix stability): the prompt is FROZEN per cache entry.
+    /// A live `Psyche` recomputation each turn drifted token-0 of the system
+    /// prompt mid-session whenever `Psyche::evolve()` /
+    /// `record_shadow_encounter()` fired on a reflection cycle, invalidating
+    /// the entire provider KV prefix. With the freeze, psyche drift lands at
+    /// the next `load_agent` entry creation or explicit `unload_agent`
+    /// (session) boundary — the correct semantic: a persona shift re-keys the
+    /// prompt, just not every reflection cycle. Callers needing an explicit
+    /// forced refresh can `unload_agent` + `load_agent`.
     pub(crate) fn load_agent_prompt(
         &self,
         agent_id: &str,
@@ -373,6 +385,20 @@ impl AgentModelManager {
         psyche: Option<&Psyche>,
         manifests: &[&crate::agent::tool_manifest::ToolManifest],
     ) -> String {
+        let mut agents = self.agents.lock().expect("model manager lock poisoned");
+        if let Some(entry) = agents.get_mut(agent_id) {
+            // Frozen: the psyche snapshot was taken at first load this
+            // session; return it unchanged so the rendered prefix is stable.
+            entry.last_used = Instant::now();
+            tracing::debug!(
+                agent_id,
+                agent_name,
+                model = %self.config.ollama.model,
+                "agent model entry reused (system prompt frozen per session)"
+            );
+            return entry.system_prompt.clone();
+        }
+        // First load: assemble from the current psyche snapshot.
         let prompt = assemble_system_prompt(
             agent_id,
             agent_name,
@@ -381,23 +407,20 @@ impl AgentModelManager {
             self.prompt_mode,
             manifests,
         );
-        let mut agents = self.agents.lock().expect("model manager lock poisoned");
-        let entry = agents
-            .entry(agent_id.to_string())
-            .or_insert_with(|| AgentEntry {
+        agents.insert(
+            agent_id.to_string(),
+            AgentEntry {
                 system_prompt: prompt.clone(),
                 last_used: Instant::now(),
-            });
-        // Always refresh prompt and timestamp on explicit load.
-        entry.system_prompt = prompt.clone();
-        entry.last_used = Instant::now();
+            },
+        );
 
         tracing::debug!(
             agent_id,
             agent_name,
             model = %self.config.ollama.model,
             tool_count = manifests.len(),
-            "agent model entry loaded"
+            "agent model entry loaded (system prompt frozen for the session)"
         );
         prompt
     }
@@ -895,11 +918,21 @@ fn generate_tool_operations_section(
         return "## Available Tools\n\nNo tools currently available.".to_string();
     }
 
+    // WI-357 (KV-cache prefix stability): iterate manifests in canonical
+    // name order, matching `ollama_tool_catalog`'s sort. The registry is
+    // HashMap-backed, so unsorted iteration order changes whenever MCP
+    // reconnects shift insertion order — every such reorder is a token-0
+    // break of the system prompt. Sorting here (one site) covers all
+    // callers; sorting there made the catalog deterministic, and this aligns
+    // the prompt section with it.
+    let mut ordered: Vec<&&crate::agent::tool_manifest::ToolManifest> = manifests.iter().collect();
+    ordered.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut section = String::from("## Available Tools\n\n");
     section.push_str("You have access to the following tools. ");
     section.push_str("Invoke them via the function-calling API.\n\n");
 
-    for manifest in manifests {
+    for manifest in &ordered {
         let danger_emoji = match manifest.danger.level {
             DangerLevel::Safe => "✓",
             DangerLevel::Cautious => "⚠",
@@ -1378,6 +1411,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): unloading sends a
+    // best-effort HTTP request to Ollama and therefore belongs in the manual suite.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn unload_agent_removes_entry() {
         let mgr = AgentModelManager::new(ModelManagerConfig::default());
         mgr.load_agent("a1", "Alice", None, &[]);
@@ -1397,6 +1433,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): the backend selection
+    // assertion performs an Ollama health request and is manual-only.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn generate_returns_no_backend_when_ollama_down_and_no_fallback() {
         // Use an unreachable Ollama endpoint — health_check returns false.
         let cfg = ModelManagerConfig {
@@ -1418,6 +1457,9 @@ mod tests {
     }
 
     #[test]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): evicting the last agent
+    // sends an Ollama unload hint and therefore belongs in the manual suite.
+    #[ignore = "WI-306: manual Ollama suite exercises HTTP transport"]
     fn unload_idle_evicts_expired_entries() {
         let cfg = ModelManagerConfig {
             idle_ttl_secs: 0, // zero TTL: every entry is immediately idle

@@ -115,6 +115,7 @@ pub mod tools;
 pub mod training_monitor;
 pub mod trajectory;
 pub mod trigger;
+pub mod turn_telemetry;
 pub mod vsa_decide;
 pub mod vsa_rl;
 #[cfg(feature = "wasm-tools")]

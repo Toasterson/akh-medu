@@ -5,10 +5,9 @@
 //! the small Node bridge in scripts/agent-backends. Credentials remain owned
 //! by the installed provider, while session IDs belong to ConversationState.
 
-mod claude;
-mod codex;
-mod process;
-#[cfg(all(test, unix))]
+#[cfg(feature = "embedded-runtime")]
+mod bridge;
+#[cfg(all(test, unix, feature = "embedded-runtime"))]
 mod tests;
 
 use std::path::PathBuf;
@@ -20,7 +19,6 @@ use std::sync::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::chat_backend::ChatPromptImage;
 use super::completion_controller::{CompletionController, CompletionDecision};
 use super::tool::{ToolInput, ToolRegistry};
 use super::tool_manifest::{Capability, DangerInfo, DangerLevel, ToolManifest, ToolSource};
@@ -102,6 +100,11 @@ impl AgentRuntime {
         effort: Option<String>,
         explicit_prompt: Option<String>,
     ) -> Result<Self, String> {
+        if !cfg!(feature = "embedded-runtime") {
+            return Err(
+                "provider execution belongs to akhrtd; this build omits embedded runtimes".into(),
+            );
+        }
         if !config.working_dir.is_absolute() || !config.working_dir.is_dir() {
             return Err("agent_runtime.working_dir must be an existing absolute directory".into());
         }
@@ -140,6 +143,7 @@ impl AgentRuntime {
     }
 }
 
+#[cfg(feature = "embedded-runtime")]
 struct Turn<'a> {
     runtime: &'a AgentRuntime,
     cwd: PathBuf,
@@ -157,6 +161,7 @@ struct Turn<'a> {
     defer_output: bool,
 }
 
+#[cfg(feature = "embedded-runtime")]
 impl Turn<'_> {
     fn text(&self, delta: &str) {
         if !self.defer_output && !delta.is_empty() {
@@ -230,6 +235,7 @@ impl Turn<'_> {
 }
 
 impl Agent {
+    #[cfg(feature = "embedded-runtime")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_runtime_turn(
         &self,
@@ -237,7 +243,6 @@ impl Agent {
         engine: &Engine,
         agent_id: &str,
         prompt: &str,
-        images: &[ChatPromptImage],
         sink: &dyn MessageSink,
         cancel: &AtomicBool,
         is_dispatch: bool,
@@ -249,9 +254,6 @@ impl Agent {
         };
         if cancel.load(Ordering::Relaxed) {
             return AgenticTurnOutcome::Completed;
-        }
-        if !images.is_empty() {
-            return fail("Coding-agent runtime image input is not supported yet".into());
         }
         let controller = match CompletionController::from_prompt(prompt) {
             Ok(c) => c,
@@ -324,10 +326,7 @@ impl Agent {
             defer_output: controller.is_some() || is_dispatch,
             controller,
         };
-        let result = match runtime.kind {
-            RuntimeKind::Codex => codex::run(&mut turn),
-            RuntimeKind::Claude => claude::run(&mut turn),
-        };
+        let result = bridge::run(&mut turn);
         // Retain the exact provider identity even on failure; never silently
         // replace failed resumes or replay a possibly side-effecting turn.
         conversation
@@ -373,5 +372,24 @@ impl Agent {
             turn.session.as_ref().and_then(|s| s.model.as_deref()),
         );
         AgenticTurnOutcome::Completed
+    }
+}
+
+#[cfg(not(feature = "embedded-runtime"))]
+impl Agent {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_runtime_turn(
+        &self,
+        _runtime: &AgentRuntime,
+        _engine: &Engine,
+        _agent_id: &str,
+        _prompt: &str,
+        sink: &dyn MessageSink,
+        _cancel: &AtomicBool,
+        _is_dispatch: bool,
+        _conversation: &Mutex<ConversationState>,
+    ) -> AgenticTurnOutcome {
+        sink.emit(&AkhMessage::error("runtime", "Provider execution belongs to akhrtd; this core build has no embedded provider transport"));
+        AgenticTurnOutcome::Refused
     }
 }

@@ -54,8 +54,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Default-on under the `tracing-otel` feature (folded into `default` so seshd
 # always ships with OTLP); the feature is also independently togglable.
 opentelemetry = { version = "=0.27", optional = true }
-opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace"], optional = true }
+opentelemetry_sdk = { version = "=0.27", features = ["rt-tokio", "metrics"], optional = true }
+opentelemetry-otlp = { version = "=0.27", features = ["grpc-tonic", "trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "=0.28", optional = true }
 opentelemetry-semantic-conventions = { version = "=0.27", features = ["semconv_experimental"], optional = true }
 
@@ -85,6 +85,7 @@ tar = "0.4"
 grug-data = { path = "../grug-data" }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+sea-orm = { version = "1", features = ["mock"] }
 
 [features]
 default = ["embedding", "tracing-otel"]

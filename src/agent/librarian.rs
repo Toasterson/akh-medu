@@ -1515,8 +1515,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a live Ollama endpoint serving AKH_LIBRARIAN_MODEL (or the default \
-                gpt-oss:120b) — not exercised by the automated suite, per ADR 081 slice 4"]
+    // WI-306 (01a0144a-b545-7e90-b444-e72d13f20adc): live LLM checks are
+    // quarantined from CI and run through the documented manual Ollama suite.
+    #[ignore = "WI-306: requires a live Ollama endpoint serving AKH_LIBRARIAN_MODEL (or the \
+                default gpt-oss:120b); also see ADR 081 slice 4"]
     fn ollama_librarian_model_extracts_against_a_live_backend() {
         let model = OllamaLibrarianModel::from_env();
         let request = ExtractionRequest {

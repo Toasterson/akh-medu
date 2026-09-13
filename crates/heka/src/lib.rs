@@ -21,6 +21,7 @@
 //!
 //! See `migrations/20260427_000001_init.sql` for the full DDL.
 
+pub mod auth;
 pub mod capture;
 pub mod chunker;
 pub mod config;
@@ -32,7 +33,9 @@ pub mod entity;
 pub mod error;
 pub mod eval;
 pub mod ingest;
+pub mod mcp;
 pub mod migration;
+pub mod serve;
 
 pub use config::HekaConfig;
 pub use error::{HekaError, HekaResult};

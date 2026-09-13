@@ -1,0 +1,26 @@
+{
+  "format": "akh.questions.v1",
+  "questions": [
+    {
+      "id": "features",
+      "header": "Features",
+      "question": "Which features should be included?",
+      "options": [
+        { "label": "Search", "description": "Find existing records" },
+        { "label": "Export", "description": "Save a local copy" }
+      ],
+      "multiple": true,
+      "allow_text": false,
+      "secret": false
+    },
+    {
+      "id": "note",
+      "header": "Details",
+      "question": "Any additional details?",
+      "options": [],
+      "multiple": false,
+      "allow_text": true,
+      "secret": false
+    }
+  ]
+}
