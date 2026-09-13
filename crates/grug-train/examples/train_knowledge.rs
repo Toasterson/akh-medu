@@ -40,9 +40,11 @@ use grug_train::knowledge_train::{
 };
 use grug_train::train::{init_training, to_eval_model, train_step_guarded};
 use grug_train::{
-    BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding, VerifiedFoundationBundle,
-    VerifiedKnowledgeBundle, build_knowledge_batch, checkpoint, validate_knowledge_steering_share,
-    verify_active_knowledge_bundle, verify_candidate_knowledge_bundle, verify_foundation_bundle,
+    BpeTokenizer, FoundationLineage, GenerateConfig, PositionalEncoding, RemediationLineage,
+    RemediationSupplement, VerifiedFoundationBundle, VerifiedKnowledgeBundle,
+    build_knowledge_batch, checkpoint, read_sibling_generator_metadata,
+    validate_knowledge_steering_share, validate_remediation_share, verify_active_knowledge_bundle,
+    verify_candidate_knowledge_bundle, verify_foundation_bundle,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -157,6 +159,26 @@ struct Args {
     #[arg(long)]
     steer_from_bundle: Option<PathBuf>,
 
+    /// Uncertified candidate bundle whose weights *and* retained Adam state
+    /// continue on `--train-jsonl` (base) plus one or more
+    /// `--supplemental-jsonl` engine-generated siblings (P6.4 local
+    /// remediation). Unlike `--adapt-from-bundle` (fresh Adam, certified
+    /// parent only) or `--steer-from-bundle` (requires a live
+    /// adaptive-controller decision + frontier exam), this continues an
+    /// uncertified candidate's own segment on a corpus that changed without
+    /// controller authorization -- e.g. a base curriculum plus siblings from
+    /// `akh_episode_generator`. Requires at least one `--supplemental-jsonl`
+    /// file; see `--remediation-max-share-ppm`.
+    #[arg(long)]
+    remediate_from_bundle: Option<PathBuf>,
+
+    /// Ceiling on how much of a remediation segment's mixture
+    /// `--supplemental-jsonl` may occupy, in parts per million (default
+    /// 50_000 = 5%, matching the adaptive loop's steering ceiling). Only
+    /// meaningful with `--remediate-from-bundle`.
+    #[arg(long, default_value_t = grug_train::DEFAULT_REMEDIATION_MAX_SHARE_PPM)]
+    remediation_max_share_ppm: u64,
+
     /// Complete `adaptive_exam_controller step` output authorizing the segment.
     #[arg(long)]
     steering_decision: Option<PathBuf>,
@@ -241,6 +263,10 @@ struct RunDescriptor {
     steering_sibling_manifest: Option<PathBuf>,
     steering_sibling_jsonl: Option<PathBuf>,
     steered_from: Option<KnowledgeSteeringLineage>,
+    #[serde(default)]
+    remediate_from_bundle: Option<PathBuf>,
+    #[serde(default)]
+    remediated_from: Option<RemediationLineage>,
     start_step: usize,
     /// Every `--allow-schedule-change` resume applied to this bundle's
     /// lineage, oldest first. Absent from run.json files written before
@@ -329,6 +355,10 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     for (label, parent) in [
         ("--adapt-from-bundle", args.adapt_from_bundle.as_ref()),
         ("--steer-from-bundle", args.steer_from_bundle.as_ref()),
+        (
+            "--remediate-from-bundle",
+            args.remediate_from_bundle.as_ref(),
+        ),
     ] {
         if let Some(parent) = parent
             && parent.canonicalize()? == args.artifacts_dir.canonicalize()?
@@ -344,9 +374,26 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     contracts.verify_integrity()?;
 
     let mut train_records = load_records(&args.train_jsonl)?;
+    let base_only_training_records = train_records.len();
+    let mut supplemental_file_records: Vec<(PathBuf, Vec<KnowledgeSftRecord>)> = Vec::new();
     for path in &args.supplemental_jsonl {
-        train_records.extend(load_records(path)?);
+        let records = load_records(path)?;
+        supplemental_file_records.push((path.clone(), records.clone()));
+        train_records.extend(records);
     }
+    let supplemental_total_records: usize = supplemental_file_records
+        .iter()
+        .map(|(_, records)| records.len())
+        .sum();
+    let remediation_share_ppm = if args.remediate_from_bundle.is_some() {
+        Some(validate_remediation_share(
+            base_only_training_records,
+            supplemental_total_records,
+            args.remediation_max_share_ppm,
+        )?)
+    } else {
+        None
+    };
     let steering_records = args
         .steering_sibling_jsonl
         .as_deref()
@@ -408,6 +455,37 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         .as_deref()
         .map(verify_candidate_knowledge_bundle)
         .transpose()?;
+    let remediation_parent = args
+        .remediate_from_bundle
+        .as_deref()
+        .map(verify_candidate_knowledge_bundle)
+        .transpose()?;
+    if let Some(parent) = &remediation_parent {
+        if parent.artifact().certification.is_some() {
+            return Err(invalid_data(
+                "--remediate-from-bundle must be an uncertified candidate; a certified bundle \
+                 belongs behind --adapt-from-bundle instead",
+            ));
+        }
+        if args
+            .remediate_from_bundle
+            .as_deref()
+            .expect("remediation_parent implies remediate_from_bundle")
+            .join("active-model.json")
+            .exists()
+        {
+            return Err(invalid_data(
+                "--remediate-from-bundle cannot be a bundle that also carries an \
+                 active-model.json",
+            ));
+        }
+        if parent.artifact().checkpoint_optimizer_hash.is_none() {
+            return Err(invalid_data(
+                "--remediate-from-bundle candidate does not carry a content-addressed Adam \
+                 state",
+            ));
+        }
+    }
 
     let installed_contracts_path = args.artifacts_dir.join("contracts.json");
     if args.resume.is_some() {
@@ -449,6 +527,13 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             &parent.artifact().tokenizer_hash,
             &tokenizer_path,
             "steering parent",
+        )?;
+    } else if let Some(parent) = &remediation_parent {
+        install_verified_tokenizer(
+            parent.tokenizer_path(),
+            &parent.artifact().tokenizer_hash,
+            &tokenizer_path,
+            "remediation parent",
         )?;
     }
     let tokenizer = load_or_train_tokenizer(&args, &train_records, &tokenizer_path)?;
@@ -506,7 +591,11 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         .as_ref()
         .map(|_| verify_candidate_knowledge_bundle(&args.artifacts_dir))
         .transpose()?;
-    if let Some(parent) = resumed_candidate.as_ref().or(steering_parent.as_ref()) {
+    if let Some(parent) = resumed_candidate
+        .as_ref()
+        .or(steering_parent.as_ref())
+        .or(remediation_parent.as_ref())
+    {
         shape = continued_candidate_shape(&shape, &parent.artifact().shape)?;
         context_extended_from = context_extended_from.or(parent.artifact().context_extended_from);
         model_config = shape.config();
@@ -529,6 +618,17 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     {
         return Err(invalid_data(
             "steering parent must be an uncertified candidate with the same model, tokenizer, and tool contract",
+        ));
+    }
+    if let Some(parent) = &remediation_parent
+        && (parent.artifact().model_size != args.model
+            || parent.artifact().shape != shape
+            || parent.artifact().tokenizer_hash != tokenizer_hash
+            || parent.artifact().contract_hash != contracts.manifest_hash)
+    {
+        return Err(invalid_data(
+            "remediation parent must have the same model, tokenizer, and tool contract as this \
+             knowledge run",
         ));
     }
     if args.eval_max_new_tokens + 3 >= model_config.max_seq_len {
@@ -581,6 +681,27 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         tokenizer.vocab_size(),
         model_config.max_seq_len
     );
+    let direct_remediation_lineage = remediation_parent
+        .as_ref()
+        .map(|parent| {
+            println!(
+                "train_knowledge: remediating candidate step {} model={} with retained Adam \
+                 state, effective lr={learning_rate} warmup_steps={}",
+                parent.artifact().checkpoint_step,
+                parent.artifact().checkpoint_model_hash,
+                args.warmup_steps
+            );
+            build_remediation_lineage(
+                &args,
+                parent,
+                &supplemental_file_records,
+                base_only_training_records,
+                supplemental_total_records,
+                remediation_share_ppm.expect("remediation records have a validated share"),
+                learning_rate,
+            )
+        })
+        .transpose()?;
 
     let (resume_artifact, resume_schedule_changes) = match verify_resume_manifest(
         &args,
@@ -627,6 +748,11 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         resume_artifact
             .as_ref()
             .and_then(|artifact| artifact.steered_from.clone())
+    });
+    let remediation_lineage = direct_remediation_lineage.or_else(|| {
+        resume_artifact
+            .as_ref()
+            .and_then(|artifact| artifact.remediated_from.clone())
     });
     let mut start_step = 0usize;
     if let Some(resume) = &args.resume {
@@ -699,8 +825,27 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             parent.artifact().checkpoint_model_hash,
             parent.artifact().contract_hash
         );
+    } else if let Some(parent) = &remediation_parent {
+        let (loaded_model, loaded_optimizer, step) =
+            checkpoint::load_checkpoint(parent.checkpoint_dir(), model, optimizer, &device)?;
+        if step != parent.artifact().checkpoint_step {
+            return Err(invalid_data(format!(
+                "remediation parent checkpoint metadata says {step}, artifact says {}",
+                parent.artifact().checkpoint_step
+            )));
+        }
+        model = loaded_model;
+        optimizer = loaded_optimizer;
+        start_step = step
+            .checked_add(1)
+            .ok_or_else(|| invalid_data("remediation checkpoint step overflow"))?;
+        println!(
+            "train_knowledge: remediating from candidate step {step} model={} with retained \
+             Adam state",
+            parent.artifact().checkpoint_model_hash
+        );
     }
-    let segment_start_step = if steering_parent.is_some() {
+    let segment_start_step = if steering_parent.is_some() || remediation_parent.is_some() {
         start_step
     } else if args.resume.is_some() {
         read_segment_start_step(&args.artifacts_dir.join("run.json"))?
@@ -746,6 +891,8 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         steering_sibling_manifest: args.steering_sibling_manifest.clone(),
         steering_sibling_jsonl: args.steering_sibling_jsonl.clone(),
         steered_from: steering_lineage.clone(),
+        remediate_from_bundle: args.remediate_from_bundle.clone(),
+        remediated_from: remediation_lineage.clone(),
         start_step: segment_start_step,
         schedule_changes: resume_schedule_changes,
     };
@@ -891,6 +1038,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
                     context_extended_from,
                     adapted_from: adaptation_lineage.clone(),
                     steered_from: steering_lineage.clone(),
+                    remediated_from: remediation_lineage.clone(),
                     certification: None,
                 };
                 artifact.verify().map_err(invalid_data)?;
@@ -936,10 +1084,39 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     let initialization_sources = usize::from(args.resume.is_some())
         + usize::from(args.foundation_bundle.is_some())
         + usize::from(args.adapt_from_bundle.is_some())
-        + usize::from(args.steer_from_bundle.is_some());
+        + usize::from(args.steer_from_bundle.is_some())
+        + usize::from(args.remediate_from_bundle.is_some());
     if initialization_sources > 1 {
         return Err(invalid_data(
-            "--resume, --foundation-bundle, --adapt-from-bundle, and --steer-from-bundle are mutually exclusive",
+            "--resume, --foundation-bundle, --adapt-from-bundle, --steer-from-bundle, and \
+             --remediate-from-bundle are mutually exclusive",
+        ));
+    }
+    if args.remediate_from_bundle.is_some() && args.supplemental_jsonl.is_empty() {
+        return Err(invalid_data(
+            "--remediate-from-bundle requires at least one --supplemental-jsonl engine-generated \
+             sibling corpus",
+        ));
+    }
+    if args.remediate_from_bundle.is_none()
+        && args.remediation_max_share_ppm != grug_train::DEFAULT_REMEDIATION_MAX_SHARE_PPM
+    {
+        return Err(invalid_data(
+            "--remediation-max-share-ppm only applies to a --remediate-from-bundle run",
+        ));
+    }
+    if args.remediate_from_bundle.is_some()
+        && (args.remediation_max_share_ppm == 0 || args.remediation_max_share_ppm > 1_000_000)
+    {
+        return Err(invalid_data(format!(
+            "--remediation-max-share-ppm must be in 1..=1_000_000, got {}",
+            args.remediation_max_share_ppm
+        )));
+    }
+    if args.remediate_from_bundle.is_some() && args.learning_rate.is_none() {
+        return Err(invalid_data(
+            "--remediate-from-bundle requires an explicit --learning-rate: a continued Adam \
+             state should never silently pick up the small/350m default schedule",
         ));
     }
     if args.epochs == 0 || args.batch_size == 0 {
@@ -1402,6 +1579,62 @@ fn verify_steering_inputs(
         base_training_records,
         sibling_training_records: sibling_records.len(),
         sibling_share_ppm,
+    };
+    lineage.verify().map_err(invalid_data)?;
+    Ok(lineage)
+}
+
+/// Build the P6.4 remediation lineage for `--remediate-from-bundle`: the
+/// parent's checkpoint identity plus one content-addressed entry per
+/// `--supplemental-jsonl` file, each carrying whatever `generator_git_hash`/
+/// `seed` a sibling `manifest.json` next to it happens to record (see
+/// [`read_sibling_generator_metadata`]).
+#[allow(clippy::too_many_arguments)]
+fn build_remediation_lineage(
+    args: &Args,
+    parent: &VerifiedKnowledgeBundle,
+    supplemental_file_records: &[(PathBuf, Vec<KnowledgeSftRecord>)],
+    base_training_records: usize,
+    supplemental_training_records: usize,
+    supplemental_share_ppm: u64,
+    learning_rate: f64,
+) -> Result<RemediationLineage, Box<dyn Error>> {
+    let parent_bundle_path = args
+        .remediate_from_bundle
+        .as_deref()
+        .ok_or_else(|| invalid_data("remediation lineage requires --remediate-from-bundle"))?;
+    let parent_checkpoint_optimizer_hash = parent
+        .artifact()
+        .checkpoint_optimizer_hash
+        .clone()
+        .ok_or_else(|| invalid_data("remediation parent has no content-addressed Adam state"))?;
+    let mut supplemental = Vec::with_capacity(supplemental_file_records.len());
+    for (path, records) in supplemental_file_records {
+        let sft_hash = fingerprint_artifact_file(path)?;
+        let (generator_git_hash, seed) = read_sibling_generator_metadata(path);
+        supplemental.push(RemediationSupplement {
+            path: path.display().to_string(),
+            sft_hash,
+            records: records.len(),
+            generator_git_hash,
+            seed,
+        });
+    }
+    let lineage = RemediationLineage {
+        parent_bundle: parent_bundle_path.display().to_string(),
+        parent_checkpoint_step: parent.artifact().checkpoint_step,
+        parent_checkpoint_model_hash: parent.artifact().checkpoint_model_hash.clone(),
+        parent_checkpoint_optimizer_hash,
+        contract_hash: parent.artifact().contract_hash.clone(),
+        tokenizer_hash: parent.artifact().tokenizer_hash.clone(),
+        supplemental,
+        base_training_records,
+        supplemental_training_records,
+        supplemental_share_ppm,
+        max_share_ppm: args.remediation_max_share_ppm,
+        learning_rate,
+        warmup_steps: args.warmup_steps,
+        epochs: args.epochs,
     };
     lineage.verify().map_err(invalid_data)?;
     Ok(lineage)
@@ -1878,6 +2111,8 @@ mod schedule_change_tests {
             steering_sibling_manifest: None,
             steering_sibling_jsonl: None,
             steered_from: None,
+            remediate_from_bundle: None,
+            remediated_from: None,
             start_step: 0,
             schedule_changes: Vec::new(),
         }
@@ -2073,5 +2308,279 @@ mod continuation_shape_tests {
         let mut wrong_width = canonical.clone();
         wrong_width.d_model = 256;
         assert!(continued_candidate_shape(&canonical, &wrong_width).is_err());
+    }
+}
+
+/// End-to-end CPU coverage for `--remediate-from-bundle` (P6.4): trains a
+/// tiny real candidate, then remediates it on the same base corpus plus one
+/// engine-generated-shaped supplemental sibling, and finally resumes the
+/// remediated segment -- proving the fifth start mode threads weights *and*
+/// Adam state through `run()`, records a `remediation` lineage block, and
+/// does not break `--resume` of its own output. CPU (`burn-ndarray`) only;
+/// never exercises a GPU backend.
+#[cfg(test)]
+mod remediation_integration_tests {
+    use super::*;
+    use grug_data::{ToolContractSnapshot, WorkflowLanguage, WorkflowStage};
+
+    fn sample_contracts() -> ToolContractSnapshot {
+        ToolContractSnapshot::from_contracts(Vec::new()).expect("empty contract snapshot builds")
+    }
+
+    fn sample_record(
+        id: &str,
+        episode_id: &str,
+        contract_hash: &str,
+        question: &str,
+        answer: &str,
+    ) -> KnowledgeSftRecord {
+        let tools: Vec<serde_json::Value> = Vec::new();
+        let conversation = vec![serde_json::json!({"role": "user", "content": question})];
+        let prompt = render_knowledge_prompt_with_system(&tools, &conversation, None);
+        let target = KnowledgeAction::Answer {
+            text: answer.into(),
+            citations: Vec::new(),
+        }
+        .render_runtime()
+        .expect("render_runtime never fails for plain ascii text");
+        KnowledgeSftRecord {
+            schema_version: grug_data::KNOWLEDGE_WORKFLOW_SCHEMA_VERSION,
+            id: id.into(),
+            episode_id: episode_id.into(),
+            step: 0,
+            stage: WorkflowStage::Answer,
+            family: "remediation_test".into(),
+            difficulty: 1,
+            language: WorkflowLanguage::English,
+            contract_hash: contract_hash.into(),
+            tools,
+            conversation,
+            system_context: None,
+            prompt,
+            target,
+        }
+    }
+
+    fn write_jsonl(path: &Path, records: &[KnowledgeSftRecord]) {
+        let mut body = String::new();
+        for record in records {
+            body.push_str(&record.to_jsonl().expect("KnowledgeSftRecord serializes"));
+            body.push('\n');
+        }
+        std::fs::write(path, body).expect("write jsonl fixture");
+    }
+
+    fn load_candidate(artifacts_dir: &Path) -> KnowledgeModelArtifact {
+        serde_json::from_reader(
+            File::open(artifacts_dir.join("candidate-model.json"))
+                .expect("candidate-model.json exists"),
+        )
+        .expect("candidate-model.json parses")
+    }
+
+    #[test]
+    fn remediate_from_bundle_continues_adam_and_records_lineage_and_then_resumes() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let contracts = sample_contracts();
+        let contracts_path = workdir.path().join("contracts.json");
+        std::fs::write(
+            &contracts_path,
+            serde_json::to_vec_pretty(&contracts).expect("serialize contracts"),
+        )
+        .expect("write contracts.json");
+
+        let base_records: Vec<KnowledgeSftRecord> = (0..4)
+            .map(|i| {
+                sample_record(
+                    &format!("base-{i}"),
+                    &format!("base-episode-{i}"),
+                    &contracts.manifest_hash,
+                    &format!("What is {i} plus {i}?"),
+                    &format!("the sum is {}", i + i),
+                )
+            })
+            .collect();
+        let base_path = workdir.path().join("base.sft.jsonl");
+        write_jsonl(&base_path, &base_records);
+
+        // --- Phase 1: train an ordinary, uncertified parent candidate. ---
+        let parent_dir = workdir.path().join("parent");
+        let parent_args = Args::try_parse_from([
+            "train_knowledge",
+            "--contracts",
+            contracts_path.to_str().unwrap(),
+            "--train-jsonl",
+            base_path.to_str().unwrap(),
+            "--artifacts-dir",
+            parent_dir.to_str().unwrap(),
+            "--model",
+            "small",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "2",
+            "--ckpt-every",
+            "1",
+            "--eval-every",
+            "999999",
+            "--bpe-vocab-size",
+            "260",
+            "--learning-rate",
+            "1e-3",
+        ])
+        .expect("parent argv parses");
+        validate_args(&parent_args).expect("parent args are valid");
+        run::<grug_train::CpuAutodiffBackend>(parent_args, Default::default())
+            .expect("parent run succeeds");
+
+        let parent_candidate = load_candidate(&parent_dir);
+        assert!(parent_candidate.checkpoint_optimizer_hash.is_some());
+        assert!(parent_candidate.certification.is_none());
+
+        // --- Phase 2: remediate the parent on base + one engine-shaped sibling. ---
+        let supplemental_records: Vec<KnowledgeSftRecord> = (0..2)
+            .map(|i| {
+                sample_record(
+                    &format!("sibling-{i}"),
+                    &format!("sibling-episode-{i}"),
+                    &contracts.manifest_hash,
+                    &format!("What is the sibling fact {i}?"),
+                    &format!("sibling-answer-{i}"),
+                )
+            })
+            .collect();
+        let supplemental_dir = workdir.path().join("sibling");
+        std::fs::create_dir_all(&supplemental_dir).expect("mkdir sibling");
+        let supplemental_path = supplemental_dir.join("train.sft.jsonl");
+        write_jsonl(&supplemental_path, &supplemental_records);
+        // A P6.3-generator-shaped sidecar `manifest.json` next to the
+        // supplemental file, carrying `generator_git_hash`/`seed`.
+        std::fs::write(
+            supplemental_dir.join("manifest.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "generator": "akh-episode-generator-engine-v1",
+                "generator_git_hash": "deadbeefcafefeed0000000000000000000000",
+                "seed": 20260913,
+            })
+            .to_string(),
+        )
+        .expect("write sibling manifest.json");
+
+        let remediation_dir = workdir.path().join("remediated");
+        let remediation_args = Args::try_parse_from([
+            "train_knowledge",
+            "--contracts",
+            contracts_path.to_str().unwrap(),
+            "--train-jsonl",
+            base_path.to_str().unwrap(),
+            "--supplemental-jsonl",
+            supplemental_path.to_str().unwrap(),
+            "--artifacts-dir",
+            remediation_dir.to_str().unwrap(),
+            "--model",
+            "small",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "2",
+            "--ckpt-every",
+            "1",
+            "--eval-every",
+            "999999",
+            "--bpe-vocab-size",
+            "260",
+            "--learning-rate",
+            "5e-4",
+            "--remediate-from-bundle",
+            parent_dir.to_str().unwrap(),
+            // This tiny fixture's supplemental share (2 of 6 records, 1 in 3)
+            // is far above the real default ceiling (5%) -- raise it here so
+            // the test exercises the mechanism itself, not the boundary (the
+            // boundary is covered by `remediation::tests` in the lib crate).
+            "--remediation-max-share-ppm",
+            "500000",
+        ])
+        .expect("remediation argv parses");
+        validate_args(&remediation_args).expect("remediation args are valid");
+        run::<grug_train::CpuAutodiffBackend>(remediation_args, Default::default())
+            .expect("remediation run succeeds");
+
+        let remediated_candidate = load_candidate(&remediation_dir);
+        let lineage = remediated_candidate
+            .remediated_from
+            .clone()
+            .expect("candidate-model.json must carry a remediation block");
+        assert_eq!(
+            lineage.parent_checkpoint_step,
+            parent_candidate.checkpoint_step
+        );
+        assert_eq!(
+            lineage.parent_checkpoint_model_hash,
+            parent_candidate.checkpoint_model_hash
+        );
+        assert_eq!(
+            lineage.parent_checkpoint_optimizer_hash,
+            parent_candidate
+                .checkpoint_optimizer_hash
+                .clone()
+                .expect("parent carries an optimizer hash")
+        );
+        assert_eq!(lineage.supplemental.len(), 1);
+        assert_eq!(lineage.supplemental[0].records, 2);
+        assert_eq!(lineage.base_training_records, 4);
+        assert_eq!(lineage.supplemental_training_records, 2);
+        assert_eq!(lineage.supplemental_share_ppm, 333_333);
+        assert_eq!(lineage.max_share_ppm, 500_000);
+        assert_eq!(
+            lineage.supplemental[0].generator_git_hash.as_deref(),
+            Some("deadbeefcafefeed0000000000000000000000")
+        );
+        assert_eq!(lineage.supplemental[0].seed, Some(20260913));
+        assert!(
+            remediated_candidate.checkpoint_step > parent_candidate.checkpoint_step,
+            "remediation must continue the step counter past the parent's"
+        );
+
+        // --- Phase 3: --resume of the remediation segment must keep working. ---
+        let resume_checkpoint = remediation_dir.join(&remediated_candidate.checkpoint_dir);
+        let resume_args = Args::try_parse_from([
+            "train_knowledge",
+            "--contracts",
+            contracts_path.to_str().unwrap(),
+            "--train-jsonl",
+            base_path.to_str().unwrap(),
+            "--supplemental-jsonl",
+            supplemental_path.to_str().unwrap(),
+            "--artifacts-dir",
+            remediation_dir.to_str().unwrap(),
+            "--model",
+            "small",
+            "--epochs",
+            "2",
+            "--batch-size",
+            "2",
+            "--ckpt-every",
+            "1",
+            "--eval-every",
+            "999999",
+            "--bpe-vocab-size",
+            "260",
+            "--learning-rate",
+            "5e-4",
+            "--resume",
+            resume_checkpoint.to_str().unwrap(),
+        ])
+        .expect("resume argv parses");
+        validate_args(&resume_args).expect("resume args are valid");
+        run::<grug_train::CpuAutodiffBackend>(resume_args, Default::default())
+            .expect("resume of a remediation run succeeds");
+
+        let resumed_candidate = load_candidate(&remediation_dir);
+        assert!(resumed_candidate.checkpoint_step > remediated_candidate.checkpoint_step);
+        let resumed_lineage = resumed_candidate
+            .remediated_from
+            .expect("resumed candidate must still carry the remediation block");
+        assert_eq!(resumed_lineage, lineage);
     }
 }

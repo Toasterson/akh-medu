@@ -38,6 +38,7 @@ pub mod multimodal;
 pub mod multimodal_runtime;
 pub mod pointer;
 pub mod reason_train;
+pub mod remediation;
 pub mod rule_train;
 pub mod tokenizer;
 pub mod train;
@@ -95,6 +96,10 @@ pub use multimodal_runtime::{
 pub use pointer::{PointerParts, PointerTransformer, PointerTransformerConfig};
 pub use reason_train::{
     build_reason_batch, encode_reason_example, format_reason_prompt, generate_reason_outputs,
+};
+pub use remediation::{
+    DEFAULT_REMEDIATION_MAX_SHARE_PPM, RemediationLineage, RemediationSupplement,
+    read_sibling_generator_metadata, validate_remediation_share,
 };
 pub use rule_train::{
     build_rule_batch, encode_rule_example, format_rule_prompt, generate_rule_outputs,

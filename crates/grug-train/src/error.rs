@@ -302,4 +302,75 @@ pub enum GrugError {
         )
     )]
     ContextExtensionShapeMismatch { reason: String },
+
+    /// [`crate::remediation::validate_remediation_share`] was given a
+    /// `--remediation-max-share-ppm` outside the valid parts-per-million
+    /// range.
+    #[error(
+        "remediation share ceiling must be in 1..=1_000_000 parts-per-million, got {ceiling_ppm}"
+    )]
+    #[diagnostic(
+        code(grug_train::remediation_invalid_ceiling),
+        help(
+            "Pass --remediation-max-share-ppm as an integer between 1 and 1_000_000 \
+             (parts per million). The default, 50_000, matches the adaptive loop's \
+             steering ceiling (5%)."
+        )
+    )]
+    RemediationInvalidCeiling { ceiling_ppm: u64 },
+
+    /// `train_knowledge --remediate-from-bundle` was given a base or
+    /// supplemental corpus with zero records.
+    #[error(
+        "remediation requires non-empty base ({base_records}) and supplemental \
+         ({supplemental_records}) corpora"
+    )]
+    #[diagnostic(
+        code(grug_train::remediation_empty_mixture),
+        help(
+            "Pass --train-jsonl with at least one record and at least one non-empty \
+             --supplemental-jsonl file. Remediation continues a candidate's Adam state \
+             on a real base-plus-sibling mixture, not on either corpus alone."
+        )
+    )]
+    RemediationEmptyMixture {
+        base_records: usize,
+        supplemental_records: usize,
+    },
+
+    /// The combined base + supplemental record count overflowed while
+    /// computing a remediation segment's supplemental share.
+    #[error("remediation record count overflow while computing the supplemental share")]
+    #[diagnostic(
+        code(grug_train::remediation_record_count_overflow),
+        help(
+            "The combined base + supplemental record count overflowed a 64-bit integer. \
+             Split the remediation segment's corpus across multiple smaller runs."
+        )
+    )]
+    RemediationRecordCountOverflow,
+
+    /// A remediation segment's `--supplemental-jsonl` mixture exceeds
+    /// `--remediation-max-share-ppm` (default 50_000 ppm / 5%, matching the
+    /// adaptive loop's steering ceiling).
+    #[error(
+        "remediation supplemental share {actual_ppm} ppm ({supplemental_records} supplemental \
+         of {base_records} base records) exceeds the configured ceiling {ceiling_ppm} ppm"
+    )]
+    #[diagnostic(
+        code(grug_train::remediation_share_exceeded),
+        help(
+            "Reduce --supplemental-jsonl relative to --train-jsonl, split the remediation \
+             segment across multiple runs, or raise --remediation-max-share-ppm only with \
+             explicit operator sign-off -- it mirrors the adaptive loop's steering ceiling \
+             and exists so an engine-generated sibling corpus cannot dominate a retraining \
+             segment."
+        )
+    )]
+    RemediationShareExceeded {
+        actual_ppm: u64,
+        ceiling_ppm: u64,
+        base_records: usize,
+        supplemental_records: usize,
+    },
 }
