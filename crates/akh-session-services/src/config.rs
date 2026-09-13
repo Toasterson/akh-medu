@@ -367,6 +367,35 @@ fn djehuty_page_size() -> u16 {
     50
 }
 
+/// Selects the durable store's backend. Absent (the default) keeps every
+/// daemon on the original per-kind redb file under `data_dir`; this is what
+/// every test and every deployment predating the Postgres backend still
+/// gets. `Postgres` moves that daemon's state into the shared `akh-pg`
+/// CloudNativePG cluster so it survives node/PVC loss instead of living on
+/// a Raspberry Pi SD card.
+///
+/// The connection string is deliberately never a config field: it is read
+/// from the environment variable named by `url_env` at startup, so
+/// credentials never need to appear in a (SOPS-decrypted or not) config
+/// file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoreConfig {
+    Postgres {
+        /// Name of the environment variable holding the `postgres://` URL.
+        url_env: String,
+        /// Postgres schema the store's table lives in. Must already be
+        /// creatable by the connecting role (`CREATE SCHEMA IF NOT EXISTS`
+        /// runs on open) and must only ever be used for this purpose, since
+        /// the database itself is shared with other consumers (e.g. akhomed).
+        #[serde(default = "default_store_schema")]
+        schema: String,
+    },
+}
+fn default_store_schema() -> String {
+    "akh_sessions".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -374,6 +403,10 @@ pub struct Config {
     pub public_url: Option<String>,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
+    /// Durable store backend. Defaults to the redb file under `data_dir`
+    /// when absent; see [`StoreConfig`].
+    #[serde(default)]
+    pub store: Option<StoreConfig>,
     pub principals: Vec<Principal>,
     #[serde(default)]
     pub endpoints: BTreeMap<String, Endpoint>,
@@ -450,6 +483,13 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         validate_key(&self.service_id)?;
+        if let Some(StoreConfig::Postgres { url_env, schema }) = &self.store
+            && (url_env.is_empty() || schema.is_empty())
+        {
+            return Err(Fault::invalid(
+                "store.url_env and store.schema must be non-empty when store.kind is postgres",
+            ));
+        }
         if let Some(profile) = &self.git_snapshot {
             profile.validate()?;
         }
