@@ -12,6 +12,74 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+
+/// Deterministic core of the dispatch retry backoff: delay doubles with each
+/// consecutive failure and is capped, so a permanently broken downstream
+/// (an unreachable cross-cluster runtime, say) cannot turn into a fixed
+/// sub-second retry storm that starves the runtime and the readiness probe
+/// along with it. Jitter is applied separately by `jittered_backoff` so this
+/// half stays a pure, easily pinned unit test.
+fn backoff_after(consecutive_failures: u32) -> Duration {
+    const BASE: Duration = Duration::from_millis(500);
+    const CAP: Duration = Duration::from_secs(60);
+    let exponent = consecutive_failures.min(7); // 500ms << 7 == 64s, already past the cap
+    BASE.saturating_mul(1u32 << exponent).min(CAP)
+}
+
+/// Spread out retries for sessions that fail in lockstep (e.g. every session
+/// dispatching through the same unreachable runtime) so they don't all wake
+/// up on the same tick forever. The jitter source is derived from the
+/// session id, not real randomness, so behavior stays reproducible in tests
+/// and logs while still decorrelating sessions from each other.
+fn jittered_backoff(consecutive_failures: u32, session_id: &str) -> Duration {
+    let base = backoff_after(consecutive_failures);
+    let millis = base.as_millis() as u64;
+    let span = millis / 5; // +/- 20%
+    if span == 0 {
+        return base;
+    }
+    let entropy = session_id
+        .bytes()
+        .fold(0xcbf29ce484222325u64, |hash, b| {
+            (hash ^ b as u64).wrapping_mul(0x100000001b3)
+        });
+    let offset = (entropy % (2 * span + 1)) as i64 - span as i64;
+    Duration::from_millis((millis as i64 + offset).max(0) as u64)
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_and_saturates() {
+        assert_eq!(backoff_after(0), Duration::from_millis(500));
+        assert_eq!(backoff_after(1), Duration::from_secs(1));
+        assert_eq!(backoff_after(2), Duration::from_secs(2));
+        assert_eq!(backoff_after(20), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn jitter_stays_within_twenty_percent_and_never_negative() {
+        for failures in 0..10 {
+            for id in ["a", "session-b", "01a09a24-e09d-78a2-acfc-6731170068b2"] {
+                let base = backoff_after(failures).as_millis() as i64;
+                let jittered = jittered_backoff(failures, id).as_millis() as i64;
+                let span = base / 5;
+                assert!(jittered >= 0);
+                assert!((jittered - base).abs() <= span.max(1));
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_decorrelates_sessions_sharing_a_failure_count() {
+        let a = jittered_backoff(3, "session-a");
+        let b = jittered_backoff(3, "session-b");
+        assert_ne!(a, b, "distinct sessions should not retry in lockstep");
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionApp {
     pub sessions: Sessions,
@@ -64,7 +132,11 @@ impl SessionApp {
                     for session in sessions {
                         if workers.len() >= 64 { break; }
                         if active.contains(&session.id) { continue; }
-                        let retry_after = if session.closed_at.is_some() { Duration::from_secs(5) } else { Duration::from_millis(500) };
+                        let retry_after = if session.closed_at.is_some() {
+                            Duration::from_secs(5)
+                        } else {
+                            jittered_backoff(session.dispatch_failures, &session.id)
+                        };
                         if last.get(&session.id).is_some_and(|at: &tokio::time::Instant| at.elapsed() < retry_after) { continue; }
                         let id = session.id.clone();
                         let worker = self.clone();
@@ -114,7 +186,20 @@ impl SessionApp {
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        tracing::warn!(session=%session.id,code=%error.code,"workspace lease renewal deferred")
+                        tracing::warn!(session=%session.id,code=%error.code,"workspace lease renewal deferred");
+                        // The manager already told us there is no implicit
+                        // reacquisition (crates/akh-session-services/src/executor.rs
+                        // renew_lease); waiting longer cannot fix it. Escalate
+                        // now instead of warning forever with the sandbox
+                        // still held.
+                        if error.code == "expired"
+                            && let Err(force_error) = self.sessions.force_retire(
+                                &session.id,
+                                "workspace lease expired; the executor will not implicitly reacquire it",
+                            )
+                        {
+                            tracing::error!(session=%session.id,code=%force_error.code,"forced retirement after lease expiry failed");
+                        }
                     }
                 }
                 self.sessions
@@ -125,6 +210,9 @@ impl SessionApp {
         if let Err(error) = self.publish_completions(&session).await {
             tracing::warn!(session=%session.id,code=%error.code,"cognitive completion delivery deferred");
         }
+        if let Err(error) = self.reconcile_progress(&session) {
+            tracing::warn!(session=%session.id,code=%error.code,"session progress reconciliation deferred");
+        }
         if !session.turns.iter().any(|t| !t.status.terminal()) {
             return Ok(());
         }
@@ -132,11 +220,16 @@ impl SessionApp {
             tracing::warn!(session=%session.id,code=%error.code,"session reconciliation deferred");
             self.sessions.store.transaction(|tx| {
                 let k = key("dispatch_error", &[&session.id]);
+                let mut current: SessionRecord = tx
+                    .get(&key("session", &[&session.id]))?
+                    .ok_or_else(|| Fault::missing("session disappeared"))?;
+                // Tracked on every failure, not only the first with a new
+                // message, so the dispatcher's retry backoff (jittered_backoff)
+                // keeps climbing for as long as the same problem persists
+                // instead of resetting to the fast retry every tick.
+                current.dispatch_failures = current.dispatch_failures.saturating_add(1);
                 if tx.get::<Fault>(&k)?.as_ref() != Some(&error) {
                     tx.put(&k, &error)?;
-                    let mut current: SessionRecord = tx
-                        .get(&key("session", &[&session.id]))?
-                        .ok_or_else(|| Fault::missing("session disappeared"))?;
                     crate::session::append_event(
                         tx,
                         &mut current,
@@ -144,9 +237,88 @@ impl SessionApp {
                         "dispatch_deferred",
                         json!({"error":error}),
                     )?;
+                } else {
+                    tx.put(&key("session", &[&session.id]), &current)?;
                 }
                 Ok(())
             })?;
+        } else if session.dispatch_failures != 0 {
+            self.sessions.store.transaction(|tx| {
+                let mut current: SessionRecord = tx
+                    .get(&key("session", &[&session.id]))?
+                    .ok_or_else(|| Fault::missing("session disappeared"))?;
+                current.dispatch_failures = 0;
+                tx.put(&key("session", &[&session.id]), &current)
+            })?;
+        }
+        Ok(())
+    }
+    /// Guarantee forward progress independent of any external caller. Runs on
+    /// every tick but is throttled to `reconciliation_interval_ms` per
+    /// session so it costs one durable read per tick, not one transaction:
+    /// - A session that never made progress (no turn ever dispatched, an
+    ///   allocated sandbox nobody is driving) is force-retired once it has
+    ///   been quiet longer than `session_stall_threshold_ms`, so its caller
+    ///   gets a terminal status instead of "provisioning" forever.
+    /// - A session already retiring is finalized (closed + eligible for
+    ///   sandbox release) as soon as its turns are terminal, and any turn
+    ///   still waiting on a runtime that never confirmed cancellation is
+    ///   forced terminal after `retirement_cancel_grace_ms` so retirement
+    ///   cannot stay "pending" solely because a remote runtime is
+    ///   unreachable.
+    fn reconcile_progress(&self, session: &SessionRecord) -> Result<()> {
+        if session.closed_at.is_some() {
+            return Ok(());
+        }
+        let config = &self.sessions.config;
+        let k = key("reconciliation_checked", &[&session.id]);
+        if self
+            .sessions
+            .store
+            .get::<u64>(&k)?
+            .is_some_and(|at| now_ms().saturating_sub(at) < config.reconciliation_interval_ms)
+        {
+            return Ok(());
+        }
+        self.sessions.store.transaction(|tx| tx.put(&k, &now_ms()))?;
+        let mut retiring = session.retirement.is_some();
+        if !retiring
+            && crate::session::is_stalled(
+                session.last_progress_at,
+                now_ms(),
+                config.session_stall_threshold_ms,
+            )
+        {
+            tracing::warn!(session=%session.id,"session made no progress within the stall threshold; forcing retirement");
+            self.sessions.force_retire(
+                &session.id,
+                "no progress observed within the reconciliation stall threshold",
+            )?;
+            retiring = true;
+        }
+        if !retiring {
+            return Ok(());
+        }
+        // Re-read: `force_retire` just above may be what set retirement, and
+        // a session with no turns at all can go straight from admitted to
+        // closed in this same pass instead of waiting for another sweep.
+        let current: SessionRecord = self
+            .sessions
+            .store
+            .get(&key("session", &[&session.id]))?
+            .ok_or_else(|| Fault::missing("session disappeared"))?;
+        if let Some(retirement) = &current.retirement
+            && crate::session::should_force_cancel(
+                retirement.at,
+                now_ms(),
+                config.retirement_cancel_grace_ms,
+            )
+        {
+            self.sessions
+                .force_cancel_unreachable(&session.id, config.retirement_cancel_grace_ms)?;
+        }
+        if self.sessions.finalize_retirement_if_ready(&session.id)? {
+            tracing::info!(session=%session.id,"retirement finalized by reconciliation sweep");
         }
         Ok(())
     }
@@ -1024,5 +1196,292 @@ mod lifecycle_tests {
             "a proven absent allocation needs no release"
         );
         server.abort();
+    }
+
+    fn lifecycle_test_config(dir: &std::path::Path, token: &std::path::Path) -> Value {
+        json!({
+            "service_id":"sessions","listen":"127.0.0.1:0","data_dir":dir,
+            "principals":[{"id":"user","token_file":token,"roles":["client"],"akhs":["test"]}],
+            "akhs":{"test":{"instructions":"test","runtime":{"runtime":"runtime","profile":"test","revision":"1","kind":"codex","execution_mode":"colocated"},"workspace_profiles":["local"]}}
+        })
+    }
+
+    /// Reproduces the incident this module exists to fix: a session is
+    /// admitted (in the real outage, a sandbox was already allocated to it)
+    /// and then never receives a turn — because the pod that would have
+    /// dispatched one was rescheduled mid-flight. With no non-terminal turn,
+    /// the old dispatcher had nothing that would ever call `dispatch()`
+    /// again, so the session sat in "provisioning" with zero witnesses
+    /// indefinitely. The stall sweep must notice and force it to a terminal
+    /// state instead.
+    #[tokio::test]
+    async fn stalled_session_with_no_turns_is_force_retired_and_closed_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let config: Config =
+            serde_json::from_value(lifecycle_test_config(dir.path(), &token)).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        // Simulate the pod-reschedule gap: no event has touched this session
+        // since long before the stall threshold.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord =
+                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.last_progress_at = 0;
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        app.tick_session(app.sessions.get(&principal, &session.id).unwrap())
+            .await
+            .unwrap();
+        let after = app.sessions.get(&principal, &session.id).unwrap();
+        assert!(
+            after.retirement.is_some(),
+            "a session with no progress must be force-retired, never left provisioning forever"
+        );
+        assert!(
+            after.closed_at.is_some(),
+            "with zero turns there is nothing to wait on; it should close in the same pass"
+        );
+    }
+
+    /// A session whose only turn is mid-flight on an unreachable runtime
+    /// (the cross-cluster case in the incident: the relay could not reach
+    /// the runtime to confirm cancellation). Retirement must still complete
+    /// once the bounded grace period elapses, rather than staying
+    /// "pending_central_retirement" forever.
+    #[tokio::test]
+    async fn retirement_completes_once_an_unreachable_runtime_stops_blocking_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let mut value = lifecycle_test_config(dir.path(), &token);
+        value["retirement_cancel_grace_ms"] = json!(0);
+        let config: Config = serde_json::from_value(value).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        app.sessions
+            .submit(
+                &principal,
+                &session.id,
+                &SubmitInput {
+                    request_id: "turn".into(),
+                    text: "do work".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        app.sessions
+            .retire(
+                &principal,
+                &session.id,
+                None,
+                &RetireSession {
+                    request_id: "retire".into(),
+                    reason: "operator requested shutdown".into(),
+                },
+            )
+            .unwrap();
+        // Advance the turn past Queued (which `retire` already cancels
+        // directly) into a dispatched state that only the unreachable
+        // runtime could otherwise confirm as cancelled.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord =
+                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.turns[0].status = TurnStatus::Running;
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let stuck = app.sessions.get(&principal, &session.id).unwrap();
+        assert!(
+            stuck.turns[0].cancel_requested && !stuck.turns[0].status.terminal(),
+            "the turn must look exactly like one waiting on a runtime that never answered"
+        );
+        app.tick_session(stuck).await.unwrap();
+        let after = app.sessions.get(&principal, &session.id).unwrap();
+        assert!(
+            after.turns[0].status.terminal(),
+            "an unconfirmed cancellation past the grace period must close locally"
+        );
+        assert_eq!(after.turns[0].error.as_ref().map(|e| e.code.as_str()), Some("unknown_outcome"));
+        assert!(
+            after.closed_at.is_some(),
+            "retirement must finalize once every turn is terminal, with no relay involved"
+        );
+    }
+
+    /// The other literal shape of the incident: a turn was genuinely
+    /// dispatched, the runtime pod it was running on got rescheduled, and the
+    /// runtime's own restart-time scan (`Runtime::new`) marked that job
+    /// `Unknown` — which `dispatch()`/`apply_job` faithfully copies onto the
+    /// turn. Nobody ever called `retire`; Anima was still waiting on this
+    /// session as "provisioning". The stall sweep, not an explicit
+    /// cancellation, must be what force-retires and closes it.
+    #[tokio::test]
+    async fn a_turn_left_unknown_by_a_restarted_runtime_is_force_retired_with_no_explicit_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("token");
+        std::fs::write(&token, "private-lifecycle-test-credential").unwrap();
+        let mut value = lifecycle_test_config(dir.path(), &token);
+        // Keep the default (non-zero) grace period so forcing retirement and
+        // forcing the unconfirmed cancellation are observably two different
+        // passes below; the grace clock is backdated between them instead of
+        // zeroed globally (a zeroed grace collapses both into one pass, which
+        // is exactly what `retirement_completes_once_an_unreachable_runtime_stops_blocking_it`
+        // already covers).
+        // Every reconciliation pass in this test is driven by an explicit
+        // `tick_session` call rather than the dispatcher's own timer, so the
+        // per-session throttle must not swallow the second pass.
+        value["reconciliation_interval_ms"] = json!(0);
+        let config: Config = serde_json::from_value(value).unwrap();
+        let principal = config.principals[0].clone();
+        let app = SessionApp::new(
+            Arc::new(config),
+            Store::open(&dir.path().join("state.redb")).unwrap(),
+        )
+        .unwrap();
+        let session = app
+            .sessions
+            .create(
+                &principal,
+                &NewSession {
+                    request_id: "create".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        app.sessions
+            .submit(
+                &principal,
+                &session.id,
+                &SubmitInput {
+                    request_id: "turn".into(),
+                    text: "do work".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        // `dispatch()` binds a workspace before ever asking for a job; mirror
+        // that so `next_job` has one to dispatch against.
+        app.sessions
+            .bind_workspace(
+                &session.id,
+                WorkspaceBinding {
+                    id: "workspace".into(),
+                    sandbox_id: "sandbox".into(),
+                    executor: "executor".into(),
+                    generation: 1,
+                    site: "test".into(),
+                    root: "/workspaces/test".into(),
+                    platform: "linux".into(),
+                    confinement: "fixture".into(),
+                },
+            )
+            .unwrap();
+        let request = app.sessions.next_job(&session.id).unwrap().unwrap();
+        app.sessions
+            .apply_job(&RuntimeJob {
+                request,
+                status: TurnStatus::Unknown,
+                provider_session: None,
+                output: None,
+                error: Some(Fault::new(
+                    "unknown_outcome",
+                    "runtime restarted before a durable terminal result",
+                )),
+                events: vec![],
+            })
+            .unwrap();
+        // Simulate the pod-reschedule gap: no further event since long
+        // before the stall threshold, and critically, no `retire` call.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord =
+                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                record.last_progress_at = 0;
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let stuck = app.sessions.get(&principal, &session.id).unwrap();
+        assert_eq!(stuck.turns[0].status, TurnStatus::Unknown);
+        assert!(stuck.retirement.is_none());
+        // First pass: retirement did not exist at the top of this call, so it
+        // can only be discovered and forced here — the still-fresh grace
+        // period means the Unknown turn cannot be force-cancelled yet, so
+        // finalizing has to wait for a later pass.
+        app.tick_session(stuck).await.unwrap();
+        let mid = app.sessions.get(&principal, &session.id).unwrap();
+        assert!(
+            mid.retirement.is_some(),
+            "no owner ever asked to retire this session; staleness alone must force it"
+        );
+        assert!(
+            mid.closed_at.is_none(),
+            "the grace period has not elapsed yet; the unconfirmed turn cannot be closed this soon"
+        );
+        // Simulate the grace period elapsing (a real deployment would just
+        // wait; backdating keeps this test fast and deterministic).
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut record: SessionRecord =
+                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                let mut retirement = record.retirement.clone().unwrap();
+                retirement.at = 0;
+                record.retirement = Some(retirement);
+                tx.put(&key("session", &[&session.id]), &record)
+            })
+            .unwrap();
+        let mid = app.sessions.get(&principal, &session.id).unwrap();
+        // Second pass: the grace period has now elapsed, so the still-Unknown
+        // turn — never confirmed cancelled by any runtime — is force-cancelled
+        // locally and the session finalized.
+        app.tick_session(mid).await.unwrap();
+        let after = app.sessions.get(&principal, &session.id).unwrap();
+        assert!(after.turns[0].status.terminal());
+        assert!(
+            after.closed_at.is_some(),
+            "retirement must finalize even though no runtime ever confirmed this turn"
+        );
     }
 }
