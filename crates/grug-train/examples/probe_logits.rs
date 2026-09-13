@@ -58,9 +58,9 @@ use grug_train::tokenizer::Vocab;
 use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::{TinyTransformer, TinyTransformerConfig};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 /// Same corpus/stream constants as `forensic_batches.rs` / `train_rule.rs`'s
@@ -322,13 +322,13 @@ fn main() {
     // --- vendor-agnostic GPU device seam (ROCm under --features gpu, CUDA
     // under --features cuda), CPU otherwise -- identical cfg pattern to
     // train_rule.rs so this one source builds unmodified on either box. ---
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = {
         let d = grug_train::gpu_device();
         println!("probe_logits: GPU backend, device: {d:?}");
         d
     };
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = {
         println!("probe_logits: CPU backend");
         Default::default()

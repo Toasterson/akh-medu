@@ -18,16 +18,18 @@ use std::time::Instant;
 const CANVAS: usize = 48;
 const GLYPHS: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 type ProbeBackend = grug_train::GpuAutodiffBackend;
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 type ProbeBackend = grug_train::CpuAutodiffBackend;
 
 #[cfg(feature = "cuda")]
 const BACKEND_NAME: &str = "cuda";
 #[cfg(all(feature = "gpu", not(feature = "cuda")))]
 const BACKEND_NAME: &str = "rocm";
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+const BACKEND_NAME: &str = "metal";
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 const BACKEND_NAME: &str = "cpu-ndarray";
 
 #[derive(Module, Debug)]
@@ -119,9 +121,9 @@ fn run_probe(
     learning_rate: f64,
 ) -> Result<ProbeResult, Box<dyn Error>> {
     type B = ProbeBackend;
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = grug_train::gpu_device();
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = Default::default();
     B::seed(&device, 90_000 + glyph_scale as u64);
     let characters: Vec<char> = GLYPHS.chars().collect();

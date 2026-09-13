@@ -21,16 +21,18 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 type TrainingBackend = grug_train::GpuAutodiffBackend;
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 type TrainingBackend = grug_train::CpuAutodiffBackend;
 
 #[cfg(feature = "cuda")]
 const BACKEND_NAME: &str = "cuda";
 #[cfg(all(feature = "gpu", not(feature = "cuda")))]
 const BACKEND_NAME: &str = "rocm";
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+const BACKEND_NAME: &str = "metal";
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 const BACKEND_NAME: &str = "cpu-ndarray";
 
 struct PreparedBatch<B: AutodiffBackend> {
@@ -198,9 +200,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .max()
         .unwrap_or(0);
 
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = grug_train::gpu_device();
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = Default::default();
     type B = TrainingBackend;
     B::seed(&device, CORPUS_SEED);

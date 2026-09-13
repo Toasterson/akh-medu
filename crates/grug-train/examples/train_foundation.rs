@@ -34,9 +34,9 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 const TOKEN_CACHE_SCHEMA_VERSION: u32 = 1;
@@ -168,6 +168,14 @@ struct Args {
     #[arg(long)]
     resume: Option<PathBuf>,
 
+    /// Packed training/eval context in tokens for this run. Defaults to the
+    /// model shape's `max_seq_len`; must not exceed it. Lets an 8k-shape
+    /// (`small_8k`, RoPE) train its early stages at 2048/4096 on a
+    /// memory-bound local GPU (ADR 106, Phase 51 P6) without changing the
+    /// checkpointed shape -- the shape, not this flag, governs inference.
+    #[arg(long)]
+    context: Option<usize>,
+
     /// Verify/decontamination lineage, train BPE, and materialize the packed
     /// token cache without allocating model weights.
     #[arg(long)]
@@ -264,13 +272,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     validate_args(&args)?;
 
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = {
         let device = grug_train::gpu_device();
         println!("train_foundation: CubeCL GPU backend, device={device:?}");
         device
     };
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = {
         println!("train_foundation: CPU backend (burn-ndarray)");
         Default::default()
@@ -336,6 +344,16 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let token_cache_path = args.artifacts_dir.join("token-cache.json");
     let token_cache_hash = fingerprint_artifact_file(&token_cache_path)?;
     let shape = KnowledgeModelShape::from_config(&args.model.config(tokenizer.vocab_size()));
+    let context = match args.context {
+        None => shape.max_seq_len,
+        Some(context) if context >= 2 && context <= shape.max_seq_len => context,
+        Some(context) => {
+            return Err(invalid_data(format!(
+                "--context {context} must be in 2..={} for model {}",
+                shape.max_seq_len, args.model
+            )));
+        }
+    };
     println!(
         "train_foundation: tokenizer={} vocab={} bpe_pretokenizer={} bpe_min_hex_run={} \
          tokens train={} eval={} context={}",
@@ -345,14 +363,14 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
         args.bpe_min_hex_run,
         token_cache.training.tokens,
         token_cache.evaluation.tokens,
-        shape.max_seq_len
+        context
     );
-    if token_cache.training.tokens <= shape.max_seq_len as u64 + 1
-        || token_cache.evaluation.tokens <= shape.max_seq_len as u64 + 1
+    if token_cache.training.tokens <= context as u64 + 1
+        || token_cache.evaluation.tokens <= context as u64 + 1
     {
         return Err(invalid_data(format!(
             "packed corpus is too small for context {} (train={}, eval={})",
-            shape.max_seq_len, token_cache.training.tokens, token_cache.evaluation.tokens
+            context, token_cache.training.tokens, token_cache.evaluation.tokens
         )));
     }
     if args.validate_only {
@@ -447,7 +465,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
     let train_log = args.artifacts_dir.join("train.jsonl");
     let eval_log = args.artifacts_dir.join("eval_causal.jsonl");
     let started = Instant::now();
-    let tokens_per_step = (args.batch_size * shape.max_seq_len) as u64;
+    let tokens_per_step = (args.batch_size * context) as u64;
     let mut loss_ema = f32::NAN;
     let mut grad_ema = f32::NAN;
     let mut skipped = 0usize;
@@ -459,10 +477,9 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
             token_cache.training.tokens,
             step,
             args.batch_size,
-            shape.max_seq_len,
+            context,
         )?;
-        let batch =
-            build_causal_batch::<B>(&sequences, tokenizer.pad_id(), shape.max_seq_len, &device)?;
+        let batch = build_causal_batch::<B>(&sequences, tokenizer.pad_id(), context, &device)?;
         let lr = learning_rate_at_step(
             step,
             args.steps,
@@ -534,7 +551,7 @@ fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn 
                 token_cache.evaluation.tokens,
                 args.eval_batches,
                 args.batch_size,
-                shape.max_seq_len,
+                context,
                 &device,
             )?;
             let perplexity = f64::from(loss).min(80.0).exp();

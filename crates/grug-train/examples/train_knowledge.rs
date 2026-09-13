@@ -49,9 +49,9 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
@@ -308,13 +308,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     validate_args(&args)?;
 
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = {
         let device = grug_train::gpu_device();
         println!("train_knowledge: CubeCL GPU backend, device={device:?}");
         device
     };
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = {
         println!("train_knowledge: CPU backend (burn-ndarray)");
         Default::default()

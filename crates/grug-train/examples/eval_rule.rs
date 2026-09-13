@@ -27,9 +27,9 @@ use grug_train::train::{init_training, to_eval_model};
 use grug_train::transformer::TinyTransformerConfig;
 use grug_train::{BpeTokenizer, checkpoint};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[derive(Parser, Debug)]
@@ -115,13 +115,13 @@ fn main() {
     // Vendor-agnostic GPU device (ROCm under `--features gpu`, CUDA under
     // `--features cuda`) so this example builds unchanged on the local 7900 XTX
     // and on an H100 cloud box.
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = {
         let d = grug_train::gpu_device();
         println!("eval_rule: GPU backend, device: {d:?}");
         d
     };
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = {
         println!("eval_rule: CPU backend");
         Default::default()

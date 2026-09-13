@@ -1146,7 +1146,7 @@ impl<B: Backend> TinyTransformer<B> {
 mod tests {
     use super::*;
     use crate::CpuBackend;
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     use crate::{GpuBackend, gpu_device};
     use burn::tensor::TensorData;
 
@@ -1225,7 +1225,7 @@ mod tests {
         assert_eq!(cache.next_position, 5);
     }
 
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     #[test]
     fn cached_decode_matches_full_forward_on_the_gpu_backend() {
         let device = gpu_device();

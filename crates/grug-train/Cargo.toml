@@ -81,3 +81,18 @@ cuda = ["burn/cuda"]
 # benefit at the shorter contexts most runs still use. See
 # `CpuAutodiffBackend`/`GpuAutodiffBackend` in `lib.rs`.
 grad_checkpointing = []
+
+# Apple-silicon local training lane (ADR 106, Phase 51 P6.1): opt-in Metal
+# GPU backend for Macs (this box: M2, 16 GB, Metal 4), so a training run
+# does not require the 7900 XTX (`gpu`) or a cloud NVIDIA box (`cuda`).
+# Burn 0.21's `metal` feature is the `burn-wgpu` (CubeCL) backend built
+# against the Metal Shading Language compiler target -- same forward+backward
+# CubeCL story as `gpu`/`cuda`, routed through `wgpu` instead of a vendor
+# runtime, so no extra toolchain install is needed beyond Xcode's Metal
+# support already present on macOS.
+#   local AMD 7900 XTX : --features gpu
+#   NVIDIA cloud       : --features cuda
+#   local Apple Silicon: --features metal
+# Mutually exclusive with `gpu` and `cuda` -- pick exactly one. See
+# `GpuBackend`/`GpuAutodiffBackend`/`gpu_device()` in `lib.rs`.
+metal = ["burn/metal"]

@@ -12,10 +12,10 @@ use grug_data::{
     TOOL_CONTRACT_EXAM_SCHEMA_VERSION, ToolContractEvaluationMode, ToolContractExamEvidence,
     ToolContractExamSet, score_tool_contract_exam,
 };
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuKnowledgeModel as ActiveKnowledgeModel;
 use grug_train::DecodingMode;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuKnowledgeModel as ActiveKnowledgeModel;
 use serde::Serialize;
 
@@ -78,9 +78,9 @@ impl From<Decoding> for DecodingMode {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let runner = ActiveKnowledgeModel::load_candidate(&args.bundle)?;
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let runner = ActiveKnowledgeModel::load_candidate_gpu(&args.bundle)?;
     let exam: ToolContractExamSet =
         serde_json::from_reader(BufReader::new(File::open(&args.exam)?))?;

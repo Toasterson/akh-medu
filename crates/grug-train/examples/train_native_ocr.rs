@@ -37,16 +37,18 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
 
 #[cfg(feature = "cuda")]
 const BACKEND_NAME: &str = "cuda";
 #[cfg(all(feature = "gpu", not(feature = "cuda")))]
 const BACKEND_NAME: &str = "rocm";
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+const BACKEND_NAME: &str = "metal";
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 const BACKEND_NAME: &str = "cpu-ndarray";
 
 #[derive(Parser, Debug)]
@@ -425,9 +427,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let audit_cases = load_cases(&args.vision_audit_manifest, audit_manifests, &args)?;
 
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = grug_train::gpu_device();
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = Default::default();
     type B = ActiveBackend;
     B::seed(&device, args.seed);

@@ -13,9 +13,9 @@ use grug_train::{
     verify_foundation_bundle,
 };
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 use grug_train::GpuBackend as ActiveBackend;
 
 #[derive(Debug, Parser)]
@@ -39,9 +39,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.prompt.trim().is_empty() || args.max_new_tokens == 0 || args.repeats == 0 {
         return Err("prompt, max-new-tokens and repeats must be non-empty/positive".into());
     }
-    #[cfg(not(any(feature = "gpu", feature = "cuda")))]
+    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
     let device = Default::default();
-    #[cfg(any(feature = "gpu", feature = "cuda"))]
+    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     let device = grug_train::gpu_device();
     run::<ActiveBackend>(args, device)
 }

@@ -16,9 +16,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 type CandidateModel = grug_train::CpuMultimodalModel;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 type CandidateModel = grug_train::GpuMultimodalModel;
 
 #[derive(Parser, Debug)]
@@ -239,12 +239,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 fn load_candidate(path: &Path) -> Result<CandidateModel, grug_train::MultimodalRuntimeError> {
     CandidateModel::load_candidate(path)
 }
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 fn load_candidate(path: &Path) -> Result<CandidateModel, grug_train::MultimodalRuntimeError> {
     CandidateModel::load_candidate_gpu(path)
 }

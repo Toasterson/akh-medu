@@ -23,14 +23,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 type CandidateModel = grug_train::CpuMultimodalModel;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 type CandidateModel = grug_train::GpuMultimodalModel;
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 type BaseTextModel = grug_train::CpuKnowledgeModel;
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 type BaseTextModel = grug_train::GpuKnowledgeModel;
 
 #[derive(Parser, Debug)]
@@ -289,22 +289,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 fn load_candidate(path: &Path) -> Result<CandidateModel, grug_train::MultimodalRuntimeError> {
     CandidateModel::load_candidate(path)
 }
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 fn load_candidate(path: &Path) -> Result<CandidateModel, grug_train::MultimodalRuntimeError> {
     CandidateModel::load_candidate_gpu(path)
 }
 
-#[cfg(not(any(feature = "gpu", feature = "cuda")))]
+#[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 fn load_base(path: &Path) -> Result<BaseTextModel, grug_train::KnowledgeRuntimeError> {
     BaseTextModel::load_active(path)
 }
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 fn load_base(path: &Path) -> Result<BaseTextModel, grug_train::KnowledgeRuntimeError> {
     BaseTextModel::load_active_gpu(path)
 }

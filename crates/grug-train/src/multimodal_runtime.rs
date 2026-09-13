@@ -102,7 +102,7 @@ pub struct MultimodalModel<B: Backend> {
 
 pub type CpuMultimodalModel = MultimodalModel<CpuBackend>;
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub type GpuMultimodalModel = MultimodalModel<crate::GpuBackend>;
 
 impl MultimodalModel<CpuBackend> {
@@ -127,7 +127,7 @@ impl MultimodalModel<CpuBackend> {
     }
 }
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 impl MultimodalModel<crate::GpuBackend> {
     pub fn load_active_gpu(bundle: impl AsRef<Path>) -> Result<Self, MultimodalRuntimeError> {
         Self::load_manifest_with_device(

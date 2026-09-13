@@ -65,7 +65,7 @@ pub use generate::{
     generate_from_prompt_ids_cached, generate_from_prompt_ids_cached_constrained, generate_ptr,
     generate_ptr_constrained,
 };
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub use knowledge_runtime::GpuKnowledgeModel;
 pub use knowledge_runtime::{
     CpuKnowledgeModel, DecodingMode, KnowledgeModel, KnowledgeRuntimeError,
@@ -87,7 +87,7 @@ pub use multimodal::{
     MultimodalAuditEvidence, MultimodalModelArtifact, MultimodalModelCertification,
     MultimodalNetworkDeniedReplayEvidence, MultimodalTextRetentionEvidence, VisionCorpusLineage,
 };
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub use multimodal_runtime::GpuMultimodalModel;
 pub use multimodal_runtime::{
     CpuMultimodalModel, MultimodalModel, MultimodalRuntimeError, NativePromptImage,
@@ -198,11 +198,46 @@ pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
 #[cfg(all(feature = "cuda", not(feature = "gpu"), feature = "grad_checkpointing"))]
 pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
 
+/// The GPU inference backend under the `metal` feature (ADR 106, Phase 51
+/// P6.1): Burn's `burn-wgpu` (CubeCL) backend, targeting Apple Silicon via
+/// the Metal Shading Language compiler target. Same forward+backward CubeCL
+/// story as the ROCm/CUDA paths, but routed through `wgpu` (Burn's
+/// `metal` feature = `["wgpu", "burn-wgpu/metal", ...]`) instead of a
+/// vendor-specific runtime -- no separate toolchain install beyond the
+/// Metal support macOS/Xcode already ships.
+///
+/// `burn::backend::Metal<F>` is itself a type alias for
+/// `burn::backend::Wgpu<F, i32, u8>` (`burn-wgpu` picks the Metal graphics
+/// API automatically on macOS via `AutoGraphicsApi`/`WgpuDevice::DefaultDevice`
+/// -- see [`gpu_device`] below).
+/// **Mutually exclusive with `gpu` and `cuda`** — enable exactly one.
+#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+pub type GpuBackend = burn::backend::Metal<f32>;
+
+/// The Metal *training* backend: [`GpuBackend`] wrapped in `Autodiff`. See
+/// [`CpuAutodiffBackend`] for the `grad_checkpointing` feature this alias
+/// also honors.
+#[cfg(all(
+    feature = "metal",
+    not(feature = "gpu"),
+    not(feature = "cuda"),
+    not(feature = "grad_checkpointing")
+))]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
+/// See the non-`grad_checkpointing` variant above.
+#[cfg(all(
+    feature = "metal",
+    not(feature = "gpu"),
+    not(feature = "cuda"),
+    feature = "grad_checkpointing"
+))]
+pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
+
 /// The default device for whichever GPU backend is enabled — the seam that
 /// keeps example/binary code **vendor-agnostic**: call `gpu_device()` instead
-/// of naming `RocmDevice`/`CudaDevice`, and the same source builds for the
-/// local 7900 XTX (`--features gpu`) and an NVIDIA cloud box
-/// (`--features cuda`).
+/// of naming `RocmDevice`/`CudaDevice`/`WgpuDevice`, and the same source
+/// builds for the local 7900 XTX (`--features gpu`), an NVIDIA cloud box
+/// (`--features cuda`), and a local Apple-silicon Mac (`--features metal`).
 #[cfg(feature = "gpu")]
 pub fn gpu_device() -> burn::backend::rocm::RocmDevice {
     Default::default()
@@ -214,12 +249,32 @@ pub fn gpu_device() -> burn::backend::cuda::CudaDevice {
     Default::default()
 }
 
-// Enabling both vendor backends at once is a configuration error: the
-// `GpuBackend`/`GpuAutodiffBackend`/`gpu_device` items would collide, and only
-// one CubeCL runtime can own the process's device context. Fail loudly at
-// compile time rather than producing a confusing type error.
+/// See the `gpu` variant above. `WgpuDevice::default()` is
+/// `WgpuDevice::DefaultDevice`, which asks `wgpu` for the best available
+/// device under the active graphics API -- on macOS that resolves to the
+/// system's Metal device, no index/selection needed for the single-GPU
+/// Apple-silicon boxes this feature targets.
+#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+pub fn gpu_device() -> burn::backend::wgpu::WgpuDevice {
+    Default::default()
+}
+
+// Enabling more than one vendor backend at once is a configuration error:
+// the `GpuBackend`/`GpuAutodiffBackend`/`gpu_device` items would collide, and
+// only one CubeCL runtime can own the process's device context. Fail loudly
+// at compile time rather than producing a confusing type error.
 #[cfg(all(feature = "gpu", feature = "cuda"))]
 compile_error!(
     "grug-train: features `gpu` (ROCm/AMD) and `cuda` (NVIDIA) are mutually exclusive — \
      enable exactly one (local 7900 XTX: --features gpu; NVIDIA cloud: --features cuda)."
+);
+#[cfg(all(feature = "gpu", feature = "metal"))]
+compile_error!(
+    "grug-train: features `gpu` (ROCm/AMD) and `metal` (Apple Silicon) are mutually exclusive \
+     — enable exactly one (local 7900 XTX: --features gpu; local Apple Silicon: --features metal)."
+);
+#[cfg(all(feature = "cuda", feature = "metal"))]
+compile_error!(
+    "grug-train: features `cuda` (NVIDIA) and `metal` (Apple Silicon) are mutually exclusive — \
+     enable exactly one (NVIDIA cloud: --features cuda; local Apple Silicon: --features metal)."
 );

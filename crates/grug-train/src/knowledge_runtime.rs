@@ -65,7 +65,7 @@ pub struct KnowledgeModel<B: Backend> {
 
 pub type CpuKnowledgeModel = KnowledgeModel<CpuBackend>;
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 pub type GpuKnowledgeModel = KnowledgeModel<crate::GpuBackend>;
 
 /// Hash- and path-verified model bundle shared by serving, offline evaluation,
@@ -189,7 +189,7 @@ impl KnowledgeModel<CpuBackend> {
     }
 }
 
-#[cfg(any(feature = "gpu", feature = "cuda"))]
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 impl KnowledgeModel<crate::GpuBackend> {
     pub fn load_active_gpu(bundle: impl AsRef<Path>) -> Result<Self, KnowledgeRuntimeError> {
         Self::load_manifest_with_device(
