@@ -4,6 +4,9 @@ A neuro-symbolic AI engine made to run on the CPU. Made for people. Not for robb
 
 **[Documentation](https://akh-medu.dev)**
 
+For per-akh OpenAI API, Codex and Claude agent sessions, see
+[coding-agent backends](docs/agent-backends.md).
+
 akh-medu combines hyperdimensional computing (Vector Symbolic Architecture)
 with knowledge graphs and symbolic reasoning. It runs entirely on the CPU
 with no LLM dependency, no GPU requirement, and no external NLP models.

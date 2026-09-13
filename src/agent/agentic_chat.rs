@@ -432,6 +432,19 @@ impl Agent {
         is_autonomous_dispatch: bool,
         conversation_state: &std::sync::Mutex<ConversationState>,
     ) -> Option<AgenticTurnOutcome> {
+        if let Some(runtime) = &self.agent_runtime {
+            return Some(self.run_runtime_turn(
+                runtime,
+                engine,
+                agent_id,
+                user_prompt,
+                prompt_images,
+                sink,
+                cancel,
+                is_autonomous_dispatch,
+                conversation_state,
+            ));
+        }
         // Resolve the akh's chat/agentic backing (ADR 070): an explicitly
         // configured backend (e.g. Candle) wins; otherwise wrap the Ollama model
         // manager. Either way the loop is backend-agnostic. `None` ⇒ no usable
@@ -1480,7 +1493,7 @@ impl Agent {
     /// **The payload schema is LOCKED** — Wave 2's sleep-cycle harvest phase
     /// parses it verbatim (ADR 091 / the transcript-capture plan):
     /// `{v, ts, workspace, model, user_prompt, agent_answer, tools: [{tool, ok}]}`.
-    fn emit_turn_wal(
+    pub(crate) fn emit_turn_wal(
         &self,
         engine: &Engine,
         agent_id: &str,
@@ -1488,15 +1501,24 @@ impl Agent {
         answer: &str,
         tools: &[Value],
     ) {
+        let model = self.model_manager.as_deref().map(|m| m.model());
+        self.emit_turn_wal_with_model(engine, agent_id, user_prompt, answer, tools, model);
+    }
+
+    /// External session runtimes supply the model returned by their provider,
+    /// without mislabeling the turn as the dormant Ollama manager's model.
+    pub(crate) fn emit_turn_wal_with_model(
+        &self,
+        engine: &Engine,
+        agent_id: &str,
+        user_prompt: &str,
+        answer: &str,
+        tools: &[Value],
+        model: Option<&str>,
+    ) {
         if !self.transcript_capture_enabled() {
             return;
         }
-        // Cheap, in-scope model name: the Ollama-backed path's model manager
-        // names the pinned model directly. Other backings (e.g. Candle, set
-        // via `chat_backend`) don't expose a model name through the
-        // `ChatBackend` trait today, so this is `None` for them rather than
-        // plumbing new state through the trait for this slice.
-        let model = self.model_manager.as_deref().map(|m| m.model());
         let payload = json!({
             "v": 1,
             "ts": rfc3339_now(),
@@ -1516,7 +1538,7 @@ impl Agent {
 /// with a JSON-Schema `parameters` object derived from the manifest's parameter
 /// list. Execution is still gated by the permission policy, so exposing every
 /// tool here is safe — a dangerous one the model picks is denied at dispatch.
-fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
+pub(crate) fn ollama_tool_catalog(registry: &ToolRegistry) -> Vec<Value> {
     // `list_advertised_manifests` (ADR 076: hides unadvertised tools) is HashMap-backed
     // (nondeterministic order); sort by name so the catalog — and any `AKH_AGENT_MAX_TOOLS`
     // truncation of it — is reproducible across runs.

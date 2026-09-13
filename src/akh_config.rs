@@ -463,6 +463,10 @@ pub enum ChatBacking {
     /// this backing (an akh that selects it without one is a config error).
     #[serde(rename = "openai")]
     OpenAi,
+    /// A local Codex app-server session, with its own coding-agent loop.
+    Codex,
+    /// A local Claude Agent SDK session, with its own coding-agent loop.
+    Claude,
     /// Akh-Medu's own compact Burn transformer bundle (`active-model.json`).
     Grug,
 }
@@ -638,6 +642,10 @@ pub struct AkhConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_endpoint: Option<OpenAiEndpoint>,
 
+    /// Local coding-agent runtime, required for `codex` and `claude`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_runtime: Option<crate::agent::runtime::RuntimeConfig>,
+
     /// Background-automation gating (P5). Defaults to fully disabled.
     #[serde(default)]
     pub autonomy: AutonomyConfig,
@@ -687,6 +695,7 @@ impl Default for AkhConfig {
             context_strategy: None,
             ollama_endpoint: OllamaEndpoint::default(),
             openai_endpoint: None,
+            agent_runtime: None,
             autonomy: AutonomyConfig::default(),
             mcp: McpConfig::default(),
             delegation: None,
@@ -829,6 +838,16 @@ impl AkhConfig {
     fn known_tables() -> &'static [(&'static str, &'static [&'static str])] {
         &[
             ("ollama_endpoint", &["kind", "base_url", "api_key"]),
+            (
+                "agent_runtime",
+                &[
+                    "working_dir",
+                    "binary",
+                    "node_binary",
+                    "bridge_script",
+                    "timeout_secs",
+                ],
+            ),
             (
                 "openai_endpoint",
                 &[

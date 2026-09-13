@@ -1,5 +1,7 @@
 # BabyLLM Dojo Curriculum — Character-Training Manual
 
+**2026-09-11 integration update:** the [Akh R1 plan](../plans/2026-09-11-akh-350m-graph-grounded-release-plan.md) coordinates all eight starter kata, the five belts, High Grug and the six consultation forms with graph learning and action. The [unfamiliar-homelab exam](../plans/2026-09-11-akh-homelab-release-exam.md) tests their use under operational pressure, correction and cold memory recall. The curriculum remains broader than that exam. Earlier stage-order notes are historical; this integration update launches no training and changes no existing dataset.
+
 - **Status:** Draft v0.1 with accepted process consultation addendum (§10,
   2026-09-08); curriculum specification, not training completion evidence.
 - **Date:** 2026-09-01

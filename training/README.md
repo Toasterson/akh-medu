@@ -1,5 +1,7 @@
 # `training/` — Phase 51 Grug-Brain GPU training workspace (H100 cloud handoff)
 
+**Current R1 direction (2026-09-11):** use the [integrated Akh plan](../docs/ai/plans/2026-09-11-akh-350m-graph-grounded-release-plan.md) and [unfamiliar-homelab release exam](../docs/ai/plans/2026-09-11-akh-homelab-release-exam.md) to coordinate 350M–1.1B capacity, graph learning, High Grug, all Dojo forms, emotional intelligence, Portuguese basics and Mac deployment. Historical recipes and results below remain references. Broad Portuguese training is no longer a dependency of consultation; no old training command is an automatic continuation of this proposal.
+
 Everything needed to take the Phase-51 reasoning organ from the measured 11M
 ablations to the **350M foundation run**, on a rented NVIDIA box (H100), from a
 clean `git clone`. Designed for **many-days, on-and-off** training: every stage

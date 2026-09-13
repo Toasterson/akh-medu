@@ -1,5 +1,7 @@
 # Portuguese language acquisition for BabyLLM
 
+**2026-09-11 priority update:** the [integrated Akh R1 plan](2026-09-11-akh-350m-graph-grounded-release-plan.md) now coordinates this work with Dojo, consultation, graph learning and homelab action. Basic Portuguese comprehension is a measured R1 target; broad fluency is optional. The Portuguese-before-consultation ordering below records the earlier proposal and no longer blocks consultation in supported languages. Preserve separate corpus manifests and retention evidence.
+
 Date: 2026-09-10. Status: deferred follow-on stage; source documentation and
 local integration points reviewed. Corpus acquisition, implementation, training,
 and capability measurements are pending.
