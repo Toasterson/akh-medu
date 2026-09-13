@@ -326,3 +326,25 @@ itself (e.g. keeping softmax/layernorm in f32 within an otherwise-f16 forward pa
 of `mixed_precision.rs`'s scope as specified (it only wraps the optimizer, not the model's forward
 pass) and would need a `transformer.rs` change coordinated with whoever owns that file's concurrent
 edits.
+
+### P6.1b(c) gate run by the coordinator (2026-09-13, merged tree `metal_f16,grad_checkpointing`)
+
+Same corpus/tokenizer as the P6.1b(a+b) runs above (704-record `p6-1b-smoke`, vocab 946), so the f32 reference is the
+merged recompute-attention binary on that corpus, not ADR 107's 4.35.
+
+| variant | ctx×batch | step (steady) | peak | loss per step | loss@4 |
+|---|---|---:|---:|---|---:|
+| f32 (`metal`, recompute attention) | 2048×1 | 1.2 s | 1.68 GB | 7.08 → 6.09 → 5.05 → 4.23 → 3.76 | **3.76** |
+| f32 | 4096×1 | 3.0 s | 3.39 GB | 7.08 → 6.07 → 5.01 → 4.21 → 3.66 | **3.66** |
+| f16 activations + f32 master (`metal_f16`) | 2048×1 | 2.5 s | 1.31 GB | 7.08 → 5.66 → **6.65** → 6.45 → 6.30 | 6.30 |
+| f16 + f32 master | 4096×1 | 2.5 s | 1.80 GB | 7.08 → 5.47 → **7.15** → 6.46 → 6.35 | 6.35 |
+
+**Gate FAILED.** The loss rises after the second update (a step-1 improvement followed by divergence), step time is
+2× the f32 path (host round trips for the two casts of 33.4M parameters per step), and the memory saving is small now
+that attention scores are no longer retained. Loss scaling (1024 vs 1) made no difference, so this is not f16
+underflow; it is the master↔low synchronisation or the gradient cast (a `ParamId`/ordering or double-application bug
+is the leading hypothesis — the CPU round-trip unit test uses f32 for both halves and cannot see it).
+
+**Decision:** `metal_f16` stays an opt-in feature (the default `metal` path is unchanged and byte-identical) and is
+**parked**; the local lane trains in f32 with recompute attention (8192×2 = 7.0 GB is enough). Reopen only if a
+`350m_8k` stage needs the halving, with a Metal A/B against this table as the acceptance test.

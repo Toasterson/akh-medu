@@ -279,6 +279,10 @@ pub trait AttentionBackend: Backend {
 impl AttentionBackend for crate::CpuBackend {}
 #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
 impl AttentionBackend for crate::GpuBackend {}
+/// The f32 master-weights backend of the `metal_f16` mixed-precision lane
+/// (ADR 107 P6.1b c) trains the same model type, so it needs the op too.
+#[cfg(feature = "metal_f16")]
+impl AttentionBackend for crate::GpuMasterBackend {}
 
 /// State retained across the forward/backward boundary for one
 /// [`RecomputeAttention`] op: `q`/`k`/`v` (needed to recompute `S` and to
@@ -1622,13 +1626,20 @@ mod tests {
             Tensor::<GpuBackend, 2, Int>::from_data(TensorData::new(vec![ids[3]], [1, 1]), &device),
             cache,
         );
-        let cached = step.into_data().to_vec::<f32>().unwrap();
+        // Compare in f32 regardless of the backend's native float element, so
+        // the same test covers `Metal<f32>` and `Metal<f16>` (`metal_f16`).
+        let cached = step.into_data().convert::<f32>().to_vec::<f32>().unwrap();
         let expected = full
             .slice([0..1, 3..4, 0..260])
             .into_data()
+            .convert::<f32>()
             .to_vec::<f32>()
             .unwrap();
-        assert_close(&cached, &expected, 1e-3, "GPU cached decode");
+        #[cfg(feature = "metal_f16")]
+        let tolerance = 5e-2;
+        #[cfg(not(feature = "metal_f16"))]
+        let tolerance = 1e-3;
+        assert_close(&cached, &expected, tolerance, "GPU cached decode");
     }
 
     #[test]

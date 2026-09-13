@@ -112,6 +112,8 @@ it retains the same quadratic tensors**. It helps inference only.
   The patch widens two module visibilities and changes nothing else. Revisit when Burn exposes them upstream; until then
   `cargo update` of burn-autodiff must re-apply the patch.
 - P6.6's memory motivation is gone as predicted; only throughput remains.
+- **(c) f16 activations + f32 master weights landed as opt-in `metal_f16` but FAILED its gate** (loss 6.30 vs 3.76 at
+  2048×1, 2× slower); parked, not used by the lane. Details in the smoke RESULT.
 
 ## Consequences
 

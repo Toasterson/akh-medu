@@ -665,8 +665,10 @@ where
 #[cfg(feature = "metal_f16")]
 fn run_mixed_precision<BLow, BHigh>(args: Args, device: BLow::Device) -> Result<(), Box<dyn Error>>
 where
-    BLow: AutodiffBackend,
-    BHigh: AutodiffBackend<Device = BLow::Device>,
+    BLow: AutodiffBackend + AttentionBackend,
+    BLow::InnerBackend: AttentionBackend,
+    BHigh: AutodiffBackend<Device = BLow::Device> + AttentionBackend,
+    BHigh::InnerBackend: AttentionBackend,
 {
     std::fs::create_dir_all(&args.artifacts_dir)?;
     let manifest: FoundationCorpusManifest =

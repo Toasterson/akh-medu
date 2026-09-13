@@ -66,7 +66,7 @@ use burn::tensor::{ElementConversion, Int, Tensor, TensorData};
 
 use crate::error::{GrugError, GrugResult};
 use crate::train::{Batch, global_grad_norm, masked_cross_entropy};
-use crate::transformer::{TinyTransformer, TinyTransformerConfig};
+use crate::transformer::{AttentionBackend, TinyTransformer, TinyTransformerConfig};
 
 /// Static loss-scale factor applied before `.backward()` on the
 /// low-precision graph, and divided back out of the f32 gradients before
@@ -93,8 +93,10 @@ pub const DEFAULT_LOSS_SCALE: f32 = 1024.0;
 /// `Tensor::from_data` casts this module uses).
 pub struct MixedPrecisionTrainer<BLow, BHigh>
 where
-    BLow: AutodiffBackend,
-    BHigh: AutodiffBackend<Device = BLow::Device>,
+    BLow: AutodiffBackend + AttentionBackend,
+    BLow::InnerBackend: AttentionBackend,
+    BHigh: AutodiffBackend<Device = BLow::Device> + AttentionBackend,
+    BHigh::InnerBackend: AttentionBackend,
 {
     master: TinyTransformer<BHigh>,
     optim: OptimizerAdaptor<Adam, TinyTransformer<BHigh>, BHigh>,
@@ -109,8 +111,10 @@ where
 
 impl<BLow, BHigh> MixedPrecisionTrainer<BLow, BHigh>
 where
-    BLow: AutodiffBackend,
-    BHigh: AutodiffBackend<Device = BLow::Device>,
+    BLow: AutodiffBackend + AttentionBackend,
+    BLow::InnerBackend: AttentionBackend,
+    BHigh: AutodiffBackend<Device = BLow::Device> + AttentionBackend,
+    BHigh::InnerBackend: AttentionBackend,
 {
     /// Build the f32 master + a fresh AdamW optimizer by casting
     /// `low_model`'s current weights up to `BHigh`, preserving every
@@ -276,8 +280,8 @@ fn clone_across_backends<From, To>(
     device: &To::Device,
 ) -> GrugResult<TinyTransformer<To>>
 where
-    From: Backend,
-    To: Backend,
+    From: Backend + AttentionBackend,
+    To: Backend + AttentionBackend,
 {
     // Burn's lazily-initialized `Param`s (the default for freshly
     // `Config::init`-ed modules) each carry their *own* independent
@@ -310,7 +314,7 @@ where
 /// Force every float parameter in `model` to materialize in place (see
 /// [`clone_across_backends`] for why this matters). No-op for parameters
 /// that are already initialized.
-fn force_materialize<B: Backend>(model: &TinyTransformer<B>) {
+fn force_materialize<B: Backend + AttentionBackend>(model: &TinyTransformer<B>) {
     struct ForceMaterialize;
 
     impl<B: Backend> ModuleVisitor<B> for ForceMaterialize {
@@ -338,8 +342,10 @@ fn cast_gradients<BLow, BHigh>(
     device_high: &BHigh::Device,
 ) -> GradientsParams
 where
-    BLow: AutodiffBackend,
-    BHigh: AutodiffBackend,
+    BLow: AutodiffBackend + AttentionBackend,
+    BLow::InnerBackend: AttentionBackend,
+    BHigh: AutodiffBackend + AttentionBackend,
+    BHigh::InnerBackend: AttentionBackend,
 {
     struct CastVisitor<'a, BLow: AutodiffBackend, BHigh: AutodiffBackend> {
         grads_low: GradientsParams,
@@ -351,8 +357,10 @@ where
 
     impl<BLow, BHigh> ModuleVisitor<BLow> for CastVisitor<'_, BLow, BHigh>
     where
-        BLow: AutodiffBackend,
-        BHigh: AutodiffBackend,
+        BLow: AutodiffBackend + AttentionBackend,
+        BLow::InnerBackend: AttentionBackend,
+        BHigh: AutodiffBackend + AttentionBackend,
+        BHigh::InnerBackend: AttentionBackend,
     {
         fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<BLow, D>>) {
             let Some(grad) = self.grads_low.remove::<BLow::InnerBackend, D>(param.id) else {
@@ -400,8 +408,10 @@ fn sync_low_precision<BHigh, BLow>(
     device_low: &BLow::Device,
 ) -> TinyTransformer<BLow>
 where
-    BHigh: AutodiffBackend,
-    BLow: AutodiffBackend,
+    BHigh: AutodiffBackend + AttentionBackend,
+    BHigh::InnerBackend: AttentionBackend,
+    BLow: AutodiffBackend + AttentionBackend,
+    BLow::InnerBackend: AttentionBackend,
 {
     struct CollectVisitor<'a, BHigh: AutodiffBackend, BLow: AutodiffBackend> {
         bag: GradientsParams,
@@ -411,8 +421,10 @@ where
 
     impl<BHigh, BLow> ModuleVisitor<BHigh> for CollectVisitor<'_, BHigh, BLow>
     where
-        BHigh: AutodiffBackend,
-        BLow: AutodiffBackend,
+        BHigh: AutodiffBackend + AttentionBackend,
+        BHigh::InnerBackend: AttentionBackend,
+        BLow: AutodiffBackend + AttentionBackend,
+        BLow::InnerBackend: AttentionBackend,
     {
         fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<BHigh, D>>) {
             let data = param.val().into_data().convert::<BLow::FloatElem>();
