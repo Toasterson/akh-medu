@@ -45,7 +45,7 @@ def main() -> int:
     ap.add_argument("--corpus", type=Path, required=True, help="generator out-dir holding <family>/train.sft.jsonl")
     ap.add_argument("--take", action="append", default=[], metavar="FAMILY=N", help="records to draw per family")
     ap.add_argument("--base-records", type=int, required=True, help="record count of the base --train-jsonl")
-    ap.add_argument("--max-share-ppm", type=int, default=50_000, help="supplemental / total ceiling (default 5 %)")
+    ap.add_argument("--max-share-ppm", type=int, default=50_000, help="supplemental / total ceiling in ppm (default 50000 = 5 percent)")
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--out", type=Path, required=True, help="output directory (train.sft.jsonl + manifest.json)")
     args = ap.parse_args()
