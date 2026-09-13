@@ -101,6 +101,18 @@ it retains the same quadratic tensors**. It helps inference only.
    to fit at batch 1–2 and run at roughly the measured 1.5k tokens/s. Only a *measured* miss after P6.1b
    (throughput, not memory) triggers P6.6.
 
+## Outcome (P6.1b a+b, landed 2026-09-13, commit `b6b14aa6`, merged `3e5d0d0a`)
+
+- `AttentionBackend::chunked_causal_attention` + `RecomputeAttention: Backward<B, 3>` in `transformer.rs`; causal-prefix
+  K/V slicing; gradients equal the naive path to 1e-4 on CPU (L=256/200, chunk 64, plus a full block).
+- Measured on the M2 (`metal,grad_checkpointing`): 2048×1 = 1.11 s / 1.68 GB (was 1.41 s / 3.5 GB); **8192×1 = 7.45 s /
+  4.67 GB; 8192×2 = 15.8 s / 7.0 GB** (was killed / >21 GB swap). Throughput ≈ 1.1k tokens/s at 8192.
+- **Cost accepted:** `burn-autodiff` 0.21.0 keeps its `graph`/`tensor` modules `pub(crate)`, so a downstream custom
+  `Backward` op cannot be written without a two-line vendored patch (`vendor/burn-autodiff`, workspace `[patch.crates-io]`).
+  The patch widens two module visibilities and changes nothing else. Revisit when Burn exposes them upstream; until then
+  `cargo update` of burn-autodiff must re-apply the patch.
+- P6.6's memory motivation is gone as predicted; only throughput remains.
+
 ## Consequences
 
 - ADR 104's "chunked attention" is re-characterised: it was a forward memory bound, not a training one.
