@@ -138,8 +138,8 @@ pub use tool_curriculum::{
     ToolContractDeltaCurriculumGenerator, ToolContractEvaluationMode, ToolContractExamCase,
     ToolContractExamEvidence, ToolContractExamReport, ToolContractExamSet,
     ToolContractFamilyReport, ToolContractTrainingSiblingPlan, ToolCurriculumError,
-    ToolCurriculumGenerator, derive_tool_contract_training_sibling, score_tool_contract_exam,
-    tool_contract_capability_specs,
+    ToolCurriculumGenerator, derive_tool_contract_training_sibling, render_request,
+    sample_offered_tools, score_tool_contract_exam, tool_contract_capability_specs,
 };
 pub use vision_audit::{
     VISION_AUDIT_GENERATOR_VERSION, VisionAuditGenerator, VisionAuditGeneratorError,

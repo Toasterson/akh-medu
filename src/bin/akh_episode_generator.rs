@@ -62,7 +62,8 @@ use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 use grug_data::{
     KnowledgeAction, KnowledgeSftRecord, KnowledgeWorkflowError, REVISION_FAMILY,
-    ToolContractSnapshot, WorkflowCitation, WorkflowLanguage, WorkflowStage,
+    ToolContractError, ToolContractSnapshot, ToolCurriculumError, WorkflowCitation,
+    WorkflowLanguage, WorkflowStage, render_request, sample_offered_tools,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -167,6 +168,40 @@ enum GeneratorError {
         help("KnowledgeAction::parse_runtime/render_runtime failed on a generated target")
     )]
     KnowledgeWorkflow(#[from] KnowledgeWorkflowError),
+
+    #[error("failed to read frozen tool-contract snapshot {path}")]
+    #[diagnostic(
+        code(akh::episode_gen::contracts_io),
+        help(
+            "verify --contracts points at a real contracts.json, e.g. \
+             runs/checkpoints/local-curricula-v3-8k/sft/contracts.json"
+        )
+    )]
+    ContractsIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("grug-data tool-contract error: {0}")]
+    #[diagnostic(
+        code(akh::episode_gen::tool_contract),
+        help(
+            "the --contracts file failed ToolContractSnapshot::verify_integrity — it may be \
+             hand-edited or truncated; regenerate it from the source akh"
+        )
+    )]
+    ToolContract(#[from] ToolContractError),
+
+    #[error("grug-data tool-curriculum error: {0}")]
+    #[diagnostic(
+        code(akh::episode_gen::tool_curriculum),
+        help(
+            "sample_offered_tools/render_request rejected an input — check the target tool is \
+             present in --contracts and the offered-tool budget (4) fits its size"
+        )
+    )]
+    ToolCurriculum(#[from] ToolCurriculumError),
 
     #[error("json serialization failed")]
     #[diagnostic(code(akh::episode_gen::json))]
@@ -443,6 +478,19 @@ struct Args {
     /// when `--e4-revision` is set.
     #[arg(long = "e4-count", default_value_t = 200)]
     e4_count: usize,
+
+    /// Frozen tool-contract snapshot (`contracts.json`) matching the base
+    /// SFT corpus and release-gate exam this run's records will be mixed
+    /// alongside — e.g.
+    /// `runs/checkpoints/local-curricula-v3-8k/sft/contracts.json`.
+    /// Required to emit the `<family>/train.sft.jsonl` steering sidecar
+    /// (P6.3b): `train_knowledge` only mixes supplemental records "under
+    /// the same tool contract", so a sidecar built from this generator's
+    /// own four-tool ad hoc snapshot is silently out of distribution and
+    /// gets rejected. Omit this flag to skip sidecar emission entirely —
+    /// the primary `<family>.jsonl` files are written either way.
+    #[arg(long = "contracts")]
+    contracts: Option<PathBuf>,
 }
 
 /// P6.5/E1 control mode — see `Args::e1_targets`.
@@ -2370,6 +2418,32 @@ struct Manifest {
     /// P6.5/E4: whether the revision-curriculum family was generated this
     /// run (`--e4-revision`).
     e4_revision_enabled: bool,
+    /// P6.3b: `--contracts` path, if supplied. `None` means no steering
+    /// sidecar was written this run (the primary `<family>.jsonl` files are
+    /// unaffected either way).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen_contracts_path: Option<String>,
+    /// P6.3b: the frozen snapshot's own `manifest_hash` — the value every
+    /// tool-contract-family primary record's `contract_hash` and every
+    /// sidecar `KnowledgeSftRecord`'s `contract_hash` now carries, in place
+    /// of this generator's ad hoc four-tool `contract_hash` (below).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen_contract_hash: Option<String>,
+    /// This generator's own four-tool `ToolContractSnapshot::from_serializable`
+    /// hash (documented at its call site) — always computed, kept for
+    /// debugging even when `frozen_contract_hash` supersedes it on every
+    /// written record.
+    ad_hoc_contract_hash: String,
+    /// P6.3b: total records dropped from the sidecar across all four
+    /// tool-contract families because their target failed
+    /// `ToolContractSnapshot::validate_call` against the frozen contract (or
+    /// named a tool absent from it). Always 0 when `frozen_contracts_path`
+    /// is `None`.
+    sidecar_schema_invalid_dropped: u64,
+    /// P6.3b: per-family record count actually written to
+    /// `<family>/train.sft.jsonl`. Empty when `frozen_contracts_path` is
+    /// `None` (no sidecar was written this run).
+    sidecar_per_family_counts: BTreeMap<String, u64>,
 }
 
 fn git_hash() -> String {
@@ -2489,6 +2563,24 @@ struct SteeringManifest {
     /// only; always 0 in `completed` mode).
     #[serde(default)]
     e1_raw_invalid_dropped: u64,
+    /// P6.3b: records dropped from this family's sidecar because their
+    /// target's tool/arguments did not pass
+    /// `ToolContractSnapshot::validate_call` against the frozen `--contracts`
+    /// snapshot (or the tool was altogether absent from it). Always 0 when
+    /// the frozen contract genuinely matches the runtime the primary record
+    /// was generated against.
+    #[serde(default)]
+    schema_invalid_dropped: u64,
+}
+
+/// Outcome of writing one family's `<family>/{train.sft.jsonl,manifest.json,
+/// separation.json}` steering sidecar.
+struct SidecarWriteStats {
+    kept: usize,
+    /// See `SteeringManifest::e1_raw_invalid_dropped`.
+    e1_raw_invalid_dropped: u64,
+    /// See `SteeringManifest::schema_invalid_dropped`.
+    schema_invalid_dropped: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2527,34 +2619,107 @@ fn workflow_language(language: &str) -> Option<WorkflowLanguage> {
     }
 }
 
-/// `contract_hash` is an override (the real `ToolContractSnapshot` hash
-/// computed once in `run()`), not `record.contract_hash` — the primary
-/// `EpisodeRecord` uses its own lighter-weight ad-hoc hash (documented on
-/// that field), but the steering-sidecar `KnowledgeSftRecord`s must agree
-/// with the sidecar manifest's `contract_hash`. `target` is an explicit
-/// override rather than always `record.target` so the P6.5/E1 `raw-valid`
-/// mode can swap in `labels.e1_raw_target` without a second record shape.
-fn to_sft_record(
+/// Deterministic per-record seed for the sidecar's own offered-tool
+/// sampling and phrasing-variant selection (`sample_offered_tools`,
+/// `render_request`). Derived from the record's stable `id` (itself a pure
+/// function of `--seed`/index), never from a shared/mutable RNG, so
+/// re-running the generator with the same `--seed` reproduces byte-identical
+/// sidecar files — the same determinism guarantee P6.3's primary files
+/// already have (see the RESULT doc's "regenerating ... gave byte-identical
+/// jsonl").
+fn sidecar_seed(id: &str) -> u64 {
+    let hash = blake3::hash(id.as_bytes());
+    u64::from_le_bytes(hash.as_bytes()[0..8].try_into().expect("8 bytes"))
+}
+
+/// Outcome of rendering one primary record's steering-sidecar counterpart.
+/// A strongly-typed alternative to a bare `Option`/error so callers can
+/// report *why* a record didn't make the sidecar, not just that it didn't.
+enum SidecarBuildOutcome {
+    Built(Box<KnowledgeSftRecord>),
+    /// No `WorkflowLanguage` counterpart for this record's language
+    /// (Italian/Spanish — see `workflow_language`).
+    UnrepresentableLanguage,
+    /// The record's target does not round-trip to a schema-valid call
+    /// against the frozen contract (`ToolContractSnapshot::validate_call`
+    /// rejected it, or the tool is altogether absent from the frozen
+    /// snapshot).
+    SchemaInvalid,
+}
+
+/// Render one primary `EpisodeRecord` into the base tool-contract corpus's
+/// own distribution: prompt via `render_knowledge_prompt_with_system`, four
+/// offered tools (`target_tool` + seeded distractors) via
+/// `grug_data::sample_offered_tools` against the *frozen* snapshot, and a
+/// user turn built from grug-data's own tool-curriculum phrase table
+/// (`grug_data::render_request`) over the exact arguments recovered from
+/// `target_text` — never this generator's own ad hoc prompt/tool list. See
+/// the module doc on `write_steering_sidecar` for the full distribution-
+/// mismatch rationale (P6.3b).
+///
+/// `target_tool` is the family's canonical tool name (needed for the
+/// `declare_gap` branch, where the target itself carries no tool name to
+/// recover). `target_text` is the record's completed target or, in
+/// `--e1-targets raw-valid` mode, `labels.e1_raw_target` — the caller
+/// decides which.
+fn build_sidecar_record(
+    frozen: &ToolContractSnapshot,
     record: &EpisodeRecord,
-    contract_hash: &str,
-    target: &str,
-) -> Option<KnowledgeSftRecord> {
-    Some(KnowledgeSftRecord {
+    target_tool: &str,
+    target_text: &str,
+) -> GenResult<SidecarBuildOutcome> {
+    let Some(language) = workflow_language(&record.language) else {
+        return Ok(SidecarBuildOutcome::UnrepresentableLanguage);
+    };
+    let Some(stage) = workflow_stage(&record.stage) else {
+        return Ok(SidecarBuildOutcome::SchemaInvalid);
+    };
+    let seed = sidecar_seed(&record.id);
+    let action = KnowledgeAction::parse_runtime(target_text)?;
+    let (tools, conversation) = match &action {
+        KnowledgeAction::ToolCall { tool, arguments } => {
+            let Some(contract) = frozen.tool(tool) else {
+                return Ok(SidecarBuildOutcome::SchemaInvalid);
+            };
+            if !frozen.validate_call(tool, arguments).valid {
+                return Ok(SidecarBuildOutcome::SchemaInvalid);
+            }
+            let request = render_request(language, &contract.description, arguments, seed as usize);
+            let tools = sample_offered_tools(frozen, tool, 4, seed)?;
+            (tools, vec![json!({"role": "user", "content": request})])
+        }
+        // A refusal has no arguments to render as a curriculum request;
+        // `render_runtime`'s single Gap format (already used to build
+        // `target_text`) is already the base corpus's only Gap rendering —
+        // reused, not reimplemented. The offered-tool set still centers the
+        // tool that was declined, matching what the model was actually
+        // asked to (not) call.
+        KnowledgeAction::Gap { .. } => {
+            if frozen.tool(target_tool).is_none() {
+                return Ok(SidecarBuildOutcome::SchemaInvalid);
+            }
+            let tools = sample_offered_tools(frozen, target_tool, 4, seed)?;
+            (tools, record.conversation.clone())
+        }
+        KnowledgeAction::Answer { .. } => return Ok(SidecarBuildOutcome::SchemaInvalid),
+    };
+    let prompt = grug_data::render_knowledge_prompt_with_system(&tools, &conversation, None);
+    Ok(SidecarBuildOutcome::Built(Box::new(KnowledgeSftRecord {
         schema_version: record.schema_version,
         id: record.id.clone(),
         episode_id: record.episode_id.clone(),
         step: record.step,
-        stage: workflow_stage(&record.stage)?,
+        stage,
         family: record.family.clone(),
         difficulty: record.difficulty,
-        language: workflow_language(&record.language)?,
-        contract_hash: contract_hash.to_string(),
-        tools: record.tools.clone(),
-        conversation: record.conversation.clone(),
-        system_context: record.system_context.clone(),
-        prompt: record.prompt.clone(),
-        target: target.to_string(),
-    })
+        language,
+        contract_hash: frozen.manifest_hash.clone(),
+        tools,
+        conversation,
+        system_context: None,
+        prompt,
+        target: target_text.to_string(),
+    })))
 }
 
 fn file_blake3(path: &Path) -> GenResult<String> {
@@ -2566,17 +2731,19 @@ fn file_blake3(path: &Path) -> GenResult<String> {
 }
 
 /// Write `<out_dir>/<tool>/{train.sft.jsonl,manifest.json,separation.json}`
-/// for one tool-contract family from its already-decontaminated records.
-/// Returns `(records kept in the sidecar, records dropped because
-/// `--e1-targets raw-valid` found a non-runtime-valid raw target)`.
+/// for one tool-contract family from its already-decontaminated records, in
+/// the base tool-contract corpus's own distribution: every record is
+/// rebuilt by `build_sidecar_record` against `frozen` (the `--contracts`
+/// snapshot) rather than carried over from the primary `EpisodeRecord`'s
+/// engine-only prompt/tools — see that function's doc comment for why.
 fn write_steering_sidecar(
     out_dir: &Path,
     family_tag: &str,
     tool: &str,
-    contract_hash: &str,
+    frozen: &ToolContractSnapshot,
     records: &[EpisodeRecord],
     e1_targets_mode: E1TargetsMode,
-) -> GenResult<(usize, u64)> {
+) -> GenResult<SidecarWriteStats> {
     let dir = out_dir.join(tool);
     fs::create_dir_all(&dir).map_err(|source| GeneratorError::Io {
         path: dir.clone(),
@@ -2584,25 +2751,35 @@ fn write_steering_sidecar(
     })?;
 
     let mut e1_raw_invalid_dropped = 0u64;
-    let sft: Vec<KnowledgeSftRecord> = records
-        .iter()
-        .filter_map(|record| match e1_targets_mode {
-            E1TargetsMode::Completed => to_sft_record(record, contract_hash, &record.target),
+    let mut schema_invalid_dropped = 0u64;
+    let mut sft: Vec<KnowledgeSftRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        let target_text = match e1_targets_mode {
+            E1TargetsMode::Completed => record.target.clone(),
             E1TargetsMode::RawValid => {
-                let labels = record.labels.as_ref()?;
-                let raw_target = labels.e1_raw_target.as_ref()?;
+                let Some(labels) = record.labels.as_ref() else {
+                    continue;
+                };
+                let Some(raw_target) = labels.e1_raw_target.as_ref() else {
+                    continue;
+                };
                 if labels.e1_raw_target_runtime_valid != Some(true) {
                     // Schema-invalid raw target: not a fair E1 control (the
                     // point is schema-valid-but-value-wrong vs.
                     // schema-valid-and-value-exact), so this record is
                     // dropped from the sidecar rather than swapped in.
                     e1_raw_invalid_dropped += 1;
-                    return None;
+                    continue;
                 }
-                to_sft_record(record, contract_hash, raw_target)
+                raw_target.clone()
             }
-        })
-        .collect();
+        };
+        match build_sidecar_record(frozen, record, tool, &target_text)? {
+            SidecarBuildOutcome::Built(sft_record) => sft.push(*sft_record),
+            SidecarBuildOutcome::UnrepresentableLanguage => {}
+            SidecarBuildOutcome::SchemaInvalid => schema_invalid_dropped += 1,
+        }
+    }
     let sft_path = dir.join("train.sft.jsonl");
     {
         let file = File::create(&sft_path).map_err(|source| GeneratorError::Io {
@@ -2669,7 +2846,7 @@ fn write_steering_sidecar(
     let manifest = SteeringManifest {
         schema_version: 1,
         complete: true,
-        contract_hash: contract_hash.to_string(),
+        contract_hash: frozen.manifest_hash.clone(),
         difficulty: 1,
         family: family_tag.to_string(),
         generator_version: "akh-episode-generator-engine-v1".into(),
@@ -2692,6 +2869,7 @@ fn write_steering_sidecar(
         tool: tool.to_string(),
         e1_targets_mode: e1_targets_mode.to_string(),
         e1_raw_invalid_dropped,
+        schema_invalid_dropped,
     };
     let manifest_path = dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -2701,7 +2879,25 @@ fn write_steering_sidecar(
         }
     })?;
 
-    Ok((sft.len(), e1_raw_invalid_dropped))
+    Ok(SidecarWriteStats {
+        kept: sft.len(),
+        e1_raw_invalid_dropped,
+        schema_invalid_dropped,
+    })
+}
+
+/// Load and verify a frozen `ToolContractSnapshot` (`contracts.json`) from
+/// disk. `verify_integrity` recomputes `manifest_hash` from the tool list —
+/// a hand-edited or truncated snapshot fails closed here rather than
+/// silently mislabeling every sidecar record with a stale hash.
+fn load_frozen_contracts(path: &Path) -> GenResult<ToolContractSnapshot> {
+    let bytes = fs::read(path).map_err(|source| GeneratorError::ContractsIo {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let snapshot: ToolContractSnapshot = serde_json::from_slice(&bytes)?;
+    snapshot.verify_integrity()?;
+    Ok(snapshot)
 }
 
 fn run(args: &Args) -> GenResult<()> {
@@ -2803,8 +2999,40 @@ fn run(args: &Args) -> GenResult<()> {
     })?;
     let contract_hash = contract_snapshot.manifest_hash.clone();
 
+    // P6.3b: the frozen tool-contract snapshot the base SFT corpus and
+    // release-gate exam were built against. When present, every primary
+    // tool-contract-family record's `contract_hash` is overlaid with this
+    // (not the ad hoc four-tool `contract_hash` above), and the steering
+    // sidecar is rebuilt in that snapshot's own distribution (see
+    // `build_sidecar_record`). Without it, sidecar emission is skipped
+    // entirely rather than emitting an out-of-distribution sidecar
+    // `train_knowledge` would reject anyway.
+    let frozen_contracts = args
+        .contracts
+        .as_ref()
+        .map(|path| load_frozen_contracts(path))
+        .transpose()?;
+    let mut memory_write_records = memory_write_records;
+    let mut create_records = create_records;
+    let mut update_records = update_records;
+    let mut reactor_records = reactor_records;
+    if let Some(frozen) = &frozen_contracts {
+        for records in [
+            &mut memory_write_records,
+            &mut create_records,
+            &mut update_records,
+            &mut reactor_records,
+        ] {
+            for record in records.iter_mut() {
+                record.contract_hash = frozen.manifest_hash.clone();
+            }
+        }
+    }
+
     let mut per_family = BTreeMap::new();
+    let mut sidecar_per_family = BTreeMap::new();
     let mut e1_raw_invalid_dropped_from_sidecar = 0u64;
+    let mut sidecar_schema_invalid_dropped = 0u64;
     let (kept, survivors) = write_family_jsonl(
         &args.out_dir,
         Family::MemoryWrite.file_stem(),
@@ -2812,15 +3040,19 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    let (_, dropped) = write_steering_sidecar(
-        &args.out_dir,
-        Family::MemoryWrite.tag(),
-        "memory_write",
-        &contract_hash,
-        &survivors,
-        args.e1_targets,
-    )?;
-    e1_raw_invalid_dropped_from_sidecar += dropped;
+    if let Some(frozen) = &frozen_contracts {
+        let stats = write_steering_sidecar(
+            &args.out_dir,
+            Family::MemoryWrite.tag(),
+            "memory_write",
+            frozen,
+            &survivors,
+            args.e1_targets,
+        )?;
+        e1_raw_invalid_dropped_from_sidecar += stats.e1_raw_invalid_dropped;
+        sidecar_schema_invalid_dropped += stats.schema_invalid_dropped;
+        sidecar_per_family.insert("memory_write".to_string(), stats.kept as u64);
+    }
     per_family.insert(Family::MemoryWrite.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2830,15 +3062,19 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    let (_, dropped) = write_steering_sidecar(
-        &args.out_dir,
-        Family::StructuredTaskCreate.tag(),
-        "structured_task_create",
-        &contract_hash,
-        &survivors,
-        args.e1_targets,
-    )?;
-    e1_raw_invalid_dropped_from_sidecar += dropped;
+    if let Some(frozen) = &frozen_contracts {
+        let stats = write_steering_sidecar(
+            &args.out_dir,
+            Family::StructuredTaskCreate.tag(),
+            "structured_task_create",
+            frozen,
+            &survivors,
+            args.e1_targets,
+        )?;
+        e1_raw_invalid_dropped_from_sidecar += stats.e1_raw_invalid_dropped;
+        sidecar_schema_invalid_dropped += stats.schema_invalid_dropped;
+        sidecar_per_family.insert("structured_task_create".to_string(), stats.kept as u64);
+    }
     per_family.insert(Family::StructuredTaskCreate.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2848,15 +3084,19 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    let (_, dropped) = write_steering_sidecar(
-        &args.out_dir,
-        Family::StructuredTaskUpdate.tag(),
-        "structured_task_update",
-        &contract_hash,
-        &survivors,
-        args.e1_targets,
-    )?;
-    e1_raw_invalid_dropped_from_sidecar += dropped;
+    if let Some(frozen) = &frozen_contracts {
+        let stats = write_steering_sidecar(
+            &args.out_dir,
+            Family::StructuredTaskUpdate.tag(),
+            "structured_task_update",
+            frozen,
+            &survivors,
+            args.e1_targets,
+        )?;
+        e1_raw_invalid_dropped_from_sidecar += stats.e1_raw_invalid_dropped;
+        sidecar_schema_invalid_dropped += stats.schema_invalid_dropped;
+        sidecar_per_family.insert("structured_task_update".to_string(), stats.kept as u64);
+    }
     per_family.insert(Family::StructuredTaskUpdate.file_stem().to_string(), kept);
 
     let (kept, survivors) = write_family_jsonl(
@@ -2866,15 +3106,19 @@ fn run(args: &Args) -> GenResult<()> {
         &sentinels,
         &mut decon,
     )?;
-    let (_, dropped) = write_steering_sidecar(
-        &args.out_dir,
-        Family::ReactorManage.tag(),
-        "reactor_manage",
-        &contract_hash,
-        &survivors,
-        args.e1_targets,
-    )?;
-    e1_raw_invalid_dropped_from_sidecar += dropped;
+    if let Some(frozen) = &frozen_contracts {
+        let stats = write_steering_sidecar(
+            &args.out_dir,
+            Family::ReactorManage.tag(),
+            "reactor_manage",
+            frozen,
+            &survivors,
+            args.e1_targets,
+        )?;
+        e1_raw_invalid_dropped_from_sidecar += stats.e1_raw_invalid_dropped;
+        sidecar_schema_invalid_dropped += stats.schema_invalid_dropped;
+        sidecar_per_family.insert("reactor_manage".to_string(), stats.kept as u64);
+    }
     per_family.insert(Family::ReactorManage.file_stem().to_string(), kept);
 
     let (kept, _survivors) = write_family_jsonl(
@@ -2909,6 +3153,14 @@ fn run(args: &Args) -> GenResult<()> {
         e1_raw_invalid_dropped_from_sidecar,
         e2_prompt_mode: args.e2_prompt.to_string(),
         e4_revision_enabled: args.e4_revision,
+        frozen_contracts_path: args
+            .contracts
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        frozen_contract_hash: frozen_contracts.as_ref().map(|f| f.manifest_hash.clone()),
+        ad_hoc_contract_hash: contract_hash,
+        sidecar_schema_invalid_dropped,
+        sidecar_per_family_counts: sidecar_per_family,
     };
     let manifest_path = args.out_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -2944,6 +3196,23 @@ mod tests {
         let scratch = ScratchDir::new("test").expect("scratch dir");
         let engine = build_engine(scratch.path()).expect("engine");
         (scratch, engine)
+    }
+
+    /// A frozen 4-tool `ToolContractSnapshot` standing in for the real
+    /// pod's `contracts.json` (53 tools, unreachable on this machine — see
+    /// the P6.3b RESULT doc). Exactly the boundary case
+    /// `offered_tool_count == contracts.tools.len() == 4`: every offered-tool
+    /// set is this whole snapshot, shuffled, which is enough to exercise
+    /// `sample_offered_tools`/`validate_call` without needing the pod's file.
+    fn test_frozen_contracts(engine: &Engine) -> ToolContractSnapshot {
+        let agent_preds = AgentPredicates::init(engine).unwrap();
+        let task_preds = TaskPredicates::init(engine).unwrap();
+        let mw = MemoryWriteTool::new(agent_preds.clone()).manifest();
+        let create =
+            StructuredTaskCreateTool::new(task_preds.clone(), agent_preds.clone()).manifest();
+        let update = StructuredTaskUpdateTool::new(task_preds.clone()).manifest();
+        let reactor = ReactorManageTool.manifest();
+        ToolContractSnapshot::from_serializable(&[mw, create, update, reactor]).unwrap()
     }
 
     #[test]
@@ -3257,16 +3526,35 @@ mod tests {
         )
         .unwrap();
 
-        let sft = to_sft_record(&records[0], "blake3:test-contract-hash", &records[0].target)
-            .expect("english record maps to KnowledgeSftRecord");
+        let frozen = test_frozen_contracts(&engine);
+        let sft =
+            match build_sidecar_record(&frozen, &records[0], "memory_write", &records[0].target)
+                .unwrap()
+            {
+                SidecarBuildOutcome::Built(record) => *record,
+                _ => panic!("expected a built sidecar record, got a drop outcome instead"),
+            };
         // Round-trips through the exact grug_data type used by
         // `train_knowledge`'s plain --train-jsonl loader.
         let line = serde_json::to_string(&sft).unwrap();
         let reparsed: KnowledgeSftRecord = serde_json::from_str(&line).unwrap();
         assert_eq!(reparsed.family, "tool_contract.memory_write");
-        assert_eq!(reparsed.contract_hash, "blake3:test-contract-hash");
+        assert_eq!(reparsed.contract_hash, frozen.manifest_hash);
         assert!(matches!(reparsed.language, WorkflowLanguage::English));
         assert!(matches!(reparsed.stage, WorkflowStage::Answer));
+        // Four offered tools, target present, every entry taken verbatim
+        // from the frozen contract's own `openai_definition()`.
+        assert_eq!(reparsed.tools.len(), 4);
+        let offered_names: HashSet<_> = reparsed
+            .tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert!(offered_names.contains("memory_write"));
+        for tool in &reparsed.tools {
+            let name = tool["function"]["name"].as_str().unwrap();
+            assert_eq!(*tool, frozen.tool(name).unwrap().openai_definition());
+        }
     }
 
     #[test]
@@ -3300,17 +3588,19 @@ mod tests {
         )
         .unwrap();
 
-        let (kept, dropped) = write_steering_sidecar(
+        let frozen = test_frozen_contracts(&engine);
+        let stats = write_steering_sidecar(
             dir.path(),
             "tool_contract.memory_write",
             "memory_write",
-            "blake3:abc",
+            &frozen,
             &records,
             E1TargetsMode::Completed,
         )
         .unwrap();
-        assert_eq!(kept, 4);
-        assert_eq!(dropped, 0);
+        assert_eq!(stats.kept, 4);
+        assert_eq!(stats.e1_raw_invalid_dropped, 0);
+        assert_eq!(stats.schema_invalid_dropped, 0);
         let family_dir = dir.path().join("memory_write");
         assert!(family_dir.join("train.sft.jsonl").exists());
         assert!(family_dir.join("manifest.json").exists());
@@ -3321,6 +3611,7 @@ mod tests {
                 .unwrap();
         assert!(manifest_json.complete);
         assert_eq!(manifest_json.records, 4);
+        assert_eq!(manifest_json.contract_hash, frozen.manifest_hash);
         assert!(manifest_json.sft_hash.starts_with("blake3:"));
         assert!(manifest_json.separation_hash.starts_with("blake3:"));
 
@@ -3357,18 +3648,20 @@ mod tests {
                 Some(true)
             );
         }
+        let frozen = test_frozen_contracts(&engine);
         let dir = ScratchDir::new("e1-raw-valid-mw").unwrap();
-        let (kept, dropped) = write_steering_sidecar(
+        let stats = write_steering_sidecar(
             dir.path(),
             "tool_contract.memory_write",
             "memory_write",
-            "blake3:x",
+            &frozen,
             &mw_records,
             E1TargetsMode::RawValid,
         )
         .unwrap();
-        assert_eq!(kept, mw_records.len());
-        assert_eq!(dropped, 0);
+        assert_eq!(stats.kept, mw_records.len());
+        assert_eq!(stats.e1_raw_invalid_dropped, 0);
+        assert_eq!(stats.schema_invalid_dropped, 0);
         let sft_lines: Vec<KnowledgeSftRecord> =
             fs::read_to_string(dir.path().join("memory_write/train.sft.jsonl"))
                 .unwrap()
@@ -3416,20 +3709,21 @@ mod tests {
             );
         }
         let dir2 = ScratchDir::new("e1-raw-valid-reactor").unwrap();
-        let (kept2, dropped2) = write_steering_sidecar(
+        let stats2 = write_steering_sidecar(
             dir2.path(),
             "tool_contract.reactor_manage",
             "reactor_manage",
-            "blake3:y",
+            &frozen,
             &reactor_records,
             E1TargetsMode::RawValid,
         )
         .unwrap();
         assert_eq!(
-            kept2, 0,
+            stats2.kept, 0,
             "every reactor_manage raw target is schema-invalid"
         );
-        assert_eq!(dropped2, reactor_records.len() as u64);
+        assert_eq!(stats2.e1_raw_invalid_dropped, reactor_records.len() as u64);
+        assert_eq!(stats2.schema_invalid_dropped, 0);
     }
 
     #[test]
@@ -3587,6 +3881,228 @@ mod tests {
         assert_eq!(controls, 3);
         for r in &records {
             assert_eq!(r.family, Family::KnowledgeRevise.tag());
+        }
+    }
+
+    /// P6.3b acceptance test: for each of the four tool-contract families,
+    /// build one primary record, render its sidecar counterpart against a
+    /// frozen contract loaded from disk (exercising the real `--contracts`
+    /// path via `load_frozen_contracts`), and assert structural equality
+    /// against a *real* base-corpus record for the same family/frozen
+    /// snapshot generated by grug-data's own `ToolCurriculumGenerator`.
+    ///
+    /// No pod-produced `tools.train.sft.jsonl`/`contracts.json`/
+    /// `all-tools.json` is reachable on this machine (checked before writing
+    /// this generator — see the P6.3b RESULT doc's "reused vs replicated"
+    /// section), so the real `ToolCurriculumGenerator` run against the same
+    /// frozen snapshot is the authoritative in-repo stand-in for "one real
+    /// base-corpus record of the same family": it exercises the actual base
+    /// corpus's code path, not a hand-authored fixture that could silently
+    /// drift from it.
+    #[test]
+    fn sidecar_matches_base_corpus_distribution_per_family() {
+        use grug_data::ToolCurriculumGenerator;
+
+        let (_scratch, engine) = fresh_engine();
+        let frozen = test_frozen_contracts(&engine);
+
+        // Round-trip the frozen snapshot through disk via the same loader
+        // `--contracts` uses, so `contract_hash` below is genuinely "read
+        // from the file", not the in-memory value we just built.
+        let contracts_dir = ScratchDir::new("contracts-fixture").unwrap();
+        let contracts_path = contracts_dir.path().join("contracts.json");
+        fs::write(&contracts_path, serde_json::to_string(&frozen).unwrap()).unwrap();
+        let loaded = load_frozen_contracts(&contracts_path).unwrap();
+        assert_eq!(loaded.manifest_hash, frozen.manifest_hash);
+
+        let base_gen = ToolCurriculumGenerator::new(loaded.clone(), 20_260_913, 4).unwrap();
+        let base_records = base_gen.generate("p6-3b-acceptance", 1).unwrap();
+
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+        let task_preds = TaskPredicates::init(&engine).unwrap();
+        let mut causal = CausalManager::new(&engine).unwrap();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let book = test_book();
+
+        let sidecars: Vec<(&str, KnowledgeSftRecord)> = {
+            let mut out = Vec::new();
+
+            let mw_manifest = MemoryWriteTool::new(agent_preds.clone()).manifest();
+            let mw_records = generate_memory_write(
+                &engine,
+                &agent_preds,
+                &mut causal,
+                &mut ec,
+                &book,
+                &mw_manifest,
+                Seed(101),
+                1,
+            )
+            .unwrap();
+            out.push((
+                "memory_write",
+                match build_sidecar_record(
+                    &loaded,
+                    &mw_records[0],
+                    "memory_write",
+                    &mw_records[0].target,
+                )
+                .unwrap()
+                {
+                    SidecarBuildOutcome::Built(r) => *r,
+                    _ => panic!("memory_write sidecar record must build"),
+                },
+            ));
+
+            let create_manifest =
+                StructuredTaskCreateTool::new(task_preds.clone(), agent_preds.clone()).manifest();
+            let update_manifest = StructuredTaskUpdateTool::new(task_preds.clone()).manifest();
+            let (create_records, update_records) = generate_structured_task(
+                &engine,
+                &task_preds,
+                &agent_preds,
+                &mut causal,
+                &mut ec,
+                &book,
+                &create_manifest,
+                &update_manifest,
+                Seed(102),
+                1,
+                E2PromptMode::None,
+            )
+            .unwrap();
+            out.push((
+                "structured_task_create",
+                match build_sidecar_record(
+                    &loaded,
+                    &create_records[0],
+                    "structured_task_create",
+                    &create_records[0].target,
+                )
+                .unwrap()
+                {
+                    SidecarBuildOutcome::Built(r) => *r,
+                    _ => panic!("structured_task_create sidecar record must build"),
+                },
+            ));
+            out.push((
+                "structured_task_update",
+                match build_sidecar_record(
+                    &loaded,
+                    &update_records[0],
+                    "structured_task_update",
+                    &update_records[0].target,
+                )
+                .unwrap()
+                {
+                    SidecarBuildOutcome::Built(r) => *r,
+                    _ => panic!("structured_task_update sidecar record must build"),
+                },
+            ));
+
+            let reactor_manifest = ReactorManageTool.manifest();
+            let reactor_records = generate_reactor_manage(
+                &engine,
+                &mut causal,
+                &mut ec,
+                &book,
+                &reactor_manifest,
+                Seed(103),
+                1,
+                E2PromptMode::None,
+            )
+            .unwrap();
+            out.push((
+                "reactor_manage",
+                match build_sidecar_record(
+                    &loaded,
+                    &reactor_records[0],
+                    "reactor_manage",
+                    &reactor_records[0].target,
+                )
+                .unwrap()
+                {
+                    SidecarBuildOutcome::Built(r) => *r,
+                    _ => panic!("reactor_manage sidecar record must build"),
+                },
+            ));
+
+            out
+        };
+
+        const TOOLS_MARKER: &str = "# Tools\n";
+        for (tool, sidecar) in &sidecars {
+            let base = base_records
+                .iter()
+                .find(|r| r.family == format!("tool_contract.{tool}"))
+                .unwrap_or_else(|| panic!("base corpus record for family {tool}"));
+
+            // 1. Identical system-prompt preamble up to "# Tools\n" — the
+            // fixed `render_knowledge_prompt_with_system` text both records
+            // share byte-for-byte.
+            let base_end = base.prompt.find(TOOLS_MARKER).unwrap() + TOOLS_MARKER.len();
+            let sidecar_end = sidecar.prompt.find(TOOLS_MARKER).unwrap() + TOOLS_MARKER.len();
+            assert_eq!(
+                &base.prompt[..base_end],
+                &sidecar.prompt[..sidecar_end],
+                "system prompt preamble must match for {tool}"
+            );
+
+            // 2. Four offered tools, target present, every entry equal to
+            // the frozen contract's own openai_definition().
+            assert_eq!(sidecar.tools.len(), 4, "{tool} must offer exactly 4 tools");
+            let offered: HashSet<_> = sidecar
+                .tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str())
+                .collect();
+            assert!(
+                offered.contains(tool),
+                "{tool} must be among its own offered tools"
+            );
+            for entry in &sidecar.tools {
+                let name = entry["function"]["name"].as_str().unwrap();
+                assert_eq!(
+                    *entry,
+                    loaded.tool(name).unwrap().openai_definition(),
+                    "offered tool {name} must be exactly the frozen contract's definition"
+                );
+            }
+
+            // 3. contract_hash equals the hash read from the frozen
+            // contracts.json file (never a hardcoded literal).
+            assert_eq!(sidecar.contract_hash, loaded.manifest_hash);
+
+            // 4. The target validates against the frozen contract.
+            match KnowledgeAction::parse_runtime(&sidecar.target).unwrap() {
+                KnowledgeAction::ToolCall {
+                    tool: called,
+                    arguments,
+                } => {
+                    assert!(
+                        loaded.validate_call(&called, &arguments).valid,
+                        "{tool}'s sidecar target must validate against the frozen contract"
+                    );
+
+                    // 5. Identical user-turn skeleton: recomputing
+                    // `render_request` over the frozen contract's own
+                    // description and the target's own arguments must
+                    // reproduce the sidecar's user content exactly — proof
+                    // it really is grug-data's phrase table, not a
+                    // reimplementation, for whichever of the 3 phrasings
+                    // this record's seed selected.
+                    let language = sidecar.language;
+                    let seed = sidecar_seed(&sidecar.id);
+                    let description = &loaded.tool(&called).unwrap().description;
+                    let expected = render_request(language, description, &arguments, seed as usize);
+                    let actual = sidecar.conversation[0]["content"].as_str().unwrap();
+                    assert_eq!(
+                        actual, expected,
+                        "{tool}'s user turn must be exactly grug-data's own render_request output"
+                    );
+                }
+                other => panic!("{tool}: expected a tool-call target, got {other:?}"),
+            }
         }
     }
 }
