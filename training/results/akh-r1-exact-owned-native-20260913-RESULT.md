@@ -1,0 +1,11 @@
+# Exact-owned native repair: build blocked
+
+Implemented Engine::retract_owned_rule_snapshot for trusted isolated host manifests. It validates exact live edge metadata, bounds source/derived sets, rejects duplicates and requires linked conclusion-bound V2 provenance for derived edges. It conservatively removes only supplied owned edges without symbol-object cascade. Existing ordinary deletion retains its TMS planning and delegates exact edge persistence to the factored shared helper, including metadata preparation, SPARQL rollback, identity invalidation and RetractBatch recording.
+
+Eight focused native tests were authored for exact removal, shared-true isolation, conjunction withdrawal, surviving alternative recomputation, downstream invalidation, assertion preservation, stale provenance metadata rejection and cold edge metadata checks. **Zero tests executed.**
+
+The one frozen offline Cargo attempt failed after about 64 seconds (exit 101). `cargo test --offline --locked --no-default-features --test exact_owned_revision` also compiled the akh binary. Existing src/main.rs references acp_call and print_acp while their definitions are gated by feature acp, producing 20 E0425 errors. The experiment did not retry, alter that unrelated code, or claim test success. Logs, manifest, source hashes and the dedicated target directory remain in the failed run. Frozen bridge binaries were untouched.
+
+This is a partial implementation, not a completed repair. The host-only API requires trusted ownership admission; candidate-facing authorization, persisted source receipt/hash witnesses and combined bridge update/rule execution are not implemented. SPARQL fault rollback with enabled features, malformed live V2 payload, foreign linked derivations and complete cold source ownership need further checks; no production or full lifecycle guarantee is made.
+
+Hypothesis change: the native repair can reuse exact mutation persistence code, but behavioral validity remains unknown because test execution was blocked by harness feature selection. No native episodes, fixtures, OCR, models, training or cloud calls occurred. No quota or gate changes. The single attempt is consumed; next is a separate harness admission/replacement-budget review, not an automatic retry.

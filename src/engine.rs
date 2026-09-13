@@ -3011,12 +3011,68 @@ impl Engine {
         }
         let removals = removals.into_values().collect::<Vec<_>>();
 
+        self.commit_exact_retractions_locked(&removals)?;
+        if let Some(planned) = planned_tms {
+            *self.tms.write().unwrap() = planned;
+        }
+        Ok(result)
+    }
+
+    /// Host-only conservative invalidation for an isolated rule snapshot.
+    /// `sources` and `derived` must come from a trusted retained ownership
+    /// manifest, never an untrusted request's asserted ownership. Exact live
+    /// metadata is the cold/stale-state witness. No symbol-level TMS cascade
+    /// is performed: the host must recompute its admitted rules before action.
+    /// This API must not be mixed with symbol-TMS-owned state.
+    pub fn retract_owned_rule_snapshot(
+        &self,
+        sources: &[Triple],
+        derived: &[Triple],
+    ) -> AkhResult<usize> {
+        let _guard = self.mutation_lock.lock().unwrap_or_else(|p| p.into_inner());
+        self.ensure_mutations_active()?;
+        if sources.len() > 32 || derived.len() > 64 {
+            return Err(invalid_persistent_state("owned snapshot bound exceeded"));
+        }
+        let mut removals = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for expected in sources.iter().chain(derived) {
+            if !seen.insert((expected.subject, expected.predicate, expected.object)) {
+                return Err(invalid_persistent_state("duplicate owned edge"));
+            }
+            let live = self.knowledge_graph.triple(expected.subject, expected.predicate, expected.object);
+            if live.as_ref() != Some(expected) {
+                return Err(invalid_persistent_state("owned edge metadata mismatch"));
+            }
+            removals.push(expected.clone());
+        }
+        for edge in derived {
+            let id = edge.provenance_id.and_then(crate::provenance::ProvenanceId::new)
+                .ok_or_else(|| invalid_persistent_state("derived ownership requires linked provenance"))?;
+            let record = self.get_provenance(id)?;
+            let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = record.kind else {
+                return Err(invalid_persistent_state("owned edge is not rule-derived"));
+            };
+            if antecedents.len() < 8 || (antecedents.len() - 5) % 3 != 0
+                || antecedents[0].get() != crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
+                || antecedents[1].get() != crate::provenance::RULE_APPLICATION_V2_SENTINEL
+                || antecedents[2..5] != [edge.subject, edge.predicate, edge.object]
+            {
+                return Err(invalid_persistent_state("invalid conclusion-bound rule provenance"));
+            }
+        }
+        self.commit_exact_retractions_locked(&removals)?;
+        Ok(removals.len())
+    }
+
+    /// Shared mutation/WAL machinery; caller holds the mutation checkpoint.
+    fn commit_exact_retractions_locked(&self, removals: &[Triple]) -> AkhResult<()> {
         // A retract batch carries the exact removed edges plus closed symbol
         // and provenance metadata. Build and validate it before touching
         // KG/TMS/SPARQL/WAL.
         let mut symbol_metadata = std::collections::BTreeMap::new();
         let mut provenance_records = std::collections::BTreeMap::new();
-        for edge in &removals {
+        for edge in removals {
             let prepared = self.prepare_assertion(edge)?;
             for meta in prepared.symbols {
                 symbol_metadata.entry(meta.id).or_insert(meta);
@@ -3029,20 +3085,17 @@ impl Engine {
             }
         }
 
-        for edge in &removals {
+        for edge in removals {
             self.knowledge_graph
                 .remove_triple(edge.subject, edge.predicate, edge.object);
         }
         if let Some(ref sparql) = self.sparql
-            && let Err(error) = sparql.apply_transition(&removals, None)
+            && let Err(error) = sparql.apply_transition(removals, None)
         {
-            for edge in &removals {
+            for edge in removals {
                 self.knowledge_graph.replace_triple_exact(edge)?;
             }
             return Err(error.into());
-        }
-        if let Some(planned) = planned_tms {
-            *self.tms.write().unwrap() = planned;
         }
         self.identity_index_built.store(false, Ordering::Release);
 
@@ -3069,7 +3122,7 @@ impl Engine {
                 "provenance": provenance_records.into_values().collect::<Vec<_>>(),
             }),
         );
-        Ok(result)
+        Ok(())
     }
 
     /// Stop accepting live graph transitions and wait for any transition that
