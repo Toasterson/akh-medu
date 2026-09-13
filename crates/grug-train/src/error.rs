@@ -302,4 +302,26 @@ pub enum GrugError {
         )
     )]
     ContextExtensionShapeMismatch { reason: String },
+
+    /// [`crate::mixed_precision::MixedPrecisionTrainer`] (ADR 107 decision
+    /// 3c, `metal_f16` feature) failed to cast a [`crate::transformer::TinyTransformer`]
+    /// between its low- and high-precision training backends.
+    #[error("mixed-precision cast between training backends failed: {message}")]
+    #[diagnostic(
+        code(grug_train::mixed_precision_cast_failed),
+        help(
+            "This is an in-memory Burn `Recorder` round trip \
+             (`BinBytesRecorder<FullPrecisionSettings>`) used to move a model's parameters \
+             between the f16 training backend and the f32 master weights while preserving \
+             every parameter's `ParamId` -- see \
+             docs/ai/decisions/107-training-memory-turboquant-vs-recompute-attention.md and \
+             `mixed_precision.rs`. It should only fail if the low- and high-precision models \
+             were built from different `TinyTransformerConfig`s (a shape mismatch) -- check \
+             that `MixedPrecisionTrainer::link`/`low_precision_model` were called with the \
+             exact same config the other-precision model was initialized from, the same way \
+             `checkpoint::load_checkpoint` requires a matching config for its model/optimizer \
+             shapes."
+        )
+    )]
+    MixedPrecisionCastFailed { message: String },
 }

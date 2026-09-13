@@ -33,6 +33,7 @@ pub mod foundation;
 pub mod generate;
 pub mod knowledge_runtime;
 pub mod knowledge_train;
+pub mod mixed_precision;
 pub mod model;
 pub mod multimodal;
 pub mod multimodal_runtime;
@@ -80,6 +81,7 @@ pub use knowledge_train::{
     fingerprint_knowledge_records, format_knowledge_prompt, generate_knowledge_outputs,
     score_knowledge_outputs, validate_knowledge_steering_share,
 };
+pub use mixed_precision::{DEFAULT_LOSS_SCALE, MixedPrecisionTrainer};
 pub use model::{Mlp, MlpConfig};
 pub use multimodal::{
     CompactVisionShape, MULTIMODAL_EVIDENCE_SCHEMA_VERSION,
@@ -211,12 +213,35 @@ pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
 /// API automatically on macOS via `AutoGraphicsApi`/`WgpuDevice::DefaultDevice`
 /// -- see [`gpu_device`] below).
 /// **Mutually exclusive with `gpu` and `cuda`** — enable exactly one.
-#[cfg(all(feature = "metal", not(feature = "gpu"), not(feature = "cuda")))]
+/// Under `metal_f16` (ADR 107 decision 3c, Phase 51 P6.1b(c)) this becomes
+/// [`burn::backend::Metal<burn::tensor::f16>`] instead -- see the variant
+/// below and [`mixed_precision`].
+#[cfg(all(
+    feature = "metal",
+    not(feature = "metal_f16"),
+    not(feature = "gpu"),
+    not(feature = "cuda")
+))]
 pub type GpuBackend = burn::backend::Metal<f32>;
+
+/// The `metal_f16` variant of [`GpuBackend`] above (ADR 107 decision 3c,
+/// Phase 51 P6.1b(c)): the trainable forward/backward graph runs in f16
+/// instead of f32, which is where the actual activation-memory win from
+/// [`mixed_precision`] comes from. Burn 0.21 has no mixed precision of its
+/// own, so on its own this would also put every trainer's Adam moments in
+/// f16 (ADR 107's whole-backend f16 measurement, which converged visibly
+/// slower) -- `mixed_precision::MixedPrecisionTrainer` pairs this backend
+/// with [`GpuMasterAutodiffBackend`] (f32) to keep the optimizer state at
+/// full precision. Implies `metal` (`metal_f16 = ["metal"]` in
+/// `Cargo.toml`), so it is mutually exclusive with `gpu`/`cuda` via the
+/// same `compile_error!`s those already trigger against `metal`.
+#[cfg(all(feature = "metal_f16", not(feature = "gpu"), not(feature = "cuda")))]
+pub type GpuBackend = burn::backend::Metal<burn::tensor::f16>;
 
 /// The Metal *training* backend: [`GpuBackend`] wrapped in `Autodiff`. See
 /// [`CpuAutodiffBackend`] for the `grad_checkpointing` feature this alias
-/// also honors.
+/// also honors. Unchanged by `metal_f16` -- it wraps whichever `GpuBackend`
+/// (f32 or f16) is active.
 #[cfg(all(
     feature = "metal",
     not(feature = "gpu"),
@@ -232,6 +257,29 @@ pub type GpuAutodiffBackend = Autodiff<GpuBackend>;
     feature = "grad_checkpointing"
 ))]
 pub type GpuAutodiffBackend = Autodiff<GpuBackend, BalancedCheckpointing>;
+
+/// The f32 *master-weights* backend for [`mixed_precision`] under
+/// `metal_f16` (ADR 107 decision 3c, Phase 51 P6.1b(c)) -- the same
+/// physical Metal device as [`GpuBackend`]/[`GpuAutodiffBackend`] (both are
+/// `Wgpu<F, i32, u8>` for different `F`, so both use `WgpuDevice`; see
+/// [`gpu_device`]), just a different float element. Only the master's
+/// weights and Adam moments live here; the trainable forward/backward graph
+/// stays on [`GpuAutodiffBackend`] (f16).
+#[cfg(feature = "metal_f16")]
+pub type GpuMasterBackend = burn::backend::Metal<f32>;
+
+/// [`GpuMasterBackend`] wrapped in `Autodiff` -- required because
+/// `burn::optim::Optimizer::step` is only defined for `M:
+/// AutodiffModule<B>, B: AutodiffBackend` (see `mixed_precision.rs`), even
+/// though the master itself never runs a forward/backward pass. Honors
+/// `grad_checkpointing` for consistency with [`GpuAutodiffBackend`], though
+/// the master's parameter-only "graph" never triggers checkpointing in
+/// practice.
+#[cfg(all(feature = "metal_f16", not(feature = "grad_checkpointing")))]
+pub type GpuMasterAutodiffBackend = Autodiff<GpuMasterBackend>;
+/// See the non-`grad_checkpointing` variant above.
+#[cfg(all(feature = "metal_f16", feature = "grad_checkpointing"))]
+pub type GpuMasterAutodiffBackend = Autodiff<GpuMasterBackend, BalancedCheckpointing>;
 
 /// The default device for whichever GPU backend is enabled — the seam that
 /// keeps example/binary code **vendor-agnostic**: call `gpu_device()` instead
