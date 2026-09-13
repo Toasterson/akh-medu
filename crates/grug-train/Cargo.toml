@@ -96,3 +96,14 @@ grad_checkpointing = []
 # Mutually exclusive with `gpu` and `cuda` -- pick exactly one. See
 # `GpuBackend`/`GpuAutodiffBackend`/`gpu_device()` in `lib.rs`.
 metal = ["burn/metal"]
+
+# ADR 107 decision 3c / Phase 51 P6.1b(c): mixed-precision Metal training --
+# `GpuBackend`/`GpuAutodiffBackend` become f16 (the trainable forward/backward
+# graph) instead of `metal`'s plain f32, paired with the f32 master weights +
+# f32 Adam moments `mixed_precision.rs` maintains on a second backend
+# (`GpuMasterBackend`/`GpuMasterAutodiffBackend`), since Burn 0.21 has no
+# built-in mixed precision (a whole-backend f16 run also puts Adam's moments
+# in f16 -- see the ADR's measurements). Implies `metal` (same wgpu/Metal
+# device, different element type); mutually exclusive with `gpu`/`cuda` via
+# the same `metal` implication those `compile_error!`s already gate on.
+metal_f16 = ["metal"]

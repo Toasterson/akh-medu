@@ -28,7 +28,9 @@ use grug_train::foundation::{
 use grug_train::knowledge_train::{
     KnowledgeModelShape, KnowledgeModelSize, fingerprint_artifact_file,
 };
-use grug_train::train::{init_training, to_eval_model, train_step_guarded};
+use grug_train::train::to_eval_model;
+#[cfg(not(feature = "metal_f16"))]
+use grug_train::train::{init_training, train_step_guarded};
 use grug_train::{AttentionBackend, BpeTokenizer, checkpoint};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -36,8 +38,19 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
 use grug_train::CpuAutodiffBackend as ActiveBackend;
-#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
+// Under `metal_f16` (ADR 107 decision 3c, Phase 51 P6.1b(c)) `main` dispatches
+// to `run_mixed_precision` instead of `run::<ActiveBackend>`, naming
+// `GpuAutodiffBackend`/`GpuMasterAutodiffBackend` directly -- `ActiveBackend`
+// would otherwise be an unused-import warning on that path.
+#[cfg(all(
+    any(feature = "gpu", feature = "cuda", feature = "metal"),
+    not(feature = "metal_f16")
+))]
 use grug_train::GpuAutodiffBackend as ActiveBackend;
+#[cfg(feature = "metal_f16")]
+use grug_train::mixed_precision::DEFAULT_LOSS_SCALE;
+#[cfg(feature = "metal_f16")]
+use grug_train::{GpuAutodiffBackend, GpuMasterAutodiffBackend, MixedPrecisionTrainer};
 
 const TOKEN_CACHE_SCHEMA_VERSION: u32 = 1;
 
@@ -272,20 +285,39 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     validate_args(&args)?;
 
-    #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
-    let device = {
+    // ADR 107 decision 3c / Phase 51 P6.1b(c): `metal_f16` trains through
+    // `MixedPrecisionTrainer` (f16 activations on `GpuAutodiffBackend`, f32
+    // master weights + Adam moments on `GpuMasterAutodiffBackend`) instead of
+    // the plain single-backend `run::<ActiveBackend>` every other feature
+    // combination uses -- `run` itself is untouched by this feature.
+    #[cfg(feature = "metal_f16")]
+    {
         let device = grug_train::gpu_device();
-        println!("train_foundation: CubeCL GPU backend, device={device:?}");
-        device
-    };
-    #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
-    let device = {
-        println!("train_foundation: CPU backend (burn-ndarray)");
-        Default::default()
-    };
-    run::<ActiveBackend>(args, device)
+        println!(
+            "train_foundation: CubeCL GPU backend, mixed precision (f16 activations / f32 master \
+             weights, ADR 107 decision 3c), device={device:?}"
+        );
+        run_mixed_precision::<GpuAutodiffBackend, GpuMasterAutodiffBackend>(args, device)
+    }
+
+    #[cfg(not(feature = "metal_f16"))]
+    {
+        #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
+        let device = {
+            let device = grug_train::gpu_device();
+            println!("train_foundation: CubeCL GPU backend, device={device:?}");
+            device
+        };
+        #[cfg(not(any(feature = "gpu", feature = "cuda", feature = "metal")))]
+        let device = {
+            println!("train_foundation: CPU backend (burn-ndarray)");
+            Default::default()
+        };
+        run::<ActiveBackend>(args, device)
+    }
 }
 
+#[cfg(not(feature = "metal_f16"))]
 fn run<B: AutodiffBackend + AttentionBackend>(
     args: Args,
     device: B::Device,
@@ -577,6 +609,364 @@ where
             let relative_checkpoint = format!("checkpoints/step_{step:08}");
             let checkpoint_dir = args.artifacts_dir.join(&relative_checkpoint);
             checkpoint::save_checkpoint(&checkpoint_dir, step, &model, &optimizer)?;
+            let artifact = FoundationModelArtifact {
+                schema_version: FOUNDATION_MODEL_ARTIFACT_SCHEMA_VERSION,
+                model_size: args.model,
+                shape: shape.clone(),
+                parameter_count,
+                tokenizer_file: "tokenizer.json".into(),
+                tokenizer_hash: tokenizer_hash.clone(),
+                corpus_manifest_file: "foundation-corpus.json".into(),
+                corpus_manifest_hash: manifest_hash.clone(),
+                training_corpus_hash: manifest.training.fingerprint.clone(),
+                evaluation_corpus_hash: manifest.evaluation.fingerprint.clone(),
+                training_records: manifest.training.records,
+                evaluation_records: manifest.evaluation.records,
+                corpus_tokens: token_cache.training.tokens,
+                evaluation_tokens: token_cache.evaluation.tokens,
+                training_tokens_seen: (step as u64 + 1) * tokens_per_step,
+                languages: foundation_training_languages(&manifest),
+                sources: foundation_training_sources(&manifest),
+                checkpoint_dir: relative_checkpoint,
+                checkpoint_step: step,
+                checkpoint_model_hash: fingerprint_artifact_file(checkpoint_dir.join("model.mpk"))?,
+                checkpoint_optimizer_hash: Some(fingerprint_artifact_file(
+                    checkpoint_dir.join("optim.mpk"),
+                )?),
+            };
+            artifact.verify().map_err(invalid_data)?;
+            write_json_pretty_atomic(
+                &args.artifacts_dir.join(FOUNDATION_MODEL_MANIFEST),
+                &artifact,
+            )?;
+            println!(
+                "  checkpoint + foundation model -> {}",
+                checkpoint_dir.display()
+            );
+        }
+    }
+    println!(
+        "train_foundation: done elapsed={:.1}s final_loss={final_loss:.4} skipped={skipped}",
+        started.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// [`run`]'s exact training loop, but through [`MixedPrecisionTrainer`]
+/// instead of a single-backend [`init_training`]/[`train_step_guarded`]
+/// (ADR 107 decision 3c, Phase 51 P6.1b(c) -- see `mixed_precision.rs`):
+/// `BLow` (f16) carries the forward/backward graph, `BHigh` (f32) carries
+/// the master weights and Adam moments. Every other flag/behavior (corpus
+/// audit, tokenizer/token-cache handling, run.json, loss/grad-norm caps,
+/// eval cadence and content, checkpoint cadence and artifact schema) is
+/// identical to `run` -- only the four lines that touch the model/optimizer
+/// directly (init, guarded step, eval, checkpoint) differ, because those are
+/// exactly the lines [`MixedPrecisionTrainer`] wraps.
+#[cfg(feature = "metal_f16")]
+fn run_mixed_precision<BLow, BHigh>(args: Args, device: BLow::Device) -> Result<(), Box<dyn Error>>
+where
+    BLow: AutodiffBackend,
+    BHigh: AutodiffBackend<Device = BLow::Device>,
+{
+    std::fs::create_dir_all(&args.artifacts_dir)?;
+    let manifest: FoundationCorpusManifest =
+        serde_json::from_reader(BufReader::new(File::open(&args.manifest)?))?;
+    manifest.verify()?;
+    let manifest_hash = fingerprint_artifact_file(&args.manifest)?;
+    println!(
+        "train_foundation: auditing train={} eval={} languages={:?}",
+        manifest.training.records, manifest.evaluation.records, manifest.languages
+    );
+    let audit = audit_corpus(
+        &args.manifest,
+        &manifest,
+        args.tokenizer_sample_records,
+        args.seed,
+    )?;
+
+    let bundled_manifest = args.artifacts_dir.join("foundation-corpus.json");
+    copy_verified(&args.manifest, &bundled_manifest, &manifest_hash)?;
+    let tokenizer_path = args.artifacts_dir.join("tokenizer.json");
+    let tokenizer = if tokenizer_path.exists() {
+        BpeTokenizer::load(&tokenizer_path)?
+    } else {
+        if args.resume.is_some() {
+            return Err(invalid_data(format!(
+                "resume requires the original tokenizer at {}",
+                tokenizer_path.display()
+            )));
+        }
+        let pretokenization = args
+            .bpe_pretokenizer
+            .into_pretokenization(args.bpe_min_hex_run);
+        println!(
+            "train_foundation: training BPE ceiling={} pretokenizer={pretokenization} from {}-record reservoir",
+            args.bpe_vocab_size,
+            audit.tokenizer_sample.len()
+        );
+        let tokenizer = BpeTokenizer::train_with_pretokenization(
+            audit.tokenizer_sample,
+            args.bpe_vocab_size,
+            pretokenization,
+        )?;
+        tokenizer.save(&tokenizer_path)?;
+        tokenizer
+    };
+    let tokenizer_hash = fingerprint_artifact_file(&tokenizer_path)?;
+    let token_cache = load_or_build_token_cache(
+        &args.artifacts_dir,
+        &args.manifest,
+        &manifest,
+        &tokenizer,
+        &tokenizer_hash,
+        &args.bpe_pretokenizer.to_string(),
+        args.bpe_min_hex_run,
+    )?;
+    let token_cache_path = args.artifacts_dir.join("token-cache.json");
+    let token_cache_hash = fingerprint_artifact_file(&token_cache_path)?;
+    let shape = KnowledgeModelShape::from_config(&args.model.config(tokenizer.vocab_size()));
+    let context = match args.context {
+        None => shape.max_seq_len,
+        Some(context) if context >= 2 && context <= shape.max_seq_len => context,
+        Some(context) => {
+            return Err(invalid_data(format!(
+                "--context {context} must be in 2..={} for model {}",
+                shape.max_seq_len, args.model
+            )));
+        }
+    };
+    println!(
+        "train_foundation: tokenizer={} vocab={} bpe_pretokenizer={} bpe_min_hex_run={} \
+         tokens train={} eval={} context={}",
+        tokenizer_hash,
+        tokenizer.vocab_size(),
+        args.bpe_pretokenizer,
+        args.bpe_min_hex_run,
+        token_cache.training.tokens,
+        token_cache.evaluation.tokens,
+        context
+    );
+    if token_cache.training.tokens <= context as u64 + 1
+        || token_cache.evaluation.tokens <= context as u64 + 1
+    {
+        return Err(invalid_data(format!(
+            "packed corpus is too small for context {} (train={}, eval={})",
+            context, token_cache.training.tokens, token_cache.evaluation.tokens
+        )));
+    }
+    if args.validate_only {
+        println!(
+            "train_foundation: validation complete manifest={} token_cache={} shape={shape:?}",
+            manifest_hash, token_cache_hash
+        );
+        return Ok(());
+    }
+
+    if args.resume.is_none() && args.artifacts_dir.join("run.json").exists() {
+        return Err(invalid_data(
+            "run.json already exists; pass --resume for an existing run or use a fresh artifacts directory",
+        ));
+    }
+    BLow::seed(&device, args.seed);
+    let config = shape.config();
+    let mut low_model = config.init::<BLow>(&device);
+    let mut mp = MixedPrecisionTrainer::<BLow, BHigh>::link(
+        &low_model,
+        &config,
+        &device,
+        DEFAULT_LOSS_SCALE,
+    )?;
+    let parameter_count = mp.master().num_params();
+    let learning_rate = args.learning_rate.unwrap_or(match args.model {
+        KnowledgeModelSize::Small
+        | KnowledgeModelSize::Small8k
+        | KnowledgeModelSize::SmallRope4k => 3e-4,
+        KnowledgeModelSize::Model350m | KnowledgeModelSize::Model350m8k => 5e-5,
+    });
+
+    let mut start_step = 0usize;
+    if let Some(resume) = &args.resume {
+        let verified = verify_foundation_bundle(&args.artifacts_dir)?;
+        if verified.artifact().training_corpus_hash != manifest.training.fingerprint
+            || verified.artifact().evaluation_corpus_hash != manifest.evaluation.fingerprint
+            || verified.artifact().tokenizer_hash != tokenizer_hash
+            || verified.artifact().shape != shape
+        {
+            return Err(invalid_data(
+                "existing foundation artifact does not match this corpus/tokenizer/model",
+            ));
+        }
+        let declared = args.artifacts_dir.join(&verified.artifact().checkpoint_dir);
+        if resume.canonicalize()? != declared.canonicalize()? {
+            return Err(invalid_data(format!(
+                "--resume {} is not the checkpoint bound by {}",
+                resume.display(),
+                FOUNDATION_MODEL_MANIFEST
+            )));
+        }
+        let (loaded_master, loaded_optim, step) = checkpoint::load_checkpoint::<BHigh>(
+            resume,
+            mp.master().clone(),
+            mp.optim().clone(),
+            &device,
+        )?;
+        mp = MixedPrecisionTrainer::from_master(
+            loaded_master,
+            loaded_optim,
+            device.clone(),
+            DEFAULT_LOSS_SCALE,
+        );
+        low_model = mp.low_precision_model(&config, &device)?;
+        start_step = step + 1;
+    }
+    if start_step >= args.steps {
+        return Err(invalid_data(format!(
+            "resume starts at step {start_step}, but --steps is {}",
+            args.steps
+        )));
+    }
+
+    write_json_pretty_atomic(
+        &args.artifacts_dir.join("run.json"),
+        &RunDescriptor {
+            schema_version: 1,
+            manifest: &args.manifest,
+            manifest_hash: &manifest_hash,
+            model_size: args.model,
+            shape: &shape,
+            parameter_count,
+            tokenizer_hash: &tokenizer_hash,
+            bpe_pretokenizer: args.bpe_pretokenizer.to_string(),
+            bpe_min_hex_run: args.bpe_min_hex_run,
+            token_cache_hash: &token_cache_hash,
+            steps: args.steps,
+            batch_size: args.batch_size,
+            learning_rate,
+            warmup_steps: args.warmup_steps,
+            lr_min_ratio: args.lr_min_ratio,
+            loss_cap: args.loss_cap,
+            grad_norm_cap: args.grad_norm_cap,
+            seed: args.seed,
+        },
+    )?;
+
+    println!(
+        "train_foundation: model={} params={} steps={} batch={} lr={learning_rate:.2e}",
+        args.model, parameter_count, args.steps, args.batch_size
+    );
+    let train_path = resolve_artifact_child(&args.artifacts_dir, &token_cache.training.file)?;
+    let eval_path = resolve_artifact_child(&args.artifacts_dir, &token_cache.evaluation.file)?;
+    let mut train_file = File::open(train_path)?;
+    let mut eval_file = File::open(eval_path)?;
+    let train_log = args.artifacts_dir.join("train.jsonl");
+    let eval_log = args.artifacts_dir.join("eval_causal.jsonl");
+    let started = Instant::now();
+    let tokens_per_step = (args.batch_size * context) as u64;
+    let mut loss_ema = f32::NAN;
+    let mut grad_ema = f32::NAN;
+    let mut skipped = 0usize;
+    let mut final_loss = f32::NAN;
+
+    for step in start_step..args.steps {
+        let sequences = read_step_sequences(
+            &mut train_file,
+            token_cache.training.tokens,
+            step,
+            args.batch_size,
+            context,
+        )?;
+        let batch = build_causal_batch::<BLow>(&sequences, tokenizer.pad_id(), context, &device)?;
+        let lr = learning_rate_at_step(
+            step,
+            args.steps,
+            learning_rate,
+            args.warmup_steps,
+            args.lr_min_ratio,
+        );
+        let dynamic_loss_cap = if step > 100 && loss_ema.is_finite() {
+            args.loss_cap.min((loss_ema * 4.0).max(loss_ema + 2.0))
+        } else {
+            args.loss_cap
+        };
+        let dynamic_grad_cap = if step > 100 && grad_ema.is_finite() {
+            args.grad_norm_cap.min((grad_ema * 5.0).max(grad_ema + 1.0))
+        } else {
+            args.grad_norm_cap
+        };
+        let step_started = Instant::now();
+        let (next_low, loss, grad_norm) = mp.train_step_guarded(
+            low_model,
+            &batch,
+            lr,
+            dynamic_loss_cap,
+            dynamic_grad_cap,
+            &device,
+        );
+        low_model = next_low;
+        let update_skipped = !loss.is_finite()
+            || loss > dynamic_loss_cap
+            || !grad_norm.is_finite()
+            || grad_norm > dynamic_grad_cap;
+        if update_skipped {
+            skipped += 1;
+            if skipped > args.max_skipped_updates {
+                return Err(invalid_data(format!(
+                    "aborting after {skipped} guarded updates; no newer foundation manifest was written"
+                )));
+            }
+        } else {
+            final_loss = loss;
+            loss_ema = ema(loss_ema, loss);
+            grad_ema = ema(grad_ema, grad_norm);
+        }
+        let tokens_seen = (step as u64 + 1) * tokens_per_step;
+        append_json_line(
+            &train_log,
+            &TrainLogRow {
+                step,
+                loss,
+                grad_norm,
+                learning_rate: lr,
+                update_skipped,
+                tokens_seen,
+                step_ms: step_started.elapsed().as_secs_f64() * 1_000.0,
+            },
+        )?;
+        if step % 10 == 0 || step + 1 == args.steps || update_skipped {
+            println!(
+                "step {step:6}: loss={loss:.4} grad={grad_norm:.3} lr={lr:.2e} tokens={tokens_seen}{}",
+                if update_skipped { " SKIPPED" } else { "" }
+            );
+        }
+
+        if (step + 1) % args.eval_every == 0 || step + 1 == args.steps {
+            let loss = evaluate_causal(
+                &low_model,
+                &tokenizer,
+                &mut eval_file,
+                token_cache.evaluation.tokens,
+                args.eval_batches,
+                args.batch_size,
+                context,
+                &device,
+            )?;
+            let perplexity = f64::from(loss).min(80.0).exp();
+            println!("  eval@{step}: loss={loss:.4} perplexity={perplexity:.2}");
+            append_json_line(
+                &eval_log,
+                &EvalLogRow {
+                    step,
+                    loss,
+                    perplexity,
+                    batches: args.eval_batches,
+                },
+            )?;
+        }
+
+        if (step + 1) % args.ckpt_every == 0 || step + 1 == args.steps {
+            let relative_checkpoint = format!("checkpoints/step_{step:08}");
+            let checkpoint_dir = args.artifacts_dir.join(&relative_checkpoint);
+            checkpoint::save_checkpoint::<BHigh>(&checkpoint_dir, step, mp.master(), mp.optim())?;
             let artifact = FoundationModelArtifact {
                 schema_version: FOUNDATION_MODEL_ARTIFACT_SCHEMA_VERSION,
                 model_size: args.model,
