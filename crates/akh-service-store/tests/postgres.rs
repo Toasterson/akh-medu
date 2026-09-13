@@ -187,3 +187,54 @@ fn legacy_redb_contents_are_imported_exactly_once() {
         "a marker-guarded reopen must not re-import and overwrite a value written after migration"
     );
 }
+
+/// Regression test for the production incident: `akhsessd`/`akhrtd`/
+/// `akhexecd`/`akhsbxd`/`akheventd` all run a bare `#[tokio::main]` (multi-
+/// thread scheduler) and call these `Store` methods synchronously from
+/// within async request-handling code — i.e. directly on a multi-thread
+/// runtime worker thread, exactly like this test body does. Before the sync
+/// facade moved its Postgres work onto a dedicated OS thread, this call
+/// shape panicked with "Cannot start a runtime from within a runtime".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires AKH_TEST_DATABASE_URL"]
+async fn store_works_when_called_synchronously_from_a_multi_thread_runtime_worker() {
+    let Some(url) = database_url() else { return };
+    let kind = unique_kind("multi_thread_runtime");
+    let store = open(&kind, &url, None);
+
+    store
+        .transaction(|tx| {
+            tx.put(&key("session", &["a"]), &1u32)?;
+            tx.put(&key("session", &["b"]), &2u32)?;
+            assert_eq!(tx.get::<u32>(&key("session", &["a"]))?, Some(1));
+            let scanned: Vec<u32> = tx.scan("session/")?;
+            assert_eq!(scanned.len(), 2);
+            Ok(())
+        })
+        .unwrap();
+
+    let mut scanned: Vec<u32> = store.scan("session/").unwrap();
+    scanned.sort_unstable();
+    assert_eq!(scanned, vec![1, 2]);
+    assert_eq!(store.get::<u32>(&key("session", &["a"])).unwrap(), Some(1));
+}
+
+/// Companion to the multi-thread-runtime-worker test above: the same store
+/// must also work when opened and used from a plain `std::thread` with no
+/// Tokio runtime at all (this always worked, even with the old
+/// `block_on`-a-private-runtime bridge — it is the multi-thread-runtime
+/// case above that regressed in production).
+#[test]
+#[ignore = "requires AKH_TEST_DATABASE_URL"]
+fn store_works_when_called_from_a_plain_std_thread_with_no_ambient_runtime() {
+    let Some(url) = database_url() else { return };
+    let kind = unique_kind("plain_std_thread");
+    let handle = std::thread::spawn(move || {
+        let store = open(&kind, &url, None);
+        store
+            .transaction(|tx| tx.put(&key("session", &["a"]), &7u32))
+            .unwrap();
+        store.scan::<u32>("session/").unwrap()
+    });
+    assert_eq!(handle.join().unwrap(), vec![7]);
+}

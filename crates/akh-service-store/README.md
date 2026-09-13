@@ -65,13 +65,35 @@ Absent a `store` section, a daemon keeps using its redb file under
 See the doc comments at the top of `src/postgres.rs` for the full reasoning;
 summarized here:
 
-- **Sync facade over an async driver.** The public API is synchronous
-  because every existing call site is. sqlx is async-only, so a small
-  dedicated multi-thread Tokio runtime (not the caller's ambient runtime,
-  and never called into recursively) drives every query to completion
-  before the calling `fn` returns. This works identically whether the
-  caller is a `#[tokio::main]` daemon or a plain `#[test]` with no runtime
-  at all.
+- **Sync facade over an async driver, on a dedicated OS thread.** The public
+  API is synchronous because every existing call site is. sqlx is
+  async-only, so a single dedicated `akh-store-pg` OS thread — never a
+  worker thread of any caller's Tokio runtime — runs its own
+  `current_thread` Tokio runtime and drives every Postgres query to
+  completion there. Every operation (open, get, scan, transaction
+  begin/get/put/delete/scan, commit/rollback) is sent to that thread as a
+  boxed closure over a `std::sync::mpsc` channel, with a `sync_channel(1)`
+  used once to carry back the result; the calling thread sends the job and
+  blocks for the reply — via `tokio::task::block_in_place` when it is itself
+  a multi-thread Tokio runtime worker (true for all five daemons, which use
+  a bare `#[tokio::main]`), or a plain blocking `recv()` otherwise (no
+  ambient runtime, or the documented `current_thread`-runtime fallback — see
+  the doc comments at the top of `src/postgres.rs`).
+  An earlier version of this bridge called `.block_on(...)` on a private
+  multi-thread runtime from whichever thread happened to be calling in. That
+  is unsound — Tokio's "already inside a runtime" check is a thread-local
+  flag, not tied to a particular `Runtime` value, so calling `block_on` on
+  *any* runtime while standing on a worker thread of *another* runtime still
+  panics with "Cannot start a runtime from within a runtime". That is
+  exactly what crashed every daemon (`akhsessd`, `akhrtd`, `akhexecd`,
+  `akhsbxd`, `akheventd`) at startup in production, since `Store::open_postgres`
+  and every call site run from inside each daemon's async `#[tokio::main]`
+  body. Routing the actual `block_on` onto a thread Tokio never touches
+  avoids the hazard entirely, in both the daemon and plain-`#[test]` shapes.
+  All Postgres work is processed one job at a time on that single thread —
+  a deliberate simplification given `Store` is already a low-QPS,
+  single-writer-per-kind durability layer (see Locking/Cache below), not a
+  latency-critical hot path.
 - **Locking.** redb allows one writer at a time per file, holding a
   consistent snapshot for the transaction's duration. Postgres emulates this
   per `kind` with `pg_advisory_xact_lock(hashtextextended(kind, 0))`, taken
@@ -119,10 +141,17 @@ everything across exactly once.
 ## Testing
 
 - `cargo test -p akh-service-store` runs the redb-backed suite plus
-  Postgres-backend unit tests (prefix bound math, cache semantics) that need
-  no database.
+  Postgres-backend unit tests (prefix bound math, cache semantics, and two
+  `run_on_db_thread` regression tests — one `#[tokio::test(flavor =
+  "multi_thread", worker_threads = 2)]`, one plain `#[test]` — that reproduce
+  the "sync facade called from a multi-thread runtime worker" incident shape
+  without needing a database).
 - The Postgres integration suite (`tests/postgres.rs`) is `#[ignore]`d by
-  default and gated on `AKH_TEST_DATABASE_URL`:
+  default and gated on `AKH_TEST_DATABASE_URL`. It includes the same two
+  runtime-context regression tests (`store_works_when_called_synchronously_
+  from_a_multi_thread_runtime_worker`, `store_works_when_called_from_a_plain_
+  std_thread_with_no_ambient_runtime`), this time exercising the real
+  `Store` (open, transaction, scan) rather than just the bridging primitive:
 
   ```sh
   docker run -d --rm --name akh-store-pg -p 55433:5432 \
