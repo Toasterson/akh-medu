@@ -9,5 +9,15 @@ akh-session-types = { path = "../akh-session-types" }
 redb = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Postgres backend. Version/feature set kept in step with the sqlx already
+# resolved in the workspace lock via `sea-orm` (crates/akhomed-store,
+# crates/seshat, crates/heka all pull sqlx 0.8 + `runtime-tokio-rustls`), so
+# this adds no second sqlx/rustls stack to the dependency tree.
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
