@@ -51,6 +51,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 
 use grug_data::{RuleCorpusConfig, RuleDataset, RuleExample, RuleWorldConfig, TraceArm};
+use grug_train::AttentionBackend;
 use grug_train::BpeTokenizer;
 use grug_train::checkpoint;
 use grug_train::rule_train::{encode_rule_example, format_rule_prompt};
@@ -188,7 +189,7 @@ fn build_probe_input<B: Backend, V: Vocab>(
     (input_ids, batch_size, seq_len)
 }
 
-fn probe_batch<B: Backend>(
+fn probe_batch<B: Backend + AttentionBackend>(
     model: &TinyTransformer<B>,
     tokenizer: &BpeTokenizer,
     train_examples: &[RuleExample],

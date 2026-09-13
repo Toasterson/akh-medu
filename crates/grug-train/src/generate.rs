@@ -13,7 +13,7 @@ use grug_data::constrain::{
 
 use crate::pointer::PointerTransformer;
 use crate::tokenizer::Vocab;
-use crate::transformer::TinyTransformer;
+use crate::transformer::{AttentionBackend, TinyTransformer};
 
 /// Phase 51 / ADR 104 D2 bug fix: hard cap on how many times the soft
 /// suffix-copy bias (mechanism 2) may override the masked argmax within a
@@ -57,7 +57,7 @@ impl Default for GenerateConfig {
 /// bytes instead of erroring, since the eval harness needs a string back
 /// either way -- an invalid-JSON string still scores as "invalid json",
 /// which is a real and useful eval outcome.
-pub fn generate<B: Backend, V: Vocab>(
+pub fn generate<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     prompt: &str,
@@ -74,7 +74,7 @@ pub fn generate<B: Backend, V: Vocab>(
 /// long prompt is compacted by retaining both its tool-policy head and latest
 /// conversation tail before generation. Callers provide neither BOS nor SEP;
 /// this function adds the same framing as [`generate`].
-pub fn generate_from_prompt_ids<B: Backend, V: Vocab>(
+pub fn generate_from_prompt_ids<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     prompt_ids: &[u32],
@@ -138,7 +138,7 @@ pub fn generate_from_prompt_ids<B: Backend, V: Vocab>(
 /// to [`generate_from_prompt_ids`], whose left-truncation semantics remain the
 /// compatibility path. Knowledge-runtime callers compact before entering this
 /// function, so normal Akh serving and checkpoint exams use the cached path.
-pub fn generate_from_prompt_ids_cached<B: Backend, V: Vocab>(
+pub fn generate_from_prompt_ids_cached<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     prompt_ids: &[u32],
@@ -247,7 +247,7 @@ impl<'a> ConstrainedDecode<'a> {
 /// Returns the decoded text plus a [`DecodeReport`] describing which
 /// (tool, property) pairs were value-copy-constrained and whether the
 /// emitted value actually landed on a context candidate.
-pub fn generate_from_prompt_ids_cached_constrained<B: Backend, V: Vocab>(
+pub fn generate_from_prompt_ids_cached_constrained<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     prompt_ids: &[u32],
@@ -645,7 +645,7 @@ pub fn select_next_token_with_copy_bias(
 /// grammar docs): it can force valid, schema-consistent keys but cannot supply
 /// correct argument *values*, which must be copied from the request — exactly
 /// the isolation Step A measures.
-pub fn generate_constrained<B: Backend, V: Vocab>(
+pub fn generate_constrained<B: AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     prompt: &str,
@@ -749,7 +749,7 @@ pub fn generate_constrained<B: Backend, V: Vocab>(
 /// model's *mixed* distribution (`PointerTransformer::log_probs`) at the last
 /// position — argmax over log-probs equals argmax over probs, so this needs no
 /// special handling versus the plain LM path.
-pub fn generate_ptr<B: Backend, V: Vocab>(
+pub fn generate_ptr<B: AttentionBackend, V: Vocab>(
     model: &PointerTransformer<B>,
     tokenizer: &V,
     prompt: &str,
@@ -804,7 +804,7 @@ pub fn generate_ptr<B: Backend, V: Vocab>(
 /// P1a-4 Step B): [`generate_ptr`] with the [`generate_constrained`] grammar
 /// mask applied to the mixed distribution's log-probs. Lets the combined
 /// effect of copy mechanism + schema constraint be measured.
-pub fn generate_ptr_constrained<B: Backend, V: Vocab>(
+pub fn generate_ptr_constrained<B: AttentionBackend, V: Vocab>(
     model: &PointerTransformer<B>,
     tokenizer: &V,
     prompt: &str,

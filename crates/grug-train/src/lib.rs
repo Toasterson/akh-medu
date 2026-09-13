@@ -102,7 +102,8 @@ pub use rule_train::{
 pub use tokenizer::{ByteTokenizer, Vocab};
 pub use train::text_batch_loss;
 pub use transformer::{
-    Attention, CausalSelfAttention, PositionalEncoding, TinyTransformer, TinyTransformerConfig,
+    Attention, AttentionBackend, CausalSelfAttention, PositionalEncoding, TinyTransformer,
+    TinyTransformerConfig,
 };
 pub use vision::{
     CompactConvVisionStem, CompactConvVisionStemConfig, CompactVisionTransformer,

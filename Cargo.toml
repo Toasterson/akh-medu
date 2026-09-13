@@ -416,3 +416,20 @@ mmap-rs = { path = "vendor/mmap-rs" }
 # Drop once the upstream rust-lang/libc PR adding the constants is merged
 # and released.
 cpu-time = { path = "vendor/cpu-time" }
+# Phase 51 P6.1b / ADR 107 (docs/ai/decisions/107-training-memory-turboquant-vs-recompute-attention.md):
+# grug-train needs to implement a custom recompute-backward attention op
+# (FlashAttention-style: keep O(L*d) per layer instead of retaining the full
+# O(L^2) attention-score tensor for `.backward()`) using burn-autodiff's own
+# `ops::Backward<B, N>` extension mechanism -- the same mechanism `Matmul`/
+# `Add`/etc. use internally in `ops/tensor.rs`. Upstream 0.21.0 declares the
+# `graph` and `tensor` modules `pub(crate)`, so `AutodiffTensor<B>` (and the
+# graph types the public `ops::Backward`/`ops::OpsPrep` API already takes and
+# returns) are unreachable from any crate outside burn-autodiff, even though
+# every field/method on them is individually `pub` -- there is no other
+# public path to a tensor's tracked-graph node. This vendored copy widens
+# exactly those two module declarations from `pub(crate)` to `pub`; it adds,
+# removes, and changes nothing else, so every existing burn-autodiff caller
+# (including the rest of this crate's own dependency graph, since only
+# grug-train depends on `burn`) is byte-identical. See
+# vendor/burn-autodiff/src/lib.rs for the annotated diff.
+burn-autodiff = { path = "vendor/burn-autodiff" }

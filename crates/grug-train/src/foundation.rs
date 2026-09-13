@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::checkpoint::load_model_only;
 use crate::knowledge_train::{KnowledgeModelShape, KnowledgeModelSize, fingerprint_artifact_file};
 use crate::train::{Batch, masked_cross_entropy};
+use crate::transformer::AttentionBackend;
 use crate::{BpeTokenizer, GrugError, TinyTransformer};
 
 pub const FOUNDATION_MODEL_ARTIFACT_SCHEMA_VERSION: u32 = 1;
@@ -179,7 +180,7 @@ impl VerifiedFoundationBundle {
         self.artifact.lineage(self.artifact_hash.clone())
     }
 
-    pub fn load_model_only<B: Backend>(
+    pub fn load_model_only<B: AttentionBackend>(
         &self,
         device: &B::Device,
     ) -> Result<TinyTransformer<B>, FoundationError> {
@@ -358,7 +359,7 @@ pub fn build_causal_batch<B: Backend>(
     })
 }
 
-pub fn causal_batch_loss<B: Backend>(model: &TinyTransformer<B>, batch: &Batch<B>) -> f32 {
+pub fn causal_batch_loss<B: AttentionBackend>(model: &TinyTransformer<B>, batch: &Batch<B>) -> f32 {
     use burn::tensor::ElementConversion;
 
     let mask: Vec<i64> = batch

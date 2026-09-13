@@ -26,6 +26,12 @@
 //! A later context-manager implementation is a new concrete type plugged
 //! into that generic parameter, not a new enum variant or trait object.
 
+use burn::backend::Autodiff;
+use burn::backend::autodiff::checkpoint::base::Checkpointer;
+use burn::backend::autodiff::checkpoint::strategy::CheckpointStrategy;
+use burn::backend::autodiff::grads::Gradients;
+use burn::backend::autodiff::ops::{Backward, Ops, OpsKind};
+use burn::backend::autodiff::tensor::AutodiffTensor;
 use burn::config::Config;
 use burn::module::Module;
 use burn::nn::attention::generate_autoregressive_mask;
@@ -33,11 +39,25 @@ use burn::nn::{
     Embedding, EmbeddingConfig, Gelu, LayerNorm, LayerNormConfig, Linear, LinearConfig,
     RotaryEncoding, RotaryEncodingConfig,
 };
+use burn::tensor::TensorPrimitive;
 use burn::tensor::activation::softmax;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Bool, Int, Tensor};
 
 use crate::error::{GrugError, GrugResult};
+
+/// The raw (inner-backend) float tensor primitive for `B`, i.e.
+/// `<B as Backend>::FloatTensorPrimitive`. A local alias purely to keep the
+/// [`AttentionBackend`]/[`RecomputeAttention`] signatures readable. The
+/// `B: Backend` bound is documentation only -- Rust does not check type
+/// alias bounds at usage sites -- so it is explicitly allowed rather than
+/// silently dropped.
+#[allow(type_alias_bounds)]
+type FloatPrim<B: Backend> = B::FloatTensorPrimitive;
+/// The raw (inner-backend) bool tensor primitive for `B`, i.e.
+/// `B::BoolTensorPrimitive`. See [`FloatPrim`].
+#[allow(type_alias_bounds)]
+type BoolPrim<B: Backend> = B::BoolTensorPrimitive;
 
 /// Choice of positional encoding for [`TinyTransformer`] (ADR 104 D3).
 ///
@@ -100,11 +120,23 @@ fn build_rotary<B: Backend>(
 
 /// Computes causal attention in query-row blocks of `chunk` rows at a time
 /// (ADR 104 D4), keeping peak materialized attention memory at
-/// `batch x heads x chunk x kv_len` instead of `batch x heads x query_len x
+/// `batch x heads x chunk x key_end` instead of `batch x heads x query_len x
 /// kv_len`. This is an exact, not approximate, memory-blocking: softmax
 /// normalizes each query row independently of every other row, so grouping
 /// rows into blocks changes only the order operations run in, never the
 /// result (byte-for-byte, up to floating-point summation order).
+///
+/// **Causal-prefix K/V slicing** (ADR 107 / Phase 51 P6.1b-a): query row
+/// `start` (0-indexed within this call) sits at absolute position
+/// `kv_offset + start`, where `kv_offset = kv_len - query_len` is 0 for an
+/// ordinary self-attention forward (`q`/`k`/`v` all cover the same fresh
+/// range) and equal to the cached-prefix length during incremental decode
+/// (`k`/`v` are `cache ++ this_call`, `q` is only `this_call`). A causal
+/// mask blocks every key at or beyond `kv_offset + end`, so scoring this
+/// chunk against keys `[key_end..kv_len)` could only ever contribute masked
+/// (`-inf`) columns; slicing to `[0, key_end)` up front is therefore exact,
+/// not approximate, and roughly halves the average score-tensor size versus
+/// always scoring the full `kv_len`.
 fn chunked_causal_attention<B: Backend>(
     q: Tensor<B, 4>,
     k: Tensor<B, 4>,
@@ -116,26 +148,365 @@ fn chunked_causal_attention<B: Backend>(
     assert!(chunk > 0, "attention_chunk must be positive");
     let [batch_size, n_heads, query_len, d_head] = q.dims();
     let kv_len = k.dims()[2];
+    let kv_offset = kv_len - query_len;
     let mut blocks = Vec::with_capacity(query_len.div_ceil(chunk));
     let mut start = 0usize;
     while start < query_len {
         let end = (start + chunk).min(query_len);
+        let key_end = kv_offset + end;
         let q_block = q
             .clone()
             .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
-        let mut scores = q_block.matmul(k.clone().swap_dims(2, 3)) / scale;
+        let k_block = k
+            .clone()
+            .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+        let v_block = v
+            .clone()
+            .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+        let mut scores = q_block.matmul(k_block.swap_dims(2, 3)) / scale;
         if let Some(mask) = &causal_mask {
             let mask_block = mask
                 .clone()
-                .slice([0..batch_size, start..end, 0..kv_len])
+                .slice([0..batch_size, start..end, 0..key_end])
                 .unsqueeze_dim::<4>(1);
             scores = scores.mask_fill(mask_block, f32::NEG_INFINITY);
         }
         let weights = softmax(scores, 3);
-        blocks.push(weights.matmul(v.clone()));
+        blocks.push(weights.matmul(v_block));
         start = end;
     }
     Tensor::cat(blocks, 2)
+}
+
+/// Forward half of the recompute-backward op ([`RecomputeAttention`]):
+/// identical causal-prefix-sliced per-chunk score/softmax/output
+/// computation as [`chunked_causal_attention`], but additionally returns
+/// each query row's log-sum-exp, `logsumexp(S_row) = max(S_row) +
+/// log(sum(exp(S_row - max)))`, alongside the attended output `O`. The
+/// backward pass recomputes `P = exp(S - LSE)` from this instead of a fresh
+/// max/sum reduction (algebraically identical to `softmax(S)`, see the
+/// derivation on [`RecomputeAttention::backward`]), which is what lets it
+/// discard the transient `[chunk x key_end]` score tensor instead of
+/// retaining it for `.backward()`.
+fn chunked_causal_attention_with_lse<B: Backend>(
+    q: Tensor<B, 4>,
+    k: Tensor<B, 4>,
+    v: Tensor<B, 4>,
+    causal_mask: Option<Tensor<B, 3, Bool>>,
+    scale: f64,
+    chunk: usize,
+) -> (Tensor<B, 4>, Tensor<B, 3>) {
+    assert!(chunk > 0, "attention_chunk must be positive");
+    let [batch_size, n_heads, query_len, d_head] = q.dims();
+    let kv_len = k.dims()[2];
+    let kv_offset = kv_len - query_len;
+    let mut o_blocks = Vec::with_capacity(query_len.div_ceil(chunk));
+    let mut lse_blocks = Vec::with_capacity(query_len.div_ceil(chunk));
+    let mut start = 0usize;
+    while start < query_len {
+        let end = (start + chunk).min(query_len);
+        let key_end = kv_offset + end;
+        let q_block = q
+            .clone()
+            .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
+        let k_block = k
+            .clone()
+            .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+        let v_block = v
+            .clone()
+            .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+        let mut scores = q_block.matmul(k_block.swap_dims(2, 3)) / scale;
+        if let Some(mask) = &causal_mask {
+            let mask_block = mask
+                .clone()
+                .slice([0..batch_size, start..end, 0..key_end])
+                .unsqueeze_dim::<4>(1);
+            scores = scores.mask_fill(mask_block, f32::NEG_INFINITY);
+        }
+        let max = scores.clone().max_dim(3); // [batch, heads, chunk, 1]
+        let exp_scores = (scores - max.clone()).exp();
+        let sum_exp = exp_scores.clone().sum_dim(3); // [batch, heads, chunk, 1]
+        let probs = exp_scores / sum_exp.clone();
+        let lse = (max + sum_exp.log()).squeeze_dim::<3>(3); // [batch, heads, chunk]
+        o_blocks.push(probs.matmul(v_block));
+        lse_blocks.push(lse);
+        start = end;
+    }
+    (Tensor::cat(o_blocks, 2), Tensor::cat(lse_blocks, 2))
+}
+
+/// Backend seam for chunked causal attention with a **recompute-backward**
+/// path (ADR 107 / Phase 51 P6.1b, `docs/ai/decisions/107-training-memory-turboquant-vs-recompute-attention.md`).
+///
+/// Every [`Backend`] gets the exact, causal-prefix-sliced
+/// [`chunked_causal_attention`] reference implementation for free (the
+/// default method below) -- this is what inference/eval on a plain backend
+/// (no `Autodiff` wrapper) and `forward_cached` always use. [`Autodiff<B,
+/// C>`] overrides the method with [`RecomputeAttention`], a custom
+/// `burn_autodiff::ops::Backward` op that retains only the attended output
+/// `O` and each query row's log-sum-exp for `.backward()` -- never the full
+/// `[chunk x key_end]` score/softmax tensor -- and recomputes that
+/// transient tensor chunk-by-chunk during backward instead. See ADR 107 for
+/// the memory analysis (attention scores are 82-95% of training footprint
+/// at the shapes this crate trains).
+///
+/// A single default method (rather than a separate concrete impl per
+/// backend family) is deliberate: the forward math is written entirely in
+/// terms of the standard [`Backend`]/[`Tensor`] API (matmul, softmax,
+/// slice), which every Burn backend already implements generically, so
+/// `impl AttentionBackend for X {}` for each of this crate's backend
+/// aliases (`CpuBackend`, `GpuBackend`) transparently covers ndarray,
+/// wgpu/Metal, ROCm, and CUDA (and any `Fusion<...>` wrapping Burn's own
+/// backend setup applies around them) without needing this crate to name or
+/// depend on `burn_cubecl`/`burn_fusion`'s internal generic parameters,
+/// which are not part of Burn's public stability contract.
+pub trait AttentionBackend: Backend {
+    /// See the trait docs. `causal_mask`/`scale`/`chunk` match
+    /// [`chunked_causal_attention`]; the default implementation *is*
+    /// [`chunked_causal_attention`].
+    fn chunked_causal_attention(
+        q: Tensor<Self, 4>,
+        k: Tensor<Self, 4>,
+        v: Tensor<Self, 4>,
+        causal_mask: Option<Tensor<Self, 3, Bool>>,
+        scale: f64,
+        chunk: usize,
+    ) -> Tensor<Self, 4> {
+        chunked_causal_attention(q, k, v, causal_mask, scale, chunk)
+    }
+}
+
+impl AttentionBackend for crate::CpuBackend {}
+#[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
+impl AttentionBackend for crate::GpuBackend {}
+
+/// State retained across the forward/backward boundary for one
+/// [`RecomputeAttention`] op: `q`/`k`/`v` (needed to recompute `S` and to
+/// compute `dQ`/`dK`/`dV`), the attended output `o` and per-row `lse`
+/// (needed to recompute `P = exp(S - lse)` without a fresh max/sum
+/// reduction), the optional causal mask, and the `scale`/`chunk`
+/// hyperparameters the forward call used. Everything here is `O(L*d)` (or
+/// smaller) -- never the `O(L^2)` score tensor.
+#[derive(Clone, Debug)]
+struct RecomputeAttentionState<B: Backend> {
+    q: FloatPrim<B>,
+    k: FloatPrim<B>,
+    v: FloatPrim<B>,
+    o: FloatPrim<B>,
+    lse: FloatPrim<B>,
+    mask: Option<BoolPrim<B>>,
+    scale: f64,
+    chunk: usize,
+}
+
+/// The custom `burn_autodiff::ops::Backward` op backing
+/// [`AttentionBackend::chunked_causal_attention`] for `Autodiff<B, C>`
+/// (ADR 107 / Phase 51 P6.1b-b). Stateless marker type, per the
+/// `Backward` trait's convention -- see [`RecomputeAttentionState`] for the
+/// actual retained data.
+///
+/// # Backward derivation
+///
+/// Forward, per causal-prefix-sliced query chunk `c` (rows `[start, end)`,
+/// keys/values `[0, key_end)`):
+/// ```text
+/// S = (Q_c . K^T) / scale                      # [chunk, key_end]
+/// P = softmax(S) = exp(S - LSE_c)               # LSE_c: [chunk] logsumexp(S)
+/// O_c = P . V
+/// ```
+/// Given `dO_c` (the gradient of the loss w.r.t. `O_c`), the standard
+/// softmax-attention backward (FlashAttention, Dao et al. 2022, section
+/// 3.1) is, entirely in terms of `O(chunk * key_end)` transients and
+/// `O(L*d)` accumulators:
+/// ```text
+/// P recomputed = exp(S - LSE_c)                  # no fresh max/sum reduction
+/// dV[0:key_end) += P^T . dO_c
+/// dP = dO_c . V^T
+/// D_c = rowsum(dO_c ⊙ O_c)                       # [chunk, 1]
+/// dS = P ⊙ (dP - D_c)
+/// dQ_c = (dS . K[0:key_end)) / scale
+/// dK[0:key_end) += (dS^T . Q_c) / scale
+/// ```
+/// `dQ_c` blocks concatenate directly (chunks partition the query
+/// dimension); `dK`/`dV` accumulate additively across chunks because later
+/// chunks' causal-visible key range is a superset of earlier chunks'.
+#[derive(Debug)]
+struct RecomputeAttention;
+
+impl<B: AttentionBackend> Backward<B, 3> for RecomputeAttention {
+    type State = RecomputeAttentionState<B>;
+
+    fn backward(
+        self,
+        ops: Ops<Self::State, 3>,
+        grads: &mut Gradients,
+        _checkpointer: &mut Checkpointer,
+    ) {
+        let state = ops.state;
+        let scale = state.scale;
+        let chunk = state.chunk;
+
+        let q = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(state.q));
+        let k = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(state.k));
+        let v = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(state.v));
+        let o = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(state.o));
+        let lse = Tensor::<B, 3>::from_primitive(TensorPrimitive::Float(state.lse));
+        let mask = state.mask.map(Tensor::<B, 3, Bool>::from_primitive);
+        let d_out =
+            Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(grads.consume::<B>(&ops.node)));
+
+        let [batch_size, n_heads, query_len, d_head] = q.dims();
+        let kv_len = k.dims()[2];
+        let kv_offset = kv_len - query_len;
+
+        let mut dq_blocks = Vec::with_capacity(query_len.div_ceil(chunk));
+        let mut dk_acc = Tensor::<B, 4>::zeros_like(&k);
+        let mut dv_acc = Tensor::<B, 4>::zeros_like(&v);
+
+        let mut start = 0usize;
+        while start < query_len {
+            let end = (start + chunk).min(query_len);
+            let key_end = kv_offset + end;
+
+            let q_c = q
+                .clone()
+                .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
+            let k_c = k
+                .clone()
+                .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+            let v_c = v
+                .clone()
+                .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+            let o_c = o
+                .clone()
+                .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
+            let do_c = d_out
+                .clone()
+                .slice([0..batch_size, 0..n_heads, start..end, 0..d_head]);
+            let lse_c = lse
+                .clone()
+                .slice([0..batch_size, 0..n_heads, start..end])
+                .unsqueeze_dim::<4>(3); // [batch, heads, chunk, 1]
+
+            let mut s = q_c.clone().matmul(k_c.clone().swap_dims(2, 3)) / scale;
+            if let Some(mask) = &mask {
+                let mask_block = mask
+                    .clone()
+                    .slice([0..batch_size, start..end, 0..key_end])
+                    .unsqueeze_dim::<4>(1);
+                s = s.mask_fill(mask_block, f32::NEG_INFINITY);
+            }
+            // Recomputed softmax weights -- the one transient
+            // `[chunk x key_end]` tensor this op ever materializes, and
+            // only for the lifetime of this loop iteration.
+            let p = (s - lse_c).exp();
+
+            let dv_c = p.clone().swap_dims(2, 3).matmul(do_c.clone());
+            let dp = do_c.clone().matmul(v_c.clone().swap_dims(2, 3));
+            let d_c = (do_c * o_c).sum_dim(3); // [batch, heads, chunk, 1]
+            let ds = p * (dp - d_c);
+            let dq_c = ds.clone().matmul(k_c) / scale;
+            let dk_c = ds.swap_dims(2, 3).matmul(q_c) / scale;
+
+            dq_blocks.push(dq_c);
+            let dk_prev = dk_acc
+                .clone()
+                .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+            dk_acc = dk_acc.slice_assign(
+                [0..batch_size, 0..n_heads, 0..key_end, 0..d_head],
+                dk_prev + dk_c,
+            );
+            let dv_prev = dv_acc
+                .clone()
+                .slice([0..batch_size, 0..n_heads, 0..key_end, 0..d_head]);
+            dv_acc = dv_acc.slice_assign(
+                [0..batch_size, 0..n_heads, 0..key_end, 0..d_head],
+                dv_prev + dv_c,
+            );
+
+            start = end;
+        }
+
+        let dq = Tensor::cat(dq_blocks, 2).into_primitive().tensor();
+        let dk = dk_acc.into_primitive().tensor();
+        let dv = dv_acc.into_primitive().tensor();
+
+        let [q_parent, k_parent, v_parent] = ops.parents;
+        if let Some(node) = q_parent {
+            grads.register::<B>(node.id, dq);
+        }
+        if let Some(node) = k_parent {
+            grads.register::<B>(node.id, dk);
+        }
+        if let Some(node) = v_parent {
+            grads.register::<B>(node.id, dv);
+        }
+    }
+}
+
+/// Runs [`RecomputeAttention`] as the forward half of
+/// [`AttentionBackend::chunked_causal_attention`] for `Autodiff<B, C>`:
+/// computes `O`/`LSE` on the *inner* backend `B` (no further autodiff
+/// tracking -- that is the entire memory win, see the trait docs), then
+/// registers the custom backward step against `q`/`k`/`v`'s graph nodes.
+fn recompute_chunked_causal_attention<B: AttentionBackend, C: CheckpointStrategy>(
+    q: Tensor<Autodiff<B, C>, 4>,
+    k: Tensor<Autodiff<B, C>, 4>,
+    v: Tensor<Autodiff<B, C>, 4>,
+    causal_mask: Option<Tensor<Autodiff<B, C>, 3, Bool>>,
+    scale: f64,
+    chunk: usize,
+) -> Tensor<Autodiff<B, C>, 4> {
+    assert!(chunk > 0, "attention_chunk must be positive");
+
+    let q_ad: AutodiffTensor<B> = q.into_primitive().tensor();
+    let k_ad: AutodiffTensor<B> = k.into_primitive().tensor();
+    let v_ad: AutodiffTensor<B> = v.into_primitive().tensor();
+    let mask_prim: Option<BoolPrim<B>> = causal_mask.map(|mask| mask.into_primitive());
+
+    let q_inner = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(q_ad.primitive.clone()));
+    let k_inner = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(k_ad.primitive.clone()));
+    let v_inner = Tensor::<B, 4>::from_primitive(TensorPrimitive::Float(v_ad.primitive.clone()));
+    let mask_inner = mask_prim.clone().map(Tensor::<B, 3, Bool>::from_primitive);
+
+    let (o_inner, lse_inner) =
+        chunked_causal_attention_with_lse::<B>(q_inner, k_inner, v_inner, mask_inner, scale, chunk);
+    let output = o_inner.into_primitive().tensor();
+    let lse = lse_inner.into_primitive().tensor();
+
+    let state = RecomputeAttentionState {
+        q: q_ad.primitive,
+        k: k_ad.primitive,
+        v: v_ad.primitive,
+        o: output.clone(),
+        lse,
+        mask: mask_prim,
+        scale,
+        chunk,
+    };
+
+    let tracked = match RecomputeAttention
+        .prepare::<C>([q_ad.node, k_ad.node, v_ad.node])
+        .compute_bound()
+        .stateful()
+    {
+        OpsKind::Tracked(prep) => prep.finish(state, output),
+        OpsKind::UnTracked(prep) => prep.finish(output),
+    };
+    Tensor::from_primitive(TensorPrimitive::Float(tracked))
+}
+
+impl<B: AttentionBackend, C: CheckpointStrategy> AttentionBackend for Autodiff<B, C> {
+    fn chunked_causal_attention(
+        q: Tensor<Self, 4>,
+        k: Tensor<Self, 4>,
+        v: Tensor<Self, 4>,
+        causal_mask: Option<Tensor<Self, 3, Bool>>,
+        scale: f64,
+        chunk: usize,
+    ) -> Tensor<Self, 4> {
+        recompute_chunked_causal_attention::<B, C>(q, k, v, causal_mask, scale, chunk)
+    }
 }
 
 /// The attention seam: anything that can turn `[batch, seq, d_model]` into
@@ -180,7 +551,7 @@ pub struct CausalSelfAttentionConfig {
 }
 
 impl CausalSelfAttentionConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CausalSelfAttention<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> CausalSelfAttention<B> {
         assert!(
             self.d_model.is_multiple_of(self.n_heads),
             "d_model ({}) must be divisible by n_heads ({})",
@@ -220,7 +591,7 @@ impl CausalSelfAttentionConfig {
 /// selects [`chunked_causal_attention`] when set; `None` keeps the original
 /// single-shot score matrix.
 #[derive(Module, Debug)]
-pub struct CausalSelfAttention<B: Backend> {
+pub struct CausalSelfAttention<B: AttentionBackend> {
     query: Linear<B>,
     key: Linear<B>,
     value: Linear<B>,
@@ -240,7 +611,7 @@ pub struct CausalSelfAttentionCache<B: Backend> {
     value: Tensor<B, 4>,
 }
 
-impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
+impl<B: AttentionBackend> Attention<B> for CausalSelfAttention<B> {
     fn forward(&self, input: Tensor<B, 3>, causal_mask: Tensor<B, 3, Bool>) -> Tensor<B, 3> {
         let [batch_size, seq_len, d_model] = input.dims();
         let n_heads = self.n_heads;
@@ -266,7 +637,14 @@ impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
 
         let scale = (d_head as f64).sqrt();
         let attended = match self.attention_chunk {
-            Some(chunk) => chunked_causal_attention(q, k, v, Some(causal_mask), scale, chunk),
+            // Routes through `B::chunked_causal_attention` (not the bare
+            // `chunked_causal_attention` free function) so that training
+            // (`B = Autodiff<Inner, C>`) gets the recompute-backward path
+            // (ADR 107 / Phase 51 P6.1b) instead of retaining the full
+            // per-chunk score tensor for `.backward()`. Any other backend
+            // just gets the identical reference implementation back (the
+            // trait's default method).
+            Some(chunk) => B::chunked_causal_attention(q, k, v, Some(causal_mask), scale, chunk),
             None => {
                 // Scaled dot-product: [batch, n_heads, seq, seq]
                 let scores = q.matmul(k.swap_dims(2, 3)) / scale;
@@ -285,7 +663,7 @@ impl<B: Backend> Attention<B> for CausalSelfAttention<B> {
     }
 }
 
-impl<B: Backend> CausalSelfAttention<B> {
+impl<B: AttentionBackend> CausalSelfAttention<B> {
     /// Attention for a prompt prefill or one incremental token. Prefill
     /// supplies the ordinary causal mask and no cache; an incremental call
     /// supplies one query token plus all prior projected keys and values.
@@ -451,7 +829,7 @@ impl<B: Backend> FeedForward<B> {
 /// scale / few steps -- relevant since Spike-0 trains for only tens to
 /// hundreds of steps).
 #[derive(Module, Debug)]
-pub struct DecoderBlock<B: Backend> {
+pub struct DecoderBlock<B: AttentionBackend> {
     ln1: LayerNorm<B>,
     attention: CausalSelfAttention<B>,
     ln2: LayerNorm<B>,
@@ -476,7 +854,7 @@ pub struct DecoderBlockConfig {
 }
 
 impl DecoderBlockConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> DecoderBlock<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> DecoderBlock<B> {
         DecoderBlock {
             ln1: LayerNormConfig::new(self.d_model).init(device),
             attention: CausalSelfAttentionConfig::new(self.d_model, self.n_heads)
@@ -490,7 +868,7 @@ impl DecoderBlockConfig {
     }
 }
 
-impl<B: Backend> DecoderBlock<B> {
+impl<B: AttentionBackend> DecoderBlock<B> {
     pub fn forward(&self, input: Tensor<B, 3>, causal_mask: Tensor<B, 3, Bool>) -> Tensor<B, 3> {
         let attended = self
             .attention
@@ -682,7 +1060,7 @@ impl TinyTransformerConfig {
             .with_attention_chunk(Some(1024))
     }
 
-    pub fn init<B: Backend>(&self, device: &B::Device) -> TinyTransformer<B> {
+    pub fn init<B: AttentionBackend>(&self, device: &B::Device) -> TinyTransformer<B> {
         let blocks = (0..self.n_layers)
             .map(|_| {
                 DecoderBlockConfig::new(self.d_model, self.n_heads, self.d_ff)
@@ -723,7 +1101,7 @@ impl TinyTransformerConfig {
 /// rotates q/k per head instead -- see [`PositionalEncoding`] for why this
 /// choice is now explicit rather than a fixed learned table.
 #[derive(Module, Debug)]
-pub struct TinyTransformer<B: Backend> {
+pub struct TinyTransformer<B: AttentionBackend> {
     token_embedding: Embedding<B>,
     position_embedding: Option<Embedding<B>>,
     positional_encoding: PositionalEncoding,
@@ -743,7 +1121,7 @@ pub struct TinyTransformerCache<B: Backend> {
     batch_size: usize,
 }
 
-impl<B: Backend> TinyTransformer<B> {
+impl<B: AttentionBackend> TinyTransformer<B> {
     /// The additive learned-position contribution for absolute positions
     /// `start..start+len`, or `None` under [`PositionalEncoding::Rope`]
     /// (rotation is applied inside attention instead of added to the token
@@ -1145,6 +1523,7 @@ impl<B: Backend> TinyTransformer<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CpuAutodiffBackend;
     use crate::CpuBackend;
     #[cfg(any(feature = "gpu", feature = "cuda", feature = "metal"))]
     use crate::{GpuBackend, gpu_device};
@@ -1593,6 +1972,227 @@ mod tests {
                     &tensor_to_vec(expected_step),
                     1e-5,
                     &format!("chunked decode chunk={chunk}"),
+                );
+            }
+        }
+    }
+
+    // --- ADR 107 / Phase 51 P6.1b: recompute-backward attention ---------
+
+    fn to_vec_any<B: Backend, const D: usize>(t: Tensor<B, D>) -> Vec<f32> {
+        t.into_data().to_vec::<f32>().unwrap()
+    }
+
+    /// (b) The recompute-backward custom op
+    /// (`AttentionBackend::chunked_causal_attention` under
+    /// `Autodiff<CpuBackend>`, i.e. [`RecomputeAttention`]) must reproduce
+    /// both the forward output AND the gradients dQ/dK/dV of the plain
+    /// autodiff-differentiated naive chunked path (the bare
+    /// `chunked_causal_attention` free function, which retains the full
+    /// per-chunk score tensor and lets ordinary autodiff differentiate
+    /// through it) to 1e-4 -- at a sequence length that is (256) and is not
+    /// (200) a multiple of the chunk size (64), so both the even-chunk and
+    /// ragged-last-chunk code paths are exercised.
+    #[test]
+    fn recompute_attention_matches_naive_chunked_forward_and_gradients() {
+        for &(seq_len, chunk) in &[(256usize, 64usize), (200usize, 64usize)] {
+            let device = Default::default();
+            let batch = 2usize;
+            let heads = 2usize;
+            let d_head = 4usize;
+            let n = batch * heads * seq_len * d_head;
+
+            let q_data: Vec<f32> = (0..n)
+                .map(|i| (((i * 7 + 1) % 13) as f32 - 6.0) * 0.1)
+                .collect();
+            let k_data: Vec<f32> = (0..n)
+                .map(|i| (((i * 11 + 3) % 13) as f32 - 6.0) * 0.1)
+                .collect();
+            let v_data: Vec<f32> = (0..n)
+                .map(|i| (((i * 5 + 2) % 13) as f32 - 6.0) * 0.1)
+                .collect();
+            let weight_data: Vec<f32> = (0..n)
+                .map(|i| (((i * 3 + 5) % 7) as f32) * 0.05 + 0.1)
+                .collect();
+            let scale = (d_head as f64).sqrt();
+
+            let make = |data: &[f32]| -> Tensor<CpuAutodiffBackend, 4> {
+                Tensor::<CpuAutodiffBackend, 4>::from_data(
+                    TensorData::new(data.to_vec(), [batch, heads, seq_len, d_head]),
+                    &device,
+                )
+                .require_grad()
+            };
+
+            let mask = generate_autoregressive_mask::<CpuAutodiffBackend>(batch, seq_len, &device);
+            let weights = Tensor::<CpuAutodiffBackend, 4>::from_data(
+                TensorData::new(weight_data, [batch, heads, seq_len, d_head]),
+                &device,
+            );
+
+            // Naive path: ordinary autodiff differentiates straight through
+            // `chunked_causal_attention`'s standard ops (full per-chunk
+            // score tensor retained for backward).
+            let (q_naive, k_naive, v_naive) = (make(&q_data), make(&k_data), make(&v_data));
+            let naive_out = chunked_causal_attention(
+                q_naive.clone(),
+                k_naive.clone(),
+                v_naive.clone(),
+                Some(mask.clone()),
+                scale,
+                chunk,
+            );
+            let naive_loss = (naive_out.clone() * weights.clone()).sum();
+            let naive_grads = naive_loss.backward();
+            let naive_dq = q_naive.grad(&naive_grads).unwrap();
+            let naive_dk = k_naive.grad(&naive_grads).unwrap();
+            let naive_dv = v_naive.grad(&naive_grads).unwrap();
+
+            // Recompute-backward path: the custom op under test, reached
+            // exactly as `CausalSelfAttention::forward` reaches it.
+            let (q_op, k_op, v_op) = (make(&q_data), make(&k_data), make(&v_data));
+            let op_out = <CpuAutodiffBackend as AttentionBackend>::chunked_causal_attention(
+                q_op.clone(),
+                k_op.clone(),
+                v_op.clone(),
+                Some(mask.clone()),
+                scale,
+                chunk,
+            );
+            let op_loss = (op_out.clone() * weights.clone()).sum();
+            let op_grads = op_loss.backward();
+            let op_dq = q_op.grad(&op_grads).unwrap();
+            let op_dk = k_op.grad(&op_grads).unwrap();
+            let op_dv = v_op.grad(&op_grads).unwrap();
+
+            let label = format!("seq_len={seq_len} chunk={chunk}");
+            assert_close(
+                &to_vec_any(naive_out),
+                &to_vec_any(op_out),
+                1e-4,
+                &format!("{label}: forward"),
+            );
+            assert_close(
+                &to_vec_any(naive_dq),
+                &to_vec_any(op_dq),
+                1e-4,
+                &format!("{label}: dQ"),
+            );
+            assert_close(
+                &to_vec_any(naive_dk),
+                &to_vec_any(op_dk),
+                1e-4,
+                &format!("{label}: dK"),
+            );
+            assert_close(
+                &to_vec_any(naive_dv),
+                &to_vec_any(op_dv),
+                1e-4,
+                &format!("{label}: dV"),
+            );
+        }
+    }
+
+    /// (b) End-to-end through a whole [`TinyTransformer`] block: gradients
+    /// w.r.t. every attention projection's weights, using the
+    /// chunked/recompute-backward attention path under
+    /// `Autodiff<CpuBackend>` (`attention_chunk = Some(chunk)`), must match
+    /// the gradients from the exact (non-chunked, `attention_chunk = None`,
+    /// ordinary-autodiff) path to 1e-4. Chunking-with-causal-prefix-slicing
+    /// is an exact reordering (see `chunked_causal_attention`'s doc
+    /// comment), so any mismatch here would be a bug in the custom
+    /// backward's interaction with the surrounding model (rotary, residual,
+    /// layer norm, the query/key/value projections), not just the isolated
+    /// op [`recompute_attention_matches_naive_chunked_forward_and_gradients`]
+    /// already checks.
+    #[test]
+    fn recompute_attention_matches_exact_gradients_through_a_transformer_block() {
+        let device = Default::default();
+        let config = tiny_config();
+        let exact = config.init::<CpuAutodiffBackend>(&device);
+
+        let seq_len = 9usize; // not a multiple of chunk = 4
+        let chunk = 4usize;
+        let ids: Vec<i64> = (0..seq_len as i64).map(|i| (i * 7) % 260).collect();
+        let input = ids_tensor::<CpuAutodiffBackend>(&ids, &device);
+
+        // Force every `Param`'s lazy initializer to materialize before the
+        // clone below (see the identical comment on
+        // `chunked_attention_matches_exact_prefill_and_decode`), so `exact`
+        // and `chunked` share identical concrete weights.
+        let _ = exact.forward(input.clone());
+
+        let mut chunked = exact.clone();
+        for block in chunked.blocks.iter_mut() {
+            block.attention.attention_chunk = Some(chunk);
+        }
+
+        let exact_logits = exact.forward(input.clone());
+        let chunked_logits = chunked.forward(input);
+
+        assert_close(
+            &to_vec_any(exact_logits.clone()),
+            &to_vec_any(chunked_logits.clone()),
+            1e-4,
+            "chunked (recompute-backward) vs exact forward",
+        );
+
+        // A non-uniform per-position/per-vocab weighting so the downstream
+        // gradient (`dO` at the attention output) is not degenerately
+        // uniform, the same rationale as the standalone op test above.
+        let [batch_size, out_seq_len, vocab] = exact_logits.dims();
+        let weight_n = batch_size * out_seq_len * vocab;
+        let weight_data: Vec<f32> = (0..weight_n)
+            .map(|i| (((i * 3 + 5) % 7) as f32) * 0.05 + 0.1)
+            .collect();
+        let weights = Tensor::<CpuAutodiffBackend, 3>::from_data(
+            TensorData::new(weight_data, [batch_size, out_seq_len, vocab]),
+            &device,
+        );
+
+        let exact_grads = (exact_logits * weights.clone()).sum().backward();
+        let chunked_grads = (chunked_logits * weights).sum().backward();
+
+        for (layer_idx, (exact_block, chunked_block)) in
+            exact.blocks.iter().zip(chunked.blocks.iter()).enumerate()
+        {
+            for (name, exact_param, chunked_param) in [
+                (
+                    "query",
+                    &exact_block.attention.query,
+                    &chunked_block.attention.query,
+                ),
+                (
+                    "key",
+                    &exact_block.attention.key,
+                    &chunked_block.attention.key,
+                ),
+                (
+                    "value",
+                    &exact_block.attention.value,
+                    &chunked_block.attention.value,
+                ),
+                (
+                    "out_proj",
+                    &exact_block.attention.out_proj,
+                    &chunked_block.attention.out_proj,
+                ),
+            ] {
+                let exact_grad = exact_param
+                    .weight
+                    .val()
+                    .grad(&exact_grads)
+                    .unwrap_or_else(|| panic!("layer {layer_idx} {name}: no exact grad"));
+                let chunked_grad = chunked_param
+                    .weight
+                    .val()
+                    .grad(&chunked_grads)
+                    .unwrap_or_else(|| panic!("layer {layer_idx} {name}: no chunked grad"));
+                assert_close(
+                    &to_vec_any(exact_grad),
+                    &to_vec_any(chunked_grad),
+                    1e-4,
+                    &format!("layer {layer_idx} {name}.weight gradient"),
                 );
             }
         }

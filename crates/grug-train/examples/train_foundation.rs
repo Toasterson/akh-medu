@@ -29,7 +29,7 @@ use grug_train::knowledge_train::{
     KnowledgeModelShape, KnowledgeModelSize, fingerprint_artifact_file,
 };
 use grug_train::train::{init_training, to_eval_model, train_step_guarded};
-use grug_train::{BpeTokenizer, checkpoint};
+use grug_train::{AttentionBackend, BpeTokenizer, checkpoint};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
@@ -286,7 +286,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     run::<ActiveBackend>(args, device)
 }
 
-fn run<B: AutodiffBackend>(args: Args, device: B::Device) -> Result<(), Box<dyn Error>> {
+fn run<B: AutodiffBackend + AttentionBackend>(
+    args: Args,
+    device: B::Device,
+) -> Result<(), Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     std::fs::create_dir_all(&args.artifacts_dir)?;
     let manifest: FoundationCorpusManifest =
         serde_json::from_reader(BufReader::new(File::open(&args.manifest)?))?;
@@ -1068,7 +1074,7 @@ fn read_tokens_circular(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_causal<B: AutodiffBackend>(
+fn evaluate_causal<B: AutodiffBackend + AttentionBackend>(
     model: &grug_train::TinyTransformer<B>,
     tokenizer: &BpeTokenizer,
     file: &mut File,
@@ -1077,7 +1083,10 @@ fn evaluate_causal<B: AutodiffBackend>(
     batch_size: usize,
     context: usize,
     device: &B::Device,
-) -> Result<f32, Box<dyn Error>> {
+) -> Result<f32, Box<dyn Error>>
+where
+    B::InnerBackend: AttentionBackend,
+{
     // Evaluation must not retain a backward graph. On the production A100,
     // evaluating through `B` nearly doubled allocator pressure compared with
     // the training step. Project once to the inner inference backend and keep

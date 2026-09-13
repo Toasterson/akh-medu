@@ -30,7 +30,7 @@ use grug_train::reason_train::encode_reason_example;
 use grug_train::tokenizer::Vocab;
 use grug_train::train::{Encoded, encode_example_fmt};
 use grug_train::transformer::{TinyTransformer, TinyTransformerConfig};
-use grug_train::{BpeTokenizer, checkpoint};
+use grug_train::{AttentionBackend, BpeTokenizer, checkpoint};
 
 // Inference-only probe: a plain (non-autodiff) backend is all that's needed,
 // since `load_model_only` never reconstructs optimizer state and nothing here
@@ -168,7 +168,7 @@ fn row_metrics(row: &[f32], gold: u32) -> (u32, usize) {
 /// Run the Stage-L logit-lens probe over one axis's holdout examples: one
 /// `hidden_layers` forward pass per example (teacher-forced on `prompt + gold
 /// completion`), scoring every completion position at every layer.
-fn probe_axis<B: Backend, V: Vocab>(
+fn probe_axis<B: Backend + AttentionBackend, V: Vocab>(
     model: &TinyTransformer<B>,
     tokenizer: &V,
     examples: &[Example],
@@ -201,7 +201,7 @@ fn probe_axis<B: Backend, V: Vocab>(
 /// [`probe_axis`]) and the P3-R reasoning corpus (encoded with
 /// [`encode_reason_example`]). `pre_skipped` counts examples the caller
 /// already dropped at encode time.
-fn probe_axis_encoded<B: Backend>(
+fn probe_axis_encoded<B: Backend + AttentionBackend>(
     model: &TinyTransformer<B>,
     vocab_size: usize,
     encodeds: &[Encoded],

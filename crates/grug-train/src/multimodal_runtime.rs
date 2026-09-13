@@ -9,9 +9,9 @@
 use std::io::{BufReader, Cursor};
 use std::path::{Component, Path, PathBuf};
 
+use crate::transformer::AttentionBackend;
 use burn::module::Module;
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
-use burn::tensor::backend::Backend;
 use grug_data::{
     KnowledgeSftRecord, ToolContractSnapshot, letterbox_rgb, read_png_normalized_rgb,
     render_knowledge_prompt_with_system,
@@ -91,7 +91,7 @@ impl NativePromptImage {
 }
 
 /// Fully verified shared text-and-vision decoder.
-pub struct MultimodalModel<B: Backend> {
+pub struct MultimodalModel<B: AttentionBackend> {
     artifact: MultimodalModelArtifact,
     contracts: ToolContractSnapshot,
     tokenizer: BpeTokenizer,
@@ -148,7 +148,7 @@ impl MultimodalModel<crate::GpuBackend> {
     }
 }
 
-impl<B: Backend> MultimodalModel<B> {
+impl<B: AttentionBackend> MultimodalModel<B> {
     fn load_manifest_with_device(
         bundle: &Path,
         manifest_name: &str,

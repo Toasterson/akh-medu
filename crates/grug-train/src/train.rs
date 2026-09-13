@@ -26,7 +26,7 @@ use grug_data::schema::Example;
 
 use crate::pointer::{PointerTransformer, PointerTransformerConfig};
 use crate::tokenizer::Vocab;
-use crate::transformer::{TinyTransformer, TinyTransformerConfig};
+use crate::transformer::{AttentionBackend, TinyTransformer, TinyTransformerConfig};
 
 /// Render the tools offered in `example` plus the user request as the
 /// prompt half of a training sequence.
@@ -212,12 +212,15 @@ pub fn build_batch_fmt<B: Backend, V: Vocab>(
 /// Run one forward + backward + optimizer-step training iteration.
 ///
 /// Returns the scalar loss (as `f32`, already detached) for logging.
-pub fn train_step<B: AutodiffBackend>(
+pub fn train_step<B: AutodiffBackend + AttentionBackend>(
     model: TinyTransformer<B>,
     optim: &mut OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
     batch: &Batch<B>,
     lr: f64,
-) -> (TinyTransformer<B>, f32) {
+) -> (TinyTransformer<B>, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let (model, loss, _grad_norm) =
         train_step_guarded(model, optim, batch, lr, f32::INFINITY, f32::INFINITY);
     (model, loss)
@@ -226,7 +229,7 @@ pub fn train_step<B: AutodiffBackend>(
 /// Forward-only masked loss through the ordinary text path. Keeping this
 /// generic over [`Backend`] lets expensive evaluations run without retaining
 /// an autodiff graph.
-pub fn text_batch_loss<B: Backend>(model: &TinyTransformer<B>, batch: &Batch<B>) -> f32 {
+pub fn text_batch_loss<B: AttentionBackend>(model: &TinyTransformer<B>, batch: &Batch<B>) -> f32 {
     let device = batch.input_ids.device();
     let mask_flags: Vec<i64> = batch
         .loss_mask
@@ -268,14 +271,17 @@ pub fn text_batch_loss<B: Backend>(model: &TinyTransformer<B>, batch: &Batch<B>)
 /// few steps -- gating on the norm directly, before it ever reaches
 /// `optim.step`, is a strictly earlier and cheaper signal than waiting for
 /// loss to move.
-pub fn train_step_guarded<B: AutodiffBackend>(
+pub fn train_step_guarded<B: AutodiffBackend + AttentionBackend>(
     model: TinyTransformer<B>,
     optim: &mut OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
     batch: &Batch<B>,
     lr: f64,
     loss_cap: f32,
     grad_norm_cap: f32,
-) -> (TinyTransformer<B>, f32, f32) {
+) -> (TinyTransformer<B>, f32, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let mask_flags: Vec<i64> = batch
         .loss_mask
@@ -387,13 +393,16 @@ pub(crate) fn masked_cross_entropy<B: Backend>(
 }
 
 /// Build a fresh model + Adam optimizer for training, per [`TrainConfig`].
-pub fn init_training<B: AutodiffBackend>(
+pub fn init_training<B: AutodiffBackend + AttentionBackend>(
     model_config: &TinyTransformerConfig,
     device: &B::Device,
 ) -> (
     TinyTransformer<B>,
     OptimizerAdaptor<Adam, TinyTransformer<B>, B>,
-) {
+)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let model = model_config.init::<B>(device);
     // Gradient-norm clipping: without it the harder/longer hard-distractor task
     // hits a large-gradient batch and diverges to NaN around step ~100 (the
@@ -408,9 +417,12 @@ pub fn init_training<B: AutodiffBackend>(
 /// Project a training-mode model to its inference-mode (`valid()`)
 /// projection, for generation/eval. Thin wrapper so callers don't need to
 /// import `AutodiffModule` themselves.
-pub fn to_eval_model<B: AutodiffBackend>(
+pub fn to_eval_model<B: AutodiffBackend + AttentionBackend>(
     model: &TinyTransformer<B>,
-) -> TinyTransformer<B::InnerBackend> {
+) -> TinyTransformer<B::InnerBackend>
+where
+    B::InnerBackend: AttentionBackend,
+{
     model.valid()
 }
 
@@ -420,13 +432,16 @@ pub fn to_eval_model<B: AutodiffBackend>(
 
 /// Build a fresh [`PointerTransformer`] + Adam optimizer (same grad-norm
 /// clipping as [`init_training`]).
-pub fn init_training_ptr<B: AutodiffBackend>(
+pub fn init_training_ptr<B: AutodiffBackend + AttentionBackend>(
     config: &PointerTransformerConfig,
     device: &B::Device,
 ) -> (
     PointerTransformer<B>,
     OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
-) {
+)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let model = config.init::<B>(device);
     let optim = AdamConfig::new()
         .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(1.0)))
@@ -438,12 +453,15 @@ pub fn init_training_ptr<B: AutodiffBackend>(
 /// Identical framing to [`train_step`], but the model emits a *mixed*
 /// distribution (`PointerTransformer::log_probs`) so the loss is an NLL over
 /// those log-probs ([`masked_nll`]) rather than a cross-entropy over logits.
-pub fn train_step_ptr<B: AutodiffBackend>(
+pub fn train_step_ptr<B: AutodiffBackend + AttentionBackend>(
     model: PointerTransformer<B>,
     optim: &mut OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
     batch: &Batch<B>,
     lr: f64,
-) -> (PointerTransformer<B>, f32) {
+) -> (PointerTransformer<B>, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let mask_flags: Vec<i64> = batch
         .loss_mask
@@ -495,9 +513,12 @@ fn masked_nll<B: AutodiffBackend>(
 
 /// Project a training-mode [`PointerTransformer`] to its inference-mode
 /// projection, for generation/eval.
-pub fn to_eval_model_ptr<B: AutodiffBackend>(
+pub fn to_eval_model_ptr<B: AutodiffBackend + AttentionBackend>(
     model: &PointerTransformer<B>,
-) -> PointerTransformer<B::InnerBackend> {
+) -> PointerTransformer<B::InnerBackend>
+where
+    B::InnerBackend: AttentionBackend,
+{
     model.valid()
 }
 
@@ -515,13 +536,16 @@ pub fn to_eval_model_ptr<B: AutodiffBackend>(
 ///
 /// `copy_lambda = 0.0` reproduces [`train_step_ptr`] exactly (BCE contributes
 /// nothing), so this is a strict generalisation.
-pub fn train_step_ptr_supervised<B: AutodiffBackend>(
+pub fn train_step_ptr_supervised<B: AutodiffBackend + AttentionBackend>(
     model: PointerTransformer<B>,
     optim: &mut OptimizerAdaptor<Adam, PointerTransformer<B>, B>,
     batch: &Batch<B>,
     lr: f64,
     copy_lambda: f64,
-) -> (PointerTransformer<B>, f32) {
+) -> (PointerTransformer<B>, f32)
+where
+    B::InnerBackend: AttentionBackend,
+{
     let device = batch.input_ids.device();
     let n = batch.batch_size * batch.seq_len;
 
