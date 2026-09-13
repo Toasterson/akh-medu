@@ -55,10 +55,14 @@ the loss lags. f16 *activations* are fine; f16 *optimizer state* is not.
 - **PolarQuant** (2502.02617) is TurboQuant's stage 1 predecessor (already chosen for Phase 26c inference KV in
   ADR 037); **QJL** is the stage 2 it reuses. Same inference-only scope.
 - **Activation-compressed training** is a different lineage: ActNN (2104.14129) / GACT (2206.11357) quantize
-  saved-for-backward activations to ~2 bits with *stochastic* (unbiased) rounding — the gradient stays an
-  unbiased estimator — at <1 pt accuracy cost. They compress generic per-layer activations; neither targets
-  the O(L²) score tensor, and the review could not confirm any 2024–26 work that does. (This bullet is the
-  one part of the review that was recalled rather than re-read in full text on 2026-09-13.)
+  saved-for-backward activations with *stochastic* rounding — ActNN's Theorem 1 proves the gradient stays an
+  unbiased estimator iff the quantizer is unbiased, which deterministic rounding (and TurboQuant's Lloyd-Max
+  stage) is not. ActNN reaches 1.25-bit average on CNNs (12× activation memory); GACT ≈4-bit adaptive on
+  BERT-large within 0.1–0.3 pt, ≈2-bit at a 1.5–2.5 pt cost (8.1× memory). **GACT explicitly does not
+  quantize the attention/softmax matrix**: it names the O(L²) term as the reason per-tensor quantization is
+  insufficient and composes with Rabe & Staats' linear-memory self-attention (2112.05682) instead — the same
+  split this ADR makes. No 2024–26 work that quantizes the score tensor during backward was found (arXiv
+  rate-limited; OpenAlex checked). All read in full text on 2026-09-13.
 - **Removing the quadratic term**: FlashAttention (2205.14135) stores only O and the row logsumexp and
   recomputes P in backward → memory O(L·d) per layer instead of O(L²); Blockwise Parallel Transformer
   (2305.19370) fuses attention + FFN blockwise: per layer 2·b·s·h instead of FlashAttention's 8·b·s·h FFN
