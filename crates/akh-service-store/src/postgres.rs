@@ -117,7 +117,7 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, mpsc},
 };
 
 /// Never produced by [`crate::key`] (which only ever emits printable ASCII),
@@ -148,6 +148,9 @@ pub(crate) struct PostgresInner {
     table: String,
     kind: String,
     cache: ReadCache,
+    /// Serialises transactions within this process; see
+    /// [`PostgresInner::transaction_gate`].
+    tx_gate: Mutex<()>,
 }
 
 /// Process-local read-through cache for a single Postgres-backed store
@@ -469,15 +472,22 @@ async fn migrate_from_redb_if_needed(
     Ok(())
 }
 
-async fn fetch_value<'e, E>(executor: E, table: &str, kind: &str, key: &[u8]) -> sqlx::Result<Option<Vec<u8>>>
+async fn fetch_value<'e, E>(
+    executor: E,
+    table: &str,
+    kind: &str,
+    key: &[u8],
+) -> sqlx::Result<Option<Vec<u8>>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query_scalar(&format!("SELECT value FROM {table} WHERE kind = $1 AND key = $2"))
-        .bind(kind)
-        .bind(key)
-        .fetch_optional(executor)
-        .await
+    sqlx::query_scalar(&format!(
+        "SELECT value FROM {table} WHERE kind = $1 AND key = $2"
+    ))
+    .bind(kind)
+    .bind(key)
+    .fetch_optional(executor)
+    .await
 }
 
 async fn fetch_scan<'e, E>(
@@ -521,7 +531,10 @@ impl PostgresInner {
         let table_for_setup = table.clone();
         let kind_for_setup = kind.clone();
         let pool = run_on_db_thread(move || async move {
-            let pool = PgPoolOptions::new().max_connections(5).connect(&url).await?;
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&url)
+                .await?;
             ensure_schema(&pool, &schema, &table_for_setup).await?;
             migrate_from_redb_if_needed(
                 &pool,
@@ -538,7 +551,36 @@ impl PostgresInner {
             table,
             kind,
             cache: ReadCache::default(),
+            tx_gate: Mutex::new(()),
         })
+    }
+
+    /// Admits one transaction at a time per process, the way redb's single
+    /// write transaction did. This is not an optimisation but a deadlock
+    /// guard: the per-kind advisory lock in [`PostgresInner::begin`] is
+    /// taken on the `akh-store-pg` thread, which runs one job start to
+    /// finish. If a second transaction's `begin` were allowed to queue while
+    /// a first one is open, it would block that thread on the advisory lock
+    /// held by the first transaction, whose own next statement is then stuck
+    /// behind it in the job queue — both hang forever and every plain read
+    /// in the process with them. akhsessd and akheventd did exactly that
+    /// within seconds of starting on 2026-09-13 (two backends per pod in
+    /// `pg_stat_activity`: one `idle in transaction`, one waiting on
+    /// `advisory`). Waiting here, on the caller's thread, keeps the DB
+    /// thread free to serve the open transaction. Uses `block_in_place` on
+    /// a multi-thread runtime for the same reason [`block_for_reply`] does.
+    pub(crate) fn transaction_gate(&self) -> MutexGuard<'_, ()> {
+        let lock = || {
+            self.tx_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(lock)
+            }
+            _ => lock(),
+        }
     }
 
     pub(crate) fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
@@ -549,7 +591,10 @@ impl PostgresInner {
         let table = self.table.clone();
         let kind = self.kind.clone();
         let key_bytes = key.as_bytes().to_vec();
-        let row = run_on_db_thread(move || async move { fetch_value(&pool, &table, &kind, &key_bytes).await })
+        let row =
+            run_on_db_thread(
+                move || async move { fetch_value(&pool, &table, &kind, &key_bytes).await },
+            )
             .map_err(failure)?;
         match row {
             Some(bytes) => {
@@ -565,9 +610,10 @@ impl PostgresInner {
         let table = self.table.clone();
         let kind = self.kind.clone();
         let prefix_bytes = prefix.as_bytes().to_vec();
-        let rows =
-            run_on_db_thread(move || async move { fetch_scan(&pool, &table, &kind, &prefix_bytes).await })
-                .map_err(failure)?;
+        let rows = run_on_db_thread(move || async move {
+            fetch_scan(&pool, &table, &kind, &prefix_bytes).await
+        })
+        .map_err(failure)?;
         rows.into_iter()
             .map(|(_, value)| serde_json::from_slice(&value).map_err(failure))
             .collect()

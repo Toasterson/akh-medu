@@ -9,8 +9,8 @@
 //!   AKH_TEST_DATABASE_URL=postgres://akh:x@127.0.0.1:55433/akh \
 //!     cargo test -p akh-service-store --test postgres -- --ignored
 //!   docker stop akh-store-pg
-use akh_session_types::Fault;
 use akh_service_store::{PostgresConfig, Store, key};
+use akh_session_types::Fault;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A fresh `kind` per test, so concurrently-run tests (and repeated runs
@@ -180,9 +180,7 @@ fn legacy_redb_contents_are_imported_exactly_once() {
         .unwrap();
     let reopened_again = open(&kind, &url, None);
     assert_eq!(
-        reopened_again
-            .get::<u32>(&key("session", &["a"]))
-            .unwrap(),
+        reopened_again.get::<u32>(&key("session", &["a"])).unwrap(),
         Some(42),
         "a marker-guarded reopen must not re-import and overwrite a value written after migration"
     );
@@ -237,4 +235,59 @@ fn store_works_when_called_from_a_plain_std_thread_with_no_ambient_runtime() {
         store.scan::<u32>("session/").unwrap()
     });
     assert_eq!(handle.join().unwrap(), vec![7]);
+}
+
+/// Regression: two transactions started concurrently from one process must
+/// not deadlock. Before the in-process transaction gate, the second
+/// `begin` blocked on the per-kind advisory lock *on the single-job
+/// `akh-store-pg` thread*, so the first transaction's own statements could
+/// never run and both hung forever (production, 2026-09-13, within seconds
+/// of akhsessd starting). Mirrors the daemons: blocking `transaction()`
+/// calls from tasks on a multi-thread tokio runtime.
+#[test]
+#[ignore = "requires AKH_TEST_DATABASE_URL"]
+fn concurrent_transactions_from_one_process_do_not_deadlock() {
+    let Some(url) = database_url() else { return };
+    let kind = unique_kind("concurrent_tx");
+    let store = std::sync::Arc::new(open(&kind, &url, None));
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let worker_store = store.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let mut tasks = Vec::new();
+            for worker in 0..8u32 {
+                let store = worker_store.clone();
+                tasks.push(tokio::spawn(async move {
+                    for round in 0..10u32 {
+                        let k = key("counter", &[&worker.to_string()]);
+                        store
+                            .transaction(|tx| {
+                                let current: u32 = tx.get(&k)?.unwrap_or(0);
+                                assert_eq!(current, round);
+                                tx.put(&k, &(current + 1))
+                            })
+                            .unwrap();
+                    }
+                }));
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+        });
+        let _ = done_tx.send(());
+    });
+
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("concurrent transactions deadlocked (no progress within 60 s)");
+    for worker in 0..8u32 {
+        let k = key("counter", &[&worker.to_string()]);
+        assert_eq!(store.get::<u32>(&k).unwrap(), Some(10));
+    }
 }
