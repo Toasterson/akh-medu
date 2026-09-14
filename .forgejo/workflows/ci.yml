@@ -67,26 +67,33 @@ jobs:
             sudo apt-get install -qq -y build-essential pkg-config libssl-dev
           fi
 
-      - name: Install Rust toolchain
-        # The `rust` runner image ships a toolchain; only bootstrap rustup when
-        # cargo is absent (same guard as check-akh-medu), then make sure the
-        # `stable` channel is current so clippy matches what CI actually runs.
+      - name: Toolchain, fmt, clippy -D warnings, test (sokar + sokar-client)
+        # One step on purpose: the toolchain choice is exported into the same
+        # shell. The `rust` runner image ships a system rustup under /opt/rust
+        # that the job user cannot modify (toolchain install -> EACCES), so we
+        # use it as-is when it is >= 1.91 (opendal 0.59 MSRV) and has clippy +
+        # rustfmt, and otherwise install a user-level stable under a writable
+        # RUSTUP_HOME.
         run: |
+          set -eu
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           fi
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
-          if command -v rustup >/dev/null 2>&1; then
+          need=1.91
+          have=$(rustc --version 2>/dev/null | awk '{print $2}' || echo 0)
+          usable=1
+          [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -n1)" = "$need" ] || usable=0
+          cargo clippy --version >/dev/null 2>&1 || usable=0
+          cargo fmt --version >/dev/null 2>&1 || usable=0
+          if [ "$usable" != 1 ]; then
+            echo "preinstalled toolchain ($have) unusable for sokar; installing user-level stable"
+            export RUSTUP_HOME="$HOME/.rustup" RUSTUP_TOOLCHAIN=stable
             rustup toolchain install stable --profile minimal -c clippy -c rustfmt
-            rustup default stable
           fi
-          cargo --version
+          rustc --version
           cargo clippy --version
           cargo fmt --version
-
-      - name: fmt, clippy -D warnings, test (sokar + sokar-client)
-        run: |
-          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
           sh .forgejo/scripts/run-logged.sh fmt-sokar cargo fmt -p sokar -p sokar-client -- --check
           sh .forgejo/scripts/run-logged.sh clippy-sokar cargo clippy --locked -p sokar -p sokar-client --all-targets -- -D warnings
