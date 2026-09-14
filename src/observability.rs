@@ -130,7 +130,6 @@ fn init_otel(
 ) -> Result<ObservabilityShutdown, Box<dyn std::error::Error + Send + Sync>> {
     use opentelemetry::{KeyValue, trace::TracerProvider as _};
     use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
-    use opentelemetry_otlp::{Protocol, SpanExporter, WithExportConfig};
     use opentelemetry_sdk::{
         Resource, propagation::TraceContextPropagator, runtime::Tokio, trace::TracerProvider,
     };
