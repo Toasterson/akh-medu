@@ -1,6 +1,7 @@
 //! Shared wire contracts. This crate deliberately has no engine, transport or provider dependency.
 pub mod bootstrap;
 pub mod credentials;
+pub mod neural_spans;
 pub mod publication;
 pub mod questions;
 pub mod repository;
@@ -406,6 +407,10 @@ pub struct AcceptedTurn {
     pub tool_receipts: Vec<String>,
     #[serde(default)]
     pub tools: Vec<ToolEvidence>,
+    /// Send only after the core advertises neural_spans_v1. Empty preserves
+    /// the original wire payload and operation fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub span_captures: Vec<neural_spans::SpanCapture>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

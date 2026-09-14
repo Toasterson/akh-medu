@@ -172,6 +172,17 @@ pub fn router(app: CoreApp) -> Router {
         .route("/v1/context", post(context))
         .route("/v1/tools/call", post(tool_call))
         .route("/v1/turns/accepted", post(accepted))
+        .route("/v1/spans/query", post(span_query))
+        .route(
+            "/v1/capabilities",
+            get(|| async {
+                Json(json!({
+                    "neural_spans_v1": true, "vector_bits": 10000,
+                    "max_session_spans": neural_spans::MAX_SESSION_SPANS,
+                    "scope": "service_principal_akh_session"
+                }))
+            }),
+        )
         .route("/v1/akhs/{akh}/tools", get(catalog))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
@@ -349,7 +360,19 @@ fn finish(
     request: &impl Serialize,
     result: ToolResult,
 ) -> Result<ToolResult> {
+    finish_with(app, p, id, request, result, |_| Ok(()))
+}
+
+fn finish_with(
+    app: &CoreApp,
+    p: &CorePrincipal,
+    id: &str,
+    request: &impl Serialize,
+    result: ToolResult,
+    write: impl FnOnce(&mut akh_service_store::Transaction<'_>) -> Result<()>,
+) -> Result<ToolResult> {
     app.store.transaction(|tx| {
+        write(tx)?;
         tx.put(
             &key("core_operation", &[&p.id, id]),
             &Operation {
@@ -422,32 +445,34 @@ async fn accepted(
     Json(request): Json<AcceptedTurn>,
 ) -> Api<ToolResult> {
     authorize(&p, &request.akh)?;
+    akh_service_store::neural_spans::validate(&request)?;
     let engine = app.backend.engine(&request.akh).await.map_err(error)?;
     let config = app.backend.config(&request.akh).await.map_err(error)?;
     if let Some(result) = begin(&app, &p, &request.request_id, &request)? {
         return Ok(Json(result));
     }
-    let capture = std::env::var("AKH_TRANSCRIPT_CAPTURE")
-        .ok()
-        .and_then(|v| match v.trim() {
-            "1" => Some(true),
-            "0" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(config.capture_transcripts);
+    let capture = capture_enabled(&config);
     if capture {
-        // In local-only mode Engine::record_turn has no WAL sink. Keep a durable
-        // cognitive journal as well; it is a projection of an accepted central turn.
+        // Projected vectors have a separate bounded annex, not a second copy
+        // retained forever in every accepted-transcript record.
+        let mut journal = request.clone();
+        journal.span_captures.clear();
         app.store.transaction(|tx| {
-            tx.put(
-                &key("accepted_transcript", &[&request.akh, &request.turn_id]),
-                &request,
-            )
+            let journal_key = key("accepted_transcript", &[&request.akh, &request.turn_id]);
+            if tx
+                .get::<AcceptedTurn>(&journal_key)?
+                .is_some_and(|old| old != journal)
+            {
+                return Err(Fault::conflict(
+                    "accepted turn identity reused with different content",
+                ));
+            }
+            tx.put(&journal_key, &journal)
         })?;
         engine.record_turn(json!({"v":1,"ts":chrono::Utc::now().to_rfc3339(),"workspace":request.akh,"session_id":request.session_id,"turn_id":request.turn_id,"model":request.model,"user_prompt":request.input.text,"origin":request.input.origin,"input":request.input,"agent_answer":request.output,"tools":request.tools,"tool_receipts":request.tool_receipts}));
     }
     engine.persist().map_err(error)?;
-    Ok(Json(finish(
+    Ok(Json(finish_with(
         &app,
         &p,
         &request.request_id,
@@ -463,7 +488,47 @@ async fn accepted(
             data: Some(json!({"captured":capture})),
             receipt: Some(request.request_id.clone()),
         },
+        |tx| {
+            if capture {
+                akh_service_store::neural_spans::append(tx, &p.id, &request)?;
+            }
+            Ok(())
+        },
     )?))
+}
+
+fn capture_enabled(config: &AkhConfig) -> bool {
+    std::env::var("AKH_TRANSCRIPT_CAPTURE")
+        .ok()
+        .and_then(|v| match v.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(config.capture_transcripts)
+}
+
+async fn span_query(
+    State(app): State<CoreApp>,
+    Extension(p): Extension<CorePrincipal>,
+    Json(request): Json<neural_spans::SpanQuery>,
+) -> Api<Vec<neural_spans::SpanHit>> {
+    authorize(&p, &request.akh)?;
+    request.validate()?;
+    let config = app.backend.config(&request.akh).await.map_err(error)?;
+    if !capture_enabled(&config) {
+        return Err(Fault::new(
+            "forbidden",
+            "neural recall disabled by transcript-capture policy",
+        )
+        .into());
+    }
+    let hits = tokio::task::spawn_blocking(move || {
+        akh_service_store::neural_spans::query(&app.store, &p.id, &request)
+    })
+    .await
+    .map_err(error)??;
+    Ok(Json(hits))
 }
 
 #[cfg(test)]
@@ -484,6 +549,141 @@ mod tests {
         }
         fn config<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<AkhConfig>> {
             Box::pin(async { Ok(self.config.clone()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn accepted_neural_spans_are_scoped_replay_safe_and_policy_gated() {
+        for capture in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let token_file = dir.path().join("token");
+            std::fs::write(&token_file, "core-test-credential-long-enough").unwrap();
+            let app = CoreApp::new(
+                CoreConfig {
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    data_dir: dir.path().into(),
+                    principals: vec![CorePrincipal {
+                        id: "sessions".into(),
+                        token_file,
+                        akhs: vec!["test".into()],
+                    }],
+                },
+                Arc::new(Backend {
+                    engine: Arc::new(Engine::new(Default::default()).unwrap()),
+                    config: Arc::new(AkhConfig {
+                        capture_transcripts: capture,
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .unwrap();
+            let space = json!({"model_sha256":"1".repeat(64),"tokenizer_sha256":"2".repeat(64),
+                "policy_sha256":"3".repeat(64),"projector_sha256":"4".repeat(64)});
+            let request = json!({"request_id":"accepted","akh":"test","session_id":"session","turn_id":"turn",
+                "input":{"origin":{"kind":"human","principal":"user"},"text":"cedar"},
+                "output":"answer","model":"exact","tool_receipts":[],"tools":[],
+                "span_captures":[{"space":space,"source":"user","byte_start":0,"byte_end":5,
+                    "vector":vec![0;neural_spans::VECTOR_BYTES]}]});
+            let mut invalid = request.clone();
+            invalid["span_captures"][0]["byte_end"] = json!(6);
+            assert_eq!(
+                post(&app, "/v1/turns/accepted", invalid).await.0,
+                StatusCode::BAD_REQUEST
+            );
+            let accepted = post(&app, "/v1/turns/accepted", request.clone()).await;
+            assert_eq!(accepted.0, StatusCode::OK, "{}", accepted.1);
+            assert_eq!(accepted.1["data"]["captured"], capture);
+            assert_eq!(
+                post(&app, "/v1/turns/accepted", request.clone()).await.1,
+                accepted.1
+            );
+            let mut q = json!({"akh":"test","session_id":"session","space":space,
+                "vector":vec![0;neural_spans::VECTOR_BYTES],"limit":1});
+            let hits = post(&app, "/v1/spans/query", q.clone()).await;
+            if capture {
+                assert_eq!(hits.0, StatusCode::OK);
+                assert_eq!(hits.1[0]["text"], "cedar");
+                assert_eq!(hits.1[0]["hamming_distance"], 0);
+                // Fill the bounded annex through the actual accepted-turn route,
+                // evicting the original vector but retaining its durable journal.
+                for index in 0..neural_spans::MAX_SESSION_SPANS {
+                    let mut later = request.clone();
+                    later["request_id"] = json!(format!("later-{index}"));
+                    later["turn_id"] = json!(format!("later-{index}"));
+                    later["span_captures"][0]["vector"] =
+                        json!(vec![255; neural_spans::VECTOR_BYTES]);
+                    assert_eq!(
+                        post(&app, "/v1/turns/accepted", later).await.0,
+                        StatusCode::OK
+                    );
+                }
+                assert_eq!(
+                    post(&app, "/v1/spans/query", q.clone()).await.1[0]["hamming_distance"],
+                    10000
+                );
+                let mut reidentified = request.clone();
+                reidentified["request_id"] = json!("new-operation-old-turn");
+                reidentified["span_captures"][0]["vector"] =
+                    json!(vec![1; neural_spans::VECTOR_BYTES]);
+                assert_eq!(
+                    post(&app, "/v1/turns/accepted", reidentified).await.0,
+                    StatusCode::CONFLICT
+                );
+                assert_eq!(
+                    post(&app, "/v1/spans/query", q.clone()).await.1[0]["hamming_distance"],
+                    10000
+                );
+                let mut changed = request.clone();
+                changed["output"] = json!("changed");
+                assert_eq!(
+                    post(&app, "/v1/turns/accepted", changed).await.0,
+                    StatusCode::CONFLICT
+                );
+                q["session_id"] = json!("other");
+                assert_eq!(post(&app, "/v1/spans/query", q.clone()).await.1, json!([]));
+            } else {
+                assert_eq!(hits.0, StatusCode::FORBIDDEN);
+                assert!(
+                    app.store
+                        .scan::<Value>("neural_spans_v1/")
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            q["akh"] = json!("other");
+            assert_eq!(
+                post(&app, "/v1/spans/query", q).await.0,
+                StatusCode::FORBIDDEN
+            );
+            let response = router(app.clone())
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/capabilities")
+                        .header("authorization", "Bearer core-test-credential-long-enough")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let caps: Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                    .unwrap();
+            assert_eq!(caps["neural_spans_v1"], true);
+            // Retain the pre-existing fail-closed unknown-outcome semantics:
+            // no automatic replay after an operation began without a receipt.
+            let mut interrupted = request.clone();
+            interrupted["request_id"] = json!("interrupted");
+            interrupted["turn_id"] = json!("interrupted");
+            let typed: AcceptedTurn = serde_json::from_value(interrupted.clone()).unwrap();
+            assert!(
+                begin(&app, &app.config.principals[0], "interrupted", &typed)
+                    .unwrap()
+                    .is_none()
+            );
+            let retry = post(&app, "/v1/turns/accepted", interrupted).await;
+            assert_eq!(retry.0, StatusCode::CONFLICT);
+            assert_eq!(retry.1["code"], "unknown_outcome");
         }
     }
     async fn post(app: &CoreApp, path: &str, value: Value) -> (StatusCode, Value) {

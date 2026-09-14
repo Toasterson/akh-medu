@@ -15,6 +15,7 @@
 //! helper), so no call site needs to know or care which one it is talking
 //! to.
 mod postgres;
+pub mod neural_spans;
 mod redb_backend;
 
 pub(crate) use akh_session_types::{Fault, Result};

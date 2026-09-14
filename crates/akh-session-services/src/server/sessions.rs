@@ -382,6 +382,7 @@ impl SessionApp {
                     core,
                     "/v1/turns/accepted",
                     &AcceptedTurn {
+                        span_captures: vec![],
                         request_id: format!("turn-{}", turn.id),
                         akh: session.akh.clone(),
                         session_id: session.id.clone(),
