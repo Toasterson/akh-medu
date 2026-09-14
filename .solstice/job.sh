@@ -62,7 +62,7 @@ rustc --version
 echo "=== cargo check -p seshat (default features) ==="
 # CARGO_BUILD_JOBS=2 mirrors ci.yml — parallel rustc on the CI VM profile
 # swaps/OOMs above this.
-CARGO_BUILD_JOBS=2 cargo check -p seshat
+CARGO_BUILD_JOBS=2 sh .forgejo/scripts/run-logged.sh check-seshat cargo check -p seshat
 
 echo "=== cargo check --features server (root crate) ==="
 # This is the check that actually matters for agent code. cargo check only
@@ -72,13 +72,24 @@ echo "=== cargo check --features server (root crate) ==="
 # build hosts; RUSTC_WRAPPER is set explicitly for clarity.
 export CARGO_BUILD_JOBS=1
 export CARGO_PROFILE_DEV_DEBUG=0
-export RUSTC_WRAPPER=sccache
-sccache --show-stats || true
-cargo check --features server
+export CARGO_INCREMENTAL=0 SCCACHE_IDLE_TIMEOUT=0
+if command -v sccache >/dev/null 2>&1 && sccache --start-server >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+else
+  unset RUSTC_WRAPPER
+fi
+sh .forgejo/scripts/run-logged.sh check-server cargo check --features server
 
 echo "=== cargo test --features postgres --lib ==="
 # Use postgres (not server) to avoid ENOSPC from linking the enormous akhomed
 # binary. --lib skips binary targets, testing only the library crate.
-cargo test --features postgres --lib
+# Quiet libtest keeps failures and summaries while avoiding thousands of
+# per-test success lines on the synchronous native log transport.
+sh .forgejo/scripts/run-logged.sh library-tests cargo test --quiet --features postgres --lib
+
+# These assertions spawn real shells. A separate test executable avoids fork
+# failing with ENOMEM after the library suite grows its process address space.
+echo "=== real shell cwd integration tests ==="
+sh .forgejo/scripts/run-logged.sh shell-cwd-tests cargo test --quiet --features postgres --test shell_exec_cwd -- --test-threads=1
 
 echo "=== done: native lane green at Actions-lane scope ==="

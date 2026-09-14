@@ -25,6 +25,10 @@ name: CI
 # Deliberately no `concurrency:` block — it requires ${{ github.* }} expression
 # support, which Solstice evaluates inconsistently (see the resolve-branch.sh
 # note on docker-seshd below). This change needs no expression support at all.
+env:
+  CARGO_INCREMENTAL: "0"
+  SCCACHE_IDLE_TIMEOUT: "0"
+
 on:
   push:
     branches: [main, develop]
@@ -32,20 +36,22 @@ on:
 
 jobs:
   test-session-platform:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install Rust and platform test prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev xz-utils python3 git
-          sh scripts/session-platform/install-ci-git.sh
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev xz-utils python3 git
+          sh .forgejo/scripts/run-logged.sh install-git sh scripts/session-platform/install-ci-git.sh
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
       - name: Verify independent daemon profiles and platform contracts
         run: |
-          . "$HOME/.cargo/env"
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
-          python3 scripts/session-platform/check-profiles.py
-          cargo test --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+          sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
+          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
 
   # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
   # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are
@@ -72,22 +78,25 @@ jobs:
   # Seshat crate type-check. Default features only (includes `embedding`;
   # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
   check-seshat:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          fi
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo '. "$HOME/.cargo/env"' >> ~/.profile
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
 
       - name: cargo check -p seshat
         run: |
-          . "$HOME/.cargo/env"
-          CARGO_BUILD_JOBS=2 cargo check -p seshat
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
+          CARGO_BUILD_JOBS=2 sh .forgejo/scripts/run-logged.sh check-seshat cargo check -p seshat
 
   # Root akh-medu crate type-check with --features server.
   #
@@ -111,28 +120,36 @@ jobs:
   # that made clean branches red after the type-check had already passed. A
   # warning-denying clippy gate can be added once main itself is warning-free.
   check-akh-medu:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          fi
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo '. "$HOME/.cargo/env"' >> ~/.profile
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
 
       - name: cargo check --features server
         run: |
-          . "$HOME/.cargo/env"
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=1
           export CARGO_PROFILE_DEV_DEBUG=0
           if command -v sccache >/dev/null 2>&1; then
-            export RUSTC_WRAPPER=sccache
-            sccache --show-stats || true
+            if sccache --start-server >/dev/null 2>&1; then
+              export RUSTC_WRAPPER=sccache
+            else
+              # Cache availability is not compiler correctness. Compile directly
+              # if the cache service cannot start; never relabel this as CI green.
+              unset RUSTC_WRAPPER
+            fi
           fi
-          cargo check --features server
+          sh .forgejo/scripts/run-logged.sh check-server cargo check --features server
 
   # Library tests for the root crate. Uses the `postgres` feature (which pulls
   # in akhomed-store + tokio) rather than the full `server` feature set (which
@@ -141,33 +158,42 @@ jobs:
   # enormous and linking it exhausts disk. `--lib` skips binary targets
   # entirely, testing only the library crate.
   test-akh-medu:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+          fi
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-          echo '. "$HOME/.cargo/env"' >> ~/.profile
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
 
       - name: cargo test --features postgres --lib
         run: |
-          . "$HOME/.cargo/env"
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=1
           export CARGO_PROFILE_DEV_DEBUG=0
           if command -v sccache >/dev/null 2>&1; then
-            export RUSTC_WRAPPER=sccache
-            sccache --show-stats || true
+            if sccache --start-server >/dev/null 2>&1; then
+              export RUSTC_WRAPPER=sccache
+            else
+              # Cache availability is not compiler correctness. Compile directly
+              # if the cache service cannot start; never relabel this as CI green.
+              unset RUSTC_WRAPPER
+            fi
           fi
           # Keep failures and totals without thousands of per-test success lines.
           # The remote log collector otherwise outlives this suite by many minutes.
-          cargo test --quiet --features postgres --lib
+          sh .forgejo/scripts/run-logged.sh library-tests cargo test --quiet --features postgres --lib
+          sh .forgejo/scripts/run-logged.sh shell-cwd-tests cargo test --quiet --features postgres --test shell_exec_cwd -- --test-threads=1
 
   docker-seshd:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     # Intentionally independent of check-seshat so that one doesn't block the
     # other. The docker build itself catches anything check missed.
     #
@@ -208,7 +234,7 @@ jobs:
               ;;
           esac
           echo "building with tags: $TAGS"
-          docker build -f docker/seshd.Dockerfile $TAGS .
+          sh .forgejo/scripts/run-logged.sh build-seshd docker build -f docker/seshd.Dockerfile $TAGS .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
         run: |
@@ -252,7 +278,7 @@ jobs:
           fi
 
           # sha tag always gets pushed — this is the canonical deploy artifact
-          docker push "$REGISTRY/seshd:$SHORT_SHA"
+          sh .forgejo/scripts/run-logged.sh push-seshd docker push "$REGISTRY/seshd:$SHORT_SHA"
 
           # branch tag only if the branch actually resolves cleanly.
           # Non-fatal: pushing the same digest under an existing mutable tag
@@ -280,7 +306,7 @@ jobs:
   # a chart fix, and vice versa. Auth: same Solstice-populated docker
   # credentials as the image push — helm 3.8+ OCI uses the docker config.
   publish-chart:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install Helm
         run: |

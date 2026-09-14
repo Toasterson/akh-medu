@@ -316,6 +316,7 @@ impl ToolCurriculumGenerator {
                     system_context: None,
                     prompt,
                     target,
+                    weight: None,
                 });
             }
         }
@@ -703,6 +704,7 @@ impl ToolContractDeltaCurriculumGenerator {
                 system_context: None,
                 prompt,
                 target,
+                weight: None,
             });
         }
         Ok(records)

@@ -383,6 +383,24 @@ struct EpisodeLabels {
     /// unresolved contradiction that is the point of the control).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     e4_stale_edge_still_present: Option<bool>,
+    /// P6.5/E3 (multi-step): this step's causal reward — a real
+    /// `CausalManager::predict_effects` -> `verify_prediction` round trip
+    /// against the engine's actual post-step state (1.0 verified, 0.0 not),
+    /// exactly like `e3_causal_reward_completed`/`_raw` above but scoped to
+    /// one step of a `generate_e3_multistep` episode rather than a
+    /// completed-vs-raw pair on a single-step record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e3_step_reward: Option<f64>,
+    /// P6.5/E3 (multi-step): this record's zero-based step index within its
+    /// `episode_id` (matches `EpisodeRecord.step`, carried into `labels`
+    /// too so a consumer that only sees `labels` — e.g. a reward-weighted
+    /// loss reading the sidecar — still knows the step position).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e3_step_index: Option<usize>,
+    /// P6.5/E3 (multi-step): the total step count `K` of this record's
+    /// episode (`K >= 2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e3_episode_steps: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -478,6 +496,15 @@ struct Args {
     /// when `--e4-revision` is set.
     #[arg(long = "e4-count", default_value_t = 200)]
     e4_count: usize,
+
+    /// P6.5/E3 (multi-step): number of multi-step engine episodes to
+    /// generate *per oracle scenario* (acquire/revise/repair), so the
+    /// total episode count is 3x this value, each with >= 2 steps and a
+    /// real per-step causal reward (`labels.e3_step_reward`). 0 (default)
+    /// skips E3 multi-step generation entirely; the single-step oracle
+    /// family (`--oracle-seeds`) is unaffected either way.
+    #[arg(long = "e3-episodes", default_value_t = 0)]
+    e3_episodes: usize,
 
     /// Frozen tool-contract snapshot (`contracts.json`) matching the base
     /// SFT corpus and release-gate exam this run's records will be mixed
@@ -2369,6 +2396,719 @@ fn generate_revision_pairs(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// P6.5/E3 (multi-step): engine-in-the-loop multi-step episodes with a real
+// per-step causal reward.
+//
+// The single-step oracle scenarios above (`generate_oracle_acquire`/
+// `_revise`/`_repair`) each collapse their whole R0 reference world into
+// one training record — the P6.3 RESULT doc's "known gaps" section names
+// this exactly: "e3_causal_reward is a post-hoc confirmation, not yet a
+// multi-step plan reward ... Extending this to score genuinely multi-step
+// plans with some correct and some incorrect steps is P6.5/E3's fuller
+// treatment, not attempted here." This section is that fuller treatment:
+// each of the same three worlds becomes a K>=2-step episode with real
+// conversation carry-over between steps — a tool-call step chains forward
+// via an assistant tool-call turn plus a tool-response turn, exactly
+// `KnowledgeEpisode::to_sft_records`'s own pattern in
+// `crates/grug-data/src/knowledge_workflow.rs`; a step that depends on a
+// genuinely new decision point (a restart, a reauthorization) chains
+// forward via a fresh user turn, the same way `convert_dojo_knowledge.rs`
+// carries a real dialogue forward — and every step gets its own real
+// `CausalManager::predict_effects` -> `verify_prediction` reward
+// (`labels.e3_step_reward`).
+//
+// Design: this generator's own code always applies each episode's *actual*
+// graph mutation directly (exactly like `generate_oracle_revise`/`_repair`/
+// the E4 treatment/control functions above — none of which route their
+// ground truth through the declared training target either), independent
+// of which target text a given step ends up declaring. That is what makes
+// the "deliberately wrong step" mechanism safe: marking one step's
+// *declared* target/reward as the raw, schema-valid-but-causally-false
+// proposal never desyncs a later step, because the later step's own causal
+// check runs against the real, independently-maintained graph state, not
+// against whatever the flagged step claimed to do. One inherent exception:
+// `oracle_repair`'s first step is a genuine refusal (`KnowledgeAction::Gap`)
+// — its `e3_step_reward` is naturally 0.0 (the would-be repair effect was
+// never applied, the same "genuine negative causal signal"
+// `generate_oracle_repair` already documents), not from the wrong-step
+// mechanism, so it is never eligible to be the deliberately-wrong step.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Every `E3_WRONG_STEP_STRIDE`th episode index gets exactly one
+/// deliberately wrong step so `labels.e3_step_reward == 0.0` steps exist in
+/// the treatment sidecar's weight distribution (otherwise every reward
+/// would trivially be 1.0 and reward-weighting would be inert). Chosen
+/// deterministically from `eligible` so the same `--seed`/index always
+/// makes the same choice.
+const E3_WRONG_STEP_STRIDE: usize = 4;
+
+fn e3_wrong_step(i: usize, eligible: &[usize]) -> Option<usize> {
+    if i.is_multiple_of(E3_WRONG_STEP_STRIDE) {
+        eligible.get(i % eligible.len()).copied()
+    } else {
+        None
+    }
+}
+
+/// Push an assistant tool-call turn plus its tool-response turn onto
+/// `conversation`, mirroring `KnowledgeEpisode::to_sft_records`'s exact
+/// shape for a `ToolCall` step so the sidecar's multi-turn prompt looks
+/// like real base-corpus tool-chain history, not an ad hoc invention.
+fn e3_push_tool_turn(conversation: &mut Vec<Value>, tool: &str, arguments: &Value, result: &str) {
+    conversation.push(json!({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": tool, "arguments": arguments}}]
+    }));
+    conversation.push(json!({"role": "tool", "content": result}));
+}
+
+/// Build one step's `EpisodeRecord` for an E3 multi-step episode. `tools`/
+/// `conversation` are consumed here (the prompt is rendered from them
+/// before they move into the record) — callers that need to keep building
+/// the conversation afterward pass `conversation.clone()`.
+#[allow(clippy::too_many_arguments)]
+fn e3_step_record(
+    episode_id: &str,
+    step: usize,
+    steps: usize,
+    stage: &str,
+    family: &str,
+    difficulty: u8,
+    contract_hash: String,
+    tools: Vec<Value>,
+    conversation: Vec<Value>,
+    target: String,
+    reward: f64,
+) -> EpisodeRecord {
+    let prompt = akh_prompt(&tools, &conversation);
+    EpisodeRecord {
+        schema_version: 1,
+        id: format!("{episode_id}-step-{step:02}"),
+        episode_id: episode_id.to_string(),
+        step,
+        stage: stage.to_string(),
+        family: family.to_string(),
+        difficulty,
+        language: "english".into(),
+        contract_hash,
+        tools,
+        conversation,
+        system_context: None,
+        prompt,
+        target,
+        labels: Some(EpisodeLabels {
+            e3_step_reward: Some(reward),
+            e3_step_index: Some(step),
+            e3_episode_steps: Some(steps),
+            ..Default::default()
+        }),
+    }
+}
+
+/// P6.5/E3 multi-step "acquire" episode (K=2): step 0 persists a discovered
+/// command syntax via a real `memory_write` execution; step 1, after a
+/// simulated restart (fresh `Engine` handle over the same persisted
+/// `ScratchDir`, exactly `generate_oracle_acquire`'s restart), recalls it.
+/// `wrong_step` (`Some(0)`, `Some(1)`, or `None`) names the one step whose
+/// declared target/reward is the raw, causally-false proposal instead of
+/// the engine-completed one — see the module doc above.
+fn generate_e3_acquire_episode(
+    book: &TemplateBook,
+    seed: Seed,
+    i: usize,
+    wrong_step: Option<usize>,
+) -> GenResult<Vec<EpisodeRecord>> {
+    const STEPS: usize = 2;
+    let scratch = ScratchDir::new(&format!("e3-acquire-{}-{i}", seed.0))?;
+    let command = format!("e3-acquire-cmd-{}-{i}", seed.0);
+    let syntax = format!("e3-acquire-syntax-{}-{i} --flag={i}", seed.0);
+    let episode_id = format!("p6-5-e3_acquire-{}-{i:05}", seed.0);
+
+    let request0 = book.render(
+        "oracle_acquire",
+        "e3_acquire_learn",
+        "en",
+        &[("command", &command), ("syntax", &syntax)],
+    )?;
+
+    let completed_args0 = json!({
+        "summary": format!("Learned syntax for {command}"),
+        "facts": [{"subject": command, "predicate": "has-syntax", "object": syntax}],
+        "source": "help-text",
+    });
+    let completed_target0 = tool_call_target(
+        &format!("{episode_id}-step-00-completed"),
+        "memory_write",
+        completed_args0.clone(),
+    )?;
+    let corrupted_syntax = corrupt_copy(&syntax);
+    let raw_args0 = json!({
+        "summary": format!("Learned syntax for {command}"),
+        "facts": [{"subject": command, "predicate": "has-syntax", "object": corrupted_syntax}],
+    });
+    let raw_target0 = tool_call_target(
+        &format!("{episode_id}-step-00-raw"),
+        "memory_write",
+        raw_args0.clone(),
+    )?;
+
+    // Ground truth is always established for real, independent of which
+    // target this step ends up declaring (see the module doc above).
+    let (tool_manifest, step0_result) = {
+        let engine = build_engine(scratch.path())?;
+        let preds = AgentPredicates::init(&engine)?;
+        let tool = MemoryWriteTool::new(preds);
+        let manifest = tool.manifest();
+        let out = tool.execute(
+            &engine,
+            ToolInput::new()
+                .with_value("summary", completed_args0["summary"].clone())
+                .with_value("facts", completed_args0["facts"].clone())
+                .with_value("source", completed_args0["source"].clone()),
+        )?;
+        if !out.success {
+            return Err(GeneratorError::Agent(AgentError::ToolExecution {
+                tool_name: "memory_write".into(),
+                message: format!("e3 acquire step 0 write failed for {episode_id}"),
+            }));
+        }
+        engine.persist()?;
+        (manifest, out.result)
+    };
+
+    let (completed_reward0, raw_reward0, recalled_syntax) = {
+        let engine = build_engine(scratch.path())?; // simulated restart
+        let mut causal = CausalManager::new(&engine)?;
+        let cmd_sym = engine.resolve_symbol(&command)?;
+        let has_syntax = engine.resolve_or_create_relation("has-syntax")?;
+        let value_id = engine.resolve_or_create_entity(&syntax)?;
+        let completed_reward = causal_label(
+            &mut causal,
+            &engine,
+            &format!("{episode_id}-step-00:completed"),
+            (cmd_sym, has_syntax, value_id),
+        )?;
+        let corrupt_id = engine.resolve_or_create_entity(&corrupted_syntax)?;
+        let raw_reward = causal_label(
+            &mut causal,
+            &engine,
+            &format!("{episode_id}-step-00:raw"),
+            (cmd_sym, has_syntax, corrupt_id),
+        )?;
+        let recalled = engine
+            .triples_from(cmd_sym)
+            .into_iter()
+            .find(|t| t.predicate == has_syntax)
+            .map(|t| engine.resolve_label(t.object))
+            .ok_or_else(|| {
+                GeneratorError::Agent(AgentError::ToolExecution {
+                    tool_name: "memory_recall".into(),
+                    message: format!("e3 acquire recall failed for {episode_id} after restart"),
+                })
+            })?;
+        (completed_reward, raw_reward, recalled)
+    };
+
+    let is_wrong0 = wrong_step == Some(0);
+    let (step0_target, step0_reward, step0_args) = if is_wrong0 {
+        (raw_target0, raw_reward0, raw_args0)
+    } else {
+        (completed_target0, completed_reward0, completed_args0)
+    };
+
+    let tools = vec![openai_tool_def(&tool_manifest)];
+    let contract_hash = format!(
+        "blake3:{}",
+        blake3::hash(tool_manifest.description.as_bytes()).to_hex()
+    );
+
+    let mut conversation = vec![json!({"role": "user", "content": request0})];
+    let mut records = Vec::with_capacity(STEPS);
+    records.push(e3_step_record(
+        &episode_id,
+        0,
+        STEPS,
+        "answer",
+        Family::OracleAcquire.tag(),
+        2,
+        contract_hash.clone(),
+        tools,
+        conversation.clone(),
+        step0_target,
+        step0_reward,
+    ));
+    e3_push_tool_turn(
+        &mut conversation,
+        "memory_write",
+        &step0_args,
+        &json!({"success": true, "result": step0_result}).to_string(),
+    );
+
+    let request1 = book.render(
+        "oracle_acquire",
+        "e3_acquire_recall",
+        "en",
+        &[("command", &command), ("syntax", &syntax)],
+    )?;
+    conversation.push(json!({"role": "user", "content": request1}));
+
+    let completed_answer1 = KnowledgeAction::Answer {
+        text: format!("The syntax is: {recalled_syntax}"),
+        citations: vec![WorkflowCitation {
+            source_id: command.clone(),
+            locator: "has-syntax".into(),
+            quote: Some(recalled_syntax.clone()),
+        }],
+    }
+    .render_runtime()?;
+    let raw_answer1 = KnowledgeAction::Answer {
+        text: "I don't recall the syntax.".into(),
+        citations: vec![],
+    }
+    .render_runtime()?;
+
+    let (completed_reward1, raw_reward1) = {
+        let engine = build_engine(scratch.path())?;
+        let mut causal = CausalManager::new(&engine)?;
+        let cmd_sym = engine.resolve_symbol(&command)?;
+        let has_syntax = engine.resolve_or_create_relation("has-syntax")?;
+        let value_id = engine.resolve_or_create_entity(&syntax)?;
+        let completed_reward = causal_label(
+            &mut causal,
+            &engine,
+            &format!("{episode_id}-step-01:completed"),
+            (cmd_sym, has_syntax, value_id),
+        )?;
+        let unknown_id = engine.resolve_or_create_entity(&format!("unknown:{episode_id}"))?;
+        let raw_reward = causal_label(
+            &mut causal,
+            &engine,
+            &format!("{episode_id}-step-01:raw"),
+            (cmd_sym, has_syntax, unknown_id),
+        )?;
+        (completed_reward, raw_reward)
+    };
+
+    let is_wrong1 = wrong_step == Some(1);
+    let (step1_target, step1_reward) = if is_wrong1 {
+        (raw_answer1, raw_reward1)
+    } else {
+        (completed_answer1, completed_reward1)
+    };
+
+    records.push(e3_step_record(
+        &episode_id,
+        1,
+        STEPS,
+        "answer",
+        Family::OracleAcquire.tag(),
+        2,
+        contract_hash,
+        Vec::new(),
+        conversation,
+        step1_target,
+        step1_reward,
+    ));
+
+    Ok(records)
+}
+
+/// P6.5/E3 multi-step "revise" episode (K=2): step 0 applies a sourced
+/// route correction via a real retract-then-assert graph mutation (mirrors
+/// `generate_oracle_revise`, not a bare `remove_triple`); step 1 verifies
+/// the current route by answering from the revised graph. See
+/// `generate_e3_acquire_episode`'s doc for the wrong-step mechanism.
+fn generate_e3_revise_episode(
+    book: &TemplateBook,
+    seed: Seed,
+    i: usize,
+    wrong_step: Option<usize>,
+) -> GenResult<Vec<EpisodeRecord>> {
+    const STEPS: usize = 2;
+    let scratch = ScratchDir::new(&format!("e3-revise-{}-{i}", seed.0))?;
+    let engine = build_engine(scratch.path())?;
+    let job = format!("e3-revise-job-{}-{i}", seed.0);
+    let old_worker = format!("e3-revise-worker-a-{}-{i}", seed.0);
+    let new_worker = format!("e3-revise-worker-b-{}-{i}", seed.0);
+    let episode_id = format!("p6-5-e3_revise-{}-{i:05}", seed.0);
+
+    let job_id = engine.resolve_or_create_entity(&job)?;
+    let old_worker_id = engine.resolve_or_create_entity(&old_worker)?;
+    let new_worker_id = engine.resolve_or_create_entity(&new_worker)?;
+    let assigned_to = engine.resolve_or_create_relation("assigned-to")?;
+    let current_worker = engine.resolve_or_create_relation("current-worker")?;
+    let mut initial = vec![
+        Triple::new(job_id, assigned_to, old_worker_id),
+        Triple::new(job_id, current_worker, old_worker_id),
+    ];
+    let mut prov = ProvenanceRecord::new(job_id, DerivationKind::Extracted).with_confidence(1.0);
+    engine.add_triples_with_provenance(&mut initial, &mut prov)?;
+
+    let request0 = book.render(
+        "oracle_revise",
+        "e3_revise_apply",
+        "en",
+        &[
+            ("job", &job),
+            ("old_worker", &old_worker),
+            ("new_worker", &new_worker),
+        ],
+    )?;
+
+    let completed_args0 = json!({
+        "summary": format!("Route for {job}"),
+        "facts": [{"subject": job, "predicate": "current-worker", "object": new_worker}],
+        "tags": ["route-correction"],
+    });
+    let completed_target0 = tool_call_target(
+        &format!("{episode_id}-step-00-completed"),
+        "memory_write",
+        completed_args0.clone(),
+    )?;
+    let raw_args0 = json!({
+        "summary": format!("Route for {job}"),
+        "facts": [{"subject": job, "predicate": "current-worker", "object": old_worker}],
+    });
+    let raw_target0 = tool_call_target(
+        &format!("{episode_id}-step-00-raw"),
+        "memory_write",
+        raw_args0.clone(),
+    )?;
+
+    // Ground truth: always retract the stale edge and assert the new one
+    // for real, regardless of which target this step declares.
+    engine.remove_triple(job_id, current_worker, old_worker_id)?;
+    let mut correction = vec![
+        Triple::new(job_id, current_worker, new_worker_id),
+        Triple::new(job_id, assigned_to, new_worker_id),
+    ];
+    let mut prov2 = ProvenanceRecord::new(job_id, DerivationKind::Extracted).with_confidence(1.0);
+    engine.add_triples_with_provenance(&mut correction, &mut prov2)?;
+
+    let mut causal = CausalManager::new(&engine)?;
+    let completed_reward0 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-00:completed"),
+        (job_id, current_worker, new_worker_id),
+    )?;
+    let raw_reward0 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-00:raw"),
+        (job_id, current_worker, old_worker_id),
+    )?;
+
+    let is_wrong0 = wrong_step == Some(0);
+    let (step0_target, step0_reward, step0_args) = if is_wrong0 {
+        (raw_target0, raw_reward0, raw_args0)
+    } else {
+        (completed_target0, completed_reward0, completed_args0)
+    };
+
+    let agent_preds = AgentPredicates::init(&engine)?;
+    let tool_manifest = MemoryWriteTool::new(agent_preds).manifest();
+    let tools = vec![openai_tool_def(&tool_manifest)];
+    let contract_hash = format!(
+        "blake3:{}",
+        blake3::hash(tool_manifest.description.as_bytes()).to_hex()
+    );
+
+    let mut conversation = vec![json!({"role": "user", "content": request0})];
+    let mut records = Vec::with_capacity(STEPS);
+    records.push(e3_step_record(
+        &episode_id,
+        0,
+        STEPS,
+        "answer",
+        Family::OracleRevise.tag(),
+        3,
+        contract_hash.clone(),
+        tools,
+        conversation.clone(),
+        step0_target,
+        step0_reward,
+    ));
+    e3_push_tool_turn(
+        &mut conversation,
+        "memory_write",
+        &step0_args,
+        &json!({"success": true, "result": format!("Route updated for {job}")}).to_string(),
+    );
+
+    let request1 = book.render(
+        "oracle_revise",
+        "e3_revise_verify",
+        "en",
+        &[
+            ("job", &job),
+            ("old_worker", &old_worker),
+            ("new_worker", &new_worker),
+        ],
+    )?;
+    conversation.push(json!({"role": "user", "content": request1}));
+
+    let completed_answer1 = KnowledgeAction::Answer {
+        text: format!("The current worker for {job} is {new_worker}."),
+        citations: vec![WorkflowCitation {
+            source_id: job.clone(),
+            locator: "current-worker".into(),
+            quote: Some(new_worker.clone()),
+        }],
+    }
+    .render_runtime()?;
+    let raw_answer1 = KnowledgeAction::Answer {
+        text: format!("The current worker for {job} is {old_worker}."),
+        citations: vec![WorkflowCitation {
+            source_id: job.clone(),
+            locator: "current-worker".into(),
+            quote: Some(old_worker.clone()),
+        }],
+    }
+    .render_runtime()?;
+
+    let completed_reward1 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-01:completed"),
+        (job_id, current_worker, new_worker_id),
+    )?;
+    let raw_reward1 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-01:raw"),
+        (job_id, current_worker, old_worker_id),
+    )?;
+
+    let is_wrong1 = wrong_step == Some(1);
+    let (step1_target, step1_reward) = if is_wrong1 {
+        (raw_answer1, raw_reward1)
+    } else {
+        (completed_answer1, completed_reward1)
+    };
+
+    records.push(e3_step_record(
+        &episode_id,
+        1,
+        STEPS,
+        "answer",
+        Family::OracleRevise.tag(),
+        3,
+        contract_hash,
+        Vec::new(),
+        conversation,
+        step1_target,
+        step1_reward,
+    ));
+
+    Ok(records)
+}
+
+/// P6.5/E3 multi-step "repair" episode (K=2): step 0 attempts the repair
+/// while authorization is revoked and must decline (`KnowledgeAction::Gap`,
+/// `e3_step_reward` naturally 0.0 — see the module doc's exception); step
+/// 1, after a real reauthorization event on the same
+/// `EventCalculusEngine` fluent, completes the repair via a real
+/// `memory_write` execution. `wrong_step` may only meaningfully be
+/// `Some(1)` — step 0's decline is never the deliberately-wrong step.
+fn generate_e3_repair_episode(
+    book: &TemplateBook,
+    seed: Seed,
+    i: usize,
+    wrong_step: Option<usize>,
+) -> GenResult<Vec<EpisodeRecord>> {
+    const STEPS: usize = 2;
+    let scratch = ScratchDir::new(&format!("e3-repair-{}-{i}", seed.0))?;
+    let engine = build_engine(scratch.path())?;
+    let mut ec = EventCalculusEngine::new(&engine)?;
+    let mut causal = CausalManager::new(&engine)?;
+    let target_system = format!("e3-repair-target-{}-{i}", seed.0);
+    let episode_id = format!("p6-5-e3_repair-{}-{i:05}", seed.0);
+
+    let fluent_label = format!("e3-repair-permission:{}:{i}", seed.0);
+    let (_granted_at_decision0, _raw_events0) =
+        temporal_label(&mut ec, &engine, &fluent_label, 0, Some(15), 20)?;
+
+    let request0 = book.render(
+        "oracle_repair",
+        "e3_repair_attempt",
+        "en",
+        &[("target", &target_system)],
+    )?;
+
+    let repair_target_sym = engine.resolve_or_create_entity(&target_system)?;
+    let repaired_pred = engine.resolve_or_create_relation("repaired-by")?;
+    let operator = engine.resolve_or_create_entity("operator")?;
+
+    let step0_target = KnowledgeAction::Gap {
+        missing: vec!["repair-authorization".into()],
+        reason: format!("authorization for {target_system} was revoked; awaiting re-authorization"),
+    }
+    .render_runtime()?;
+    // Genuine negative signal, not the wrong-step mechanism: nothing was
+    // (or should be) applied while revoked.
+    let step0_reward = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-00:completed"),
+        (repair_target_sym, repaired_pred, operator),
+    )?;
+
+    let mut conversation = vec![json!({"role": "user", "content": request0})];
+    let mut records = Vec::with_capacity(STEPS);
+    records.push(e3_step_record(
+        &episode_id,
+        0,
+        STEPS,
+        "declare_gap",
+        Family::OracleRepair.tag(),
+        3,
+        "blake3:e3-oracle-repair".into(),
+        Vec::new(),
+        conversation.clone(),
+        step0_target.clone(),
+        step0_reward,
+    ));
+
+    // The decline is a plain chat turn, not a tool call — no tool response
+    // to chain; the next real decision point is a fresh event
+    // (reauthorization), reflected as a new user turn exactly like
+    // `generate_e3_acquire_episode`'s post-restart turn.
+    conversation.push(json!({"role": "assistant", "content": step0_target}));
+
+    let request1 = book.render(
+        "oracle_repair",
+        "e3_repair_complete",
+        "en",
+        &[("target", &target_system)],
+    )?;
+    conversation.push(json!({"role": "user", "content": request1}));
+
+    // Real reauthorization event: a second grant on the same fluent, later
+    // than the revoke, decision time after that.
+    let (_granted_at_decision1, _raw_events1) =
+        temporal_label(&mut ec, &engine, &fluent_label, 25, None, 30)?;
+
+    let agent_preds = AgentPredicates::init(&engine)?;
+    let tool = MemoryWriteTool::new(agent_preds);
+    let tool_manifest = tool.manifest();
+    let tools = vec![openai_tool_def(&tool_manifest)];
+    let contract_hash = format!(
+        "blake3:{}",
+        blake3::hash(tool_manifest.description.as_bytes()).to_hex()
+    );
+
+    let completed_args1 = json!({
+        "summary": format!("Repaired {target_system}"),
+        "facts": [{"subject": target_system, "predicate": "repaired-by", "object": "operator"}],
+        "tags": ["reauthorized"],
+        "source": "operator",
+    });
+    let completed_target1 = tool_call_target(
+        &format!("{episode_id}-step-01-completed"),
+        "memory_write",
+        completed_args1.clone(),
+    )?;
+    let unverified_actor = format!("unverified-{}-{i}", seed.0);
+    let raw_args1 = json!({
+        "summary": format!("Repaired {target_system}"),
+        "facts": [{"subject": target_system, "predicate": "repaired-by", "object": unverified_actor}],
+    });
+    let raw_target1 = tool_call_target(
+        &format!("{episode_id}-step-01-raw"),
+        "memory_write",
+        raw_args1,
+    )?;
+
+    // Ground truth: the repair really runs, post-reauthorization,
+    // regardless of which target this step declares.
+    let out = tool.execute(
+        &engine,
+        ToolInput::new()
+            .with_value("summary", completed_args1["summary"].clone())
+            .with_value("facts", completed_args1["facts"].clone())
+            .with_value("tags", completed_args1["tags"].clone())
+            .with_value("source", completed_args1["source"].clone()),
+    )?;
+    if !out.success {
+        return Err(GeneratorError::Agent(AgentError::ToolExecution {
+            tool_name: "memory_write".into(),
+            message: format!("e3 repair step 1 write failed for {episode_id}"),
+        }));
+    }
+
+    let completed_reward1 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-01:completed"),
+        (repair_target_sym, repaired_pred, operator),
+    )?;
+    let unverified_id = engine.resolve_or_create_entity(&unverified_actor)?;
+    let raw_reward1 = causal_label(
+        &mut causal,
+        &engine,
+        &format!("{episode_id}-step-01:raw"),
+        (repair_target_sym, repaired_pred, unverified_id),
+    )?;
+
+    let is_wrong1 = wrong_step == Some(1);
+    let (step1_target, step1_reward) = if is_wrong1 {
+        (raw_target1, raw_reward1)
+    } else {
+        (completed_target1, completed_reward1)
+    };
+
+    records.push(e3_step_record(
+        &episode_id,
+        1,
+        STEPS,
+        "answer",
+        Family::OracleRepair.tag(),
+        3,
+        contract_hash,
+        tools,
+        conversation,
+        step1_target,
+        step1_reward,
+    ));
+
+    Ok(records)
+}
+
+/// P6.5/E3: generate `n` multi-step episodes per oracle scenario
+/// (acquire/revise/repair) — `3n` episodes total, each `K=2` steps, so `6n`
+/// records. See the module doc above `generate_e3_acquire_episode`.
+fn generate_e3_multistep(
+    book: &TemplateBook,
+    seed: Seed,
+    n: usize,
+) -> GenResult<Vec<EpisodeRecord>> {
+    let mut out = Vec::with_capacity(n * 6);
+    for i in 0..n {
+        out.extend(generate_e3_acquire_episode(
+            book,
+            seed,
+            i,
+            e3_wrong_step(i, &[0, 1]),
+        )?);
+        out.extend(generate_e3_revise_episode(
+            book,
+            seed,
+            i,
+            e3_wrong_step(i, &[0, 1]),
+        )?);
+        out.extend(generate_e3_repair_episode(
+            book,
+            seed,
+            i,
+            e3_wrong_step(i, &[1]),
+        )?);
+    }
+    Ok(out)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Prompt rendering (local, mirrors grug_data::render_knowledge_prompt's
 // OpenAI-tool-call/<tool_call> convention without depending on its exact
 // system-prompt text, which is that crate's data to own)
@@ -2454,6 +3194,26 @@ struct Manifest {
     /// `--e4-revision` and `--contracts` were given this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     e4_sidecar_control: Option<E4SidecarStats>,
+    /// P6.5/E3 (multi-step): multi-step episodes generated per oracle
+    /// scenario this run (`--e3-episodes`; 0 means E3 multi-step generation
+    /// was skipped entirely).
+    e3_episodes_per_scenario: usize,
+    /// P6.5/E3 (multi-step): real tally of `labels.e3_step_reward` values
+    /// (formatted `"{reward:.1}"`, e.g. `"0.0"`/`"1.0"`) across every
+    /// decontaminated `e3_multistep.jsonl` record. Empty when
+    /// `e3_episodes_per_scenario == 0`.
+    e3_step_reward_histogram: BTreeMap<String, u64>,
+    /// P6.5/E3 (multi-step): the `e3_multistep_treatment/` sidecar's write
+    /// stats (`weight = Some(e3_step_reward)` on every record). `None`
+    /// unless both `--e3-episodes` and `--contracts` were given this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e3_sidecar_treatment: Option<E4SidecarStats>,
+    /// P6.5/E3 (multi-step): the `e3_multistep_control/` sidecar's write
+    /// stats — byte-identical records to the treatment arm except every
+    /// `weight` is `None`. `None` unless both `--e3-episodes` and
+    /// `--contracts` were given this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e3_sidecar_control: Option<E4SidecarStats>,
 }
 
 /// P6.5/E4: one `knowledge_revise` arm's sidecar write stats, recorded in
@@ -2772,6 +3532,7 @@ fn build_sidecar_record(
         system_context: None,
         prompt,
         target: target_text.to_string(),
+        weight: None,
     })))
 }
 
@@ -2842,6 +3603,34 @@ fn write_steering_sidecar(
             SidecarBuildOutcome::SchemaInvalid => schema_invalid_dropped += 1,
         }
     }
+    write_sidecar_files(
+        &dir,
+        family_tag,
+        tool,
+        frozen,
+        sft,
+        e1_targets_mode.to_string(),
+        e1_raw_invalid_dropped,
+        schema_invalid_dropped,
+    )
+}
+
+/// Shared tail of `write_steering_sidecar`/`write_e3_sidecar`: write
+/// `<dir>/{train.sft.jsonl,manifest.json,separation.json}` from an
+/// already-built `Vec<KnowledgeSftRecord>`. `dir` must already exist (both
+/// callers create it before building their records, since building may
+/// itself fail).
+#[allow(clippy::too_many_arguments)]
+fn write_sidecar_files(
+    dir: &Path,
+    family_tag: &str,
+    tool: &str,
+    frozen: &ToolContractSnapshot,
+    sft: Vec<KnowledgeSftRecord>,
+    e1_targets_mode: String,
+    e1_raw_invalid_dropped: u64,
+    schema_invalid_dropped: u64,
+) -> GenResult<SidecarWriteStats> {
     let sft_path = dir.join("train.sft.jsonl");
     {
         let file = File::create(&sft_path).map_err(|source| GeneratorError::Io {
@@ -2929,7 +3718,7 @@ fn write_steering_sidecar(
         ),
         source_exam_fingerprint: format!("engine-generated-no-frontier-exam:{tool}"),
         tool: tool.to_string(),
-        e1_targets_mode: e1_targets_mode.to_string(),
+        e1_targets_mode,
         e1_raw_invalid_dropped,
         schema_invalid_dropped,
     };
@@ -2946,6 +3735,122 @@ fn write_steering_sidecar(
         e1_raw_invalid_dropped,
         schema_invalid_dropped,
     })
+}
+
+/// P6.5/E3: sidecar builder for the multi-step engine episodes
+/// (`generate_e3_multistep`). Unlike `build_sidecar_record` — which
+/// deliberately *resynthesizes* a fresh single-turn user request from the
+/// base tool-contract corpus's own phrase table, because those four
+/// families' own `EpisodeRecord.conversation` is a single ad hoc turn with
+/// no base-corpus equivalent to carry over — these episodes' `conversation`
+/// *is* the real multi-step dialogue this generator built (prior
+/// user/assistant/tool turns, `e3_step_record`/`e3_push_tool_turn`
+/// following `KnowledgeEpisode::to_sft_records`'s own chaining pattern);
+/// resynthesizing it here would erase the multi-step character the whole
+/// experiment measures. So this builder keeps `record.conversation` and
+/// `record.target` verbatim, and only borrows `build_sidecar_record`'s two
+/// real obligations: a real `frozen.manifest_hash` `contract_hash`, and
+/// `ToolContractSnapshot::validate_call` on every `ToolCall` target
+/// (`Answer`/`Gap` targets have no call to validate and are accepted as
+/// rendered, exactly like the Gap branch in `build_sidecar_record`).
+fn build_e3_sidecar_record(
+    frozen: &ToolContractSnapshot,
+    record: &EpisodeRecord,
+    target_tool: &str,
+) -> GenResult<SidecarBuildOutcome> {
+    let Some(language) = workflow_language(&record.language) else {
+        return Ok(SidecarBuildOutcome::UnrepresentableLanguage);
+    };
+    let Some(stage) = workflow_stage(&record.stage) else {
+        return Ok(SidecarBuildOutcome::SchemaInvalid);
+    };
+    let action = KnowledgeAction::parse_runtime(&record.target)?;
+    let seed = sidecar_seed(&record.id);
+    let tools = match &action {
+        KnowledgeAction::ToolCall { tool, arguments } => {
+            if frozen.tool(tool).is_none() || !frozen.validate_call(tool, arguments).valid {
+                return Ok(SidecarBuildOutcome::SchemaInvalid);
+            }
+            sample_offered_tools(frozen, tool, 4, seed)?
+        }
+        KnowledgeAction::Gap { .. } | KnowledgeAction::Answer { .. } => {
+            if frozen.tool(target_tool).is_none() {
+                return Ok(SidecarBuildOutcome::SchemaInvalid);
+            }
+            sample_offered_tools(frozen, target_tool, 4, seed)?
+        }
+    };
+    let prompt = grug_data::render_knowledge_prompt_with_system(&tools, &record.conversation, None);
+    Ok(SidecarBuildOutcome::Built(Box::new(KnowledgeSftRecord {
+        schema_version: record.schema_version,
+        id: record.id.clone(),
+        episode_id: record.episode_id.clone(),
+        step: record.step,
+        stage,
+        family: record.family.clone(),
+        difficulty: record.difficulty,
+        language,
+        contract_hash: frozen.manifest_hash.clone(),
+        tools,
+        conversation: record.conversation.clone(),
+        system_context: None,
+        prompt,
+        target: record.target.clone(),
+        weight: None,
+    })))
+}
+
+/// P6.5/E3: write `<out_dir>/<dir_name>/{train.sft.jsonl,manifest.json,
+/// separation.json}` for the multi-step engine episodes, in the same
+/// pod-artifact shape `write_steering_sidecar` uses for the other
+/// families. `weighted` selects the arm: `true` copies each record's
+/// `labels.e3_step_reward` into `KnowledgeSftRecord.weight`
+/// (`e3_multistep_treatment/`); `false` leaves every `weight` `None`
+/// (`e3_multistep_control/`) — otherwise byte-identical records, per the
+/// brief ("Control sidecar: identical records with weight = None").
+fn write_e3_sidecar(
+    out_dir: &Path,
+    family_tag: &str,
+    dir_name: &str,
+    target_tool: &str,
+    frozen: &ToolContractSnapshot,
+    records: &[EpisodeRecord],
+    weighted: bool,
+) -> GenResult<SidecarWriteStats> {
+    let dir = out_dir.join(dir_name);
+    fs::create_dir_all(&dir).map_err(|source| GeneratorError::Io {
+        path: dir.clone(),
+        source,
+    })?;
+
+    let mut schema_invalid_dropped = 0u64;
+    let mut sft: Vec<KnowledgeSftRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        match build_e3_sidecar_record(frozen, record, target_tool)? {
+            SidecarBuildOutcome::Built(mut sft_record) => {
+                if weighted {
+                    sft_record.weight = record
+                        .labels
+                        .as_ref()
+                        .and_then(|labels| labels.e3_step_reward)
+                        .map(|reward| reward as f32);
+                }
+                sft.push(*sft_record);
+            }
+            SidecarBuildOutcome::UnrepresentableLanguage => {}
+            SidecarBuildOutcome::SchemaInvalid => schema_invalid_dropped += 1,
+        }
+    }
+    write_sidecar_files(
+        &dir,
+        family_tag,
+        target_tool,
+        frozen,
+        sft,
+        "n/a".to_string(),
+        0,
+        schema_invalid_dropped,
+    )
 }
 
 /// Load and verify a frozen `ToolContractSnapshot` (`contracts.json`) from
@@ -3022,6 +3927,14 @@ fn run(args: &Args) -> GenResult<()> {
     let oracle_records = generate_oracle(&book, seed, args.oracle_seeds)?;
     let revision_records = if args.e4_revision {
         generate_revision_pairs(&book, seed, args.e4_count)?
+    } else {
+        Vec::new()
+    };
+    // P6.5/E3 (multi-step): each scenario builds its own isolated
+    // `ScratchDir`/`Engine` internally (mirroring `generate_oracle_acquire`
+    // and the E4 pair generators above), so this doesn't touch `engine`.
+    let e3_records = if args.e3_episodes > 0 {
+        generate_e3_multistep(&book, seed, args.e3_episodes)?
     } else {
         Vec::new()
     };
@@ -3258,6 +4171,59 @@ fn run(args: &Args) -> GenResult<()> {
         }
     }
 
+    // P6.5/E3 (multi-step): the primary `e3_multistep.jsonl` file (all
+    // three oracle scenarios' steps together — `family` distinguishes
+    // them), plus, when `--contracts` is given, the two reward-weighted
+    // sidecars. `e3_step_reward_histogram` is a real measured tally
+    // (`"0.0"`/`"1.0"` -> count) over the decontaminated primary records,
+    // not a projection — see the P6.5/E3 RESULT doc section for the
+    // reward-distribution acceptance check this backs.
+    let mut e3_sidecar_treatment = None;
+    let mut e3_sidecar_control = None;
+    let mut e3_step_reward_histogram: BTreeMap<String, u64> = BTreeMap::new();
+    if args.e3_episodes > 0 {
+        let (kept, survivors) = write_family_jsonl(
+            &args.out_dir,
+            "e3_multistep",
+            e3_records,
+            &sentinels,
+            &mut decon,
+        )?;
+        per_family.insert("e3_multistep".to_string(), kept);
+        for record in &survivors {
+            if let Some(reward) = record.labels.as_ref().and_then(|l| l.e3_step_reward) {
+                *e3_step_reward_histogram
+                    .entry(format!("{reward:.1}"))
+                    .or_insert(0) += 1;
+            }
+        }
+        if let Some(frozen) = &frozen_contracts {
+            let treatment_stats = write_e3_sidecar(
+                &args.out_dir,
+                "knowledge.oracle_e3_multistep",
+                "e3_multistep_treatment",
+                "memory_write",
+                frozen,
+                &survivors,
+                true,
+            )?;
+            e3_sidecar_treatment = Some(E4SidecarStats::new(
+                "e3_multistep_treatment",
+                &treatment_stats,
+            ));
+            let control_stats = write_e3_sidecar(
+                &args.out_dir,
+                "knowledge.oracle_e3_multistep",
+                "e3_multistep_control",
+                "memory_write",
+                frozen,
+                &survivors,
+                false,
+            )?;
+            e3_sidecar_control = Some(E4SidecarStats::new("e3_multistep_control", &control_stats));
+        }
+    }
+
     let manifest = Manifest {
         schema_version: 1,
         generator: "akh_episode_generator/p6.3",
@@ -3280,6 +4246,10 @@ fn run(args: &Args) -> GenResult<()> {
         sidecar_per_family_counts: sidecar_per_family,
         e4_sidecar_treatment,
         e4_sidecar_control,
+        e3_episodes_per_scenario: args.e3_episodes,
+        e3_step_reward_histogram,
+        e3_sidecar_treatment,
+        e3_sidecar_control,
     };
     let manifest_path = args.out_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -4180,6 +5150,280 @@ mod tests {
                 a, b,
                 "{dir_name}/train.sft.jsonl must be byte-identical across runs with the same seed"
             );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // P6.5/E3 (multi-step)
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn e3_wrong_step_stride_is_deterministic_and_scoped_to_eligible() {
+        // Every 4th index is the deliberately-wrong episode; the rest are
+        // never flagged.
+        assert_eq!(e3_wrong_step(0, &[0, 1]), Some(0));
+        assert_eq!(e3_wrong_step(1, &[0, 1]), None);
+        assert_eq!(e3_wrong_step(2, &[0, 1]), None);
+        assert_eq!(e3_wrong_step(3, &[0, 1]), None);
+        assert_eq!(e3_wrong_step(4, &[0, 1]), Some(0));
+        assert_eq!(e3_wrong_step(8, &[0, 1]), Some(0));
+        // repair's only eligible step is 1.
+        assert_eq!(e3_wrong_step(0, &[1]), Some(1));
+        assert_eq!(e3_wrong_step(4, &[1]), Some(1));
+        assert_eq!(e3_wrong_step(1, &[1]), None);
+    }
+
+    #[test]
+    fn e3_acquire_episode_has_two_steps_with_conversation_carryover_and_full_reward() {
+        let book = test_book();
+        let records = generate_e3_acquire_episode(&book, Seed(100), 1, None).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].step, 0);
+        assert_eq!(records[1].step, 1);
+        assert_eq!(records[0].episode_id, records[1].episode_id);
+        assert_eq!(records[0].id, format!("{}-step-00", records[0].episode_id));
+        assert_eq!(records[1].id, format!("{}-step-01", records[0].episode_id));
+        // Step 1's conversation carries every prior turn (user + the
+        // assistant tool-call/tool-response pair) plus its own new user
+        // turn, not just a lone new user message.
+        assert!(records[1].conversation.len() > records[0].conversation.len());
+        assert_eq!(records[0].conversation.len(), 1);
+        assert_eq!(records[1].conversation.len(), 4);
+        assert_eq!(
+            records[1].conversation[0], records[0].conversation[0],
+            "step 1 must literally carry step 0's user turn forward"
+        );
+        assert_eq!(records[1].conversation[1]["role"], "assistant");
+        assert_eq!(records[1].conversation[2]["role"], "tool");
+        assert_eq!(records[1].conversation[3]["role"], "user");
+        // No wrong step in this episode: both steps are engine-completed,
+        // so both rewards are genuinely 1.0.
+        for r in &records {
+            let labels = r.labels.as_ref().unwrap();
+            assert_eq!(labels.e3_step_reward, Some(1.0));
+            assert_eq!(labels.e3_episode_steps, Some(2));
+        }
+        assert!(KnowledgeAction::parse_runtime(&records[0].target).is_ok());
+        match KnowledgeAction::parse_runtime(&records[1].target).unwrap() {
+            KnowledgeAction::Answer { text, .. } => assert!(text.contains("--flag=1")),
+            other => panic!("expected an Answer target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn e3_wrong_step_flips_exactly_one_step_to_a_causally_false_target_and_reward() {
+        let book = test_book();
+        for scenario in ["acquire", "revise"] {
+            let normal: Vec<EpisodeRecord> = match scenario {
+                "acquire" => generate_e3_acquire_episode(&book, Seed(200), 3, None).unwrap(),
+                _ => generate_e3_revise_episode(&book, Seed(200), 3, None).unwrap(),
+            };
+            for wrong in [0usize, 1] {
+                let flagged: Vec<EpisodeRecord> = match scenario {
+                    "acquire" => {
+                        generate_e3_acquire_episode(&book, Seed(200), 3, Some(wrong)).unwrap()
+                    }
+                    _ => generate_e3_revise_episode(&book, Seed(200), 3, Some(wrong)).unwrap(),
+                };
+                assert_eq!(flagged.len(), 2);
+                for (step, record) in flagged.iter().enumerate() {
+                    let reward = record.labels.as_ref().unwrap().e3_step_reward.unwrap();
+                    if step == wrong {
+                        assert_eq!(
+                            reward, 0.0,
+                            "{scenario} step {step} must be the causally-false wrong step"
+                        );
+                        assert_ne!(
+                            record.target, normal[step].target,
+                            "{scenario} step {step}'s target must differ from the completed one"
+                        );
+                    } else {
+                        assert_eq!(
+                            reward, 1.0,
+                            "{scenario} step {step} must stay engine-completed (reward 1.0)"
+                        );
+                        assert_eq!(
+                            record.target, normal[step].target,
+                            "{scenario} step {step} must be unaffected by the other step's flag"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn e3_repair_first_step_is_a_genuine_zero_reward_decline_never_the_wrong_step() {
+        let book = test_book();
+        for wrong in [None, Some(1)] {
+            let records = generate_e3_repair_episode(&book, Seed(300), 2, wrong).unwrap();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].stage, "declare_gap");
+            assert!(matches!(
+                KnowledgeAction::parse_runtime(&records[0].target).unwrap(),
+                KnowledgeAction::Gap { .. }
+            ));
+            assert_eq!(
+                records[0].labels.as_ref().unwrap().e3_step_reward,
+                Some(0.0),
+                "the declined repair attempt is a genuine negative signal regardless of `wrong_step`"
+            );
+            let step1_reward = records[1].labels.as_ref().unwrap().e3_step_reward.unwrap();
+            if wrong == Some(1) {
+                assert_eq!(step1_reward, 0.0);
+            } else {
+                assert_eq!(step1_reward, 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn e3_multistep_produces_six_records_per_index_with_a_real_reward_spread() {
+        let book = test_book();
+        let records = generate_e3_multistep(&book, Seed(400), 8).unwrap();
+        // 3 scenarios x 8 episodes x 2 steps.
+        assert_eq!(records.len(), 48);
+        let zeros = records
+            .iter()
+            .filter(|r| r.labels.as_ref().unwrap().e3_step_reward == Some(0.0))
+            .count();
+        let ones = records
+            .iter()
+            .filter(|r| r.labels.as_ref().unwrap().e3_step_reward == Some(1.0))
+            .count();
+        assert_eq!(
+            zeros + ones,
+            records.len(),
+            "every step has a 0.0 or 1.0 reward"
+        );
+        assert!(
+            zeros > 0,
+            "the treatment corpus must contain 0.0-reward steps"
+        );
+        assert!(
+            ones > 0,
+            "the treatment corpus must also contain 1.0-reward steps"
+        );
+        // Every episode_id groups exactly 2 steps, step indices 0 then 1.
+        let mut by_episode: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for r in &records {
+            by_episode
+                .entry(r.episode_id.clone())
+                .or_default()
+                .push(r.step);
+        }
+        assert_eq!(
+            by_episode.len(),
+            24,
+            "3 scenarios x 8 episodes = 24 distinct episode ids"
+        );
+        for steps in by_episode.values() {
+            assert_eq!(steps, &vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn e3_sidecars_are_written_treatment_weighted_control_unweighted() {
+        let book = test_book();
+        let (_scratch, engine) = fresh_engine();
+        let frozen = test_frozen_contracts(&engine);
+
+        let records = generate_e3_multistep(&book, Seed(500), 3).unwrap();
+        assert_eq!(records.len(), 18);
+
+        let dir = ScratchDir::new("e3-sidecars").unwrap();
+        let treatment_stats = write_e3_sidecar(
+            dir.path(),
+            "knowledge.oracle_e3_multistep",
+            "e3_multistep_treatment",
+            "memory_write",
+            &frozen,
+            &records,
+            true,
+        )
+        .unwrap();
+        let control_stats = write_e3_sidecar(
+            dir.path(),
+            "knowledge.oracle_e3_multistep",
+            "e3_multistep_control",
+            "memory_write",
+            &frozen,
+            &records,
+            false,
+        )
+        .unwrap();
+
+        // The repair scenario's declined step is a Gap and the recall/
+        // verify answer steps are Answer targets — build_e3_sidecar_record
+        // (unlike build_sidecar_record) must accept both, so nothing is
+        // dropped here.
+        assert_eq!(treatment_stats.schema_invalid_dropped, 0);
+        assert_eq!(control_stats.schema_invalid_dropped, 0);
+        assert_eq!(treatment_stats.kept, 18);
+        assert_eq!(control_stats.kept, 18);
+
+        let load_sft = |dir_name: &str| -> Vec<KnowledgeSftRecord> {
+            fs::read_to_string(dir.path().join(dir_name).join("train.sft.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        };
+        let treatment_sft = load_sft("e3_multistep_treatment");
+        let control_sft = load_sft("e3_multistep_control");
+        assert_eq!(treatment_sft.len(), 18);
+        assert_eq!(control_sft.len(), 18);
+
+        let by_id: BTreeMap<&str, &EpisodeRecord> =
+            records.iter().map(|r| (r.id.as_str(), r)).collect();
+        for sft in &treatment_sft {
+            let primary = by_id[sft.id.as_str()];
+            let expected = primary
+                .labels
+                .as_ref()
+                .and_then(|l| l.e3_step_reward)
+                .map(|r| r as f32);
+            assert_eq!(
+                sft.weight, expected,
+                "treatment weight must equal labels.e3_step_reward for {}",
+                sft.id
+            );
+            // Real multi-step conversation carried through verbatim, not
+            // resynthesized into a single-turn request.
+            assert_eq!(sft.conversation, primary.conversation);
+            assert_eq!(sft.target, primary.target);
+        }
+        for sft in &control_sft {
+            assert_eq!(
+                sft.weight, None,
+                "control sidecar must leave every weight unset ({})",
+                sft.id
+            );
+        }
+        // Control records are otherwise identical to treatment (same
+        // prompt/target/conversation), only `weight` differs.
+        for (t, c) in treatment_sft.iter().zip(control_sft.iter()) {
+            assert_eq!(t.id, c.id);
+            assert_eq!(t.prompt, c.prompt);
+            assert_eq!(t.target, c.target);
+            assert_ne!(
+                t.weight, c.weight,
+                "weight is the only field the two arms may disagree on"
+            );
+        }
+
+        // Every ToolCall target in the sidecar validates against the
+        // frozen contract.
+        for sft in treatment_sft.iter().chain(control_sft.iter()) {
+            if let KnowledgeAction::ToolCall { tool, arguments } =
+                KnowledgeAction::parse_runtime(&sft.target).unwrap()
+            {
+                assert!(
+                    frozen.validate_call(&tool, &arguments).valid,
+                    "sidecar tool-call target must validate against the frozen contract ({})",
+                    sft.id
+                );
+            }
         }
     }
 

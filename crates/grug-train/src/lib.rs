@@ -107,7 +107,7 @@ pub use rule_train::{
     build_rule_batch, encode_rule_example, format_rule_prompt, generate_rule_outputs,
 };
 pub use tokenizer::{ByteTokenizer, Vocab};
-pub use train::text_batch_loss;
+pub use train::{RecordWeightsMode, text_batch_loss, train_step_guarded_weighted};
 pub use transformer::{
     Attention, AttentionBackend, CausalSelfAttention, PositionalEncoding, TinyTransformer,
     TinyTransformerConfig,

@@ -609,6 +609,7 @@ impl KnowledgeEpisode {
                 system_context: None,
                 prompt,
                 target: target.clone(),
+                weight: None,
             });
 
             match &step.expected {
@@ -654,6 +655,13 @@ pub struct KnowledgeSftRecord {
     pub prompt: String,
     /// Runtime-native assistant output.
     pub target: String,
+    /// Optional per-record training weight in `[0, 1]`: Phase 51 P6.5/E3's
+    /// per-step causal reward (`CausalManager::predict_effects` ->
+    /// `verify_prediction`), consumed by `train_knowledge --record-weights use`.
+    /// `None` (or the default `--record-weights ignore`) means weight 1.0,
+    /// identical to pre-E3 behaviour; every existing reader is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
 }
 
 impl KnowledgeSftRecord {
