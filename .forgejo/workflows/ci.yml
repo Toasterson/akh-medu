@@ -58,7 +58,7 @@ jobs:
   # #[ignore] when SOKAR_TEST_DATABASE_URL / SOKAR_MINIO_* are unset, so this
   # job needs no services.
   test-sokar:
-    runs-on: ubuntu-22.04
+    runs-on: rust
     steps:
       - name: Install dependencies
         run: |

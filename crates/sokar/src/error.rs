@@ -48,7 +48,7 @@ pub enum SokarError {
         op: &'static str,
         kind: ErrorKind,
         #[source]
-        source: opendal::Error,
+        source: Box<opendal::Error>,
     },
     #[error("database operation failed")]
     #[diagnostic(
@@ -169,7 +169,7 @@ impl SokarError {
             store: store.clone(),
             op,
             kind: source.kind(),
-            source,
+            source: Box::new(source),
         }
     }
     pub fn status(&self) -> axum::http::StatusCode {
@@ -269,6 +269,21 @@ mod tests {
         assert_eq!(
             schema.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    /// clippy::result_large_err (rustc 1.98+) denies `Result<_, E>` when E is
+    /// at least 128 bytes; the OpenDAL source is boxed to keep every
+    /// `SokarResult` under that bound. Keep this test so the bound cannot regress silently.
+    #[test]
+    fn sokar_error_stays_small() {
+        assert!(
+            std::mem::size_of::<super::SokarError>() < 128,
+            "SokarError is {} bytes",
+            std::mem::size_of::<super::SokarError>()
         );
     }
 }

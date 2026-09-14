@@ -14,6 +14,10 @@ FROM rust:${RUST_VERSION}-bookworm AS builder
 
 WORKDIR /build
 
+# Cap rustc parallelism: the Solstice runner VMs are memory-constrained and
+# sokar's graph (opendal + sqlx + axum + aws-lc) is heavier than seshd's.
+ENV CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+
 # Copy manifests first so dep compilation caches as its own layer. sokar
 # depends on sokar-client by path, so both manifests are needed up front.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml* ./
