@@ -385,12 +385,16 @@ async fn completion(
             .await
             .map_err(|_| Fault::new("transport", "model stream interrupted"))?
         {
+            check(cancel, deadline)?;
             bytes += chunk.len();
             if bytes > MAX_BYTES {
                 return Err(Fault::new("capacity", "model output exceeded byte limit"));
             }
             buffer.extend_from_slice(&chunk);
             while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+                // Buffered SSE can remain ready while callbacks block. Check
+                // here too: select's interruption future may not get polled.
+                check(cancel, deadline)?;
                 stream.line(&buffer[..end], host)?;
                 buffer.drain(..=end);
             }
@@ -399,6 +403,7 @@ async fn completion(
             }
         }
         if !buffer.is_empty() {
+            check(cancel, deadline)?;
             stream.line(&buffer, host)?;
         }
         let finish = stream.finish.ok_or_else(|| {
@@ -435,9 +440,15 @@ mod tests {
     struct Witness {
         events: Vec<RuntimeEvent>,
         calls: usize,
+        cancel_on_text: Option<std::sync::Arc<AtomicBool>>,
     }
     impl Host for Witness {
         fn event(&mut self, event: RuntimeEvent) -> std::result::Result<(), String> {
+            if matches!(event, RuntimeEvent::Text { .. })
+                && let Some(cancel) = &self.cancel_on_text
+            {
+                cancel.store(true, Ordering::SeqCst);
+            }
             self.events.push(event);
             Ok(())
         }
@@ -549,6 +560,29 @@ mod tests {
         );
         server.abort();
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_stream_checks_cancellation_between_events() {
+        use axum::{Router, routing::post};
+        let body = [
+            json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"must not be emitted"},"finish_reason":"stop"}]}),
+        ].iter().map(|v| format!("data: {v}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        let app = Router::new().route("/", post(move || {
+            let body = body.clone();
+            async move { ([("content-type", "text/event-stream")], body) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let mut host = Witness { cancel_on_text: Some(cancel.clone()), ..Default::default() };
+        let error = completion(reqwest::Client::new().post(url), &mut host, &cancel,
+            Instant::now() + Duration::from_secs(5)).await.unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(host.events.len(), 1, "buffered output continued after cancellation");
+        server.abort();
+    }
+
     #[test]
     fn incomplete_streams_and_wrong_tool_finish_are_not_success() {
         let mut host = Witness::default();
