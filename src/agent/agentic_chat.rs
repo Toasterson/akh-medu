@@ -209,7 +209,12 @@ fn repository_witness(cwd: &std::path::Path) -> Option<u64> {
     for name in untracked.split(|b| *b == 0).filter(|name| !name.is_empty()) {
         let name = std::str::from_utf8(name).ok()?;
         name.hash(&mut hash);
-        std::fs::read(cwd.join(name)).ok()?.hash(&mut hash);
+        // Do not follow symlinks or read arbitrary untracked datasets/devices.
+        // Metadata is sufficient to distinguish an untouched checkout from a
+        // new or modified candidate; Anima still validates the actual diff.
+        let metadata = std::fs::symlink_metadata(cwd.join(name)).ok()?;
+        metadata.len().hash(&mut hash);
+        metadata.modified().ok()?.hash(&mut hash);
     }
     Some(hash.finish())
 }
