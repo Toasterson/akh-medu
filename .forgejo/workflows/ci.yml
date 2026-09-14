@@ -50,7 +50,7 @@ jobs:
         run: |
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
-          python3 scripts/session-platform/check-profiles.py
+          sh .forgejo/scripts/run-logged.sh daemon-profiles python3 scripts/session-platform/check-profiles.py
           sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
 
   # Seshat crate type-check. Default features only (includes `embedding`;
@@ -212,7 +212,7 @@ jobs:
               ;;
           esac
           echo "building with tags: $TAGS"
-          docker build -f docker/seshd.Dockerfile $TAGS .
+          sh .forgejo/scripts/run-logged.sh build-seshd docker build -f docker/seshd.Dockerfile $TAGS .
 
       - name: Smoke-test seshd binary (catch stub-binary regression)
         run: |
@@ -256,7 +256,7 @@ jobs:
           fi
 
           # sha tag always gets pushed — this is the canonical deploy artifact
-          docker push "$REGISTRY/seshd:$SHORT_SHA"
+          sh .forgejo/scripts/run-logged.sh push-seshd docker push "$REGISTRY/seshd:$SHORT_SHA"
 
           # branch tag only if the branch actually resolves cleanly.
           # Non-fatal: pushing the same digest under an existing mutable tag
