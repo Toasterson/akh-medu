@@ -2444,6 +2444,47 @@ struct Manifest {
     /// `<family>/train.sft.jsonl`. Empty when `frozen_contracts_path` is
     /// `None` (no sidecar was written this run).
     sidecar_per_family_counts: BTreeMap<String, u64>,
+    /// P6.5/E4: the `knowledge_revise_treatment/` sidecar's write stats
+    /// (records with `labels.e4_retraction_applied == true`). `None` unless
+    /// both `--e4-revision` and `--contracts` were given this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e4_sidecar_treatment: Option<E4SidecarStats>,
+    /// P6.5/E4: the `knowledge_revise_control/` sidecar's write stats (the
+    /// append-only, never-retracted siblings). `None` unless both
+    /// `--e4-revision` and `--contracts` were given this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    e4_sidecar_control: Option<E4SidecarStats>,
+}
+
+/// P6.5/E4: one `knowledge_revise` arm's sidecar write stats, recorded in
+/// the top-level manifest so a downstream consumer doesn't have to open
+/// `knowledge_revise_treatment/manifest.json` / `knowledge_revise_control/
+/// manifest.json` separately to learn whether the sidecar was written, how
+/// many records it kept, and how many were dropped as schema-invalid
+/// against the frozen `--contracts` snapshot.
+#[derive(Debug, Serialize)]
+struct E4SidecarStats {
+    /// Directory under `--out-dir` holding this arm's `train.sft.jsonl`,
+    /// `manifest.json`, and `separation.json`.
+    dir: String,
+    /// Records written to `<dir>/train.sft.jsonl`.
+    kept: u64,
+    /// Records dropped because their target failed
+    /// `ToolContractSnapshot::validate_call` against the frozen contract.
+    /// Always 0 in practice for E4 (both arms always target `memory_write`
+    /// with arguments the frozen contract already accepts), kept for parity
+    /// with the four tool-contract families' sidecar accounting.
+    schema_invalid_dropped: u64,
+}
+
+impl E4SidecarStats {
+    fn new(dir: &str, stats: &SidecarWriteStats) -> Self {
+        Self {
+            dir: dir.to_string(),
+            kept: stats.kept as u64,
+            schema_invalid_dropped: stats.schema_invalid_dropped,
+        }
+    }
 }
 
 fn git_hash() -> String {
@@ -2742,21 +2783,30 @@ fn file_blake3(path: &Path) -> GenResult<String> {
     Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
 }
 
-/// Write `<out_dir>/<tool>/{train.sft.jsonl,manifest.json,separation.json}`
+/// Write `<out_dir>/<dir_name>/{train.sft.jsonl,manifest.json,separation.json}`
 /// for one tool-contract family from its already-decontaminated records, in
 /// the base tool-contract corpus's own distribution: every record is
 /// rebuilt by `build_sidecar_record` against `frozen` (the `--contracts`
 /// snapshot) rather than carried over from the primary `EpisodeRecord`'s
 /// engine-only prompt/tools — see that function's doc comment for why.
+///
+/// `dir_name` and `tool` are separate parameters (rather than one, as
+/// before P6.5/E4) because the `knowledge_revise` treatment/control
+/// sidecars live in their own directories (`knowledge_revise_treatment/`,
+/// `knowledge_revise_control/`) while still building against the real
+/// `memory_write` contract (`tool`, passed to `build_sidecar_record` as
+/// `target_tool` and recorded in the written `SteeringManifest.tool`). The
+/// four tool-contract families pass the same string for both, unchanged.
 fn write_steering_sidecar(
     out_dir: &Path,
     family_tag: &str,
+    dir_name: &str,
     tool: &str,
     frozen: &ToolContractSnapshot,
     records: &[EpisodeRecord],
     e1_targets_mode: E1TargetsMode,
 ) -> GenResult<SidecarWriteStats> {
-    let dir = out_dir.join(tool);
+    let dir = out_dir.join(dir_name);
     fs::create_dir_all(&dir).map_err(|source| GeneratorError::Io {
         path: dir.clone(),
         source,
@@ -3057,6 +3107,7 @@ fn run(args: &Args) -> GenResult<()> {
             &args.out_dir,
             Family::MemoryWrite.tag(),
             "memory_write",
+            "memory_write",
             frozen,
             &survivors,
             args.e1_targets,
@@ -3078,6 +3129,7 @@ fn run(args: &Args) -> GenResult<()> {
         let stats = write_steering_sidecar(
             &args.out_dir,
             Family::StructuredTaskCreate.tag(),
+            "structured_task_create",
             "structured_task_create",
             frozen,
             &survivors,
@@ -3101,6 +3153,7 @@ fn run(args: &Args) -> GenResult<()> {
             &args.out_dir,
             Family::StructuredTaskUpdate.tag(),
             "structured_task_update",
+            "structured_task_update",
             frozen,
             &survivors,
             args.e1_targets,
@@ -3123,6 +3176,7 @@ fn run(args: &Args) -> GenResult<()> {
             &args.out_dir,
             Family::ReactorManage.tag(),
             "reactor_manage",
+            "reactor_manage",
             frozen,
             &survivors,
             args.e1_targets,
@@ -3142,8 +3196,10 @@ fn run(args: &Args) -> GenResult<()> {
     )?;
     per_family.insert("oracle".to_string(), kept);
 
+    let mut e4_sidecar_treatment = None;
+    let mut e4_sidecar_control = None;
     if args.e4_revision {
-        let (kept, _survivors) = write_family_jsonl(
+        let (kept, survivors) = write_family_jsonl(
             &args.out_dir,
             Family::KnowledgeRevise.file_stem(),
             revision_records,
@@ -3151,6 +3207,55 @@ fn run(args: &Args) -> GenResult<()> {
             &mut decon,
         )?;
         per_family.insert(Family::KnowledgeRevise.file_stem().to_string(), kept);
+
+        // P6.5/E4: the trainer-facing sidecars, mirroring the four
+        // tool-contract families' `<tool>/{train.sft.jsonl,manifest.json,
+        // separation.json}` shape so `train_knowledge` can load this
+        // curriculum too. Two directories, not one, because treatment
+        // (`e4_role == "treatment"`) and control (`"control"`) are
+        // deliberately different arms of the experiment — see
+        // `build_sidecar_record`'s doc comment on why the request is always
+        // rendered from the record's own completed target. Skipped (both
+        // stay `None`) when `--contracts` was not given, exactly like the
+        // four existing sidecars.
+        if let Some(frozen) = &frozen_contracts {
+            let (treatment_survivors, control_survivors): (Vec<_>, Vec<_>) =
+                survivors.into_iter().partition(|record| {
+                    record
+                        .labels
+                        .as_ref()
+                        .and_then(|labels| labels.e4_role.as_deref())
+                        == Some("treatment")
+                });
+
+            let treatment_stats = write_steering_sidecar(
+                &args.out_dir,
+                Family::KnowledgeRevise.tag(),
+                "knowledge_revise_treatment",
+                "memory_write",
+                frozen,
+                &treatment_survivors,
+                E1TargetsMode::Completed,
+            )?;
+            e4_sidecar_treatment = Some(E4SidecarStats::new(
+                "knowledge_revise_treatment",
+                &treatment_stats,
+            ));
+
+            let control_stats = write_steering_sidecar(
+                &args.out_dir,
+                Family::KnowledgeRevise.tag(),
+                "knowledge_revise_control",
+                "memory_write",
+                frozen,
+                &control_survivors,
+                E1TargetsMode::Completed,
+            )?;
+            e4_sidecar_control = Some(E4SidecarStats::new(
+                "knowledge_revise_control",
+                &control_stats,
+            ));
+        }
     }
 
     let manifest = Manifest {
@@ -3173,6 +3278,8 @@ fn run(args: &Args) -> GenResult<()> {
         ad_hoc_contract_hash: contract_hash,
         sidecar_schema_invalid_dropped,
         sidecar_per_family_counts: sidecar_per_family,
+        e4_sidecar_treatment,
+        e4_sidecar_control,
     };
     let manifest_path = args.out_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -3605,6 +3712,7 @@ mod tests {
             dir.path(),
             "tool_contract.memory_write",
             "memory_write",
+            "memory_write",
             &frozen,
             &records,
             E1TargetsMode::Completed,
@@ -3666,6 +3774,7 @@ mod tests {
             dir.path(),
             "tool_contract.memory_write",
             "memory_write",
+            "memory_write",
             &frozen,
             &mw_records,
             E1TargetsMode::RawValid,
@@ -3724,6 +3833,7 @@ mod tests {
         let stats2 = write_steering_sidecar(
             dir2.path(),
             "tool_contract.reactor_manage",
+            "reactor_manage",
             "reactor_manage",
             &frozen,
             &reactor_records,
@@ -3893,6 +4003,183 @@ mod tests {
         assert_eq!(controls, 3);
         for r in &records {
             assert_eq!(r.family, Family::KnowledgeRevise.tag());
+        }
+    }
+
+    /// P6.5/E4 sidecars: `knowledge_revise_treatment/` and
+    /// `knowledge_revise_control/` are the trainer-facing counterparts of
+    /// `knowledge_revise.jsonl`, mirroring the four tool-contract families'
+    /// `<dir>/{train.sft.jsonl,manifest.json,separation.json}` shape so
+    /// `train_knowledge` can mix this curriculum in too. Also the
+    /// acceptance test for the "do treatment/control prompts differ"
+    /// question the task asked to settle empirically: the *primary*
+    /// `EpisodeRecord.prompt` (book-templated from job/worker names only)
+    /// is identical across a pair, but the *sidecar's* rendered request
+    /// (`build_sidecar_record` → `grug_data::render_request`, which lists
+    /// every top-level argument of the record's own completed target) is
+    /// NOT — the retraction changes the completed `memory_write` arguments
+    /// themselves (treatment carries `tags`/`source`, the append-only
+    /// control does not), so the two arms' sidecar prompts genuinely
+    /// describe different situations, not just different targets. This is
+    /// unlike E1, where the sidecar deliberately keeps the *same* prompt
+    /// across arms and swaps only the target.
+    #[test]
+    fn e4_sidecars_are_written_for_treatment_and_control() {
+        let book = test_book();
+        let (_scratch, engine) = fresh_engine();
+        let frozen = test_frozen_contracts(&engine);
+
+        let records = generate_revision_pairs(&book, Seed(42), 5).unwrap();
+        assert_eq!(records.len(), 10);
+
+        // Primary-record prompt identity within a pair (same index i):
+        // book.render only substitutes job/old_worker/new_worker names,
+        // which `revision_pair_setup` derives from `(seed, i)` alone (not
+        // the treatment/control label), so the rendered request — and
+        // therefore the whole primary `prompt` — is byte-identical across
+        // the pair. Only `target` (and the labels) differ.
+        for pair in records.chunks(2) {
+            let (treatment, control) = (&pair[0], &pair[1]);
+            assert_eq!(
+                treatment.labels.as_ref().unwrap().e4_role.as_deref(),
+                Some("treatment")
+            );
+            assert_eq!(
+                control.labels.as_ref().unwrap().e4_role.as_deref(),
+                Some("control")
+            );
+            assert_eq!(
+                treatment.prompt, control.prompt,
+                "primary record prompt must be identical across a treatment/control pair"
+            );
+            assert_ne!(
+                treatment.target, control.target,
+                "targets must differ: retraction+tags/source vs. append-only"
+            );
+        }
+
+        let (treatment_records, control_records): (Vec<EpisodeRecord>, Vec<EpisodeRecord>) =
+            records.into_iter().partition(|r| {
+                r.labels.as_ref().and_then(|l| l.e4_role.as_deref()) == Some("treatment")
+            });
+        assert_eq!(treatment_records.len(), 5);
+        assert_eq!(control_records.len(), 5);
+
+        let dir = ScratchDir::new("e4-sidecars").unwrap();
+        let treatment_stats = write_steering_sidecar(
+            dir.path(),
+            Family::KnowledgeRevise.tag(),
+            "knowledge_revise_treatment",
+            "memory_write",
+            &frozen,
+            &treatment_records,
+            E1TargetsMode::Completed,
+        )
+        .unwrap();
+        let control_stats = write_steering_sidecar(
+            dir.path(),
+            Family::KnowledgeRevise.tag(),
+            "knowledge_revise_control",
+            "memory_write",
+            &frozen,
+            &control_records,
+            E1TargetsMode::Completed,
+        )
+        .unwrap();
+
+        assert_eq!(treatment_stats.kept, 5);
+        assert_eq!(control_stats.kept, 5);
+        assert_eq!(treatment_stats.e1_raw_invalid_dropped, 0);
+        assert_eq!(control_stats.e1_raw_invalid_dropped, 0);
+        assert_eq!(treatment_stats.schema_invalid_dropped, 0);
+        assert_eq!(control_stats.schema_invalid_dropped, 0);
+
+        for dir_name in ["knowledge_revise_treatment", "knowledge_revise_control"] {
+            let family_dir = dir.path().join(dir_name);
+            assert!(family_dir.join("train.sft.jsonl").exists());
+            assert!(family_dir.join("manifest.json").exists());
+            assert!(family_dir.join("separation.json").exists());
+            let manifest_json: SteeringManifest = serde_json::from_str(
+                &fs::read_to_string(family_dir.join("manifest.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(manifest_json.complete);
+            assert_eq!(manifest_json.records, 5);
+            assert_eq!(manifest_json.family, Family::KnowledgeRevise.tag());
+            assert_eq!(manifest_json.tool, "memory_write");
+            assert_eq!(manifest_json.contract_hash, frozen.manifest_hash);
+        }
+
+        let load_sft = |dir_name: &str| -> Vec<KnowledgeSftRecord> {
+            fs::read_to_string(dir.path().join(dir_name).join("train.sft.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        };
+        let treatment_sft = load_sft("knowledge_revise_treatment");
+        let control_sft = load_sft("knowledge_revise_control");
+        assert_eq!(treatment_sft.len(), 5);
+        assert_eq!(control_sft.len(), 5);
+
+        // Every sidecar target must validate against the frozen contract.
+        for sft in treatment_sft.iter().chain(control_sft.iter()) {
+            match KnowledgeAction::parse_runtime(&sft.target).unwrap() {
+                KnowledgeAction::ToolCall { tool, arguments } => {
+                    assert_eq!(tool, "memory_write");
+                    assert!(
+                        frozen.validate_call(&tool, &arguments).valid,
+                        "sidecar target must validate against the frozen contract"
+                    );
+                }
+                other => panic!("expected a memory_write tool call, got {other:?}"),
+            }
+        }
+
+        // The prompt-identity finding, now checked against the actual
+        // written sidecars (not just reasoned about): treatment/control
+        // sidecar prompts differ at every paired index.
+        for (t, c) in treatment_sft.iter().zip(control_sft.iter()) {
+            assert_ne!(
+                t.prompt, c.prompt,
+                "E4 sidecar prompts differ by design (see the test's doc comment)"
+            );
+        }
+
+        // Determinism: regenerating with the same seed must be byte-identical.
+        let records2 = generate_revision_pairs(&book, Seed(42), 5).unwrap();
+        let (treatment_records2, control_records2): (Vec<EpisodeRecord>, Vec<EpisodeRecord>) =
+            records2.into_iter().partition(|r| {
+                r.labels.as_ref().and_then(|l| l.e4_role.as_deref()) == Some("treatment")
+            });
+        let dir3 = ScratchDir::new("e4-sidecars-repeat").unwrap();
+        write_steering_sidecar(
+            dir3.path(),
+            Family::KnowledgeRevise.tag(),
+            "knowledge_revise_treatment",
+            "memory_write",
+            &frozen,
+            &treatment_records2,
+            E1TargetsMode::Completed,
+        )
+        .unwrap();
+        write_steering_sidecar(
+            dir3.path(),
+            Family::KnowledgeRevise.tag(),
+            "knowledge_revise_control",
+            "memory_write",
+            &frozen,
+            &control_records2,
+            E1TargetsMode::Completed,
+        )
+        .unwrap();
+        for dir_name in ["knowledge_revise_treatment", "knowledge_revise_control"] {
+            let a = fs::read_to_string(dir.path().join(dir_name).join("train.sft.jsonl")).unwrap();
+            let b = fs::read_to_string(dir3.path().join(dir_name).join("train.sft.jsonl")).unwrap();
+            assert_eq!(
+                a, b,
+                "{dir_name}/train.sft.jsonl must be byte-identical across runs with the same seed"
+            );
         }
     }
 
