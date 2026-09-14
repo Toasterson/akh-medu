@@ -62,18 +62,35 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev
+          if ! pkg-config --exists openssl 2>/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config libssl-dev
+          fi
+
       - name: Install Rust toolchain
+        # The `rust` runner image ships a toolchain; only bootstrap rustup when
+        # cargo is absent (same guard as check-akh-medu), then make sure the
+        # `stable` channel is current so clippy matches what CI actually runs.
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-      - name: cargo test -p sokar -p sokar-client
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
+          if command -v rustup >/dev/null 2>&1; then
+            rustup toolchain install stable --profile minimal -c clippy -c rustfmt
+            rustup default stable
+          fi
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: fmt, clippy -D warnings, test (sokar + sokar-client)
         run: |
-          . "$HOME/.cargo/env"
+          test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
-          cargo fmt -p sokar -p sokar-client -- --check
-          cargo clippy --locked -p sokar -p sokar-client --all-targets -- -D warnings
-          cargo test --locked -p sokar -p sokar-client
+          sh .forgejo/scripts/run-logged.sh fmt-sokar cargo fmt -p sokar -p sokar-client -- --check
+          sh .forgejo/scripts/run-logged.sh clippy-sokar cargo clippy --locked -p sokar -p sokar-client --all-targets -- -D warnings
+          sh .forgejo/scripts/run-logged.sh test-sokar cargo test --locked -p sokar -p sokar-client
 
   # Seshat crate type-check. Default features only (includes `embedding`;
   # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
