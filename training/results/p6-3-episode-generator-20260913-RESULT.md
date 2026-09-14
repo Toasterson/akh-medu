@@ -421,3 +421,76 @@ phrase table and compact-JSON nested-value rendering, not this generator's prior
   (which depends on that corpus's full-run RNG interleave); it reproduces the same *rule*, deterministically, from
   the caller's own record identity instead. The acceptance criteria (offered-tool count, target presence, exact
   `openai_definition()` equality) do not depend on matching a specific historical draw.
+
+## P6.5 addendum: E4 sidecars (2026-09-14)
+
+`--e4-revision` wrote `knowledge_revise.jsonl` (primary records) but, unlike the four tool-contract blocker
+families, never emitted a `<family>/{train.sft.jsonl,manifest.json,separation.json}` sidecar — so E4 windows had
+no trainer-facing artifact `train_knowledge` could load. Fixed: when `--e4-revision` and `--contracts` are both
+given, the generator now also writes `knowledge_revise_treatment/` (the `e4_role == "treatment"` records — sourced
+correction through `retract_owned_rule_snapshot`) and `knowledge_revise_control/` (the append-only, never-retracted
+siblings), each in the identical schema as the existing four, built through
+`build_sidecar_record(frozen, record, "memory_write", &record.target)` (i.e. always the record's own completed
+target — E4 has no raw-vs-completed distinction, so `E1TargetsMode::Completed` is hardcoded for these two calls
+regardless of the run's `--e1-targets` flag). Both sidecars are recorded in the top-level `manifest.json` as
+`e4_sidecar_treatment`/`e4_sidecar_control` (`{dir, kept, schema_invalid_dropped}`), `None` when `--contracts` is
+omitted, matching the existing four families' "no `--contracts` ⇒ no sidecar" behavior. `family` on every E4
+record (primary and sidecar) stays `REVISION_FAMILY` (`grug_data::knowledge_workflow`'s real
+`"knowledge.revise_from_new_edition"` tag) — no new contract family was invented.
+
+Implementation note: `write_steering_sidecar` previously used one `tool: &str` parameter both as the output
+directory name and as the tool identity passed to `build_sidecar_record`/recorded in the sidecar's own
+`manifest.json`. Split into `dir_name` and `tool` so the two E4 sidecars can live in
+`knowledge_revise_treatment/`/`knowledge_revise_control/` while still building against the real `memory_write`
+contract; the four existing call sites pass the same string for both (no behavior change there — confirmed by the
+full `cargo test --bin akh_episode_generator --features daemon` suite staying green, all 15 pre-existing tests
+plus 4 new/extended ones).
+
+**Prompt-identity finding (empirically checked, not assumed):** the *primary* `EpisodeRecord.prompt`
+(`akh_prompt` over the book-rendered `request`, which only substitutes `job`/`old_worker`/`new_worker` names) is
+byte-identical across every treatment/control pair — `revision_pair_setup` derives those three names from
+`(seed, i)` alone, not from the treatment/control label, so both arms render the same user turn. This mirrors E1's
+control design. The **sidecar** prompt does *not* share that property, and this is by design, not a bug: E1's
+sidecar deliberately renders the request from the record's own `completed` target and only swaps the emitted
+`target` field, keeping one shared prompt across arms; E4 instead calls `build_sidecar_record` independently per
+arm with `target_text == record.target` (no swap), and the treatment's completed `memory_write` call carries
+`tags`/`source` arguments the control's does not (see `generate_revision_treatment`/`generate_revision_control`).
+`grug_data::render_request` lists every top-level argument as a `- {name} = {value}` line, so the extra
+`tags`/`source` lines make the two arms' sidecar prompts genuinely different texts describing different (but
+paired) situations — confirmed on the smoke run below: 50/50 primary-record prompt pairs identical, 0/50 sidecar
+prompt pairs identical.
+
+**Determinism:** the new `e4_sidecars_are_written_for_treatment_and_control` test regenerates the same
+`--e4-count 5` pair set with the same seed into a second directory and asserts the two `train.sft.jsonl` files are
+byte-identical; the manual smoke run below does the same at `--count 50`.
+
+**Tests:** `cargo test --bin akh_episode_generator --features daemon` — 19 passed, 0 failed (15 pre-existing +
+`e4_sidecars_are_written_for_treatment_and_control` new, asserting: both sidecars written with 5/5 kept and 0
+schema-invalid drops; every sidecar target round-trips through `KnowledgeAction::parse_runtime` as a `memory_write`
+`ToolCall` and passes `frozen.validate_call`; primary-prompt identity vs. sidecar-prompt divergence per the finding
+above; byte-identical regeneration). `cargo clippy -p akh-medu --bin akh_episode_generator --features daemon
+--tests` reports zero findings in `src/bin/akh_episode_generator.rs`; `cargo clippy -p akh-medu -- -D warnings`
+(and even `-p grug-data -- -D warnings` alone) fails on 7 pre-existing `collapsible_if` errors in
+`crates/grug-data/src/tool_contract.rs` — unrelated to this change (that crate is untouched by this diff),
+reproducible on a clean `grug-data` checkout, and out of scope (this task is scoped to
+`src/bin/akh_episode_generator.rs`).
+
+**Smoke run** (`--count 50 --e4-revision --e4-count 50 --seed 20260913`, same 4-tool stand-in `contracts.json` as
+above — the real `runs/checkpoints/.../contracts.json` is not in this worktree):
+
+| artifact | records |
+|---|---:|
+| `knowledge_revise.jsonl` (primary) | 100 (50 treatment + 50 control) |
+| `knowledge_revise_treatment/train.sft.jsonl` | 50 |
+| `knowledge_revise_control/train.sft.jsonl` | 50 |
+
+`manifest.json`: `e4_sidecar_treatment: {"dir":"knowledge_revise_treatment","kept":50,"schema_invalid_dropped":0}`,
+`e4_sidecar_control: {"dir":"knowledge_revise_control","kept":50,"schema_invalid_dropped":0}`. Two independent runs
+with the same seed produced byte-identical `knowledge_revise.jsonl`,
+`knowledge_revise_treatment/train.sft.jsonl`, and `knowledge_revise_control/train.sft.jsonl`.
+
+One pre-existing quirk carried over unchanged from `write_steering_sidecar` (not introduced by this change,
+not fixed here since it's outside this task's scope): `plan_hash` is derived from `family_tag` + record count only
+(`blake3("akh-episode-generator-engine-v1:{family_tag}:{sft.len()}")`), so the treatment and control sidecar
+manifests share an identical `plan_hash` when their kept counts match (as in the 50/50 smoke run above) — this
+already happens for the four existing families across separate runs of equal size and is orthogonal to E4.
