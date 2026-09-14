@@ -1,104 +1,150 @@
 //! One durable database per daemon. Multi-record decisions commit atomically.
-use akh_session_types::{Fault, Result};
-use redb::{Database, ReadableTable, TableDefinition};
+//!
+//! `Store` has two interchangeable backends, selected at construction time:
+//!
+//! - **redb** (default, via [`Store::open`]): one local file per store kind.
+//!   This is the original implementation and remains what every test and
+//!   every existing call site uses unless it opts into Postgres.
+//! - **Postgres** (via [`Store::open_postgres`]): a shared cluster, used in
+//!   production so daemon state survives node/PVC loss instead of living on
+//!   a single Raspberry Pi SD card. See the `postgres` module docs for the
+//!   sync/async bridging, locking, cache and migration design.
+//!
+//! Both backends implement exactly the same public API (`get`/`scan` on
+//! `Store`, `get`/`put`/`delete`/`scan` on `Transaction`, the same `key()`
+//! helper), so no call site needs to know or care which one it is talking
+//! to.
+mod postgres;
+mod redb_backend;
+
+pub(crate) use akh_session_types::{Fault, Result};
+pub use postgres::PostgresConfig;
+use postgres::{PgTxState, PostgresInner};
+use redb_backend::{RedbInner, RedbTxState};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{path::Path, sync::Arc};
 
-const RECORDS: TableDefinition<&str, &[u8]> = TableDefinition::new("records_v1");
-
-#[derive(Clone)]
-pub struct Store(Arc<Database>);
-
-pub struct Transaction<'a> {
-    table: redb::Table<'a, &'static str, &'static [u8]>,
-}
-
-fn failure(error: impl std::fmt::Display) -> Fault {
+pub(crate) fn failure(error: impl std::fmt::Display) -> Fault {
     Fault::new("storage_error", error.to_string())
 }
 
+enum Inner {
+    Redb(RedbInner),
+    Postgres(PostgresInner),
+}
+
+#[derive(Clone)]
+pub struct Store(Arc<Inner>);
+
+enum TransactionInner<'a> {
+    Redb(RedbTxState<'a>),
+    Postgres(PgTxState<'a>),
+}
+
+pub struct Transaction<'a> {
+    inner: TransactionInner<'a>,
+}
+
 impl Store {
+    /// Opens (creating if needed) a redb-backed store at `path`. Unchanged
+    /// since before the Postgres backend existed — every existing call site
+    /// and every test keeps using this.
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(failure)?;
-        }
-        let db = Database::create(path).map_err(failure)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(failure)?;
-        }
-        let store = Self(Arc::new(db));
-        store.transaction(|_| Ok(()))?;
-        Ok(store)
+        Ok(Self(Arc::new(Inner::Redb(RedbInner::open(path)?))))
+    }
+
+    /// Opens a Postgres-backed store, importing a legacy redb file's
+    /// contents once if `config.legacy_redb_path` points at one and this
+    /// `kind` has not already been migrated. See the `postgres` module docs
+    /// for the full design (locking, cache, sync bridging).
+    pub fn open_postgres(config: PostgresConfig) -> Result<Self> {
+        Ok(Self(Arc::new(Inner::Postgres(PostgresInner::open(
+            config,
+        )?))))
     }
 
     pub fn transaction<T>(
         &self,
         action: impl FnOnce(&mut Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
-        let write = self.0.begin_write().map_err(failure)?;
-        let result = {
-            let table = write.open_table(RECORDS).map_err(failure)?;
-            action(&mut Transaction { table })?
-        };
-        write.commit().map_err(failure)?;
-        Ok(result)
+        match self.0.as_ref() {
+            Inner::Redb(inner) => {
+                let write = inner.database().begin_write().map_err(failure)?;
+                let result = {
+                    let table = write.open_table(redb_backend::RECORDS).map_err(failure)?;
+                    let mut tx = Transaction {
+                        inner: TransactionInner::Redb(RedbTxState::new(table)),
+                    };
+                    action(&mut tx)
+                };
+                // Mirrors the original behavior exactly: only a successful
+                // action commits. Dropping `write` without committing aborts
+                // the redb transaction, so a failed action's writes never
+                // become visible — this is what the rollback test asserts.
+                match result {
+                    Ok(value) => {
+                        write.commit().map_err(failure)?;
+                        Ok(value)
+                    }
+                    Err(err) => Err(err),
+                }
+            }
+            Inner::Postgres(inner) => {
+                // Held until `finish` returns: one transaction per process
+                // at a time (see `PostgresInner::transaction_gate`).
+                let _gate = inner.transaction_gate();
+                let state = inner.begin()?;
+                let mut tx = Transaction {
+                    inner: TransactionInner::Postgres(state),
+                };
+                let result = action(&mut tx);
+                let TransactionInner::Postgres(state) = tx.inner else {
+                    unreachable!("postgres transaction stayed postgres")
+                };
+                inner.finish(state, result)
+            }
+        }
     }
 
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        let read = self.0.begin_read().map_err(failure)?;
-        let table = read.open_table(RECORDS).map_err(failure)?;
-        table
-            .get(key)
-            .map_err(failure)?
-            .map(|v| serde_json::from_slice(v.value()).map_err(failure))
-            .transpose()
+        match self.0.as_ref() {
+            Inner::Redb(inner) => inner.get(key),
+            Inner::Postgres(inner) => inner.get(key),
+        }
     }
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
-        let read = self.0.begin_read().map_err(failure)?;
-        let table = read.open_table(RECORDS).map_err(failure)?;
-        let mut values = Vec::new();
-        for entry in table.range(prefix..).map_err(failure)? {
-            let (key, value) = entry.map_err(failure)?;
-            if !key.value().starts_with(prefix) {
-                break;
-            }
-            values.push(serde_json::from_slice(value.value()).map_err(failure)?);
+        match self.0.as_ref() {
+            Inner::Redb(inner) => inner.scan(prefix),
+            Inner::Postgres(inner) => inner.scan(prefix),
         }
-        Ok(values)
     }
 }
 
 impl Transaction<'_> {
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        self.table
-            .get(key)
-            .map_err(failure)?
-            .map(|v| serde_json::from_slice(v.value()).map_err(failure))
-            .transpose()
+        match &self.inner {
+            TransactionInner::Redb(state) => state.get(key),
+            TransactionInner::Postgres(state) => state.get(key),
+        }
     }
     pub fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
-        let data = serde_json::to_vec(value).map_err(failure)?;
-        self.table.insert(key, data.as_slice()).map_err(failure)?;
-        Ok(())
+        match &mut self.inner {
+            TransactionInner::Redb(state) => state.put(key, value),
+            TransactionInner::Postgres(state) => state.put(key, value),
+        }
     }
     pub fn delete(&mut self, key: &str) -> Result<()> {
-        self.table.remove(key).map_err(failure)?;
-        Ok(())
+        match &mut self.inner {
+            TransactionInner::Redb(state) => state.delete(key),
+            TransactionInner::Postgres(state) => state.delete(key),
+        }
     }
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
-        let mut values = Vec::new();
-        for entry in self.table.range(prefix..).map_err(failure)? {
-            let (key, value) = entry.map_err(failure)?;
-            if !key.value().starts_with(prefix) {
-                break;
-            }
-            values.push(serde_json::from_slice(value.value()).map_err(failure)?);
+        match &self.inner {
+            TransactionInner::Redb(state) => state.scan(prefix),
+            TransactionInner::Postgres(state) => state.scan(prefix),
         }
-        Ok(values)
     }
 }
 

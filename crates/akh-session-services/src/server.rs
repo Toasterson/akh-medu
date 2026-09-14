@@ -1,4 +1,9 @@
-use crate::{config::Config, http, store::Store, types::SCHEMA_VERSION};
+use crate::{
+    config::{Config, StoreConfig},
+    http,
+    store::{PostgresConfig, Store},
+    types::{Fault, SCHEMA_VERSION},
+};
 #[cfg(any(
     feature = "session",
     feature = "runtime",
@@ -67,7 +72,27 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
         println!("{kind}: configuration valid");
         return Ok(());
     }
-    let store = Store::open(&config.data_dir.join(format!("{kind}.redb")))?;
+    let legacy_redb_path = config.data_dir.join(format!("{kind}.redb"));
+    let store = match &config.store {
+        None => Store::open(&legacy_redb_path)?,
+        Some(StoreConfig::Postgres { url_env, schema }) => {
+            let url = std::env::var(url_env).map_err(|_| {
+                Fault::invalid(format!(
+                    "store.kind is postgres but environment variable {url_env} is not set"
+                ))
+            })?;
+            Store::open_postgres(PostgresConfig {
+                url,
+                schema: schema.clone(),
+                kind: kind.to_string(),
+                // One-shot import: only runs while a store has not already
+                // recorded a migration for this kind, so switching a
+                // previously-redb deployment over to Postgres carries every
+                // in-flight session across exactly once.
+                legacy_redb_path: Some(legacy_redb_path),
+            })?
+        }
+    };
     #[allow(unused_mut)]
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = vec![];
     #[cfg(feature = "runtime")]
