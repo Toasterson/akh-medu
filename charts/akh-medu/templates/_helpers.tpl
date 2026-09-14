@@ -76,6 +76,19 @@ app.kubernetes.io/component: seshd
 {{- end }}
 
 {{/*
+sokard component labels.
+*/}}
+{{- define "akh-medu.sokard.labels" -}}
+{{ include "akh-medu.labels" . }}
+app.kubernetes.io/component: sokard
+{{- end }}
+
+{{- define "akh-medu.sokard.selectorLabels" -}}
+{{ include "akh-medu.selectorLabels" . }}
+app.kubernetes.io/component: sokard
+{{- end }}
+
+{{/*
 akhomed image reference.
 */}}
 {{- define "akh-medu.akhomed.image" -}}
@@ -96,6 +109,20 @@ seshd image reference.
 {{- $registry := .Values.global.imageRegistry -}}
 {{- $repo := .Values.seshd.image.repository -}}
 {{- $tag := .Values.seshd.image.tag | default .Chart.AppVersion -}}
+{{- if $registry -}}
+{{- printf "%s/%s:%s" $registry $repo $tag -}}
+{{- else -}}
+{{- printf "%s:%s" $repo $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+sokard image reference.
+*/}}
+{{- define "akh-medu.sokard.image" -}}
+{{- $registry := .Values.global.imageRegistry -}}
+{{- $repo := .Values.sokard.image.repository -}}
+{{- $tag := .Values.sokard.image.tag | default .Chart.AppVersion -}}
 {{- if $registry -}}
 {{- printf "%s/%s:%s" $registry $repo $tag -}}
 {{- else -}}
@@ -190,5 +217,19 @@ When using an external existing secret, that secret must contain a DATABASE_URL 
 {{- .Values.externalPostgresql.existingSecret -}}
 {{- else -}}
 {{- printf "%s-seshd-db" (include "akh-medu.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Name of the secret containing SOKAR_DATABASE_URL (or whatever
+sokard.database.secretKey names). Distinct from seshd's db secret: sokar
+gets its own database/user (default "sokar"/"sokar") on the same PostgreSQL
+host — see sokard.database in values.yaml.
+*/}}
+{{- define "akh-medu.sokard.db.secretName" -}}
+{{- if .Values.sokard.database.existingSecret -}}
+{{- .Values.sokard.database.existingSecret -}}
+{{- else -}}
+{{- printf "%s-sokard-db" (include "akh-medu.fullname" .) -}}
 {{- end -}}
 {{- end }}
