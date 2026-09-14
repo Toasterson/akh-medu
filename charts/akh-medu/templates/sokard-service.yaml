@@ -1,0 +1,21 @@
+{{- if .Values.sokard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-sokard
+  labels:
+    {{- include "akh-medu.sokard.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.sokard.service.type }}
+  ports:
+    - port: {{ .Values.sokard.service.apiPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: {{ .Values.sokard.service.adminPort }}
+      targetPort: admin
+      protocol: TCP
+      name: admin
+  selector:
+    {{- include "akh-medu.sokard.selectorLabels" . | nindent 4 }}
+{{- end }}

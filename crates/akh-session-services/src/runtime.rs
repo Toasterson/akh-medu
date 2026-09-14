@@ -226,10 +226,15 @@ impl Runtime {
         })
     }
     pub fn get(&self, id: &str) -> Result<RuntimeJob> {
-        let job: RuntimeJob = self.store.get(&job_key(id))?
+        let job: RuntimeJob = self
+            .store
+            .get(&job_key(id))?
             .ok_or_else(|| Fault::missing("runtime job not found"))?;
         if job.request.binding.runtime != self.config.service_id {
-            return Err(Fault::new("forbidden", "runtime job belongs to another service"));
+            return Err(Fault::new(
+                "forbidden",
+                "runtime job belongs to another service",
+            ));
         }
         Ok(job)
     }
@@ -263,12 +268,9 @@ impl Runtime {
                 "installed runtime profile differs from session binding",
             ));
         }
-        if self
-            .store
-            .scan::<RuntimeJob>("job/")?
-            .iter()
-            .any(|j| j.request.binding.runtime == self.config.service_id && j.status == TurnStatus::Unknown)
-        {
+        if self.store.scan::<RuntimeJob>("job/")?.iter().any(|j| {
+            j.request.binding.runtime == self.config.service_id && j.status == TurnStatus::Unknown
+        }) {
             return Err(Fault::new(
                 "unknown_outcome",
                 "runtime is quarantined until unknown jobs and possible orphan processes are reconciled",
@@ -615,15 +617,36 @@ mod tests {
         let mut other = unknown_job("foreign");
         other.request.binding.runtime = "runtime-2".into();
         other.status = TurnStatus::Running;
-        store.transaction(|tx| tx.put(&job_key("foreign"), &other)).unwrap();
+        store
+            .transaction(|tx| tx.put(&job_key("foreign"), &other))
+            .unwrap();
         let runtime = Runtime::new(config(dir.path()), store.clone()).unwrap();
-        assert_eq!(store.get::<RuntimeJob>(&job_key("foreign")).unwrap().unwrap().status, TurnStatus::Running);
+        assert_eq!(
+            store
+                .get::<RuntimeJob>(&job_key("foreign"))
+                .unwrap()
+                .unwrap()
+                .status,
+            TurnStatus::Running
+        );
         assert_eq!(runtime.get("foreign").unwrap_err().code, "forbidden");
         assert_eq!(runtime.cancel("foreign").unwrap_err().code, "forbidden");
         other.status = TurnStatus::Unknown;
-        store.transaction(|tx| { tx.put(&job_key("foreign"), &other)?; tx.put(&unknown_since_key("foreign"), &0u64) }).unwrap();
+        store
+            .transaction(|tx| {
+                tx.put(&job_key("foreign"), &other)?;
+                tx.put(&unknown_since_key("foreign"), &0u64)
+            })
+            .unwrap();
         assert!(runtime.resolve_stale_unknown_jobs().unwrap().is_empty());
-        assert_eq!(store.get::<RuntimeJob>(&job_key("foreign")).unwrap().unwrap().status, TurnStatus::Unknown);
+        assert_eq!(
+            store
+                .get::<RuntimeJob>(&job_key("foreign"))
+                .unwrap()
+                .unwrap()
+                .status,
+            TurnStatus::Unknown
+        );
     }
 
     /// The exact incident this sweep exists for: a job left `Running` when the

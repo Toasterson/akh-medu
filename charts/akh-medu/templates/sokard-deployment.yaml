@@ -1,0 +1,135 @@
+{{- if .Values.sokard.enabled }}
+{{- $dbSecretName := include "akh-medu.sokard.db.secretName" . -}}
+{{- $dbSecretKey := .Values.sokard.database.secretKey | default "SOKAR_DATABASE_URL" -}}
+{{- $ingressAuthSecretKey := .Values.ingressAuth.secretKey | default "tokens" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "akh-medu.fullname" . }}-sokard
+  labels:
+    {{- include "akh-medu.sokard.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.sokard.replicaCount }}
+  strategy:
+    type: Recreate  # sokar's ephemeral index (no database) is single-daemon only.
+  selector:
+    matchLabels:
+      {{- include "akh-medu.sokard.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/sokard-configmap.yaml") . | sha256sum }}
+        {{- with .Values.sokard.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "akh-medu.sokard.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      {{- if .Values.sokard.database.enabled }}
+      initContainers:
+        # Run migrations before starting the service.
+        - name: migrate
+          image: {{ include "akh-medu.sokard.image" . }}
+          imagePullPolicy: {{ .Values.sokard.image.pullPolicy }}
+          args: ["--config", "/config/sokar.toml", "--migrate"]
+          env:
+            - name: {{ $dbSecretKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecretName }}
+                  key: {{ $dbSecretKey }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      {{- end }}
+      containers:
+        - name: sokard
+          image: {{ include "akh-medu.sokard.image" . }}
+          imagePullPolicy: {{ .Values.sokard.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.sokard.service.apiPort }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.sokard.service.adminPort }}
+              protocol: TCP
+          env:
+            {{- range $key, $val := .Values.sokard.env }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- if .Values.sokard.database.enabled }}
+            - name: {{ $dbSecretKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $dbSecretName }}
+                  key: {{ $dbSecretKey }}
+            {{- end }}
+            # OTLP service instance ID from the pod name.
+            - name: OTEL_SERVICE_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          {{- if .Values.sokard.storeSecrets.existingSecret }}
+          envFrom:
+            # Exposes the store-credential Secret's keys as env vars so
+            # `[store.options]` entries like `access_key_id = "env:NAME"`
+            # resolve at runtime.
+            - secretRef:
+                name: {{ .Values.sokard.storeSecrets.existingSecret }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: ingress-auth
+              mountPath: /etc/sokar/token
+              subPath: token
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.sokard.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "akh-medu.fullname" . }}-sokard-config
+        - name: ingress-auth
+          secret:
+            secretName: {{ include "akh-medu.ingressAuth.secretName" . }}
+            defaultMode: 0400
+            items:
+              - key: {{ $ingressAuthSecretKey }}
+                path: token
+      {{- with .Values.sokard.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.sokard.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        {{- include "akh-medu.archAffinity" . | nindent 8 }}
+        {{- with .Values.sokard.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

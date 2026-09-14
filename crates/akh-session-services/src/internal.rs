@@ -567,19 +567,35 @@ mod tests {
             json!({"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}),
             json!({"choices":[{"index":0,"delta":{"content":"must not be emitted"},"finish_reason":"stop"}]}),
         ].iter().map(|v| format!("data: {v}\n\n")).collect::<String>() + "data: [DONE]\n\n";
-        let app = Router::new().route("/", post(move || {
-            let body = body.clone();
-            async move { ([("content-type", "text/event-stream")], body) }
-        }));
+        let app = Router::new().route(
+            "/",
+            post(move || {
+                let body = body.clone();
+                async move { ([("content-type", "text/event-stream")], body) }
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
-        let mut host = Witness { cancel_on_text: Some(cancel.clone()), ..Default::default() };
-        let error = completion(reqwest::Client::new().post(url), &mut host, &cancel,
-            Instant::now() + Duration::from_secs(5)).await.unwrap_err();
+        let mut host = Witness {
+            cancel_on_text: Some(cancel.clone()),
+            ..Default::default()
+        };
+        let error = completion(
+            reqwest::Client::new().post(url),
+            &mut host,
+            &cancel,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.code, "cancelled");
-        assert_eq!(host.events.len(), 1, "buffered output continued after cancellation");
+        assert_eq!(
+            host.events.len(),
+            1,
+            "buffered output continued after cancellation"
+        );
         server.abort();
     }
 

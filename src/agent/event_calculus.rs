@@ -255,7 +255,9 @@ impl EventCalculusEngine {
                 })?;
                 ec.ensure_init(engine)?;
                 let ids: Vec<_> = ec.fluents.values().map(|f| f.symbol_id).collect();
-                for id in ids { ec.refresh_fluent_cache(id); }
+                for id in ids {
+                    ec.refresh_fluent_cache(id);
+                }
                 Ok(ec)
             }
             _ => Self::new(engine),
@@ -418,9 +420,13 @@ impl EventCalculusEngine {
     /// termination wins the truth-value tie, as in `holds_at`.
     fn refresh_fluent_cache(&mut self, id: SymbolId) {
         let history = self.history.get(&id.get());
-        let latest = |initiated| history.into_iter().flatten()
-            .filter(|entry| entry.initiated == initiated)
-            .max_by_key(|entry| (entry.timestamp, entry.by_event.get()));
+        let latest = |initiated| {
+            history
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.initiated == initiated)
+                .max_by_key(|entry| (entry.timestamp, entry.by_event.get()))
+        };
         let init = latest(true);
         let term = latest(false);
         if let Some(fluent) = self.fluents.get_mut(&id.get()) {
@@ -428,8 +434,8 @@ impl EventCalculusEngine {
             fluent.last_initiated_by = init.map(|e| e.by_event);
             fluent.last_terminated_at = term.map(|e| e.timestamp);
             fluent.last_terminated_by = term.map(|e| e.by_event);
-            fluent.current_value = init.is_some_and(|i|
-                term.is_none_or(|t| i.timestamp > t.timestamp));
+            fluent.current_value =
+                init.is_some_and(|i| term.is_none_or(|t| i.timestamp > t.timestamp));
         }
     }
 
@@ -448,13 +454,18 @@ impl EventCalculusEngine {
         // Delivery order is not event time. Delayed evidence must not override
         // a newer initiation merely because it was appended last. At equal
         // timestamps, termination wins conservatively.
-        let Some(init_t) = history.iter()
+        let Some(init_t) = history
+            .iter()
             .filter(|entry| entry.initiated && entry.timestamp <= time)
-            .map(|entry| entry.timestamp).max() else {
+            .map(|entry| entry.timestamp)
+            .max()
+        else {
             return false;
         };
         !self.is_clipped(fluent_id, init_t, time)
-            && !history.iter().any(|entry| !entry.initiated && entry.timestamp == init_t)
+            && !history
+                .iter()
+                .any(|entry| !entry.initiated && entry.timestamp == init_t)
     }
 
     /// Is fluent `f` clipped between `t1` (exclusive) and `t2` (inclusive)?
@@ -720,24 +731,39 @@ mod tests {
         let mut ec = EventCalculusEngine::new(&engine).unwrap();
         let fluent = make_fluent_id(&engine, "permission");
         for (label, timestamp, initiate) in [
-            ("grant", 10, true), ("revoke", 20, false),
-            ("correct", 30, true), ("late-revoke", 15, false),
+            ("grant", 10, true),
+            ("revoke", 20, false),
+            ("correct", 30, true),
+            ("late-revoke", 15, false),
             ("late-grant", 12, true),
         ] {
-            ec.record_event(Event {
-                symbol_id: make_event_id(&engine, label), name: label.into(), timestamp,
-                initiates: if initiate { vec![fluent] } else { vec![] },
-                terminates: if initiate { vec![] } else { vec![fluent] },
-            }, &engine).unwrap();
+            ec.record_event(
+                Event {
+                    symbol_id: make_event_id(&engine, label),
+                    name: label.into(),
+                    timestamp,
+                    initiates: if initiate { vec![fluent] } else { vec![] },
+                    terminates: if initiate { vec![] } else { vec![fluent] },
+                },
+                &engine,
+            )
+            .unwrap();
         }
         assert!(!ec.holds_at(fluent, 9));
         assert!(ec.holds_at(fluent, 10));
         assert!(!ec.holds_at(fluent, 20));
         assert!(ec.holds_at(fluent, 30));
-        ec.record_event(Event {
-            symbol_id: make_event_id(&engine, "tie"), name: "tie".into(),
-            timestamp: 30, initiates: vec![], terminates: vec![fluent],
-        }, &engine).unwrap();
+        ec.record_event(
+            Event {
+                symbol_id: make_event_id(&engine, "tie"),
+                name: "tie".into(),
+                timestamp: 30,
+                initiates: vec![],
+                terminates: vec![fluent],
+            },
+            &engine,
+        )
+        .unwrap();
         assert!(!ec.holds_at(fluent, 30));
     }
 
@@ -745,24 +771,37 @@ mod tests {
     fn cached_truth_and_witnesses_survive_late_events_and_restore() {
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::new(EngineConfig {
-            data_dir: Some(dir.path().to_path_buf()), ..EngineConfig::default()
-        }).unwrap();
+            data_dir: Some(dir.path().to_path_buf()),
+            ..EngineConfig::default()
+        })
+        .unwrap();
         let mut ec = EventCalculusEngine::new(&engine).unwrap();
         let fluent = make_fluent_id(&engine, "cached-permission");
         let mut witnesses = Vec::new();
         for (label, timestamp, initiate) in [
-            ("grant", 10, true), ("revoke", 20, false),
-            ("correct", 30, true), ("late-revoke", 15, false),
+            ("grant", 10, true),
+            ("revoke", 20, false),
+            ("correct", 30, true),
+            ("late-revoke", 15, false),
             ("late-grant", 12, true),
         ] {
             let id = make_event_id(&engine, label);
             witnesses.push(id);
-            ec.record_event(Event { symbol_id: id, name: label.into(), timestamp,
-                initiates: if initiate { vec![fluent] } else { vec![] },
-                terminates: if initiate { vec![] } else { vec![fluent] },
-            }, &engine).unwrap();
-            assert_eq!(ec.get_fluent(fluent).unwrap().current_value,
-                ec.holds_at(fluent, u64::MAX));
+            ec.record_event(
+                Event {
+                    symbol_id: id,
+                    name: label.into(),
+                    timestamp,
+                    initiates: if initiate { vec![fluent] } else { vec![] },
+                    terminates: if initiate { vec![] } else { vec![fluent] },
+                },
+                &engine,
+            )
+            .unwrap();
+            assert_eq!(
+                ec.get_fluent(fluent).unwrap().current_value,
+                ec.holds_at(fluent, u64::MAX)
+            );
         }
         let f = ec.get_fluent(fluent).unwrap();
         assert_eq!(f.last_initiated_at, Some(30));
@@ -778,11 +817,23 @@ mod tests {
         ec.persist(&engine).unwrap();
         let mut restored = EventCalculusEngine::restore(&engine).unwrap();
         assert_eq!(restored.holding_fluents().len(), 1);
-        assert_eq!(restored.get_fluent(fluent).unwrap().last_initiated_by, Some(witnesses[2]));
+        assert_eq!(
+            restored.get_fluent(fluent).unwrap().last_initiated_by,
+            Some(witnesses[2])
+        );
         assert_eq!(restored.fluent_history(fluent).unwrap().len(), 5);
-        restored.record_event(Event { symbol_id: make_event_id(&engine, "tie"),
-            name: "tie".into(), timestamp: 30, initiates: vec![], terminates: vec![fluent],
-        }, &engine).unwrap();
+        restored
+            .record_event(
+                Event {
+                    symbol_id: make_event_id(&engine, "tie"),
+                    name: "tie".into(),
+                    timestamp: 30,
+                    initiates: vec![],
+                    terminates: vec![fluent],
+                },
+                &engine,
+            )
+            .unwrap();
         assert!(restored.holding_fluents().is_empty());
         assert!(!restored.holds_at(fluent, 30));
     }
