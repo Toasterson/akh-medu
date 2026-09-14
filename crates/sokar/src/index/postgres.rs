@@ -121,13 +121,26 @@ impl Index for PgIndex {
             .collect::<Result<_, _>>()?;
         Ok(page(values, limit))
     }
-    async fn begin(&self) -> SokarResult<Box<dyn IndexTransaction>> {
+    async fn begin(&self, scope: MutationScope) -> SokarResult<Box<dyn IndexTransaction>> {
         let mut tx = self.pool.begin().await?;
-        // Global rather than per-digest: also protects scope uniqueness, previous chains,
-        // reindex inventories and idempotency across replicas. Staging is outside the lock.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sokar.mutations'))")
-            .execute(&mut *tx)
-            .await?;
+        // Always global before store. Shared global admits independent stores while
+        // exclusive global excludes all artifact mutations for collection/reindex work.
+        match scope {
+            MutationScope::Global => {
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sokar.mutations'))")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            MutationScope::Store(store) => {
+                sqlx::query("SELECT pg_advisory_xact_lock_shared(hashtext('sokar.mutations'))")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext('sokar.store:' || $1))")
+                    .bind(store.as_str())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         Ok(Box::new(PgTransaction { tx }))
     }
 }
@@ -191,14 +204,21 @@ impl IndexTransaction for PgTransaction {
                 .bind(c.id.as_uuid())
                 .fetch_optional(&mut *self.tx)
                 .await?;
-        if existing.is_some_and(|store| store != c.store.as_str()) {
-            return Err(SokarError::Conflict(
-                "collection UUID belongs to another store".into(),
-            ));
+        if let Some(store) = existing
+            && store != c.store.as_str()
+        {
+            return Err(SokarError::StoreMismatch {
+                expected: store.parse()?,
+                actual: c.store.clone(),
+            });
         }
         sqlx::query("INSERT INTO sokar.collection(id,scope,scope_key,owner,store,retention,quota,created_at,manifest) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET scope=EXCLUDED.scope,scope_key=EXCLUDED.scope_key,owner=EXCLUDED.owner,store=EXCLUDED.store,retention=EXCLUDED.retention,quota=EXCLUDED.quota,created_at=EXCLUDED.created_at,manifest=EXCLUDED.manifest")
             .bind(c.id.as_uuid()).bind(serde_json::to_value(&c.scope)?).bind(c.scope.key()).bind(&c.owner).bind(c.store.as_str()).bind(serde_json::to_value(&c.retention)?).bind(serde_json::to_value(&c.quota)?).bind(c.created_at).bind(serde_json::to_value(c)?)
-            .execute(&mut *self.tx).await.map_err(db_error)?;
+            .execute(&mut *self.tx).await.map_err(|e| {
+                if e.as_database_error().is_some_and(|e| e.is_unique_violation() && e.constraint() == Some("collection_scope_key_key")) {
+                    SokarError::ScopeExists(c.scope.key())
+                } else { db_error(e) }
+            })?;
         Ok(())
     }
     async fn put_artifact(&mut self, store: &StoreName, a: &Artifact) -> SokarResult<()> {
@@ -209,31 +229,46 @@ impl IndexTransaction for PgTransaction {
                 .await?,
         )?;
         if &collection.store != store {
-            return Err(SokarError::Conflict(
-                "artifact store differs from collection".into(),
-            ));
+            return Err(SokarError::StoreMismatch {
+                expected: collection.store.clone(),
+                actual: store.clone(),
+            });
         }
         let size = i64::try_from(a.blob.size)
             .map_err(|_| SokarError::Invalid("blob too large for index".into()))?;
-        sqlx::query("INSERT INTO sokar.blob(store,digest,size,media_type,refcount,created_at) VALUES($1,$2,$3,$4,1,$5) ON CONFLICT(store,digest) DO UPDATE SET refcount=sokar.blob.refcount+1")
-            .bind(store.as_str()).bind(a.blob.digest.0.as_slice()).bind(size).bind(a.blob.media_type.as_str()).bind(a.created_at).execute(&mut *self.tx).await?;
-        sqlx::query("INSERT INTO sokar.artifact(id,collection,path,kind,store,digest,media_type,labels,created_by,created_at,expires_at,previous,manifest) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
-            .bind(a.id.as_uuid()).bind(a.collection.as_uuid()).bind(a.path.as_str()).bind(a.kind.to_string()).bind(store.as_str()).bind(a.blob.digest.0.as_slice()).bind(a.blob.media_type.as_str()).bind(serde_json::to_value(&a.labels)?).bind(&a.created_by).bind(a.created_at).bind(a.expires_at).bind(a.previous.map(|i| i.as_uuid())).bind(serde_json::to_value(a)?)
+        sqlx::query("INSERT INTO sokar.blob(store,digest,size,media_type,refcount,created_at) VALUES($1,$2,$3,$4,$6,$5) ON CONFLICT(store,digest) DO UPDATE SET refcount=sokar.blob.refcount+EXCLUDED.refcount")
+            .bind(store.as_str()).bind(a.blob.digest.0.as_slice()).bind(size).bind(a.blob.media_type.as_str()).bind(a.created_at).bind(i32::from(a.deleted_at.is_none())).execute(&mut *self.tx).await?;
+        sqlx::query("INSERT INTO sokar.artifact(id,collection,path,kind,store,digest,media_type,labels,created_by,created_at,expires_at,previous,manifest,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
+            .bind(a.id.as_uuid()).bind(a.collection.as_uuid()).bind(a.path.as_str()).bind(a.kind.to_string()).bind(store.as_str()).bind(a.blob.digest.0.as_slice()).bind(a.blob.media_type.as_str()).bind(serde_json::to_value(&a.labels)?).bind(&a.created_by).bind(a.created_at).bind(a.expires_at).bind(a.previous.map(|i| i.as_uuid())).bind(serde_json::to_value(a)?).bind(a.deleted_at)
             .execute(&mut *self.tx).await.map_err(db_error)?;
         Ok(())
     }
     async fn put_idempotency(&mut self, i: &Idempotency) -> SokarResult<()> {
-        sqlx::query("DELETE FROM sokar.idempotency WHERE expires_at<=now()")
+        sqlx::query("DELETE FROM sokar.idempotency WHERE collection=$1 AND expires_at<=now()")
+            .bind(i.collection.as_uuid())
             .execute(&mut *self.tx)
             .await?;
         sqlx::query("INSERT INTO sokar.idempotency(principal,collection,key,fingerprint,response,expires_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(principal,collection,key) DO UPDATE SET fingerprint=EXCLUDED.fingerprint,response=EXCLUDED.response,expires_at=EXCLUDED.expires_at")
             .bind(&i.principal).bind(i.collection.as_uuid()).bind(&i.key).bind(&i.fingerprint).bind(serde_json::to_value(&i.response)?).bind(i.expires_at).execute(&mut *self.tx).await?;
         Ok(())
     }
-    async fn delete_artifact(&mut self, store: &StoreName, id: ArtifactId) -> SokarResult<u64> {
-        let a = self.artifact(id).await?;
-        sqlx::query("UPDATE sokar.artifact SET deleted_at=now() WHERE id=$1")
-            .bind(id.as_uuid())
+    async fn purge_idempotency_for(&mut self, artifact_id: ArtifactId) -> SokarResult<()> {
+        sqlx::query("DELETE FROM sokar.idempotency WHERE response->'artifact'->>'id'=$1")
+            .bind(artifact_id.to_string())
+            .execute(&mut *self.tx)
+            .await?;
+        Ok(())
+    }
+    async fn delete_artifact(
+        &mut self,
+        store: &StoreName,
+        artifact: &Artifact,
+    ) -> SokarResult<u64> {
+        let a = self.artifact(artifact.id).await?;
+        sqlx::query("UPDATE sokar.artifact SET deleted_at=$2,manifest=$3 WHERE id=$1")
+            .bind(artifact.id.as_uuid())
+            .bind(artifact.deleted_at)
+            .bind(serde_json::to_value(artifact)?)
             .execute(&mut *self.tx)
             .await?;
         let remaining: i32 = sqlx::query_scalar("UPDATE sokar.blob SET refcount=refcount-1 WHERE store=$1 AND digest=$2 AND refcount>0 RETURNING refcount")
@@ -246,7 +281,11 @@ impl IndexTransaction for PgTransaction {
         collections: &[Collection],
         artifacts: &[Artifact],
     ) -> SokarResult<ReindexCounts> {
-        let artifact_ids: std::collections::HashSet<_> = artifacts.iter().map(|a| a.id).collect();
+        let artifact_ids: std::collections::HashSet<_> = artifacts
+            .iter()
+            .filter(|a| a.deleted_at.is_none())
+            .map(|a| a.id)
+            .collect();
         let rows = sqlx::query("SELECT principal,collection,key,fingerprint,response,expires_at FROM sokar.idempotency WHERE collection IN (SELECT id FROM sokar.collection WHERE store=$1) AND expires_at>now()")
             .bind(store.as_str()).fetch_all(&mut *self.tx).await?;
         let mut receipts = Vec::new();
@@ -287,13 +326,15 @@ impl IndexTransaction for PgTransaction {
         for receipt in receipts {
             self.put_idempotency(&receipt).await?;
         }
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sokar.blob WHERE store=$1")
-            .bind(store.as_str())
-            .fetch_one(&mut *self.tx)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sokar.blob WHERE store=$1 AND refcount>0")
+                .bind(store.as_str())
+                .fetch_one(&mut *self.tx)
+                .await?;
         Ok(ReindexCounts {
             collections: collections.len(),
-            artifacts: artifacts.len(),
+            artifacts: artifacts.iter().filter(|a| a.deleted_at.is_none()).count(),
+            orphans: 0,
             blobs: count as usize,
         })
     }

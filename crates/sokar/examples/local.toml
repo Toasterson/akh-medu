@@ -7,6 +7,7 @@ api_bind = "127.0.0.1:9400"
 admin_bind = "127.0.0.1:9401"
 
 # Omit database for an ephemeral index rebuilt from manifests on every start.
+# Ephemeral mode is single-daemon only: never share its prefix between daemons.
 # For durable idempotency and coordination across replicas, enable PostgreSQL:
 # [database]
 # url = "env:SOKAR_DATABASE_URL"

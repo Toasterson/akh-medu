@@ -20,6 +20,22 @@ pub struct StoreCapability {
     pub ranged_read: bool,
     pub conditional_write: bool,
 }
+impl From<opendal::Capability> for StoreCapability {
+    fn from(cap: opendal::Capability) -> Self {
+        Self {
+            presign_read: cap.presign_read,
+            presign_write: cap.presign_write,
+            // 0.59 has no read_with_range field. Its range-class availability flag
+            // is read_with_suffix (including the default SimulateLayer on fs).
+            ranged_read: cap.read_with_suffix,
+            conditional_write: if cap.copy {
+                cap.copy_with_if_not_exists
+            } else {
+                cap.write_with_if_not_exists
+            },
+        }
+    }
+}
 pub struct Store {
     pub name: StoreName,
     pub op: Operator,
@@ -86,16 +102,7 @@ impl StoreRegistry {
             let store = Arc::new(Store {
                 name: config.name.clone(),
                 op,
-                cap: StoreCapability {
-                    presign_read: cap.presign_read,
-                    presign_write: cap.presign_write,
-                    ranged_read: cap.read,
-                    conditional_write: if cap.copy {
-                        cap.copy_with_if_not_exists
-                    } else {
-                        cap.write_with_if_not_exists
-                    },
-                },
+                cap: StoreCapability::from(cap),
             });
             store.initialize().await?;
             if stores.insert(config.name.clone(), store).is_some() {
@@ -108,7 +115,7 @@ impl StoreRegistry {
         self.stores
             .get(name)
             .cloned()
-            .ok_or_else(|| SokarError::Invalid(format!("unknown store {name}")))
+            .ok_or_else(|| SokarError::UnknownStore(name.clone()))
     }
     pub async fn check(&self, probe: bool) -> SokarResult<()> {
         for store in self.stores.values() {
@@ -142,10 +149,6 @@ impl Store {
         self.check(false).await
     }
     pub async fn check(&self, probe: bool) -> SokarResult<()> {
-        self.op
-            .stat(FORMAT_KEY)
-            .await
-            .map_err(|e| self.error("stat format", e))?;
         let marker: serde_json::Value = self.read_json(FORMAT_KEY).await?;
         sokar_client::check_schema(
             marker.get("schema").and_then(|v| v.as_str()).unwrap_or(""),
@@ -162,19 +165,14 @@ impl Store {
         Ok(())
     }
     pub async fn read_json<T: DeserializeOwned>(&self, key: &str) -> SokarResult<T> {
-        let metadata = self
-            .op
-            .stat(key)
-            .await
-            .map_err(|e| self.error("stat manifest", e))?;
-        if metadata.content_length() > 16 * 1024 * 1024 {
-            return Err(SokarError::Invalid("manifest exceeds 16 MiB".into()));
-        }
         let data = self
             .op
             .read(key)
             .await
             .map_err(|e| self.error("read manifest", e))?;
+        if data.len() > 16 * 1024 * 1024 {
+            return Err(SokarError::Invalid("manifest exceeds 16 MiB".into()));
+        }
         Ok(serde_json::from_slice(&data.to_bytes())?)
     }
     pub async fn read_manifest<T: DeserializeOwned>(
@@ -249,7 +247,9 @@ impl Store {
         .await;
         if let Err(e) = result {
             let _ = writer.abort().await;
-            stage.cleanup().await?;
+            if let Err(cleanup) = stage.cleanup().await {
+                tracing::warn!(error = %cleanup, key = %stage.key, "staging cleanup failed");
+            }
             return Err(e);
         }
         stage.digest = BlobDigest(hash.finalize().into());
@@ -270,7 +270,10 @@ pub struct StagedUpload {
     cleaned: bool,
 }
 impl StagedUpload {
-    /// Caller holds the index mutation lock through promotion, manifest and row commit.
+    /// Runs outside index locks. Non-conditional stat-then-copy has a TOCTOU window:
+    /// concurrent writes are safe only because a digest names byte-identical content.
+    /// Index locks cannot serialize bucket writes across independent indexes; a bucket
+    /// owner marker is deferred to 52b.
     pub async fn promote(&self) -> SokarResult<UploadOutcome> {
         let final_key = self.digest.key();
         if !self.store.cap.conditional_write {
@@ -296,7 +299,7 @@ impl StagedUpload {
                 .map(|_| ())
         } else {
             // OpenDAL's memory backend has no copy operation. Relay through bounded
-            // chunks; the index mutation lock still makes stat/create atomic to Sokar.
+            // chunks. Concurrent promotion is safe only for byte-identical digest content.
             async {
                 let reader = self.store.op.reader(&self.key).await?;
                 let mut stream = reader.into_bytes_stream(..).await?;
@@ -325,6 +328,9 @@ impl StagedUpload {
         }
     }
     pub async fn cleanup(&mut self) -> SokarResult<()> {
+        if self.cleaned {
+            return Ok(());
+        }
         self.store.delete(&self.key).await?;
         self.cleaned = true;
         Ok(())
@@ -332,16 +338,22 @@ impl StagedUpload {
 }
 impl Drop for StagedUpload {
     fn drop(&mut self) {
-        if !self.cleaned
-            && let Ok(handle) = tokio::runtime::Handle::try_current()
-        {
-            let store = self.store.clone();
-            let key = self.key.clone();
-            handle.spawn(async move {
-                if let Err(e) = store.delete(&key).await {
-                    tracing::warn!(error = %e, "staging cleanup failed");
-                }
-            });
+        if self.cleaned {
+            return;
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let store = self.store.clone();
+                let key = self.key.clone();
+                handle.spawn(async move {
+                    if let Err(e) = store.delete(&key).await {
+                        tracing::warn!(error = %e, %key, "staging cleanup failed");
+                    }
+                });
+            }
+            Err(_) => {
+                tracing::warn!(key = %self.key, "staging cleanup unavailable without a runtime")
+            }
         }
     }
 }

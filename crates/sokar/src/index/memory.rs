@@ -1,6 +1,6 @@
 use super::*;
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 #[derive(Default, Clone)]
 struct Data {
     collections: HashMap<CollectionId, Collection>,
@@ -27,9 +27,12 @@ impl Data {
 #[derive(Default)]
 pub struct MemoryIndex {
     data: Arc<Mutex<Data>>,
+    global: Arc<RwLock<()>>,
+    stores: Mutex<HashMap<StoreName, Arc<Mutex<()>>>>,
 }
 impl MemoryIndex {
     pub async fn clear(&self) {
+        let _global = self.global.write().await;
         *self.data.lock().await = Data::default();
     }
     pub async fn refcount(&self, store: &StoreName, digest: BlobDigest) -> u64 {
@@ -104,14 +107,48 @@ impl Index for MemoryIndex {
         values.sort_by_key(|a| (a.created_at, a.id));
         Ok(page(values, limit))
     }
-    async fn begin(&self) -> SokarResult<Box<dyn IndexTransaction>> {
-        let guard = self.data.clone().lock_owned().await;
-        let working = guard.clone();
-        Ok(Box::new(MemoryTransaction { guard, working }))
+    async fn begin(&self, scope: MutationScope) -> SokarResult<Box<dyn IndexTransaction>> {
+        let locks = match &scope {
+            MutationScope::Global => Locks::Global {
+                _global: self.global.clone().write_owned().await,
+            },
+            MutationScope::Store(store) => {
+                let global = self.global.clone().read_owned().await;
+                let lock = self
+                    .stores
+                    .lock()
+                    .await
+                    .entry(store.clone())
+                    .or_default()
+                    .clone();
+                Locks::Store {
+                    _global: global,
+                    _store: lock.lock_owned().await,
+                }
+            }
+        };
+        let working = self.data.lock().await.clone();
+        Ok(Box::new(MemoryTransaction {
+            data: self.data.clone(),
+            scope,
+            _locks: locks,
+            working,
+        }))
     }
 }
+enum Locks {
+    Global {
+        _global: OwnedRwLockWriteGuard<()>,
+    },
+    Store {
+        _global: OwnedRwLockReadGuard<()>,
+        _store: OwnedMutexGuard<()>,
+    },
+}
 struct MemoryTransaction {
-    guard: OwnedMutexGuard<Data>,
+    data: Arc<Mutex<Data>>,
+    scope: MutationScope,
+    _locks: Locks,
     working: Data,
 }
 #[async_trait]
@@ -147,22 +184,20 @@ impl IndexTransaction for MemoryTransaction {
             .cloned())
     }
     async fn put_collection(&mut self, c: &Collection) -> SokarResult<()> {
-        if self
-            .working
-            .collections
-            .get(&c.id)
-            .is_some_and(|old| old.store != c.store)
+        if let Some(old) = self.working.collections.get(&c.id)
+            && old.store != c.store
         {
-            return Err(SokarError::Conflict(
-                "collection UUID belongs to another store".into(),
-            ));
+            return Err(SokarError::StoreMismatch {
+                expected: old.store.clone(),
+                actual: c.store.clone(),
+            });
         }
         if self
             .working
             .scope(&c.scope.key())
             .is_some_and(|old| old.id != c.id)
         {
-            return Err(SokarError::Conflict("scope already exists".into()));
+            return Err(SokarError::ScopeExists(c.scope.key()));
         }
         self.working.collections.insert(c.id, c.clone());
         Ok(())
@@ -174,32 +209,50 @@ impl IndexTransaction for MemoryTransaction {
             .get(&a.collection)
             .ok_or(SokarError::NotFound)?;
         if &c.store != store {
-            return Err(SokarError::Conflict(
-                "artifact store differs from collection".into(),
-            ));
+            return Err(SokarError::StoreMismatch {
+                expected: c.store.clone(),
+                actual: store.clone(),
+            });
         }
-        if self.working.artifacts.contains_key(&a.id) {
+        if self.working.artifacts.contains_key(&a.id) || self.working.tombstones.contains_key(&a.id)
+        {
             return Err(SokarError::Conflict("artifact already exists".into()));
         }
-        *self
+        let refs = self
             .working
             .refs
             .entry((store.clone(), a.blob.digest))
-            .or_default() += 1;
-        self.working.artifacts.insert(a.id, a.clone());
+            .or_default();
+        if a.deleted_at.is_some() {
+            self.working.tombstones.insert(a.id, a.clone());
+        } else {
+            *refs += 1;
+            self.working.artifacts.insert(a.id, a.clone());
+        }
         Ok(())
     }
     async fn put_idempotency(&mut self, i: &Idempotency) -> SokarResult<()> {
-        self.working
-            .idempotency
-            .retain(|_, v| v.expires_at > OffsetDateTime::now_utc());
+        self.working.idempotency.retain(|_, v| {
+            v.collection != i.collection || v.expires_at > OffsetDateTime::now_utc()
+        });
         self.working.idempotency.insert(
             (i.principal.clone(), i.collection, i.key.clone()),
             i.clone(),
         );
         Ok(())
     }
-    async fn delete_artifact(&mut self, store: &StoreName, id: ArtifactId) -> SokarResult<u64> {
+    async fn purge_idempotency_for(&mut self, artifact_id: ArtifactId) -> SokarResult<()> {
+        self.working
+            .idempotency
+            .retain(|_, i| i.response.artifact.id != artifact_id);
+        Ok(())
+    }
+    async fn delete_artifact(
+        &mut self,
+        store: &StoreName,
+        artifact: &Artifact,
+    ) -> SokarResult<u64> {
+        let id = artifact.id;
         let a = self
             .working
             .artifacts
@@ -215,10 +268,7 @@ impl IndexTransaction for MemoryTransaction {
             .checked_sub(1)
             .ok_or_else(|| SokarError::Conflict("invalid refcount".into()))?;
         let remaining = *count;
-        if remaining == 0 {
-            self.working.refs.remove(&key);
-        }
-        self.working.tombstones.insert(id, a);
+        self.working.tombstones.insert(id, artifact.clone());
         Ok(remaining)
     }
     async fn replace_store(
@@ -240,7 +290,11 @@ impl IndexTransaction for MemoryTransaction {
         self.working
             .tombstones
             .retain(|_, a| !ids.contains(&a.collection));
-        let artifact_ids: std::collections::HashSet<_> = artifacts.iter().map(|a| a.id).collect();
+        let artifact_ids: std::collections::HashSet<_> = artifacts
+            .iter()
+            .filter(|a| a.deleted_at.is_none())
+            .map(|a| a.id)
+            .collect();
         self.working.idempotency.retain(|_, i| {
             !ids.contains(&i.collection)
                 || (artifact_ids.contains(&i.response.artifact.id)
@@ -256,12 +310,64 @@ impl IndexTransaction for MemoryTransaction {
         }
         Ok(ReindexCounts {
             collections: collections.len(),
-            artifacts: artifacts.len(),
-            blobs: self.working.refs.keys().filter(|(s, _)| s == store).count(),
+            artifacts: artifacts.iter().filter(|a| a.deleted_at.is_none()).count(),
+            orphans: 0,
+            blobs: self
+                .working
+                .refs
+                .iter()
+                .filter(|((s, _), n)| s == store && **n > 0)
+                .count(),
         })
     }
     async fn commit(mut self: Box<Self>) -> SokarResult<()> {
-        *self.guard = std::mem::take(&mut self.working);
+        let mut data = self.data.lock().await;
+        match &self.scope {
+            MutationScope::Global => *data = std::mem::take(&mut self.working),
+            MutationScope::Store(store) => {
+                // Merge only the locked store. Another store may have committed since
+                // this transaction took its snapshot; never overwrite those changes.
+                let ids: std::collections::HashSet<_> = self
+                    .working
+                    .collections
+                    .values()
+                    .filter(|c| &c.store == store)
+                    .map(|c| c.id)
+                    .collect();
+                data.artifacts.retain(|_, a| !ids.contains(&a.collection));
+                data.tombstones.retain(|_, a| !ids.contains(&a.collection));
+                data.refs.retain(|(s, _), _| s != store);
+                data.idempotency.retain(|_, i| !ids.contains(&i.collection));
+                data.artifacts.extend(
+                    self.working
+                        .artifacts
+                        .iter()
+                        .filter(|(_, a)| ids.contains(&a.collection))
+                        .map(|(k, v)| (*k, v.clone())),
+                );
+                data.tombstones.extend(
+                    self.working
+                        .tombstones
+                        .iter()
+                        .filter(|(_, a)| ids.contains(&a.collection))
+                        .map(|(k, v)| (*k, v.clone())),
+                );
+                data.refs.extend(
+                    self.working
+                        .refs
+                        .iter()
+                        .filter(|((s, _), _)| s == store)
+                        .map(|(k, v)| (k.clone(), *v)),
+                );
+                data.idempotency.extend(
+                    self.working
+                        .idempotency
+                        .iter()
+                        .filter(|(_, i)| ids.contains(&i.collection))
+                        .map(|(k, v)| (k.clone(), v.clone())),
+                );
+            }
+        }
         Ok(())
     }
 }

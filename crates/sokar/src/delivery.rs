@@ -39,7 +39,9 @@ pub async fn content(
     let mut headers = HeaderMap::new();
     let etag = format!("\"sha256-{}\"", artifact.blob.digest);
     headers.insert(header::ETAG, header_value(&etag)?);
-    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if store.cap.ranged_read {
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    }
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, immutable, max-age=31536000"),
@@ -88,9 +90,10 @@ pub async fn content(
     }
     let size = artifact.blob.size;
     // If-Range only supports our strong validator. Dates or mismatches return the full body.
-    let use_range = request
-        .get(header::IF_RANGE)
-        .is_none_or(|v| v.as_bytes() == etag.as_bytes());
+    let use_range = store.cap.ranged_read
+        && request
+            .get(header::IF_RANGE)
+            .is_none_or(|v| v.as_bytes() == etag.as_bytes());
     let range = if use_range {
         request
             .get(header::RANGE)
@@ -125,10 +128,12 @@ pub async fn content(
             .chunk(1024 * 1024)
             .await
             .map_err(|e| store.error("open content", e))?;
-        let stream = reader
-            .into_bytes_stream(start..end)
-            .await
-            .map_err(|e| store.error("read range", e))?;
+        let stream = if store.cap.ranged_read {
+            reader.into_bytes_stream(start..end).await
+        } else {
+            reader.into_bytes_stream(..).await
+        }
+        .map_err(|e| store.error("read range", e))?;
         let name = store.name.clone();
         Body::from_stream(stream.map_err(move |e| {
             SokarError::storage(
@@ -177,6 +182,75 @@ pub fn parse_range(value: &str, size: u64) -> SokarResult<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn fake_read_only_capability_ignores_range() {
+        use crate::store::StoreCapability;
+        use sokar_client::*;
+        let mut capability = opendal::Capability {
+            read: true,
+            ..Default::default()
+        };
+        let mut store = Store {
+            name: "fake".parse().unwrap(),
+            op: opendal::Operator::new(opendal::services::Memory::default()).unwrap(),
+            cap: StoreCapability::from(capability),
+        };
+        assert!(!store.cap.ranged_read);
+        let digest = BlobDigest([7; 32]);
+        let artifact = Artifact {
+            schema: Artifact::SCHEMA.into(),
+            id: ArtifactId::new(),
+            collection: CollectionId::new(),
+            path: "file.txt".parse().unwrap(),
+            kind: ArtifactKind::Document,
+            blob: BlobRef {
+                digest,
+                size: 6,
+                media_type: "text/plain".parse().unwrap(),
+                key: digest.key(),
+            },
+            labels: Labels::new(),
+            created_by: "test".into(),
+            created_at: time::OffsetDateTime::now_utc(),
+            expires_at: None,
+            previous: None,
+            deleted_at: None,
+        };
+        store.op.write(&artifact.blob.key, "abcdef").await.unwrap();
+        for range in ["bytes=1-2", "bytes=999-", "invalid"] {
+            let mut request = HeaderMap::new();
+            request.insert(header::RANGE, range.parse().unwrap());
+            let response = content(&store, &artifact, &request, &DeliveryConfig::default())
+                .await
+                .unwrap()
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(header::ACCEPT_RANGES));
+            assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 100)
+                    .await
+                    .unwrap(),
+                "abcdef"
+            );
+        }
+        capability.read_with_suffix = true;
+        store.cap = StoreCapability::from(capability);
+        let mut request = HeaderMap::new();
+        request.insert(header::RANGE, "bytes=1-2".parse().unwrap());
+        let response = content(&store, &artifact, &request, &DeliveryConfig::default())
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap(),
+            "bc"
+        );
+    }
     #[test]
     fn ranges() {
         assert_eq!(parse_range("bytes=1000-1999", 3000).unwrap(), (1000, 2000));

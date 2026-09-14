@@ -305,6 +305,12 @@ pub struct Artifact {
     #[serde(with = "time::serde::rfc3339::option")]
     pub expires_at: Option<OffsetDateTime>,
     pub previous: Option<ArtifactId>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub deleted_at: Option<OffsetDateTime>,
 }
 impl Artifact {
     pub const SCHEMA: &'static str = "sokar.artifact.v1";
@@ -321,14 +327,47 @@ impl Artifact {
 }
 pub type CollectionManifest = Collection;
 pub type ArtifactManifest = Artifact;
+/// Parsed version tag. The owned manifest field preserves unknown tags for diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSchema {
+    pub kind: String,
+    pub major: u32,
+}
+impl std::str::FromStr for ManifestSchema {
+    type Err = Error;
+    fn from_str(value: &str) -> Result<Self, Error> {
+        let invalid = || Error::Invalid(format!("invalid manifest schema: {value}"));
+        let (kind, major) = value
+            .strip_prefix("sokar.")
+            .and_then(|v| v.split_once(".v"))
+            .ok_or_else(invalid)?;
+        if kind.is_empty()
+            || !kind.bytes().all(|b| b.is_ascii_lowercase())
+            || major.is_empty()
+            || !major.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            kind: kind.into(),
+            major: major.parse().map_err(|_| invalid())?,
+        })
+    }
+}
 pub fn check_schema(actual: &str, expected: &'static str) -> Result<(), Error> {
-    if actual != expected {
-        Err(Error::ManifestSchema {
+    match (
+        actual.parse::<ManifestSchema>(),
+        expected.parse::<ManifestSchema>(),
+    ) {
+        (Ok(actual), Ok(expected))
+            if actual.kind == expected.kind && actual.major == expected.major =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::ManifestSchema {
             actual: actual.into(),
             expected,
-        })
-    } else {
-        Ok(())
+        }),
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -385,6 +424,38 @@ pub struct Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_manifest_schema_versions_and_kinds() {
+        for (tag, kind, major) in [
+            ("sokar.artifact.v1", "artifact", 1),
+            ("sokar.artifact.v2", "artifact", 2),
+            ("sokar.collection.v1", "collection", 1),
+        ] {
+            assert_eq!(
+                tag.parse::<ManifestSchema>().unwrap(),
+                ManifestSchema {
+                    kind: kind.into(),
+                    major
+                }
+            );
+        }
+        check_schema("sokar.artifact.v1", Artifact::SCHEMA).unwrap();
+        check_schema("sokar.collection.v1", Collection::SCHEMA).unwrap();
+        for tag in [
+            "sokar.artifact.v2",
+            "sokar.collection.v1",
+            "sokar.artifact.v0",
+            "sokar.artifact.vx",
+            "other.artifact.v1",
+            "sokar..v1",
+            "sokar.artifact.v1.extra",
+        ] {
+            assert!(matches!(
+                check_schema(tag, Artifact::SCHEMA),
+                Err(Error::ManifestSchema { .. })
+            ));
+        }
+    }
     #[test]
     fn validated_types() {
         for path in [
@@ -447,10 +518,16 @@ mod tests {
             created_at: c.created_at,
             expires_at: None,
             previous: None,
+            deleted_at: None,
         };
         let restored: Artifact = serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
         assert_eq!(a, restored);
         restored.validate().unwrap();
+        let mut tombstone = a.clone();
+        tombstone.deleted_at = Some(a.created_at);
+        let restored: Artifact =
+            serde_json::from_slice(&serde_json::to_vec(&tombstone).unwrap()).unwrap();
+        assert_eq!(restored, tombstone);
         assert!(check_schema("sokar.artifact.v2", Artifact::SCHEMA).is_err());
     }
 }

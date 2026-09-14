@@ -43,6 +43,17 @@ pub enum Error {
     Serde(#[from] serde_json::Error),
 }
 impl Error {
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Invalid(_) => "sokar_client::invalid",
+            Self::ManifestSchema { .. } => "sokar_client::manifest_schema",
+            Self::Remote(_) => "sokar_client::remote",
+            #[cfg(feature = "client")]
+            Self::Transport(_) => "sokar_client::transport",
+            Self::Serde(_) => "sokar_client::serde",
+        }
+    }
+
     pub fn problem(&self) -> Option<&Problem> {
         if let Self::Remote(p) = self {
             Some(p)

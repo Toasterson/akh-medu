@@ -37,7 +37,9 @@ async fn reindex_rejects_future_schema_atomically_and_gc_protects_orphans() {
         .unwrap();
     assert!(matches!(
         fixture.state.reindex(&c.store).await,
-        Err(SokarError::ManifestSchema { .. })
+        Err(SokarError::Client(
+            sokar_client::Error::ManifestSchema { .. }
+        ))
     ));
     assert_eq!(fixture.memory.artifact(orphan.id).await.unwrap(), orphan);
     store.delete(&key).await.unwrap();
@@ -50,7 +52,9 @@ async fn reindex_rejects_future_schema_atomically_and_gc_protects_orphans() {
         .unwrap();
     assert!(matches!(
         store.initialize().await,
-        Err(SokarError::ManifestSchema { .. })
+        Err(SokarError::Client(
+            sokar_client::Error::ManifestSchema { .. }
+        ))
     ));
 }
 #[tokio::test]
@@ -160,7 +164,20 @@ async fn postgres_drop_schema_reindex_fs_contract() {
     server.client.delete_artifact(a.id).await.unwrap();
     server.client.delete_artifact(b.id).await.unwrap();
     let store = fixture.state.stores.get(&c.store).unwrap();
-    assert!(!store.op.exists(&a.blob.key).await.unwrap());
+    assert!(store.op.exists(&a.blob.key).await.unwrap());
+    let refs: i32 =
+        sqlx::query_scalar("SELECT refcount FROM sokar.blob WHERE store=$1 AND digest=$2")
+            .bind(c.store.as_str())
+            .bind(a.blob.digest.0.as_slice())
+            .fetch_one(index.pool())
+            .await
+            .unwrap();
+    assert_eq!(refs, 0);
+    // Run additional backend contracts within this one disposable-schema test to
+    // avoid parallel DROP SCHEMA interfering with another PostgreSQL test.
+    let extra = Fixture::with_index(true, Some(index.clone())).await;
+    receipts_and_tombstones(&extra).await;
+    concurrent_store_transactions(index.as_ref()).await;
 }
 #[tokio::test]
 #[ignore = "requires local MinIO; SOKAR_MINIO_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY} environment references"]
@@ -259,7 +276,7 @@ async fn identical_content_in_two_stores_has_independent_refcounts_and_reindex()
         .unwrap();
     assert!(matches!(
         state.reindex(&a.store).await,
-        Err(SokarError::Conflict(_))
+        Err(SokarError::StoreMismatch { .. })
     ));
     assert_eq!(fixture.memory.collection(b.id).await.unwrap(), b);
     stores
@@ -285,4 +302,271 @@ async fn identical_content_in_two_stores_has_independent_refcounts_and_reindex()
             .await,
         1
     );
+}
+
+#[tokio::test]
+async fn duplicate_scope_manifests_choose_earliest_and_count_orphans() {
+    let fixture = Fixture::new(false).await;
+    let c = fixture.collection().await;
+    let store = fixture.state.stores.get(&c.store).unwrap();
+    let mut duplicate = c.clone();
+    duplicate.id = CollectionId::new();
+    assert!(c.id < duplicate.id);
+    // Reverse write order exercises independence from listing/insertion order.
+    store
+        .write_json(&duplicate.key(), &duplicate)
+        .await
+        .unwrap();
+    store.write_json(&c.key(), &c).await.unwrap();
+    fixture.memory.clear().await;
+    for _ in 0..2 {
+        let counts = fixture.state.reindex(&c.store).await.unwrap();
+        assert_eq!(
+            (counts.collections, counts.artifacts, counts.orphans),
+            (1, 0, 1)
+        );
+        assert_eq!(fixture.memory.by_scope(&c.scope.key()).await.unwrap(), c);
+        assert!(matches!(
+            fixture.memory.collection(duplicate.id).await,
+            Err(SokarError::NotFound)
+        ));
+        // Recovery never deletes the losing portable manifest.
+        assert!(store.op.exists(&duplicate.key()).await.unwrap());
+    }
+}
+
+async fn receipts_and_tombstones(fixture: &Fixture) {
+    use sokar::index::MutationScope;
+    let server = fixture.serve().await;
+    let c = fixture
+        .state
+        .create_collection("test-service", create("delete-replay"))
+        .await
+        .unwrap();
+    let store = fixture.state.stores.get(&c.store).unwrap();
+    let mut opts = options("replay");
+    opts.idempotency_key = Some("delete-replay-key".into());
+    let first = server.client.upload(c.id, &opts, "original").await.unwrap();
+    // Capture a receipt to simulate a stale pre-upgrade cache later.
+    let mut tx = fixture
+        .state
+        .index
+        .begin(MutationScope::Store(c.store.clone()))
+        .await
+        .unwrap();
+    let old = tx
+        .idempotency("test-service", c.id, "delete-replay-key")
+        .await
+        .unwrap()
+        .unwrap();
+    drop(tx);
+    server
+        .client
+        .delete_artifact(first.artifact.id)
+        .await
+        .unwrap();
+    let mut tx = fixture
+        .state
+        .index
+        .begin(MutationScope::Store(c.store.clone()))
+        .await
+        .unwrap();
+    assert!(
+        tx.idempotency("test-service", c.id, "delete-replay-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(tx);
+    assert!(store.op.exists(&first.artifact.blob.key).await.unwrap());
+    let tombstone: Artifact = store.read_json(&first.artifact.key()).await.unwrap();
+    assert!(tombstone.deleted_at.is_some());
+    fixture.state.reindex(&c.store).await.unwrap();
+    assert!(matches!(
+        fixture.state.index.artifact(first.artifact.id).await,
+        Err(SokarError::NotFound)
+    ));
+    let second = server.client.upload(c.id, &opts, "original").await.unwrap();
+    assert_ne!(first.artifact.id, second.artifact.id);
+    assert_eq!(second.outcome, UploadOutcome::Deduplicated);
+    server
+        .client
+        .delete_artifact(second.artifact.id)
+        .await
+        .unwrap();
+    // Even a receipt with a different fingerprint is ignored when its artifact is gone.
+    let mut tx = fixture
+        .state
+        .index
+        .begin(MutationScope::Store(c.store.clone()))
+        .await
+        .unwrap();
+    tx.put_idempotency(&old).await.unwrap();
+    tx.commit().await.unwrap();
+    let third = server
+        .client
+        .upload(c.id, &opts, "different")
+        .await
+        .unwrap();
+    assert_ne!(third.artifact.id, first.artifact.id);
+    assert_eq!(
+        server
+            .client
+            .upload(c.id, &opts, "different")
+            .await
+            .unwrap(),
+        third
+    );
+    let conflict = server
+        .client
+        .upload(c.id, &opts, "mismatch")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        conflict.problem().unwrap().code,
+        "sokar::idempotency_mismatch"
+    );
+    let manifests = store
+        .op
+        .list_with("artifacts/")
+        .recursive(true)
+        .await
+        .unwrap();
+    assert_eq!(
+        manifests
+            .iter()
+            .filter(|e| e.path().ends_with("/manifest.json"))
+            .count(),
+        3
+    );
+    let uploads = store
+        .op
+        .list_with("uploads/")
+        .recursive(true)
+        .await
+        .unwrap();
+    assert!(uploads.iter().all(|e| !e.metadata().is_file()));
+    // Simulate future janitor collection of bytes referenced only by tombstones.
+    store.delete(&first.artifact.blob.key).await.unwrap();
+    let counts = fixture.state.reindex(&c.store).await.unwrap();
+    assert_eq!((counts.artifacts, counts.blobs), (1, 1));
+    assert_eq!(
+        fixture
+            .state
+            .index
+            .artifact(third.artifact.id)
+            .await
+            .unwrap(),
+        third.artifact
+    );
+}
+
+#[tokio::test]
+async fn replay_after_delete_purges_receipts_and_restores_tombstones() {
+    receipts_and_tombstones(&Fixture::new(false).await).await;
+}
+
+async fn concurrent_store_transactions(index: &dyn Index) {
+    use sokar::index::MutationScope;
+    use std::time::Duration;
+    let store_a: StoreName = "concurrent-a".parse().unwrap();
+    let store_b: StoreName = "concurrent-b".parse().unwrap();
+    let collection = |store: StoreName| Collection {
+        schema: Collection::SCHEMA.into(),
+        id: CollectionId::new(),
+        scope: CollectionScope::Named {
+            name: format!("scope-{}", uuid::Uuid::now_v7()),
+        },
+        owner: "test".into(),
+        store,
+        retention: RetentionPolicy::Forever,
+        quota: Quota::default(),
+        created_at: time::OffsetDateTime::now_utc(),
+    };
+    let a = collection(store_a.clone());
+    let b = collection(store_b.clone());
+    let mut global = index.begin(MutationScope::Global).await.unwrap();
+    global.put_collection(&a).await.unwrap();
+    global.put_collection(&b).await.unwrap();
+    global.commit().await.unwrap();
+    // Both implementations must expose the same typed scope collision.
+    let mut collision = a.clone();
+    collision.id = CollectionId::new();
+    let mut global = index.begin(MutationScope::Global).await.unwrap();
+    assert!(matches!(
+        global.put_collection(&collision).await,
+        Err(SokarError::ScopeExists(_))
+    ));
+    drop(global);
+    let artifact = |c: &Collection| Artifact {
+        schema: Artifact::SCHEMA.into(),
+        id: ArtifactId::new(),
+        collection: c.id,
+        path: "concurrent".parse().unwrap(),
+        kind: ArtifactKind::Document,
+        blob: BlobRef {
+            digest: BlobDigest([8; 32]),
+            size: 1,
+            media_type: "text/plain".parse().unwrap(),
+            key: BlobDigest([8; 32]).key(),
+        },
+        labels: Labels::new(),
+        created_by: "test".into(),
+        created_at: c.created_at,
+        expires_at: None,
+        previous: None,
+        deleted_at: None,
+    };
+    let aa = artifact(&a);
+    let bb = artifact(&b);
+    let mut first = index
+        .begin(MutationScope::Store(store_a.clone()))
+        .await
+        .unwrap();
+    first.put_artifact(&store_a, &aa).await.unwrap();
+    // This must acquire, mutate and commit while A is still held, not merely start.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut second = index
+            .begin(MutationScope::Store(store_b.clone()))
+            .await
+            .unwrap();
+        second.put_artifact(&store_b, &bb).await.unwrap();
+        second.commit().await.unwrap();
+    })
+    .await
+    .expect("independent store blocked on first store");
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            index.begin(MutationScope::Store(store_a.clone()))
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            index.begin(MutationScope::Global)
+        )
+        .await
+        .is_err()
+    );
+    first.commit().await.unwrap();
+    assert_eq!(index.artifact(aa.id).await.unwrap().id, aa.id);
+    assert_eq!(index.artifact(bb.id).await.unwrap().id, bb.id);
+    let global = index.begin(MutationScope::Global).await.unwrap();
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            index.begin(MutationScope::Store(store_b))
+        )
+        .await
+        .is_err()
+    );
+    drop(global);
+}
+
+#[tokio::test]
+async fn two_memory_stores_mutate_concurrently_without_lost_commits() {
+    concurrent_store_transactions(&sokar::index::MemoryIndex::default()).await;
 }

@@ -2,7 +2,7 @@ use crate::{
     SokarError, SokarResult,
     authz::{Authorizer, ServiceOnly},
     config::Config,
-    index::{Idempotency, Index, ReindexCounts},
+    index::{Idempotency, Index, MutationScope, ReindexCounts},
     store::{StagedUpload, StoreRegistry},
 };
 use futures::TryStreamExt;
@@ -34,16 +34,29 @@ impl Sokar {
         owner: &str,
         input: CreateCollection,
     ) -> SokarResult<Collection> {
+        Ok(self.create_collection_outcome(owner, input).await?.0)
+    }
+    /// The boolean distinguishes a newly created collection (201) from replay (200).
+    pub async fn create_collection_outcome(
+        &self,
+        owner: &str,
+        input: CreateCollection,
+    ) -> SokarResult<(Collection, bool)> {
+        let mut tx = self.index.begin(MutationScope::Global).await?;
+        if let Some(existing) = tx.by_scope(&input.scope.key()).await? {
+            if input
+                .store
+                .as_ref()
+                .is_none_or(|store| store == &existing.store)
+            {
+                return Ok((existing, false));
+            }
+            return Err(SokarError::ScopeExists(input.scope.key()));
+        }
         let store = input
             .store
             .unwrap_or_else(|| self.config.default_store.clone());
         let storage = self.stores.get(&store)?;
-        let mut tx = self.index.begin().await?;
-        if tx.by_scope(&input.scope.key()).await?.is_some() {
-            return Err(SokarError::Conflict(
-                "collection scope already exists".into(),
-            ));
-        }
         let c = Collection {
             schema: Collection::SCHEMA.into(),
             id: CollectionId::new(),
@@ -54,11 +67,11 @@ impl Sokar {
             quota: input.quota,
             created_at: now(),
         };
-        // Bucket manifests are truth: write manifest BEFORE the index transaction.
+        // Bucket manifests are truth: write manifest BEFORE inserting the index row.
         storage.write_json(&c.key(), &c).await?;
         tx.put_collection(&c).await?;
         tx.commit().await?;
-        Ok(c)
+        Ok((c, true))
     }
     pub async fn finish_upload(
         &self,
@@ -67,9 +80,36 @@ impl Sokar {
         options: UploadOptions,
         mut staged: StagedUpload,
     ) -> SokarResult<UploadResponse> {
+        // Every early return runs explicit cleanup, and cleanup failure must never
+        // replace the original upload error. Drop remains a cancellation fallback.
+        let result = self
+            .finish_staged(principal, collection, options, &mut staged)
+            .await;
+        if let Err(cleanup) = staged.cleanup().await {
+            tracing::warn!(error = %cleanup, key = %staged.key, "staging cleanup failed");
+        }
+        result
+    }
+    async fn finish_staged(
+        &self,
+        principal: &str,
+        collection: &Collection,
+        options: UploadOptions,
+        staged: &mut StagedUpload,
+    ) -> SokarResult<UploadResponse> {
         if staged.store.name != collection.store {
-            return Err(SokarError::Conflict(
-                "staging store differs from collection".into(),
+            return Err(SokarError::StoreMismatch {
+                expected: collection.store.clone(),
+                actual: staged.store.name.clone(),
+            });
+        }
+        if options
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|key| key.is_empty() || key.len() > 256)
+        {
+            return Err(SokarError::Invalid(
+                "idempotency key must be 1..256 bytes".into(),
             ));
         }
         let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&(
@@ -81,29 +121,13 @@ impl Sokar {
             staged.digest,
             staged.size,
         ))?));
-        let mut tx = self.index.begin().await?;
-        if let Some(key) = &options.idempotency_key {
-            if key.is_empty() || key.len() > 256 {
-                return Err(SokarError::Invalid(
-                    "idempotency key must be 1..256 bytes".into(),
-                ));
-            }
-            if let Some(old) = tx.idempotency(principal, collection.id, key).await? {
-                if old.fingerprint != fingerprint {
-                    return Err(SokarError::Conflict(
-                        "idempotency key reused with different content or metadata".into(),
-                    ));
-                }
-                tx.artifact(old.response.artifact.id).await?;
-                staged.cleanup().await?;
-                return Ok(old.response);
-            }
-        }
-        let previous = tx.latest(collection.id, &options.path).await?;
-        let created_at = previous.as_ref().map_or_else(now, |a| {
-            now().max(a.created_at + time::Duration::microseconds(1))
-        });
-        let artifact = Artifact {
+        let outcome = staged.promote().await?;
+        let mut previous = match self.index.latest(collection.id, &options.path).await {
+            Ok(a) => Some(a),
+            Err(SokarError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let mut artifact = Artifact {
             schema: Artifact::SCHEMA.into(),
             id: ArtifactId::new(),
             collection: collection.id,
@@ -117,53 +141,92 @@ impl Sokar {
             },
             labels: options.labels,
             created_by: principal.into(),
-            created_at,
+            created_at: now(),
             expires_at: None,
-            previous: previous.map(|a| a.id),
+            previous: None,
+            deleted_at: None,
         };
-        let outcome = staged.promote().await?;
-        staged.cleanup().await?;
-        staged.store.write_json(&artifact.key(), &artifact).await?;
-        tx.put_artifact(&collection.store, &artifact).await?;
-        let response = UploadResponse { artifact, outcome };
-        if let Some(key) = options.idempotency_key {
-            tx.put_idempotency(&Idempotency {
-                principal: principal.into(),
-                collection: collection.id,
-                key,
-                fingerprint,
-                response: response.clone(),
-                expires_at: now() + time::Duration::hours(24),
-            })
-            .await?;
+        loop {
+            artifact.previous = previous.as_ref().map(|a| a.id);
+            artifact.created_at = previous.as_ref().map_or_else(now, |a| {
+                now().max(a.created_at + time::Duration::microseconds(1))
+            });
+            // Bytes -> manifest -> row. No bucket I/O while the index lock is held.
+            staged.store.write_json(&artifact.key(), &artifact).await?;
+            let mut tx = self
+                .index
+                .begin(MutationScope::Store(collection.store.clone()))
+                .await?;
+            if let Some(key) = &options.idempotency_key
+                && let Some(old) = tx.idempotency(principal, collection.id, key).await?
+            {
+                match tx.artifact(old.response.artifact.id).await {
+                    Ok(_) => {
+                        drop(tx);
+                        // A receipt wins: remove only our unused manifest, never bytes.
+                        let cleanup_manifest = staged.store.delete(&artifact.key()).await;
+                        if old.fingerprint != fingerprint {
+                            if let Err(e) = cleanup_manifest {
+                                tracing::warn!(error = %e, key = %artifact.key(), "unused manifest cleanup failed");
+                            }
+                            if let Err(e) = staged.cleanup().await {
+                                tracing::warn!(error = %e, key = %staged.key, "staging cleanup failed");
+                            }
+                            return Err(SokarError::IdempotencyMismatch);
+                        }
+                        cleanup_manifest?;
+                        return Ok(old.response);
+                    }
+                    Err(SokarError::NotFound) => {
+                        tx.purge_idempotency_for(old.response.artifact.id).await?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            let latest = tx.latest(collection.id, &artifact.path).await?;
+            if latest.as_ref().map(|a| a.id) != artifact.previous {
+                // Another finalizer won. Release the lock before rewriting the
+                // manifest with its predecessor and microsecond-monotonic timestamp.
+                drop(tx);
+                previous = latest;
+                continue;
+            }
+            tx.put_artifact(&collection.store, &artifact).await?;
+            let response = UploadResponse { artifact, outcome };
+            if let Some(key) = &options.idempotency_key {
+                tx.put_idempotency(&Idempotency {
+                    principal: principal.into(),
+                    collection: collection.id,
+                    key: key.clone(),
+                    fingerprint,
+                    response: response.clone(),
+                    expires_at: now() + time::Duration::hours(24),
+                })
+                .await?;
+            }
+            tx.commit().await?;
+            return Ok(response);
         }
-        tx.commit().await?;
-        Ok(response)
     }
     pub async fn delete_artifact(&self, id: ArtifactId) -> SokarResult<()> {
-        let artifact = self.index.artifact(id).await?;
+        let mut artifact = self.index.artifact(id).await?;
         let collection = self.index.collection(artifact.collection).await?;
         let store = self.stores.get(&collection.store)?;
-        let mut tx = self.index.begin().await?;
-        let remaining = tx.delete_artifact(&collection.store, id).await?;
-        store.delete(&artifact.key()).await?;
-        // Synchronous 52a GC, under the same index transaction/mutation lock.
-        // An orphan manifest from an earlier failed index commit must protect its bytes.
-        if remaining == 0 {
-            let manifests = artifact_manifests(&store).await?;
-            if !manifests
-                .iter()
-                .any(|a| a.blob.digest == artifact.blob.digest)
-            {
-                store.delete(&artifact.blob.key).await?;
-            }
-        }
+        artifact.deleted_at = Some(now());
+        // Durable tombstone first. Manifest and bytes survive commit failure and
+        // are reconciled by reindex; physical GC belongs exclusively to 52b.
+        store.write_json(&artifact.key(), &artifact).await?;
+        let mut tx = self
+            .index
+            .begin(MutationScope::Store(collection.store.clone()))
+            .await?;
+        tx.delete_artifact(&collection.store, &artifact).await?;
+        tx.purge_idempotency_for(id).await?;
         tx.commit().await?;
         Ok(())
     }
     pub async fn reindex(&self, name: &StoreName) -> SokarResult<ReindexCounts> {
         let store = self.stores.get(name)?;
-        let mut tx = self.index.begin().await?;
         store.check(false).await?;
         let mut collections = Vec::new();
         let mut lister = store
@@ -184,14 +247,40 @@ impl Sokar {
                 .read_manifest(entry.path(), Collection::SCHEMA)
                 .await?;
             c.validate()?;
-            if c.key() != entry.path() || &c.store != name {
+            if &c.store != name {
+                return Err(SokarError::StoreMismatch {
+                    expected: name.clone(),
+                    actual: c.store,
+                });
+            }
+            if c.key() != entry.path() {
                 return Err(SokarError::Invalid(
                     "collection manifest key/store mismatch".into(),
                 ));
             }
             collections.push(c);
         }
-        let artifacts = artifact_manifests(&store).await?;
+        // Retry after a manifest-only collection creation can leave duplicate scopes.
+        // UUIDv7 ordering chooses the earliest deterministically, regardless of list order.
+        collections.sort_by_key(|c| c.id);
+        let mut scopes = HashSet::new();
+        let mut orphan_collections = HashSet::new();
+        collections.retain(|c| {
+            if scopes.insert(c.scope.key()) { true } else {
+                orphan_collections.insert(c.id);
+                tracing::warn!(collection = %c.id, scope = %c.scope.key(), "duplicate scope manifest orphaned");
+                false
+            }
+        });
+        let mut orphans = orphan_collections.len();
+        let mut artifacts = artifact_manifests(&store).await?;
+        artifacts.retain(|a| {
+            if orphan_collections.contains(&a.collection) {
+                orphans += 1;
+                tracing::warn!(artifact = %a.id, collection = %a.collection, "artifact of duplicate scope orphaned");
+                false
+            } else { true }
+        });
         let ids: HashSet<_> = collections.iter().map(|c| c.id).collect();
         let mut blobs = HashMap::new();
         for a in &artifacts {
@@ -199,6 +288,11 @@ impl Sokar {
                 return Err(SokarError::Invalid(
                     "artifact references a missing collection manifest".into(),
                 ));
+            }
+            // Tombstones hold no live blob reference; bytes may already have been
+            // collected by a future janitor and are not required for restoration.
+            if a.deleted_at.is_some() {
+                continue;
             }
             if let Some(size) = blobs.insert(a.blob.digest, a.blob.size) {
                 if size != a.blob.size {
@@ -219,7 +313,9 @@ impl Sokar {
                 }
             }
         }
-        let counts = tx.replace_store(name, &collections, &artifacts).await?;
+        let mut tx = self.index.begin(MutationScope::Global).await?;
+        let mut counts = tx.replace_store(name, &collections, &artifacts).await?;
+        counts.orphans = orphans;
         tx.commit().await?;
         Ok(counts)
     }

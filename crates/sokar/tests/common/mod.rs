@@ -8,7 +8,7 @@ use sokar::{
 use sokar_client::*;
 use std::{collections::BTreeMap, sync::Arc};
 
-pub const TOKEN: &str = "sokar-local-test-token";
+pub const TOKEN: &str = "sokar-local-test-token-at-least-24";
 pub struct Fixture {
     pub dir: tempfile::TempDir,
     pub state: Arc<Sokar>,

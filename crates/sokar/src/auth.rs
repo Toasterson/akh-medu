@@ -2,14 +2,7 @@
 use crate::{SokarError, SokarResult, authz::Principal, config::PrincipalConfig};
 use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
-fn token_equal(a: &[u8], b: &[u8]) -> bool {
-    let mut difference = a.len() ^ b.len();
-    for index in 0..a.len().max(b.len()) {
-        difference |=
-            (a.get(index).copied().unwrap_or(0) ^ b.get(index).copied().unwrap_or(0)) as usize;
-    }
-    difference == 0
-}
+use subtle::ConstantTimeEq;
 pub fn authenticate(principals: &[PrincipalConfig], headers: &HeaderMap) -> SokarResult<Principal> {
     if headers.get_all("authorization").iter().count() != 1 {
         return Err(SokarError::Authn);
@@ -28,7 +21,7 @@ pub fn authenticate(principals: &[PrincipalConfig], headers: &HeaderMap) -> Soka
         match principal.credential() {
             Ok((token, hashed)) => {
                 let candidate = if hashed { &digest } else { supplied };
-                if token_equal(candidate.as_bytes(), token.as_bytes()) {
+                if bool::from(candidate.as_bytes().ct_eq(token.as_bytes())) {
                     matches.push(principal);
                 }
             }

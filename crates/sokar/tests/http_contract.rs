@@ -115,8 +115,10 @@ async fn fs_100_mib_stream_dedup_range_etag_and_reindex() {
         .delete_artifact(second.artifact.id)
         .await
         .unwrap();
-    assert!(!store.op.exists(&second.artifact.blob.key).await.unwrap());
-    assert!(!store.op.exists(&second.artifact.key()).await.unwrap());
+    assert!(store.op.exists(&second.artifact.blob.key).await.unwrap());
+    assert!(store.op.exists(&second.artifact.key()).await.unwrap());
+    let tombstone: Artifact = store.read_json(&second.artifact.key()).await.unwrap();
+    assert!(tombstone.deleted_at.is_some());
 }
 #[tokio::test]
 async fn api_multipart_idempotency_versions_paging_and_client_problems() {
@@ -132,13 +134,14 @@ async fn api_multipart_idempotency_versions_paging_and_client_problems() {
         server.client.collection_by_scope(&c.scope).await.unwrap(),
         c
     );
-    let error = server
-        .client
-        .create_collection(&create("api"))
-        .await
-        .unwrap_err();
-    assert_eq!(error.problem().unwrap().code, "sokar::conflict");
-    assert!(!error.problem().unwrap().request_id.is_empty());
+    assert_eq!(
+        server
+            .client
+            .create_collection(&create("api"))
+            .await
+            .unwrap(),
+        c
+    );
     let mut opts = options("unicode/résumé a%.txt");
     opts.media_type = "text/plain".parse().unwrap();
     opts.idempotency_key = Some("retry-1".into());
@@ -264,10 +267,15 @@ async fn auth_fail_closed_rotation_sha256_and_admin_separation() {
     assert!(sokar::auth::authenticate(&principals, &headers).is_err());
     std::fs::write(
         fixture.config.principals[0].token_file.as_ref().unwrap(),
-        "rotated",
+        "rotated-token-at-least-24-characters",
     )
     .unwrap();
-    headers.insert("authorization", "Bearer rotated".parse().unwrap());
+    headers.insert(
+        "authorization",
+        "Bearer rotated-token-at-least-24-characters"
+            .parse()
+            .unwrap(),
+    );
     assert!(sokar::auth::authenticate(&fixture.config.principals, &headers).is_ok());
     let admin = sokar::http::admin(fixture.state.clone());
     for route in ["/healthz", "/readyz", "/metrics"] {
@@ -281,7 +289,10 @@ async fn auth_fail_closed_rotation_sha256_and_admin_separation() {
     let response = api
         .oneshot(
             Request::get("/metrics")
-                .header("authorization", "Bearer rotated")
+                .header(
+                    "authorization",
+                    "Bearer rotated-token-at-least-24-characters",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -506,4 +517,64 @@ async fn empty_artifact_and_live_reindex_preserves_idempotency() {
     );
     fixture.state.reindex(&c.store).await.unwrap();
     assert_eq!(server.client.upload(c.id, &opts, "").await.unwrap(), a);
+}
+
+#[tokio::test]
+async fn collection_create_or_get_and_incompatible_store() {
+    let fixture = Fixture::new(false).await;
+    let server = fixture.serve().await;
+    let http = reqwest::Client::new();
+    let url = format!("{}/v1/collections", server.base);
+    let mut input = create("create-or-get");
+    let first = http
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 201);
+    let collection: Collection = first.json().await.unwrap();
+    for store in [None, Some(collection.store.clone())] {
+        input.store = store;
+        let response = http
+            .post(&url)
+            .bearer_auth(TOKEN)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.json::<Collection>().await.unwrap(), collection);
+    }
+    input.store = Some("different".parse().unwrap());
+    let response = http
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 409);
+    assert_eq!(
+        response.json::<Problem>().await.unwrap().code,
+        "sokar::scope_exists"
+    );
+}
+
+#[tokio::test]
+async fn credential_format_matches_session_services() {
+    let fixture = Fixture::new(false).await;
+    let config = &fixture.config.principals[0];
+    let file = config.token_file.as_ref().unwrap();
+    for token in [
+        "short",
+        "a-long-token-with whitespace",
+        "a-long-token-with\twhitespace",
+    ] {
+        std::fs::write(file, token).unwrap();
+        assert!(config.credential().is_err());
+    }
+    std::fs::write(file, format!("  {TOKEN}\n")).unwrap();
+    assert_eq!(config.credential().unwrap().0, TOKEN);
 }

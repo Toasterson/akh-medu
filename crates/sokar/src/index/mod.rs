@@ -1,4 +1,6 @@
-//! Transactional index seam. Mutations serialize across all stores and daemon replicas.
+//! Transactional index seam. Lock order is global before store, never reversed.
+//! Store mutations take shared global + exclusive store; global mutations take
+//! exclusive global, excluding every store mutation during collection/reindex changes.
 mod memory;
 mod postgres;
 use crate::{SokarError, SokarResult};
@@ -22,6 +24,12 @@ pub struct ReindexCounts {
     pub collections: usize,
     pub artifacts: usize,
     pub blobs: usize,
+    pub orphans: usize,
+}
+#[derive(Debug, Clone)]
+pub enum MutationScope {
+    Global,
+    Store(StoreName),
 }
 #[async_trait]
 pub trait Index: Send + Sync {
@@ -35,7 +43,7 @@ pub trait Index: Send + Sync {
         collection: CollectionId,
         query: &ListArtifacts,
     ) -> SokarResult<ArtifactPage>;
-    async fn begin(&self) -> SokarResult<Box<dyn IndexTransaction>>;
+    async fn begin(&self, scope: MutationScope) -> SokarResult<Box<dyn IndexTransaction>>;
 }
 #[async_trait]
 pub trait IndexTransaction: Send {
@@ -55,8 +63,10 @@ pub trait IndexTransaction: Send {
     async fn put_collection(&mut self, collection: &Collection) -> SokarResult<()>;
     async fn put_artifact(&mut self, store: &StoreName, artifact: &Artifact) -> SokarResult<()>;
     async fn put_idempotency(&mut self, entry: &Idempotency) -> SokarResult<()>;
+    async fn purge_idempotency_for(&mut self, artifact_id: ArtifactId) -> SokarResult<()>;
     /// Tombstones the artifact; returns remaining references in this store.
-    async fn delete_artifact(&mut self, store: &StoreName, id: ArtifactId) -> SokarResult<u64>;
+    async fn delete_artifact(&mut self, store: &StoreName, artifact: &Artifact)
+    -> SokarResult<u64>;
     /// Replace only this store's index with the fully validated manifest inventory.
     async fn replace_store(
         &mut self,

@@ -93,8 +93,8 @@ async fn run(args: Args) -> SokarResult<()> {
     if let Some(Command::Reindex { store }) = args.command {
         let count = state.reindex(&store).await?;
         println!(
-            "STORE\tCOLLECTIONS\tARTIFACTS\tBLOBS\n{store}\t{}\t{}\t{}",
-            count.collections, count.artifacts, count.blobs
+            "STORE\tCOLLECTIONS\tARTIFACTS\tBLOBS\tORPHANS\n{store}\t{}\t{}\t{}\t{}",
+            count.collections, count.artifacts, count.blobs, count.orphans
         );
         return Ok(());
     }

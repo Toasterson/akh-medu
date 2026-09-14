@@ -98,8 +98,9 @@ impl PrincipalConfig {
                 ));
             }
         };
-        let value = SecretRef::File(path.clone()).resolve()?;
-        if value.trim() != value
+        let value = SecretRef::File(path.clone()).resolve()?.trim().to_owned();
+        if value.len() < 24
+            || value.chars().any(char::is_whitespace)
             || value.len() > 4096
             || (hashed && (value.len() != 64 || hex::decode(&value).is_err()))
         {

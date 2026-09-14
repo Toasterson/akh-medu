@@ -158,9 +158,14 @@ async fn create_collection(
     Extension(p): Extension<Principal>,
     Json(input): Json<CreateCollection>,
 ) -> SokarResult<Response> {
+    let (collection, created) = state.create_collection_outcome(&p.id, input).await?;
     Ok((
-        StatusCode::CREATED,
-        Json(state.create_collection(&p.id, input).await?),
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        Json(collection),
     )
         .into_response())
 }

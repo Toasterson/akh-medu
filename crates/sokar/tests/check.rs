@@ -3,7 +3,7 @@ use std::process::Command;
 fn check_wrong_store_option_is_diagnostic_and_exit_two() {
     let dir = tempfile::tempdir().unwrap();
     let token = dir.path().join("token");
-    std::fs::write(&token, "local-test").unwrap();
+    std::fs::write(&token, "sokar-local-test-token-at-least-24").unwrap();
     let value = dir.path().join("option");
     std::fs::write(&value, "unused").unwrap();
     let config = dir.path().join("sokar.toml");
@@ -35,13 +35,13 @@ definitely_wrong_option = "file:{}"
     assert_eq!(result.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("sokar::storage"), "{stderr}");
-    assert!(!stderr.contains("local-test"));
+    assert!(!stderr.contains("sokar-local-test-token-at-least-24"));
 }
 #[test]
 fn check_and_reindex_local_fs_cli() {
     let dir = tempfile::tempdir().unwrap();
     let token = dir.path().join("token");
-    std::fs::write(&token, "local-test").unwrap();
+    std::fs::write(&token, "sokar-local-test-token-at-least-24").unwrap();
     let root = dir.path().join("root");
     std::fs::write(&root, dir.path().join("objects").to_str().unwrap()).unwrap();
     let config = dir.path().join("sokar.toml");
