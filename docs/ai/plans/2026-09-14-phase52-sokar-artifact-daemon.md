@@ -41,7 +41,8 @@ Each slice lands behind its own WI, builds and tests in CI with `--features` tha
 - `POST /v1/artifacts/{id}/links` → HMAC-signed share link (key from `file:`, rotation with two active keys), `DELETE /v1/links/{id}`; proxy delivery honours `Link` principals.
 - Delivery decision `Delivery::{Redirect(PresignedUrl), Stream}` per ADR 108 D5; `presign_read` with `response-content-disposition`; TTL = min(grant expiry, config max).
 - Two-phase large uploads via `presign_write` with digest verification on commit.
-- `RetentionPolicy` on collections, janitor task, blob refcount GC, quotas per collection.
+- `RetentionPolicy` on collections, janitor task, quotas per collection. Janitor owns everything irreversible: blobs with refcount 0 deleted only after a manifest reconcile shows no live reference; tombstoned manifests (`deleted_at`) removed after a grace period; `uploads/` staging keys older than the upload timeout swept; expired idempotency receipts purged.
+- Carried over from the 52a review (`docs/ai/phases/phase-52-sokar/52a-review.md`): per-resource serialization instead of the 52a advisory locks (per-`(store,digest)` for promotion, per-scope for collection creation, per-`(collection,path)` for version chains); a bucket owner marker `_sokar/owner.json` with a lease so two daemons with independent indexes cannot manage one prefix (ADR 049 split-brain guard pattern).
 - Exit condition: property tests for the claim-rule evaluator (all ops, nested `All/Any/Not`, unknown pointer → deny); an `s3` contract test (MinIO) shows `302` presign, an `fs` store shows proxy for the same request; a revoked share link returns 403 within one request; janitor deletes an expired artifact and its orphaned blob.
 
 ### 52c — OIDC (Barycenter + Keycloak), cookie sessions, JWKS bearer, claim explain
