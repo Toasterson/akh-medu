@@ -1,0 +1,29 @@
+# Local filesystem demo. See docs/ai/phases/phase-52-sokar/52a-report.md.
+# Store options (including nonsecret settings) use env:/file: references.
+default_store = "local"
+
+[server]
+api_bind = "127.0.0.1:9400"
+admin_bind = "127.0.0.1:9401"
+
+# Omit database for an ephemeral index rebuilt from manifests on every start.
+# For durable idempotency and coordination across replicas, enable PostgreSQL:
+# [database]
+# url = "env:SOKAR_DATABASE_URL"
+
+[[store]]
+name = "local"
+service = "fs"
+prefix = "sokar"
+[store.options]
+root = "env:SOKAR_FS_ROOT"
+
+[[principal]]
+id = "local-service"
+token_file = "/tmp/sokar-local/token"
+
+[limits]
+max_body_bytes = 268435456
+
+[delivery]
+inline_media_types = ["text/plain", "image/png", "image/jpeg"]
