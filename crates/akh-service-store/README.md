@@ -116,6 +116,21 @@ summarized here:
   `starts_with`, exactly like the redb backend already does) when no finite
   upper bound exists.
 
+### One transaction per process at a time
+
+`Store::transaction` on the Postgres backend holds a process-level mutex
+for the whole transaction, exactly like redb's single write transaction.
+This is a deadlock guard, not an optimisation: the per-kind advisory lock
+is taken on the `akh-store-pg` thread, which runs one job start to finish.
+Without the gate a second transaction's `begin` blocks that thread on the
+lock the first transaction holds, the first transaction's next statement
+queues behind it, and both hang forever together with every plain read.
+akhsessd and akheventd did exactly that within seconds of starting on
+2026-09-13. The signature in `pg_stat_activity` is two backends from one
+process: one `idle in transaction`, one waiting on `advisory`. The
+regression test is `concurrent_transactions_from_one_process_do_not_deadlock`
+in `tests/postgres.rs`.
+
 ## One-shot redb → Postgres migration
 
 `Store::open_postgres` always checks, before returning, whether this `kind`
