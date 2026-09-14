@@ -38,11 +38,9 @@ fn jittered_backoff(consecutive_failures: u32, session_id: &str) -> Duration {
     if span == 0 {
         return base;
     }
-    let entropy = session_id
-        .bytes()
-        .fold(0xcbf29ce484222325u64, |hash, b| {
-            (hash ^ b as u64).wrapping_mul(0x100000001b3)
-        });
+    let entropy = session_id.bytes().fold(0xcbf29ce484222325u64, |hash, b| {
+        (hash ^ b as u64).wrapping_mul(0x100000001b3)
+    });
     let offset = (entropy % (2 * span + 1)) as i64 - span as i64;
     Duration::from_millis((millis as i64 + offset).max(0) as u64)
 }
@@ -280,7 +278,9 @@ impl SessionApp {
         {
             return Ok(());
         }
-        self.sessions.store.transaction(|tx| tx.put(&k, &now_ms()))?;
+        self.sessions
+            .store
+            .transaction(|tx| tx.put(&k, &now_ms()))?;
         let mut retiring = session.retirement.is_some();
         if !retiring
             && crate::session::is_stalled(
@@ -1244,8 +1244,7 @@ mod lifecycle_tests {
         app.sessions
             .store
             .transaction(|tx| {
-                let mut record: SessionRecord =
-                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
                 record.last_progress_at = 0;
                 tx.put(&key("session", &[&session.id]), &record)
             })
@@ -1323,8 +1322,7 @@ mod lifecycle_tests {
         app.sessions
             .store
             .transaction(|tx| {
-                let mut record: SessionRecord =
-                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
                 record.turns[0].status = TurnStatus::Running;
                 tx.put(&key("session", &[&session.id]), &record)
             })
@@ -1340,7 +1338,10 @@ mod lifecycle_tests {
             after.turns[0].status.terminal(),
             "an unconfirmed cancellation past the grace period must close locally"
         );
-        assert_eq!(after.turns[0].error.as_ref().map(|e| e.code.as_str()), Some("unknown_outcome"));
+        assert_eq!(
+            after.turns[0].error.as_ref().map(|e| e.code.as_str()),
+            Some("unknown_outcome")
+        );
         assert!(
             after.closed_at.is_some(),
             "retirement must finalize once every turn is terminal, with no relay involved"
@@ -1436,8 +1437,7 @@ mod lifecycle_tests {
         app.sessions
             .store
             .transaction(|tx| {
-                let mut record: SessionRecord =
-                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
                 record.last_progress_at = 0;
                 tx.put(&key("session", &[&session.id]), &record)
             })
@@ -1464,8 +1464,7 @@ mod lifecycle_tests {
         app.sessions
             .store
             .transaction(|tx| {
-                let mut record: SessionRecord =
-                    tx.get(&key("session", &[&session.id]))?.unwrap();
+                let mut record: SessionRecord = tx.get(&key("session", &[&session.id]))?.unwrap();
                 let mut retirement = record.retirement.clone().unwrap();
                 retirement.at = 0;
                 record.retirement = Some(retirement);

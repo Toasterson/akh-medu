@@ -92,7 +92,6 @@ pub fn should_force_cancel(retirement_at_ms: u64, now_ms: u64, grace_ms: u64) ->
     now_ms.saturating_sub(retirement_at_ms) >= grace_ms
 }
 
-
 /// Validate without writing. Only semantic failures from this phase may become
 /// negative receipts; a storage failure must roll the whole transaction back.
 fn prepare_response(

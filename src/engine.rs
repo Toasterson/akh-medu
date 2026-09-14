@@ -3040,25 +3040,35 @@ impl Engine {
             if !seen.insert((expected.subject, expected.predicate, expected.object)) {
                 return Err(invalid_persistent_state("duplicate owned edge"));
             }
-            let live = self.knowledge_graph.triple(expected.subject, expected.predicate, expected.object);
+            let live =
+                self.knowledge_graph
+                    .triple(expected.subject, expected.predicate, expected.object);
             if live.as_ref() != Some(expected) {
                 return Err(invalid_persistent_state("owned edge metadata mismatch"));
             }
             removals.push(expected.clone());
         }
         for edge in derived {
-            let id = edge.provenance_id.and_then(crate::provenance::ProvenanceId::new)
-                .ok_or_else(|| invalid_persistent_state("derived ownership requires linked provenance"))?;
+            let id = edge
+                .provenance_id
+                .and_then(crate::provenance::ProvenanceId::new)
+                .ok_or_else(|| {
+                    invalid_persistent_state("derived ownership requires linked provenance")
+                })?;
             let record = self.get_provenance(id)?;
-            let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = record.kind else {
+            let crate::provenance::DerivationKind::RuleInference { antecedents, .. } = record.kind
+            else {
                 return Err(invalid_persistent_state("owned edge is not rule-derived"));
             };
-            if antecedents.len() < 8 || (antecedents.len() - 5) % 3 != 0
+            if antecedents.len() < 8
+                || (antecedents.len() - 5) % 3 != 0
                 || antecedents[0].get() != crate::provenance::RULE_SUPPORT_TRIPLES_V1_SENTINEL
                 || antecedents[1].get() != crate::provenance::RULE_APPLICATION_V2_SENTINEL
                 || antecedents[2..5] != [edge.subject, edge.predicate, edge.object]
             {
-                return Err(invalid_persistent_state("invalid conclusion-bound rule provenance"));
+                return Err(invalid_persistent_state(
+                    "invalid conclusion-bound rule provenance",
+                ));
             }
         }
         self.commit_exact_retractions_locked(&removals)?;
