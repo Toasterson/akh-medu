@@ -21,3 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
+# `macros` for `#[tokio::test(flavor = "multi_thread", ...)]`, used to
+# reproduce the "sync facade called from an async multi-thread runtime
+# worker" incident shape in tests.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -18,8 +18,8 @@ mod postgres;
 mod redb_backend;
 
 pub(crate) use akh_session_types::{Fault, Result};
-use postgres::{PgTxState, PostgresInner};
 pub use postgres::PostgresConfig;
+use postgres::{PgTxState, PostgresInner};
 use redb_backend::{RedbInner, RedbTxState};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{path::Path, sync::Arc};
@@ -90,6 +90,9 @@ impl Store {
                 }
             }
             Inner::Postgres(inner) => {
+                // Held until `finish` returns: one transaction per process
+                // at a time (see `PostgresInner::transaction_gate`).
+                let _gate = inner.transaction_gate();
                 let state = inner.begin()?;
                 let mut tx = Transaction {
                     inner: TransactionInner::Postgres(state),

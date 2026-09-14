@@ -1,30 +1,86 @@
 //! Postgres-backed implementation of the `Store`/`Transaction` API.
 //!
-//! # Sync facade over an async driver
+//! # Sync facade over an async driver, without nesting runtimes
 //!
 //! `Store`'s public API is synchronous (plain `fn`s, no `.await`), because
 //! the redb backend it originally shipped with is synchronous and every call
-//! site in `akh-session-services` invokes it that way, often from inside a
-//! `#[tokio::main]` daemon. sqlx is async-only, so this module bridges the
-//! two with a small, dedicated, lazily-started multi-thread Tokio runtime
-//! (see [`pg_runtime`]) that is *not* the caller's ambient runtime.
+//! site in `akh-session-services` invokes it that way — often from inside a
+//! `#[tokio::main]` daemon's async request handlers. sqlx is async-only, so
+//! this module has to bridge the two.
 //!
-//! Every Postgres operation below is exactly one top-level
-//! `pg_runtime().block_on(...)` call that runs to completion before
-//! returning. None of these calls are ever nested inside one another (a
-//! transaction's `get`/`put`/`scan` each issue their own independent
-//! `block_on`, only after the transaction's opening `block_on` has already
-//! returned control to plain sync code). That is deliberate: Tokio panics
-//! with "Cannot start a runtime from within a runtime" if `block_on` is
-//! reentered on a thread that is already inside a `block_on`/task poll for
-//! *that same runtime* — using a private runtime instance side-steps the
-//! ambient-runtime version of that hazard, and never calling `block_on`
-//! recursively side-steps the same-runtime version. The alternative
-//! (`tokio::task::block_in_place` + `Handle::current().block_on`) would only
-//! work when the caller happens to be on a multi-thread runtime, and would
-//! panic outright in a plain `#[test]` with no runtime at all; the
-//! dedicated-runtime approach works identically in both places, which is why
-//! it was chosen over that alternative.
+//! An earlier version of this module did that by calling
+//! `.block_on(...)` on a private, lazily-started multi-thread Tokio runtime
+//! from whichever thread the caller happened to be on. That is unsound: it
+//! panics with "Cannot start a runtime from within a runtime" the moment the
+//! caller thread is *already* a worker thread of some other Tokio runtime
+//! (e.g. every `#[tokio::main]` daemon's request-handling path) — Tokio's
+//! "already inside a runtime" detection is a thread-local flag checked
+//! regardless of which `Runtime` object `block_on` is called on, so a
+//! second, distinct runtime instance does not side-step it. This crashed
+//! every daemon at startup in production (see the crate's `CHANGES`/incident
+//! notes) the moment `Store::open_postgres` (or any `get`/`scan`/
+//! `transaction` call) executed on a Tokio worker thread.
+//!
+//! The fix used here instead runs all Postgres/sqlx work on a **dedicated
+//! OS thread that Tokio never owns**, so nothing ever calls `block_on` while
+//! standing on a runtime's worker thread:
+//!
+//! - [`db_thread`] lazily spawns one plain `std::thread` (named
+//!   `akh-store-pg`) that builds its own `tokio::runtime::Builder::
+//!   new_current_thread()` runtime and then just loops: receive a job from an
+//!   `std::sync::mpsc::Receiver<Job>`, `runtime.block_on` it, repeat. That
+//!   thread is never entered by any other code, so `block_on` there is
+//!   always the outermost (and only) runtime frame on that thread — the
+//!   hazard the old code hit cannot occur here.
+//! - Every Postgres operation (`open`, `get`, `scan`, `begin`, a
+//!   transaction's `get`/`put`/`delete`/`scan`, `commit`/`rollback`) is
+//!   packaged by [`run_on_db_thread`] into one such job: a boxed closure
+//!   that produces the future to run, plus a `std::sync::mpsc::sync_channel`
+//!   of capacity 1 used exactly once to send back the result. The calling
+//!   thread — whatever it is — sends the job and then blocks waiting for
+//!   that one reply.
+//! - How the calling thread blocks depends on what it *is*:
+//!   - If it is a worker thread of a multi-thread Tokio runtime
+//!     (`Handle::try_current().runtime_flavor() ==
+//!     RuntimeFlavor::MultiThread`), the wait is wrapped in
+//!     `tokio::task::block_in_place`, which tells that runtime "this worker
+//!     is about to block; hand its other ready tasks to another worker (or
+//!     spawn one)". This is exactly the situation `block_in_place` exists
+//!     for, and it is what every daemon in this workspace hits — all five
+//!     (`akhsessd`, `akhrtd`, `akhexecd`, `akhsbxd`, `akheventd`) use a bare
+//!     `#[tokio::main]`, which defaults to the multi-thread scheduler.
+//!   - If there is no ambient runtime at all (a plain `#[test]`, or a call
+//!     from a bare `std::thread`), the calling thread just blocks on
+//!     `Receiver::recv()` directly — nothing else needed that thread, so
+//!     blocking it is free.
+//!   - If the ambient runtime exists but is `current_thread` flavor,
+//!     `block_in_place` would itself panic ("this runtime doesn't support
+//!     blocking operations"), so this case also falls back to a plain
+//!     `Receiver::recv()`. That is only safe because it stalls that
+//!     runtime's *only* thread for the duration of one DB round trip — any
+//!     other task scheduled on it (a concurrent request, a health check)
+//!     would not make progress until the store call returns. No binary in
+//!     this workspace uses `current_thread` today (grepping for
+//!     `tokio::main`/`tokio::test` turns up only the multi-thread default,
+//!     confirmed for every `akhsessd`/`akhrtd`/`akhexecd`/`akhsbxd`/
+//!     `akheventd` binary), so this branch is a documented safety net, not
+//!     a path anything currently takes. If a `current_thread` daemon is ever
+//!     added, revisit this — it would need either a runtime-flavor change
+//!     or a different blocking strategy.
+//!
+//! All Postgres work is funneled through the single `akh-store-pg` thread
+//! and processed strictly one job at a time (the thread's loop does not
+//! start the next job until the previous one's future resolves). That is a
+//! deliberate simplification, not an oversight: `Store` is already meant to
+//! be a single-writer-at-a-time, low-QPS durability layer (see the locking
+//! and cache sections below, and the "single process per store kind"
+//! invariant they depend on), so serializing its Postgres round trips onto
+//! one thread trades a small amount of theoretical throughput for a much
+//! simpler, obviously-correct implementation. If this ever becomes a
+//! bottleneck, the jobs could be `tokio::spawn`ed onto the `akh-store-pg`
+//! runtime instead of `block_on`-ed one at a time, letting them interleave
+//! on that same single OS thread — but nothing measured so far calls for
+//! that complexity.
 //!
 //! # Locking model
 //!
@@ -58,8 +114,10 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::{
     cell::RefCell,
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
-    sync::RwLock,
+    pin::Pin,
+    sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, mpsc},
 };
 
 /// Never produced by [`crate::key`] (which only ever emits printable ASCII),
@@ -90,6 +148,9 @@ pub(crate) struct PostgresInner {
     table: String,
     kind: String,
     cache: ReadCache,
+    /// Serialises transactions within this process; see
+    /// [`PostgresInner::transaction_gate`].
+    tx_gate: Mutex<()>,
 }
 
 /// Process-local read-through cache for a single Postgres-backed store
@@ -138,25 +199,105 @@ impl ReadCache {
     }
 }
 
+/// A transaction's `sqlx::Transaction`, shared between the caller thread
+/// (which owns the `PgTxState`) and whichever job the `akh-store-pg` thread
+/// is currently running against it. Only ever touched by one job at a time
+/// — the caller always waits for one job's reply before issuing the next —
+/// so the `Mutex` is never actually contended; it exists so the handle can
+/// be `Send`/`'static` and moved into each job's closure by reference-
+/// counted clone.
+type TxHandle = Arc<Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>>;
+
 pub(crate) struct PgTxState<'a> {
     inner: &'a PostgresInner,
-    tx: RefCell<Option<sqlx::Transaction<'static, sqlx::Postgres>>>,
+    tx: TxHandle,
     pending: RefCell<Vec<(String, Option<Vec<u8>>)>>,
 }
 
-/// A small, dedicated Tokio runtime used only to drive sqlx futures to
-/// completion synchronously. See the module docs for why this is not the
-/// caller's ambient runtime.
-fn pg_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("akh-service-store-pg")
-            .enable_all()
-            .build()
-            .expect("failed to start the dedicated Postgres store runtime")
+/// One unit of work for the `akh-store-pg` thread: a closure that, when
+/// called (on that thread), produces the future to drive to completion. See
+/// [`run_on_db_thread`] for how the result gets back to the caller.
+type Job = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+
+struct DbThread {
+    sender: mpsc::Sender<Job>,
+}
+
+/// Lazily spawns (once per process) the dedicated `akh-store-pg` OS thread
+/// and its private single-threaded Tokio runtime. See the module docs for
+/// why this thread — and never the caller's own thread — is what ever calls
+/// `block_on`.
+fn db_thread() -> &'static DbThread {
+    static THREAD: OnceLock<DbThread> = OnceLock::new();
+    THREAD.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("akh-store-pg".to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to start the dedicated akh-store-pg runtime");
+                // One job at a time, start to finish, before pulling the
+                // next: see the module docs for why that is an intentional
+                // simplification rather than an accident.
+                while let Ok(job) = receiver.recv() {
+                    runtime.block_on(job());
+                }
+            })
+            .expect("failed to spawn the akh-store-pg thread");
+        DbThread { sender }
     })
+}
+
+/// Runs `work` to completion on the dedicated `akh-store-pg` thread and
+/// blocks the calling thread for the result, using whichever waiting
+/// strategy is safe for the caller's own runtime context. See the module
+/// docs for the three cases this distinguishes.
+fn run_on_db_thread<T, F, Fut>(work: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let (reply_tx, reply_rx) = mpsc::sync_channel::<T>(1);
+    let job: Job = Box::new(move || {
+        Box::pin(async move {
+            let result = work().await;
+            // `send` only fails if the receiving end was already dropped,
+            // which only happens if `block_for_reply` below already gave up
+            // (e.g. panicked) — nothing useful to do with that here.
+            let _ = reply_tx.send(result);
+        })
+    });
+    db_thread()
+        .sender
+        .send(job)
+        .expect("the akh-store-pg worker thread has terminated; cannot submit more work");
+    block_for_reply(reply_rx)
+}
+
+/// Blocks the calling thread for a `run_on_db_thread` reply, choosing the
+/// wait strategy that is actually safe given whatever runtime (if any) owns
+/// this thread. See the module docs for the reasoning behind each branch.
+fn block_for_reply<T>(reply_rx: mpsc::Receiver<T>) -> T {
+    let recv = move || {
+        reply_rx
+            .recv()
+            .expect("akh-store-pg worker thread dropped a reply sender without responding")
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            // Hands this worker off so the runtime can keep making progress
+            // on other tasks while we block on the DB thread's reply.
+            tokio::task::block_in_place(recv)
+        }
+        // No ambient runtime (plain thread/`#[test]`), or a `current_thread`
+        // runtime where `block_in_place` would itself panic: just block.
+        // See the module docs for why the latter is safe only because no
+        // binary in this workspace currently runs a `current_thread` daemon.
+        _ => recv(),
+    }
 }
 
 /// A Postgres identifier is restricted to `[a-z_][a-z0-9_]*` here (stricter
@@ -195,31 +336,77 @@ pub(crate) fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// `advisory_lock`'s `seed` for the per-`kind` transaction lock (see
+/// [`PostgresInner::begin`] and [`migrate_from_redb_if_needed`]).
+const KIND_TRANSACTION_LOCK_SEED: i64 = 0;
+/// `advisory_lock`'s `seed` for the schema-bootstrap lock (see
+/// [`ensure_schema`]). Distinct from the per-`kind` seed above so a `kind`
+/// string that happened to equal the schema name would not contend for the
+/// same lock as an unrelated bootstrap.
+const SCHEMA_BOOTSTRAP_LOCK_SEED: i64 = 1;
+
+/// Every daemon (akhsessd, akheventd, akhrtd, akhexecd, akhsbxd) opens its
+/// store — and therefore calls this — concurrently right after a rollout,
+/// all against the same shared `schema`. Without serializing it, two
+/// connections can both pass `CREATE SCHEMA IF NOT EXISTS`/`CREATE TABLE IF
+/// NOT EXISTS`'s existence check before either commits, and one loses with a
+/// duplicate-key error against the catalog (`pg_namespace_nspname_index` or
+/// `pg_type_typname_nsp_index`). Taking a dedicated advisory lock keyed by
+/// the schema name — so every daemon contends for the exact same lock,
+/// regardless of `kind` — serializes the bootstrap; the 23505 retry is a
+/// belt-and-braces fallback for any interleaving the lock doesn't cover.
 async fn ensure_schema(pool: &PgPool, schema: &str, table: &str) -> sqlx::Result<()> {
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(pool)
-        .await?;
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS {table} (\
-            kind TEXT NOT NULL, \
-            key BYTEA NOT NULL, \
-            value BYTEA NOT NULL, \
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
-            PRIMARY KEY (kind, key))"
-    ))
-    .execute(pool)
-    .await?;
-    Ok(())
+    for attempt in 0..2 {
+        let mut tx = pool.begin().await?;
+        advisory_lock(&mut tx, schema, SCHEMA_BOOTSTRAP_LOCK_SEED).await?;
+        let bootstrap: sqlx::Result<()> = async {
+            sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(&format!(
+                "CREATE TABLE IF NOT EXISTS {table} (\
+                    kind TEXT NOT NULL, \
+                    key BYTEA NOT NULL, \
+                    value BYTEA NOT NULL, \
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), \
+                    PRIMARY KEY (kind, key))"
+            ))
+            .execute(&mut *tx)
+            .await?;
+            Ok(())
+        }
+        .await;
+        match bootstrap {
+            Ok(()) => {
+                tx.commit().await?;
+                return Ok(());
+            }
+            Err(sqlx::Error::Database(ref db_error))
+                if attempt == 0 && db_error.code().as_deref() == Some("23505") =>
+            {
+                let _ = tx.rollback().await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Unreachable in practice (the loop above always returns from its first
+    // iteration unless it hits a retryable 23505, and the second iteration
+    // always returns), spelled out so a future edit that changes the retry
+    // count can't silently fall through without a result.
+    unreachable!("ensure_schema either returns Ok or propagates an error within two attempts")
 }
 
 async fn advisory_lock(
     tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
-    kind: &str,
+    key: &str,
+    seed: i64,
 ) -> sqlx::Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(kind)
-        .execute(&mut **tx)
-        .await?;
+    sqlx::query(&format!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, {seed}))"
+    ))
+    .bind(key)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -230,7 +417,7 @@ async fn migrate_from_redb_if_needed(
     legacy_path: Option<&Path>,
 ) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    advisory_lock(&mut tx, kind).await?;
+    advisory_lock(&mut tx, kind, KIND_TRANSACTION_LOCK_SEED).await?;
     let already_migrated: Option<i32> = sqlx::query_scalar(&format!(
         "SELECT 1 FROM {table} WHERE kind = $1 AND key = $2"
     ))
@@ -285,15 +472,22 @@ async fn migrate_from_redb_if_needed(
     Ok(())
 }
 
-async fn fetch_value<'e, E>(executor: E, table: &str, kind: &str, key: &[u8]) -> sqlx::Result<Option<Vec<u8>>>
+async fn fetch_value<'e, E>(
+    executor: E,
+    table: &str,
+    kind: &str,
+    key: &[u8],
+) -> sqlx::Result<Option<Vec<u8>>>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    sqlx::query_scalar(&format!("SELECT value FROM {table} WHERE kind = $1 AND key = $2"))
-        .bind(kind)
-        .bind(key)
-        .fetch_optional(executor)
-        .await
+    sqlx::query_scalar(&format!(
+        "SELECT value FROM {table} WHERE kind = $1 AND key = $2"
+    ))
+    .bind(kind)
+    .bind(key)
+    .fetch_optional(executor)
+    .await
 }
 
 async fn fetch_scan<'e, E>(
@@ -328,34 +522,79 @@ impl PostgresInner {
     pub(crate) fn open(config: PostgresConfig) -> Result<Self> {
         validate_identifier(&config.schema)?;
         let table = format!("\"{}\".akh_store", config.schema);
-        let pool = pg_runtime()
-            .block_on(PgPoolOptions::new().max_connections(5).connect(&config.url))
-            .map_err(failure)?;
-        pg_runtime()
-            .block_on(ensure_schema(&pool, &config.schema, &table))
-            .map_err(failure)?;
-        pg_runtime()
-            .block_on(migrate_from_redb_if_needed(
+        let PostgresConfig {
+            url,
+            schema,
+            kind,
+            legacy_redb_path,
+        } = config;
+        let table_for_setup = table.clone();
+        let kind_for_setup = kind.clone();
+        let pool = run_on_db_thread(move || async move {
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&url)
+                .await?;
+            ensure_schema(&pool, &schema, &table_for_setup).await?;
+            migrate_from_redb_if_needed(
                 &pool,
-                &table,
-                &config.kind,
-                config.legacy_redb_path.as_deref(),
-            ))
-            .map_err(failure)?;
+                &table_for_setup,
+                &kind_for_setup,
+                legacy_redb_path.as_deref(),
+            )
+            .await?;
+            Ok::<_, sqlx::Error>(pool)
+        })
+        .map_err(failure)?;
         Ok(Self {
             pool,
             table,
-            kind: config.kind,
+            kind,
             cache: ReadCache::default(),
+            tx_gate: Mutex::new(()),
         })
+    }
+
+    /// Admits one transaction at a time per process, the way redb's single
+    /// write transaction did. This is not an optimisation but a deadlock
+    /// guard: the per-kind advisory lock in [`PostgresInner::begin`] is
+    /// taken on the `akh-store-pg` thread, which runs one job start to
+    /// finish. If a second transaction's `begin` were allowed to queue while
+    /// a first one is open, it would block that thread on the advisory lock
+    /// held by the first transaction, whose own next statement is then stuck
+    /// behind it in the job queue — both hang forever and every plain read
+    /// in the process with them. akhsessd and akheventd did exactly that
+    /// within seconds of starting on 2026-09-13 (two backends per pod in
+    /// `pg_stat_activity`: one `idle in transaction`, one waiting on
+    /// `advisory`). Waiting here, on the caller's thread, keeps the DB
+    /// thread free to serve the open transaction. Uses `block_in_place` on
+    /// a multi-thread runtime for the same reason [`block_for_reply`] does.
+    pub(crate) fn transaction_gate(&self) -> MutexGuard<'_, ()> {
+        let lock = || {
+            self.tx_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(lock)
+            }
+            _ => lock(),
+        }
     }
 
     pub(crate) fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         if let Some(bytes) = self.cache.get(key) {
             return serde_json::from_slice(&bytes).map(Some).map_err(failure);
         }
-        let row = pg_runtime()
-            .block_on(fetch_value(&self.pool, &self.table, &self.kind, key.as_bytes()))
+        let pool = self.pool.clone();
+        let table = self.table.clone();
+        let kind = self.kind.clone();
+        let key_bytes = key.as_bytes().to_vec();
+        let row =
+            run_on_db_thread(
+                move || async move { fetch_value(&pool, &table, &kind, &key_bytes).await },
+            )
             .map_err(failure)?;
         match row {
             Some(bytes) => {
@@ -367,25 +606,31 @@ impl PostgresInner {
     }
 
     pub(crate) fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
-        let rows = pg_runtime()
-            .block_on(fetch_scan(&self.pool, &self.table, &self.kind, prefix.as_bytes()))
-            .map_err(failure)?;
+        let pool = self.pool.clone();
+        let table = self.table.clone();
+        let kind = self.kind.clone();
+        let prefix_bytes = prefix.as_bytes().to_vec();
+        let rows = run_on_db_thread(move || async move {
+            fetch_scan(&pool, &table, &kind, &prefix_bytes).await
+        })
+        .map_err(failure)?;
         rows.into_iter()
             .map(|(_, value)| serde_json::from_slice(&value).map_err(failure))
             .collect()
     }
 
     pub(crate) fn begin(&self) -> Result<PgTxState<'_>> {
-        let tx = pg_runtime()
-            .block_on(async {
-                let mut tx = self.pool.begin().await?;
-                advisory_lock(&mut tx, &self.kind).await?;
-                Ok::<_, sqlx::Error>(tx)
-            })
-            .map_err(failure)?;
+        let pool = self.pool.clone();
+        let kind = self.kind.clone();
+        let sqlx_tx = run_on_db_thread(move || async move {
+            let mut tx = pool.begin().await?;
+            advisory_lock(&mut tx, &kind, KIND_TRANSACTION_LOCK_SEED).await?;
+            Ok::<_, sqlx::Error>(tx)
+        })
+        .map_err(failure)?;
         Ok(PgTxState {
             inner: self,
-            tx: RefCell::new(Some(tx)),
+            tx: Arc::new(Mutex::new(Some(sqlx_tx))),
             pending: RefCell::new(Vec::new()),
         })
     }
@@ -393,11 +638,13 @@ impl PostgresInner {
     pub(crate) fn finish<T>(&self, state: PgTxState<'_>, result: Result<T>) -> Result<T> {
         let sqlx_tx = state
             .tx
-            .into_inner()
+            .lock()
+            .expect("akh-store-pg tx lock poisoned")
+            .take()
             .expect("transaction handle consumed twice");
         match result {
             Ok(value) => {
-                pg_runtime().block_on(sqlx_tx.commit()).map_err(failure)?;
+                run_on_db_thread(move || async move { sqlx_tx.commit().await }).map_err(failure)?;
                 self.cache.apply_committed(state.pending.into_inner());
                 Ok(value)
             }
@@ -405,43 +652,74 @@ impl PostgresInner {
                 // Best-effort: the connection returning to the pool without an
                 // explicit commit already rolls back on drop, but doing it
                 // explicitly surfaces failures instead of swallowing them.
-                let _ = pg_runtime().block_on(sqlx_tx.rollback());
+                let _ = run_on_db_thread(move || async move { sqlx_tx.rollback().await });
                 Err(err)
             }
         }
     }
 }
 
+/// Takes `handle`'s transaction out, handing back both the owned
+/// transaction and a guard-free "put it back" closure. A
+/// `std::sync::MutexGuard` is not `Send`, so it cannot be held across an
+/// `.await` inside a future that must itself be `Send` (required by
+/// [`run_on_db_thread`]); every call site below takes the transaction out
+/// before its query's `.await`, and restores it with
+/// [`restore_transaction`] right after. This is sound because only one job
+/// touches a given transaction at a time (the caller always waits for one
+/// job's reply before issuing the next), so there is never a second taker
+/// while a transaction is checked out.
+fn take_transaction(handle: &TxHandle) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    handle
+        .lock()
+        .expect("akh-store-pg tx lock poisoned")
+        .take()
+        .expect("transaction already finished")
+}
+
+fn restore_transaction(handle: &TxHandle, tx: sqlx::Transaction<'static, sqlx::Postgres>) {
+    *handle.lock().expect("akh-store-pg tx lock poisoned") = Some(tx);
+}
+
 impl PgTxState<'_> {
     pub(crate) fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
-        let mut guard = self.tx.borrow_mut();
-        let tx = guard.as_mut().expect("transaction already finished");
-        let row = pg_runtime()
-            .block_on(fetch_value(&mut **tx, &self.inner.table, &self.inner.kind, key.as_bytes()))
-            .map_err(failure)?;
+        let tx = self.tx.clone();
+        let table = self.inner.table.clone();
+        let kind = self.inner.kind.clone();
+        let key_bytes = key.as_bytes().to_vec();
+        let row = run_on_db_thread(move || async move {
+            let mut sqlx_tx = take_transaction(&tx);
+            let result = fetch_value(&mut *sqlx_tx, &table, &kind, &key_bytes).await;
+            restore_transaction(&tx, sqlx_tx);
+            result
+        })
+        .map_err(failure)?;
         row.map(|bytes| serde_json::from_slice(&bytes).map_err(failure))
             .transpose()
     }
 
     pub(crate) fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
         let bytes = serde_json::to_vec(value).map_err(failure)?;
-        {
-            let mut guard = self.tx.borrow_mut();
-            let tx = guard.as_mut().expect("transaction already finished");
-            pg_runtime()
-                .block_on(
-                    sqlx::query(&format!(
-                        "INSERT INTO {} (kind, key, value, updated_at) VALUES ($1, $2, $3, now()) \
-                         ON CONFLICT (kind, key) DO UPDATE SET value = excluded.value, updated_at = now()",
-                        self.inner.table
-                    ))
-                    .bind(&self.inner.kind)
-                    .bind(key.as_bytes())
-                    .bind(&bytes)
-                    .execute(&mut **tx),
-                )
-                .map_err(failure)?;
-        }
+        let tx = self.tx.clone();
+        let table = self.inner.table.clone();
+        let kind = self.inner.kind.clone();
+        let key_bytes = key.as_bytes().to_vec();
+        let bytes_for_write = bytes.clone();
+        run_on_db_thread(move || async move {
+            let mut sqlx_tx = take_transaction(&tx);
+            let result = sqlx::query(&format!(
+                "INSERT INTO {table} (kind, key, value, updated_at) VALUES ($1, $2, $3, now()) \
+                 ON CONFLICT (kind, key) DO UPDATE SET value = excluded.value, updated_at = now()"
+            ))
+            .bind(&kind)
+            .bind(&key_bytes)
+            .bind(&bytes_for_write)
+            .execute(&mut *sqlx_tx)
+            .await;
+            restore_transaction(&tx, sqlx_tx);
+            result
+        })
+        .map_err(failure)?;
         self.pending
             .borrow_mut()
             .push((key.to_string(), Some(bytes)));
@@ -449,31 +727,37 @@ impl PgTxState<'_> {
     }
 
     pub(crate) fn delete(&mut self, key: &str) -> Result<()> {
-        {
-            let mut guard = self.tx.borrow_mut();
-            let tx = guard.as_mut().expect("transaction already finished");
-            pg_runtime()
-                .block_on(
-                    sqlx::query(&format!(
-                        "DELETE FROM {} WHERE kind = $1 AND key = $2",
-                        self.inner.table
-                    ))
-                    .bind(&self.inner.kind)
-                    .bind(key.as_bytes())
-                    .execute(&mut **tx),
-                )
-                .map_err(failure)?;
-        }
+        let tx = self.tx.clone();
+        let table = self.inner.table.clone();
+        let kind = self.inner.kind.clone();
+        let key_bytes = key.as_bytes().to_vec();
+        run_on_db_thread(move || async move {
+            let mut sqlx_tx = take_transaction(&tx);
+            let result = sqlx::query(&format!("DELETE FROM {table} WHERE kind = $1 AND key = $2"))
+                .bind(&kind)
+                .bind(&key_bytes)
+                .execute(&mut *sqlx_tx)
+                .await;
+            restore_transaction(&tx, sqlx_tx);
+            result
+        })
+        .map_err(failure)?;
         self.pending.borrow_mut().push((key.to_string(), None));
         Ok(())
     }
 
     pub(crate) fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
-        let mut guard = self.tx.borrow_mut();
-        let tx = guard.as_mut().expect("transaction already finished");
-        let rows = pg_runtime()
-            .block_on(fetch_scan(&mut **tx, &self.inner.table, &self.inner.kind, prefix.as_bytes()))
-            .map_err(failure)?;
+        let tx = self.tx.clone();
+        let table = self.inner.table.clone();
+        let kind = self.inner.kind.clone();
+        let prefix_bytes = prefix.as_bytes().to_vec();
+        let rows = run_on_db_thread(move || async move {
+            let mut sqlx_tx = take_transaction(&tx);
+            let result = fetch_scan(&mut *sqlx_tx, &table, &kind, &prefix_bytes).await;
+            restore_transaction(&tx, sqlx_tx);
+            result
+        })
+        .map_err(failure)?;
         rows.into_iter()
             .map(|(_, value)| serde_json::from_slice(&value).map_err(failure))
             .collect()
@@ -544,5 +828,23 @@ mod tests {
         let pending = vec![("a".to_string(), Some(b"after".to_vec()))];
         drop(pending); // simulates `Store::transaction`'s rollback path
         assert_eq!(cache.get("a"), Some(b"before".to_vec()));
+    }
+
+    /// Regression test for the production incident: calling `run_on_db_thread`
+    /// synchronously from inside an async function running on a multi-thread
+    /// Tokio runtime worker must not panic with "Cannot start a runtime from
+    /// within a runtime". This does not touch Postgres — it only exercises
+    /// the `block_for_reply`/`block_in_place` bridging, which is exactly what
+    /// crashed every daemon at startup before this module's rewrite.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_on_db_thread_does_not_panic_from_a_multi_thread_runtime_worker() {
+        let value = run_on_db_thread(|| async { 42u32 });
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn run_on_db_thread_works_with_no_ambient_runtime() {
+        let value = run_on_db_thread(|| async { "ok".to_string() });
+        assert_eq!(value, "ok");
     }
 }
