@@ -87,4 +87,17 @@ fn config_rejects_inline_secrets_and_unknown_fields() {
     assert!(toml::from_str::<sokar::config::Limits>("max_body_bytes=1024\ntypo=true").is_err());
     assert!(sokar::config::SecretRef::try_from("env:".to_owned()).is_err());
     assert!(sokar::config::SecretRef::try_from("file:relative".to_owned()).is_err());
+    assert!(sokar::config::OptionValue::try_from("env:".to_owned()).is_err());
+    assert!(matches!(
+        sokar::config::OptionValue::try_from("my-bucket".to_owned()),
+        Ok(sokar::config::OptionValue::Literal(v)) if v == "my-bucket"
+    ));
+    assert!(matches!(
+        sokar::config::OptionValue::try_from("literal:env:notasecret".to_owned()),
+        Ok(sokar::config::OptionValue::Literal(v)) if v == "env:notasecret"
+    ));
+    assert!(matches!(
+        sokar::config::OptionValue::try_from("env:SOKAR_X".to_owned()),
+        Ok(sokar::config::OptionValue::Secret(_))
+    ));
 }

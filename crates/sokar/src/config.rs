@@ -34,6 +34,53 @@ impl TryFrom<String> for SecretRef {
         ))
     }
 }
+/// A store option value: a plain literal for non-secret settings (bucket,
+/// endpoint, region, root) or an `env:`/`file:` indirection for credentials.
+/// `literal:` escapes a value that happens to start with a reserved prefix.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "String")]
+pub enum OptionValue {
+    Literal(String),
+    Secret(SecretRef),
+}
+impl TryFrom<String> for OptionValue {
+    type Error = SokarError;
+    fn try_from(value: String) -> SokarResult<Self> {
+        if value.starts_with("env:") || value.starts_with("file:") {
+            return SecretRef::try_from(value).map(Self::Secret);
+        }
+        if let Some(rest) = value.strip_prefix("literal:") {
+            return Ok(Self::Literal(rest.into()));
+        }
+        if value.is_empty() {
+            return Err(SokarError::Config(
+                "store option values must not be empty".into(),
+            ));
+        }
+        Ok(Self::Literal(value))
+    }
+}
+impl From<SecretRef> for OptionValue {
+    fn from(value: SecretRef) -> Self {
+        Self::Secret(value)
+    }
+}
+impl OptionValue {
+    pub fn resolve(&self) -> SokarResult<String> {
+        match self {
+            Self::Literal(value) => Ok(value.clone()),
+            Self::Secret(secret) => secret.resolve(),
+        }
+    }
+    /// Renders the value back in config syntax (used by test fixtures).
+    pub fn to_config_string(&self) -> String {
+        match self {
+            Self::Literal(value) => value.clone(),
+            Self::Secret(SecretRef::Env(name)) => format!("env:{name}"),
+            Self::Secret(SecretRef::File(path)) => format!("file:{}", path.display()),
+        }
+    }
+}
 impl SecretRef {
     pub fn resolve(&self) -> SokarResult<String> {
         let value = match self {
@@ -78,7 +125,7 @@ pub struct StoreConfig {
     pub service: ServiceKind,
     pub prefix: Option<String>,
     #[serde(default)]
-    pub options: BTreeMap<String, SecretRef>,
+    pub options: BTreeMap<String, OptionValue>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

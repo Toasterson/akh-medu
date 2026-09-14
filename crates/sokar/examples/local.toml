@@ -1,5 +1,5 @@
 # Local filesystem demo. See docs/ai/phases/phase-52-sokar/52a-report.md.
-# Store options (including nonsecret settings) use env:/file: references.
+# Store options: plain literals for non-secret settings; credentials via env:/file:.
 default_store = "local"
 
 [server]

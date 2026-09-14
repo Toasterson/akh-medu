@@ -35,7 +35,7 @@ impl Fixture {
             },
             prefix: Some("test-prefix".into()),
             options: if fs {
-                BTreeMap::from([("root".into(), SecretRef::File(root))])
+                BTreeMap::from([("root".into(), SecretRef::File(root).into())])
             } else {
                 BTreeMap::new()
             },
@@ -153,10 +153,7 @@ token_file = {token:?}
             }
             config.push_str("[store.options]\n");
             for (key, value) in &store.options {
-                let value = match value {
-                    SecretRef::File(path) => format!("file:{}", path.display()),
-                    SecretRef::Env(name) => format!("env:{name}"),
-                };
+                let value = value.to_config_string();
                 config.push_str(&format!("{key} = {value:?}\n"));
             }
         }

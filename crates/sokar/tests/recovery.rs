@@ -196,7 +196,7 @@ async fn minio_s3_contract() {
             ("region", "SOKAR_MINIO_REGION"),
         ]
         .into_iter()
-        .map(|(key, value)| (key.into(), SecretRef::Env(value.into())))
+        .map(|(key, value)| (key.into(), SecretRef::Env(value.into()).into()))
         .collect(),
     };
     let stores = StoreRegistry::build(&[config]).await.unwrap();
