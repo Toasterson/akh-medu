@@ -609,6 +609,7 @@ impl KnowledgeEpisode {
                 system_context: None,
                 prompt,
                 target: target.clone(),
+                weight: None,
             });
 
             match &step.expected {
@@ -654,6 +655,12 @@ pub struct KnowledgeSftRecord {
     pub prompt: String,
     /// Runtime-native assistant output.
     pub target: String,
+    /// Optional reward-derived per-record loss weight in `[0, 1]`, used by
+    /// `train_knowledge --record-weights use` (P6.5 experiment E3). Absent
+    /// (or ignored under the default `--record-weights ignore`) means the
+    /// record is weighted as 1.0, identical to pre-E3 behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f32>,
 }
 
 impl KnowledgeSftRecord {

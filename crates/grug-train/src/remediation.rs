@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::GrugError;
 use crate::knowledge_train::MAX_KNOWLEDGE_STEERING_SHARE_PPM;
+use crate::train::RecordWeightsMode;
 
 /// Default ceiling on how much of a remediation segment's mixture an
 /// engine-generated supplemental corpus may occupy, in parts per million.
@@ -103,6 +104,23 @@ pub struct RemediationLineage {
     pub learning_rate: f64,
     pub warmup_steps: usize,
     pub epochs: usize,
+    /// Whether this segment read per-record reward weights from
+    /// `KnowledgeSftRecord::weight` (Phase 51 P6.5 experiment E3). Absent
+    /// from `RemediationLineage` blocks written before this field existed --
+    /// `#[serde(default)]` resolves those to [`RecordWeightsMode::Ignore`],
+    /// exactly matching their actual (pre-E3) behaviour.
+    #[serde(default)]
+    pub record_weights: RecordWeightsMode,
+    /// How many training records in this segment's full mixture (base +
+    /// supplemental) carried a `weight` value. Always `0` when
+    /// `record_weights` is `Ignore` (weights are never read, so none are
+    /// counted as "used" regardless of what the source JSONL happens to
+    /// contain) -- this is what lets an E3 treatment candidate
+    /// (`record_weights: "use"`, `weighted_record_count > 0`) and its
+    /// control (`record_weights: "ignore"`, `weighted_record_count == 0`)
+    /// be told apart from `candidate-model.json` alone.
+    #[serde(default)]
+    pub weighted_record_count: usize,
 }
 
 impl RemediationLineage {
@@ -156,6 +174,13 @@ impl RemediationLineage {
         }
         if self.epochs == 0 {
             return Err("remediation lineage epochs must be positive".into());
+        }
+        if self.record_weights == RecordWeightsMode::Ignore && self.weighted_record_count != 0 {
+            return Err(
+                "remediation lineage has record_weights=ignore but a nonzero \
+                 weighted_record_count -- weights that are never read cannot have been used"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -267,6 +292,8 @@ mod tests {
             learning_rate: 1.5e-4,
             warmup_steps: 100,
             epochs: 2,
+            record_weights: RecordWeightsMode::Ignore,
+            weighted_record_count: 0,
         }
     }
 
@@ -292,6 +319,40 @@ mod tests {
         let mut lineage = sample_lineage();
         lineage.supplemental_training_records = 51;
         assert!(lineage.verify().is_err());
+    }
+
+    #[test]
+    fn lineage_rejects_ignore_mode_with_nonzero_weighted_count() {
+        let mut lineage = sample_lineage();
+        lineage.record_weights = RecordWeightsMode::Ignore;
+        lineage.weighted_record_count = 3;
+        assert!(lineage.verify().is_err());
+    }
+
+    #[test]
+    fn lineage_accepts_use_mode_with_weighted_count() {
+        let mut lineage = sample_lineage();
+        lineage.record_weights = RecordWeightsMode::Use;
+        lineage.weighted_record_count = 3;
+        lineage
+            .verify()
+            .expect("use mode with weighted records verifies");
+    }
+
+    /// A `RemediationLineage` JSON blob written before `record_weights`/
+    /// `weighted_record_count` existed must still deserialize, defaulting to
+    /// `Ignore`/`0` -- exactly the pre-E3 behaviour those blocks recorded.
+    #[test]
+    fn lineage_defaults_record_weights_when_absent_from_legacy_json() {
+        let mut value = serde_json::to_value(sample_lineage()).expect("serialize sample lineage");
+        let object = value.as_object_mut().expect("lineage is a JSON object");
+        object.remove("record_weights");
+        object.remove("weighted_record_count");
+        let decoded: RemediationLineage =
+            serde_json::from_value(value).expect("legacy lineage without record_weights fields");
+        assert_eq!(decoded.record_weights, RecordWeightsMode::Ignore);
+        assert_eq!(decoded.weighted_record_count, 0);
+        decoded.verify().expect("legacy-defaulted lineage verifies");
     }
 
     #[test]

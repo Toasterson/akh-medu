@@ -1196,6 +1196,7 @@ mod tests {
             system_context: None,
             prompt: prompt.into(),
             target: target.into(),
+            weight: None,
         }
     }
 

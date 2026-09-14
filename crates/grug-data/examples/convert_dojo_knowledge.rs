@@ -220,6 +220,7 @@ fn make_record(
         system_context: Some(system_context),
         prompt,
         target,
+        weight: None,
     })
 }
 

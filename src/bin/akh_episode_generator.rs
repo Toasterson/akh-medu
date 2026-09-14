@@ -2772,6 +2772,7 @@ fn build_sidecar_record(
         system_context: None,
         prompt,
         target: target_text.to_string(),
+        weight: None,
     })))
 }
 
