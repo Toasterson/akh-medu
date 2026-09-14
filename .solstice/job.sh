@@ -72,8 +72,12 @@ echo "=== cargo check --features server (root crate) ==="
 # build hosts; RUSTC_WRAPPER is set explicitly for clarity.
 export CARGO_BUILD_JOBS=1
 export CARGO_PROFILE_DEV_DEBUG=0
-export RUSTC_WRAPPER=sccache
-sccache --show-stats || true
+export CARGO_INCREMENTAL=0 SCCACHE_IDLE_TIMEOUT=0
+if command -v sccache >/dev/null 2>&1 && sccache --start-server >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+else
+  unset RUSTC_WRAPPER
+fi
 cargo check --features server
 
 echo "=== cargo test --features postgres --lib ==="
