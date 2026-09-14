@@ -494,3 +494,183 @@ not fixed here since it's outside this task's scope): `plan_hash` is derived fro
 (`blake3("akh-episode-generator-engine-v1:{family_tag}:{sft.len()}")`), so the treatment and control sidecar
 manifests share an identical `plan_hash` when their kept counts match (as in the 50/50 smoke run above) — this
 already happens for the four existing families across separate runs of equal size and is orthogonal to E4.
+
+## P6.5/E3 addendum: multi-step engine episodes with per-step causal rewards (2026-09-14)
+
+Scope: `docs/ai/plans/2026-09-13-phase51-p6-local-training-neurosymbolic.md` §Experiments (E3), Anima WI
+`01a09ac7-f938-7e43-9044-94cdbebbc14e` (P6.5). This closes the "known gap" the original P6.3 run recorded
+verbatim: "`e3_causal_reward` is a post-hoc confirmation, not yet a multi-step plan reward... Extending this
+to score genuinely multi-step plans with some correct and some incorrect steps is P6.5/E3's fuller
+treatment, not attempted here" — and the P6.5 concrete-designs section's "E3 is NOT runnable yet: the
+siblings are single-step, so 'causal reward per step' has nothing to weight; it needs multi-step engine
+episodes... Recorded as open."
+
+### What landed
+
+New `--e3-episodes N` (default 0, off). For each of the three oracle-scenario worlds
+(`docs/ai/plans/2026-09-12-akh-R0-episode-contract.md`'s acquire/revise/repair) the generator now builds `N`
+real multi-step (`K=2`) engine episodes — `3N` episodes, `6N` `EpisodeRecord`s — instead of the single-step
+`--oracle-seeds` family, which is unchanged and still runs alongside it:
+
+- **`generate_e3_acquire_episode`**: step 0 persists a discovered command syntax via a real
+  `MemoryWriteTool::execute`; step 1, after a simulated restart (a fresh `Engine` handle re-opened over the
+  same persisted `ScratchDir`), recalls it as an `Answer`.
+- **`generate_e3_revise_episode`**: step 0 applies a sourced route correction via the same
+  retract-then-assert graph mutation `generate_oracle_revise` uses (not a bare `remove_triple`); step 1
+  verifies the current route by answering from the revised graph.
+- **`generate_e3_repair_episode`**: step 0 attempts the repair while authorization is revoked and must
+  decline (`KnowledgeAction::Gap`); step 1, after a real reauthorization event recorded on the same
+  `EventCalculusEngine` fluent, completes the repair via a real tool execution.
+
+Every step's `labels.e3_step_reward` is computed the same way the existing single-step E3 labels are: a
+real `ActionSchema` registered with `CausalManager::register_action_schema`, then
+`predict_effects` -> `verify_prediction` against the engine's actual post-step state (1.0 verified, 0.0
+not) — `causal_label`, unchanged, reused per step rather than reimplemented. `labels.e3_step_index` and
+`labels.e3_episode_steps` are also carried so a consumer reading only `labels` (e.g. a reward-weighted loss
+over the sidecar) knows a step's position without needing `EpisodeRecord.step`/`episode_id`.
+
+**Conversation carry-over** follows the two patterns already established elsewhere in this codebase rather
+than inventing a third: a tool-call step chains forward via an assistant tool-call turn plus a tool-response
+turn, exactly `KnowledgeEpisode::to_sft_records`'s own shape (`crates/grug-data/src/knowledge_workflow.rs`);
+a step that depends on a genuinely new decision point (a restart, a reauthorization) chains forward via a
+fresh user turn, the way `crates/grug-data/examples/convert_dojo_knowledge.rs`'s sparring conversion carries
+a real dialogue forward. Verified directly in `e3_acquire_episode_has_two_steps_with_conversation_carryover_and_full_reward`:
+step 1's `conversation` is `[user0, assistant0(tool_call), tool0(response), user1]` — 4 entries, not a fresh
+single-turn reconstruction — and its first entry is literally the same object as step 0's only entry.
+
+### The "deliberately wrong step" mechanism (spread of rewards)
+
+Without it every step's reward would trivially be 1.0 (every "ground truth" graph mutation in this
+generator always succeeds), which would make reward-weighting inert — the brief's own acceptance bar
+("the E3 treatment must have a spread of rewards, otherwise weighting is inert"). Design: this generator's
+own code always applies each episode's *actual* graph mutation directly — exactly like
+`generate_oracle_revise`/`_repair` and the E4 treatment/control functions above, none of which route their
+ground truth through the declared training target either — independent of which target text a given step
+ends up declaring. `e3_wrong_step(i, eligible)` deterministically flags every 4th episode index
+(`E3_WRONG_STEP_STRIDE = 4`), choosing one of that scenario's `eligible` steps (`[0, 1]` for acquire/revise;
+`[1]` only for repair — see below), and that one step's declared target/reward swaps from the
+engine-completed pair to the raw, schema-valid-but-causally-false one (the same `raw_target`/`raw_reward`
+shape the single-step E1/E3 labels already use). Because ground truth is applied independently of the
+declared target, flagging one step never desyncs another — verified in
+`e3_wrong_step_flips_exactly_one_step_to_a_causally_false_target_and_reward`: for every non-flagged step the
+target and reward are byte-identical to the same episode generated with `wrong_step: None`.
+
+`oracle_repair`'s first step is exempt from this mechanism: its `Gap` decline is a genuine negative signal
+(the would-be repair effect was never applied — the same case `generate_oracle_repair`'s existing doc
+comment calls out), always `e3_step_reward == 0.0` regardless of `wrong_step`, not a flagged proposal — so
+only step 1 (the post-reauthorization repair) is eligible to be the deliberately-wrong step for that
+scenario. This means the repair scenario contributes a real 0.0 on *every* episode, not just every 4th —
+documented in `e3_repair_first_step_is_a_genuine_zero_reward_decline_never_the_wrong_step` and in the
+richer-than-required reward spread reported below.
+
+### Sidecars: `e3_multistep_treatment/` and `e3_multistep_control/`
+
+Both require `--contracts`, same as the other sidecars. Unlike `write_steering_sidecar`/`build_sidecar_record`
+(which deliberately *resynthesize* a fresh single-turn user request from the base tool-contract corpus's own
+phrase table — appropriate for the four tool-contract families, whose own `EpisodeRecord.conversation` is a
+single ad hoc turn with no base-corpus equivalent to carry over), a new `build_e3_sidecar_record` keeps
+`record.conversation` and `record.target` **verbatim** — resynthesizing either would erase the multi-step
+character the whole experiment measures. It borrows `build_sidecar_record`'s two real obligations only: a
+real `frozen.manifest_hash` `contract_hash`, and `ToolContractSnapshot::validate_call` on every `ToolCall`
+target. It also extends coverage `build_sidecar_record` does not have: `Answer` targets (the recall/verify
+steps) are accepted, not dropped as `SchemaInvalid` — necessary here since two of the three scenarios end in
+an `Answer`, not a `ToolCall`/`Gap`.
+
+Both sidecars carry byte-identical records; the sole difference is `KnowledgeSftRecord.weight` — the new
+field added to `grug_data::knowledge_workflow::KnowledgeSftRecord` (`#[serde(default,
+skip_serializing_if = "Option::is_none")] pub weight: Option<f32>`, last field, per the brief's exact
+declaration). Treatment sets `weight = Some(labels.e3_step_reward as f32)` on every record; control leaves
+every `weight` `None`. Verified directly in `e3_sidecars_are_written_treatment_weighted_control_unweighted`:
+per-record weight equality against the primary record's `labels.e3_step_reward`, `None` on every control
+record, and prompt/target/conversation identity across the two arms (only `weight` may differ).
+
+`write_steering_sidecar`'s write-and-hash tail (`train.sft.jsonl`, `separation.json`, `manifest.json`) was
+extracted into a shared `write_sidecar_files` helper so `write_e3_sidecar` reuses it verbatim rather than
+copy-pasting the ~90-line tail a second time — a pure refactor, not a behavior change (the existing E1/E2/E4
+sidecar tests, unmodified, still pass against the refactored `write_steering_sidecar`).
+
+`grug-data` field addition (the one exception to "touch only the generator", explicitly granted in the
+brief): `weight: Option<f32>` on `KnowledgeSftRecord`. Because that struct has no `#[derive(Default)]` and
+every existing construction site is a full struct literal (not `..Default::default()`), the field addition
+alone does not compile the crate — confirmed with `cargo check -p grug-data` before touching anything else,
+which failed with 3 `E0063 missing field` errors (`crates/grug-data/src/knowledge_workflow.rs:597`,
+`crates/grug-data/src/tool_curriculum.rs:300` and `:691`) plus a 4th in the example
+`crates/grug-data/examples/convert_dojo_knowledge.rs:208` once `cargo test -p grug-data` was run. Added the
+mechanical `weight: None,` one-liner at each of those four sites — no logic change, required for the crate
+(and this task's own `cargo test -p grug-data` deliverable) to build at all. `crates/grug-train`'s
+construction sites (`examples/train_knowledge.rs`, `src/knowledge_train.rs`) were deliberately left
+untouched, per the brief's "a concurrent agent adds the identical line... for the trainer side."
+
+### Tests
+
+Seven new tests (25/25 total in the binary): `e3_wrong_step_stride_is_deterministic_and_scoped_to_eligible`,
+`e3_acquire_episode_has_two_steps_with_conversation_carryover_and_full_reward`,
+`e3_wrong_step_flips_exactly_one_step_to_a_causally_false_target_and_reward` (both acquire and revise, both
+eligible step indices), `e3_repair_first_step_is_a_genuine_zero_reward_decline_never_the_wrong_step`,
+`e3_multistep_produces_six_records_per_index_with_a_real_reward_spread` (asserts both 0.0 and 1.0 rewards
+present, 24 distinct episode ids each with steps `[0, 1]`), `e3_sidecars_are_written_treatment_weighted_control_unweighted`.
+`cargo test --bin akh_episode_generator --features daemon` 25/25 green; `cargo test -p grug-data` green (290
+lib + 41 integration + 4 doctests — one integration test, `procedural_generation_is_fast_at_moderate_volume`,
+is a wall-clock throughput assertion that flaked once under concurrent CPU load from other processes on this
+machine and passed cleanly on a standalone rerun, confirmed unrelated to this change: it asserts nothing
+about `KnowledgeSftRecord`/`weight`). `cargo clippy --bin akh_episode_generator --features daemon` clean for
+`src/bin/akh_episode_generator.rs` (one `manual_is_multiple_of` finding fixed during development; running
+`--tests` additionally compiles an unrelated `benchmark_chat` integration test that fails on two pre-existing
+`clippy::approx_constant` errors in `src/agent/active_inference.rs`, outside this change's scope).
+`cargo fmt` applied to the four touched files only.
+
+### Smoke run
+
+No real `contracts.json` is reachable on this machine (same "Real base-corpus/exam artifacts" boundary the
+P6.3b section above documents). Built the same 4-tool stand-in snapshot `test_frozen_contracts` uses (a
+throwaway `examples/tmp_e3_smoke_contracts.rs`, deleted after the run — not part of this change) and ran:
+
+```
+cargo run --bin akh_episode_generator --features daemon -- \
+  --count 20 --oracle-seeds 4 --e3-episodes 20 --seed 20260914 \
+  --contracts <4-tool stand-in contracts.json> \
+  --out-dir <out-dir>
+```
+
+| artifact | records |
+|---|---:|
+| `e3_multistep.jsonl` (primary) | 120 (3 scenarios x 20 episodes x 2 steps) |
+| `e3_multistep_treatment/train.sft.jsonl` | 120 |
+| `e3_multistep_control/train.sft.jsonl` | 120 |
+
+`manifest.json`: `e3_episodes_per_scenario: 20`, `e3_step_reward_histogram: {"0.0": 35, "1.0": 85}`,
+`e3_sidecar_treatment: {"dir":"e3_multistep_treatment","kept":120,"schema_invalid_dropped":0}`,
+`e3_sidecar_control: {"dir":"e3_multistep_control","kept":120,"schema_invalid_dropped":0}`. `60` distinct
+`episode_id`s (3 scenarios x 20), each with exactly steps `[0, 1]`.
+
+**Reward distribution, worked out and matched exactly:** per scenario, 20 episodes each contribute one
+deliberately-wrong step on indices `i % 4 == 0` (`i = 0, 4, 8, 12, 16` — 5 episodes). Acquire/revise: 5
+wrong episodes x 1 zero-reward step + 15 clean episodes x 2 one-reward steps = 5 zeros / 35 ones each (40
+records each). Repair: every episode's step 0 is a genuine 0.0 (20 zeros) plus 5 more zeros from the
+wrong-flagged step 1 (15 ones) = 25 zeros / 15 ones (40 records). Totals: `5 + 5 + 25 = 35` zeros, `35 + 35 +
+15 = 85` ones, `35 + 85 = 120` — exactly the measured `e3_step_reward_histogram`. Independently verified the
+treatment sidecar's `weight` field matches this same `{0.0: 35, 1.0: 85}` split
+(`python3 -c "..."` over `e3_multistep_treatment/train.sft.jsonl`) and the control sidecar's `weight` is
+`None` on all 120 records.
+
+Spot-checked episode 0 (a wrong-flagged acquire episode, step 0 == the flagged step): step 0's target is a
+`memory_write` `ToolCall` with a truncated (`corrupt_copy`) syntax value and `e3_step_reward: 0.0`; step 1's
+target is `"The syntax is: e3-acquire-syntax-20260914-0 --flag=0\n\nSources:\n- ..."` — the real,
+uncorrupted persisted value, recalled correctly with `e3_step_reward: 1.0` — direct confirmation that step
+0's declared-wrong proposal never affected the graph state step 1 reads from.
+
+`per_family_counts.oracle: 12` (unchanged `--oracle-seeds 4` single-step family, distinct from
+`e3_multistep`) confirms the two oracle-style families coexist in the same run without interference.
+
+### Deviations from the brief
+
+- The repair scenario's step 0 decline is a genuine 0.0-reward negative signal on every episode (not just
+  every 4th), on top of the every-4th deliberately-wrong-step mechanism — a richer reward spread than the
+  brief's minimum bar, documented above and in the reward-distribution numbers rather than suppressed to
+  look like a cleaner 3:1 split.
+- `weight` is copied as `e3_step_reward as f32` (the field's declared type); `e3_step_reward` itself stays
+  `f64` in `EpisodeLabels`, matching the existing `e3_causal_reward_completed`/`_raw` fields' type — no
+  precision loss in practice since every value is exactly `0.0` or `1.0`.
+- Mechanical `weight: None,` additions at grug-data's own three internal `KnowledgeSftRecord` construction
+  sites plus one example, beyond the literal "one field addition" — required for `cargo check -p grug-data`/
+  `cargo test -p grug-data` to pass at all (see above); no logic in those functions changed.
