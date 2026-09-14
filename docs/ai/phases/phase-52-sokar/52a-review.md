@@ -1,4 +1,6 @@
-# 52a review — round 1 findings and round 2 fix list
+# 52a review — findings, fix rounds and acceptance
+
+**Verdict (2026-09-14): ACCEPTED** at `e4bc89b3` after three rounds (R1–R18 all landed). Reviewer re-ran scoped fmt, clippy `-D warnings`, `cargo test -p sokar -p sokar-client` (31 passed, 1 ignored MinIO contract), `cargo check --workspace --all-targets` and `cargo fmt --all --check` on the merged tree; merged into `t3code/2efc86a1` as `5fcabf2b` (no push yet). Remaining evidence gaps, carried into 52b/52g: live SeaweedFS/MinIO presign and conditional-copy behaviour (fake-operator evidence only), GCS/Azure build-only.
 
 Reviewer: Fable architect session, 2026-09-14. Subject: branch `sokar/52a` at `93addcbb` (three Codex gpt-6-astra commits).
 Verification by the reviewer: `cargo fmt -p sokar -p sokar-client --check` pass, `cargo clippy … -D warnings` pass, `cargo test -p sokar -p sokar-client` 17 passed / 1 ignored (MinIO). Scope respected: only the two crates, workspace members, lockfile and the report changed.
