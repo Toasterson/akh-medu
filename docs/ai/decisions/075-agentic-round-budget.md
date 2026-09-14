@@ -71,3 +71,14 @@ Replace the flat constant with a `RoundBudget` that combines overlapping limits:
   distinct-calls-don't-trip. Deploy needs a release rebuild + daemon restart.
 - Untouched (separate gap): `memory_recall` returns episode summaries, not the
   granular facts — a recall-quality follow-up worth doing so a single round suffices.
+
+## Amendment: autonomous continuation (2026-09-14)
+
+Autonomous dispatch no longer inherits the interactive 12/20/30-round or
+300-second limits. Explicit operator environment limits remain effective.
+Repetition, cancellation, and liveness detection remain enabled. An interrupted
+turn returns an incomplete outcome through ACP (`max_turn_requests` with a typed
+`_akh_interruption` reason, or `cancelled` for client cancellation), never
+`end_turn`. Dispatch does not synthesize a completion on cutoff; interrupted
+answers are not recorded as completed-turn training examples. The runner must
+preserve partial edits for continuation without promoting them to review.

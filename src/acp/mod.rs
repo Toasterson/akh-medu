@@ -1445,6 +1445,11 @@ impl AkhAcpAgent {
             ) {
                 return Err(TurnFailure::CompletionContractFailed);
             }
+            if let Some(crate::agent::agentic_chat::AgenticTurnOutcome::Interrupted(reason)) =
+                agentic_outcome
+            {
+                return Err(TurnFailure::Interrupted(reason));
+            }
             if agentic_outcome.is_none() {
                 // Symbolic fallback needs `&mut Agent` (it calls
                 // `dispatch_abstree` / `escalate_to_goal` which mutate goals,
@@ -1486,12 +1491,30 @@ impl AkhAcpAgent {
 /// instead of letting the session continue tool-less.
 #[derive(Debug)]
 enum TurnFailure {
+    Interrupted(crate::agent::agentic_chat::TurnStop),
     /// A host-enforced completion contract rejected this turn's completion.
     CompletionContractFailed,
     /// One or more client-pushed MCP servers did not come back after the
     /// bounded retry. The session must not continue without its tools.
     #[cfg(feature = "daemon")]
     McpDiscoveryFailed(mcp_bridge::DiscoveryFailure),
+}
+
+fn interrupted_prompt_response(
+    reason: crate::agent::agentic_chat::TurnStop,
+    client_cancelled: bool,
+) -> PromptResponse {
+    let stop = if client_cancelled || reason == crate::agent::agentic_chat::TurnStop::Cancelled {
+        StopReason::Cancelled
+    } else {
+        StopReason::MaxTurnRequests
+    };
+    let mut response = PromptResponse::new(stop);
+    response.meta = Some(serde_json::Map::from_iter([
+        ("_akh_interruption".into(), serde_json::json!(reason.code())),
+        ("_akh_incomplete".into(), serde_json::json!(true)),
+    ]));
+    response
 }
 
 /// ACP-facing wrapper around the registry's thread-confined session overlay.
@@ -5433,6 +5456,18 @@ fn build_connection(me: AkhAcpAgent) -> impl agent_client_protocol::ConnectTo<Cl
                                 // charges rejected/tool-less work as a clean
                                 // completion.
                                 match start_err {
+                                    TurnFailure::Interrupted(reason) => {
+                                        use crate::agent::agentic_chat::TurnStop;
+                                        let cancelled = cancel.load(std::sync::atomic::Ordering::Relaxed)
+                                            || reason == TurnStop::Cancelled;
+                                        telemetry.finish(&ws, if cancelled {
+                                            crate::agent::turn_telemetry::TurnStopReason::Cancelled
+                                        } else {
+                                            crate::agent::turn_telemetry::TurnStopReason::Other
+                                        });
+                                        let response = interrupted_prompt_response(reason, cancelled);
+                                        return responder.respond(response);
+                                    }
                                     TurnFailure::CompletionContractFailed => {
                                         tracing::warn!(
                                             workspace = %ws,
@@ -6678,6 +6713,31 @@ pub async fn run_prompt_turn_tcp(
 // tighten these back; if a test legitimately needs >60s, something is wrong.
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_turn_response_never_claims_end_turn() {
+        use crate::agent::agentic_chat::TurnStop;
+        for reason in [
+            TurnStop::IterationCap,
+            TurnStop::Timeout,
+            TurnStop::RepeatLoop,
+            TurnStop::WedgeTimeout,
+            TurnStop::DeclaredButIdle,
+        ] {
+            let response = interrupted_prompt_response(reason, false);
+            assert_eq!(response.stop_reason, StopReason::MaxTurnRequests);
+            assert_eq!(response.meta.unwrap()["_akh_interruption"], reason.code());
+            assert_eq!(
+                interrupted_prompt_response(reason, true).stop_reason,
+                StopReason::Cancelled
+            );
+        }
+        assert_eq!(
+            interrupted_prompt_response(TurnStop::Cancelled, false).stop_reason,
+            StopReason::Cancelled
+        );
+    }
+
     use crate::agent::AgentConfig;
     use crate::engine::EngineConfig;
     use crate::nlu::NluPipeline;
