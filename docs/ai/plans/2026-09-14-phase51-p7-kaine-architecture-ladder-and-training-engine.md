@@ -1,7 +1,7 @@
 # Phase 51 P7 — ADAM → Kaine architecture ladder and the training-engine memory program
 
 - **Status:** Planned (2026-09-14), **gated on P6**: no P7 item starts until the P6.4/P6.5 window queue (`runs/p6-4/queue-20260914.txt`) and its release gate have finished (operator decision 2026-09-14). All items are HITL: `source=architect-session`, `draft` until the operator promotes them, never `ready`/`working`
-- **ADRs:** [ADR 108](../decisions/108-kaine-architecture-ladder.md) (architecture ladder), [ADR 109](../decisions/109-training-engine-memory-program.md) (engine memory); governance [ADR 105](../decisions/105-autonomous-run-governance.md); lane [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); attention memory [ADR 107](../decisions/107-training-memory-turboquant-vs-recompute-attention.md)
+- **ADRs:** [ADR 108](../decisions/108-kaine-architecture-ladder.md) (architecture ladder), [ADR 109](../decisions/109-training-engine-memory-program.md) (engine memory), [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) (character, guided reward, live environment — extension of 2026-09-14, §below); governance [ADR 105](../decisions/105-autonomous-run-governance.md); lane [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); attention memory [ADR 107](../decisions/107-training-memory-turboquant-vs-recompute-attention.md)
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`
 - **Predecessor:** [P6 plan](2026-09-13-phase51-p6-local-training-neurosymbolic.md) (active; P7 does not pre-empt the P6.4/P6.5 window queue)
 
@@ -68,3 +68,44 @@ the Mac, 350M and 1.1B on one pod GPU, Kaine on whatever P7.8 shows is needed.
 - It does not change the ADAM release gate or the P6 remediation windows.
 - It does not adopt Titans/TTT/ATLAS, activation quantisation, LOMO, FP8 or an engine swap (ADR 108 §Decision 6, ADR 109 §Decision 2, 4).
 - It does not fix Kaine's parameter count; that is the output of P7.7 and P7.8.
+
+## ADR 110 extension (2026-09-14): character, guided reward, live environment
+
+Inputs: Cantrill, *Intelligence is not Enough* (Monktoberfest 2023); Hatcher on Gibson, *we act to perceive*; Oxide's principles and
+values. Decisions are in [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md): (1) the crew-of-8 slots carry
+Oxide's 15 values as their public trained biases, the three principles are captain invariants enforced by the runtime; (2) reward is
+guided and fine-grained — every step scored, every failed step yields a corrected sibling, a five-component reward vector
+(effect / validity / provenance / disposition / budget) with a named reduction policy, weights in [0, 1], never a penalty, no
+scalar-judge policy gradient; (3) episodes come from the real environment — `Engine` + the full `ToolRegistry` + Agent Board + Anima +
+executor `Backend`, run as a sandboxed dojo tenancy, one dispatch per episode, end to end.
+
+### New work items
+
+| WI | scope | exit condition |
+|---|---|---|
+| `01a0a1b9-eb77-7390-9730-361a9d92faae` P7.10 `AkhEnvironment` dojo tenancy | stepped environment over the real Engine, full `ToolRegistry`, Agent Board (`DjehutyClient` + `akh-session-services` inbox intake, `coordination/*@v1`) and Anima (`get_work_item`, `submit_session_change`, `git_publication`, thread verdict) with the per-step recorder; full-registry `ToolContractSnapshot`; network tools on recorded fixtures | one authored dispatch runs end to end with every step recorded to JSONL; contract hash recorded; decontamination green against the four sentinel sets; dojo tenancy IDs documented; negative check shows nothing written outside the tenancy |
+| `01a0a1ba-255a-7f70-afa8-85016faad6ab` P7.11 guided reward vector + trainer (depends P6.5, P7.3) | sidecar schema v1 (five components + `voice_called_for` + `corrected_sibling`), versioned `weight_policy`, `train_knowledge --record-weights use --weight-policy v1`, weighted loss through Cut CE | gradient equality of the weighted blockwise loss vs the naive weighted path; one A/B window from 401,577 (vector + corrected siblings vs E3 scalar) on the unchanged sentinels, delta recorded |
+| `01a0a1bc-3abe-7042-9c17-5acdd9c1c551` P7.12 crew × Oxide corpus (depends P7.10, P7.11) | `slot` + `disposition` labels on the kata drills (15 values / 8 slots); emergent-property-bug and act-to-perceive families generated in the tenancy with passive controls; captain-selection labels; blinded social rubric; White→Yellow belt gate | corpus + generator hash; belt gate passed on the ADAM candidate without regressing the 1,272-case gate by more than 3 cases; RESULT with per-slot and per-family numbers |
+| `01a0a1bc-c798-7003-9879-934fa3568507` P7.13 environment release gate (depends P7.12, P7.5) | frozen quarantined dispatch-episode set with deterministic final-state verifiers + reward-vector components + blinded rubric; evaluator under `crates/grug-train`; RESULT row every rung and every Kaine candidate emits | gate definition frozen (episode/verifier/rubric hashes); ADAM baseline recorded; runs within the ADR 106 local budget or the excess is measured and a pod run proposed under ADR 105 |
+
+### Amendments to P7.1–P7.9 (recorded on the Anima items)
+
+- P7.3: the blockwise loss accepts per-record weights; the gradient test covers the weighted path.
+- P7.5–P7.8: each RESULT table gains the P7.13 environment-gate row once the gate exists, the P7.12 belt gate until then; P7.5 keeps
+  board/Anima ID spans inside the global-layer copy path; P7.7's Kaine go/no-go is taken on all four gates; P7.8's memory table includes
+  the weighted-loss path.
+- P7.9: board/Anima episodic writes are the first use case for the memory-layer seam; `disposition`/`effect` are candidate write signals.
+
+### Sequence and gating
+
+Unchanged: nothing under this extension starts before the P6 window queue and gate are recorded, and every item stays `draft` +
+`source=architect-session` until the operator promotes it. P7.10 is CPU-side harness code with no GPU or recipe contention; promoting
+it earlier is an operator option, not a default. Order once open: P7.10 → P7.11 (after P6.5's E3 result and P7.3) → P7.12 → P7.13;
+P7.13 then becomes a row in every architecture rung's RESULT table.
+
+### Budget
+
+- P7.10–P7.12 run on the Mac (CPU for the harness and corpus; the belt-gate window under the ADR 106 lane gate).
+- P7.13's gate must fit the ≤ 12 h M2 evaluation budget or state the excess; any pod use is its own ADR 105 WI with a dollar cap.
+- Dojo tenancy resources (Anima project, board tenancy tokens, dojo repository) are created once and named in the P7.10 RESULT.
+
