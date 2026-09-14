@@ -1,6 +1,6 @@
-# ADR 108 — The ADAM → Kaine architecture ladder: attention stays the backbone; hybrids and memory layers are measured at the rung where the literature validates them
+# ADR 111 — The ADAM → Kaine architecture ladder: attention stays the backbone; hybrids and memory layers are measured at the rung where the literature validates them
 
-> Date: 2026-09-14
+> Date: 2026-09-14 (renumbered 108 → 111 on 2026-09-14: ADR 108 is the Sokar artifact daemon, merged to main first)
 > Status: Accepted
 > Phase: 51 P7 (plan: `docs/ai/plans/2026-09-14-phase51-p7-kaine-architecture-ladder-and-training-engine.md`)
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`; WIs P7.5 `01a0a1a3-439f`, P7.6 `01a0a1a3-6c2b`, P7.7 `01a0a1a3-a8a2`, P7.9 `01a0a1a4-03cb`

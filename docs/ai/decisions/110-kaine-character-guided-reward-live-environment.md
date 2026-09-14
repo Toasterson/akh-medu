@@ -4,12 +4,12 @@
 > Status: Accepted (design; extends Phase 51 P7 — no training starts under this ADR until the P6 window queue and gate are recorded)
 > Phase: 51 P7 extension (plan: `docs/ai/plans/2026-09-14-phase51-p7-kaine-architecture-ladder-and-training-engine.md`, §"ADR 110 extension")
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`; new WIs P7.10–P7.13 (IDs in the plan); amends P7.3, P7.5–P7.9
-> Related: ADR 088 (action world model, proposed), ADR 096 (step-level rewards, design not built), ADR 099 (engine as captain), ADR 102 (tool-native learning model), ADR 105 (run governance), ADR 106 (engine-in-the-loop training), ADR 108 (Kaine ladder), ADR 109 (engine memory); dojo manual `docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md` §2, §5, §6, §10
+> Related: ADR 088 (action world model, proposed), ADR 096 (step-level rewards, design not built), ADR 099 (engine as captain), ADR 102 (tool-native learning model), ADR 105 (run governance), ADR 106 (engine-in-the-loop training), ADR 111 (Kaine ladder), ADR 109 (engine memory); dojo manual `docs/ai/manuals/2026-09-01-babyllm-dojo-curriculum.md` §2, §5, §6, §10
 > Inputs: Bryan Cantrill, *Intelligence is not Enough* (Monktoberfest 2023, `youtube.com/watch?v=bQfJi7rjuEk`); Danny Hatcher, *Perception doesn't happen, we act to perceive* (Gibson / *Activist Affordances*, `youtube.com/watch?v=yFHAGOL6Pk8`); Oxide Computer Company principles and values (`oxide.computer/principles`, read 2026-09-14)
 
 ## Question
 
-Kaine (ADR 108) is being designed as an architecture. This ADR decides three things ADR 108/109 leave open: **what character** Kaine
+Kaine (ADR 111) is being designed as an architecture. This ADR decides three things ADR 111/109 leave open: **what character** Kaine
 is trained toward and how that maps onto the crew-of-eight; **how the reward reaches the model** so training guides rather than punishes;
 and **what environment** the episodes come from. The operator's constraint: training must be "guided and fine-grained, not a whip", and it
 must happen in the real environment the akh will live in — all tools, the Agent Board, and Anima.
@@ -158,7 +158,7 @@ Amendments to existing P7 items (appended to their Anima descriptions):
 
 ## What this ADR does not decide
 
-- Kaine's size or backbone (ADR 108 §7; P7.7/P7.8).
+- Kaine's size or backbone (ADR 111 §7; P7.7/P7.8).
 - The names of the eight voices, the belt names, or whether Kaine internalizes a captain (dojo §8).
 - Any change to the P6 windows or the ADAM release gate.
 - Online RL inside a live akh (`vsa_rl.rs` stays as is); this ADR is about offline episodes from a sandboxed tenancy.

@@ -1,7 +1,7 @@
 # Phase 51 P7 — ADAM → Kaine architecture ladder and the training-engine memory program
 
 - **Status:** Planned (2026-09-14), **gated on P6**: no P7 item starts until the P6.4/P6.5 window queue (`runs/p6-4/queue-20260914.txt`) and its release gate have finished (operator decision 2026-09-14). All items are HITL: `source=architect-session`, `draft` until the operator promotes them, never `ready`/`working`
-- **ADRs:** [ADR 108](../decisions/108-kaine-architecture-ladder.md) (architecture ladder), [ADR 109](../decisions/109-training-engine-memory-program.md) (engine memory), [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) (character, guided reward, live environment — extension of 2026-09-14, §below); governance [ADR 105](../decisions/105-autonomous-run-governance.md); lane [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); attention memory [ADR 107](../decisions/107-training-memory-turboquant-vs-recompute-attention.md)
+- **ADRs:** [ADR 111](../decisions/111-kaine-architecture-ladder.md) (architecture ladder), [ADR 109](../decisions/109-training-engine-memory-program.md) (engine memory), [ADR 110](../decisions/110-kaine-character-guided-reward-live-environment.md) (character, guided reward, live environment — extension of 2026-09-14, §below); governance [ADR 105](../decisions/105-autonomous-run-governance.md); lane [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); attention memory [ADR 107](../decisions/107-training-memory-turboquant-vs-recompute-attention.md)
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`
 - **Predecessor:** [P6 plan](2026-09-13-phase51-p6-local-training-neurosymbolic.md) (active; P7 does not pre-empt the P6.4/P6.5 window queue)
 
@@ -66,7 +66,7 @@ the Mac, 350M and 1.1B on one pod GPU, Kaine on whatever P7.8 shows is needed.
 ## What this plan does not do
 
 - It does not change the ADAM release gate or the P6 remediation windows.
-- It does not adopt Titans/TTT/ATLAS, activation quantisation, LOMO, FP8 or an engine swap (ADR 108 §Decision 6, ADR 109 §Decision 2, 4).
+- It does not adopt Titans/TTT/ATLAS, activation quantisation, LOMO, FP8 or an engine swap (ADR 111 §Decision 6, ADR 109 §Decision 2, 4).
 - It does not fix Kaine's parameter count; that is the output of P7.7 and P7.8.
 
 ## ADR 110 extension (2026-09-14): character, guided reward, live environment

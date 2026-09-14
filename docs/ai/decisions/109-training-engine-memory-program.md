@@ -4,7 +4,7 @@
 > Status: Accepted
 > Phase: 51 P7 (plan: `docs/ai/plans/2026-09-14-phase51-p7-kaine-architecture-ladder-and-training-engine.md`)
 > Anima: project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`; WIs P7.1 `01a0a1a2-aa69`, P7.2 `01a0a1a2-cf26`, P7.3 `01a0a1a2-ef2c`, P7.4 `01a0a1a3-157a`, P7.8 `01a0a1a3-d7c3`
-> Related: ADR 106 (Burn on Metal lane), ADR 107 (recompute-backward attention; supersedes nothing there), ADR 108 (architecture ladder)
+> Related: ADR 106 (Burn on Metal lane), ADR 107 (recompute-backward attention; supersedes nothing there), ADR 111 (architecture ladder)
 > Evidence: Burn 0.21 source audit (registry + `vendor/burn-autodiff`) and 14 papers read in full text on 2026-09-14
 
 ## Question
