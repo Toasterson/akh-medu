@@ -39,8 +39,21 @@ Anima keeps its RBAC and its work-item semantics; it becomes a Sokar client. The
 ### D1. Storage: OpenDAL `Operator` registry, content-addressed blobs, Postgres metadata
 
 - Config declares named stores as data: `[[store]] name = "lab-s3"; service = "s3"; options = { bucket = "...", endpoint = "...", region = "us-east-1", access_key_id = "env:SOKAR_S3_KEY", secret_access_key = "file:/var/run/secrets/s3/secret", disable_config_load = "true", disable_ec2_metadata = "true" }` and builds each with `Operator::via_iter::<services::S3>` behind `RetryLayer`, `TimeoutLayer`, `ConcurrentLimitLayer`, `TracingLayer`, `PrometheusClientLayer`. Store choice is a Cargo feature set (`services-s3`, `services-gcs`, `services-azblob`, `services-fs`, `memory` always on for tests).
+- **The bucket is self-describing.** Every resource has a JSON manifest in the store next to the bytes, keyed by its UUID, so a request's UUID alone locates its metadata without Postgres and a lost index is rebuilt from the bucket (`sokard reindex --store <name>`). Layout under the store's `prefix`:
+
+  ```
+  _sokar/format.json                          layout version marker ("sokar.layout.v1")
+  blobs/sha256/<aa>/<bb>/<hex>                content-addressed bytes (dedup unit)
+  artifacts/<uuid>/manifest.json              sokar.artifact.v1: id, collection, path, kind, blob {digest,size,media_type,key}, labels, created_by, created_at, expires_at, previous
+  collections/<uuid>/manifest.json            sokar.collection.v1: id, scope, owner, retention, quota, store
+  collections/<uuid>/grants/<uuid>.json       sokar.grant.v1 (policy is replicable; tokens and cookie sessions are NOT — they stay Postgres-only)
+  sites/<uuid>/manifest.json                  sokar.site.v1: collection, root, index, csp profile
+  surfaces/<uuid>/manifest.json               sokar.surface.v1 + events/<seq>.jsonl chunks + snapshot.json
+  ```
+
+  Write order is bytes → manifest → Postgres row; readers trust Postgres; the janitor reconciles both ways (orphan manifest → re-index, dangling row → repair or tombstone). Manifests carry `schema` and are versioned; unknown newer schemas are refused with a diagnostic, never silently dropped.
 - Blob key layout: `blobs/sha256/<aa>/<bb>/<hex>`; upload computes SHA-256 while streaming to a staging key, then `copy_with(..).if_not_exists(true)` to the final key so identical content dedups and a `ConditionNotMatch` is the *normal* path, not an error. Digest is the ETag and the cache validator.
-- Postgres tables (own schema `sokar`, sqlx migrations, advisory-locked like `akhomed_store::run_migrations_locked`): `blob`, `collection`, `artifact`, `artifact_version`, `site`, `principal`, `token`, `grant`, `claim_rule`, `share_link`, `surface`, `surface_event`, `retention_job`. Metadata never stores bytes; bytes never carry authorization.
+- Postgres (own schema `sokar`, sqlx migrations, advisory-locked like `akhomed_store::run_migrations_locked`) is the **index and cache** over the manifests plus the only home of credentials: `blob`, `collection`, `artifact`, `artifact_version`, `site`, `principal`, `token`, `session`, `grant`, `claim_rule`, `share_link`, `surface`, `surface_event`, `retention_job`. Metadata never stores bytes; bytes never carry authorization; credentials never touch the bucket.
 - One `sokard` may serve several stores; a collection pins one store (`store` column) so relocation is explicit.
 
 ### D2. Domain types (express the model in the types)
@@ -60,6 +73,8 @@ pub enum ArtifactKind { Document, Image, Audio, Video, Archive, Transcript, Disp
 pub struct Artifact { id: ArtifactId /* uuid v7 */, collection: CollectionId, path: ArtifactPath, kind: ArtifactKind, blob: BlobRef, labels: Labels, created_by: PrincipalId, created_at, expires_at: Option<..>, previous: Option<ArtifactId> }
 pub enum RetentionPolicy { Forever, Ttl(Duration), UntilScopeClosed { grace: Duration }, KeepLast(u32) }
 ```
+
+Every resource is addressed by a UUIDv7 in URLs and manifests (`/v1/artifacts/{uuid}`, `/v1/collections/{uuid}`, `/v1/sites/{uuid}`, `/v1/surfaces/{uuid}`); `CollectionScope` is a unique index over the collection manifest so Anima and akh find their collection by scope, then address it by UUID. `path` inside a collection is a secondary lookup (`GET /v1/collections/{uuid}/artifacts/by-path/{path}` → latest version, `previous` chains older ones).
 
 Anima's closed `ArtifactKind` (`Html | Css | Svg | Image | Other`) maps onto `Document`/`Image` plus a `media_type`; the old enum is preserved as a label during migration so nothing is lost.
 
@@ -125,14 +140,9 @@ bitflags! Permissions: READ | WRITE | DELETE | LIST | MANAGE_ACCESS | PRESENT (d
 - `akhsessd` issues a per-session Sokar token scoped to that session's `AkhSession` collection using the existing `session_credentials` pattern (0o700 file, receipt without secret in the KV store); the runner exports `SOKAR_URL`, `SOKAR_TOKEN_FILE`, `SOKAR_COLLECTION` into the session.
 - "Set up a claim match by skill": provider- and situation-specific knowledge is a skillpack, not daemon code. Convention: `skills/sokar-access-<situation>/` with `procedures.md` (when to use it), `actions.json` (the `artifacts.grant` action schema) and a `claim_rules.json` of `ClaimRule` templates with named placeholders (e.g. `keycloak-team-readonly`: `All[Issuer(keycloak), Claim{/realm_access/roles, Contains("${team}")}]`, `barycenter-user`: `All[Issuer(barycenter), Claim{/sub, Equals("${subject}")}]`). `skill_author` can author new ones from a description; the daemon exposes `POST /v1/claim-rules/validate` and `POST /v1/claim-rules/explain` so a skill can check its rule against a sample token before granting.
 
-### D8. Anima migration (retain every feature, fix the gaps)
+### D8. Anima: full replacement, handled as a separate item after Phase 52
 
-- `anima-server` gets `sokar-client` with a service token. New collections: `AnimaWorkItem` for design artifacts, `AnimaSession` for transcripts (kind `Transcript`) and dispatch prompts (kind `DispatchPrompt`). The scheduler keeps its ADR 0026 invariant: dispatch is blocked unless Sokar acknowledges the prompt write.
-- `ArtifactService.{List,Get}Artifacts` and `GET /artifacts/{id}` become thin proxies that first run Anima's own `check_permission(WorkItemRead)` and then hand back a Sokar share link (fixing the per-project authorization gap). `RunDefinePhase` uploads the pretotype HTML instead of inserting BYTEA. MCP `get_session_transcript` / `get_dispatch_prompt` use Sokar range reads for tailing.
-- One-shot migration binary copies `artifacts` rows and the SeaweedFS keys into Sokar (same bucket can be registered as a store, so transcripts do not even move bytes: Sokar adopts existing keys via `stat` + digest backfill).
-- Thread attachments larger than a threshold are offloaded to Sokar with a `resource_link` block; small inline blocks stay as they are.
-- The PWA renders design artifacts and A2UI surfaces in a sandboxed iframe pointing at the Sokar sites origin — the first live consumer of ADR 0007.
-- Old code (`services/artifact.rs`, `handlers/artifact.rs`, the SigV4 client, migration 038 tables) is retired only after the cut-over WI verifies parity.
+Phase 52 builds Sokar to feature parity with everything Anima stores today (design artifacts, transcripts, dispatch prompts, attachments) without touching Anima. When 52f is done, a dedicated WI in the **Anima** project is filed for the replacement: `anima-server` takes `sokar-client`, creates `AnimaWorkItem`/`AnimaSession` collections, keeps its own `check_permission` in front of Sokar share links (closing the cross-project `GET /artifacts/{id}` gap), keeps the ADR 0026 block-on-failure invariant for dispatch prompts, imports existing BYTEA rows and SeaweedFS keys by writing Sokar manifests, then **removes** the `artifacts` table, the SigV4 client and the old routes in the same change. No dual-read window and no long-lived compatibility shim: Sokar completely replaces Anima's artifact storage. The PWA's sandboxed iframe for artifacts and surfaces belongs to that item too.
 
 ### D9. Errors, config, observability, conventions
 
@@ -140,6 +150,20 @@ bitflags! Permissions: READ | WRITE | DELETE | LIST | MANAGE_ACCESS | PRESENT (d
 - Config is TOML with `#[serde(deny_unknown_fields)]`, secrets referenced as `env:` or `file:` never inline, `sokard --check` validates config, stores (`stat` a probe key), Postgres and OIDC discovery without serving.
 - `tracing` + Prometheus (`/metrics` on the admin listener), request ids, per-store latency histograms, GC counters. Retention janitor runs in-process (`RetentionPolicy` → `retention_job` rows) and deletes blobs only when their refcount hits zero.
 - Three listeners: API (bearer/cookie, CORS to configured app origins), sites (no cookies from the API origin, strict CSP), admin (metrics, health, `/readyz` that checks Postgres and every store).
+
+## Grilling (2026-09-14) — settled
+
+- **Metadata placement**: in the bucket, keyed by UUID (D1); Postgres is a rebuildable index. Grants are replicated to the bucket because policy must survive an index loss; tokens and sessions are not, because a bucket must never be a credential source.
+- **Identity of a request**: UUIDv7 everywhere (time-ordered, index-friendly); no name-based addressing in the API beyond the by-path lookup.
+- **Blob GC**: refcount in Postgres for the fast path; the janitor's full reconcile recomputes refcounts from manifests, so a wrong counter can only delay, never cause, a delete. A blob is deleted only when no manifest references it after reconcile.
+- **Encryption at rest**: backend-provided (SSE-S3/KMS/GCS default encryption) configured per store; no client-side encryption in Phase 52 (would break presigned delivery and dedup).
+- **Limits (defaults, all config)**: single request body 256 MiB, two-phase uploads up to 5 GiB, presign TTL default 15 min / max 24 h, share link default 7 d / max 90 d, scoped token max 1 y, surface event log 10k events before forced snapshot.
+- **Idempotency**: `Idempotency-Key` header on uploads and surface messages, stored 24 h.
+- **Token format**: `sk_` + 32 random bytes base32, SHA-256 stored; cookie sessions are opaque 32-byte ids in a private cookie.
+- **Middleware**: `tower-http` (cors, trace, request-id, limit, compression) is used — ADR 061 dropped it from `akhomed` because akhomed has no HTTP surface, which does not apply to a browser-facing daemon.
+- **Sites origin**: one hostname per environment from config (`public_sites_url`), paths `/s/{uuid}/…` and `/ui/surfaces/{uuid}`; per-site subdomains are a later option.
+- **Implementer and reviewer**: implementation of each slice is done locally by Codex (`gpt-6-astra`, `codex exec`, reasoning high) in a dedicated worktree branch `sokar/52<x>`; the Fable architect session writes the brief, reviews the diff (`/code-review` + tests + `--check` runs), and only reviewed work is committed and pushed for the lane.
+- **Anima**: out of this phase (D8); filed separately when 52f lands; full replacement, no dual-read.
 
 ## Alternatives considered
 
@@ -153,7 +177,7 @@ bitflags! Permissions: READ | WRITE | DELETE | LIST | MANAGE_ACCESS | PRESENT (d
 ## Consequences
 
 - New crates `sokar`, `sokar-client`; new Helm component `sokard` in `charts/akh-medu`; new Flux release in the `talos` repo (namespace `akh-medu`), Barycenter client registration, and an S3 identity for Sokar in the SeaweedFS identities secret.
-- Anima loses ~1.2k lines (artifact service/handler, SigV4 client, BYTEA table) and gains a client; its raw artifact route stops leaking cross-project reads.
+- Anima is untouched during Phase 52; the later Anima item removes ~1.2k lines (artifact service/handler, SigV4 client, BYTEA table), adds a client, and closes the cross-project artifact read.
 - akh sessions gain durable, shareable output and a way to draw UI that outlives the session.
 - Operational: one more Postgres schema and one more public origin to protect. Browser-facing auth (cookies, OIDC) is a new pattern in this workspace and gets its own security review before the sites origin is exposed.
 - Observation from the survey worth acting on outside this ADR: the SeaweedFS `anima-transcripts` secret key is committed in plaintext in the `talos` repo's Anima HelmRelease values; move it to an ExternalSecret and rotate it when Sokar's identity is created.

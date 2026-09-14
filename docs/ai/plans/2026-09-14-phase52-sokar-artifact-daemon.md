@@ -4,7 +4,7 @@
 - **Date**: 2026-09-14
 - **ADR**: [108 — Sokar artifact daemon](../decisions/108-sokar-artifact-daemon.md)
 - **Anima WI**: `01a0a00a-d3b0-7713-90cc-99b6fdac941e` (umbrella, draft; one WI per slice)
-- **Governance**: every slice is one Anima WI with an exit condition (ADR 105); the Anima cut-over slice additionally needs a dedicated Anima worktree WI in the Anima project.
+- **Governance**: every slice is one Anima WI with an exit condition (ADR 105). Implementer: Codex `gpt-6-astra` run locally with `codex exec` in a worktree branch `sokar/52<x>`; reviewer: the Fable architect session (brief → implement → `/code-review` + tests → commit). Anima is not touched in this phase; a replacement WI in the Anima project is filed once 52f lands.
 
 ## Goal
 
@@ -27,14 +27,15 @@ Each slice lands behind its own WI, builds and tests in CI with `--features` tha
 - `SokarError` (miette + thiserror, diagnostic codes `sokar::config`, `sokar::storage`, `sokar::database`, `sokar::authn`, `sokar::authz`, `sokar::delivery`, `sokar::surface`), `problem+json` mapping.
 - Config: `[server] api_bind, sites_bind, admin_bind, public_api_url, public_sites_url`; `[database] url = "env:SOKAR_DATABASE_URL"`; `[[store]]` (name, service, options with `env:`/`file:` indirection); `[limits] max_body, presign_max_ttl, share_link_max_ttl`.
 - Store registry: `StoreRegistry { HashMap<StoreName, Arc<Operator>> }` built with `via_iter`, layered (retry, timeout, concurrency, tracing, prometheus); `StoreCapability { presign_read, presign_write, ranges }` captured at boot from `info().capability()`.
-- Postgres schema `sokar` (sqlx migrations, advisory-locked): `blob`, `collection`, `artifact`, `artifact_version`.
+- Bucket layout per ADR 108 D1 (`_sokar/format.json`, `blobs/sha256/…`, `artifacts/<uuid>/manifest.json`, `collections/<uuid>/manifest.json`), versioned `sokar.*.v1` manifest types with serde round-trip tests; write order bytes → manifest → Postgres row.
+- Postgres schema `sokar` (sqlx migrations, advisory-locked) as index: `blob`, `collection`, `artifact`, `artifact_version`; `sokard reindex --store <name>` rebuilds it from manifests; UUIDv7 ids everywhere.
 - Endpoints: `POST /v1/collections`, `GET /v1/collections/{id}`, `POST /v1/collections/{id}/artifacts` (stream + multipart, SHA-256 while streaming, staging key → `copy_with(..).if_not_exists(true)`, `UploadOutcome::{Stored, Deduplicated}`), `GET /v1/artifacts/{id}`, `GET /v1/artifacts/{id}/content` (proxy only in this slice: ranges, ETag, `Content-Disposition`), `DELETE /v1/artifacts/{id}` (refcounted blob delete), `GET /v1/collections/{id}/artifacts` (paged, by path prefix and kind).
 - Auth in this slice: service bearer tokens only (file-mounted, constant-time, optional SHA-256 verifier), reusing the `akh-session-services` pattern verbatim.
-- Exit condition: `cargo test -p sokar` green on `memory` + `fs`; an `fs`-backed `sokard` round-trips a 100 MiB upload with dedup and a range download; `sokard --check` reports config, DB and store health with diagnostics.
+- Exit condition: `cargo test -p sokar` green on `memory` + `fs`; an `fs`-backed `sokard` round-trips a 100 MiB upload with dedup and a range download; dropping the Postgres schema and running `sokard reindex` restores every artifact and collection from manifests; `sokard --check` reports config, DB and store health with diagnostics.
 
 ### 52b — Access model, scoped tokens, share links, presign-or-proxy, retention
 
-- Tables `principal`, `token`, `grant`, `claim_rule`, `share_link`, `retention_job`.
+- Tables `principal`, `token`, `grant`, `claim_rule`, `share_link`, `retention_job`; grants also written as `collections/<uuid>/grants/<uuid>.json` manifests and restored by `reindex`; tokens/sessions Postgres-only.
 - `Principal`, `PrincipalMatcher`, `ClaimRule`, `ClaimOp`, `Permissions` exactly as in ADR 108 D3; `Authorizer::decide(principal, resource, permission) -> Decision { allowed, grant_id, reason }` with a `sokar::authz::decision` span.
 - `POST /v1/tokens` (scoped opaque tokens, hashed at rest, embedded grant set, expiry; needs `MANAGE_ACCESS`), `DELETE /v1/tokens/{id}`, `POST /v1/grants`, `DELETE /v1/grants/{id}`, `GET /v1/{resource}/grants`.
 - `POST /v1/artifacts/{id}/links` → HMAC-signed share link (key from `file:`, rotation with two active keys), `DELETE /v1/links/{id}`; proxy delivery honours `Link` principals.
@@ -72,17 +73,16 @@ Each slice lands behind its own WI, builds and tests in CI with `--features` tha
 - Skillpacks: `skills/sokar-artifacts/` (procedures for put/link/site/surface), `skills/sokar-access-keycloak-team/`, `skills/sokar-access-barycenter-user/`, `skills/sokar-access-public-link/` — each with `procedures.md`, `actions.json`, `claim_rules.json` templates; `skill_author` documented as the way to add a situation.
 - Exit condition: a chat turn "share the report with the SRE Keycloak group for a week" ends with a `Claims` grant whose rule was validated via `explain` before creation, all through the tool (no natural-language constants in code); a session publishes a transcript-shaped artifact without any Anima involvement.
 
-### 52g — Anima cut-over, deployment, retirement
+### 52g — Deployment (chart + Flux) and the Anima hand-off
 
-- `anima-server`: `sokar-client` with service token; collections per work item and session; scheduler writes dispatch prompts to Sokar and keeps the ADR 0026 block-on-failure invariant; `ArtifactService`/`GET /artifacts/{id}` become `check_permission` + share-link proxies; `RunDefinePhase` uploads pretotype HTML; MCP transcript/dispatch-prompt tools use range reads; large thread attachments offloaded to `resource_link`.
-- Migration binary `anima-sokar-migrate` (adopt existing SeaweedFS keys by `stat` + digest backfill; copy BYTEA rows), dual-read window, then drop `artifacts` table + SigV4 client.
-- PWA: sandboxed iframe for design artifacts and surfaces pointing at the sites origin.
-- Deployment: `charts/akh-medu` gains a `sokard` component (Deployment, Service, HTTPRoute for API + sites hosts, ConfigMap, ExternalSecrets for DB URL, S3 identity, OIDC client secret, HMAC key); Flux release in `talos` under `akh-medu`; a `sokar` identity added to the SeaweedFS identities secret; rotate and move the plaintext `anima-transcripts` key found in the Anima HelmRelease values into an ExternalSecret.
-- Exit condition: parity checklist green (every Anima artifact/transcript/prompt readable through Sokar with the same or stricter authorization), old code removed, `docs/ai/architecture.md` and `docs/ops/sokar.md` updated.
+- `charts/akh-medu` gains a `sokard` component (Deployment, Service, HTTPRoutes for the API and sites hosts, ConfigMap, ExternalSecrets for DB URL, S3 identity, OIDC client secrets, HMAC key); Flux release in `talos` under `akh-medu`; a `sokar` identity in the SeaweedFS identities secret; `docs/ops/sokar.md` runbook.
+- Rotate the plaintext `anima-transcripts` key found in the Anima HelmRelease values and move it into an ExternalSecret (talos repo, not this one).
+- File the **Anima replacement WI** in the Anima project (ADR 108 D8: full replacement, import by writing manifests, remove old code in the same change, PWA iframe). That WI is outside Phase 52.
+- Exit condition: `sokard` serves in the cluster against SeaweedFS with presign verified end to end; the Anima WI exists and links this plan.
 
 ## Sequencing and parallelism
 
-52a → 52b → {52c, 52d, 52e in parallel} → 52f → 52g. 52f can start once 52b's client surface is stable; 52g's Anima worktree WI depends on 52b + 52d + 52e. One Anima WI per slice; 52g is two WIs (akh-medu chart + Anima repo).
+52a → 52b → {52c, 52d, 52e in parallel} → 52f → 52g. 52f can start once 52b's client surface is stable; 52g can start as soon as 52b serves (chart work does not wait for A2UI). One Anima WI per slice; the Anima replacement is a separate WI filed at 52g.
 
 ## Risks
 
