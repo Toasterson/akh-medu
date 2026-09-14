@@ -275,6 +275,24 @@ impl IndexTransaction for PgTransaction {
             .bind(store.as_str()).bind(a.blob.digest.0.as_slice()).fetch_one(&mut *self.tx).await?;
         Ok(remaining as u64)
     }
+    async fn orphan_collection(&mut self, id: CollectionId) -> SokarResult<usize> {
+        sqlx::query("UPDATE sokar.blob b SET refcount=b.refcount-a.refs FROM (SELECT store,digest,count(*)::integer AS refs FROM sokar.artifact WHERE collection=$1 AND deleted_at IS NULL GROUP BY store,digest) a WHERE b.store=a.store AND b.digest=a.digest")
+            .bind(id.as_uuid()).execute(&mut *self.tx).await?;
+        sqlx::query("DELETE FROM sokar.idempotency WHERE collection=$1")
+            .bind(id.as_uuid())
+            .execute(&mut *self.tx)
+            .await?;
+        let removed = sqlx::query("DELETE FROM sokar.artifact WHERE collection=$1")
+            .bind(id.as_uuid())
+            .execute(&mut *self.tx)
+            .await?
+            .rows_affected();
+        sqlx::query("DELETE FROM sokar.collection WHERE id=$1")
+            .bind(id.as_uuid())
+            .execute(&mut *self.tx)
+            .await?;
+        Ok(removed as usize)
+    }
     async fn replace_store(
         &mut self,
         store: &StoreName,

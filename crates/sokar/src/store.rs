@@ -9,16 +9,22 @@ use prometheus_client::registry::Registry;
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use sokar_client::{BlobDigest, StoreName, UploadOutcome};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub const FORMAT_KEY: &str = "_sokar/format.json";
 pub const FORMAT_SCHEMA: &str = "sokar.layout.v1";
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct StoreCapability {
     pub presign_read: bool,
     pub presign_write: bool,
     pub ranged_read: bool,
-    pub conditional_write: bool,
+    pub conditional_write: AtomicBool,
 }
 impl From<opendal::Capability> for StoreCapability {
     fn from(cap: opendal::Capability) -> Self {
@@ -28,11 +34,11 @@ impl From<opendal::Capability> for StoreCapability {
             // 0.59 has no read_with_range field. Its range-class availability flag
             // is read_with_suffix (including the default SimulateLayer on fs).
             ranged_read: cap.read_with_suffix,
-            conditional_write: if cap.copy {
+            conditional_write: AtomicBool::new(if cap.copy {
                 cap.copy_with_if_not_exists
             } else {
                 cap.write_with_if_not_exists
-            },
+            }),
         }
     }
 }
@@ -49,6 +55,8 @@ impl StoreRegistry {
     pub async fn build(configs: &[StoreConfig]) -> SokarResult<Self> {
         let mut metrics = Registry::default();
         let mut stores = HashMap::new();
+        let mut configs: Vec<_> = configs.iter().collect();
+        configs.sort_by(|a, b| a.name.cmp(&b.name));
         for config in configs {
             let keys = match config.service {
                 ServiceKind::S3 => serde_json::to_value(services::S3Config::default())?,
@@ -117,9 +125,14 @@ impl StoreRegistry {
             .cloned()
             .ok_or_else(|| SokarError::UnknownStore(name.clone()))
     }
+    pub fn sorted_names(&self) -> Vec<StoreName> {
+        let mut names: Vec<_> = self.stores.keys().cloned().collect();
+        names.sort();
+        names
+    }
     pub async fn check(&self, probe: bool) -> SokarResult<()> {
-        for store in self.stores.values() {
-            store.check(probe).await?;
+        for name in self.sorted_names() {
+            self.get(&name)?.check(probe).await?;
         }
         Ok(())
     }
@@ -146,7 +159,8 @@ impl Store {
             }
             Err(e) => return Err(self.error("stat format", e)),
         }
-        self.check(false).await
+        self.check(false).await?;
+        self.probe_conditional_copy().await
     }
     pub async fn check(&self, probe: bool) -> SokarResult<()> {
         let marker: serde_json::Value = self.read_json(FORMAT_KEY).await?;
@@ -155,14 +169,60 @@ impl Store {
             FORMAT_SCHEMA,
         )?;
         if probe {
-            let key = format!("_sokar/probes/{}", uuid::Uuid::now_v7());
+            let key = format!("_sokar/probe/{}", uuid::Uuid::now_v7());
             self.op
                 .write(&key, "sokar probe")
                 .await
                 .map_err(|e| self.error("write probe", e))?;
             self.delete(&key).await?;
+            self.probe_conditional_copy().await?;
         }
         Ok(())
+    }
+    fn downgrade_conditional_copy(&self, reason: &str) {
+        self.cap.conditional_write.store(false, Ordering::Relaxed);
+        tracing::warn!(store = %self.name, %reason, "conditional copy disabled; using stat-then-copy");
+    }
+    /// Advertising a precondition does not prove that the configured endpoint honors it.
+    /// A downgrade is sticky for this Store, including across subsequent health checks.
+    async fn probe_conditional_copy(&self) -> SokarResult<()> {
+        let cap = self.op.info().capability();
+        if !(cap.copy && cap.copy_with_if_not_exists) {
+            return Ok(());
+        }
+        let source = format!("_sokar/probe/{}", uuid::Uuid::now_v7());
+        let target = format!("{source}-copy");
+        let probe: SokarResult<()> = async {
+            self.op
+                .write(&source, "sokar conditional copy probe")
+                .await
+                .map_err(|e| self.error("write copy probe", e))?;
+            self.op
+                .copy_with(&source, &target)
+                .if_not_exists(true)
+                .await
+                .map_err(|e| self.error("first conditional copy probe", e))?;
+            match self
+                .op
+                .copy_with(&source, &target)
+                .if_not_exists(true)
+                .await
+            {
+                Err(e) if dedup_error(&e) => Ok(()),
+                Err(e) => Err(self.error("second conditional copy probe", e)),
+                Ok(_) => Err(SokarError::Invalid(
+                    "conditional copy overwrote an existing probe".into(),
+                )),
+            }
+        }
+        .await;
+        if let Err(error) = probe {
+            self.downgrade_conditional_copy(&error.to_string());
+        }
+        // Attempt both deletions even if one fails; check/build surface cleanup failures.
+        let source_cleanup = self.delete(&source).await;
+        let target_cleanup = self.delete(&target).await;
+        source_cleanup.and(target_cleanup)
     }
     pub async fn read_json<T: DeserializeOwned>(&self, key: &str) -> SokarResult<T> {
         let data = self
@@ -275,8 +335,23 @@ impl StagedUpload {
     /// Index locks cannot serialize bucket writes across independent indexes; a bucket
     /// owner marker is deferred to 52b.
     pub async fn promote(&self) -> SokarResult<UploadOutcome> {
+        let conditional = self.store.cap.conditional_write.load(Ordering::Relaxed);
+        match self.promote_once(conditional).await {
+            Err(SokarError::Storage { ref source, .. })
+                if conditional
+                    && self.store.op.info().capability().copy
+                    && !dedup_error(source) =>
+            {
+                self.store.downgrade_conditional_copy(&source.to_string());
+                // One fallback only: ordinary copy errors must still reach the caller.
+                self.promote_once(false).await
+            }
+            result => result,
+        }
+    }
+    async fn promote_once(&self, conditional: bool) -> SokarResult<UploadOutcome> {
         let final_key = self.digest.key();
-        if !self.store.cap.conditional_write {
+        if !conditional {
             match self.store.op.stat(&final_key).await {
                 Ok(meta) if meta.content_length() == self.size => {
                     return Ok(UploadOutcome::Deduplicated);
@@ -294,7 +369,7 @@ impl StagedUpload {
             self.store
                 .op
                 .copy_with(&self.key, &final_key)
-                .if_not_exists(self.store.cap.conditional_write)
+                .if_not_exists(conditional)
                 .await
                 .map(|_| ())
         } else {
@@ -307,7 +382,7 @@ impl StagedUpload {
                     .store
                     .op
                     .writer_with(&final_key)
-                    .if_not_exists(self.store.cap.conditional_write)
+                    .if_not_exists(conditional)
                     .await?;
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|e| {
@@ -357,3 +432,7 @@ impl Drop for StagedUpload {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

@@ -97,12 +97,7 @@ impl Sokar {
         options: UploadOptions,
         staged: &mut StagedUpload,
     ) -> SokarResult<UploadResponse> {
-        if staged.store.name != collection.store {
-            return Err(SokarError::StoreMismatch {
-                expected: collection.store.clone(),
-                actual: staged.store.name.clone(),
-            });
-        }
+        // Reject malformed keys before any index access or mutation lock.
         if options
             .idempotency_key
             .as_ref()
@@ -111,6 +106,12 @@ impl Sokar {
             return Err(SokarError::Invalid(
                 "idempotency key must be 1..256 bytes".into(),
             ));
+        }
+        if staged.store.name != collection.store {
+            return Err(SokarError::StoreMismatch {
+                expected: collection.store.clone(),
+                actual: staged.store.name.clone(),
+            });
         }
         let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&(
             collection.id,
@@ -314,7 +315,39 @@ impl Sokar {
             }
         }
         let mut tx = self.index.begin(MutationScope::Global).await?;
-        let mut counts = tx.replace_store(name, &collections, &artifacts).await?;
+        // Cross-store uniqueness is decided under the global lock. A store scanned
+        // later may contain the earliest UUID, so it must evict an indexed loser.
+        let mut winners = Vec::new();
+        for collection in collections {
+            if let Some(existing) = tx.by_scope(&collection.scope.key()).await?
+                && existing.store != *name
+                && existing.id != collection.id
+            {
+                if existing.id < collection.id {
+                    orphan_collections.insert(collection.id);
+                    orphans += 1;
+                    tracing::warn!(store = %name, collection = %collection.id, winner = %existing.id,
+                        "cross-store duplicate scope manifest orphaned");
+                    continue;
+                }
+                let removed = tx.orphan_collection(existing.id).await?;
+                orphans += 1 + removed;
+                tracing::warn!(store = %existing.store, collection = %existing.id, winner = %collection.id,
+                    artifacts = removed, "cross-store duplicate scope and its artifacts orphaned");
+            }
+            winners.push(collection);
+        }
+        artifacts.retain(|a| {
+            if orphan_collections.contains(&a.collection) {
+                orphans += 1;
+                tracing::warn!(store = %name, artifact = %a.id, collection = %a.collection,
+                    "artifact of cross-store duplicate scope orphaned");
+                false
+            } else {
+                true
+            }
+        });
+        let mut counts = tx.replace_store(name, &winners, &artifacts).await?;
         counts.orphans = orphans;
         tx.commit().await?;
         Ok(counts)

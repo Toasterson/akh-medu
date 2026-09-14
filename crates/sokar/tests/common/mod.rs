@@ -130,29 +130,37 @@ impl Fixture {
         let address = socket.local_addr().unwrap();
         let path = self.dir.path().join("daemon.toml");
         let token = self.config.principals[0].token_file.as_ref().unwrap();
-        let root = self.dir.path().join("root-ref");
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-default_store = "local"
+        let mut config = format!(
+            r#"
+default_store = "{}"
 [server]
 api_bind = "{address}"
 admin_bind = "127.0.0.1:0"
 [[principal]]
 id = "test-service"
 token_file = {token:?}
-[[store]]
-name = "local"
-service = "fs"
-prefix = "test-prefix"
-[store.options]
-root = "file:{}"
 "#,
-                root.display()
-            ),
-        )
-        .unwrap();
+            self.config.default_store
+        );
+        for store in &self.config.stores {
+            config.push_str(&format!(
+                "\n[[store]]\nname = {:?}\nservice = {:?}\n",
+                store.name.as_str(),
+                store.service.as_str()
+            ));
+            if let Some(prefix) = &store.prefix {
+                config.push_str(&format!("prefix = {prefix:?}\n"));
+            }
+            config.push_str("[store.options]\n");
+            for (key, value) in &store.options {
+                let value = match value {
+                    SecretRef::File(path) => format!("file:{}", path.display()),
+                    SecretRef::Env(name) => format!("env:{name}"),
+                };
+                config.push_str(&format!("{key} = {value:?}\n"));
+            }
+        }
+        std::fs::write(&path, config).unwrap();
         drop(socket);
         let log = self.dir.path().join("daemon.log");
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_sokard"))

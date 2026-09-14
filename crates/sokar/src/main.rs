@@ -99,8 +99,9 @@ async fn run(args: Args) -> SokarResult<()> {
         return Ok(());
     }
     if config.database.is_none() {
-        for store in stores.stores.keys() {
-            state.reindex(store).await?;
+        for store in stores.sorted_names() {
+            let counts = state.reindex(&store).await?;
+            tracing::info!(%store, ?counts, "ephemeral store reindexed");
         }
     }
     let api = tokio::net::TcpListener::bind(config.server.api_bind).await?;

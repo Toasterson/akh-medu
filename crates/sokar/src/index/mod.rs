@@ -67,6 +67,9 @@ pub trait IndexTransaction: Send {
     /// Tombstones the artifact; returns remaining references in this store.
     async fn delete_artifact(&mut self, store: &StoreName, artifact: &Artifact)
     -> SokarResult<u64>;
+    /// Remove a losing scope's index rows and receipts, retaining physical manifests
+    /// and bytes. Requires the global lock; returns the number of orphaned artifacts.
+    async fn orphan_collection(&mut self, id: CollectionId) -> SokarResult<usize>;
     /// Replace only this store's index with the fully validated manifest inventory.
     async fn replace_store(
         &mut self,

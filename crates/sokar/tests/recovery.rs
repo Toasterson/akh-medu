@@ -178,6 +178,7 @@ async fn postgres_drop_schema_reindex_fs_contract() {
     let extra = Fixture::with_index(true, Some(index.clone())).await;
     receipts_and_tombstones(&extra).await;
     concurrent_store_transactions(index.as_ref()).await;
+    cross_store_scope_recovery(Some(index.clone())).await;
 }
 #[tokio::test]
 #[ignore = "requires local MinIO; SOKAR_MINIO_{ENDPOINT,BUCKET,ACCESS_KEY,SECRET_KEY} environment references"]
@@ -569,4 +570,299 @@ async fn concurrent_store_transactions(index: &dyn Index) {
 #[tokio::test]
 async fn two_memory_stores_mutate_concurrently_without_lost_commits() {
     concurrent_store_transactions(&sokar::index::MemoryIndex::default()).await;
+}
+
+#[tokio::test]
+async fn malformed_idempotency_keys_return_without_waiting_for_mutation_lock() {
+    use sokar::index::MutationScope;
+    let fixture = Fixture::new(false).await;
+    let collection = fixture.collection().await;
+    let store = fixture.state.stores.get(&collection.store).unwrap();
+    let global = fixture.memory.begin(MutationScope::Global).await.unwrap();
+    for key in [String::new(), "x".repeat(257)] {
+        let staged = store
+            .stage(stream::iter([Ok(Bytes::from_static(b"invalid"))]), 100)
+            .await
+            .unwrap();
+        let mut opts = options("invalid");
+        opts.idempotency_key = Some(key);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            fixture
+                .state
+                .finish_upload("test", &collection, opts, staged),
+        )
+        .await
+        .expect("malformed key waited for mutation lock");
+        assert!(matches!(result, Err(SokarError::Invalid(_))));
+    }
+    drop(global);
+    for prefix in ["uploads/", "blobs/", "artifacts/"] {
+        assert!(
+            store
+                .op
+                .list_with(prefix)
+                .recursive(true)
+                .await
+                .unwrap()
+                .iter()
+                .all(|e| !e.metadata().is_file())
+        );
+    }
+    // Both valid shape boundaries still work.
+    for key in ["x".into(), "x".repeat(256)] {
+        let staged = store
+            .stage(stream::iter([Ok(Bytes::from_static(b"valid"))]), 100)
+            .await
+            .unwrap();
+        let mut opts = options("valid");
+        opts.idempotency_key = Some(key);
+        fixture
+            .state
+            .finish_upload("test", &collection, opts, staged)
+            .await
+            .unwrap();
+    }
+}
+
+struct CrossStore {
+    fixture: Fixture,
+    winner: Collection,
+    loser: Collection,
+    survivor: Collection,
+    winner_artifact: Artifact,
+    loser_artifact: Artifact,
+    survivor_artifact: Artifact,
+}
+async fn cross_store_fixture(index: Option<Arc<dyn Index>>) -> CrossStore {
+    use sokar::store::StoreRegistry;
+    let mut fixture = Fixture::with_index(true, index).await;
+    let mut config = (*fixture.config).clone();
+    let mut second = config.stores[0].clone();
+    second.name = "zstore".parse().unwrap();
+    second.prefix = Some("second-prefix".into());
+    config.stores.insert(0, second); // Deliberately reverse name order in configuration.
+    let stores = Arc::new(StoreRegistry::build(&config.stores).await.unwrap());
+    fixture.config = Arc::new(config);
+    fixture.state = Arc::new(sokar::Sokar::new(
+        fixture.config.clone(),
+        stores,
+        fixture.state.index.clone(),
+    ));
+    let scope = format!("cross-store-{}", uuid::Uuid::now_v7());
+    let mut input = create(&format!("{scope}-old"));
+    input.store = Some("zstore".parse().unwrap());
+    let mut winner = fixture
+        .state
+        .create_collection("test", input)
+        .await
+        .unwrap();
+    let loser = fixture
+        .state
+        .create_collection("test", create(&scope))
+        .await
+        .unwrap();
+    let survivor = fixture
+        .state
+        .create_collection("test", create(&format!("{scope}-survivor")))
+        .await
+        .unwrap();
+    assert!(winner.id < loser.id);
+    let mut artifacts = Vec::new();
+    for c in [&winner, &loser, &survivor, &loser] {
+        let store = fixture.state.stores.get(&c.store).unwrap();
+        let stage = store
+            .stage(stream::iter([Ok(Bytes::from_static(b"shared"))]), 100)
+            .await
+            .unwrap();
+        let mut opts = options(&format!("file-{}", artifacts.len()));
+        opts.idempotency_key = Some(format!("receipt-{}", artifacts.len()));
+        artifacts.push(
+            fixture
+                .state
+                .finish_upload("test", c, opts, stage)
+                .await
+                .unwrap()
+                .artifact,
+        );
+    }
+    fixture
+        .state
+        .delete_artifact(artifacts[3].id)
+        .await
+        .unwrap();
+    winner.scope = loser.scope.clone();
+    let store = fixture.state.stores.get(&winner.store).unwrap();
+    store.write_json(&winner.key(), &winner).await.unwrap();
+    CrossStore {
+        fixture,
+        winner,
+        loser,
+        survivor,
+        winner_artifact: artifacts[0].clone(),
+        loser_artifact: artifacts[1].clone(),
+        survivor_artifact: artifacts[2].clone(),
+    }
+}
+async fn cross_store_scope_recovery(index: Option<Arc<dyn Index>>) {
+    use sokar::index::MutationScope;
+    let data = cross_store_fixture(index).await;
+    let state = &data.fixture.state;
+    // First exercise rollback of removing a losing collection and its receipts.
+    let mut tx = state.index.begin(MutationScope::Global).await.unwrap();
+    assert_eq!(tx.orphan_collection(data.loser.id).await.unwrap(), 2);
+    drop(tx);
+    assert_eq!(
+        state.index.artifact(data.loser_artifact.id).await.unwrap(),
+        data.loser_artifact
+    );
+    state.reindex(&data.loser.store).await.unwrap();
+    let counts = state.reindex(&data.winner.store).await.unwrap();
+    assert_eq!(
+        (
+            counts.collections,
+            counts.artifacts,
+            counts.blobs,
+            counts.orphans
+        ),
+        (1, 1, 1, 3)
+    );
+    // The survivor shares the loser's digest; only its live reference remains.
+    let mut tx = state
+        .index
+        .begin(MutationScope::Store(data.survivor.store.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        tx.delete_artifact(&data.survivor.store, &data.survivor_artifact)
+            .await
+            .unwrap(),
+        0
+    );
+    drop(tx);
+    for _ in 0..2 {
+        let counts = state.reindex(&data.loser.store).await.unwrap();
+        assert_eq!(
+            (
+                counts.collections,
+                counts.artifacts,
+                counts.blobs,
+                counts.orphans
+            ),
+            (1, 1, 1, 3)
+        );
+        assert_eq!(
+            state
+                .index
+                .by_scope(&data.winner.scope.key())
+                .await
+                .unwrap(),
+            data.winner
+        );
+        assert!(matches!(
+            state.index.collection(data.loser.id).await,
+            Err(SokarError::NotFound)
+        ));
+        assert!(matches!(
+            state.index.artifact(data.loser_artifact.id).await,
+            Err(SokarError::NotFound)
+        ));
+        assert_eq!(
+            state
+                .index
+                .artifact(data.survivor_artifact.id)
+                .await
+                .unwrap(),
+            data.survivor_artifact
+        );
+        let mut tx = state.index.begin(MutationScope::Global).await.unwrap();
+        assert!(
+            tx.idempotency("test", data.loser.id, "receipt-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        drop(tx);
+        let store = state.stores.get(&data.loser.store).unwrap();
+        assert!(store.op.exists(&data.loser.key()).await.unwrap());
+        assert!(store.op.exists(&data.loser_artifact.key()).await.unwrap());
+        assert!(
+            store
+                .op
+                .exists(&data.loser_artifact.blob.key)
+                .await
+                .unwrap()
+        );
+    }
+}
+#[tokio::test]
+async fn cross_store_scope_recovery_memory() {
+    cross_store_scope_recovery(None).await;
+}
+#[tokio::test]
+async fn two_store_binary_boot_and_restart_choose_lowest_uuid_in_sorted_store_order() {
+    let mut data = cross_store_fixture(None).await;
+    for reverse in [false, true] {
+        if reverse {
+            Arc::make_mut(&mut data.fixture.config).stores.reverse();
+        }
+        // Starts the actual executable: main -> run -> build -> ephemeral reindex.
+        let daemon = data.fixture.serve_binary().await;
+        assert_eq!(
+            daemon
+                .client
+                .collection_by_scope(&data.winner.scope)
+                .await
+                .unwrap(),
+            data.winner
+        );
+        assert_eq!(
+            daemon
+                .client
+                .artifact(data.winner_artifact.id)
+                .await
+                .unwrap(),
+            data.winner_artifact
+        );
+        assert_eq!(
+            daemon
+                .client
+                .artifact(data.survivor_artifact.id)
+                .await
+                .unwrap(),
+            data.survivor_artifact
+        );
+        assert_eq!(
+            daemon
+                .client
+                .collection(data.loser.id)
+                .await
+                .unwrap_err()
+                .problem()
+                .unwrap()
+                .status,
+            404
+        );
+        assert_eq!(
+            daemon
+                .client
+                .artifact(data.loser_artifact.id)
+                .await
+                .unwrap_err()
+                .problem()
+                .unwrap()
+                .status,
+            404
+        );
+        let log = std::fs::read_to_string(data.fixture.dir.path().join("daemon.log")).unwrap();
+        let boot: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("ephemeral store reindexed"))
+            .collect();
+        assert_eq!(boot.len(), 2, "{log}");
+        assert!(boot[0].contains("local"), "{log}");
+        assert!(boot[1].contains("zstore"), "{log}");
+        assert!(log.contains("cross-store duplicate scope"), "{log}");
+        drop(daemon);
+    }
 }

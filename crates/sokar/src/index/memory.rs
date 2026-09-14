@@ -271,6 +271,41 @@ impl IndexTransaction for MemoryTransaction {
         self.working.tombstones.insert(id, artifact.clone());
         Ok(remaining)
     }
+    async fn orphan_collection(&mut self, id: CollectionId) -> SokarResult<usize> {
+        let collection = self
+            .working
+            .collections
+            .remove(&id)
+            .ok_or(SokarError::NotFound)?;
+        let mut removed = 0;
+        for artifact in self
+            .working
+            .artifacts
+            .values()
+            .filter(|a| a.collection == id)
+        {
+            if let Some(count) = self
+                .working
+                .refs
+                .get_mut(&(collection.store.clone(), artifact.blob.digest))
+            {
+                *count -= 1;
+            }
+            removed += 1;
+        }
+        removed += self
+            .working
+            .tombstones
+            .values()
+            .filter(|a| a.collection == id)
+            .count();
+        self.working.artifacts.retain(|_, a| a.collection != id);
+        self.working.tombstones.retain(|_, a| a.collection != id);
+        self.working
+            .idempotency
+            .retain(|_, receipt| receipt.collection != id);
+        Ok(removed)
+    }
     async fn replace_store(
         &mut self,
         store: &StoreName,
