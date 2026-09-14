@@ -29,6 +29,13 @@ Verification by the reviewer: `cargo fmt -p sokar -p sokar-client --check` pass,
 - **R16 Lock scope**: artifact mutations (finish, delete) take a per-store advisory lock (`hashtext('sokar.store:' || store)`), collection creation and the reindex swap take the global `sokar.mutations` lock (scope uniqueness is cross-store). Memory index mirrors this with one mutex per store plus a global one. Document the lock order (global before store) to keep it deadlock-free.
 - **R9 Report**: update `52a-report.md` (invariants section, deletion paragraph, validation table) and add a "Round 2" section listing what changed. Run the same gates: scoped fmt, clippy `-D warnings`, `cargo test -p sokar -p sokar-client`; keep the 100 MiB and recovery tests green (adjust the delete test: blob bytes now survive with refcount 0).
 
+## Round 3 — added after the last review angle (cross-file tracer)
+
+- **R17 Probe-verified conditional copy** (`store.rs`): OpenDAL's S3 service advertises `copy_with_if_not_exists` unconditionally (opendal-service-s3 0.59.1 `backend.rs`), but SeaweedFS and some gateways reject the precondition header outright, which today fails *every* upload to that store, not just dedup. At store build (and in `--check-stores`) probe it: write `_sokar/probe/<uuid>`, `copy_with(..).if_not_exists(true)` to a second probe key twice; the second attempt must yield `ConditionNotMatch`/`AlreadyExists` — anything else downgrades `cap.conditional_write` to `false` with a `tracing::warn!` naming the store; delete the probe keys. In `promote()`, if a conditional copy fails with a non-dedup error kind, retry once via the stat-then-copy fallback and downgrade the capability for the store's lifetime. Test with a fake operator that rejects the condition.
+- **R18 Deterministic multi-store boot** (`main.rs`, `service.rs` reindex): iterate stores in sorted name order at boot; resolve a cross-store scope collision the same way as R13 (lowest UUIDv7 wins, the others are counted as orphans and logged), never abort boot on it. Add a two-store boot test through the real `run()` path (currently `Fixture` bypasses it).
+- **R1 addendum**: validate the `Idempotency-Key` shape before `index.begin()` so malformed requests never take a lock.
+- Note (no action): two ephemeral (no `[database]`) replicas on one bucket remain unsupported; R2 removes the synchronous blob delete that made the race destructive. Keep the single-daemon warning in `examples/local.toml`.
+
 ## Accepted as-is (with notes)
 
 - Per-request credential file reload (`auth.rs`): matches the house pattern (`seshat::auth::SharedSecretAuth` re-reads projected Secrets per request). Fine for the expected principal count.
