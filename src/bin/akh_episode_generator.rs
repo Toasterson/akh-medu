@@ -2675,8 +2675,20 @@ fn build_sidecar_record(
         return Ok(SidecarBuildOutcome::SchemaInvalid);
     };
     let seed = sidecar_seed(&record.id);
+    // The request the model sees is ALWAYS rendered from the engine-completed
+    // episode (`record.target`): that is the situation's ground truth. The
+    // emitted target may differ from it only under `--e1-targets raw-valid`,
+    // where the control arm keeps the identical prompt and swaps in the
+    // schema-valid-but-not-value-exact raw proposal — otherwise the two E1
+    // arms would train on different episodes, not different targets.
+    let completed = KnowledgeAction::parse_runtime(&record.target)?;
     let action = KnowledgeAction::parse_runtime(target_text)?;
-    let (tools, conversation) = match &action {
+    if let KnowledgeAction::ToolCall { tool, arguments } = &action
+        && !frozen.validate_call(tool, arguments).valid
+    {
+        return Ok(SidecarBuildOutcome::SchemaInvalid);
+    }
+    let (tools, conversation) = match &completed {
         KnowledgeAction::ToolCall { tool, arguments } => {
             let Some(contract) = frozen.tool(tool) else {
                 return Ok(SidecarBuildOutcome::SchemaInvalid);
