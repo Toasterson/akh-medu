@@ -295,6 +295,7 @@ pub struct AgentDaemon {
     agent: Arc<RwLock<Agent>>,
     config: DaemonConfig,
     total_cycles: usize,
+    consecutive_idle_skips: std::sync::atomic::AtomicUsize,
     /// When true, cycle/learning methods skip their work without acquiring
     /// the agent lock — allowing external writers to acquire it uncontended.
     paused: Arc<AtomicBool>,
@@ -347,6 +348,7 @@ impl AgentDaemon {
             agent,
             config,
             total_cycles: 0,
+            consecutive_idle_skips: std::sync::atomic::AtomicUsize::new(0),
             paused: Arc::new(AtomicBool::new(false)),
             cycle_done: Arc::new(tokio::sync::Notify::new()),
             shutdown: None,
@@ -465,7 +467,22 @@ impl AgentDaemon {
     /// cycle rather than blocking the turn.
     #[cfg(test)]
     fn try_write_agent(&self) -> Option<std::sync::RwLockWriteGuard<'_, Agent>> {
-        self.agent.try_write().ok()
+        match self.agent.try_write() {
+            Ok(guard) => {
+                let skipped = self.consecutive_idle_skips.swap(0, Ordering::Relaxed);
+                if skipped >= 3 {
+                    tracing::info!(skipped, "daemon idle work resumed after contention");
+                }
+                Some(guard)
+            }
+            Err(_) => {
+                let skipped = self.consecutive_idle_skips.fetch_add(1, Ordering::Relaxed) + 1;
+                if skipped == 3 || skipped.is_multiple_of(60) {
+                    tracing::warn!(skipped, "daemon idle work yields to active turns");
+                }
+                None
+            }
+        }
     }
 
     /// Run the main daemon loop.
@@ -2605,12 +2622,14 @@ mod tests {
             daemon.try_write_agent().is_none(),
             "try_write_agent must yield to a held read lock instead of blocking"
         );
+        assert_eq!(daemon.consecutive_idle_skips.load(Ordering::Relaxed), 1);
         drop(turn_guard);
 
         assert!(
             daemon.try_write_agent().is_some(),
             "sanity: once the read lock is released, try_write_agent must succeed"
         );
+        assert_eq!(daemon.consecutive_idle_skips.load(Ordering::Relaxed), 0);
     }
 
     /// End-to-end version of the same guarantee through the real call site:
