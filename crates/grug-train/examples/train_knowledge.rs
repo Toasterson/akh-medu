@@ -736,6 +736,14 @@ where
                 .as_ref()
                 .and_then(|parent| parent.artifact().foundation.clone())
         })
+        // A remediated candidate keeps its parent's foundation lineage exactly
+        // like a steered one: the parent's `context_extended_from` (carried
+        // above) is only valid together with the foundation it extended from.
+        .or_else(|| {
+            remediation_parent
+                .as_ref()
+                .and_then(|parent| parent.artifact().foundation.clone())
+        })
         .or_else(|| {
             resume_artifact
                 .as_ref()
