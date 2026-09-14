@@ -49,9 +49,21 @@ spec:
                 secretKeyRef:
                   name: {{ $dbSecretName }}
                   key: {{ $dbSecretKey }}
+          {{- if .Values.sokard.storeSecrets.existingSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.sokard.storeSecrets.existingSecret }}
+          {{- end }}
+          # Same mounts as the main container: sokard validates the whole config
+          # (principal token files included) before running migrations, so the
+          # init container must see the token too (chart 0.1.15 crash-looped).
           volumeMounts:
             - name: config
               mountPath: /config
+            - name: ingress-auth
+              mountPath: /etc/sokar/token
+              subPath: token
+              readOnly: true
       {{- end }}
       containers:
         - name: sokard
