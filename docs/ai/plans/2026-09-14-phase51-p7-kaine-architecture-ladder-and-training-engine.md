@@ -1,6 +1,6 @@
 # Phase 51 P7 — ADAM → Kaine architecture ladder and the training-engine memory program
 
-- **Status:** Planned (2026-09-14); items are session-driven (`source=architect-session`), never `ready`/`working`
+- **Status:** Planned (2026-09-14), **gated on P6**: no P7 item starts until the P6.4/P6.5 window queue (`runs/p6-4/queue-20260914.txt`) and its release gate have finished (operator decision 2026-09-14). All items are HITL: `source=architect-session`, `draft` until the operator promotes them, never `ready`/`working`
 - **ADRs:** [ADR 108](../decisions/108-kaine-architecture-ladder.md) (architecture ladder), [ADR 109](../decisions/109-training-engine-memory-program.md) (engine memory); governance [ADR 105](../decisions/105-autonomous-run-governance.md); lane [ADR 106](../decisions/106-local-burn-metal-lane-and-engine-in-the-loop-training.md); attention memory [ADR 107](../decisions/107-training-memory-turboquant-vs-recompute-attention.md)
 - **Anima:** project `019d9844-ce74-7993-a9f0-c953b8f04a4e`, plan `019f90cb-2e66-7f92-ba88-a4060be97c6e`
 - **Predecessor:** [P6 plan](2026-09-13-phase51-p6-local-training-neurosymbolic.md) (active; P7 does not pre-empt the P6.4/P6.5 window queue)
@@ -44,8 +44,9 @@ the Mac, 350M and 1.1B on one pod GPU, Kaine on whatever P7.8 shows is needed.
 
 ## Sequence
 
-1. **Engine first, on the Mac, while the P6 queue runs:** P7.1 → P7.2 → P7.3 → P7.4. Each lands behind a flag with its gradient test
-   and enters a lane only after its gate. None changes the P6.4/P6.5 recipe (f32 + recompute attention) until re-measured.
+1. **Engine first, on the Mac, after the P6 window queue and its gate have finished:** P7.1 → P7.2 → P7.3 → P7.4. Each lands behind a
+   flag with its gradient test and enters a lane only after its gate. The P6 recipe (f32 + recompute attention) is never changed
+   retroactively; P6's fine-tuning result is recorded before any P7 lever touches the lane.
 2. **Architecture at 33M:** P7.5 and P7.6 on the Mac from the foundation corpus, scored on the unchanged sentinels. P7.5 is also an
    engine memory lever (L×w score chunks), so it may move ahead of P7.3/P7.4 if the P7.2 measurement says activations are still the floor.
 3. **350M rung:** P7.7 on a pod (ADR 105 WI, dollar cap, exit condition) with the P7.5 350M preset as control. This is the first
