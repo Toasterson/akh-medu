@@ -40,9 +40,9 @@ jobs:
     steps:
       - name: Install Rust and platform test prerequisites
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config protobuf-compiler libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev xz-utils python3 git
-          sh scripts/session-platform/install-ci-git.sh
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libssl-dev libcurl4-openssl-dev libexpat1-dev zlib1g-dev xz-utils python3 git
+          sh .forgejo/scripts/run-logged.sh install-git sh scripts/session-platform/install-ci-git.sh
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
           fi
@@ -51,7 +51,7 @@ jobs:
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
           export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
           python3 scripts/session-platform/check-profiles.py
-          cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
+          sh .forgejo/scripts/run-logged.sh platform-tests cargo test --quiet --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
 
   # Seshat crate type-check. Default features only (includes `embedding`;
   # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
@@ -61,8 +61,8 @@ jobs:
       - name: Install dependencies
         run: |
           if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
           fi
 
       - name: Install Rust toolchain
@@ -74,7 +74,7 @@ jobs:
       - name: cargo check -p seshat
         run: |
           test ! -f "$HOME/.cargo/env" || . "$HOME/.cargo/env"
-          CARGO_BUILD_JOBS=2 cargo check -p seshat
+          CARGO_BUILD_JOBS=2 sh .forgejo/scripts/run-logged.sh check-seshat cargo check -p seshat
 
   # Root akh-medu crate type-check with --features server.
   #
@@ -103,8 +103,8 @@ jobs:
       - name: Install dependencies
         run: |
           if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
           fi
 
       - name: Install Rust toolchain
@@ -127,7 +127,7 @@ jobs:
               unset RUSTC_WRAPPER
             fi
           fi
-          cargo check --features server
+          sh .forgejo/scripts/run-logged.sh check-server cargo check --features server
 
   # Library tests for the root crate. Uses the `postgres` feature (which pulls
   # in akhomed-store + tokio) rather than the full `server` feature set (which
@@ -141,8 +141,8 @@ jobs:
       - name: Install dependencies
         run: |
           if ! command -v protoc >/dev/null 2>&1 || ! pkg-config --exists protobuf openssl; then
-            sudo apt-get update
-            sudo apt-get install -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
+            sudo apt-get update -qq
+            sudo apt-get install -qq -y build-essential pkg-config protobuf-compiler libprotobuf-dev libssl-dev
           fi
 
       - name: Install Rust toolchain
@@ -167,7 +167,8 @@ jobs:
           fi
           # Keep failures and totals without thousands of per-test success lines.
           # The remote log collector otherwise outlives this suite by many minutes.
-          cargo test --quiet --features postgres --lib
+          sh .forgejo/scripts/run-logged.sh library-tests cargo test --quiet --features postgres --lib
+          sh .forgejo/scripts/run-logged.sh shell-cwd-tests cargo test --quiet --features postgres --test shell_exec_cwd -- --test-threads=1
 
   docker-seshd:
     runs-on: rust
