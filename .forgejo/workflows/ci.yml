@@ -47,6 +47,28 @@ jobs:
           python3 scripts/session-platform/check-profiles.py
           cargo test --locked -p akh-session-services --all-features -p akh-runtime -p akh-session-types -p akh-service-store
 
+  # Sokar artifact daemon (Phase 52, ADR 108): unit + integration tests on the
+  # OpenDAL memory/fs services. Postgres and MinIO contract tests skip or are
+  # #[ignore] when SOKAR_TEST_DATABASE_URL / SOKAR_MINIO_* are unset, so this
+  # job needs no services.
+  test-sokar:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      - name: cargo test -p sokar -p sokar-client
+        run: |
+          . "$HOME/.cargo/env"
+          export CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+          cargo fmt -p sokar -p sokar-client -- --check
+          cargo clippy --locked -p sokar -p sokar-client --all-targets -- -D warnings
+          cargo test --locked -p sokar -p sokar-client
+
   # Seshat crate type-check. Default features only (includes `embedding`;
   # excludes the memory-heavy `synthesis` candle feature which OOMs the runner).
   check-seshat:
