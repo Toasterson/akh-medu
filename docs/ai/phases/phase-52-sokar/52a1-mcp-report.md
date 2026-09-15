@@ -199,3 +199,77 @@ Which later slice should add the typed `upstreams.sokar` configuration and engin
 dispatch for direct akhomed consumers? The requested file boundary prevents that
 consumer change here. Session-services MCP routing is available with explicit
 tool grants; Sokar's nine-tool MCP surface is implemented and locally validated.
+
+## Round 2
+
+Authority: all R1–R8 in [the review](52a1-mcp-review.md). Work remains on
+`sokar/52a1-mcp`, within the original file boundary, with no push.
+
+### Required fixes
+
+| Item | Change and evidence |
+| --- | --- |
+| R1 | `[mcp] session_idle_secs` defaults to 900; every principal's `LocalSessionManager` now sets `SessionConfig.keep_alive`. The real transport test uses a one-second idle TTL, verifies reuse returns 404, then initializes and lists tools successfully in a fresh session. |
+| R2 | The MCP subtree is wrapped in `RequestBodyLimitLayer` with `max_inline_bytes * 4 / 3 + 64 KiB`, before mounting. A bounded body adapter collects before rmcp parses JSON so unknown-length/chunked overflow also returns 413 instead of rmcp's body-read 500. Tests send oversized invalid JSON both with and without Content-Length. The global HTTP limit still applies. |
+| R3 | Both upload schemas expose optional `idempotency_key` with retry guidance and pass it into `UploadOptions`. For both text and base64, tests verify same-key replay returns the original artifact ID, a REST replay returns that same ID, and changed content returns `sokar::idempotency_mismatch`. |
+| R4 | Authenticated responses beneath the configured MCP mount bypass `normalize_problem`; authentication/authorization failures retain Sokar problem+json. Tests preserve rmcp's 400, 404, 406, 415 and 422 responses, including the exact missing-session POST body, and check custom mount matching does not capture sibling paths. |
+| R5 | Upload tools parse collection IDs and authorize before size checks, decoding or staging. Shared typed `authz::Resource` renders REST-handler and MCP-tool authorization resources, including percent-encoded by-path segments; list permission is Read. A recording/denying authorizer verifies parity for list/find/get/content, including Unicode and reserved path characters, and proves denied text/base64 inputs return authz before inline/decode errors. REST and MCP endpoint 403 envelopes remain problem+json. |
+| R6 | `RoutePath` implements FromStr/Deserialize with typed `NotAbsolute`, `TrailingSlash`, `DotSegment`, `IllegalByte`, and `ReservedV1` reasons and per-variant help. The TOML diagnostic text also includes corrective guidance. MCP deserialization defers path validation when disabled; `Config::validate` rechecks it if enabled later. Tests cover every reason, defaults, unknown fields, disabled invalid configuration, re-enabling, and positive inline/idle bounds. |
+| R7 | `ListParams.limit` is Option<u32>, passed unchanged through ListArtifacts to the existing index page helper; `list_limit()` is removed. A 101-artifact transport test compares MCP and REST pages at the shared default 100 and explicit limits, and verifies invalid-limit tool errors. |
+| R8 | This section, the operator guide, and the local TOML example document the changes. Scoped fmt, rustc 1.98 clippy, the test suite and error-size gate pass. |
+
+### Accepted behavior retained and source clarifications
+
+- Tool IDs and paths deliberately remain raw String parameters and are parsed
+  inside each tool. Malformed values therefore retain the accepted
+  `{code,message,help}` tool-error envelope instead of becoming JSON-RPC
+  invalid_params. Diagnostic codes remain identical to REST; the accepted tool
+  envelope, principal/session isolation and service-layer upload path remain.
+- rmcp **0.17.0** returns **422**, with the exact text
+  `Unexpected message, expect initialize request`, for a non-initialize POST
+  without a session ID. Its missing-session GET returns **400** with
+  `Bad Request: Session ID is required`. Tests preserve these actual upstream
+  responses; no response is rewritten to match the review's illustrative 400.
+- The existing `index::page_limit()` defaults to 100 and **rejects** values
+  outside 1–1000; it does not clamp. MCP now shares that behavior with REST,
+  preserving the foundation's validation semantics.
+- Canonical resource authorization now occurs in the REST handlers after typed
+  extraction, using the same Resource variants as the MCP tools. Bearer
+  authentication remains at the API boundary before body processing. MCP also
+  retains its endpoint authorization before transport/body processing.
+- The chart retains its accepted 0.1.17 settings; the new idle setting uses the
+  daemon's default unless configured directly in TOML. The reviewer-owned
+  architecture document and all other out-of-scope files are untouched.
+
+### Validation and limits
+
+All Rust gates use `rustc 1.98.0 (88d9e12ae 2026-08-18)` via `+1.98.0`.
+
+| Gate | Result |
+| --- | --- |
+| `cargo +1.98.0 fmt -p sokar -p sokar-client --check` | Pass |
+| `cargo +1.98.0 clippy --locked -p sokar -p sokar-client --all-targets -- -D warnings` | Pass |
+| `cargo +1.98.0 test --locked -p sokar -p sokar-client` | 44 reported passed, 0 failed, 1 ignored |
+| MCP transport contracts | 9 passed, including the 5 added Round 2 contracts |
+| Typed config diagnostics and CLI checks | 6 passed, including the added per-reason test and local example boot |
+| `SokarError` size / diagnostic-code parity | Pass; error remains below 128 bytes |
+| `git diff --check`, branch and file-scope audit | Pass |
+
+The existing Postgres test returns early when `SOKAR_TEST_DATABASE_URL` is unset,
+so 43 test bodies exercised their contracts; the MinIO test remains explicitly
+ignored. No live external database/object-store, CI, deployment or consumer
+registration validation is claimed. Registration snippets and chart templates
+were unchanged in Round 2; their earlier evidence remains recorded above.
+
+Logs: `/tmp/sokar-52a1-round2-clippy.log` and
+`/tmp/sokar-52a1-round2-tests.log` (local convenience evidence).
+
+### Round 2 commits
+
+- `7a6bed75` — `fix(sokar): address round two MCP review findings`:
+  implementation, regression tests, local example and operator documentation.
+- This report is committed separately as
+  `docs(sokar): record round two MCP fixes and validation`.
+
+Both commits end with the required
+`Co-Authored-By: Codex gpt-6-astra <noreply@openai.com>` trailer. No push.
