@@ -2,6 +2,8 @@
 members = [
     ".",
     "crates/seshat",
+    "crates/sokar",
+    "crates/sokar-client",
     "crates/heka",
     "crates/shend",
     "crates/anima-ai",

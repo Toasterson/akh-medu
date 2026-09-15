@@ -44,8 +44,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(json!({"success": true, "rows": rows}));
             }
             if name == "exam_retract_owned" {
-                let sources: Vec<akh_medu::graph::Triple> = serde_json::from_value(request["arguments"]["sources"].clone())?;
-                let derived: Vec<akh_medu::graph::Triple> = serde_json::from_value(request["arguments"]["derived"].clone())?;
+                let sources: Vec<akh_medu::graph::Triple> =
+                    serde_json::from_value(request["arguments"]["sources"].clone())?;
+                let derived: Vec<akh_medu::graph::Triple> =
+                    serde_json::from_value(request["arguments"]["derived"].clone())?;
                 let removed = engine.retract_owned_rule_snapshot(&sources, &derived)?;
                 engine.persist()?;
                 return Ok(json!({"success": true, "removed": removed}));
