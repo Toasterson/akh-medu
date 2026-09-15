@@ -17,6 +17,7 @@ pub mod error;
 pub mod kg_context;
 pub mod parse_ranker;
 pub mod router;
+pub mod span_projection;
 
 #[cfg(feature = "nlu-ml")]
 pub mod micro_ml;
