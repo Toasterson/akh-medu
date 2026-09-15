@@ -152,8 +152,10 @@ impl Projector {
     /// Canonical description hashed into `projector_sha256`.
     pub fn canonical(&self) -> String {
         format!(
-            "akh-neural-span-projector/1;seed={:#018x};per_layer=l2norm,zero_pad_{},randomized_hadamard_xorshift64_signs_normalized,\
-             first_{}_coefficients,sign_bit(nonnegative=1);layer_seed=seed^layer*0x9e3779b97f4a7c15;bits={};pack=msb_first",
+            "akh-neural-span-projector/2;seed={:#018x};per_layer=l2norm_f64_sum_sqrt_div_cast_f32,zero_pad_{},randomized_hadamard_xorshift64_signs_normalized,\
+             first_{}_coefficients,sign_bit(nonnegative=1);layer_seed=seed^(layer*0x9e3779b97f4a7c15_wrapping_u64);\
+             zero_layer_seed=0x9e3779b97f4a7c15;xorshift=left13,right7,left17;flip=lowbit1;\
+             fwht=f32_butterflies_then_f32_inv_sqrt_scale;bits={};pack=msb_first",
             self.seed, HADAMARD_WIDTH, BITS_PER_LAYER, VECTOR_BITS
         )
     }
@@ -413,6 +415,29 @@ mod tests {
             projector.project(&policy, &nan).unwrap_err(),
             ProjectionError::DegenerateMean { layer: 19 }
         );
+    }
+
+    #[test]
+    fn recipe_describes_precision_and_zero_seed_fallback() {
+        let recipe = Projector { seed: 0 }.canonical();
+        assert!(recipe.contains("l2norm_f64_sum_sqrt_div_cast_f32"));
+        assert!(recipe.contains("zero_layer_seed=0x9e3779b97f4a7c15"));
+        assert!(recipe.contains("xorshift=left13,right7,left17;flip=lowbit1"));
+        assert!(recipe.contains("fwht=f32_butterflies_then_f32_inv_sqrt_scale"));
+        // Worked basis-vector case: layer zero derives a zero seed and uses
+        // the fallback. Its first xorshift sign is negative, so H(e_0) has
+        // negative coefficients throughout, giving 2000 zero bits.
+        let policy = CapturePolicy::for_model(5, 1).unwrap();
+        let means: Vec<_> = policy
+            .layers
+            .iter()
+            .map(|&layer| LayerMean {
+                layer,
+                mean: vec![1.0],
+            })
+            .collect();
+        let vector = Projector { seed: 0 }.project(&policy, &means).unwrap();
+        assert_eq!(&vector[..250], &[0u8; 250]);
     }
 
     #[test]
