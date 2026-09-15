@@ -27,15 +27,24 @@ impl Drop for Server {
     }
 }
 async fn serve(f: &Fixture, change: impl FnOnce(&mut Config)) -> Server {
+    serve_authorized(f, change, Arc::new(sokar::authz::ServiceOnly)).await
+}
+async fn serve_authorized(
+    f: &Fixture,
+    change: impl FnOnce(&mut Config),
+    authorizer: Arc<dyn sokar::authz::Authorizer>,
+) -> Server {
     let mut config = (*f.config).clone();
     change(&mut config);
     config.validate().unwrap();
     let path = config.mcp.path.clone();
-    let state = Arc::new(Sokar::new(
+    let mut state = Sokar::new(
         Arc::new(config),
         f.state.stores.clone(),
         f.state.index.clone(),
-    ));
+    );
+    state.authorizer = authorizer;
+    let state = Arc::new(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}{path}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -332,7 +341,7 @@ async fn inline_limits_are_decoded_exact_and_apply_to_reads_and_text() {
 async fn auth_precedes_mcp_custom_path_and_public_url_work() {
     let f = Fixture::new(true).await;
     let server = serve(&f, |config| {
-        config.mcp.path = "/agent/tools".into();
+        config.mcp.path = "/agent/tools".parse().unwrap();
         config.server.public_api_url = Some("https://sokar.example/prefix/".parse().unwrap());
     })
     .await;
@@ -485,4 +494,381 @@ async fn sessions_are_principal_bound_and_credentials_reload() {
         .await
         .unwrap();
     other.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_sessions_expire_and_can_initialize_again() {
+    let f = Fixture::new(true).await;
+    let server = serve(&f, |config| config.mcp.session_idle_secs = 1).await;
+    let http = reqwest::Client::new();
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"expiry-test","version":"1"}}});
+    let response = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .json(&initialize)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let session = response.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    response.text().await.unwrap();
+    let response = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let expired = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-session-id", &session)
+        .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(expired.status(), 404);
+    assert_eq!(
+        expired.text().await.unwrap(),
+        "Not Found: Session not found"
+    );
+    let fresh = connect(&server, TOKEN).await;
+    assert_eq!(fresh.list_all_tools().await.unwrap().len(), 9);
+    fresh.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_body_limit_precedes_parsing_and_transport_errors_survive() {
+    let f = Fixture::new(true).await;
+    let server = serve(&f, |config| {
+        config.mcp.path = "/agents/sokar".parse().unwrap();
+        config.mcp.max_inline_bytes = 3;
+    })
+    .await;
+    let http = reqwest::Client::new();
+    // Not valid JSON, but the Content-Length boundary must reject before rmcp parsing.
+    let oversized = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .body("!".repeat(3 * 4 / 3 + 64 * 1024 + 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(oversized.status(), 413);
+    // Unknown-length bodies must also be bounded before JSON parsing.
+    let chunks = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from(
+        vec![b'!'; 65_541],
+    ))]);
+    let chunked = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .body(reqwest::Body::wrap_stream(chunks))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chunked.status(), 413);
+    let missing_get = http
+        .get(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "text/event-stream")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_get.status(), 400);
+    assert_eq!(
+        missing_get.text().await.unwrap(),
+        "Bad Request: Session ID is required"
+    );
+    let unsupported = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .body("wrong content type")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), 415);
+    assert_eq!(
+        unsupported.text().await.unwrap(),
+        "Unsupported Media Type: Content-Type must be application/json"
+    );
+    let missing = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 422);
+    assert_eq!(
+        missing.text().await.unwrap(),
+        "Unexpected message, expect initialize request"
+    );
+    let unacceptable = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .header("accept", "text/plain")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unacceptable.status(), 406);
+    assert!(!unacceptable.text().await.unwrap().contains("urn:sokar"));
+    let no_route = http
+        .post(server.url.replace("/agents/sokar", "/agents/sokar-other"))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_route.status(), 404);
+    assert_eq!(
+        no_route.headers()["content-type"],
+        "application/problem+json"
+    );
+}
+
+#[tokio::test]
+async fn upload_idempotency_is_shared_with_rest() {
+    let f = Fixture::new(true).await;
+    let server = serve(&f, |_| {}).await;
+    let peer = connect(&server, TOKEN).await;
+    let c = collection(&peer).await;
+    let rest = sokar_client::Client::new(server.url.trim_end_matches("/mcp"), TOKEN).unwrap();
+    for (tool, field, value, changed) in [
+        ("sokar_put_text", "text", "abc", "def"),
+        ("sokar_put_base64", "base64", "YWJj", "ZGVm"),
+    ] {
+        let mut args = json!({"collection_id":c["id"],"path":tool,"media_type":"text/plain","kind":"document","idempotency_key":tool});
+        args[field] = json!(value);
+        let first = data(call(&peer, tool, args.clone()).await);
+        let retry = data(call(&peer, tool, args.clone()).await);
+        assert_eq!(first["artifact"]["id"], retry["artifact"]["id"]);
+        let mut options = common::options(tool);
+        options.media_type = "text/plain".parse().unwrap();
+        options.idempotency_key = Some(tool.into());
+        let rest_retry = rest
+            .upload(
+                c["id"].as_str().unwrap().parse().unwrap(),
+                &options,
+                bytes::Bytes::from_static(b"abc"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first["artifact"]["id"], rest_retry.artifact.id.to_string());
+        args[field] = json!(changed);
+        error(call(&peer, tool, args).await, "sokar::idempotency_mismatch");
+    }
+    peer.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn list_default_and_limit_validation_match_rest() {
+    let f = Fixture::new(true).await;
+    let server = serve(&f, |_| {}).await;
+    let peer = connect(&server, TOKEN).await;
+    let c = collection(&peer).await;
+    for i in 0..101 {
+        data(
+            call(
+                &peer,
+                "sokar_put_text",
+                json!({"collection_id":c["id"],"path":format!("item-{i:03}"),"text":"x"}),
+            )
+            .await,
+        );
+    }
+    let rest = sokar_client::Client::new(server.url.trim_end_matches("/mcp"), TOKEN).unwrap();
+    let id = c["id"].as_str().unwrap().parse().unwrap();
+    for limit in [None, Some(1), Some(1000)] {
+        let mcp = data(
+            call(
+                &peer,
+                "sokar_list",
+                json!({"collection_id":c["id"],"limit":limit}),
+            )
+            .await,
+        );
+        let page = rest
+            .list_artifacts(
+                id,
+                &sokar_client::ListArtifacts {
+                    limit,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(mcp, serde_json::to_value(&page).unwrap());
+        if limit.is_none() {
+            assert_eq!(mcp["artifacts"].as_array().unwrap().len(), 100);
+        }
+    }
+    for limit in [0, 1001] {
+        error(
+            call(
+                &peer,
+                "sokar_list",
+                json!({"collection_id":c["id"],"limit":limit}),
+            )
+            .await,
+            "sokar::request",
+        );
+    }
+    peer.cancel().await.unwrap();
+}
+
+#[derive(Default)]
+struct RecordingAuthorizer {
+    calls: std::sync::Mutex<Vec<(String, sokar::authz::Permission)>>,
+    deny_resources: std::sync::atomic::AtomicBool,
+    deny_endpoint: std::sync::atomic::AtomicBool,
+}
+impl sokar::authz::Authorizer for RecordingAuthorizer {
+    fn authorize(
+        &self,
+        _: &sokar::authz::Principal,
+        resource: &str,
+        permission: sokar::authz::Permission,
+    ) -> sokar::SokarResult<()> {
+        if self.deny_endpoint.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(sokar::SokarError::Authz);
+        }
+        if resource.starts_with("/v1/") {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((resource.into(), permission));
+            if self
+                .deny_resources
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(sokar::SokarError::Authz);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn resource_permissions_match_rest_and_upload_auth_precedes_content_work() {
+    use sokar::authz::Permission;
+    let f = Fixture::new(true).await;
+    let auth = Arc::new(RecordingAuthorizer::default());
+    let server = serve_authorized(&f, |config| config.mcp.max_inline_bytes = 3, auth.clone()).await;
+    let peer = connect(&server, TOKEN).await;
+    let c = collection(&peer).await;
+    let path = "nested/héllo ?#.txt";
+    let put = data(
+        call(
+            &peer,
+            "sokar_put_text",
+            json!({"collection_id":c["id"],"path":path,"text":"abc"}),
+        )
+        .await,
+    );
+    auth.calls.lock().unwrap().clear();
+    data(call(&peer, "sokar_list", json!({"collection_id":c["id"]})).await);
+    data(
+        call(
+            &peer,
+            "sokar_find",
+            json!({"collection_id":c["id"],"path":path}),
+        )
+        .await,
+    );
+    data(
+        call(
+            &peer,
+            "sokar_get",
+            json!({"artifact_id":put["artifact"]["id"]}),
+        )
+        .await,
+    );
+    data(
+        call(
+            &peer,
+            "sokar_read_text",
+            json!({"artifact_id":put["artifact"]["id"]}),
+        )
+        .await,
+    );
+    let mcp_calls = std::mem::take(&mut *auth.calls.lock().unwrap());
+    assert_eq!(mcp_calls.len(), 4);
+    assert!(mcp_calls.iter().all(|(_, p)| *p == Permission::Read));
+    let http = reqwest::Client::new();
+    for (resource, _) in &mcp_calls {
+        let response = http
+            .get(format!("{}{resource}", server.url.trim_end_matches("/mcp")))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{resource}");
+    }
+    assert_eq!(*auth.calls.lock().unwrap(), mcp_calls);
+    assert!(mcp_calls[1].0.contains("h%C3%A9llo%20%3F%23.txt"));
+    auth.deny_resources
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    for text in ["four", "abc"] {
+        error(
+            call(
+                &peer,
+                "sokar_put_text",
+                json!({"collection_id":c["id"],"path":"denied","text":text}),
+            )
+            .await,
+            "sokar::authz",
+        );
+    }
+    for base64 in ["!!!!", "YWJjZGVm"] {
+        error(call(&peer, "sokar_put_base64", json!({"collection_id":c["id"],"path":"denied","media_type":"text/plain","base64":base64})).await, "sokar::authz");
+    }
+    let denied = http
+        .get(format!(
+            "{}{}",
+            server.url.trim_end_matches("/mcp"),
+            mcp_calls[0].0
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(denied.headers()["content-type"], "application/problem+json");
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["code"],
+        "sokar::authz"
+    );
+    auth.deny_endpoint
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let denied = http
+        .post(&server.url)
+        .bearer_auth(TOKEN)
+        .body("invalid JSON")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(denied.headers()["content-type"], "application/problem+json");
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["code"],
+        "sokar::authz"
+    );
+    auth.deny_endpoint
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    peer.cancel().await.unwrap();
 }

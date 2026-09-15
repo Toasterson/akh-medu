@@ -13,6 +13,7 @@ public_api_url = "http://127.0.0.1:9400"
 enabled = true
 path = "/mcp"
 max_inline_bytes = 8388608
+session_idle_secs = 900
 
 # Omit database for an ephemeral index rebuilt from manifests on every start.
 # Ephemeral mode is single-daemon only: never share its prefix between daemons.

@@ -1,5 +1,8 @@
 use super::SokarMcp;
-use crate::{SokarError, SokarResult, authz::Permission};
+use crate::{
+    SokarError, SokarResult,
+    authz::{Permission, Resource},
+};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use miette::Diagnostic;
@@ -36,6 +39,8 @@ pub(super) struct PutTextParams {
     kind: ArtifactKind,
     /// Optional string metadata labels.
     labels: Option<Labels>,
+    /// Optional idempotency key; reuse on retry to avoid a duplicate version.
+    idempotency_key: Option<String>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +58,8 @@ pub(super) struct PutBase64Params {
     kind: ArtifactKind,
     /// Optional string metadata labels.
     labels: Option<Labels>,
+    /// Optional idempotency key; reuse on retry to avoid a duplicate version.
+    idempotency_key: Option<String>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -63,9 +70,8 @@ pub(super) struct ListParams {
     prefix: Option<String>,
     /// Optional artifact category filter.
     kind: Option<ArtifactKind>,
-    /// Page size; defaults to 50 (service maximum 1000).
-    #[serde(default = "list_limit")]
-    limit: u32,
+    /// Page size; defaults to 100 (service maximum 1000), shared with REST.
+    limit: Option<u32>,
     /// Opaque next_cursor from the preceding page, retaining the same filters.
     cursor: Option<String>,
 }
@@ -107,9 +113,6 @@ fn text_media_type() -> String {
 fn document_kind() -> ArtifactKind {
     ArtifactKind::Document
 }
-fn list_limit() -> u32 {
-    50
-}
 fn text_limit() -> usize {
     1_048_576
 }
@@ -143,7 +146,7 @@ impl SokarMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         reply(
             async {
-                self.authorize("/v1/collections", Permission::Write)?;
+                self.authorize(Resource::Collections, Permission::Write)?;
                 self.state
                     .create_collection(
                         &self.principal.id,
@@ -168,15 +171,17 @@ impl SokarMcp {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         reply(
             async {
+                let id = p.collection_id.parse()?;
+                self.authorize(Resource::Artifacts(id), Permission::Write)?;
                 self.check_inline(p.text.len())?;
                 self.put(
-                    p.collection_id,
+                    id,
                     UploadOptions {
                         path: p.path.parse()?,
                         media_type: p.media_type.parse()?,
                         kind: p.kind,
                         labels: p.labels.unwrap_or_default(),
-                        idempotency_key: None,
+                        idempotency_key: p.idempotency_key,
                     },
                     Bytes::from(p.text),
                 )
@@ -193,6 +198,8 @@ impl SokarMcp {
         Parameters(p): Parameters<PutBase64Params>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         reply(async {
+            let id = p.collection_id.parse()?;
+            self.authorize(Resource::Artifacts(id), Permission::Write)?;
             let limit = self.state.config.mcp.max_inline_bytes;
             // Bound allocation before decoding; exact length is checked after decoding.
             if p.base64.len() > limit.saturating_add(2).saturating_div(3).saturating_mul(4) {
@@ -201,9 +208,9 @@ impl SokarMcp {
             let bytes = STANDARD.decode(p.base64).map_err(|_| SokarError::Invalid(
                 "base64 must use the standard alphabet and padding, without whitespace or a data URL prefix".into()))?;
             self.check_inline(bytes.len())?;
-            self.put(p.collection_id, UploadOptions {
+            self.put(id, UploadOptions {
                 path: p.path.parse()?, media_type: p.media_type.parse()?, kind: p.kind,
-                labels: p.labels.unwrap_or_default(), idempotency_key: None,
+                labels: p.labels.unwrap_or_default(), idempotency_key: p.idempotency_key,
             }, Bytes::from(bytes)).await
         }.await)
     }
@@ -217,7 +224,7 @@ impl SokarMcp {
         reply(
             async {
                 let id = p.collection_id.parse()?;
-                self.authorize(&format!("/v1/collections/{id}/artifacts"), Permission::List)?;
+                self.authorize(Resource::Artifacts(id), Permission::Read)?;
                 self.state.index.collection(id).await?;
                 self.state
                     .index
@@ -226,7 +233,7 @@ impl SokarMcp {
                         &ListArtifacts {
                             prefix: p.prefix,
                             kind: p.kind,
-                            limit: Some(p.limit),
+                            limit: p.limit,
                             cursor: p.cursor,
                         },
                     )
@@ -245,9 +252,9 @@ impl SokarMcp {
         reply(
             async {
                 let id: ArtifactId = p.artifact_id.parse()?;
-                self.authorize(&format!("/v1/artifacts/{id}"), Permission::Read)?;
+                self.authorize(Resource::Artifact(id), Permission::Read)?;
                 let artifact = self.state.index.artifact(id).await?;
-                let path = format!("/v1/artifacts/{id}/content");
+                let path = Resource::Content(id).to_string();
                 let content_url = self
                     .state
                     .config
@@ -274,10 +281,7 @@ impl SokarMcp {
             async {
                 let id: CollectionId = p.collection_id.parse()?;
                 let path: ArtifactPath = p.path.parse()?;
-                self.authorize(
-                    &format!("/v1/collections/{id}/artifacts/by-path/{path}"),
-                    Permission::Read,
-                )?;
+                self.authorize(Resource::ByPath(id, &path), Permission::Read)?;
                 self.state.index.latest(id, &path).await
             }
             .await,
@@ -320,7 +324,7 @@ impl SokarMcp {
         reply(
             async {
                 let id: ArtifactId = p.artifact_id.parse()?;
-                self.authorize(&format!("/v1/artifacts/{id}"), Permission::Delete)?;
+                self.authorize(Resource::Artifact(id), Permission::Delete)?;
                 self.state.delete_artifact(id).await?;
                 Ok(json!({ "tombstoned": true }))
             }
@@ -339,10 +343,10 @@ impl SokarMcp {
             tool_router: Self::tool_router(),
         }
     }
-    fn authorize(&self, resource: &str, permission: Permission) -> SokarResult<()> {
+    fn authorize(&self, resource: Resource<'_>, permission: Permission) -> SokarResult<()> {
         self.state
             .authorizer
-            .authorize(&self.principal, resource, permission)
+            .authorize(&self.principal, &resource.to_string(), permission)
     }
     fn check_inline(&self, size: usize) -> SokarResult<()> {
         let limit = self.state.config.mcp.max_inline_bytes;
@@ -354,15 +358,10 @@ impl SokarMcp {
     }
     async fn put(
         &self,
-        collection_id: String,
+        id: CollectionId,
         options: UploadOptions,
         bytes: Bytes,
     ) -> SokarResult<UploadResponse> {
-        let id: CollectionId = collection_id.parse()?;
-        self.authorize(
-            &format!("/v1/collections/{id}/artifacts"),
-            Permission::Write,
-        )?;
         let collection = self.state.index.collection(id).await?;
         let store = self.state.stores.get(&collection.store)?;
         let staged = store
@@ -381,7 +380,7 @@ impl SokarMcp {
         max_bytes: usize,
     ) -> SokarResult<(Artifact, Vec<u8>)> {
         let id: ArtifactId = artifact_id.parse()?;
-        self.authorize(&format!("/v1/artifacts/{id}/content"), Permission::Read)?;
+        self.authorize(Resource::Content(id), Permission::Read)?;
         self.state
             .read_inline(id, max_bytes.min(self.state.config.mcp.max_inline_bytes))
             .await

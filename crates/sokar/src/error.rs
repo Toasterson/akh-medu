@@ -11,6 +11,9 @@ pub enum SokarError {
         help("Check the TOML fields and env:/file: references; run sokard --check.")
     )]
     Config(String),
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RoutePath(#[from] crate::config::RoutePathError),
     #[error("unknown store {0}")]
     #[diagnostic(
         code(sokar::config),
@@ -158,7 +161,7 @@ fn storage_help(kind: ErrorKind) -> &'static str {
 impl SokarError {
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Config(_) | Self::UnknownStore(_) => "sokar::config",
+            Self::Config(_) | Self::RoutePath(_) | Self::UnknownStore(_) => "sokar::config",
             Self::ScopeExists(_) => "sokar::scope_exists",
             Self::IdempotencyMismatch => "sokar::idempotency_mismatch",
             Self::StoreMismatch { .. } => "sokar::store_mismatch",
@@ -229,6 +232,7 @@ mod tests {
         let json_error = || serde_json::from_str::<serde_json::Value>("{").unwrap_err();
         let errors = vec![
             SokarError::Config("test".into()),
+            SokarError::RoutePath(crate::config::RoutePathError::NotAbsolute),
             SokarError::UnknownStore("missing".parse().unwrap()),
             SokarError::ScopeExists("scope".into()),
             SokarError::IdempotencyMismatch,

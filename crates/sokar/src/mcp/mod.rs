@@ -11,10 +11,11 @@ use rmcp::{
     handler::server::tool::ToolRouter,
     model::*,
     transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        StreamableHttpServerConfig, StreamableHttpService,
+        session::local::{LocalSessionManager, SessionConfig},
     },
 };
-use std::{collections::HashMap, convert::Infallible, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc, time::Duration};
 use tower::{Service, ServiceExt};
 
 #[derive(Clone)]
@@ -42,10 +43,17 @@ pub fn service(
             let principal = Principal {
                 id: config.id.clone(),
             };
+            let manager = LocalSessionManager {
+                session_config: SessionConfig {
+                    keep_alive: Some(Duration::from_secs(state.config.mcp.session_idle_secs)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let state = state.clone();
             let service = StreamableHttpService::new(
                 move || Ok(SokarMcp::new(state.clone(), principal.clone())),
-                Arc::new(LocalSessionManager::default()),
+                Arc::new(manager),
                 StreamableHttpServerConfig::default(),
             );
             (config.id.clone(), service)

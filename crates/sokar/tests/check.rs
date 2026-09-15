@@ -107,7 +107,8 @@ fn mcp_config_defaults_and_invalid_paths_are_diagnostic() {
     use sokar::config::{McpConfig, ServerConfig};
     let defaults: McpConfig = toml::from_str("").unwrap();
     assert!(defaults.enabled);
-    assert_eq!(defaults.path, "/mcp");
+    assert_eq!(defaults.path.as_str(), "/mcp");
+    assert_eq!(defaults.session_idle_secs, 900);
     assert_eq!(defaults.max_inline_bytes, 8_388_608);
     assert!(
         toml::from_str::<ServerConfig>("")
@@ -150,16 +151,11 @@ service = "memory"
         "/mcp\n",
         "/mcp%2Fx",
     ] {
-        let mut config = config.clone();
-        config.mcp.path = path.into();
-        assert!(
-            matches!(config.validate(), Err(sokar::SokarError::Config(_))),
-            "{path}"
-        );
+        assert!(path.parse::<sokar::config::RoutePath>().is_err(), "{path}");
     }
     for path in ["/mcp", "/tools/mcp", "/mcp-v2"] {
         let mut config = config.clone();
-        config.mcp.path = path.into();
+        config.mcp.path = path.parse().unwrap();
         config.validate().unwrap();
     }
     for url in [
@@ -173,8 +169,23 @@ service = "memory"
         assert!(config.validate().is_err());
     }
     let mut config = config;
+    config.mcp.session_idle_secs = 0;
+    assert!(config.validate().is_err());
+    config.mcp.session_idle_secs = 900;
     config.mcp.max_inline_bytes = 0;
     assert!(config.validate().is_err());
+    config.mcp = toml::from_str(
+        "enabled = false\npath = 'invalid'\nmax_inline_bytes = 0\nsession_idle_secs = 0",
+    )
+    .unwrap();
+    config.validate().unwrap();
+    config.mcp.enabled = true;
+    assert!(matches!(
+        config.validate(),
+        Err(sokar::SokarError::RoutePath(
+            sokar::config::RoutePathError::NotAbsolute
+        ))
+    ));
 }
 
 #[test]
@@ -239,4 +250,45 @@ fn local_example_with_mcp_checks_and_boots_both_listeners() {
         std::thread::sleep(Duration::from_millis(50));
     }
     panic!("local example did not boot both listeners");
+}
+
+#[test]
+fn route_path_reasons_help_and_disabled_validation() {
+    use miette::Diagnostic;
+    use sokar::config::{McpConfig, RoutePath, RoutePathError::*};
+    for (path, reason) in [
+        ("mcp", NotAbsolute),
+        ("/mcp/", TrailingSlash),
+        ("/mcp/../tools", DotSegment),
+        ("/mcp//tools", DotSegment),
+        ("/{tool}", IllegalByte),
+        ("/v1/artifacts", ReservedV1),
+    ] {
+        assert_eq!(path.parse::<RoutePath>().unwrap_err(), reason);
+        let help = Diagnostic::help(&reason).unwrap().to_string();
+        assert!(!help.is_empty());
+        let input = format!("path = {path:?}");
+        assert!(
+            toml::from_str::<McpConfig>(&input)
+                .unwrap_err()
+                .to_string()
+                .contains(&reason.to_string())
+        );
+        let mut disabled: McpConfig = toml::from_str(&format!("enabled = false\n{input}")).unwrap();
+        assert_eq!(disabled.path.as_str(), path);
+        disabled.enabled = true;
+        assert_eq!(disabled.path.validate().unwrap_err(), reason);
+    }
+    #[derive(serde::Deserialize)]
+    struct PathOnly {
+        path: RoutePath,
+    }
+    assert_eq!(
+        toml::from_str::<PathOnly>("path = '/tools/mcp'")
+            .unwrap()
+            .path
+            .as_str(),
+        "/tools/mcp"
+    );
+    assert!(toml::from_str::<PathOnly>("path = 'relative'").is_err());
 }

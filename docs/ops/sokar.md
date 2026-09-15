@@ -43,13 +43,15 @@ public_api_url = "http://sokar.lab.home" # optional; may include a proxy prefix
 enabled = true
 path = "/mcp"
 max_inline_bytes = 8388608
+session_idle_secs = 900
 ```
 
 Omitting `public_api_url` returns relative `/v1/artifacts/{id}/content` URLs.
 The configured base is used for absolute URLs; it must use HTTP(S) without
 credentials, query or fragment. Every content URL requires the same bearer token.
 Custom MCP paths must be literal absolute paths outside `/v1`, with no trailing
-slash. Disabling MCP leaves the REST API available. Unknown config fields fail
+slash. Invalid paths report a specific reason and corrective help. Path and MCP
+limit validation applies only when MCP is enabled. Disabling MCP leaves the REST API available. Unknown config fields fail
 validation.
 
 ## Tools
@@ -61,7 +63,7 @@ The streamable-HTTP endpoint publishes nine tools:
 | `sokar_collection` | Create or get a collection by typed scope |
 | `sokar_put_text` | Upload UTF-8 text; default kind `document`, MIME `text/plain; charset=utf-8` |
 | `sokar_put_base64` | Upload standard padded base64; required MIME, default kind `other` |
-| `sokar_list` | List live versions; optional prefix/kind/cursor, default page size 50 |
+| `sokar_list` | List live versions; optional prefix/kind/cursor, default page size 100 (valid range 1–1000, shared with REST) |
 | `sokar_get` | Return `{artifact, content_url}` for a version |
 | `sokar_find` | Find the latest live version at a collection path |
 | `sokar_read_text` | Return full UTF-8 text; default maximum 1 MiB |
@@ -69,13 +71,24 @@ The streamable-HTTP endpoint publishes nine tools:
 | `sokar_delete` | Tombstone a version; return `{tombstoned: true}` |
 
 Tool results contain JSON text (including a JSON string for `sokar_read_text`).
-Upload results contain `{artifact, outcome}`. Errors use `isError: true` and
+Upload results contain `{artifact, outcome}`. Both upload tools accept an optional
+`idempotency_key`: reuse it on retry to avoid a duplicate version. The same key
+with identical content and metadata returns the original artifact ID; changed
+content or metadata returns `sokar::idempotency_mismatch`. This uses the same
+semantics and key storage as the REST `Idempotency-Key` header. Errors use `isError: true` and
 `{code, message, help}`. Invalid MCP arguments/protocol messages follow rmcp's
-protocol errors; authentication and other HTTP rejections use `problem+json`.
+protocol errors; MCP transport errors preserve rmcp's HTTP status and body.
+Authentication/authorization failures and REST HTTP rejections use `problem+json`.
 
 Inline limits count decoded bytes, including UTF-8 bytes for text. Reads use the
 smaller of `max_bytes` and the server cap, reject oversized content, and never
 truncate it. Use the REST upload/content endpoints for larger artifacts.
+The MCP subtree also limits the entire HTTP request body to
+`max_inline_bytes * 4 / 3 + 64 KiB` (11,250,346 bytes with defaults), allowing
+base64 expansion plus protocol/metadata overhead. The global `limits.max_body_bytes`
+cap still applies. Oversized requests are rejected with HTTP 413 before JSON
+parsing; use REST for larger uploads. JSON escaping and large metadata count
+toward this request limit.
 Non-UTF-8 text reads direct callers to `sokar_read_base64`.
 
 Paths are relative NFC paths, unique for latest-wins lookup within a collection.
@@ -83,7 +96,10 @@ Every upload creates an immutable version; identical bytes deduplicate. Listing
 includes live historical versions, and deleting the newest version exposes the
 previous live version in path lookup. Deletion retains tombstone manifests and
 blob bytes for later reconciliation/GC. MCP sessions are isolated per principal;
-another principal cannot call, resume, or delete your session.
+another principal cannot call, resume, or delete your session. Idle sessions
+expire after `[mcp] session_idle_secs` (default 900 seconds); reuse returns HTTP
+404 and the client must initialize a fresh session. Both `session_idle_secs`
+and `max_inline_bytes` must be positive when MCP is enabled.
 
 ## Register consumers
 
