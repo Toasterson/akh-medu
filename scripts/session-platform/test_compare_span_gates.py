@@ -15,24 +15,31 @@ def fixture():
 
 
 class ComparisonTests(unittest.TestCase):
+    def test_fact_queries_never_use_questions_as_evidence_candidates(self):
+        left = fixture()
+        left["task"] = "fact_query"
+        report = compare(left, copy.deepcopy(left))
+        self.assertEqual([r["query"] for r in report["left_queries_right_index"]], [1, 3, 5])
+        self.assertEqual([r["nearest"] for r in report["left_queries_right_index"]], [[0], [2], [4]])
+
     def test_identity_and_one_bit_change_have_known_distances(self):
         left = fixture()
         report = compare(left, copy.deepcopy(left))
         self.assertTrue(report["bit_identical"])
-        self.assertTrue(report["all_paraphrase_neighbors_preserved"])
+        self.assertTrue(report["all_expected_neighbors_preserved"])
         right = copy.deepcopy(left)
         right["vectors"][0][0][0] = 1
         report = compare(left, right)
         self.assertEqual(report["same_prompt_bit_flips"], [1, 0, 0, 0, 0, 0])
         self.assertFalse(report["bit_identical"])
-        self.assertTrue(report["all_paraphrase_neighbors_preserved"])
+        self.assertTrue(report["all_expected_neighbors_preserved"])
 
     def test_ties_are_not_counted_as_success(self):
         left = fixture()
         left["vectors"] = [[[0] * 1250 for _ in range(2)] for _ in range(3)]
         report = compare(left, copy.deepcopy(left))
         self.assertTrue(report["bit_identical"])
-        self.assertFalse(report["all_paraphrase_neighbors_preserved"])
+        self.assertFalse(report["all_expected_neighbors_preserved"])
 
     def test_space_mismatch_and_malformed_vectors_are_rejected(self):
         left = fixture()

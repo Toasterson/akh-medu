@@ -6,6 +6,9 @@ from pathlib import Path
 
 
 def compare(left, right):
+    task = left.get("task", "paraphrase")
+    if task not in ("paraphrase", "fact_query") or right.get("task", "paraphrase") != task:
+        raise ValueError("unsupported or mismatched task")
     for field in ("schema", "model_path", "tokenizer_path", "policy_sha256",
                   "projector_sha256", "groups"):
         if left[field] != right[field]:
@@ -36,21 +39,24 @@ def compare(left, right):
     def neighbors(source, target):
         result = []
         for i, vector in enumerate(source):
+            if task == "fact_query" and i % 2 == 0:
+                continue
             candidates = [(distance(vector, other), j)
-                          for j, other in enumerate(target) if j != i]
+                          for j, other in enumerate(target)
+                          if j != i and (task == "paraphrase" or j % 2 == 0)]
             minimum = min(d for d, _ in candidates)
             nearest = [j for d, j in candidates if d == minimum]
             result.append({"query": i, "nearest": nearest, "distance": minimum,
-                           "unique_paraphrase": nearest == [i ^ 1]})
+                           "unique_expected_neighbor": nearest == [i ^ 1]})
         return result
 
     flips = [distance(x, y) for x, y in zip(a, b)]
     forward, reverse = neighbors(a, b), neighbors(b, a)
-    return {"left_backend": left["backend"], "right_backend": right["backend"],
+    return {"task": task, "left_backend": left["backend"], "right_backend": right["backend"],
             "same_prompt_bit_flips": flips, "bit_identical": not any(flips),
             "left_queries_right_index": forward, "right_queries_left_index": reverse,
-            "all_paraphrase_neighbors_preserved": all(
-                row["unique_paraphrase"] for row in forward + reverse)}
+            "all_expected_neighbors_preserved": all(
+                row["unique_expected_neighbor"] for row in forward + reverse)}
 
 
 def main():
@@ -62,7 +68,7 @@ def main():
     print(json.dumps(report, indent=2))
     # Bit identity is reported separately: unequal bits alone do not establish
     # semantic incompatibility, and this small fixture cannot prove equivalence.
-    return 0 if report["all_paraphrase_neighbors_preserved"] else 1
+    return 0 if report["all_expected_neighbors_preserved"] else 1
 
 
 if __name__ == "__main__":
