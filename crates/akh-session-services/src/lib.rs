@@ -71,3 +71,5 @@ pub mod runtime_profile;
 
 #[cfg(feature = "runtime")]
 pub mod internal;
+#[cfg(any(feature = "candle-runtime", test))]
+mod native_window;
