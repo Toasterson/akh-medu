@@ -49,3 +49,23 @@ The captured-but-not-completed turn also returned no hits.
 
 No runtime implementation change was needed for this transport slice. The
 test feature is opt-in and adds no default production dependency activation.
+
+The complete package suite for this feature set also passed:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo test --offline -p akh-session-services --no-default-features --features core-integration-tests
+```
+
+This includes all 16 library tests and all 23 session integration tests, plus
+the other enabled package targets. It is not a whole-workspace or GPU suite.
+Existing compiler warnings remain; `git diff --check` passed.
+
+## Review
+
+Standards review: no findings. Spec review: one coverage gap, because a
+generation mismatch did not independently prove completed-turn rejection.
+The follow-up assertion replays the completed turn's original callback and
+credential and requires 409, separately from the generation-mismatch check.
+The full package suite passed again after this addition. Spec re-review
+confirmed the gap closed; neither review axis has an unresolved finding for
+this bounded slice.

@@ -1827,6 +1827,14 @@ mod lifecycle_tests {
             })
             .unwrap();
         let current = app.sessions.get(owner, &record.id).unwrap();
+        // A completed turn cannot replay a recall callback with its original
+        // (otherwise valid) generation and runtime credential.
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, query.clone())
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
         let mut recall = query;
         recall["call"]["turn_id"] = json!(current.turns[1].id);
         recall["call"]["generation"] = json!(current.turns[1].generation);
