@@ -14,6 +14,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::time::Instant;
 
+#[cfg(all(test, feature = "core-integration-tests", feature = "candle-runtime"))]
+#[path = "sessions_native_gate.rs"]
+mod native_gate;
+
 /// Deterministic core of the dispatch retry backoff: delay doubles with each
 /// consecutive failure and is capped, so a permanently broken downstream
 /// (an unreachable cross-cluster runtime, say) cannot turn into a fixed
@@ -1902,6 +1906,8 @@ mod lifecycle_tests {
             post(&router, "/v1/runtime/recall", runtime_secret, recall).await,
             (StatusCode::OK, json!({"supported":true,"hits":[]}))
         );
+        #[cfg(feature = "candle-runtime")]
+        native_gate::run(app, router, runtime_secret, dir.path()).await;
     }
 
     #[tokio::test]
