@@ -59,6 +59,7 @@ fn setup(
     let config = ProviderConfig {
         isolation: None,
         model_endpoint: None,
+        native_candle: None,
         revision: "1".into(),
         kind,
         working_dir: cwd.clone(),

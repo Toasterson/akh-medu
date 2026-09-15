@@ -32,6 +32,15 @@ pub trait CustomOp1 {
         ))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(
+        &self,
+        _storage: &crate::VulkanStorage,
+        _layout: &Layout,
+    ) -> Result<(crate::VulkanStorage, Shape)> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
+    }
+
     /// This function takes as argument the argument `arg` used in the forward pass, the result
     /// produced by the forward operation `res` and the gradient of the result `grad_res`.
     /// The function should return the gradient of the argument.
@@ -79,6 +88,17 @@ pub trait CustomOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(
+        &self,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+    ) -> Result<(crate::VulkanStorage, Shape)> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
     }
 
     fn bwd(
@@ -137,6 +157,19 @@ pub trait CustomOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(
+        &self,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+    ) -> Result<(crate::VulkanStorage, Shape)> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
     }
 
     fn bwd(
@@ -270,6 +303,11 @@ pub trait InplaceOp1 {
             format!("no metal implementation for {}", self.name()).into(),
         ))
     }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, _storage: &mut crate::VulkanStorage, _layout: &Layout) -> Result<()> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
+    }
 }
 
 pub trait InplaceOp2 {
@@ -300,6 +338,17 @@ pub trait InplaceOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(
+        &self,
+        _: &mut crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
     }
 }
 
@@ -348,6 +397,19 @@ pub trait InplaceOp3 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(
+        &self,
+        _: &mut crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+        _: &crate::VulkanStorage,
+        _: &Layout,
+    ) -> Result<()> {
+        crate::bail!("no Vulkan implementation for {}", self.name())
     }
 }
 

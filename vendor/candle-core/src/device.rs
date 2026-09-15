@@ -7,8 +7,16 @@ use crate::{CpuStorage, DType, Result, Shape, Storage, WithDType};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum DeviceLocation {
     Cpu,
-    Cuda { gpu_id: usize },
-    Metal { gpu_id: usize },
+    Cuda {
+        gpu_id: usize,
+    },
+    Metal {
+        gpu_id: usize,
+    },
+    #[cfg(feature = "vulkan")]
+    Vulkan {
+        gpu_id: usize,
+    },
 }
 
 /// Cpu, Cuda, or Metal
@@ -17,6 +25,8 @@ pub enum Device {
     Cpu,
     Cuda(crate::CudaDevice),
     Metal(crate::MetalDevice),
+    #[cfg(feature = "vulkan")]
+    Vulkan(crate::VulkanDevice),
 }
 
 pub trait NdArray {
@@ -231,6 +241,20 @@ impl<S: WithDType> NdArray for Vec<Vec<Vec<Vec<S>>>> {
 }
 
 impl Device {
+    #[cfg(feature = "vulkan")]
+    pub fn new_vulkan(ordinal: usize) -> Result<Self> {
+        Ok(Self::Vulkan(crate::VulkanDevice::new(ordinal)?))
+    }
+    pub fn is_vulkan(&self) -> bool {
+        #[cfg(feature = "vulkan")]
+        {
+            if matches!(self, Self::Vulkan(_)) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn new_cuda(ordinal: usize) -> Result<Self> {
         Ok(Self::Cuda(crate::CudaDevice::new(ordinal)?))
     }
@@ -240,6 +264,8 @@ impl Device {
             Self::Cuda(d) => Ok(d),
             Self::Cpu => crate::bail!("expected a cuda device, got cpu"),
             Self::Metal(_) => crate::bail!("expected a cuda device, got Metal"),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => crate::bail!("expected a cuda device, got Vulkan"),
         }
     }
 
@@ -248,6 +274,8 @@ impl Device {
             Self::Cuda(_) => crate::bail!("expected a metal device, got cuda"),
             Self::Cpu => crate::bail!("expected a metal device, got cpu"),
             Self::Metal(d) => Ok(d),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => crate::bail!("expected a metal device, got Vulkan"),
         }
     }
 
@@ -264,6 +292,8 @@ impl Device {
             Self::Cpu => CpuDevice.set_seed(seed),
             Self::Cuda(c) => c.set_seed(seed),
             Self::Metal(m) => m.set_seed(seed),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(m) => m.set_seed(seed),
         }
     }
 
@@ -272,6 +302,8 @@ impl Device {
             Self::Cpu => CpuDevice.get_current_seed(),
             Self::Cuda(c) => c.get_current_seed(),
             Self::Metal(m) => m.get_current_seed(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(m) => m.get_current_seed(),
         }
     }
 
@@ -280,6 +312,8 @@ impl Device {
             (Self::Cpu, Self::Cpu) => true,
             (Self::Cuda(lhs), Self::Cuda(rhs)) => lhs.same_device(rhs),
             (Self::Metal(lhs), Self::Metal(rhs)) => lhs.same_device(rhs),
+            #[cfg(feature = "vulkan")]
+            (Self::Vulkan(lhs), Self::Vulkan(rhs)) => lhs.same_device(rhs),
             _ => false,
         }
     }
@@ -289,6 +323,8 @@ impl Device {
             Self::Cpu => DeviceLocation::Cpu,
             Self::Cuda(device) => device.location(),
             Device::Metal(device) => device.location(),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => device.location(),
         }
     }
 
@@ -307,6 +343,8 @@ impl Device {
     pub fn supports_bf16(&self) -> bool {
         match self {
             Self::Cuda(_) | Self::Metal(_) => true,
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(_) => false,
             Self::Cpu => false,
         }
     }
@@ -362,6 +400,11 @@ impl Device {
                 let storage = device.rand_uniform(shape, dtype, lo, up)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = device.rand_uniform(shape, dtype, lo, up)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -400,6 +443,11 @@ impl Device {
                 let storage = device.rand_normal(shape, dtype, mean, std)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = device.rand_normal(shape, dtype, mean, std)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -426,6 +474,11 @@ impl Device {
                 let storage = device.zeros_impl(shape, dtype)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = device.zeros_impl(shape, dtype)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -443,6 +496,11 @@ impl Device {
                 let storage = device.alloc_uninit(shape, dtype)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = device.alloc_uninit(shape, dtype)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -456,6 +514,11 @@ impl Device {
             Device::Metal(device) => {
                 let storage = device.storage_from_slice(data)?;
                 Ok(Storage::Metal(storage))
+            }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = device.storage_from_slice(data)?;
+                Ok(Storage::Vulkan(storage))
             }
         }
     }
@@ -473,6 +536,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = array.to_cpu_storage();
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -489,6 +558,12 @@ impl Device {
                 let storage = device.storage_from_cpu_storage_owned(storage)?;
                 Ok(Storage::Metal(storage))
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(device) => {
+                let storage = S::to_cpu_storage_owned(data);
+                let storage = device.storage_from_cpu_storage_owned(storage)?;
+                Ok(Storage::Vulkan(storage))
+            }
         }
     }
 
@@ -497,6 +572,8 @@ impl Device {
             Self::Cpu => Ok(()),
             Self::Cuda(d) => d.synchronize(),
             Self::Metal(d) => d.synchronize(),
+            #[cfg(feature = "vulkan")]
+            Self::Vulkan(d) => d.synchronize(),
         }
     }
 }

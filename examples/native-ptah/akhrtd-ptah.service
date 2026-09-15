@@ -1,0 +1,29 @@
+[Unit]
+Description=Ptah resident Candle runtime (akhrtd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=toasty
+Group=toasty
+WorkingDirectory=/home/toasty/.local/share/akh-medu/runtime/ptah
+ExecStart=/home/toasty/.local/lib/akh-medu/ptah-runtime/canary-v1/akhrtd --config /home/toasty/.config/akh-medu/runtime/ptah/akhrtd.json
+Environment=AKH_HIP_KERNEL_DIR=/home/toasty/.local/lib/akh-medu/ptah-runtime/canary-v1/lib
+Environment=ROCM_PATH=/opt/rocm
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/toasty/.local/share/akh-medu/runtime/ptah
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

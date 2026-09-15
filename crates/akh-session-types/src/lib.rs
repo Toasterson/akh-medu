@@ -691,6 +691,8 @@ mod tests {
 pub struct ProviderConfig {
     pub isolation: Option<RuntimeIsolation>,
     pub model_endpoint: Option<ModelEndpoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_candle: Option<NativeCandle>,
     pub revision: String,
     pub kind: RuntimeKind,
     pub working_dir: std::path::PathBuf,
@@ -745,6 +747,32 @@ pub struct ModelEndpoint {
     pub allow_insecure_http: bool,
     pub max_iterations: u32,
     pub max_output_tokens: u32,
+}
+
+/// Explicit local inference configuration. No device or model discovery/fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCandle {
+    /// Logical model identity exposed in runtime bindings, pinned to these artifacts.
+    pub model: String,
+    pub model_path: std::path::PathBuf,
+    pub model_sha256: String,
+    pub tokenizer_path: std::path::PathBuf,
+    pub tokenizer_sha256: String,
+    pub device: NativeCandleDevice,
+    pub max_context_tokens: usize,
+    pub max_iterations: u32,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeCandleDevice {
+    Cpu,
+    Hip { ordinal: usize },
+    Cuda { ordinal: usize },
+    Metal { ordinal: usize },
+    Vulkan { ordinal: usize },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

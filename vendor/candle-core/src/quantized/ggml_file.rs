@@ -123,10 +123,25 @@ fn from_raw_data<T: super::GgmlType + Send + Sync + 'static>(
     dims: Vec<usize>,
     device: &Device,
 ) -> Result<super::QTensor> {
+    #[cfg(feature = "vulkan")]
+    if let Device::Vulkan(vulkan) = device {
+        // GGUF TensorInfo::read also uses this shared loader. Upload the exact
+        // block bytes without constructing a potentially unaligned typed slice.
+        if raw_data.len() != size_in_bytes || size_in_bytes % std::mem::size_of::<T>() != 0 {
+            crate::bail!(
+                "Vulkan packed tensor byte length mismatch: got {}, expected {size_in_bytes}",
+                raw_data.len()
+            );
+        }
+        let storage = super::vulkan::QVulkanStorage::from_data(vulkan, raw_data, T::DTYPE)?;
+        return super::QTensor::new(QStorage::Vulkan(storage), dims);
+    }
     let raw_data_ptr = raw_data.as_ptr();
     let n_blocks = size_in_bytes / std::mem::size_of::<T>();
     let data = unsafe { std::slice::from_raw_parts(raw_data_ptr as *const T, n_blocks) };
     let data: QStorage = match device {
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(_) => unreachable!("Vulkan upload handled before typed slice creation"),
         Device::Cpu => QStorage::Cpu(Box::new(data.to_vec())),
         Device::Metal(metal) => super::metal::load_quantized(metal, data)?,
         Device::Cuda(cuda) => super::cuda::load_quantized(cuda, data)?,

@@ -221,7 +221,6 @@ dependencies = [
  "dashmap",
  "deadpool-lapin",
  "egg",
- "encoding_rs",
  "epub",
  "flate2",
  "futures",
@@ -238,7 +237,6 @@ dependencies = [
  "lettre",
  "libc",
  "libloading 0.8.9",
- "llama-cpp-2",
  "mail-parser",
  "memmap2",
  "miette 7.6.0",
@@ -316,6 +314,7 @@ dependencies = [
 name = "akh-session-services"
 version = "0.1.0"
 dependencies = [
+ "akh-medu",
  "akh-runtime",
  "akh-service-store",
  "akh-session-types",
@@ -1996,6 +1995,7 @@ dependencies = [
 name = "candle-core"
 version = "0.10.2"
 dependencies = [
+ "bytemuck",
  "byteorder",
  "candle-metal-kernels",
  "candle-ug",
@@ -2009,12 +2009,14 @@ dependencies = [
  "num_cpus",
  "objc2-foundation",
  "objc2-metal",
+ "pollster",
  "rand 0.9.2",
  "rand_distr 0.5.1",
  "rayon",
  "safetensors 0.7.0",
  "thiserror 2.0.18",
  "tokenizers",
+ "wgpu",
  "yoke 0.8.1",
  "zip 7.2.0",
 ]
@@ -2344,15 +2346,6 @@ name = "clap_lex"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
-
-[[package]]
-name = "cmake"
-version = "0.1.57"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "cmov"
@@ -4315,26 +4308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enumflags2"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
-dependencies = [
- "enumflags2_derive",
-]
-
-[[package]]
-name = "enumflags2_derive"
-version = "0.7.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "enumset"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4646,15 +4619,6 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
-name = "find_cuda_helper"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f9e65c593dd01ac77daad909ea4ad17f0d6d1776193fc8ea766356177abdad"
-dependencies = [
- "glob",
-]
 
 [[package]]
 name = "fixedbitset"
@@ -6936,34 +6900,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llama-cpp-2"
-version = "0.1.136"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6347a802381f3953cd871d42572463a11b888ca2878065390d12f3339025e88"
-dependencies = [
- "encoding_rs",
- "enumflags2",
- "llama-cpp-sys-2",
- "thiserror 2.0.18",
- "tracing",
- "tracing-core",
-]
-
-[[package]]
-name = "llama-cpp-sys-2"
-version = "0.1.136"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8536707545e27a8a889cb089fd5064a3a22fe0b7b9a71b23bf91e84b1a7a90d"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "cmake",
- "find_cuda_helper",
- "glob",
- "walkdir",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8954,6 +8890,12 @@ dependencies = [
  "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "poly1305"

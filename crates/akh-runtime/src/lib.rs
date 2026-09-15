@@ -7,6 +7,7 @@ mod questions;
 
 use akh_session_types::{
     ApprovalPolicy, ExecutionMode, RuntimeEvent, RuntimeJobRequest, RuntimeKind, ToolResult,
+    neural_spans::{SpanCapture, SpanHit, SpanSpace},
 };
 use serde_json::{Value, json};
 use std::{
@@ -22,6 +23,23 @@ pub trait Host {
     fn tool(&mut self, id: &str, name: &str, arguments: Value) -> Result<ToolResult, String>;
     fn approval(&mut self, id: &str, name: &str, arguments: &Value) -> Result<bool, String>;
     fn question(&mut self, id: &str, questions: &Value) -> Result<Value, String>;
+    /// Same-space neural recall for the active turn. `Ok(None)` means the host
+    /// cannot serve recall (older daemon, missing capability or policy); the
+    /// runtime then continues without recalled context. Hosts never fabricate hits.
+    fn recall(
+        &mut self,
+        _id: &str,
+        _space: &SpanSpace,
+        _vector: &[u8],
+        _limit: usize,
+    ) -> Result<Option<Vec<SpanHit>>, String> {
+        Ok(None)
+    }
+    /// Deliver bounded captures of the active turn's accepted input. `Ok(false)`
+    /// means the host does not retain them; the turn itself is unaffected.
+    fn spans(&mut self, _id: &str, _captures: &[SpanCapture]) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 pub fn run(

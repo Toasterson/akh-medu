@@ -55,6 +55,7 @@ pub mod conv;
 mod convert;
 pub mod cpu;
 pub mod cpu_backend;
+pub mod hip_kernel_path;
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 // Phase 45 / ADR 073: AMD ROCm/HIP backend. Fills the `cuda` module slot (below)
@@ -124,6 +125,11 @@ pub use hip_backend as cuda;
 pub use dummy_cuda_backend as cuda;
 
 pub use cuda::{CudaDevice, CudaStorage};
+
+#[cfg(feature = "vulkan")]
+pub mod vulkan_backend;
+#[cfg(feature = "vulkan")]
+pub use vulkan_backend::{VulkanDevice, VulkanStorage};
 
 #[cfg(feature = "metal")]
 pub use metal_backend::{MetalDevice, MetalError, MetalStorage};

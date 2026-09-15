@@ -226,6 +226,10 @@ impl Tensor {
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
                 // For dummy types, create storage with raw bytes
                 let storage = match device {
+                    #[cfg(feature = "vulkan")]
+                    Device::Vulkan(_) => {
+                        crate::bail!("Vulkan packed experimental dtype unsupported")
+                    }
                     Device::Cpu => {
                         let cpu_storage = match dtype {
                             DType::F6E2M3 => crate::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
@@ -326,6 +330,8 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
 
     // Create storage with the appropriate dummy type variant
     let storage = match device {
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(_) => crate::bail!("Vulkan packed experimental dtype unsupported"),
         Device::Cpu => {
             let cpu_storage = match dtype {
                 DType::F6E2M3 => crate::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
