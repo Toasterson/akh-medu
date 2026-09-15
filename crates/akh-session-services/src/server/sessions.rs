@@ -1680,6 +1680,18 @@ mod lifecycle_tests {
     #[cfg(feature = "core-integration-tests")]
     #[tokio::test]
     async fn accepted_capture_round_trips_through_real_core_http() {
+        real_core_roundtrip(false).await;
+    }
+
+    #[cfg(all(feature = "core-integration-tests", feature = "candle-runtime"))]
+    #[tokio::test]
+    #[ignore = "requires pinned Ptah artifacts, explicit device/output and exclusive GPU access"]
+    async fn exact_ptah_capture_round_trips_through_real_core_http() {
+        real_core_roundtrip(true).await;
+    }
+
+    #[cfg(feature = "core-integration-tests")]
+    async fn real_core_roundtrip(_exact: bool) {
         use akh_medu::{
             akh_config::AkhConfig,
             core_service::{CoreApp, CoreBackend, CoreConfig, CoreFuture, CorePrincipal},
@@ -1907,7 +1919,7 @@ mod lifecycle_tests {
             (StatusCode::OK, json!({"supported":true,"hits":[]}))
         );
         #[cfg(feature = "candle-runtime")]
-        native_gate::run(app, router, runtime_secret, dir.path()).await;
+        native_gate::run(app, router, runtime_secret, dir.path(), _exact).await;
     }
 
     #[tokio::test]
