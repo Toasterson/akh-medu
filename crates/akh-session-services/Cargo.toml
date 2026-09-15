@@ -9,6 +9,8 @@ description = "Independent Akh session, runtime, sandbox, executor and ingress s
 default = ["session", "runtime", "executor", "sandbox", "events", "client"]
 session = ["dep:jsonschema", "dep:async-stream", "dep:rmcp", "axum/ws"]
 runtime = ["dep:akh-runtime", "helpers"]
+# Opt-in real-core transport tests, without requiring GPU inference.
+core-integration-tests = ["session", "dep:akh-medu", "akh-medu/core-server"]
 executor = ["helpers", "dep:regex", "dep:globset", "dep:base64", "dep:tempfile"]
 sandbox = []
 events = ["dep:lapin", "dep:tokio-executor-trait", "dep:tokio-reactor-trait", "dep:chrono"]
@@ -19,6 +21,7 @@ trigger = ["dep:chrono"]
 kagent = ["dep:async-stream"]
 
 [dependencies]
+akh-medu = { path = "../..", default-features = false, optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rustls-pemfile = { version = "2", optional = true }
 akh-session-types = { path = "../akh-session-types" }

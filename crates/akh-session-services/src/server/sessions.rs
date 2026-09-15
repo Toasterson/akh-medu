@@ -1673,6 +1673,229 @@ mod lifecycle_tests {
         core.server.abort();
     }
 
+    #[cfg(feature = "core-integration-tests")]
+    #[tokio::test]
+    async fn accepted_capture_round_trips_through_real_core_http() {
+        use akh_medu::{
+            akh_config::AkhConfig,
+            core_service::{CoreApp, CoreBackend, CoreConfig, CoreFuture, CorePrincipal},
+            engine::Engine,
+        };
+        use tower::ServiceExt;
+
+        struct Backend(Arc<Engine>);
+        impl CoreBackend for Backend {
+            fn engine<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<Engine>> {
+                Box::pin(async { Ok(self.0.clone()) })
+            }
+            fn config<'a>(&'a self, _: &'a str) -> CoreFuture<'a, Arc<AkhConfig>> {
+                Box::pin(async {
+                    Ok(Arc::new(AkhConfig {
+                        capture_transcripts: true,
+                        ..Default::default()
+                    }))
+                })
+            }
+        }
+        // Abort even on assertion failure; no detached local server survives.
+        struct Server(tokio::task::JoinHandle<()>);
+        impl Drop for Server {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        async fn post(
+            router: &Router,
+            path: &str,
+            token: &str,
+            body: Value,
+        ) -> (StatusCode, Value) {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        assert!(
+            std::env::var_os("AKH_TRANSCRIPT_CAPTURE").is_none(),
+            "run without a process-wide transcript policy override"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let token = dir.path().join("core.token");
+        std::fs::write(&token, "private-real-core-test-credential").unwrap();
+        let runtime_token = dir.path().join("runtime.token");
+        let runtime_secret = "private-runtime-test-credential";
+        std::fs::write(&runtime_token, runtime_secret).unwrap();
+        let core = CoreApp::new(
+            CoreConfig {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                data_dir: dir.path().join("core"),
+                principals: vec![CorePrincipal {
+                    id: "sessions".into(),
+                    token_file: token.clone(),
+                    akhs: vec!["test".into()],
+                }],
+            },
+            Arc::new(Backend(Arc::new(Engine::new(Default::default()).unwrap()))),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = Server(tokio::spawn(async move {
+            axum::serve(listener, akh_medu::core_service::router(core))
+                .await
+                .unwrap();
+        }));
+        let mut config = neural_test_config(dir.path(), &token, address);
+        config["principals"][1]["token_file"] = json!(runtime_token);
+        let (app, _, record) = dispatched_session(config, dir.path()).await;
+        let router = session_router(app.clone());
+        let query = json!(neural_spans::RecallRequest {
+            call: runtime_call(&record, neural_spans::RecallRequest::CALL_NAME),
+            space: span_space(),
+            vector: vec![9; neural_spans::VECTOR_BYTES],
+            limit: 4,
+        });
+        let before = post(&router, "/v1/runtime/recall", runtime_secret, query.clone()).await;
+        assert_eq!(before.0, StatusCode::OK);
+        assert_eq!(before.1, json!({"supported":true,"hits":[]}));
+        let delivery = json!(neural_spans::SpanDelivery {
+            call: runtime_call(&record, neural_spans::SpanDelivery::CALL_NAME),
+            captures: vec![neural_spans::SpanCapture {
+                space: span_space(),
+                source: neural_spans::SpanSource::User,
+                byte_start: 2,
+                byte_end: 25,
+                vector: vec![9; neural_spans::VECTOR_BYTES]
+            }],
+        });
+        assert_eq!(
+            post(&router, "/v1/runtime/spans", runtime_secret, delivery).await,
+            (StatusCode::OK, json!({"accepted":true}))
+        );
+        // Capturing a running turn must not publish unaccepted memory.
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, query.clone())
+                .await
+                .1,
+            json!({"supported":true,"hits":[]})
+        );
+        // Scheduler fixture: this test supplies completion, not model inference.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut current: SessionRecord = tx.get(&key("session", &[&record.id]))?.unwrap();
+                current.turns[0].status = TurnStatus::Completed;
+                current.turns[0].output = Some("Noted.".into());
+                tx.put(&key("session", &[&record.id]), &current)
+            })
+            .unwrap();
+        let owner = &app.sessions.config.principals[0];
+        let completed = app.sessions.get(owner, &record.id).unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        app.publish_completions(&completed).await.unwrap();
+        app.sessions
+            .submit(
+                owner,
+                &record.id,
+                &SubmitInput {
+                    request_id: "query-turn".into(),
+                    text: "What word should I remember?".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let mut current: SessionRecord = tx.get(&key("session", &[&record.id]))?.unwrap();
+                current.turns[1].status = TurnStatus::Running;
+                tx.put(&key("session", &[&record.id]), &current)
+            })
+            .unwrap();
+        let current = app.sessions.get(owner, &record.id).unwrap();
+        let mut recall = query;
+        recall["call"]["turn_id"] = json!(current.turns[1].id);
+        recall["call"]["generation"] = json!(current.turns[1].generation);
+        let after = post(
+            &router,
+            "/v1/runtime/recall",
+            runtime_secret,
+            recall.clone(),
+        )
+        .await;
+        assert_eq!(after.0, StatusCode::OK);
+        assert_eq!(
+            after.1["hits"],
+            json!([{"turn_id":record.turns[0].id,
+            "source":"user","byte_start":2,"byte_end":25,
+            "text":"Remember the word cedar","hamming_distance":0}])
+        );
+        assert_eq!(
+            post(
+                &router,
+                "/v1/runtime/recall",
+                "incorrect-credential",
+                recall.clone()
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let mut stale = recall.clone();
+        stale["call"]["generation"] = json!(current.generation + 1);
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, stale)
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        let other = app
+            .sessions
+            .create(
+                owner,
+                &NewSession {
+                    request_id: "other-session".into(),
+                    akh: "test".into(),
+                    workspace_profile: "local".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        let other_turn = app
+            .sessions
+            .submit(
+                owner,
+                &other.id,
+                &SubmitInput {
+                    request_id: "other-query".into(),
+                    text: "What word should I remember?".into(),
+                    artifacts: vec![],
+                },
+            )
+            .unwrap();
+        recall["call"]["session_id"] = json!(other.id);
+        recall["call"]["turn_id"] = json!(other_turn.id);
+        recall["call"]["generation"] = json!(other_turn.generation);
+        assert_eq!(
+            post(&router, "/v1/runtime/recall", runtime_secret, recall).await,
+            (StatusCode::OK, json!({"supported":true,"hits":[]}))
+        );
+    }
+
     #[tokio::test]
     async fn an_older_core_without_capabilities_gets_the_legacy_payload_and_no_recall() {
         let dir = tempfile::tempdir().unwrap();
