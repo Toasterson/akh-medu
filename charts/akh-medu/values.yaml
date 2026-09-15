@@ -352,6 +352,10 @@ sokard:
   env:
     RUST_LOG: "sokar=info,opendal=warn"
 
+  mcp:
+    enabled: true
+    path: /mcp
+
   # Sokar config (rendered as ConfigMap → mounted at /config/sokar.toml).
   # Field names below map 1:1 onto crates/sokar/src/config.rs, which has
   # `#[serde(deny_unknown_fields)]` throughout — an unrecognized key crashes
@@ -360,6 +364,8 @@ sokard:
     # Must name one of the entries in `stores` below. Empty ⇒ default to the
     # first configured store.
     defaultStore: ""
+    # Optional external API base URL; empty returns relative content URLs.
+    publicApiUrl: ""
     limits:
       maxBodyBytes: 268435456
     # Optional: media types the API inlines in responses instead of

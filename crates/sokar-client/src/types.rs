@@ -182,6 +182,7 @@ impl FromStr for BlobDigest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum CollectionScope {
     AnimaWorkItem {
         project: Uuid,
@@ -230,6 +231,7 @@ pub struct Quota {
 }
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ArtifactKind {
     Document,
     Image,

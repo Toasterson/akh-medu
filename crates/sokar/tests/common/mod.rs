@@ -42,6 +42,7 @@ impl Fixture {
         };
         let config = Arc::new(Config {
             server: ServerConfig::default(),
+            mcp: McpConfig::default(),
             database: None,
             default_store: name,
             stores: vec![store],

@@ -23,6 +23,13 @@ data:
     [server]
     api_bind = "0.0.0.0:{{ .Values.sokard.service.apiPort }}"
     admin_bind = "0.0.0.0:{{ .Values.sokard.service.adminPort }}"
+    {{- if .Values.sokard.config.publicApiUrl }}
+    public_api_url = {{ .Values.sokard.config.publicApiUrl | quote }}
+    {{- end }}
+
+    [mcp]
+    enabled = {{ .Values.sokard.mcp.enabled }}
+    path = {{ .Values.sokard.mcp.path | quote }}
 
     {{- if .Values.sokard.database.enabled }}
 
