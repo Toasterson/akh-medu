@@ -674,3 +674,140 @@ uncorrupted persisted value, recalled correctly with `e3_step_reward: 1.0` — d
 - Mechanical `weight: None,` additions at grug-data's own three internal `KnowledgeSftRecord` construction
   sites plus one example, beyond the literal "one field addition" — required for `cargo check -p grug-data`/
   `cargo test -p grug-data` to pass at all (see above); no logic in those functions changed.
+
+## Phase 51 P6.4 window 2: copy-fidelity siblings + the memory_write shape upgrade (2026-09-15)
+
+Scope: `docs/ai/plans/2026-09-13-phase51-p6-local-training-neurosymbolic.md`, Anima WI P6.4
+(`01a09a61-f4d2-7db3-bc2c-0f3ff513191e`). Follows `training/results/p6-4-window-1-RESULT.md`'s gate-failure
+case analysis: window 1's siblings never exercised the sentinels' copy-fidelity shape (single-fact
+`memory_write` always, no `reactor_manage`/`study_note_revise`/`seshat_wish` siblings at all), so
+`memory_write`/`reactor_manage` stayed unchanged and `study_note_revise`/`seshat_wish` regressed at LR
+4e-6/1 epoch with no targeted coverage.
+
+### What landed
+
+1. **`--copy-fidelity tool=N[,tool=N...]`** (requires `--contracts`): for each named tool, generates `N`
+   fresh copy-fidelity sibling records with grug-data's own `ToolCurriculumGenerator` — the exact generator
+   `generate_for_tools`/`generate_exam_internal` both call, i.e. the same code path that produced the base
+   SFT corpus *and* the release-gate sentinel exam (`Standard` prompt domain, `grug_data::render_request`).
+   Nothing about the sentinel shape is reimplemented locally: `sample_schema`'s own placeholder vocabulary
+   (`{name}-zurich`, `{name}-revision-{n}`, `"the exact requested value"`) is what a generated record's
+   values come from, because it's the same function that filled them in for the sentinels. New functions in
+   `src/bin/akh_episode_generator.rs`: `generate_copy_fidelity_family` (calls
+   `ToolCurriculumGenerator::new(frozen, seed, offered_tool_count).generate_for_tools(...)`),
+   `schema_validate_copy_fidelity` (defensive `validate_call` re-check — always 0 drops in practice, since
+   the generator already guarantees this), `decontaminate_copy_fidelity`. No grug-data changes were needed:
+   `ToolCurriculumGenerator`, `generate_for_tools`, `ToolContractExamSet`, and `render_request` were already
+   `pub` at the crate root.
+   - **Difficulty/offered-tool budget**: `--copy-fidelity-difficulty` (default 3) or, when
+     `--copy-fidelity-exam <path>` is given, read from that frozen `ToolContractExamSet` JSON's own
+     `difficulty` field (`load_copy_fidelity_exam_difficulty`, does not call `.verify()` — only the
+     `difficulty` field is trusted). Offered-tool count follows the same formula
+     `generate_exam_internal` uses for difficulty: `4.min(difficulty + 1).min(contracts.tools.len())` — 4 at
+     difficulty 3, confirmed against the real window-1 sentinel exam JSON's `"difficulty": 3` field
+     (`runs/checkpoints/.../sentinels/*.json` on the training Mac, not in this worktree).
+   - **Seed**: `--copy-fidelity-seed`, defaulting to `--seed XOR 0xC0FF_EE15_5161_5711` (`COPY_FIDELITY_SEED_SALT`)
+     — independent of both the primary engine-in-the-loop families' seed and the frozen sentinel exam's own
+     seed, so these are a genuinely fresh draw, not a replay.
+   - **Decontamination**: every record runs through the existing NFKC-normalized exact/13-word-shingle
+     `SentinelIndex` check (over `prompt` and `target`, same as every other family) *and* a new belt-and-braces
+     check: `SentinelIndex` now also indexes each sentinel row's user-turn request text (from a top-level
+     `request`/`user_request` field or a `conversation`'s first `role: "user"` turn) into
+     `request_texts: HashSet<String>`, whitespace-collapsed but not NFKC-folded/lowercased (a literal, not
+     fuzzy, comparison — `SentinelIndex::request_collision`). A record whose own rendered request
+     whitespace-collapses to the same string as an indexed sentinel request is dropped and counted separately
+     (`dropped_sentinel_request_exact`) from the general exact/shingle counts. `subtract_baseline` was
+     extended to subtract baseline request texts too, for the same boilerplate-is-not-leakage reason it
+     already subtracts baseline exact/shingle hashes.
+   - Output: `<out-dir>/copy_fidelity_<tool>/{train.sft.jsonl,manifest.json,separation.json}` per named tool,
+     written by the existing `write_sidecar_files` (unchanged — reused as-is, not reimplemented), and a
+     `copy_fidelity: {<tool>: {...}}` block in the top-level `manifest.json` (requested/generated/kept counts,
+     every decontamination count, seed, difficulty, offered_tool_count).
+
+2. **`memory_write` engine-episode shape upgrade** (`generate_memory_write`, still fully engine-grounded —
+   every fact's value is still read back from the graph via `engine.resolve_label`, and the tool call still
+   actually executes): `facts` length is now seeded 1-4 (`seeded_facts_len`, cycling deterministically through
+   all four as the record index increments — window 1's siblings were always exactly 1 fact, which never
+   exercised the sentinels' "dropped a fact"/"merged two facts" failure modes). Each fact carries `confidence`
+   ~50% of the time (`seeded_bool`/`seeded_confidence`, a `blake3(seed:salt:i:j)`-derived uniform draw, no
+   shared mutable RNG needed); the record carries `origin`/`source`/`tags` each ~50% of the time, independently
+   seeded; `timestamp` is never emitted (the sentinels never exercise it — emitting it would teach an
+   unexamined field). E1/E2/E3 labels keep their existing meaning: E1's raw/completed pair is now a full
+   multi-fact write (raw = every fact's corrupted echo, completed = every fact's graph-verified value); E3's
+   causal reward is now the AND (`.min`) across every fact's own `causal_label` check — 1.0 only if the whole
+   write verifies, 0.0 if any fact doesn't (the raw arm is always 0.0 by construction of `corrupt_copy`); E2
+   stays keyed to the primary (first) fact's source-currency fluent, unchanged in shape.
+
+### Tests
+
+`cargo test --bin akh_episode_generator --features daemon`: 31/31 pass (23 pre-existing + 8 new). New:
+`memory_write_shape_matches_sentinel_copy_fidelity_distribution` (240 records: all of facts-length 1/2/3/4
+present, confidence on 30-70% of facts, origin/source/tags each on 30-70% of records, timestamp never),
+`memory_write_multi_fact_completion_still_executes_and_is_labelled` (E1/E3 labels hold under multi-fact),
+`copy_fidelity_records_validate_against_frozen_contract_and_render_request` (`validate_call` on every target,
+4 offered tools all drawn from the frozen contract, user turn is one of `render_request`'s 3 phrasing
+variants for the record's own language/description/arguments — the internal generator variant index isn't
+reproducible from outside without duplicating grug-data's RNG interleave, so membership-in-3 is the honest
+check, not a specific-variant equality the sidecar tests for the other four families can do because they
+pin `sidecar_seed(id)` as the variant themselves), `copy_fidelity_decontamination_rejects_sentinel_equal_request`
+(unit test of the new belt-and-braces path in isolation from the general exact/shingle check),
+`parse_copy_fidelity_specs_accepts_multiple_pairs_and_rejects_garbage`,
+`copy_fidelity_exam_difficulty_is_read_from_the_exam_json`. `cargo test -p grug-data`: 41/41 pass, unchanged
+(no grug-data source edited). Clippy clean for the binary (`cargo clippy --bin akh_episode_generator
+--features daemon --no-deps` — zero warnings attributed to `akh_episode_generator.rs`, only pre-existing
+warnings elsewhere in the workspace). `cargo fmt` run on the touched file only.
+
+### Smoke (stand-in contract snapshot — the real `runs/checkpoints/local-curricula-v3-8k/sft/contracts.json`
+is not in this worktree)
+
+Used the existing, untouched `examples/export_akh_learning_contracts.rs` (`cargo run --release --example
+export_akh_learning_contracts --features daemon`) to dump a real 47-tool `ToolContractSnapshot` from a fresh
+`Agent`'s actual default tool registry plus the four study-note tools that example already registers —
+includes `memory_write`, `reactor_manage`, and `study_note_revise` (not `mcp__seshat__seshat_wish`, which
+needs `--mcp-stdin seshat=...` descriptors this environment doesn't have). A better stand-in than a hand-built
+fixture and required zero new files.
+
+`--count 20 --oracle-seeds 2 --contracts <dumped 47-tool snapshot> --copy-fidelity
+memory_write=20,reactor_manage=20`, clean `--out-dir`, no `--sentinel`:
+
+| tool | requested | generated | kept | offered_tool_count | difficulty | seed |
+|---|---:|---:|---:|---:|---:|---:|
+| `memory_write` | 20 | 20 | 20 | 4 | 3 | 13907095949652819744 |
+| `reactor_manage` | 20 | 20 | 20 | 4 | 3 | 13907095949652819744 |
+
+(seed = `20260913 XOR COPY_FIDELITY_SEED_SALT`, the `--copy-fidelity-seed` default.) A `reactor_manage`
+copy-fidelity sample reproduced exactly the window-1 case analysis's documented nested shape: `{"id":
+"id-revision-939","operation":"operation-revision-316","schedule":{"action":{},"misfire_grace_seconds":9,
+"name":"name-revision-129","retry":{},"rule":{}}}` — `schedule.rule`/`schedule.action`/`schedule.retry` as
+empty nested objects and `misfire_grace_seconds`, the exact structure window 1's siblings (plain `add`/`list`
+operations) never touched. Languages across the 20 `reactor_manage` records: 7 German, 7 French, 6 English.
+
+Primary `memory_write.jsonl` (`--count 20`, no `--copy-fidelity`, engine-in-the-loop family): facts length
+distribution `[1,1,1,1,1,2,2,2,2,2,3,3,3,3,3,4,4,4,4,4]` (exactly 5 each, deterministic seeding), confidence
+on 25/50 facts (50.0%), `origin` on 8/20, `source` on 9/20, `tags` on 9/20 (all in-band), `timestamp` on 0/20.
+
+Decontamination end-to-end check (separate run, `--count 5 --copy-fidelity memory_write=20`): a synthetic
+1-line sentinel JSONL containing one already-generated copy-fidelity record's exact rendered request under a
+bare `conversation` key (no `prompt`/`target`/`request` top-level field, so the *general* exact/shingle index
+sees nothing to index) dropped exactly 1/20 records with `dropped_sentinel_request_exact: 1` and
+`dropped_sentinel_exact: 0`, `dropped_sentinel_ngram: 0` — the new belt-and-braces path firing in isolation,
+confirmed independently of the unit test. A second check with the same sentinel text under a `request` key
+(which *is* one of the general scanner's keys) dropped all 20 records on `dropped_sentinel_ngram` instead —
+the tool's own description is a shared 13-word shingle across every record for that tool, the same boilerplate
+behavior documented in the original P6.3 sentinel-decontamination section above (fixed there by
+`--sentinel-baseline`, unchanged here).
+
+### Deviations from the brief
+
+- `study_note_revise`/`mcp__seshat__seshat_wish` copy-fidelity siblings were not smoke-tested (only
+  `memory_write`/`reactor_manage`, per the brief's exact smoke command) — `--copy-fidelity` is generic over
+  any tool name present in `--contracts`, so this is a coverage gap in the demonstration, not a code path
+  gap; `study_note_revise` is confirmed present in the dumped 47-tool stand-in contract (untested end-to-end
+  here) and `mcp__seshat__seshat_wish` needs real MCP descriptors this environment doesn't have.
+- `--copy-fidelity-exam`'s difficulty read is unit-tested (`copy_fidelity_exam_difficulty_is_read_from_the_exam_json`,
+  round-tripping a real generated `ToolContractExamSet` through disk) but not smoke-tested against an actual
+  frozen sentinel exam file, for the same "not in this worktree" reason as the base P6.3 sentinel corpus.
+- The offered-tool-budget formula (`4.min(difficulty + 1).min(len)`) is inlined at the call site rather than
+  factored out of grug-data's private `generate_exam_internal`, since that function isn't `pub` and touching
+  grug-data was scoped to "visibility only, no logic changes" — duplicating one arithmetic line was judged
+  lower-risk than widening grug-data's public surface for it.

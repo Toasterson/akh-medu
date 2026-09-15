@@ -32,7 +32,7 @@
 //! Run: `cargo run --release --bin akh_episode_generator -- --help`
 //! Test: `cargo test --bin akh_episode_generator`
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, ValueEnum};
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
@@ -62,8 +62,8 @@ use akh_medu::symbol::SymbolId;
 use akh_medu::vsa::Dimension;
 use grug_data::{
     KnowledgeAction, KnowledgeSftRecord, KnowledgeWorkflowError, REVISION_FAMILY,
-    ToolContractError, ToolContractSnapshot, ToolCurriculumError, WorkflowCitation,
-    WorkflowLanguage, WorkflowStage, render_request, sample_offered_tools,
+    ToolContractError, ToolContractSnapshot, ToolCurriculumError, ToolCurriculumGenerator,
+    WorkflowCitation, WorkflowLanguage, WorkflowStage, render_request, sample_offered_tools,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -217,6 +217,36 @@ enum GeneratorError {
         #[source]
         source: std::io::Error,
     },
+
+    /// P6.4 window 2.
+    #[error("invalid --copy-fidelity spec {spec:?} (expected tool=count)")]
+    #[diagnostic(
+        code(akh::episode_gen::copy_fidelity_spec),
+        help("use e.g. --copy-fidelity memory_write=800,reactor_manage=400")
+    )]
+    CopyFidelitySpec { spec: String },
+
+    /// P6.4 window 2.
+    #[error("--copy-fidelity requires --contracts (a frozen tool-contract snapshot)")]
+    #[diagnostic(
+        code(akh::episode_gen::copy_fidelity_requires_contracts),
+        help(
+            "pass --contracts <path to contracts.json> alongside --copy-fidelity, e.g. \
+             runs/checkpoints/local-curricula-v3-8k/sft/contracts.json"
+        )
+    )]
+    CopyFidelityRequiresContracts,
+
+    /// P6.4 window 2.
+    #[error("--copy-fidelity-exam declared difficulty {difficulty}, expected 1..=3")]
+    #[diagnostic(
+        code(akh::episode_gen::copy_fidelity_difficulty),
+        help(
+            "the sentinel exam's difficulty must be in 1..=3 (the release sentinels are \
+             difficulty 3); check --copy-fidelity-exam points at the right file"
+        )
+    )]
+    CopyFidelityDifficulty { difficulty: u8 },
 }
 
 type GenResult<T> = std::result::Result<T, GeneratorError>;
@@ -518,6 +548,43 @@ struct Args {
     /// the primary `<family>.jsonl` files are written either way.
     #[arg(long = "contracts")]
     contracts: Option<PathBuf>,
+
+    /// P6.4 window 2: generate copy-fidelity sibling records for the named
+    /// tools with grug-data's own `ToolCurriculumGenerator` — the same
+    /// generator that produced the base SFT corpus and the release-gate
+    /// sentinel exam (`generate_for_tools`'s `Standard` prompt domain,
+    /// i.e. `render_request`) — at the sentinel exam's own
+    /// difficulty/offered-tool budget, under a fresh seed independent of
+    /// both `--seed` and the sentinel's own. Comma-separated `tool=count`
+    /// pairs, e.g. `memory_write=800,reactor_manage=400`. Requires
+    /// `--contracts`. Written to `<out-dir>/copy_fidelity_<tool>/
+    /// {train.sft.jsonl,manifest.json,separation.json}`, one directory per
+    /// named tool, in the same shape `write_steering_sidecar` writes.
+    #[arg(long = "copy-fidelity", value_delimiter = ',')]
+    copy_fidelity: Vec<String>,
+
+    /// Seed for `--copy-fidelity` generation. Defaults to `--seed` XORed
+    /// with a fixed salt (`COPY_FIDELITY_SEED_SALT`) — deliberately
+    /// different from both the primary engine-in-the-loop families' seed
+    /// and the frozen sentinel exam's own seed, so copy-fidelity siblings
+    /// are a genuinely independent draw, not a replay.
+    #[arg(long = "copy-fidelity-seed")]
+    copy_fidelity_seed: Option<u64>,
+
+    /// Difficulty for `--copy-fidelity` generation (1..=3), used only when
+    /// `--copy-fidelity-exam` is not given. The P6.4 window-1 release
+    /// sentinels are difficulty 3.
+    #[arg(long = "copy-fidelity-difficulty", default_value_t = 3)]
+    copy_fidelity_difficulty: u8,
+
+    /// Optional path to the frozen sentinel `ToolContractExamSet` JSON. When
+    /// given, its declared `difficulty` field overrides
+    /// `--copy-fidelity-difficulty` — "read from the exam JSON" rather than
+    /// assumed. `verify()` is deliberately not required to pass here (only
+    /// the `difficulty` field is trusted metadata; the exam's own contract
+    /// snapshot need not byte-match this run's `--contracts`).
+    #[arg(long = "copy-fidelity-exam")]
+    copy_fidelity_exam: Option<PathBuf>,
 }
 
 /// P6.5/E1 control mode — see `Args::e1_targets`.
@@ -701,6 +768,12 @@ impl TemplateBook {
 
 const SENTINEL_WORD_NGRAM_SIZE: usize = 13;
 
+/// P6.4 window 2: XOR salt deriving `--copy-fidelity`'s default seed from
+/// `--seed`, when `--copy-fidelity-seed` is not given. Arbitrary but fixed
+/// (deterministic reruns), and distinct from the primary families' seed
+/// stream and from the frozen sentinel exam's own seed.
+const COPY_FIDELITY_SEED_SALT: u64 = 0xC0FF_EE15_5161_5711;
+
 fn normalized_words(text: &str) -> Vec<String> {
     text.nfkc()
         .flat_map(char::to_lowercase)
@@ -713,6 +786,14 @@ fn normalized_words(text: &str) -> Vec<String> {
         })
         .filter(|word| !word.is_empty())
         .collect()
+}
+
+/// Collapse runs of whitespace to a single space and trim the ends — a
+/// literal "modulo whitespace" comparison, deliberately weaker than
+/// [`normalized_words`]'s NFKC-fold + lowercase + alphanumeric-only
+/// normalization (see [`SentinelIndex::request_texts`]).
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn normalized_text_hash(text: &str) -> [u8; 32] {
@@ -756,6 +837,17 @@ struct SentinelIndex {
     baseline_texts: usize,
     ngrams_removed_by_baseline: usize,
     exact_removed_by_baseline: usize,
+    /// P6.4 window 2: whitespace-collapsed (not NFKC/lowercased — a
+    /// literal, not fuzzy, comparison) user-turn request texts, indexed
+    /// from each sentinel row's `request`/`user_request` field or its
+    /// `conversation`'s first `role: "user"` turn. A second, stricter
+    /// decontamination pass for `--copy-fidelity` siblings on top of the
+    /// existing NFKC-normalized exact/13-word-shingle check above (belt and
+    /// braces): those siblings are generated by the *same* code path that
+    /// produced the sentinel cases (`ToolCurriculumGenerator`), so a
+    /// request-level exact match is the most direct signal a sibling
+    /// happened to reproduce a sentinel's exact phrasing+arguments.
+    request_texts: HashSet<String>,
 }
 
 impl SentinelIndex {
@@ -769,6 +861,7 @@ impl SentinelIndex {
             baseline_texts: 0,
             ngrams_removed_by_baseline: 0,
             exact_removed_by_baseline: 0,
+            request_texts: HashSet::new(),
         }
     }
 
@@ -786,6 +879,8 @@ impl SentinelIndex {
         let before_exact = self.exact.len();
         self.ngram.retain(|hash| !baseline.ngram.contains(hash));
         self.exact.retain(|hash| !baseline.exact.contains(hash));
+        self.request_texts
+            .retain(|text| !baseline.request_texts.contains(text));
         self.ngrams_removed_by_baseline = before_ngram - self.ngram.len();
         self.exact_removed_by_baseline = before_exact - self.exact.len();
         self.baseline_files = baseline.files;
@@ -821,6 +916,21 @@ impl SentinelIndex {
                 {
                     index.index_text(&rendered);
                 }
+                for key in ["request", "user_request"] {
+                    if let Some(text) = value.get(key).and_then(Value::as_str) {
+                        index.index_request_text(text);
+                    }
+                }
+                if let Some(content) = value
+                    .get("conversation")
+                    .and_then(Value::as_array)
+                    .and_then(|conversation| conversation.first())
+                    .filter(|turn| turn.get("role").and_then(Value::as_str) == Some("user"))
+                    .and_then(|turn| turn.get("content"))
+                    .and_then(Value::as_str)
+                {
+                    index.index_request_text(content);
+                }
             }
             index.files += 1;
         }
@@ -832,6 +942,16 @@ impl SentinelIndex {
         self.ngram
             .extend(word_ngram_hashes(text, SENTINEL_WORD_NGRAM_SIZE));
         self.texts += 1;
+    }
+
+    /// See [`Self::request_texts`].
+    fn index_request_text(&mut self, text: &str) {
+        self.request_texts.insert(collapse_whitespace(text));
+    }
+
+    /// See [`Self::request_texts`].
+    fn request_collision(&self, text: &str) -> bool {
+        self.request_texts.contains(&collapse_whitespace(text))
     }
 
     /// Returns `Some(reason)` if `text` collides with an indexed sentinel.
@@ -1106,6 +1226,45 @@ fn corrupt_copy(value: &str) -> String {
     truncated
 }
 
+/// P6.4 window 2: a boolean derived from `blake3(seed:salt:i:j)`'s first
+/// byte's low bit — a uniform ~50% draw, deterministic in `(seed, i, j)`
+/// and reproducible across reruns with the same `--seed`, with no shared
+/// mutable RNG to thread through (`generate_memory_write` is otherwise a
+/// pure function of its loop index).
+fn seeded_bool(seed_v: u64, salt: &str, i: usize, j: usize) -> bool {
+    let hash = blake3::hash(format!("mw-shape:{seed_v}:{salt}:{i}:{j}").as_bytes());
+    hash.as_bytes()[0] & 1 == 1
+}
+
+/// P6.4 window 2: a deterministic confidence value in `[0.0, 1.0]`
+/// (2-decimal precision), same determinism rationale as [`seeded_bool`].
+fn seeded_confidence(seed_v: u64, i: usize, j: usize) -> f64 {
+    let hash = blake3::hash(format!("mw-confidence:{seed_v}:{i}:{j}").as_bytes());
+    ((hash.as_bytes()[1] as f64) / 255.0 * 100.0).round() / 100.0
+}
+
+/// P6.4 window 2: 1..=4 facts per record, seeded so every length appears
+/// across a run (`(seed_v + i) % 4 + 1` cycles through all four as `i`
+/// increments). Mirrors the sentinel copy-fidelity shape identified in the
+/// window-1 case analysis (`training/results/p6-4-window-1-RESULT.md`): a
+/// `facts` array of 1-4 objects, not always exactly one.
+fn seeded_facts_len(seed_v: u64, i: usize) -> usize {
+    1 + ((seed_v.wrapping_add(i as u64)) % 4) as usize
+}
+
+/// One grounded (subject, predicate, object) source triple backing a
+/// `memory_write` fact — the "source of truth" a completed fact object
+/// must copy verbatim, and the corrupted echo the raw (E1 control) fact
+/// object copies instead.
+struct MemoryFactDef {
+    doc_label: String,
+    predicate: String,
+    ground_truth_value: String,
+    excerpt: String,
+    doc_id: SymbolId,
+    predicate_id: SymbolId,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_memory_write(
     engine: &Engine,
@@ -1127,57 +1286,115 @@ fn generate_memory_write(
 
     for i in 0..count {
         let seed_v = seed.0;
-        let doc_label = format!("doc:mw:{seed_v}:{i}");
-        let predicate = "has-field";
-        let value = stress_value(book, &value_kind(i), seed_v, i);
+        let facts_len = seeded_facts_len(seed_v, i);
 
-        // Ground the source fact directly in the graph — this is the
-        // "source of truth" the model's fact must copy verbatim.
-        let doc_id = engine.resolve_or_create_entity(&doc_label)?;
-        let predicate_id = engine.resolve_or_create_relation(predicate)?;
-        let value_id = engine.resolve_or_create_entity(&format!("literal:{value}"))?;
-        let mut source_triples = vec![Triple::new(doc_id, predicate_id, value_id)];
-        let mut prov =
-            ProvenanceRecord::new(doc_id, DerivationKind::Extracted).with_confidence(1.0);
-        engine.add_triples_with_provenance(&mut source_triples, &mut prov)?;
+        // Ground each fact's source triple directly in the graph — this is
+        // the "source of truth" the model's fact objects must copy
+        // verbatim. P6.4 window 2: 1-4 facts per record (window 1's
+        // siblings always used exactly one, which never exercised the
+        // sentinels' documented "dropped a fact"/"merged two facts"
+        // failure modes).
+        let mut fact_defs = Vec::with_capacity(facts_len);
+        for j in 0..facts_len {
+            let fact_index = i * 4 + j;
+            let doc_label = format!("doc:mw:{seed_v}:{i}:{j}");
+            let predicate = "has-field";
+            let value = stress_value(book, &value_kind(fact_index), seed_v, fact_index);
+
+            let doc_id = engine.resolve_or_create_entity(&doc_label)?;
+            let predicate_id = engine.resolve_or_create_relation(predicate)?;
+            let value_id = engine.resolve_or_create_entity(&format!("literal:{value}"))?;
+            let mut source_triples = vec![Triple::new(doc_id, predicate_id, value_id)];
+            let mut prov =
+                ProvenanceRecord::new(doc_id, DerivationKind::Extracted).with_confidence(1.0);
+            engine.add_triples_with_provenance(&mut source_triples, &mut prov)?;
+
+            // COMPLETED value read back from the graph (`engine.resolve_label`),
+            // not a template guess.
+            let ground_truth = engine.resolve_label(value_id);
+            let ground_truth_value = ground_truth
+                .strip_prefix("literal:")
+                .unwrap_or(&ground_truth)
+                .to_string();
+            let excerpt = corrupt_copy(&value); // RAW (E1 control) fact value: a truncated echo, not the graph-verified literal.
+            fact_defs.push(MemoryFactDef {
+                doc_label,
+                predicate: predicate.to_string(),
+                ground_truth_value,
+                excerpt,
+                doc_id,
+                predicate_id,
+            });
+        }
+        let primary = &fact_defs[0];
 
         let id = format!("p6-3-memory_write-{seed_v}-{i:05}");
-        let excerpt = corrupt_copy(&value); // shown as the "source excerpt" is the ground truth; the corrupted copy models the failure mode below
         let request = book.render(
             "memory_write",
             "record_field",
             "en",
             &[
-                ("doc_label", &doc_label),
-                ("source_excerpt", &value),
-                ("predicate", predicate),
+                ("doc_label", &primary.doc_label),
+                ("source_excerpt", &primary.ground_truth_value),
+                ("predicate", &primary.predicate),
             ],
         )?;
 
-        // RAW (E1 control): value copied from a truncated echo, not the
-        // graph-verified literal — models the documented copy-fidelity
-        // failure exactly (schema-valid envelope, wrong value).
+        // RAW (E1 control): every fact's value copied from a truncated
+        // echo, not the graph-verified literal — models the documented
+        // copy-fidelity failure exactly (schema-valid envelope, wrong
+        // value(s)).
+        let raw_facts: Vec<Value> = fact_defs
+            .iter()
+            .map(|f| json!({"subject": f.doc_label, "predicate": f.predicate, "object": f.excerpt}))
+            .collect();
         let raw_args = json!({
-            "summary": format!("Recorded {doc_label} {predicate}"),
-            "facts": [{"subject": doc_label, "predicate": predicate, "object": excerpt}],
+            "summary": format!("Recorded {facts_len} fact(s) for {}", primary.doc_label),
+            "facts": raw_facts,
         });
         let raw_target = tool_call_target(&format!("{id}-raw"), "memory_write", raw_args)?;
         let raw_runtime_valid = KnowledgeAction::parse_runtime(&raw_target).is_ok();
 
-        // COMPLETED (E1 treatment): value read back from the graph
-        // (`engine.resolve_label`), then the tool is actually executed and
-        // must succeed — symbolic completion, not a template guess.
-        let ground_truth = engine.resolve_label(value_id);
-        let ground_truth_value = ground_truth
-            .strip_prefix("literal:")
-            .unwrap_or(&ground_truth)
-            .to_string();
-        let completed_args = json!({
-            "summary": format!("Recorded {doc_label} {predicate}"),
-            "facts": [{"subject": doc_label, "predicate": predicate, "object": ground_truth_value}],
-            "tags": ["copy-fidelity"],
-            "source": doc_label,
-        });
+        // COMPLETED (E1 treatment): the tool is actually executed against
+        // the engine and must succeed — symbolic completion, not a
+        // template guess. P6.4 window 2 shape (from the sentinel
+        // copy-fidelity case analysis): each fact carries `confidence`
+        // ~50% of the time; the record carries `origin`/`source`/`tags`
+        // each ~50% of the time; `timestamp` is never emitted (the
+        // sentinels never exercise it).
+        let completed_facts: Vec<Value> = fact_defs
+            .iter()
+            .enumerate()
+            .map(|(j, f)| {
+                let mut fact = Map::new();
+                fact.insert("subject".into(), json!(f.doc_label));
+                fact.insert("predicate".into(), json!(f.predicate));
+                fact.insert("object".into(), json!(f.ground_truth_value));
+                if seeded_bool(seed_v, "confidence", i, j) {
+                    fact.insert("confidence".into(), json!(seeded_confidence(seed_v, i, j)));
+                }
+                Value::Object(fact)
+            })
+            .collect();
+        let mut completed_map = Map::new();
+        completed_map.insert(
+            "summary".into(),
+            json!(format!(
+                "Recorded {facts_len} fact(s) for {}",
+                primary.doc_label
+            )),
+        );
+        completed_map.insert("facts".into(), Value::Array(completed_facts));
+        if seeded_bool(seed_v, "origin", i, 0) {
+            completed_map.insert("origin".into(), json!("agent"));
+        }
+        if seeded_bool(seed_v, "source", i, 0) {
+            completed_map.insert("source".into(), json!(primary.doc_label));
+        }
+        if seeded_bool(seed_v, "tags", i, 0) {
+            completed_map.insert("tags".into(), json!(["copy-fidelity"]));
+        }
+        let completed_args = Value::Object(completed_map);
         let completed_target = tool_call_target(
             &format!("{id}-completed"),
             "memory_write",
@@ -1185,11 +1402,12 @@ fn generate_memory_write(
         )?;
         let output = tool.execute(
             engine,
-            ToolInput::new()
-                .with_value("summary", completed_args["summary"].clone())
-                .with_value("facts", completed_args["facts"].clone())
-                .with_value("tags", completed_args["tags"].clone())
-                .with_value("source", completed_args["source"].clone()),
+            ToolInput {
+                params: completed_args
+                    .as_object()
+                    .expect("completed_args is always a JSON object")
+                    .clone(),
+            },
         )?;
         if !output.success {
             return Err(GeneratorError::Agent(AgentError::ToolExecution {
@@ -1198,32 +1416,43 @@ fn generate_memory_write(
             }));
         }
 
-        // E2: is the source still "current" at decision time? 1-in-4
-        // episodes model a superseded source (write should be considered
-        // stale), the rest a still-current one.
-        let fluent_label = format!("source-current:{doc_label}");
+        // E2: is the primary source still "current" at decision time?
+        // 1-in-4 episodes model a superseded source (write should be
+        // considered stale), the rest a still-current one.
+        let fluent_label = format!("source-current:{}", primary.doc_label);
         let (temporal_validity, raw_events) = if i % 4 == 3 {
             temporal_label(ec, engine, &fluent_label, 0, Some(50), 100)?
         } else {
             temporal_label(ec, engine, &fluent_label, 0, None, 10)?
         };
 
-        // E3: causal reward for the completed vs. raw fact triple.
-        let object_completed =
-            engine.resolve_or_create_entity(&format!("literal:{ground_truth_value}"))?;
-        let object_raw = engine.resolve_or_create_entity(&format!("literal:{excerpt}"))?;
-        let reward_completed = causal_label(
-            causal,
-            engine,
-            &format!("{id}:completed"),
-            (doc_id, predicate_id, object_completed),
-        )?;
-        let reward_raw = causal_label(
-            causal,
-            engine,
-            &format!("{id}:raw"),
-            (doc_id, predicate_id, object_raw),
-        )?;
+        // E3: causal reward for the completed vs. raw write — verified
+        // (1.0) only if *every* fact's triple actually holds; the raw
+        // (corrupted) write is verified only if every corrupted fact
+        // somehow still matches (never true by construction of
+        // `corrupt_copy`, for any facts_len).
+        let mut reward_completed = 1.0_f64;
+        let mut reward_raw = 1.0_f64;
+        for (j, f) in fact_defs.iter().enumerate() {
+            let object_completed =
+                engine.resolve_or_create_entity(&format!("literal:{}", f.ground_truth_value))?;
+            let object_raw = engine.resolve_or_create_entity(&format!("literal:{}", f.excerpt))?;
+            let r_completed = causal_label(
+                causal,
+                engine,
+                &format!("{id}:completed:{j}"),
+                (f.doc_id, f.predicate_id, object_completed),
+            )?;
+            let r_raw = causal_label(
+                causal,
+                engine,
+                &format!("{id}:raw:{j}"),
+                (f.doc_id, f.predicate_id, object_raw),
+            )?;
+            reward_completed = reward_completed.min(r_completed);
+            reward_raw = reward_raw.min(r_raw);
+        }
+        let changed_from_raw = fact_defs.iter().any(|f| f.excerpt != f.ground_truth_value);
 
         out.push(EpisodeRecord {
             schema_version: 1,
@@ -1243,7 +1472,7 @@ fn generate_memory_write(
             labels: Some(EpisodeLabels {
                 e1_raw_target: Some(raw_target),
                 e1_raw_target_runtime_valid: Some(raw_runtime_valid),
-                e1_completed_changed_from_raw: Some(excerpt != ground_truth_value),
+                e1_completed_changed_from_raw: Some(changed_from_raw),
                 e2_temporal_validity: Some(temporal_validity),
                 e2_raw_events: Some(raw_events),
                 e3_causal_reward_completed: Some(reward_completed),
@@ -3214,6 +3443,23 @@ struct Manifest {
     /// `--contracts` were given this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     e3_sidecar_control: Option<E4SidecarStats>,
+    /// P6.4 window 2: `--copy-fidelity` per-tool sidecar stats, keyed by
+    /// tool name. Empty when `--copy-fidelity` was not given.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    copy_fidelity: BTreeMap<String, CopyFidelityFamilyStats>,
+    /// P6.4 window 2: the seed `--copy-fidelity` generation actually used
+    /// (either `--copy-fidelity-seed` or the `--seed`-derived default).
+    /// `None` when `--copy-fidelity` was not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    copy_fidelity_seed: Option<u64>,
+    /// P6.4 window 2: the difficulty `--copy-fidelity` generation actually
+    /// used (either `--copy-fidelity-difficulty` or read from
+    /// `--copy-fidelity-exam`). `None` when `--copy-fidelity` was not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    copy_fidelity_difficulty: Option<u8>,
+    /// P6.4 window 2: `--copy-fidelity-exam` path, when given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    copy_fidelity_exam_path: Option<String>,
 }
 
 /// P6.5/E4: one `knowledge_revise` arm's sidecar write stats, recorded in
@@ -3256,6 +3502,177 @@ fn git_hash() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into())
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P6.4 window 2: --copy-fidelity siblings
+//
+// Unlike every other family in this file, these records are not generated
+// by driving the engine — they are generated by grug-data's own
+// `ToolCurriculumGenerator`, the exact generator that produced the base
+// SFT corpus and the release-gate sentinel exam (`generate_for_tools`'s
+// `Standard` prompt domain calls `grug_data::render_request` internally,
+// the same function `build_sidecar_record` below calls for the other four
+// families' sidecars). The window-1 gate failure was that our own
+// siblings never exercised the sentinels' copy-fidelity shape (multi-fact
+// `memory_write`, nested `reactor_manage` schedules, ...); reusing the
+// real generator at the sentinel's own difficulty is the fix, not
+// reimplementing that shape by hand a second time.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Generate `count` fresh copy-fidelity records for one tool from `frozen`
+/// (the full frozen catalog, so distractors are drawn from the real
+/// offered-tool distribution) via `ToolCurriculumGenerator::generate_for_tools`
+/// — the crate's own base-corpus generator, not a local reimplementation.
+fn generate_copy_fidelity_family(
+    frozen: &ToolContractSnapshot,
+    tool: &str,
+    count: usize,
+    seed: u64,
+    offered_tool_count: usize,
+    run_id: &str,
+) -> GenResult<Vec<KnowledgeSftRecord>> {
+    let generator = ToolCurriculumGenerator::new(frozen.clone(), seed, offered_tool_count)?;
+    let tool_names = BTreeSet::from([tool.to_string()]);
+    Ok(generator.generate_for_tools(run_id, count, &tool_names)?)
+}
+
+/// Defensive re-validation of every generated record's target against
+/// `frozen` (`ToolCurriculumGenerator::generate_for_tools` already
+/// guarantees this internally — it validates every sampled argument set
+/// before accepting it — so `dropped` should always be 0; this is a second
+/// check at the boundary, the same posture `build_sidecar_record` takes
+/// for the other four families).
+fn schema_validate_copy_fidelity(
+    frozen: &ToolContractSnapshot,
+    records: Vec<KnowledgeSftRecord>,
+) -> GenResult<(Vec<KnowledgeSftRecord>, u64)> {
+    let mut kept = Vec::with_capacity(records.len());
+    let mut dropped = 0u64;
+    for record in records {
+        let action = KnowledgeAction::parse_runtime(&record.target)?;
+        let KnowledgeAction::ToolCall { tool, arguments } = &action else {
+            dropped += 1;
+            continue;
+        };
+        if !frozen.validate_call(tool, arguments).valid {
+            dropped += 1;
+            continue;
+        }
+        kept.push(record);
+    }
+    Ok((kept, dropped))
+}
+
+/// P6.4 window 2 decontamination tally — see [`decontaminate_copy_fidelity`].
+#[derive(Debug, Default)]
+struct CopyFidelityDecon {
+    checked: u64,
+    dropped_sentinel_exact: u64,
+    dropped_sentinel_ngram: u64,
+    dropped_sentinel_request_exact: u64,
+}
+
+/// Decontaminate copy-fidelity records against `sentinels`: the same
+/// NFKC-normalized exact/13-word-shingle check every other family runs
+/// (over `prompt` and `target`), plus a belt-and-braces literal
+/// whitespace-collapsed check of the rendered user request against
+/// `sentinels.request_texts` — see [`SentinelIndex::request_texts`] for why
+/// that extra check matters specifically for this family (same generator,
+/// same code path, as the sentinel cases themselves).
+fn decontaminate_copy_fidelity(
+    records: Vec<KnowledgeSftRecord>,
+    sentinels: &SentinelIndex,
+) -> (Vec<KnowledgeSftRecord>, CopyFidelityDecon) {
+    let mut decon = CopyFidelityDecon::default();
+    let mut kept = Vec::with_capacity(records.len());
+    for record in records {
+        decon.checked += 1;
+        let general_collision = sentinels
+            .collision(&record.prompt)
+            .or_else(|| sentinels.collision(&record.target));
+        if let Some(reason) = general_collision {
+            if reason == "exact" {
+                decon.dropped_sentinel_exact += 1;
+            } else {
+                decon.dropped_sentinel_ngram += 1;
+            }
+            continue;
+        }
+        let request = record
+            .conversation
+            .first()
+            .and_then(|turn| turn.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if sentinels.request_collision(request) {
+            decon.dropped_sentinel_request_exact += 1;
+            continue;
+        }
+        kept.push(record);
+    }
+    (kept, decon)
+}
+
+/// Parse `--copy-fidelity`'s comma-separated `tool=count` pairs.
+fn parse_copy_fidelity_specs(raw: &[String]) -> GenResult<Vec<(String, usize)>> {
+    raw.iter()
+        .map(|item| {
+            let (tool, count) = item
+                .split_once('=')
+                .ok_or_else(|| GeneratorError::CopyFidelitySpec { spec: item.clone() })?;
+            let tool = tool.trim();
+            let count: usize = count
+                .trim()
+                .parse()
+                .map_err(|_| GeneratorError::CopyFidelitySpec { spec: item.clone() })?;
+            if tool.is_empty() || count == 0 {
+                return Err(GeneratorError::CopyFidelitySpec { spec: item.clone() });
+            }
+            Ok((tool.to_string(), count))
+        })
+        .collect()
+}
+
+/// Read `difficulty` from a frozen `ToolContractExamSet` JSON file (the
+/// release-gate sentinel exam) — "read from the exam JSON", not assumed.
+/// Deliberately does not call `ToolContractExamSet::verify`: only the
+/// declared `difficulty` field is trusted metadata here, and the exam's
+/// own contract snapshot need not byte-match this run's `--contracts` for
+/// that single field to be meaningful.
+fn load_copy_fidelity_exam_difficulty(path: &Path) -> GenResult<u8> {
+    let bytes = fs::read(path).map_err(|source| GeneratorError::ContractsIo {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let exam: grug_data::ToolContractExamSet = serde_json::from_slice(&bytes)?;
+    Ok(exam.difficulty)
+}
+
+/// P6.4 window 2: one `--copy-fidelity` tool's sidecar write stats,
+/// recorded in the top-level manifest under `copy_fidelity` (keyed by tool
+/// name) so a consumer doesn't have to open every
+/// `copy_fidelity_<tool>/manifest.json` separately.
+#[derive(Debug, Serialize)]
+struct CopyFidelityFamilyStats {
+    dir: String,
+    tool: String,
+    /// The `--copy-fidelity tool=N` count requested.
+    requested: u64,
+    /// Records `ToolCurriculumGenerator::generate_for_tools` returned,
+    /// before decontamination.
+    generated: u64,
+    /// Records actually written to `<dir>/train.sft.jsonl`.
+    kept: u64,
+    /// Records that reached the decontamination pass (post schema check).
+    decontamination_checked: u64,
+    schema_invalid_dropped: u64,
+    dropped_sentinel_exact: u64,
+    dropped_sentinel_ngram: u64,
+    dropped_sentinel_request_exact: u64,
+    seed: u64,
+    difficulty: u8,
+    offered_tool_count: usize,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3868,6 +4285,9 @@ fn load_frozen_contracts(path: &Path) -> GenResult<ToolContractSnapshot> {
 }
 
 fn run(args: &Args) -> GenResult<()> {
+    if !args.copy_fidelity.is_empty() && args.contracts.is_none() {
+        return Err(GeneratorError::CopyFidelityRequiresContracts);
+    }
     let book = TemplateBook::load(&args.templates_dir)?;
     let sentinels = SentinelIndex::load(&args.sentinel_paths)?
         .subtract_baseline(&args.sentinel_baseline_paths)?;
@@ -4224,6 +4644,89 @@ fn run(args: &Args) -> GenResult<()> {
         }
     }
 
+    // P6.4 window 2: --copy-fidelity siblings (see the module doc above
+    // `generate_copy_fidelity_family`). `frozen_contracts` is guaranteed
+    // `Some` here — checked at the top of `run` — whenever
+    // `args.copy_fidelity` is non-empty.
+    let mut copy_fidelity_stats: BTreeMap<String, CopyFidelityFamilyStats> = BTreeMap::new();
+    let mut copy_fidelity_seed_used: Option<u64> = None;
+    let mut copy_fidelity_difficulty_used: Option<u8> = None;
+    if !args.copy_fidelity.is_empty() {
+        let frozen = frozen_contracts
+            .as_ref()
+            .ok_or(GeneratorError::CopyFidelityRequiresContracts)?;
+        let specs = parse_copy_fidelity_specs(&args.copy_fidelity)?;
+        let difficulty = match &args.copy_fidelity_exam {
+            Some(path) => load_copy_fidelity_exam_difficulty(path)?,
+            None => args.copy_fidelity_difficulty,
+        };
+        if !(1..=3).contains(&difficulty) {
+            return Err(GeneratorError::CopyFidelityDifficulty { difficulty });
+        }
+        // Same offered-tool-budget formula `ToolCurriculumGenerator::
+        // generate_exam_internal` uses for difficulty: 2 tools at level
+        // one, 3 at level two, the daemon's normal four-tool budget at
+        // level three — the sentinels' own level.
+        let offered_tool_count = 4usize
+            .min(usize::from(difficulty) + 1)
+            .min(frozen.tools.len());
+        let seed = args
+            .copy_fidelity_seed
+            .unwrap_or(args.seed ^ COPY_FIDELITY_SEED_SALT);
+        copy_fidelity_seed_used = Some(seed);
+        copy_fidelity_difficulty_used = Some(difficulty);
+        for (tool, count) in specs {
+            let dir_name = format!("copy_fidelity_{tool}");
+            let dir = args.out_dir.join(&dir_name);
+            fs::create_dir_all(&dir).map_err(|source| GeneratorError::Io {
+                path: dir.clone(),
+                source,
+            })?;
+            let run_id = format!("p6-4-window2-copy-fidelity-{seed}-{tool}");
+            let raw_records = generate_copy_fidelity_family(
+                frozen,
+                &tool,
+                count,
+                seed,
+                offered_tool_count,
+                &run_id,
+            )?;
+            let generated = raw_records.len() as u64;
+            let (schema_valid, schema_invalid_dropped) =
+                schema_validate_copy_fidelity(frozen, raw_records)?;
+            let (kept, decon_stats) = decontaminate_copy_fidelity(schema_valid, &sentinels);
+            let family_tag = format!("tool_contract.{tool}");
+            let write_stats = write_sidecar_files(
+                &dir,
+                &family_tag,
+                &tool,
+                frozen,
+                kept,
+                "n/a".to_string(),
+                0,
+                schema_invalid_dropped,
+            )?;
+            copy_fidelity_stats.insert(
+                tool.clone(),
+                CopyFidelityFamilyStats {
+                    dir: dir_name,
+                    tool,
+                    requested: count as u64,
+                    generated,
+                    kept: write_stats.kept as u64,
+                    decontamination_checked: decon_stats.checked,
+                    schema_invalid_dropped: write_stats.schema_invalid_dropped,
+                    dropped_sentinel_exact: decon_stats.dropped_sentinel_exact,
+                    dropped_sentinel_ngram: decon_stats.dropped_sentinel_ngram,
+                    dropped_sentinel_request_exact: decon_stats.dropped_sentinel_request_exact,
+                    seed,
+                    difficulty,
+                    offered_tool_count,
+                },
+            );
+        }
+    }
+
     let manifest = Manifest {
         schema_version: 1,
         generator: "akh_episode_generator/p6.3",
@@ -4250,6 +4753,13 @@ fn run(args: &Args) -> GenResult<()> {
         e3_step_reward_histogram,
         e3_sidecar_treatment,
         e3_sidecar_control,
+        copy_fidelity: copy_fidelity_stats,
+        copy_fidelity_seed: copy_fidelity_seed_used,
+        copy_fidelity_difficulty: copy_fidelity_difficulty_used,
+        copy_fidelity_exam_path: args
+            .copy_fidelity_exam
+            .as_ref()
+            .map(|path| path.display().to_string()),
     };
     let manifest_path = args.out_dir.join("manifest.json");
     fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?).map_err(|source| {
@@ -5647,5 +6157,316 @@ mod tests {
                 other => panic!("{tool}: expected a tool-call target, got {other:?}"),
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // P6.4 window 2: memory_write shape upgrade + --copy-fidelity siblings
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn memory_write_shape_matches_sentinel_copy_fidelity_distribution() {
+        // 240 records (60 full cycles of the seeded 1-4 facts_len pattern)
+        // — enough to make a 30-70% presence band a meaningful check, not
+        // noise. See the window-1 case analysis this shape targets:
+        // `training/results/p6-4-window-1-RESULT.md`.
+        let (_scratch, engine) = fresh_engine();
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+        let mut causal = CausalManager::new(&engine).unwrap();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let book = test_book();
+        let manifest = MemoryWriteTool::new(agent_preds.clone()).manifest();
+
+        let records = generate_memory_write(
+            &engine,
+            &agent_preds,
+            &mut causal,
+            &mut ec,
+            &book,
+            &manifest,
+            Seed(20_260_913),
+            240,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 240);
+
+        let mut facts_lens: HashSet<usize> = HashSet::new();
+        let mut total_facts = 0u64;
+        let mut facts_with_confidence = 0u64;
+        let mut records_with_origin = 0u64;
+        let mut records_with_source = 0u64;
+        let mut records_with_tags = 0u64;
+        for record in &records {
+            let KnowledgeAction::ToolCall { tool, arguments } =
+                KnowledgeAction::parse_runtime(&record.target).unwrap()
+            else {
+                panic!("memory_write record target must be a tool call");
+            };
+            assert_eq!(tool, "memory_write");
+            assert!(
+                arguments.get("timestamp").is_none(),
+                "memory_write's P6.4 window-2 shape must never emit timestamp"
+            );
+            let facts = arguments["facts"].as_array().unwrap();
+            facts_lens.insert(facts.len());
+            for fact in facts {
+                total_facts += 1;
+                if fact.get("confidence").is_some() {
+                    facts_with_confidence += 1;
+                }
+            }
+            if arguments.get("origin").is_some() {
+                records_with_origin += 1;
+            }
+            if arguments.get("source").is_some() {
+                records_with_source += 1;
+            }
+            if arguments.get("tags").is_some() {
+                records_with_tags += 1;
+            }
+        }
+        assert_eq!(
+            facts_lens,
+            HashSet::from([1, 2, 3, 4]),
+            "every facts length 1-4 must appear across 240 records, got {facts_lens:?}"
+        );
+        let band = |present: u64, total: u64| {
+            let fraction = present as f64 / total as f64;
+            (0.3..=0.7).contains(&fraction)
+        };
+        assert!(
+            band(facts_with_confidence, total_facts),
+            "confidence should be present on ~50% of facts, got {facts_with_confidence}/{total_facts}"
+        );
+        assert!(
+            band(records_with_origin, records.len() as u64),
+            "origin should be present on ~50% of records, got {records_with_origin}/{}",
+            records.len()
+        );
+        assert!(
+            band(records_with_source, records.len() as u64),
+            "source should be present on ~50% of records, got {records_with_source}/{}",
+            records.len()
+        );
+        assert!(
+            band(records_with_tags, records.len() as u64),
+            "tags should be present on ~50% of records, got {records_with_tags}/{}",
+            records.len()
+        );
+    }
+
+    #[test]
+    fn memory_write_multi_fact_completion_still_executes_and_is_labelled() {
+        // The upgraded shape must still be real symbolic completion: every
+        // fact's value comes from the graph, the tool call actually runs,
+        // and E1/E2/E3 labels keep their existing meaning (now aggregated
+        // — AND — across every fact in the write).
+        let (_scratch, engine) = fresh_engine();
+        let agent_preds = AgentPredicates::init(&engine).unwrap();
+        let mut causal = CausalManager::new(&engine).unwrap();
+        let mut ec = EventCalculusEngine::new(&engine).unwrap();
+        let book = test_book();
+        let manifest = MemoryWriteTool::new(agent_preds.clone()).manifest();
+
+        let records = generate_memory_write(
+            &engine,
+            &agent_preds,
+            &mut causal,
+            &mut ec,
+            &book,
+            &manifest,
+            Seed(1),
+            8,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 8);
+        for record in &records {
+            let labels = record.labels.as_ref().expect("labels present");
+            assert_eq!(labels.e1_completed_changed_from_raw, Some(true));
+            assert!(KnowledgeAction::parse_runtime(&record.target).is_ok());
+            assert_eq!(labels.e3_causal_reward_completed, Some(1.0));
+            assert_eq!(labels.e3_causal_reward_raw, Some(0.0));
+        }
+        assert!(
+            records.iter().any(|r| {
+                let KnowledgeAction::ToolCall { arguments, .. } =
+                    KnowledgeAction::parse_runtime(&r.target).unwrap()
+                else {
+                    return false;
+                };
+                arguments["facts"].as_array().unwrap().len() > 1
+            }),
+            "at least one of 8 records should carry more than one fact"
+        );
+    }
+
+    #[test]
+    fn copy_fidelity_records_validate_against_frozen_contract_and_render_request() {
+        let (_scratch, engine) = fresh_engine();
+        let frozen = test_frozen_contracts(&engine);
+
+        let records = generate_copy_fidelity_family(
+            &frozen,
+            "memory_write",
+            12,
+            99,
+            4,
+            "test-copy-fidelity-run",
+        )
+        .unwrap();
+        assert_eq!(records.len(), 12);
+
+        let frozen_tool_names: HashSet<&str> =
+            frozen.tools.iter().map(|t| t.name.as_str()).collect();
+        for record in &records {
+            // 1. validate_call on every target.
+            let KnowledgeAction::ToolCall { tool, arguments } =
+                KnowledgeAction::parse_runtime(&record.target).unwrap()
+            else {
+                panic!("copy-fidelity record target must be a tool call");
+            };
+            assert_eq!(tool, "memory_write");
+            assert!(frozen.validate_call(&tool, &arguments).valid);
+
+            // 2. tools = 4 offered from the frozen contract.
+            assert_eq!(record.tools.len(), 4);
+            let offered_names: HashSet<String> = record
+                .tools
+                .iter()
+                .filter_map(|t| t["function"]["name"].as_str().map(String::from))
+                .collect();
+            assert_eq!(
+                offered_names.len(),
+                4,
+                "offered tools must be 4 distinct names"
+            );
+            assert!(offered_names.contains(&tool));
+            for name in &offered_names {
+                assert!(
+                    frozen_tool_names.contains(name.as_str()),
+                    "offered tool {name} must come from the frozen contract"
+                );
+            }
+
+            // 3. request rendered through render_request: the user turn
+            // must equal one of render_request's 3 phrasing variants for
+            // this record's own language/description/arguments (the
+            // internal variant index is grug-data's own, not reproducible
+            // from outside without duplicating its RNG interleave).
+            let description = &frozen.tool(&tool).unwrap().description;
+            let actual = record.conversation[0]["content"].as_str().unwrap();
+            let candidates: Vec<String> = (0..3)
+                .map(|variant| render_request(record.language, description, &arguments, variant))
+                .collect();
+            assert!(
+                candidates.iter().any(|c| c == actual),
+                "user turn must be one of render_request's phrasings, got {actual:?} not in {candidates:?}"
+            );
+        }
+
+        // 4. Decontamination against an empty sentinel index keeps
+        // everything (no sentinel loaded == nothing to collide with).
+        let (schema_valid, schema_invalid_dropped) =
+            schema_validate_copy_fidelity(&frozen, records).unwrap();
+        assert_eq!(schema_invalid_dropped, 0);
+        let (kept, decon) = decontaminate_copy_fidelity(schema_valid, &SentinelIndex::empty());
+        assert_eq!(kept.len(), 12);
+        assert_eq!(decon.dropped_sentinel_exact, 0);
+        assert_eq!(decon.dropped_sentinel_ngram, 0);
+        assert_eq!(decon.dropped_sentinel_request_exact, 0);
+    }
+
+    #[test]
+    fn copy_fidelity_decontamination_rejects_sentinel_equal_request() {
+        // Belt-and-braces check: a record whose rendered request matches an
+        // indexed sentinel request modulo whitespace must be dropped and
+        // counted, independent of the general NFKC exact/shingle check.
+        let mut sentinels = SentinelIndex::empty();
+        sentinels.index_request_text(
+            "Perform this operation: record a field\nUse these exact inputs:\n- x = 1",
+        );
+
+        let colliding = KnowledgeSftRecord {
+            schema_version: 1,
+            id: "collide-1".into(),
+            episode_id: "collide-1".into(),
+            step: 0,
+            stage: WorkflowStage::Answer,
+            family: "tool_contract.memory_write".into(),
+            difficulty: 3,
+            language: WorkflowLanguage::English,
+            contract_hash: "blake3:deadbeef".into(),
+            tools: vec![],
+            conversation: vec![json!({
+                "role": "user",
+                // Extra whitespace around the sentinel's text — must still
+                // collide (a literal whitespace-modulo comparison).
+                "content": "  Perform this operation: record a field\nUse these exact inputs:\n- x = 1  "
+            })],
+            system_context: None,
+            prompt: "irrelevant-prompt-not-indexed-by-sentinel".into(),
+            target: "irrelevant-target-not-indexed-by-sentinel".into(),
+            weight: None,
+        };
+        let clean = KnowledgeSftRecord {
+            id: "clean-1".into(),
+            episode_id: "clean-1".into(),
+            conversation: vec![
+                json!({"role": "user", "content": "A completely different request."}),
+            ],
+            ..colliding.clone()
+        };
+
+        let (kept, decon) = decontaminate_copy_fidelity(vec![colliding, clean], &sentinels);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "clean-1");
+        assert_eq!(decon.checked, 2);
+        assert_eq!(decon.dropped_sentinel_request_exact, 1);
+        assert_eq!(decon.dropped_sentinel_exact, 0);
+        assert_eq!(decon.dropped_sentinel_ngram, 0);
+    }
+
+    #[test]
+    fn parse_copy_fidelity_specs_accepts_multiple_pairs_and_rejects_garbage() {
+        let specs = parse_copy_fidelity_specs(&[
+            "memory_write=800".to_string(),
+            "reactor_manage=400".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            specs,
+            vec![
+                ("memory_write".to_string(), 800),
+                ("reactor_manage".to_string(), 400),
+            ]
+        );
+
+        assert!(parse_copy_fidelity_specs(&["memory_write".to_string()]).is_err());
+        assert!(parse_copy_fidelity_specs(&["memory_write=0".to_string()]).is_err());
+        assert!(parse_copy_fidelity_specs(&["=5".to_string()]).is_err());
+    }
+
+    #[test]
+    fn copy_fidelity_exam_difficulty_is_read_from_the_exam_json() {
+        let (_scratch, engine) = fresh_engine();
+        let frozen = test_frozen_contracts(&engine);
+        let generator = ToolCurriculumGenerator::new(frozen.clone(), 42, 4).unwrap();
+        let exam = generator
+            .generate_exam(
+                "difficulty-fixture",
+                grug_data::CheckpointRef {
+                    step: 0,
+                    artifact_hash: "unbound:immutable-sentinel".into(),
+                },
+                grug_data::ExamTier::Sentinel,
+                3,
+                1,
+            )
+            .unwrap();
+        let dir = ScratchDir::new("copy-fidelity-exam").unwrap();
+        let exam_path = dir.path().join("exam.json");
+        fs::write(&exam_path, serde_json::to_string(&exam).unwrap()).unwrap();
+
+        let difficulty = load_copy_fidelity_exam_difficulty(&exam_path).unwrap();
+        assert_eq!(difficulty, 3);
     }
 }
