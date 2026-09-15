@@ -2,8 +2,10 @@
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape};
+#[path = "vulkan_pipeline_cache.rs"]
+mod pipeline_cache;
+use pipeline_cache::PipelineCache;
 use std::{
-    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -114,7 +116,7 @@ struct Context {
     queue: wgpu::Queue,
     ordinal: usize,
     info: wgpu::AdapterInfo,
-    pipelines: Mutex<HashMap<String, wgpu::ComputePipeline>>,
+    pipelines: Mutex<PipelineCache<wgpu::ComputePipeline>>,
     pending: Mutex<Vec<wgpu::CommandBuffer>>,
     submission_batch: usize,
     encoder_batching: bool,
@@ -392,7 +394,7 @@ impl VulkanDevice {
         // use dispatch_group with their own lane counts. Both span a 2D grid.
         let code = format!("fn dispatch_group(v:vec3<u32>)->u32{{return v.x+v.y*{groups_x}u;}} fn dispatch_index(v:vec3<u32>)->u32{{return v.x+v.y*{groups_x}u*64u;}}\n{code}");
         let mut cache = self.0.pipelines.lock().map_err(vk_error)?;
-        if !cache.contains_key(&code) {
+        let pipeline = cache.get_or_try_insert_with(code, |code| {
             let scope = self
                 .0
                 .device
@@ -402,7 +404,7 @@ impl VulkanDevice {
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("Candle Vulkan compute"),
-                    source: wgpu::ShaderSource::Wgsl(code.clone().into()),
+                    source: wgpu::ShaderSource::Wgsl(code.into()),
                 });
             let pipeline =
                 self.0
@@ -418,9 +420,8 @@ impl VulkanDevice {
             if let Some(error) = pollster::block_on(scope.pop()) {
                 return Err(vk_error(error));
             }
-            cache.insert(code.clone(), pipeline);
-        }
-        let pipeline = &cache[&code];
+            Ok(pipeline)
+        })?;
         let entries: Vec<_> = buffers
             .iter()
             .enumerate()
@@ -443,12 +444,12 @@ impl VulkanDevice {
             if let Some(error) = pollster::block_on(scope.pop()) {
                 return Err(vk_error(error));
             }
-            return self.record_compute(pipeline, &group, groups_x, groups_y);
+            return self.record_compute(&pipeline, &group, groups_x, groups_y);
         }
         let mut encoder = self.0.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
-            pass.set_pipeline(pipeline);
+            pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &group, &[]);
             pass.dispatch_workgroups(groups_x, groups_y, 1);
         }
@@ -973,7 +974,8 @@ impl crate::backend::BackendDevice for VulkanDevice {
             queue,
             ordinal,
             info,
-            pipelines: Mutex::new(HashMap::new()),
+            // Bound application-held specializations, not opaque driver allocations.
+            pipelines: Mutex::new(PipelineCache::new(2048, 16 * 1024 * 1024)),
             pending: Mutex::new(Vec::new()),
             submission_batch: if std::env::var("AKH_VULKAN_BATCH_SUBMIT").as_deref() != Ok("0") {
                 64
@@ -1060,6 +1062,26 @@ impl crate::backend::BackendDevice for VulkanDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "exclusive Vulkan device"]
+    fn pipeline_eviction_preserves_pending_commands() -> Result<()> {
+        let device = crate::Device::new_vulkan(0)?;
+        let crate::Device::Vulkan(vulkan) = &device else { unreachable!() };
+        *vulkan.0.pipelines.lock().unwrap() = PipelineCache::new(2, 1024 * 1024);
+        let mut value = crate::Tensor::new(&[0.0f32], &device)?;
+        // Different affine constants generate different pipelines. Keep work
+        // pending across eviction, including across submission boundaries.
+        for increment in 1..=130 {
+            value = value.affine(1.0, increment as f64)?;
+            assert!(vulkan.0.pipelines.lock().unwrap().len() <= 2);
+        }
+        assert_eq!(value.to_vec1::<f32>()?, vec![8515.0]);
+        // Recompile an evicted specialization and verify it still executes.
+        assert_eq!(value.affine(1.0, 1.0)?.to_vec1::<f32>()?, vec![8516.0]);
+        vulkan.synchronize()?;
+        Ok(())
+    }
 
     #[test]
     #[ignore = "exclusive Vulkan device; set AKH_VULKAN_BATCH_PASS=1"]
