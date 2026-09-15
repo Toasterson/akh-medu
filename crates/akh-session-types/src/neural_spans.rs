@@ -106,3 +106,149 @@ pub struct SpanHit {
     pub text: String,
     pub hamming_distance: u32,
 }
+
+/// Runtime -> session daemon: same-space recall on behalf of the active turn.
+/// The session daemon owns the core principal, akh and session scope; the
+/// runtime only supplies the query vector and its representation identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RecallRequest {
+    /// Identity of the active job (`name` must be `neural_recall`).
+    pub call: crate::ToolCall,
+    pub space: SpanSpace,
+    pub vector: Vec<u8>,
+    pub limit: usize,
+}
+impl RecallRequest {
+    pub const CALL_NAME: &'static str = "neural_recall";
+    pub fn validate(&self) -> Result<()> {
+        if self.call.name != Self::CALL_NAME {
+            return Err(Fault::invalid("neural recall requires a neural_recall call"));
+        }
+        self.space.validate()?;
+        if self.vector.len() != VECTOR_BYTES || !(1..=16).contains(&self.limit) {
+            return Err(Fault::invalid(
+                "neural recall requires 10000 bits and limit 1..16",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `supported == false` means the session daemon or core cannot serve neural
+/// recall for this session (missing capability or capture policy); the
+/// runtime continues without recalled context.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RecallReply {
+    pub supported: bool,
+    #[serde(default)]
+    pub hits: Vec<SpanHit>,
+}
+
+/// Runtime -> session daemon: captures for the active turn's accepted input.
+/// Only user-input spans are accepted before the turn completes; the daemon
+/// attaches them to the accepted turn when the core advertises support.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpanDelivery {
+    /// Identity of the active job (`name` must be `neural_spans`).
+    pub call: crate::ToolCall,
+    pub captures: Vec<SpanCapture>,
+}
+impl SpanDelivery {
+    pub const CALL_NAME: &'static str = "neural_spans";
+    /// Validate against the turn's accepted input text.
+    pub fn validate(&self, input_text: &str) -> Result<()> {
+        if self.call.name != Self::CALL_NAME {
+            return Err(Fault::invalid("span delivery requires a neural_spans call"));
+        }
+        if self.captures.len() > MAX_CAPTURES {
+            return Err(Fault::invalid("at most four spans per accepted turn"));
+        }
+        for capture in &self.captures {
+            if capture.source != SpanSource::User {
+                return Err(Fault::invalid(
+                    "only user-input spans can be delivered before the turn completes",
+                ));
+            }
+            capture.text(input_text, "")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpanDeliveryReply {
+    pub accepted: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(name: &str) -> crate::ToolCall {
+        crate::ToolCall {
+            id: "neural-0".into(),
+            session_id: "session".into(),
+            turn_id: "turn".into(),
+            generation: 1,
+            name: name.into(),
+            arguments: serde_json::json!({}),
+        }
+    }
+    fn space() -> SpanSpace {
+        SpanSpace {
+            model_sha256: "1".repeat(64),
+            tokenizer_sha256: "2".repeat(64),
+            policy_sha256: "3".repeat(64),
+            projector_sha256: "4".repeat(64),
+        }
+    }
+
+    #[test]
+    fn recall_requests_are_bounded_and_named() {
+        let mut request = RecallRequest {
+            call: call(RecallRequest::CALL_NAME),
+            space: space(),
+            vector: vec![0; VECTOR_BYTES],
+            limit: 4,
+        };
+        assert!(request.validate().is_ok());
+        request.limit = 17;
+        assert!(request.validate().is_err());
+        request.limit = 1;
+        request.vector.pop();
+        assert!(request.validate().is_err());
+        request.vector.push(0);
+        request.call.name = "read".into();
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn deliveries_accept_only_user_spans_inside_the_input() {
+        let capture = SpanCapture {
+            space: space(),
+            source: SpanSource::User,
+            byte_start: 2,
+            byte_end: 7,
+            vector: vec![7; VECTOR_BYTES],
+        };
+        let mut delivery = SpanDelivery {
+            call: call(SpanDelivery::CALL_NAME),
+            captures: vec![capture.clone()],
+        };
+        assert!(delivery.validate("  cedar tree").is_ok());
+        assert!(delivery.validate("  cé").is_err());
+        delivery.captures[0].source = SpanSource::Assistant;
+        assert!(delivery.validate("  cedar tree").is_err());
+        delivery.captures = vec![capture; MAX_CAPTURES + 1];
+        assert!(delivery.validate("  cedar tree").is_err());
+        delivery.captures.truncate(1);
+        delivery.call.name = "neural_recall".into();
+        assert!(delivery.validate("  cedar tree").is_err());
+        let reply: RecallReply = serde_json::from_str(r#"{"supported":false}"#).unwrap();
+        assert!(reply.hits.is_empty());
+    }
+}
