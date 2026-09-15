@@ -101,3 +101,142 @@ fn config_rejects_inline_secrets_and_unknown_fields() {
         Ok(sokar::config::OptionValue::Secret(_))
     ));
 }
+
+#[test]
+fn mcp_config_defaults_and_invalid_paths_are_diagnostic() {
+    use sokar::config::{McpConfig, ServerConfig};
+    let defaults: McpConfig = toml::from_str("").unwrap();
+    assert!(defaults.enabled);
+    assert_eq!(defaults.path, "/mcp");
+    assert_eq!(defaults.max_inline_bytes, 8_388_608);
+    assert!(
+        toml::from_str::<ServerConfig>("")
+            .unwrap()
+            .public_api_url
+            .is_none()
+    );
+    assert!(toml::from_str::<McpConfig>("typo = true").is_err());
+    assert!(toml::from_str::<ServerConfig>("public_url = 'http://example.com'").is_err());
+
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "config-validation-token-at-least-24").unwrap();
+    let input = format!(
+        r#"
+default_store = "local"
+[[principal]]
+id = "test"
+token_file = {token:?}
+[[store]]
+name = "local"
+service = "memory"
+"#
+    );
+    let config: sokar::config::Config = toml::from_str(&input).unwrap();
+    config.validate().unwrap();
+    for path in [
+        "",
+        "/",
+        "mcp",
+        "/mcp/",
+        "/v1",
+        "/v1/artifacts",
+        "/{id}",
+        "/mcp?x",
+        "/mcp#x",
+        "/mcp//x",
+        "/mcp/../x",
+        "/mcp/./x",
+        "/mcp\n",
+        "/mcp%2Fx",
+    ] {
+        let mut config = config.clone();
+        config.mcp.path = path.into();
+        assert!(
+            matches!(config.validate(), Err(sokar::SokarError::Config(_))),
+            "{path}"
+        );
+    }
+    for path in ["/mcp", "/tools/mcp", "/mcp-v2"] {
+        let mut config = config.clone();
+        config.mcp.path = path.into();
+        config.validate().unwrap();
+    }
+    for url in [
+        "file:///tmp/content",
+        "https://user:password@example.com",
+        "https://example.com?x=1",
+        "https://example.com#x",
+    ] {
+        let mut config = config.clone();
+        config.server.public_api_url = Some(url.parse().unwrap());
+        assert!(config.validate().is_err());
+    }
+    let mut config = config;
+    config.mcp.max_inline_bytes = 0;
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn local_example_with_mcp_checks_and_boots_both_listeners() {
+    use std::{net::TcpListener, time::Duration};
+    let dir = tempfile::tempdir().unwrap();
+    let token = dir.path().join("token");
+    std::fs::write(&token, "example-config-token-at-least-24").unwrap();
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let admin = TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_address = api.local_addr().unwrap();
+    let admin_address = admin.local_addr().unwrap();
+    let input = include_str!("../examples/local.toml")
+        .replace("/tmp/sokar-local/token", token.to_str().unwrap())
+        .replace("127.0.0.1:9400", &api_address.to_string())
+        .replace("127.0.0.1:9401", &admin_address.to_string());
+    let path = dir.path().join("local.toml");
+    std::fs::write(&path, input).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_sokard"));
+    command
+        .arg("--config")
+        .arg(&path)
+        .env("SOKAR_FS_ROOT", dir.path().join("objects"));
+    let check = command.arg("--check").output().unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&check.stdout)
+            .contains("Sokar config, index and all stores checked")
+    );
+    drop((api, admin));
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(
+        Command::new(env!("CARGO_BIN_EXE_sokard"))
+            .arg("--config")
+            .arg(&path)
+            .env("SOKAR_FS_ROOT", dir.path().join("objects"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    for _ in 0..100 {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "daemon exited before listening"
+        );
+        if std::net::TcpStream::connect(api_address).is_ok()
+            && std::net::TcpStream::connect(admin_address).is_ok()
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("local example did not boot both listeners");
+}

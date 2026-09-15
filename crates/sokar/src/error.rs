@@ -95,6 +95,20 @@ pub enum SokarError {
         help("Reduce the request size or raise limits.max_body_bytes.")
     )]
     BodyLimit,
+    #[error("inline content exceeds the effective limit of {limit} bytes")]
+    #[diagnostic(
+        code(sokar::inline_limit),
+        help(
+            "Use the HTTP content/upload API for larger artifacts, or raise max_bytes and mcp.max_inline_bytes."
+        )
+    )]
+    InlineLimit { limit: usize },
+    #[error("artifact content is not valid UTF-8")]
+    #[diagnostic(
+        code(sokar::not_utf8),
+        help("Use sokar_read_base64 to retrieve binary content without loss.")
+    )]
+    NotUtf8,
     #[error("unsupported manifest schema {actual}; expected {expected}")]
     #[diagnostic(
         code(sokar::manifest_schema),
@@ -157,6 +171,8 @@ impl SokarError {
             Self::Conflict(_) => "sokar::conflict",
             Self::Invalid(_) => "sokar::request",
             Self::BodyLimit => "sokar::body_limit",
+            Self::InlineLimit { .. } => "sokar::inline_limit",
+            Self::NotUtf8 => "sokar::not_utf8",
             Self::ManifestSchema { .. } => "sokar::manifest_schema",
             Self::Range { .. } => "sokar::delivery",
             Self::Serde(_) => "sokar::manifest",
@@ -184,8 +200,8 @@ impl SokarError {
             | Self::StoreMismatch { .. } => S::CONFLICT,
             Self::Client(sokar_client::Error::ManifestSchema { .. }) => S::INTERNAL_SERVER_ERROR,
             Self::Client(_) => S::BAD_REQUEST,
-            Self::Invalid(_) => S::BAD_REQUEST,
-            Self::BodyLimit => S::PAYLOAD_TOO_LARGE,
+            Self::Invalid(_) | Self::NotUtf8 => S::BAD_REQUEST,
+            Self::BodyLimit | Self::InlineLimit { .. } => S::PAYLOAD_TOO_LARGE,
             Self::Range { .. } => S::RANGE_NOT_SATISFIABLE,
             Self::Storage { .. } | Self::Database(_) => S::SERVICE_UNAVAILABLE,
             _ => S::INTERNAL_SERVER_ERROR,
@@ -245,6 +261,8 @@ mod tests {
             SokarError::Conflict("test".into()),
             SokarError::Invalid("test".into()),
             SokarError::BodyLimit,
+            SokarError::InlineLimit { limit: 10 },
+            SokarError::NotUtf8,
             SokarError::ManifestSchema {
                 actual: "sokar.artifact.v2".into(),
                 expected: sokar_client::Artifact::SCHEMA,

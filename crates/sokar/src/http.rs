@@ -21,7 +21,7 @@ use tower_http::{
 };
 
 pub fn api(state: Arc<Sokar>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/v1/collections", post(create_collection))
         .route("/v1/collections/by-scope", get(by_scope))
         .route("/v1/collections/{id}", get(collection))
@@ -31,7 +31,11 @@ pub fn api(state: Arc<Sokar>) -> Router {
             get(by_path),
         )
         .route("/v1/artifacts/{id}", get(artifact).delete(delete))
-        .route("/v1/artifacts/{id}/content", get(content))
+        .route("/v1/artifacts/{id}/content", get(content));
+    if state.config.mcp.enabled {
+        router = router.nest_service(&state.config.mcp.path, crate::mcp::service(state.clone()));
+    }
+    router
         .layer(DefaultBodyLimit::max(state.config.limits.max_body_bytes))
         .layer(RequestBodyLimitLayer::new(
             state.config.limits.max_body_bytes,

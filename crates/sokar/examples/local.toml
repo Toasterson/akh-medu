@@ -5,6 +5,14 @@ default_store = "local"
 [server]
 api_bind = "127.0.0.1:9400"
 admin_bind = "127.0.0.1:9401"
+# Optional public base URL (including a reverse-proxy prefix if needed).
+# Omit to return relative content URLs.
+public_api_url = "http://127.0.0.1:9400"
+
+[mcp]
+enabled = true
+path = "/mcp"
+max_inline_bytes = 8388608
 
 # Omit database for an ephemeral index rebuilt from manifests on every start.
 # Ephemeral mode is single-daemon only: never share its prefix between daemons.

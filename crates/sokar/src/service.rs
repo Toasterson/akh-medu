@@ -209,6 +209,42 @@ impl Sokar {
             return Ok(response);
         }
     }
+    /// Bounded full-content read. Never silently truncate, including if backend
+    /// bytes have drifted from their manifest size. Check metadata before I/O.
+    pub async fn read_inline(
+        &self,
+        id: ArtifactId,
+        limit: usize,
+    ) -> SokarResult<(Artifact, Vec<u8>)> {
+        let artifact = self.index.artifact(id).await?;
+        if artifact.blob.size > limit as u64 {
+            return Err(SokarError::InlineLimit { limit });
+        }
+        let collection = self.index.collection(artifact.collection).await?;
+        let store = self.stores.get(&collection.store)?;
+        let reader = store
+            .op
+            .reader(&artifact.blob.key)
+            .await
+            .map_err(|e| store.error("open inline content", e))?;
+        let mut stream = reader
+            .into_bytes_stream(..)
+            .await
+            .map_err(|e| store.error("stream inline content", e))?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.try_next().await.map_err(SokarError::Io)? {
+            if chunk.len() > limit.saturating_sub(bytes.len()) {
+                return Err(SokarError::InlineLimit { limit });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() as u64 != artifact.blob.size {
+            return Err(SokarError::Conflict(
+                "blob size differs from manifest".into(),
+            ));
+        }
+        Ok((artifact, bytes))
+    }
     pub async fn delete_artifact(&self, id: ArtifactId) -> SokarResult<()> {
         let mut artifact = self.index.artifact(id).await?;
         let collection = self.index.collection(artifact.collection).await?;

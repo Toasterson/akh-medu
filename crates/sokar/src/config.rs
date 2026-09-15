@@ -173,12 +173,31 @@ pub struct DatabaseConfig {
 pub struct ServerConfig {
     pub api_bind: SocketAddr,
     pub admin_bind: SocketAddr,
+    pub public_api_url: Option<url::Url>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             api_bind: ([127, 0, 0, 1], 9400).into(),
             admin_bind: ([127, 0, 0, 1], 9401).into(),
+            public_api_url: None,
+        }
+    }
+}
+/// Bounds apply to decoded bytes for both upload and download tools.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpConfig {
+    pub enabled: bool,
+    pub path: String,
+    pub max_inline_bytes: usize,
+}
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: "/mcp".into(),
+            max_inline_bytes: 8_388_608,
         }
     }
 }
@@ -204,6 +223,8 @@ pub struct DeliveryConfig {
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
     /// Omit for an explicitly ephemeral local index; startup reindexes the stores.
     pub database: Option<DatabaseConfig>,
     pub default_store: StoreName,
@@ -246,6 +267,47 @@ impl Config {
         }
         for principal in &self.principals {
             principal.credential()?;
+        }
+        // A literal non-root route, disjoint from the REST API. Reject axum
+        // route syntax here so bad configuration is diagnostic, never a panic.
+        if !self.mcp.path.starts_with('/')
+            || self.mcp.path == "/"
+            || self.mcp.path.ends_with('/')
+            || self
+                .mcp
+                .path
+                .split('/')
+                .skip(1)
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || self
+                .mcp
+                .path
+                .bytes()
+                .any(|b| !b.is_ascii_alphanumeric() && !b"/_-.".contains(&b))
+            || self.mcp.path == "/v1"
+            || self.mcp.path.starts_with("/v1/")
+        {
+            return Err(SokarError::Config(
+                "mcp.path must be a literal absolute path outside /v1, without a trailing slash"
+                    .into(),
+            ));
+        }
+        if self.mcp.max_inline_bytes == 0 {
+            return Err(SokarError::Config(
+                "mcp.max_inline_bytes must be positive".into(),
+            ));
+        }
+        if let Some(url) = &self.server.public_api_url
+            && (!matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some())
+        {
+            return Err(SokarError::Config(
+                "public_api_url requires HTTP(S) with no credentials, query or fragment".into(),
+            ));
         }
         if self.limits.max_body_bytes == 0 {
             return Err(SokarError::Config("max_body_bytes must be positive".into()));

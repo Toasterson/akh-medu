@@ -11,7 +11,7 @@ name = "sokard"
 path = "src/main.rs"
 
 [dependencies]
-sokar-client = { path = "../sokar-client", default-features = false, features = ["types-only"] }
+sokar-client = { path = "../sokar-client", default-features = false, features = ["types-only", "schema"] }
 opendal = { version = "0.59", features = ["services-s3", "services-fs", "services-memory", "services-gcs", "services-azblob", "layers-prometheus-client", "layers-tracing"] }
 axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "request-id", "limit", "set-header"] }
@@ -35,11 +35,15 @@ futures = "0.3"
 http-body-util = "0.1"
 prometheus-client = "0.25"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
-url = "2"
+url = { version = "2", features = ["serde"] }
 async-trait = "0.1"
 percent-encoding = "2"
+base64 = "0.22"
+rmcp = { version = "0.17", features = ["server", "macros", "transport-streamable-http-server"] }
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
+rmcp = { version = "0.17", features = ["client", "transport-streamable-http-client-reqwest", "reqwest"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }

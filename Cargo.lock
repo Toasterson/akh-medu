@@ -10604,6 +10604,8 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -10694,6 +10696,7 @@ dependencies = [
  "pastey 0.2.1",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.5",
  "rmcp-macros",
  "schemars 1.2.1",
  "serde",
@@ -11243,6 +11246,7 @@ dependencies = [
  "schemars_derive 1.2.1",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -12045,6 +12049,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
+ "base64 0.22.1",
  "bytes",
  "clap",
  "futures",
@@ -12056,6 +12061,7 @@ dependencies = [
  "percent-encoding",
  "prometheus-client",
  "reqwest 0.12.28",
+ "rmcp",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12083,6 +12089,7 @@ dependencies = [
  "miette 7.6.0",
  "mime",
  "reqwest 0.12.28",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -8,6 +8,7 @@ pub mod delivery;
 pub mod error;
 pub mod http;
 pub mod index;
+pub mod mcp;
 pub mod service;
 pub mod store;
 pub use error::{SokarError, SokarResult};
