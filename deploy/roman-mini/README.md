@@ -67,7 +67,9 @@ minutes, Minerva (PO) every hour, and Vesta (incident coordination) every 15
 minutes. Addressed Djehuty delegations are polled every 15 seconds; status
 messages do not wake teammates. Native event ingress persists before inbox
 acknowledgement. One runtime serializes inference; this is not a guaranteed
-low-latency incident-response service.
+low-latency incident-response service. Older turns waiting on runtime capacity
+take precedence over newer wakes, so retry backoff cannot let a busy role
+continually jump ahead of its teammates.
 
 The observer polls Anima through MCP, rotating eight active projects per minute.
 Work-item and plan changes wake both Janus and Minerva, coalesced to at most 40
@@ -91,9 +93,11 @@ Session and observer LaunchAgents require the logged-in user's keychain;
 remaining services run as system LaunchDaemons under that user. Bots themselves
 have no filesystem or shell tools. Provider keys remain in process environments.
 
-During activation, Grafana's pod was unreachable and Sokar's artifact backend
-was unavailable; consult current monitoring and evidence before claiming those
-integrations healthy. Internal notes remain available. A known model output-limit
+Grafana uses its HTTPS route with the authenticated cluster's public PKI CA;
+its failing kubelet port-forward is not required. Alert suppression metadata is
+preserved. Sokar's artifact backend remained unavailable during activation;
+consult current evidence before claiming artifact writes healthy. Internal notes
+remain available. A known model output-limit
 stop fails its turn without quarantining unrelated jobs; uncertain tool outcomes
 retain reconciliation gates.
 

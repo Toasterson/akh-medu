@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import sqlite3
+import ssl
 import subprocess
 import sys
 import threading
@@ -28,9 +29,9 @@ INTERVALS = {'janus': 900, 'minerva': 3600, 'vesta': 900}
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'))
 
-def fetch(url, headers=None, data=None, timeout=15):
+def fetch(url, headers=None, data=None, timeout=15, context=None):
     request = urllib.request.Request(url, headers=headers or {}, data=None if data is None else json.dumps(data).encode())
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
         raw = response.read(4 * 1024 * 1024 + 1)
         if len(raw) > 4 * 1024 * 1024:
             raise RuntimeError('response exceeds limit')
@@ -59,6 +60,7 @@ class Observer:
         self.event_token = (self.root / 'secrets/observer.key').read_text().strip()
         self.anima_headers = None
         self.grafana_headers = None
+        self.grafana_context = None
 
     def get(self, key, default=None):
         row = self.db.execute('select value from state where key=?', (key,)).fetchone()
@@ -207,12 +209,17 @@ class Observer:
                 secret=json.loads(capture(['/opt/homebrew/bin/kubectl','-n','observability','get','secret','grafana-admin','-o','json']))['data']
                 pair=base64.b64decode(secret['admin-user'])+b':'+base64.b64decode(secret['admin-password'])
                 self.grafana_headers={'Authorization':'Basic '+base64.b64encode(pair).decode()}
-            alerts=fetch('http://127.0.0.1:18441/api/alertmanager/grafana/api/v2/alerts',self.grafana_headers,timeout=5)
+            if self.grafana_context is None:
+                ca=capture(['/opt/homebrew/bin/kubectl','-n','default','get','secret','pki-ca-secret','-o',r'jsonpath={.data.tls\.crt}'])
+                self.grafana_context=ssl.create_default_context()
+                self.grafana_context.load_verify_locations(cadata=base64.b64decode(ca).decode())
+            alerts=fetch('https://grafana.lab.home/api/alertmanager/grafana/api/v2/alerts',self.grafana_headers,timeout=5,context=self.grafana_context)
             alerts=[{'fingerprint':a.get('fingerprint'),'labels':a.get('labels'),
                      'annotations':a.get('annotations'),'status':a.get('status'),'startsAt':a.get('startsAt')} for a in alerts]
             alerts.sort(key=lambda a:a.get('fingerprint') or encoded(a))
             grafana={'available':True,'alerts':alerts}
         except Exception:
+            self.grafana_headers=None;self.grafana_context=None
             grafana={'available':False,'error':'Grafana alert feed unavailable; alert state unknown, not zero'}
         try:
             metrics=fetch('http://127.0.0.1:18440/api/v1/query?query=ALERTS%7Balertstate%3D%22firing%22%7D',timeout=5)

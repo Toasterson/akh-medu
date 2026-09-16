@@ -65,6 +65,6 @@ for role in roles:
 for file in ('observer.py','daemon_credentials.py'):shutil.copy2(source/file,root/'bin'/file)
 plist('events',['/usr/bin/python3',str(root/'bin/daemon_credentials.py'),'events',str(root)])
 plist('observer',['/usr/bin/python3',str(root/'bin/observer.py'),str(root)],user=True)
-for name,service,ports in [('metrics-tunnel','vmsingle','18440:8428'),('grafana-tunnel','grafana','18441:80')]:
+for name,service,ports in [('metrics-tunnel','vmsingle','18440:8428')]:
     plist(name,['/opt/homebrew/bin/kubectl','-n','observability','port-forward','--address=127.0.0.1','service/'+service,ports])
 print('Rendered three enabled automations, inbox intake, Anima change routes, alert routes and schedules')
