@@ -49,6 +49,7 @@ def prepare(root, binaries, user, storage):
         return {"url": f"http://127.0.0.1:{SERVICES[name][1]}",
                 "token_file": str(root / "secrets" / (name + ".key"))}
     endpoints = {name: endpoint(name) for name in SERVICES}
+    endpoints["sandboxes"] = endpoint("sandbox")
     endpoints["core"] = {"url": "http://127.0.0.1:18430",
                          "token_file": str(root / "secrets/core.key")}
     profiles = {}
@@ -81,7 +82,7 @@ def prepare(root, binaries, user, storage):
             "execution_mode": "brokered", "timeout_secs": 300,
             "isolation": {"directory": str(root / "state" / ("provider-" + provider))},
             "model_endpoint": {"url": url,
-                "token_file": str(root / "secrets" / (provider + ".key")),
+                "token_env": "ROMAN_" + provider.upper() + "_KEY",
                 "max_iterations": 12, "max_output_tokens": 2048}}
     for name, (binary, port) in SERVICES.items():
         config = {"service_id": name, "listen": f"127.0.0.1:{port}",
@@ -96,6 +97,8 @@ def prepare(root, binaries, user, storage):
             config["store"] = {"kind": "sqlite"}
         if name == "sessions":
             config.update(akhs=akhs, automations=automations)
+            config["principals"][0]["id"] = "runtime"
+            config["principals"][0]["roles"] = ["runtime"]
         if name == "runtime":
             config["runtimes"] = runtimes
         if name == "executor":

@@ -10,7 +10,10 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Endpoint {
     pub url: String,
+    #[serde(default)]
     pub token_file: PathBuf,
+    #[serde(default)]
+    pub token_env: Option<String>,
     pub ca_file: Option<PathBuf>,
     #[serde(default)]
     pub allow_insecure_http: bool,
@@ -35,7 +38,19 @@ impl Endpoint {
                 "service URL requires HTTPS or explicitly authorized private HTTP, with no embedded credentials/query",
             ));
         }
-        if !self.token_file.is_absolute() {
+        if let Some(name) = &self.token_env {
+            if !self.token_file.as_os_str().is_empty()
+                || name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+                || name.as_bytes()[0].is_ascii_digit()
+            {
+                return Err(Fault::invalid(
+                    "endpoint requires one valid credential source",
+                ));
+            }
+        } else if !self.token_file.is_absolute() {
             return Err(Fault::invalid("token_file must be absolute"));
         }
         if self.ca_file.as_ref().is_some_and(|p| !p.is_absolute()) {
@@ -61,6 +76,18 @@ impl Endpoint {
             .map_err(|_| Fault::new("transport", "HTTP client initialization failed"))
     }
     pub fn token(&self) -> Result<String> {
+        if let Some(name) = &self.token_env {
+            let token = std::env::var(name).map_err(|_| {
+                Fault::new("auth_unavailable", "credential environment unavailable")
+            })?;
+            if token.len() < 24 || token.chars().any(char::is_whitespace) {
+                return Err(Fault::new(
+                    "auth_unavailable",
+                    "invalid credential environment",
+                ));
+            }
+            return Ok(token);
+        }
         read_token(&self.token_file)
     }
     pub fn route(&self, path: &str) -> String {

@@ -68,10 +68,13 @@ provider turns; urgent incident admission and an independent outage watchdog
 still need to be connected before unattended operation.
 
 The provider profiles use Ollama Cloud and OpenRouter's chat-completions APIs.
-Private provider keys belong at `secrets/ollama.key` and
-`secrets/openrouter.key` under the deployment root, mode 0600. Do not paste keys
-into source, chat, logs or process arguments. The preparer never creates fake
-provider credentials. OpenRouter is an alternate profile, not an automatic
+Provider keys are resolved from the authorized 1Password references by
+`daemon_credentials.py` when the runtime starts. Only environment variable names
+are stored in runtime configuration; keys are never copied to files or T3.
+The session launcher resolves the existing Anima operator PAT, archive service
+credential, and each Akh's own Djehuty identity into its private environment.
+Anima mutations remain subject to the operator PAT scopes and server gates.
+OpenRouter is an alternate profile, not an automatic
 fallback. Model availability and tool use require authenticated verification.
 
 Local durable storage preserves state during outages. Cloud inference still
@@ -80,3 +83,45 @@ requires connectivity.
 Coordination is recorded using the
 [Agent Board coordination skill](/Users/toasty/.codex/skills/agent-board-coordination/SKILL.md)
 under this Codex thread's own registered identity.
+
+
+## Service and T3 integration
+
+`configure_integrations.py ROOT` imports authenticated MCP catalogs from
+`ROOT/evidence/{anima,seshat,sokar,board}-mcp-catalog.json`. It grants cognitive
+and MCP tools only. Filesystem, shell, client, and workspace tools are absent;
+the current session allocator still maintains an internal opaque workspace.
+Do not grant executor tools to these roles. Notes belong in internal memory,
+Seshat, Anima documents, or Sokar artifacts.
+
+The installed T3 build has no generic ACP provider setting. `t3_entrypoint.py`
+adapts its existing Grok ACP transport to `akh-acp --t3-compat`, using separately
+scoped Roman client credentials. Provider instances display the Roman role
+names; the transport's `grok-build` alias means the daemon-configured model
+(GLM-5.3 via Ollama), not an xAI model. No T3 project files or filesystem tools
+are forwarded. T3 settings are watched live; preserve unrelated instances.
+
+Dedicated launchd-managed localhost Kubernetes tunnels route Djehuty and Sokar
+while their lab ingress routes fail. A working MCP catalog is not proof of
+artifact storage availability: Sokar currently reports backend SeaweedFS errors.
+
+The session daemon runs in `gui/UID` as a LaunchAgent because the existing Anima
+PAT lives in the login keychain. It starts at login; the other services remain
+system LaunchDaemons. A logged-out reboot does not start the session daemon.
+
+Install T3 entries with `configure_t3.py ROOT ~/.t3/userdata/settings.json`, then
+restart the Roman user session service to load new client credentials. The T3
+adapter discards editor-injected MCP servers and additional directory grants.
+
+Live checks: all three Akhs completed Ollama turns, called Anima/Board/Seshat,
+and wrote internal memory. OpenRouter `z-ai/glm-5.3` returned `OK`. Broker probes
+rejected file and shell operations with `tool_disabled`, and a cross-Akh T3 read
+returned 403. Sokar's correctly typed call reached the backend and failed with
+`store lab-seaweed: write manifest failed (Unexpected)`. Its schema definitions
+are expanded before cloud use; authoritative broker validation is retained.
+
+The original integration probe failed before its first tool could run due to a
+callback principal mismatch. It was reconciled through the runtime API against
+the exact request hash and retired through the session API; failed evidence is
+retained. The renderer now uses the required `sandboxes` alias and runtime
+callback principal.

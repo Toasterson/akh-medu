@@ -31,7 +31,20 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         .model_endpoint
         .as_ref()
         .ok_or_else(|| Fault::invalid("internal runtime needs a model_endpoint"))?;
+    if endpoint.token_env.as_ref().is_some_and(|name| {
+        name.is_empty()
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+            || name.as_bytes()[0].is_ascii_digit()
+    }) || (endpoint.token_env.is_some() && endpoint.token_file.is_some())
+    {
+        return Err(Fault::invalid(
+            "model authentication requires one valid credential source",
+        ));
+    }
     Endpoint {
+        token_env: None,
         ca_file: None,
         url: endpoint.url.clone(),
         token_file: endpoint
@@ -166,6 +179,20 @@ fn run_loop(
         let mut call = client.post(&endpoint.url).json(&body);
         if let Some(path) = &endpoint.token_file {
             call = call.bearer_auth(crate::config::read_token(path)?);
+        } else if let Some(name) = &endpoint.token_env {
+            let token = std::env::var(name).map_err(|_| {
+                Fault::new(
+                    "auth_unavailable",
+                    "model credential environment unavailable",
+                )
+            })?;
+            if token.trim().len() < 24 || token.chars().any(char::is_whitespace) {
+                return Err(Fault::new(
+                    "auth_unavailable",
+                    "invalid model credential environment",
+                ));
+            }
+            call = call.bearer_auth(token);
         }
         let (message, finish) = handle.block_on(completion(call, host, cancel, deadline))?;
         let calls = message
@@ -480,6 +507,22 @@ mod tests {
         let profile=serde_json::from_value(json!({"revision":"1","kind":"internal","working_dir":dir,"binary":"/unused","execution_mode":"brokered","timeout_secs":5,"model_endpoint":{"url":url,"max_iterations":4,"max_output_tokens":512}})).unwrap();
         let request=serde_json::from_value(json!({"id":"job","session_id":"session","turn_id":"turn","generation":1,"binding":{"runtime":"runtime","profile":"local","revision":"1","kind":"internal","model":"fixture","execution_mode":"brokered"},"workspace":{"id":"w","sandbox_id":"s","executor":"e","generation":1,"site":"test","root":"/remote-only","platform":"test","confinement":"test"},"input":{"origin":{"kind":"human","principal":"user"},"text":"read file"},"instructions":"Use supplied tools","tools":[{"name":"read","description":"read","input_schema":{"type":"object"},"read_only":true,"destination":{"kind":"workspace","operation":"read"}}],"approval_policy":"ask_writes"})).unwrap();
         (profile, request)
+    }
+    #[test]
+    fn model_authentication_rejects_ambiguous_and_invalid_sources() {
+        let (mut profile, request) = fixture(
+            "https://example.com/v1/chat/completions",
+            std::path::Path::new("/tmp"),
+        );
+        profile.model_endpoint.as_mut().unwrap().token_env = Some("ROMAN_MODEL_KEY".into());
+        validate(&profile, &request).unwrap();
+        profile.model_endpoint.as_mut().unwrap().token_file = Some("/private/key".into());
+        assert!(validate(&profile, &request).is_err());
+        profile.model_endpoint.as_mut().unwrap().token_file = None;
+        for name in ["", "1KEY", "KEY=secret", "KEY\n"] {
+            profile.model_endpoint.as_mut().unwrap().token_env = Some(name.into());
+            assert!(validate(&profile, &request).is_err());
+        }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn streams_tools_and_resumes_the_exact_durable_conversation() {

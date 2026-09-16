@@ -736,6 +736,9 @@ pub struct ModelEndpoint {
     /// Complete OpenAI-compatible chat-completions URL, including its path.
     pub url: String,
     pub token_file: Option<std::path::PathBuf>,
+    /// Daemon environment variable holding the credential. Never passed to tools.
+    #[serde(default)]
+    pub token_env: Option<String>,
     #[serde(default)]
     pub allow_insecure_http: bool,
     pub max_iterations: u32,
