@@ -102,7 +102,10 @@ stop fails its turn without quarantining unrelated jobs; uncertain tool outcomes
 retain reconciliation gates.
 
 The provider profiles use Ollama Cloud and OpenRouter's chat-completions APIs.
-Routine Ollama wakes request `reasoning_effort: none`, use an 8192-token output
+Routine wakes use Ollama Cloud `mistral-large-3:675b`, selected after GLM
+repeatedly exhausted its budget planning without tool calls. Authenticated tests
+used the same full Vesta prompt and tool catalog. They request
+`reasoning_effort: none`, use an 8192-token output
 budget and a 420-second turn deadline. This uses Ollama's documented
 [reasoning control](https://docs.ollama.com/api/openai-compatibility).
 Board message payload schemas are narrowed to objects for the roles' structured
@@ -138,7 +141,7 @@ The installed T3 build has no generic ACP provider setting. `t3_entrypoint.py`
 adapts its existing Grok ACP transport to `akh-acp --t3-compat`, using separately
 scoped Roman client credentials. Provider instances display the Roman role
 names; the transport's `grok-build` alias means the daemon-configured model
-(GLM-5.3 via Ollama), not an xAI model. No T3 project files or filesystem tools
+(Mistral Large 3 via Ollama), not an xAI model. No T3 project files or filesystem tools
 are forwarded. T3 settings are watched live; preserve unrelated instances.
 
 Dedicated launchd-managed localhost Kubernetes tunnels route Djehuty and Sokar
@@ -153,7 +156,8 @@ Install T3 entries with `configure_t3.py ROOT ~/.t3/userdata/settings.json`, the
 restart the Roman user session service to load new client credentials. The T3
 adapter discards editor-injected MCP servers and additional directory grants.
 
-Live checks: all three Akhs completed Ollama turns, called Anima/Board/Seshat,
+Initial integration checks (before automated-wake model tuning): all three Akhs
+completed Ollama turns, called Anima/Board/Seshat,
 and wrote internal memory. OpenRouter `z-ai/glm-5.3` returned `OK`. Broker probes
 rejected file and shell operations with `tool_disabled`, and a cross-Akh T3 read
 returned 403. Sokar's correctly typed call reached the backend and failed with

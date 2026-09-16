@@ -38,6 +38,7 @@ for role in roles:
 Coordinate directly only when another role has a concrete next action: use board_send_inbox with message_type coordination/delegation@v1 and payload {assignee_id, objective, scope:[...]}; status messages do not wake teammates. Avoid acknowledgements that ask for another acknowledgement. Record handoff IDs to prevent duplicate requests. '''+json.dumps(ids)+'''
 Monitoring snapshots include observation times: unavailable or stale is unknown, never healthy. Vesta can triage and coordinate through Anima/Board but has no Kubernetes or shell remediation grant. Report actionable findings and material blockers on thread 01a0ab49-9cc4-7012-8785-1eada26fbd46 using coordination/status@v1 (payload state and detail); at most one unchanged-blocker digest per day. If a tool rejects your arguments, correct the schema once; do not loop on the same failure. Save durable notes before ending. Initial activation should establish your ledger and name one useful next action without mass-changing project state.'''
     profile=session['akhs'][role]
+    profile['runtime']['model']='mistral-large-3:675b'
     profile['tools']=[t for t in profile['tools'] if t['name']!='monitoring_snapshot']
     for tool in profile['tools']:
         if tool['name'] in ('board__board_post_thread','board__board_send_inbox'):
