@@ -126,7 +126,7 @@ def service(root):
                 return request(base+'/api/orchestration/dispatch',token,durable)
             if not any(p['id']==project for p in snapshot['projects']):
                 dispatch({'type':'project.create','commandId':'roman-activity-project-v1','projectId':project,'title':'Roman autonomous activity','workspaceRoot':str(root/'workspaces'),'createdAt':now()})
-            sessions=request('http://127.0.0.1:18431/v1/sessions',operator)
+            sessions=request('http://127.0.0.1:18431/v1/sessions?compact=true',operator)
             for role in ROLES:
                 thread='roman-activity-'+role
                 existing=next((t for t in snapshot['threads'] if t['id']==thread),None)
@@ -146,7 +146,7 @@ def service(root):
                             dispatch({'type':'thread.session.stop','commandId':command+'-stop','threadId':thread,'createdAt':now()})
                             dispatch({'type':'thread.turn.start','commandId':command,'threadId':thread,'message':{'messageId':command,'role':'user','text':f"Observe autonomous {role} session {source['id']}",'attachments':[]},'modelSelection':{'instanceId':thread,'model':'grok-build'},'runtimeMode':'full-access','interactionMode':'default','createdAt':now()})
                             db.execute('INSERT OR REPLACE INTO retries VALUES(?,?)',(source['id'],attempt+1)); db.commit(); continue
-                candidates=[s for s in sessions if s['akh']==role and s['principal']=='t3-'+role and s['turns'] and not db.execute('SELECT 1 FROM submitted WHERE session=?',(s['id'],)).fetchone()]
+                candidates=[s for s in sessions if s['akh']==role and s['principal']=='t3-'+role and s['turns'] and any(t['status'] in TERMINAL or t['status']=='running' for t in s['turns']) and not db.execute('SELECT 1 FROM submitted WHERE session=?',(s['id'],)).fetchone()]
                 # On first install show the latest wake, avoiding replaying the entire old backlog.
                 if not db.execute('SELECT 1 FROM submitted WHERE role=?',(role,)).fetchone() and len(candidates)>1:
                     for old in sorted(candidates,key=lambda s:s['created_at'])[:-1]: db.execute('INSERT OR IGNORE INTO submitted VALUES(?,?,?)',(old['id'],role,'baseline'))

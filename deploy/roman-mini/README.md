@@ -211,3 +211,20 @@ The image recipe is `vesta/Dockerfile`; its kubectl download is checksum-verifie
 Validate sandbox writes, denied host/credential/socket access, denied network and
 live node reads before enabling new sessions. Prepared fixes and patch evidence
 travel through Sokar/Anima/Board; local edits alone do not publish or deploy them.
+
+### Bounded wake cadence
+
+Janus checks periodically after 30 minutes of rest; Minerva and Vesta after an
+hour. Active or queued work suppresses timer wakes. Anima changes accumulate by
+entity and are batched no more often than 15 minutes for Janus and 30 minutes for
+Minerva, with at least five minutes of rest. Alert state changes wake Vesta after
+existing work completes and five minutes of rest. Volatile elapsed fields and
+alert annotation values do not create new work. Concrete inbox delegations remain
+durable and are never coalesced.
+
+The event service optionally coalesces older, definitely unadmitted timer/alert
+notifications while retaining their original events and supersession receipts.
+Ambiguous transport failures and admitted turns are preserved. Compact session
+and pending-delivery queries support activity checks; T3 starts its live activity
+feed when a bot is running or has finished, rather than while it is queued.
+Board write tools expose the registered status/delegation schemas explicitly.

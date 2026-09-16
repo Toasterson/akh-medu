@@ -1,7 +1,10 @@
 use super::*;
 use crate::ingress::Events;
 use crate::{config::Principal, http::Api, types::*};
-use axum::{Extension, extract::{Path, State}};
+use axum::{
+    Extension,
+    extract::{Path, Query, State},
+};
 pub fn event_router(service: Events) -> Router {
     let config = service.config.clone();
     protect(
@@ -21,7 +24,9 @@ async fn delivery(
 ) -> Api<crate::ingress::Delivery> {
     http::role(&p, "admin")?;
     validate_key(&id)?;
-    let value = service.store.get(&crate::store::key("delivery", &[&id]))?
+    let value = service
+        .store
+        .get(&crate::store::key("delivery", &[&id]))?
         .ok_or_else(|| Fault::missing("event delivery not found"))?;
     Ok(Json(value))
 }
@@ -42,10 +47,23 @@ async fn ingest(
 ) -> Api<crate::ingress::IngressReceipt> {
     Ok(Json(service.ingest(&p, event)?))
 }
+#[derive(serde::Deserialize, Default)]
+struct DeliveryQuery {
+    #[serde(default)]
+    pending: bool,
+}
 async fn deliveries(
     State(service): State<Events>,
     Extension(p): Extension<Principal>,
+    Query(query): Query<DeliveryQuery>,
 ) -> Api<Vec<crate::ingress::Delivery>> {
     http::role(&p, "admin")?;
-    Ok(Json(service.store.scan("delivery/")?))
+    Ok(Json(
+        service
+            .store
+            .scan::<crate::ingress::Delivery>("delivery/")?
+            .into_iter()
+            .filter(|d| !query.pending || !d.terminal)
+            .collect(),
+    ))
 }

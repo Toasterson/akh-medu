@@ -825,12 +825,25 @@ async fn get_session(
 ) -> Api<SessionRecord> {
     Ok(Json(app.sessions.get(&p, &id)?))
 }
+#[derive(Deserialize, Default)]
+struct ListSessionsQuery {
+    #[serde(default)]
+    compact: bool,
+}
 async fn list_sessions(
     State(app): State<SessionApp>,
     Extension(p): Extension<Principal>,
-) -> Api<Vec<SessionRecord>> {
+    Query(query): Query<ListSessionsQuery>,
+) -> Api<Value> {
     http::role(&p, "client")?;
-    Ok(Json(app.sessions.list(&p)?))
+    let sessions = app.sessions.list(&p)?;
+    Ok(Json(if query.compact {
+        Value::Array(sessions.iter().map(|s| json!({"id":s.id,"akh":s.akh,"principal":s.principal,
+            "created_at":s.created_at,"last_progress_at":s.last_progress_at,"closed_at":s.closed_at,
+            "turns":s.turns.iter().map(|t|json!({"id":t.id,"status":t.status})).collect::<Vec<_>>() })).collect())
+    } else {
+        json!(sessions)
+    }))
 }
 pub fn controller(
     app: &SessionApp,

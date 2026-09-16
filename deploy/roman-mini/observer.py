@@ -24,10 +24,22 @@ import urllib.request
 import uuid
 
 ROLES = ('janus', 'minerva', 'vesta')
-INTERVALS = {'janus': 900, 'minerva': 3600, 'vesta': 900}
+INTERVALS = {'janus': 1800, 'minerva': 3600, 'vesta': 3600}
+CHANGE_INTERVALS = {'janus': 900, 'minerva': 1800}
 
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'))
+
+def stable_item(item):
+    return {key:item[key] for key in ('id','code','title','status','current_phase','priority','project_id','plan_id','parked','parked_reason','hold_reason') if key in item}
+
+def monitoring_signature(state):
+    if state is None:return None
+    grafana=state.get('grafana',{})
+    return {'local_services':state.get('local_services'),'grafana_available':grafana.get('available'),
+            'alerts':[{'fingerprint':a.get('fingerprint'),'labels':a.get('labels'),
+                       'status':{k:a.get('status',{}).get(k) for k in ('state','silencedBy','inhibitedBy')}} for a in grafana.get('alerts',[])],
+            'victoriametrics':state.get('victoriametrics')}
 
 def fetch(url, headers=None, data=None, timeout=15, context=None):
     request = urllib.request.Request(url, headers=headers or {}, data=None if data is None else json.dumps(data).encode())
@@ -69,6 +81,32 @@ class Observer:
     def put(self, key, value):
         self.db.execute('insert or replace into state values (?,?)', (key, encoded(value)))
 
+    def refresh_activity(self):
+        token=(self.root/'secrets/operator.key').read_text().strip()
+        headers={'Authorization':'Bearer '+token}
+        pending=fetch('http://127.0.0.1:18435/v1/deliveries?pending=true',headers)
+        sessions=fetch('http://127.0.0.1:18431/v1/sessions?compact=true',headers)
+        roles={r:{'busy':False,'last_finished':0,'pending':False} for r in ROLES}
+        for d in pending:
+            if d['automation'] in roles and not d['terminal']:roles[d['automation']]['pending']=True
+        for session in sessions:
+            if session['akh'] not in roles:continue
+            state=roles[session['akh']];turns=session['turns']
+            active=any(t['status'] not in ('completed','failed','cancelled') for t in turns)
+            state['busy'] |= active and session.get('closed_at') is None
+            if turns and not active:state['last_finished']=max(state['last_finished'],session['last_progress_at']//1000)
+        with self.db:self.put('role_activity',{'ok':True,'at':int(time.time()),'roles':roles})
+
+    def role_ready(self,role,rest=300):
+        activity=self.get('role_activity',{})
+        if not activity.get('ok'):return False
+        state=activity.get('roles',{}).get(role,{})
+        if state.get('busy') or state.get('pending') or int(time.time())-state.get('last_finished',0)<rest:return False
+        for raw, in self.db.execute('select event from outbox where accepted=0'):
+            typ=json.loads(raw)['type']
+            if typ in ('schedule.'+role,'anima.'+role+'.changed') or (role=='vesta' and typ=='monitoring.changed'):return False
+        return True
+
     def event(self, source, kind, data, event_id=None):
         event_id = event_id or str(uuid.uuid4())
         data = dict(data, observed_at_utc=datetime.fromtimestamp(time.time(), timezone.utc).isoformat())
@@ -103,7 +141,7 @@ class Observer:
                 detail={'akh':session['akh'],'session_id':session['id'],'turn_id':turn['id'],
                         'status':status,'error':turn.get('error'),'output':turn.get('output')}
             elif delivery['terminal']:
-                status='rejected';detail={'error':delivery.get('error'),'automation':delivery['automation']}
+                status='superseded' if (delivery.get('error') or {}).get('code')=='superseded' else 'rejected';detail={'error':delivery.get('error'),'automation':delivery['automation']}
             else:continue
             with self.db:
                 self.db.execute('update deliveries set state=?,detail=? where id=?',(status,encoded(detail),ident))
@@ -131,8 +169,10 @@ class Observer:
     def observe_entities(self, kind, project, items, notify_new=True):
         baseline = self.get('baseline:'+kind+':'+project, False)
         for item in items:
+            if kind=='work_item':item=stable_item(item)
             ident = kind+':'+item['id']
             previous = self.get(ident)
+            if kind=='work_item' and previous is not None:previous=stable_item(previous)
             if baseline and previous != item and (previous is not None or notify_new):
                 change = {'kind':kind,'project_id':project,'id':item['id'],
                           'previous':previous,'current':item}
@@ -177,12 +217,14 @@ class Observer:
                 if cursor: args['page_token']=cursor
                 page = self.mcp('list_plans',args)
                 plans += [{'id':p['id'],'title':str(p.get('title',p.get('name','')))[:256],
-                           'status':p.get('status'),'content_sha256':hashlib.sha256(encoded(p).encode()).hexdigest()} for p in page['plans']]; cursor=page.get('next_page_token')
+                           'status':p.get('status'),'content_sha256':hashlib.sha256(encoded({k:p[k] for k in ('id','title','name','status','description','content','version','document_id','workflow_id') if k in p}).encode()).hexdigest()} for p in page['plans']]; cursor=page.get('next_page_token')
                 if not cursor:break
             if cursor: raise RuntimeError('plan scan exceeded page bound')
             with self.db:
                 self.observe_entities('work_item',pid,list(items.values()),notify_new=self.get('expanded:'+pid,False))
                 self.put('expanded:'+pid,True)
+                if not self.get('plan_fingerprint_v2:'+pid):
+                    self.put('baseline:plan:'+pid,False);self.put('plan_fingerprint_v2:'+pid,True)
                 self.observe_entities('plan',pid,plans)
                 coverage[pid]={'name':project['name'],'at':now,'observed':len(items),
                                'total':work.get('total'),'truncated':work.get('total',0)>len(items),'phases':phase_coverage}
@@ -191,7 +233,7 @@ class Observer:
         with self.db:
             self.put('anima_status',{'ok':True,'at':now,'projects':len(projects)})
             for role in ('janus','minerva'):
-                if now-self.get('last_change:'+role,0)<300:continue
+                if now-self.get('last_change:'+role,0)<CHANGE_INTERVALS[role] or not self.role_ready(role):continue
                 rows=self.db.execute('select entity,value from pending where role=? order by rowid limit 40',(role,)).fetchall()
                 if not rows:continue
                 self.event('roman-anima','anima.'+role+'.changed',{'changes':[json.loads(v) for _,v in rows],
@@ -230,14 +272,21 @@ class Observer:
         previous=self.get('monitoring')
         with self.db:
             self.put('monitoring',state); self.put('monitoring_at',now)
-            if previous!=state:self.event('roman-alerts','monitoring.changed',{'previous':previous,'current':state})
+            if monitoring_signature(previous)!=monitoring_signature(state):
+                pending=self.get('monitoring_pending')
+                self.put('monitoring_pending',{'previous':pending['previous'] if pending else previous,'current':state})
+            pending=self.get('monitoring_pending')
+            if pending and self.role_ready('vesta'):
+                if monitoring_signature(pending['previous'])!=monitoring_signature(pending['current']):
+                    self.event('roman-alerts','monitoring.changed',pending)
+                self.put('monitoring_pending',None)
 
     def schedules(self):
         now=int(time.time())
         with self.db:
             for role,interval in INTERVALS.items():
                 slot=now//interval
-                if self.get('schedule:'+role)==slot:continue
+                if self.get('schedule:'+role)==slot or not self.role_ready(role,rest=interval):continue
                 self.event('roman-clock','schedule.'+role,{'akh':role,'interval_seconds':interval,
                     'instruction':'Perform a bounded review of current evidence and commitments. Make useful authorized progress; if nothing changed, record a quiet check without messaging teammates.'},f'schedule:{role}:{slot}')
                 self.put('schedule:'+role,slot)
@@ -249,11 +298,12 @@ class Observer:
                 'grafana_available':monitor.get('grafana',{}).get('available'),
                 'metrics_available':monitor.get('victoriametrics',{}).get('available'),
                 'anima_available':self.get('anima_status',{}).get('ok'),
+                'activity_available':self.get('role_activity',{}).get('ok'),
                 'latest_workflow_failure':failure}
         if signal!=self.get('watchdog_signal'):
             notice=self.get('watchdog_notice')
             if notice is None:
-                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available')) or failure is not None
+                degraded=any(v!='up' for v in (signal['local_services'] or {}).values()) or any(signal[k] is False for k in ('grafana_available','metrics_available','anima_available','activity_available')) or failure is not None
                 notice={'message_type':'coordination/status@v1','payload':{'state':'blocked' if degraded else 'complete',
                         'detail':'Deterministic Roman watchdog evidence (does not imply model task completion): '+encoded(signal)},
                         'summary':'Roman workflow and monitoring availability changed',
@@ -268,6 +318,9 @@ class Observer:
                 self.put('watchdog_notice',None)
 
     def tick(self):
+        try:self.refresh_activity()
+        except Exception as error:
+            with self.db:self.put('role_activity',{'ok':False,'at':int(time.time()),'error':type(error).__name__})
         self.monitoring()
         try:self.scan_anima()
         except Exception as error:
@@ -308,7 +361,7 @@ def serve(root):
                 elif method=='tools/list':result={'tools':[{'name':'monitoring_snapshot','description':'Read latest alert, daemon-health, Anima-observer and coverage evidence, including observation times. Unavailable feeds mean unknown state. No filesystem access.','inputSchema':{'type':'object','properties':{},'additionalProperties':False},'annotations':{'readOnlyHint':True}}]}
                 elif method=='tools/call' and q['params']['name']=='monitoring_snapshot' and q['params'].get('arguments',{})=={}:
                     c=sqlite3.connect('file:'+str(root/'state/observer.sqlite3')+'?mode=ro',uri=True)
-                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','workflow_failure','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
+                    data={k:json.loads(v) for k,v in c.execute("select key,value from state where key in ('monitoring','monitoring_at','anima_status','coverage','heartbeat','workflow_counts','role_activity','workflow_failure','ingress_status','delivery_watch_status','board_watchdog_status')")};c.close()
                     data['read_at']=int(time.time());data['read_at_utc']=datetime.now(timezone.utc).isoformat();result={'content':[{'type':'text','text':json.dumps(data)}]}
                 else:return self.reply(200,{'jsonrpc':'2.0','id':ident,'error':{'code':-32601,'message':'Unsupported read-only observer request'}})
                 self.reply(200,{'jsonrpc':'2.0','id':ident,'result':result})

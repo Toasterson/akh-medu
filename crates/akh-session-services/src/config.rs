@@ -324,6 +324,9 @@ pub fn validate_checkout(request: &bootstrap::BootstrapRepository) -> Result<()>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventRoute {
+    /// For replaceable state notifications only, never delegations or commands.
+    #[serde(default)]
+    pub coalesce_pending: bool,
     pub id: String,
     pub source: String,
     pub event_type: String,

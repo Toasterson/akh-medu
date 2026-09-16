@@ -46,6 +46,15 @@ Monitoring snapshots include observation times: unavailable or stale is unknown,
         if tool['name'] in ('board__board_post_thread','board__board_send_inbox'):
             tool['input_schema']['properties']['payload']['type']='object'
             tool['input_schema']['properties']['payload']['description']='A JSON object matching the registered protocol. Never stringify this object.'
+            props=tool['input_schema']['properties']
+            props['idempotency_key']={'type':'string','pattern':'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$','description':'Stable ASCII token, preferably a UUID. Reuse only for an identical retry; no spaces or Unicode.'}
+            if tool['name']=='board__board_post_thread':
+                props['message_type']={'type':'string','enum':['coordination/status@v1']}
+                props['payload']={'type':'object','properties':{'state':{'type':'string','enum':['working','blocked','complete','failed','yielded']},'detail':{'type':'string','minLength':1}},'required':['state','detail'],'additionalProperties':False}
+            else:
+                props['message_type']={'type':'string','enum':['coordination/delegation@v1']}
+                props['payload']={'type':'object','properties':{'assignee_id':{'type':'string','format':'uuid'},'objective':{'type':'string','minLength':1},'scope':{'type':'array','items':{'type':'string'},'minItems':1},'parent_message_id':{'type':'string','format':'uuid'}},'required':['assignee_id','objective','scope'],'additionalProperties':False}
+
     profile['tools'].append({'name':'monitoring_snapshot','description':'Read timestamped alerts, local daemon health and observer coverage. Missing feeds mean unknown state. No filesystem access.','input_schema':{'type':'object','properties':{},'additionalProperties':False},'read_only':True,'destination':{'kind':'mcp','service':'observer','tool':'monitoring_snapshot'}})
 session['session_stall_threshold_ms']=1800000
 save(session_path,session)
@@ -68,7 +77,7 @@ for role in roles:
     events['endpoints'][alias]={'url':'http://127.0.0.1:18089','token_env':'ROMAN_BOARD_'+role.upper()}
     events['djehuty_inboxes'].append({'endpoint':alias,'source':'roman-inbox-'+role,'recipient_id':ids[role],'message_types':['coordination/delegation@v1'],'interval_secs':15,'page_size':50})
     for src,typ in [('roman-clock','schedule.'+role),('roman-inbox-'+role,'djehuty.inbox')]+([('roman-anima','anima.'+role+'.changed')] if role!='vesta' else [('roman-alerts','monitoring.changed')]):
-        events['routes'].append({'id':role+'-'+typ,'source':src,'event_type':typ,'automation':role})
+        events['routes'].append({'id':role+'-'+typ,'source':src,'event_type':typ,'automation':role,'coalesce_pending':src in ('roman-clock','roman-alerts')})
 (root/'state/events').mkdir(exist_ok=True,mode=0o700);save(root/'config/events.json',events)
 for file in ('observer.py','daemon_credentials.py'):shutil.copy2(source/file,root/'bin'/file)
 plist('events',['/usr/bin/python3',str(root/'bin/daemon_credentials.py'),'events',str(root)])
