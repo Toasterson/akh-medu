@@ -54,6 +54,9 @@ pub fn validate(profile: &ProviderConfig, request: &RuntimeJobRequest) -> Result
         allow_insecure_http: endpoint.allow_insecure_http,
     }
     .validate()?;
+    if endpoint.reasoning_effort.as_deref().is_some_and(|effort| !matches!(effort, "none" | "low" | "medium" | "high" | "max")) {
+        return Err(Fault::invalid("unsupported reasoning effort"));
+    }
     if profile.kind != RuntimeKind::Internal
         || profile.execution_mode != ExecutionMode::Brokered
         || profile.timeout_secs == 0
@@ -89,7 +92,7 @@ pub fn run(
 ) -> std::result::Result<String, String> {
     run_loop(store, profile, request, host, cancel).map_err(|error| error.to_string())
 }
-fn run_loop(
+pub(crate) fn run_loop(
     store: &Store,
     profile: &ProviderConfig,
     request: &RuntimeJobRequest,
@@ -163,6 +166,9 @@ fn run_loop(
         let mut messages = vec![json!({"role":"system","content":request.instructions})];
         messages.extend(conversation.messages.iter().cloned());
         let mut body = json!({"model":request.binding.model,"messages":messages,"stream":true,"max_tokens":endpoint.max_output_tokens});
+        if let Some(effort) = &endpoint.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = json!(tools);
         }
@@ -548,7 +554,8 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
-        let (profile, mut request) = fixture(&url, dir.path());
+        let (mut profile, mut request) = fixture(&url, dir.path());
+        profile.model_endpoint.as_mut().unwrap().reasoning_effort = Some("none".into());
         let store = Store::open(&dir.path().join("runtime.redb")).unwrap();
         tokio::task::spawn_blocking(move || {
             let cancel = AtomicBool::new(false);
@@ -593,6 +600,7 @@ mod tests {
         .unwrap();
         let requests = bodies.lock().unwrap();
         assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|body| body["reasoning_effort"] == "none"));
         assert_eq!(requests[1]["messages"][3]["tool_call_id"], "native");
         assert!(
             requests[2]["messages"]

@@ -1,17 +1,29 @@
 use super::*;
 use crate::ingress::Events;
 use crate::{config::Principal, http::Api, types::*};
-use axum::{Extension, extract::State};
+use axum::{Extension, extract::{Path, State}};
 pub fn event_router(service: Events) -> Router {
     let config = service.config.clone();
     protect(
         Router::new()
             .route("/v1/events", post(ingest))
             .route("/v1/deliveries", get(deliveries))
+            .route("/v1/deliveries/{id}", get(delivery))
             .route("/v1/inboxes", get(inboxes))
             .with_state(service),
         config,
     )
+}
+async fn delivery(
+    State(service): State<Events>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Api<crate::ingress::Delivery> {
+    http::role(&p, "admin")?;
+    validate_key(&id)?;
+    let value = service.store.get(&crate::store::key("delivery", &[&id]))?
+        .ok_or_else(|| Fault::missing("event delivery not found"))?;
+    Ok(Json(value))
 }
 async fn inboxes(
     State(service): State<Events>,

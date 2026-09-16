@@ -743,6 +743,9 @@ pub struct ModelEndpoint {
     pub allow_insecure_http: bool,
     pub max_iterations: u32,
     pub max_output_tokens: u32,
+    /// Optional provider-supported reasoning budget; omitted preserves provider defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -36,6 +36,10 @@ def main():
         for akh in ('janus', 'minerva', 'vesta'):
             env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
         binary = 'akhsessd'
+    elif role == 'events':
+        for akh in ('janus', 'minerva', 'vesta'):
+            env['ROMAN_BOARD_' + akh.upper()] = json.loads((root / 'secrets' / f'board-{akh}.json').read_text())['bearer_token']
+        binary = 'akheventd'
     else:
         raise RuntimeError('unsupported daemon')
     os.execve(root / 'bin' / binary, [binary, '--config', str(root / 'config' / (role + '.json'))], env)

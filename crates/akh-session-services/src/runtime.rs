@@ -310,13 +310,14 @@ impl Runtime {
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if profile.kind == RuntimeKind::Internal {
-                    crate::internal::run(&service.store, &profile, &request, &mut host, &cancel)
+                    crate::internal::run_loop(&service.store, &profile, &request, &mut host, &cancel)
                 } else {
                     akh_runtime::run(&profile, &request, &mut host, &cancel)
+                        .map_err(|message| Fault::new("unknown_outcome", message))
                 }
             }))
             .unwrap_or_else(|_| {
-                Err("runtime worker panicked; outcome requires reconciliation".into())
+                Err(Fault::new("unknown_outcome", "runtime worker panicked; outcome requires reconciliation"))
             });
             let saved = service.store.transaction(|tx| {
                 let mut job: RuntimeJob = tx
@@ -334,7 +335,16 @@ impl Runtime {
                             "provider answer exceeded the durable job response budget",
                         ));
                     }
-                    Err(message) => {
+                    Err(error) if profile.kind == RuntimeKind::Internal && error.code == "model_incomplete" => {
+                        // This typed error is raised before the new assistant
+                        // tool plan is persisted or executed. Every preceding
+                        // iteration has durable receipts. Retire continuation
+                        // without claiming success or replaying earlier effects.
+                        crate::internal::reconcile(tx, &job, false)?;
+                        job.status = TurnStatus::Failed;
+                        job.error = Some(error);
+                    }
+                    Err(error) => {
                         // An internal model can stop between a persisted tool plan and
                         // its receipt. Cancellation alone cannot close that history.
                         job.status = if cancel.load(Ordering::SeqCst)
@@ -350,7 +360,7 @@ impl Runtime {
                             } else {
                                 "cancelled"
                             },
-                            message,
+                            error.to_string(),
                         ));
                     }
                 }
@@ -546,6 +556,47 @@ impl akh_runtime::Host for RemoteHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_model_response_fails_without_quarantining_next_job() {
+        use axum::{Router, routing::post};
+        let body = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}));
+        let app = Router::new().route("/", post(move || {
+            let body = body.clone();
+            async move { ([("content-type", "text/event-stream")], body) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = (*config(dir.path())).clone();
+        cfg.runtimes.insert("local".into(), serde_json::from_value(json!({
+            "revision":"1","kind":"internal","working_dir":dir.path(),"binary":"/unused",
+            "execution_mode":"brokered","timeout_secs":5,"isolation":{"directory":dir.path().join("profile")},
+            "model_endpoint":{"url":url,"max_iterations":2,"max_output_tokens":128}
+        })).unwrap());
+        let principal = cfg.principals[0].clone();
+        let runtime = Runtime::new(Arc::new(cfg), Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
+        for id in ["limited-one", "limited-two"] {
+            let mut req = request(id);
+            req.binding.profile = "local".into();
+            req.binding.revision = "1".into();
+            req.binding.kind = RuntimeKind::Internal;
+            req.binding.execution_mode = ExecutionMode::Brokered;
+            req.binding.model = Some("fixture".into());
+            runtime.submit(&principal, req).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if runtime.active.lock().unwrap().is_empty() { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            let job = runtime.get(id).unwrap();
+            assert_eq!(job.status, TurnStatus::Failed);
+            assert_eq!(job.error.unwrap().code, "model_incomplete");
+        }
+        server.abort();
+    }
 
     fn config(dir: &std::path::Path) -> Arc<Config> {
         Arc::new(

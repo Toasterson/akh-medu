@@ -61,13 +61,49 @@ Consult `evidence/prepared.json` and the other verification records under the
 installed root for actual deployment status. A listening daemon or an awakened
 identity does not prove an operational autonomous team.
 
-Provider credentials, project-system grants, teammate handoffs, scheduled
-admission and alert ingestion must be connected and verified before enabling
-the three automations. They are disabled in the template. One runtime serializes
-provider turns; urgent incident admission and an independent outage watchdog
-still need to be connected before unattended operation.
+`activate.py ROOT` renders enabled automations and the event/observer launchd
+jobs after authenticated service integration. Janus (PM) reviews every 15
+minutes, Minerva (PO) every hour, and Vesta (incident coordination) every 15
+minutes. Addressed Djehuty delegations are polled every 15 seconds; status
+messages do not wake teammates. Native event ingress persists before inbox
+acknowledgement. One runtime serializes inference; this is not a guaranteed
+low-latency incident-response service.
+
+The observer polls Anima through MCP, rotating eight active projects per minute.
+Work-item and plan changes wake both Janus and Minerva, coalesced to at most 40
+changed entities per role every five minutes. Initial observations establish a
+baseline. Capped work-item lists are expanded by phase where possible; coverage
+and remaining truncation are visible, and missing rows never imply deletion.
+Fresh sessions share each Akh's durable memory and limit accumulated context.
+Each role admits one active automation turn at a time.
+
+Monitoring changes wake Vesta. A separate deterministic watchdog posts daemon,
+feed, and workflow failures even when inference cannot run. VictoriaMetrics and
+Grafana are separate sources: unavailable Grafana means unknown alert state,
+not zero alerts. The monitoring MCP exposes only timestamped observations.
+Vesta has Anima and Board coordination tools, not host or Kubernetes remediation
+commands. Event data never expands role authority.
+
+The observer stores observations, immutable event outbox entries, schedule
+occurrences and delivery outcomes in private SQLite. Repeated ingress attempts
+reuse the same identity. Scheduled downtime does not replay historical ticks.
+Session and observer LaunchAgents require the logged-in user's keychain;
+remaining services run as system LaunchDaemons under that user. Bots themselves
+have no filesystem or shell tools. Provider keys remain in process environments.
+
+During activation, Grafana's pod was unreachable and Sokar's artifact backend
+was unavailable; consult current monitoring and evidence before claiming those
+integrations healthy. Internal notes remain available. A known model output-limit
+stop fails its turn without quarantining unrelated jobs; uncertain tool outcomes
+retain reconciliation gates.
 
 The provider profiles use Ollama Cloud and OpenRouter's chat-completions APIs.
+Routine Ollama wakes request `reasoning_effort: none`, use an 8192-token output
+budget and a 420-second turn deadline. This uses Ollama's documented
+[reasoning control](https://docs.ollama.com/api/openai-compatibility).
+Board message payload schemas are narrowed to objects for the roles' structured
+coordination protocols, avoiding stringified JSON payloads. Wake instructions
+bound work to eight tool calls and require an early durable checkpoint.
 Provider keys are resolved from the authorized 1Password references by
 `daemon_credentials.py` when the runtime starts. Only environment variable names
 are stored in runtime configuration; keys are never copied to files or T3.
