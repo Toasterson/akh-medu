@@ -13,6 +13,7 @@ class DurableEvents(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
         (self.root/'state').mkdir();(self.root/'secrets').mkdir()
         (self.root/'secrets/observer.key').write_text('fixture-token')
+        (self.root/'secrets/operator.key').write_text('fixture-token')
         self.o=m.Observer(self.root)
         with self.o.db:self.o.put('role_activity',{'ok':True,'roles':{}})
     def tearDown(self):self.o.db.close();self.tmp.cleanup()
@@ -66,6 +67,13 @@ class DurableEvents(unittest.TestCase):
         with self.o.db:self.o.put('role_activity',{'ok':False})
         with patch.object(m.time,'time',return_value=now+7200):self.o.schedules()
         self.assertEqual(self.o.db.execute('select count(*) from outbox').fetchone()[0],1)
+
+    def test_archiving_completed_sessions_does_not_restart_rest(self):
+        session={'akh':'vesta','closed_at':None,'last_progress_at':100000,'turns':[{'id':'turn-one','status':'completed'}]}
+        with patch.object(m,'fetch',side_effect=[[],[session]]):self.o.refresh_activity()
+        session.update(closed_at=200000,last_progress_at=200000)
+        with patch.object(m,'fetch',side_effect=[[],[session]]):self.o.refresh_activity()
+        self.assertEqual(self.o.get('role_activity')['roles']['vesta']['last_finished'],100)
 
     def test_volatile_work_item_fields_do_not_wake_roles(self):
         with self.o.db:

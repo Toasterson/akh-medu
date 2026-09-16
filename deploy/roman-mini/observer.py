@@ -87,6 +87,7 @@ class Observer:
         pending=fetch('http://127.0.0.1:18435/v1/deliveries?pending=true',headers)
         sessions=fetch('http://127.0.0.1:18431/v1/sessions?compact=true',headers)
         roles={r:{'busy':False,'last_finished':0,'pending':False} for r in ROLES}
+        terminal_seen=self.get('terminal_seen',{})
         for d in pending:
             if d['automation'] in roles and not d['terminal']:roles[d['automation']]['pending']=True
         for session in sessions:
@@ -94,8 +95,14 @@ class Observer:
             state=roles[session['akh']];turns=session['turns']
             active=any(t['status'] not in ('completed','failed','cancelled') for t in turns)
             state['busy'] |= active and session.get('closed_at') is None
-            if turns and not active:state['last_finished']=max(state['last_finished'],session['last_progress_at']//1000)
-        with self.db:self.put('role_activity',{'ok':True,'at':int(time.time()),'roles':roles})
+            if turns and not active:
+                for turn in turns:
+                    # Later archival events must not restart the rest period.
+                    finished=terminal_seen.setdefault(turn['id'],session['last_progress_at']//1000)
+                    state['last_finished']=max(state['last_finished'],finished)
+        with self.db:
+            self.put('terminal_seen',terminal_seen)
+            self.put('role_activity',{'ok':True,'at':int(time.time()),'roles':roles})
 
     def role_ready(self,role,rest=300):
         activity=self.get('role_activity',{})
