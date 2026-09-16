@@ -1,6 +1,6 @@
 //! One durable database per daemon. Multi-record decisions commit atomically.
 //!
-//! `Store` has two interchangeable backends, selected at construction time:
+//! `Store` has three interchangeable backends, selected at construction time:
 //!
 //! - **redb** (default, via [`Store::open`]): one local file per store kind.
 //!   This is the original implementation and remains what every test and
@@ -10,12 +10,15 @@
 //!   a single Raspberry Pi SD card. See the `postgres` module docs for the
 //!   sync/async bridging, locking, cache and migration design.
 //!
-//! Both backends implement exactly the same public API (`get`/`scan` on
+//! SQLite is available through `Store::open_sqlite` for local, offline deployments.
+//!
+//! All backends implement exactly the same public API (`get`/`scan` on
 //! `Store`, `get`/`put`/`delete`/`scan` on `Transaction`, the same `key()`
 //! helper), so no call site needs to know or care which one it is talking
 //! to.
 mod postgres;
 mod redb_backend;
+mod sqlite_backend;
 
 pub(crate) use akh_session_types::{Fault, Result};
 pub use postgres::PostgresConfig;
@@ -29,6 +32,7 @@ pub(crate) fn failure(error: impl std::fmt::Display) -> Fault {
 }
 
 enum Inner {
+    Sqlite(sqlite_backend::SqliteInner),
     Redb(RedbInner),
     Postgres(PostgresInner),
 }
@@ -37,6 +41,7 @@ enum Inner {
 pub struct Store(Arc<Inner>);
 
 enum TransactionInner<'a> {
+    Sqlite(&'a rusqlite::Connection),
     Redb(RedbTxState<'a>),
     Postgres(PgTxState<'a>),
 }
@@ -46,6 +51,13 @@ pub struct Transaction<'a> {
 }
 
 impl Store {
+    /// Opens a private, local SQLite database using WAL and full synchronous commits.
+    pub fn open_sqlite(path: &Path) -> Result<Self> {
+        Ok(Self(Arc::new(Inner::Sqlite(
+            sqlite_backend::SqliteInner::open(path)?,
+        ))))
+    }
+
     /// Opens (creating if needed) a redb-backed store at `path`. Unchanged
     /// since before the Postgres backend existed — every existing call site
     /// and every test keeps using this.
@@ -68,6 +80,17 @@ impl Store {
         action: impl FnOnce(&mut Transaction<'_>) -> Result<T>,
     ) -> Result<T> {
         match self.0.as_ref() {
+            Inner::Sqlite(inner) => {
+                let mut connection = inner.lock()?;
+                let write = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(failure)?;
+                let result = action(&mut Transaction {
+                    inner: TransactionInner::Sqlite(&write),
+                })?;
+                write.commit().map_err(failure)?;
+                Ok(result)
+            }
             Inner::Redb(inner) => {
                 let write = inner.database().begin_write().map_err(failure)?;
                 let result = {
@@ -108,6 +131,7 @@ impl Store {
 
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         match self.0.as_ref() {
+            Inner::Sqlite(inner) => sqlite_backend::get(&*inner.lock()?, key),
             Inner::Redb(inner) => inner.get(key),
             Inner::Postgres(inner) => inner.get(key),
         }
@@ -115,6 +139,7 @@ impl Store {
 
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
         match self.0.as_ref() {
+            Inner::Sqlite(inner) => sqlite_backend::scan(&*inner.lock()?, prefix),
             Inner::Redb(inner) => inner.scan(prefix),
             Inner::Postgres(inner) => inner.scan(prefix),
         }
@@ -124,24 +149,28 @@ impl Store {
 impl Transaction<'_> {
     pub fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         match &self.inner {
+            TransactionInner::Sqlite(state) => sqlite_backend::get(state, key),
             TransactionInner::Redb(state) => state.get(key),
             TransactionInner::Postgres(state) => state.get(key),
         }
     }
     pub fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
         match &mut self.inner {
+            TransactionInner::Sqlite(state) => sqlite_backend::put(state, key, value),
             TransactionInner::Redb(state) => state.put(key, value),
             TransactionInner::Postgres(state) => state.put(key, value),
         }
     }
     pub fn delete(&mut self, key: &str) -> Result<()> {
         match &mut self.inner {
+            TransactionInner::Sqlite(state) => sqlite_backend::delete(state, key),
             TransactionInner::Redb(state) => state.delete(key),
             TransactionInner::Postgres(state) => state.delete(key),
         }
     }
     pub fn scan<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<T>> {
         match &self.inner {
+            TransactionInner::Sqlite(state) => sqlite_backend::scan(state, prefix),
             TransactionInner::Redb(state) => state.scan(prefix),
             TransactionInner::Postgres(state) => state.scan(prefix),
         }
@@ -160,6 +189,71 @@ pub fn key(namespace: &str, parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sqlite_rollback_reopen_and_literal_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        let store = Store::open_sqlite(&path).unwrap();
+        let result: Result<()> = store.transaction(|tx| {
+            tx.put("session/x", &1)?;
+            tx.put("dedupe/x", &2)?;
+            Err(Fault::conflict("abort"))
+        });
+        assert!(result.is_err());
+        assert_eq!(store.get::<u32>("session/x").unwrap(), None);
+        assert_eq!(store.get::<u32>("dedupe/x").unwrap(), None);
+        store
+            .transaction(|tx| {
+                tx.put("a%/2", &2)?;
+                tx.put("a%/1", &1)?;
+                tx.put("abc/3", &3)?;
+                assert_eq!(tx.scan::<u32>("a%/")?, vec![1, 2]);
+                tx.delete("a%/1")?;
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        let store = Store::open_sqlite(&path).unwrap();
+        assert_eq!(store.scan::<u32>("a%/").unwrap(), vec![2]);
+        assert_eq!(store.scan::<u32>("").unwrap(), vec![2, 3]);
+        assert_eq!(&std::fs::read(&path).unwrap()[..16], b"SQLite format 3\0");
+    }
+
+    #[test]
+    fn sqlite_independent_connections_serialize_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite3");
+        let stores = [
+            Store::open_sqlite(&path).unwrap(),
+            Store::open_sqlite(&path).unwrap(),
+        ];
+        let workers: Vec<_> = stores
+            .into_iter()
+            .map(|store| {
+                std::thread::spawn(move || {
+                    for _ in 0..30 {
+                        store
+                            .transaction(|tx| {
+                                let n: u32 = tx.get("counter")?.unwrap_or_default();
+                                tx.put("counter", &(n + 1))
+                            })
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            Store::open_sqlite(&path)
+                .unwrap()
+                .get::<u32>("counter")
+                .unwrap(),
+            Some(60)
+        );
+    }
+
     #[test]
     fn failed_multi_record_admission_is_rolled_back_and_commits_survive_reopen() {
         let dir = tempfile::tempdir().unwrap();

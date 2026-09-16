@@ -75,6 +75,7 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let legacy_redb_path = config.data_dir.join(format!("{kind}.redb"));
     let store = match &config.store {
         None => Store::open(&legacy_redb_path)?,
+        Some(StoreConfig::Sqlite) => Store::open_sqlite(&config.data_dir.join(format!("{kind}.sqlite3")))?,
         Some(StoreConfig::Postgres { url_env, schema }) => {
             let url = std::env::var(url_env).map_err(|_| {
                 Fault::invalid(format!(

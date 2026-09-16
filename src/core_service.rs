@@ -45,6 +45,8 @@ pub struct CorePrincipal {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoreConfig {
+    #[serde(default)]
+    pub sqlite: bool,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
     pub principals: Vec<CorePrincipal>,
@@ -112,7 +114,11 @@ pub struct CoreApp {
 impl CoreApp {
     pub fn new(config: CoreConfig, backend: Arc<dyn CoreBackend>) -> Result<Self> {
         Ok(Self {
-            store: Store::open(&config.data_dir.join("core-operations.redb"))?,
+            store: if config.sqlite {
+                Store::open_sqlite(&config.data_dir.join("core-operations.sqlite3"))?
+            } else {
+                Store::open(&config.data_dir.join("core-operations.redb"))?
+            },
             config: Arc::new(config),
             backend,
         })
@@ -520,6 +526,7 @@ mod tests {
         });
         let app = CoreApp::new(
             CoreConfig {
+                sqlite: false,
                 listen: "127.0.0.1:0".parse().unwrap(),
                 data_dir: dir.path().into(),
                 principals: vec![CorePrincipal {

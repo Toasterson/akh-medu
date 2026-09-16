@@ -4253,9 +4253,6 @@ async fn try_connect_pg(
     opts: &akhomed_store::PoolOptions,
     migrate: bool,
 ) -> Result<Arc<akhomed_store::DatabaseConnection>, String> {
-    let db = akhomed_store::connect(opts)
-        .await
-        .map_err(|e| format!("connect: {e}"))?;
     if migrate {
         // Advisory-locked so several hosts starting against one fresh cluster
         // database don't race on creating `seaql_migrations`.
@@ -4263,6 +4260,9 @@ async fn try_connect_pg(
             .await
             .map_err(|e| format!("migrations: {e}"))?;
     }
+    let db = akhomed_store::connect(opts)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
     Ok(Arc::new(db))
 }
 
@@ -4288,10 +4288,14 @@ async fn init_postgres(config: &AkhomedConfig) -> Option<Arc<akhomed_store::Data
     for attempt in 1..=PG_STARTUP_ATTEMPTS {
         match try_connect_pg(&opts, migrate).await {
             Ok(pool) => {
-                tracing::info!("connected to PostgreSQL backing store");
+                tracing::info!(sqlite = opts.url.starts_with("sqlite:"), "connected to SeaORM backing store");
                 return Some(pool);
             }
             Err(e) => {
+                if opts.url.starts_with("sqlite:") {
+                    tracing::error!(error = %e, "configured SQLite backing store failed; refusing local-only fallback");
+                    std::process::exit(1);
+                }
                 if attempt < PG_STARTUP_ATTEMPTS {
                     tracing::warn!(
                         attempt,
@@ -4403,6 +4407,10 @@ async fn main() {
             c
         }
         Err(e) => {
+            if cfg!(feature = "core-server") {
+                tracing::error!(error = %e, "core configuration failed; refusing default storage fallback");
+                std::process::exit(1);
+            }
             tracing::warn!(error = %e, "failed to load config, using defaults");
             AkhomedConfig::default()
         }
@@ -6424,7 +6432,12 @@ mod control_plane_tests {
 #[cfg(feature = "core-server")]
 impl akh_medu::core_service::CoreBackend for ServerState {
     fn engine<'a>(&'a self, akh: &'a str) -> akh_medu::core_service::CoreFuture<'a, Arc<Engine>> {
-        Box::pin(async move { self.get_engine(akh).await })
+        Box::pin(async move {
+            // Relational snapshots capture Agent state; core-only tool sessions
+            // must materialize it too, without starting a provider/OODA loop.
+            self.get_agent(akh).await?;
+            self.get_engine(akh).await
+        })
     }
     fn config<'a>(
         &'a self,

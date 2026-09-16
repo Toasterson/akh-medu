@@ -943,10 +943,18 @@ pub async fn wake(
         );
 
         // Psyche + the `extra` misc state.
-        if let Some(psyche) = state.psyche.as_ref().and_then(|v| {
-            serde_json::from_value::<crate::compartment::psyche::Psyche>(v.clone()).ok()
-        }) {
+        if let Some(value) = state.psyche.as_ref() {
+            let psyche: crate::compartment::psyche::Psyche = serde_json::from_value(value.clone())
+                .map_err(|e| SnapshotError::Agent(format!("wake: invalid persisted psyche: {e}")))?;
+            let json = serde_json::to_vec(&psyche)
+                .map_err(|e| SnapshotError::Agent(format!("wake: encode psyche JSON: {e}")))?;
+            store.put_meta(b"agent:psyche_json_v1", &json)
+                .map_err(|e| SnapshotError::Agent(format!("wake: persist psyche JSON: {e}")))?;
             put_bincode(&store, b"agent:psyche", &psyche);
+        } else {
+            for key in [b"agent:psyche_json_v1".as_slice(), b"agent:psyche".as_slice()] {
+                store.remove_meta(key).map_err(|e| SnapshotError::Agent(format!("wake: clear absent psyche: {e}")))?;
+            }
         }
         restore_extra(&store, state.extra.as_ref());
         restore_reactor_metadata(&store, state.extra.as_ref())?;

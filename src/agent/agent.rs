@@ -3764,6 +3764,14 @@ impl Agent {
 
         // Persist psyche if loaded.
         if let Some(ref psyche) = self.psyche {
+            // Psyche has omitted optional fields: a positional bincode sequence
+            // cannot reliably decode it. Keep a versioned, self-describing cache.
+            let json = serde_json::to_vec(psyche).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to serialize psyche JSON: {e}"),
+            })?;
+            store.put_meta(b"agent:psyche_json_v1", &json).map_err(|e| AgentError::ConsolidationFailed {
+                message: format!("failed to persist psyche JSON: {e}"),
+            })?;
             let psyche_bytes =
                 bincode::serialize(psyche).map_err(|e| AgentError::ConsolidationFailed {
                     message: format!("failed to serialize psyche: {e}"),
@@ -4188,14 +4196,25 @@ impl Agent {
             .unwrap_or_else(|| goal::restore_goals(&engine, &predicates).unwrap_or_default());
 
         // Restore psyche: prefer persisted state, fall back to compartment manager.
-        let psyche = store
+        let psyche = if let Some(bytes) = store.get_meta(b"agent:psyche_json_v1")
+            .map_err(|e| AgentError::ConsolidationFailed { message: format!("failed to read psyche JSON: {e}") })? {
+            Some(serde_json::from_slice::<crate::compartment::psyche::Psyche>(&bytes)
+                .map_err(|e| AgentError::ConsolidationFailed { message: format!("invalid persisted psyche JSON: {e}") })?)
+        } else { store
             .get_meta(b"agent:psyche")
             .ok()
             .flatten()
             .and_then(|bytes| {
                 bincode::deserialize::<crate::compartment::psyche::Psyche>(&bytes).ok()
             })
-            .or_else(|| engine.compartments().and_then(|cm| cm.psyche()));
+            .or_else(|| engine.compartments().and_then(|cm| cm.psyche())) };
+        // The cognitive core assembles prompts from the compartment view.
+        // Restore that view from the same authoritative session identity.
+        if let Some(restored) = psyche.as_ref()
+            && let Some(manager) = engine.compartments()
+        {
+            manager.force_set_psyche(restored.clone());
+        }
 
         // Restore drive system: prefer persisted state, fall back to config defaults.
         let drives = store

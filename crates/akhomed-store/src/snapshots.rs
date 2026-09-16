@@ -33,6 +33,10 @@ const PG_MAX_BIND_PARAMS: usize = 65_535;
 
 /// Chunk size for a multi-row insert so the total bind parameters stay under
 /// the Postgres extended-query limit.
+fn sqlite_row_limit(db: &DatabaseConnection) -> usize {
+    if db.get_database_backend() == DatabaseBackend::Sqlite { 500 } else { usize::MAX }
+}
+
 pub(crate) fn chunk_size_for_columns(columns: usize) -> usize {
     (PG_MAX_BIND_PARAMS / columns).max(1)
 }
@@ -78,7 +82,7 @@ macro_rules! akh_scoped_ops {
                 );
             }
 
-            let chunk_size = chunk_size_for_columns(Column::iter().count());
+            let chunk_size = chunk_size_for_columns(Column::iter().count()).min(sqlite_row_limit(db));
             let txn = db.begin().await?;
             Entity::delete_many()
                 .filter(Column::AkhId.eq(akh_id))
@@ -174,17 +178,16 @@ pub async fn publish_snapshot(
                 .filter(crate::entity::$module::Column::AkhId.eq(akh_id))
                 .exec(&$transaction)
                 .await?;
-            if !$rows.is_empty() {
+            for chunk in $rows.chunks(sqlite_row_limit(db)) {
+                if chunk.is_empty() { continue; }
                 crate::entity::$module::Entity::insert_many(
-                    $rows.into_iter().map(IntoActiveModel::into_active_model),
-                )
-                .exec(&$transaction)
-                .await?;
+                    chunk.iter().cloned().map(IntoActiveModel::into_active_model),
+                ).exec(&$transaction).await?;
             }
         }};
     }
 
-    const ROWS_PER_CHUNK: usize = 6_000;
+    let rows_per_chunk = 6_000.min(sqlite_row_limit(db));
     let transaction = db.begin().await?;
     if transaction.get_database_backend() == DatabaseBackend::Postgres {
         transaction
@@ -253,7 +256,7 @@ pub async fn publish_snapshot(
         .filter(provenance_snapshot::Column::AkhId.eq(akh_id))
         .exec(&transaction)
         .await?;
-    for chunk in facts.chunks(ROWS_PER_CHUNK) {
+    for chunk in facts.chunks(rows_per_chunk) {
         fact::Entity::insert_many(
             chunk
                 .iter()
@@ -273,7 +276,7 @@ pub async fn publish_snapshot(
         .exec(&transaction)
         .await?;
     }
-    for chunk in publication.provenance.chunks(ROWS_PER_CHUNK) {
+    for chunk in publication.provenance.chunks(rows_per_chunk) {
         provenance_snapshot::Entity::insert_many(
             chunk
                 .iter()
@@ -366,7 +369,7 @@ pub async fn replace_workspace_facts(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(fact::Column::iter().count());
+        let chunk_size = chunk_size_for_columns(fact::Column::iter().count()).min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             fact::Entity::insert_many(
                 chunk
@@ -406,7 +409,7 @@ pub async fn replace_workspace_facts_and_provenance(
     rows: Vec<fact::Model>,
     provenance_rows: Vec<provenance_snapshot::Model>,
 ) -> StoreResult<()> {
-    const ROWS_PER_CHUNK: usize = 6_000;
+    let rows_per_chunk = 6_000.min(sqlite_row_limit(db));
 
     let mut seen = std::collections::HashSet::with_capacity(rows.len());
     let mut unique_rows = Vec::with_capacity(rows.len());
@@ -427,7 +430,7 @@ pub async fn replace_workspace_facts_and_provenance(
         .exec(&txn)
         .await?;
 
-    for chunk in unique_rows.chunks(ROWS_PER_CHUNK) {
+    for chunk in unique_rows.chunks(rows_per_chunk) {
         fact::Entity::insert_many(
             chunk
                 .iter()
@@ -447,7 +450,7 @@ pub async fn replace_workspace_facts_and_provenance(
         .exec(&txn)
         .await?;
     }
-    for chunk in provenance_rows.chunks(ROWS_PER_CHUNK) {
+    for chunk in provenance_rows.chunks(rows_per_chunk) {
         provenance_snapshot::Entity::insert_many(
             chunk
                 .iter()
@@ -520,7 +523,7 @@ pub async fn replace_provenance_inputs(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count());
+        let chunk_size = chunk_size_for_columns(provenance_input::Column::iter().count()).min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             provenance_input::Entity::insert_many(
                 chunk
@@ -587,7 +590,7 @@ pub async fn replace_workspace_seed_packs(
         .exec(&txn)
         .await?;
     if !unique_rows.is_empty() {
-        let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count());
+        let chunk_size = chunk_size_for_columns(workspace_seed_pack::Column::iter().count()).min(sqlite_row_limit(db));
         for chunk in unique_rows.chunks(chunk_size) {
             workspace_seed_pack::Entity::insert_many(
                 chunk

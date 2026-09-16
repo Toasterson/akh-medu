@@ -448,3 +448,9 @@ cpu-time = { path = "vendor/cpu-time" }
 # grug-train depends on `burn`) is byte-identical. See
 # vendor/burn-autodiff/src/lib.rs for the annotated diff.
 burn-autodiff = { path = "vendor/burn-autodiff" }
+
+[[example]]
+name = "roman_awaken"
+path = "examples/roman_awaken.rs"
+required-features = ["postgres"]
+test = true

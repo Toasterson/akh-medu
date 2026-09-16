@@ -381,6 +381,8 @@ fn djehuty_page_size() -> u16 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StoreConfig {
+    /// Local SQLite WAL database under data_dir, with no network dependency.
+    Sqlite,
     Postgres {
         /// Name of the environment variable holding the `postgres://` URL.
         url_env: String,
