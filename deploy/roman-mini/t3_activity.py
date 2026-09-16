@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Read-only ACP projection of autonomous sessions, plus supported T3 API driver.
-No model calls, bot dispatches, filesystem tools or T3 database edits.
+"""ACP activity projection with durable, scoped forwarding of user messages.
+Watching never starts work; explicit user messages create idempotent bot turns.
 """
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -40,6 +41,27 @@ def project_event(event):
         return {'sessionUpdate':'tool_call_update','toolCallId':data['id'],'status':'completed' if data.get('success') else 'failed','rawOutput':data}
     return None
 
+def submit_feedback(root,role,conversation,prompt):
+    if role not in ROLES or not prompt.strip():raise ValueError('A nonempty message and known role are required')
+    ident='feedback-'+hashlib.sha256(json.dumps([role,conversation,prompt]).encode()).hexdigest()
+    token=(root/'secrets'/f't3-{role}.key').read_text().strip()
+    base='http://127.0.0.1:18431'
+    # Persist intent before either POST. Stable daemon request IDs reconcile
+    # lost replies without admitting duplicate turns. Never edit T3 tables.
+    with sqlite3.connect(root/'state/t3-feedback.sqlite3') as db:
+        db.execute('PRAGMA synchronous=FULL')
+        db.execute('CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY, role TEXT, prompt TEXT, session TEXT, turn TEXT)')
+        db.execute('INSERT OR IGNORE INTO feedback VALUES(?,?,?,NULL,NULL)',(ident,role,prompt));db.commit()
+        sid,turn=db.execute('SELECT session,turn FROM feedback WHERE id=?',(ident,)).fetchone()
+        if turn:return {'session_id':sid,'turn_id':turn}
+        if not sid:
+            created=request(base+'/v1/sessions',token,{'request_id':ident,'akh':role,'workspace_profile':role})
+            sid=created['id'];db.execute('UPDATE feedback SET session=? WHERE id=?',(sid,ident));db.commit()
+        accepted=request(base+'/v1/sessions/'+sid+'/inputs',token,{'request_id':ident,'text':
+            'Direct message from Toasty through your T3 activity thread. Respond to this instruction. If it is a correction, preference or standing policy, save it to durable memory, explicitly supersede conflicting notes, and confirm the recorded content only after the memory tool succeeds. Keep this turn focused; do not start unrelated periodic work.\n\n'+prompt})
+        turn=accepted['id'];db.execute('UPDATE feedback SET turn=? WHERE id=?',(turn,ident));db.commit()
+        return {'session_id':sid,'turn_id':turn}
+
 def acp(root, role):
     token=(root/'secrets'/f't3-{role}.key').read_text().strip()
     base='http://127.0.0.1:18431'
@@ -54,13 +76,14 @@ def acp(root, role):
         session=message['params']['sessionId']; id=message['id']
         try:
             prompt=''.join(p.get('text','') for p in message['params']['prompt'])
-            match=re.search(r'Observe autonomous '+role+r' session ([0-9a-f-]{36})(?![0-9a-f-])',prompt)
+            match=re.fullmatch(r'Observe autonomous '+role+r' session ([0-9a-f-]{36})',prompt)
             if not match:
-                text(session, 'This is the read-only autonomous activity feed. Use the '+role.title()+' provider to give instructions.\n'); reply(id,{'stopReason':'end_turn'}); return
+                receipt=submit_feedback(root,role,session,prompt)
+                text(session, f"Delivered to {role.title()} as a direct user message. Session `{receipt['session_id']}`, turn `{receipt['turn_id']}`. It may wait for runtime capacity; the activity feed will show the result. Durable memory is confirmed only when the bot records it successfully.\n"); reply(id,{'stopReason':'end_turn'}); return
             source=match[1]; path='/v1/sessions/'+source; cursor=0; heartbeat=time.monotonic()
             record=request(base+path,token)
             if record['akh']!=role: raise ValueError('session owner mismatch')
-            text(session,f'\n**{role.title()} autonomous wake** · `{source}` · model `{record["runtime"].get("model")}`\n\n')
+            text(session,f'\n**{role.title()} session** · `{source}` · model `{record["runtime"].get("model")}`\n\n')
             while not cancelled.is_set():
                 events=request(base+path+'/events?after='+str(cursor),token)
                 # API may return a capped page. Never skip unread events.

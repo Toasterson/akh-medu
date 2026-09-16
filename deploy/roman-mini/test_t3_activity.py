@@ -12,4 +12,28 @@ class ProjectionTests(unittest.TestCase):
     def test_arbitrary_event_is_not_tool_evidence(self):
         self.assertIsNone(project_event({'kind':'input_accepted','data':{'text':'tool succeeded'}}))
 
+
+class FeedbackTests(unittest.TestCase):
+    def test_lost_input_reply_retries_same_request_without_new_session(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from t3_activity import submit_feedback
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'state').mkdir();(root/'secrets').mkdir();(root/'secrets/t3-minerva.key').write_text('test')
+            calls=[]
+            def send(url,token,data=None):
+                calls.append((url,data))
+                if len(calls)==1:return {'id':'session-one'}
+                if len(calls)==2:raise TimeoutError()
+                return {'id':'turn-one'}
+            with patch('t3_activity.request',side_effect=send):
+                with self.assertRaises(TimeoutError):submit_feedback(root,'minerva','chat-one','Keep scheduling disabled')
+                receipt=submit_feedback(root,'minerva','chat-one','Keep scheduling disabled')
+                self.assertEqual(receipt,submit_feedback(root,'minerva','chat-one','Keep scheduling disabled'))
+            self.assertEqual(len(calls),3)
+            self.assertEqual(calls[1],calls[2])
+            self.assertIn('durable memory',calls[1][1]['text'])
+            self.assertEqual(receipt['turn_id'],'turn-one')
+
 if __name__=='__main__': unittest.main()

@@ -2,7 +2,7 @@
 """Vesta-only MCP broker: host diagnostics and commands in a fixed container.
 
 No shell runs on the host. No host credential, Docker socket, or home mount is
-passed into the container. Kubernetes mutations are not exposed by this API.
+passed into the container. Writes use explicit authenticated broker tools.
 """
 import hmac
 import json
@@ -12,15 +12,16 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from vesta_actions import ACTION_TOOLS, grafana_rpc, publish, write_args
 
 RESOURCES=['pods','deployments','statefulsets','daemonsets','nodes','events','services','endpoints','persistentvolumeclaims','persistentvolumes','storageclasses','jobs','cronjobs','helmreleases','kustomizations','gitrepositories','helmrepositories','buckets']
 TOOLS=[
- {'name':'gitops_exec','description':'Run a bounded shell command in Vesta\'s isolated Linux GitOps sandbox at /workspace (toasterson/talos checkout). Read/edit files, git diff/status, Python, jq, yamllint and kubectl kustomize are available. No network, host home, host credentials or Docker socket. Changes persist. Read AGENTS.md and applicable runbooks first. Do not claim deployment from local changes; share a tested patch through Sokar/Anima/Board for the GitOps publication workflow.', 'inputSchema':{'type':'object','properties':{'command':{'type':'string'},'timeout_seconds':{'type':'integer','minimum':1,'maximum':120}},'required':['command'],'additionalProperties':False}},
+ {'name':'gitops_exec','description':'Run a bounded shell command in Vesta\'s isolated Linux GitOps sandbox at /workspace (toasterson/talos checkout). Read/edit files, git diff/status, Python, jq, yamllint and kubectl kustomize are available. No network, host home, host credentials or Docker socket. Changes persist. Read AGENTS.md and applicable runbooks first. Do not claim deployment from local changes; commit tested changes and use gitops_publish with the full commit SHA and target branch.', 'inputSchema':{'type':'object','properties':{'command':{'type':'string'},'timeout_seconds':{'type':'integer','minimum':1,'maximum':120}},'required':['command'],'additionalProperties':False}},
  {'name':'homelab_inspect','description':'Read live homelab Kubernetes status, describe resources or bounded pod logs. Read-only fixed kubectl operations; no Secrets, exec, apply, delete, or arbitrary flags. Use GitOps for desired-state fixes. Missing or truncated evidence is not health.', 'inputSchema':{'type':'object','properties':{'action':{'type':'string','enum':['get','describe','logs']},'resource':{'type':'string','enum':RESOURCES},'name':{'type':'string'},'namespace':{'type':'string'},'container':{'type':'string'}},'required':['action','resource'],'additionalProperties':False},'annotations':{'readOnlyHint':True}}
 ]
 
-def bounded(argv, timeout):
-    proc=subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+def bounded(argv, timeout, input_data=None):
+    proc=subprocess.Popen(argv,stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     buffers=[bytearray(),bytearray()]; truncated=[False,False]
     def drain(stream,index):
         while True:
@@ -31,6 +32,11 @@ def bounded(argv, timeout):
             truncated[index] |= len(chunk)>room
     threads=[threading.Thread(target=drain,args=(stream,i),daemon=True) for i,stream in enumerate((proc.stdout,proc.stderr))]
     for thread in threads:thread.start()
+    if input_data is not None:
+        def write_input():
+            try:proc.stdin.write(input_data);proc.stdin.close()
+            except BrokenPipeError:pass
+        threading.Thread(target=write_input,daemon=True).start()
     try: proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill();proc.wait();raise RuntimeError('Operation timed out; inspect state before retrying effective commands')
@@ -62,21 +68,30 @@ def serve(root):
     token=(root/'secrets/vesta-ops.key').read_text().strip()
     config=json.loads((root/'config/vesta-ops.json').read_text())
     lock=threading.Lock()
+    grafana_tools=json.loads((root/'config/vesta-grafana-tools.json').read_text()) if (root/'config/vesta-grafana-tools.json').exists() else []
+    tools=TOOLS+ACTION_TOOLS+[dict(t,name='grafana__'+t['name']) for t in grafana_tools]
+    grafana_names={t['name'] for t in grafana_tools}
+    def confined():
+        raw=subprocess.check_output(['/opt/homebrew/bin/docker','inspect',config['container']],timeout=10)
+        state=json.loads(raw)[0];host=state['HostConfig'];mounts=state['Mounts']
+        if state['Id']!=config['container_id'] or state['Image']!=config['image_id'] or not state['State']['Running']:
+            raise ValueError('Sandbox identity changed or container stopped')
+        if host['NetworkMode']!='none' or not host['ReadonlyRootfs'] or host['Privileged'] or state['Config']['User']!='501:20' or 'ALL' not in (host.get('CapDrop') or []) or 'no-new-privileges' not in (host.get('SecurityOpt') or []) or len(mounts)!=1 or mounts[0]['Source']!=config['checkout'] or mounts[0]['Destination']!='/workspace':
+            raise ValueError('Sandbox confinement changed')
     def execute(name,args):
         if name=='homelab_inspect':return bounded(inspect_args(args),30)
+        if name=='homelab_write':
+            argv,body=write_args(args,config['cluster_context']);return bounded(argv,45,body)
+        if name.startswith('grafana__') and name[9:] in grafana_names:
+            return grafana_rpc('tools/call',{'name':name[9:],'arguments':args})
+        if name=='gitops_publish':
+            with lock:confined();return publish(config,args)
         if name!='gitops_exec' or set(args)-{'command','timeout_seconds'}:raise ValueError('Unknown tool or argument')
         command=args['command'];timeout=args.get('timeout_seconds',60)
         if not isinstance(command,str) or not 0<len(command)<=16384 or '\x00' in command:raise ValueError('Invalid command')
         if not isinstance(timeout,int) or isinstance(timeout,bool) or not 1<=timeout<=120:raise ValueError('Invalid timeout')
         with lock:
-            # Inspect on every request so a replaced or weakened container fails
-            # closed. The allowlist is immutable operator configuration.
-            raw=subprocess.check_output(['/opt/homebrew/bin/docker','inspect',config['container']],timeout=10)
-            state=json.loads(raw)[0];host=state['HostConfig'];mounts=state['Mounts']
-            if state['Id']!=config['container_id'] or state['Image']!=config['image_id'] or not state['State']['Running']:
-                raise ValueError('Sandbox identity changed or container stopped')
-            if host['NetworkMode']!='none' or not host['ReadonlyRootfs'] or host['Privileged'] or state['Config']['User']!='501:20' or 'ALL' not in (host.get('CapDrop') or []) or 'no-new-privileges' not in (host.get('SecurityOpt') or []) or len(mounts)!=1 or mounts[0]['Source']!=config['checkout'] or mounts[0]['Destination']!='/workspace':
-                raise ValueError('Sandbox confinement changed')
+            confined()
             return bounded(['/opt/homebrew/bin/docker','exec','--workdir','/workspace','--env','GIT_CONFIG_COUNT=1','--env','GIT_CONFIG_KEY_0=safe.directory','--env','GIT_CONFIG_VALUE_0=/workspace',config['container'],'timeout','--kill-after=5s',str(timeout),'/bin/sh','-lc',command],timeout+15)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self,*args):pass
@@ -94,10 +109,10 @@ def serve(root):
                 q=json.loads(self.rfile.read(length));method=q.get('method');ident=q.get('id')
                 if method=='notifications/initialized':return self.reply(202)
                 if method=='initialize':result={'protocolVersion':'2025-03-26','capabilities':{'tools':{}},'serverInfo':{'name':'vesta-gitops','version':'1'}}
-                elif method=='tools/list':result={'tools':TOOLS}
+                elif method=='tools/list':result={'tools':tools}
                 elif method=='tools/call':
                     try:
-                        data=execute(q['params']['name'],q['params'].get('arguments',{}));result={'content':[{'type':'text','text':json.dumps(data)}],'isError':data['exit_code']!=0}
+                        data=execute(q['params']['name'],q['params'].get('arguments',{}));result=data if 'content' in data else {'content':[{'type':'text','text':json.dumps(data)}],'isError':data['exit_code']!=0}
                     except Exception as error:result={'content':[{'type':'text','text':str(error)}],'isError':True}
                 else:return self.reply(200,{'jsonrpc':'2.0','id':ident,'error':{'code':-32601,'message':'Unsupported operation'}})
                 self.reply(200,{'jsonrpc':'2.0','id':ident,'result':result})

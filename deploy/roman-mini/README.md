@@ -180,7 +180,7 @@ callback principal.
 
 ### Autonomous activity in T3
 
-`configure_t3.py` also installs three read-only activity ACP providers and a
+`configure_t3.py` also installs three activity ACP providers and a
 `t3-activity` LaunchAgent. Its supported T3 auth CLI issues a short-lived token
 held only in memory; HTTP orchestration creates the **Roman autonomous activity**
 project and one thread per role. Private SQLite records submitted session IDs,
@@ -188,7 +188,11 @@ and deterministic command IDs make retries idempotent. It never edits T3 tables.
 The ACP viewer reads only sessions owned by that role's scoped T3 principal,
 streams reasoning and tool receipt events, and reports terminal outcomes. Watching
 or cancelling a feed does not start, repeat, or cancel the bot's actual job.
-Use the original role providers for direct instructions. Historical attempts and
+Messages typed into an activity thread are forwarded to that bot as scoped user
+turns. Durable request IDs prevent duplicate admission after response loss. The
+initial acknowledgment confirms delivery, not memory storage; the bot must record
+the correction and its tool receipt provides proof. Watching alone starts no work.
+Use the original role providers for longer direct conversations. Historical attempts and
 errors remain visible. Model credentials and project filesystem access are never
 provided to these viewers.
 
@@ -209,8 +213,10 @@ execution. Cluster credentials remain in the separate host diagnostics broker.
 provisioned container. `activate.py` preserves this configuration on rerender.
 The image recipe is `vesta/Dockerfile`; its kubectl download is checksum-verified.
 Validate sandbox writes, denied host/credential/socket access, denied network and
-live node reads before enabling new sessions. Prepared fixes and patch evidence
-travel through Sokar/Anima/Board; local edits alone do not publish or deploy them.
+live node reads before enabling new sessions. Local edits alone do not publish or deploy them. With action grants provisioned,
+`gitops_publish` exports an exact commit through a temporary bare repository and
+pushes only to `toasterson/talos`, without loading sandbox Git configuration on the
+host or exposing SSH credentials. Force pushes and arbitrary remotes are absent.
 
 ### Bounded wake cadence
 
@@ -228,3 +234,21 @@ Ambiguous transport failures and admitted turns are preserved. Compact session
 and pending-delivery queries support activity checks; T3 starts its live activity
 feed when a bot is running or has finished, rather than while it is queued.
 Board write tools expose the registered status/delegation schemas explicitly.
+
+### Vesta action grants and Janus merge authority
+
+Run `configure_vesta_actions.py ROOT` to install the loopback Grafana MCP tunnel,
+discover the live tool catalog, pin the cluster context and render Vesta grants.
+The broker forwards authenticated `grafana__*` tools to the existing homelab MCP,
+including write tools; Grafana credentials stay in that deployment. The broker
+exposes named Kubernetes apply/patch/delete/scale/restart/cordon operations via
+`homelab_write`. It never executes arbitrary host shell commands. Reload the broker
+and session daemon at a quiescent boundary. Janus and Minerva get none of these
+tools. Verify using a temporary branch, ConfigMap lifecycle, and Grafana annotation.
+
+`configure_janus.py ROOT` records the operator's explicit standing authorization
+for Janus to use its existing `anima__approve_and_merge` grant. Anima enforces the
+live head, preceding review and exact-head CI. Explicit holds and human gates remain
+in force. Janus can discover active workers on Board and send an addressed, bounded
+handoff when a technical boundary requires it. `activate.py` preserves both role
+configurations. No actual application PR is merged merely to test tool availability.
