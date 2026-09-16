@@ -76,3 +76,8 @@ plist('observer',['/usr/bin/python3',str(root/'bin/observer.py'),str(root)],user
 for name,service,ports in [('metrics-tunnel','vmsingle','18440:8428')]:
     plist(name,['/opt/homebrew/bin/kubectl','-n','observability','port-forward','--address=127.0.0.1','service/'+service,ports])
 print('Rendered three enabled automations, inbox intake, Anima change routes, alert routes and schedules')
+
+# Preserve explicitly provisioned Vesta capabilities when rerendering wakes.
+if (root/'config/vesta-ops.json').exists():
+    import subprocess
+    subprocess.run([sys.executable,str(source/'configure_vesta.py'),str(root)],check=True)

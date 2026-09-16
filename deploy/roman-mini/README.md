@@ -191,3 +191,23 @@ or cancelling a feed does not start, repeat, or cancel the bot's actual job.
 Use the original role providers for direct instructions. Historical attempts and
 errors remain visible. Model credentials and project filesystem access are never
 provided to these viewers.
+
+### Vesta GitOps sandbox and homelab diagnostics
+
+Vesta alone can use `homelab_inspect` (live Kubernetes get/describe/pod logs) and
+`gitops_exec` (commands and file edits in the fixed `roman-vesta-gitops` Colima
+container). The container has a dedicated `toasterson/talos` clone at `/workspace`,
+a non-root UID, read-only root filesystem, no network, dropped capabilities,
+no Docker socket or host credentials, and bounded CPU, memory, process and command
+budgets. Git, Python, jq, yamllint and kubectl/kustomize are installed. Persistent
+edits live in the dedicated checkout; host home directories are not exposed.
+`vesta_ops.py` checks the pinned container/image identity and confinement on each
+execution. Cluster credentials remain in the separate host diagnostics broker.
+
+`configure_vesta.py ROOT` registers only Vesta's grants and writes the
+`dev.roman-akhs.vesta-ops` LaunchAgent after `ROOT/config/vesta-ops.json` records the
+provisioned container. `activate.py` preserves this configuration on rerender.
+The image recipe is `vesta/Dockerfile`; its kubectl download is checksum-verified.
+Validate sandbox writes, denied host/credential/socket access, denied network and
+live node reads before enabling new sessions. Prepared fixes and patch evidence
+travel through Sokar/Anima/Board; local edits alone do not publish or deploy them.
