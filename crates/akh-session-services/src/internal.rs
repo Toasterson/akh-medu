@@ -218,40 +218,43 @@ pub(crate) fn run_loop(
                 "model tool response was truncated or malformed",
             ));
         }
+        // Validate the entire model plan before persisting it or executing its
+        // first call. Malformed model output is not an uncertain tool outcome.
+        let mut ids = HashSet::new();
+        let mut plan = Vec::new();
+        for call in &calls {
+            let raw_id = call["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 512)
+                .ok_or_else(|| Fault::new("model_incomplete", "model tool call has no valid ID"))?;
+            if !ids.insert(raw_id) {
+                return Err(Fault::new("model_incomplete", "duplicate model tool call ID"));
+            }
+            let name = call["function"]["name"].as_str().filter(|s| !s.is_empty())
+                .ok_or_else(|| Fault::new("model_incomplete", "tool name missing"))?;
+            let arguments: Value = serde_json::from_str(call["function"]["arguments"].as_str()
+                .ok_or_else(|| Fault::new("model_incomplete", "tool arguments must be JSON text"))?)
+                .map_err(|_| Fault::new("model_incomplete", "model tool arguments are invalid JSON"))?;
+            if !arguments.is_object() {
+                return Err(Fault::new("model_incomplete", "model tool arguments must be an object"));
+            }
+            plan.push((raw_id.to_owned(), name.to_owned(), arguments));
+        }
         let output = message["content"].as_str().unwrap_or("").to_owned();
         conversation.messages.push(message);
-        // A returned tool plan is durable before any callback can have effects.
+        // A validated tool plan is durable before any callback can have effects.
         store.transaction(|tx| tx.put(&k, &conversation))?;
-        if calls.is_empty() {
+        if plan.is_empty() {
             conversation.active_job = None;
             store.transaction(|tx| tx.put(&k, &conversation))?;
             return Ok(output);
         }
-        let mut ids = HashSet::new();
-        for (index, call) in calls.iter().enumerate() {
-            let raw_id = call["id"]
-                .as_str()
-                .filter(|s| !s.is_empty() && s.len() <= 512)
-                .ok_or_else(|| Fault::invalid("model tool call has no valid ID"))?;
-            if !ids.insert(raw_id) {
-                return Err(Fault::invalid("duplicate model tool call ID"));
-            }
+        for (index, (raw_id, name, arguments)) in plan.into_iter().enumerate() {
             check(cancel, deadline)?;
-            let name = call["function"]["name"]
-                .as_str()
-                .ok_or_else(|| Fault::invalid("tool name missing"))?;
-            let arguments: Value = serde_json::from_str(
-                call["function"]["arguments"]
-                    .as_str()
-                    .ok_or_else(|| Fault::invalid("tool arguments must be JSON text"))?,
-            )
-            .map_err(|_| Fault::invalid("model tool arguments are invalid JSON"))?;
             let id = format!("internal-{iteration}-{index}");
             let result = if request.tools.iter().any(|t| t.name == name) {
-                host.tool(&id, name, arguments)
+                host.tool(&id, &name, arguments)
                     .map_err(|e| Fault::new("tool_callback", e))?
             } else {
-                ToolResult::denied(name, None)
+                ToolResult::denied(&name, None)
             };
             conversation.messages.push(json!({"role":"tool","tool_call_id":raw_id,"content":serde_json::to_string(&result).map_err(|_| Fault::invalid("cannot encode tool result"))?}));
             store.transaction(|tx| tx.put(&k, &conversation))?;
@@ -311,7 +314,8 @@ struct Call {
 #[derive(Default)]
 struct Stream {
     text: String,
-    calls: BTreeMap<usize, Call>,
+    calls: BTreeMap<(usize, usize), Call>,
+    generations: BTreeMap<usize, usize>,
     finish: Option<String>,
     done: bool,
 }
@@ -362,7 +366,23 @@ impl Stream {
                     .filter(|i| *i < 128)
                     .ok_or_else(|| Fault::invalid("invalid tool delta index"))?
                     as usize;
-                let call = self.calls.entry(index).or_default();
+                let generation = self.generations.entry(index).or_default();
+                // Ollama can emit several complete calls with index=0 in one
+                // delta. A distinct full ID plus two complete argument objects
+                // establishes a new call, never a fragment of the old call.
+                let complete_object = |text: &str| serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object());
+                if let Some(previous) = self.calls.get(&(index, *generation)) {
+                    let new_id = delta["id"].as_str().unwrap_or("");
+                    if !new_id.is_empty() && !previous.id.is_empty() && new_id != previous.id
+                        && delta["function"]["name"].as_str().is_some_and(|s| !s.is_empty())
+                        && complete_object(&previous.arguments)
+                        && delta["function"]["arguments"].as_str().is_some_and(complete_object)
+                    { *generation += 1; }
+                }
+                if !self.calls.contains_key(&(index, *generation)) && self.calls.len() >= 128 {
+                    return Err(Fault::new("model_incomplete", "too many tool calls"));
+                }
+                let call = self.calls.entry((index, *generation)).or_default();
                 for (target, value) in [
                     (&mut call.id, &delta["id"]),
                     (&mut call.name, &delta["function"]["name"]),
@@ -514,6 +534,21 @@ mod tests {
         let request=serde_json::from_value(json!({"id":"job","session_id":"session","turn_id":"turn","generation":1,"binding":{"runtime":"runtime","profile":"local","revision":"1","kind":"internal","model":"fixture","execution_mode":"brokered"},"workspace":{"id":"w","sandbox_id":"s","executor":"e","generation":1,"site":"test","root":"/remote-only","platform":"test","confinement":"test"},"input":{"origin":{"kind":"human","principal":"user"},"text":"read file"},"instructions":"Use supplied tools","tools":[{"name":"read","description":"read","input_schema":{"type":"object"},"read_only":true,"destination":{"kind":"workspace","operation":"read"}}],"approval_policy":"ask_writes"})).unwrap();
         (profile, request)
     }
+    #[test]
+    fn complete_calls_reusing_ollama_index_remain_separate() {
+        let mut stream = Stream::default();
+        let mut witness = Witness::default();
+        let delta = json!({"choices":[{"index":0,"delta":{"tool_calls":[
+            {"index":0,"id":"one","function":{"name":"memory_recall","arguments":"{\"query_symbols\":\"ledger\"}"}},
+            {"index":0,"id":"two","function":{"name":"monitoring_snapshot","arguments":"{}"}}
+        ]},"finish_reason":"tool_calls"}]});
+        stream.line(format!("data: {delta}").as_bytes(), &mut witness).unwrap();
+        let calls = stream.calls.values().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 2);
+        assert_eq!((calls[0].id.as_str(), calls[0].name.as_str()), ("one", "memory_recall"));
+        assert_eq!((calls[1].id.as_str(), calls[1].name.as_str(), calls[1].arguments.as_str()), ("two", "monitoring_snapshot", "{}"));
+    }
+
     #[test]
     fn model_authentication_rejects_ambiguous_and_invalid_sources() {
         let (mut profile, request) = fixture(

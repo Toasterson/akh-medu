@@ -99,7 +99,10 @@ preserved. Sokar's artifact backend remained unavailable during activation;
 consult current evidence before claiming artifact writes healthy. Internal notes
 remain available. A known model output-limit
 stop fails its turn without quarantining unrelated jobs; uncertain tool outcomes
-retain reconciliation gates.
+retain reconciliation gates. Complete Ollama tool calls that reuse stream index
+zero remain separate by their full call identities. The entire tool plan is
+validated before persistence or execution, so malformed arguments cannot trigger
+a partial batch or quarantine the runtime as an uncertain tool outcome.
 
 The provider profiles use Ollama Cloud and OpenRouter's chat-completions APIs.
 Routine wakes use Ollama Cloud `mistral-large-3:675b`, selected after GLM

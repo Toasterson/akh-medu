@@ -560,9 +560,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn incomplete_model_response_fails_without_quarantining_next_job() {
         use axum::{Router, routing::post};
-        let body = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}));
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app = Router::new().route("/", post(move || {
-            let body = body.clone();
+            let nth = counter.fetch_add(1, Ordering::SeqCst);
+            let choice = if nth == 1 {
+                json!({"index":0,"delta":{"tool_calls":[{"index":0,"id":"bad","function":{"name":"read","arguments":"{broken"}}]},"finish_reason":"tool_calls"})
+            } else { json!({"index":0,"delta":{"content":"partial"},"finish_reason":"length"}) };
+            let body = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[choice]}));
             async move { ([("content-type", "text/event-stream")], body) }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -577,7 +581,7 @@ mod tests {
         })).unwrap());
         let principal = cfg.principals[0].clone();
         let runtime = Runtime::new(Arc::new(cfg), Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
-        for id in ["limited-one", "limited-two"] {
+        for id in ["limited-one", "malformed-plan", "limited-two"] {
             let mut req = request(id);
             req.binding.profile = "local".into();
             req.binding.revision = "1".into();
