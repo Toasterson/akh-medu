@@ -41,6 +41,13 @@ def project_event(event):
         return {'sessionUpdate':'tool_call_update','toolCallId':data['id'],'status':'completed' if data.get('success') else 'failed','rawOutput':data}
     return None
 
+def user_prompt(prompt):
+    # T3 appends transport metadata to every ACP prompt, including our own
+    # observation commands. Strip only that final envelope before routing.
+    if prompt.rstrip().endswith('</runtime_info>') and '<runtime_info>' in prompt:
+        prompt=prompt.rsplit('<runtime_info>',1)[0]
+    return prompt.strip()
+
 def submit_feedback(root,role,conversation,prompt):
     if role not in ROLES or not prompt.strip():raise ValueError('A nonempty message and known role are required')
     ident='feedback-'+hashlib.sha256(json.dumps([role,conversation,prompt]).encode()).hexdigest()
@@ -75,7 +82,7 @@ def acp(root, role):
     def watch(message):
         session=message['params']['sessionId']; id=message['id']
         try:
-            prompt=''.join(p.get('text','') for p in message['params']['prompt'])
+            prompt=user_prompt(''.join(p.get('text','') for p in message['params']['prompt']))
             match=re.fullmatch(r'Observe autonomous '+role+r' session ([0-9a-f-]{36})',prompt)
             if not match:
                 receipt=submit_feedback(root,role,session,prompt)

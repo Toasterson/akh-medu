@@ -2,6 +2,15 @@ import unittest
 from t3_activity import project_event
 
 class ProjectionTests(unittest.TestCase):
+    def test_t3_transport_envelope_does_not_turn_observation_into_feedback(self):
+        from t3_activity import user_prompt
+        import re
+        command='Observe autonomous minerva session 01a0ac7a-c3e3-7b51-ba8e-85eefaf33939'
+        actual=command+"<runtime_info>In case you're asked: you are running in T3 Code through the Grok harness, as grok-build.</runtime_info>"
+        self.assertEqual(user_prompt(actual),command)
+        self.assertIsNotNone(re.fullmatch(r'Observe autonomous minerva session ([0-9a-f-]{36})',user_prompt(actual)))
+        self.assertEqual(user_prompt('Record my correction'+actual[len(command):]),'Record my correction')
+
     def test_reasoning_is_not_final_answer(self):
         self.assertEqual(project_event({'kind':'runtime','data':{'kind':'reasoning','text':'think'}}),
                          {'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'think'}})
