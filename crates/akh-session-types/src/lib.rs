@@ -436,6 +436,9 @@ pub enum RuntimeEvent {
     Text {
         text: String,
     },
+    Reasoning {
+        text: String,
+    },
     ToolStarted {
         id: String,
         name: String,

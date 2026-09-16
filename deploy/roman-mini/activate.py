@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render the authorized scheduled/event deployment; no cluster workloads changed."""
 import json
+import copy
 from pathlib import Path
 import plistlib
 import secrets
@@ -38,19 +39,25 @@ for role in roles:
 Coordinate directly only when another role has a concrete next action: use board_send_inbox with message_type coordination/delegation@v1 and payload {assignee_id, objective, scope:[...]}; status messages do not wake teammates. Avoid acknowledgements that ask for another acknowledgement. Record handoff IDs to prevent duplicate requests. '''+json.dumps(ids)+'''
 Monitoring snapshots include observation times: unavailable or stale is unknown, never healthy. Vesta can triage and coordinate through Anima/Board but has no Kubernetes or shell remediation grant. Report actionable findings and material blockers on thread 01a0ab49-9cc4-7012-8785-1eada26fbd46 using coordination/status@v1 (payload state and detail); at most one unchanged-blocker digest per day. If a tool rejects your arguments, correct the schema once; do not loop on the same failure. Save durable notes before ending. Initial activation should establish your ledger and name one useful next action without mass-changing project state.'''
     profile=session['akhs'][role]
-    profile['runtime']['model']='mistral-large-3:675b'
+    profile['runtime']['model']='glm-5.3'
+    profile['runtime']['profile']='ollama-'+role
     profile['tools']=[t for t in profile['tools'] if t['name']!='monitoring_snapshot']
     for tool in profile['tools']:
         if tool['name'] in ('board__board_post_thread','board__board_send_inbox'):
             tool['input_schema']['properties']['payload']['type']='object'
             tool['input_schema']['properties']['payload']['description']='A JSON object matching the registered protocol. Never stringify this object.'
     profile['tools'].append({'name':'monitoring_snapshot','description':'Read timestamped alerts, local daemon health and observer coverage. Missing feeds mean unknown state. No filesystem access.','input_schema':{'type':'object','properties':{},'additionalProperties':False},'read_only':True,'destination':{'kind':'mcp','service':'observer','tool':'monitoring_snapshot'}})
+session['session_stall_threshold_ms']=1800000
 save(session_path,session)
 runtime_path=root/'config/runtime.json';runtime=json.loads(runtime_path.read_text())
 for profile in runtime['runtimes'].values():
-    profile['timeout_secs']=420
-    profile['model_endpoint'].update(max_output_tokens=8192,max_iterations=16)
-runtime['runtimes']['ollama']['model_endpoint']['reasoning_effort']='none'
+    profile['timeout_secs']=1200
+    profile['model_endpoint'].update(max_output_tokens=32768,max_iterations=16)
+runtime['runtimes']['ollama']['model_endpoint'].pop('reasoning_effort',None)
+for role in roles:
+    profile=copy.deepcopy(runtime['runtimes']['ollama'])
+    profile['isolation']['directory']=str(root/'state'/('provider-ollama-'+role))
+    runtime['runtimes']['ollama-'+role]=profile
 save(runtime_path,runtime)
 events={'service_id':'events','listen':'127.0.0.1:18435','public_url':'http://127.0.0.1:18435','data_dir':str(root/'state/events'),'store':{'kind':'sqlite'},
  'principals':[{'id':'observer','token_file':key('observer'),'roles':['event'],'sources':['roman-clock','roman-anima','roman-alerts']},

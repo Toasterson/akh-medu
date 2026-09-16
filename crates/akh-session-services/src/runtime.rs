@@ -186,15 +186,9 @@ impl Runtime {
             active: Default::default(),
         })
     }
-    /// Automatic, evidence-free closure of a job whose outcome has been
-    /// unknown for longer than the configured stall threshold. This never
-    /// claims success — it only ever transitions `Unknown` -> `Failed` — so
-    /// it cannot corrupt history the way a mistaken admin `reconcile` call
-    /// claiming `Completed` could; that endpoint still exists for a human who
-    /// has actual evidence. Without this sweep, one lost job (this process
-    /// restarting mid-turn, or its worker panicking) permanently quarantines
-    /// every future job for the same Akh: `submit` below refuses to admit any
-    /// new job while any job on this runtime stays `Unknown`.
+    /// Legacy native-runtime expiry. Internal brokered jobs are excluded:
+    /// elapsed time cannot establish whether an uncertain tool had effects.
+    /// Their owning profile stays quarantined until evidence reconciles it.
     pub fn resolve_stale_unknown_jobs(&self) -> Result<Vec<String>> {
         let active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let threshold = self.config.session_stall_threshold_ms;
@@ -202,7 +196,7 @@ impl Runtime {
         self.store.transaction(|tx| {
             let mut resolved = vec![];
             for mut job in tx.scan::<RuntimeJob>("job/")? {
-                if job.request.binding.runtime != self.config.service_id || job.status != TurnStatus::Unknown || active.contains_key(&job.request.id) {
+                if job.request.binding.runtime != self.config.service_id || job.status != TurnStatus::Unknown || active.contains_key(&job.request.id) || job.request.binding.kind == RuntimeKind::Internal {
                     continue;
                 }
                 let Some(since) = tx.get::<u64>(&unknown_since_key(&job.request.id))? else {
@@ -238,6 +232,27 @@ impl Runtime {
         }
         Ok(job)
     }
+    /// Atomically fence a dispatch that was cancelled before admission. A late
+    /// submit observes this exact tombstone and cannot start a model or tool.
+    pub fn cancel_unsubmitted(&self, principal: &Principal, request: RuntimeJobRequest) -> Result<RuntimeJob> {
+        crate::http::role(principal, "session")?;
+        validate_key(&request.id)?;
+        if request.binding.runtime != self.config.service_id || request.generation == 0 {
+            return Err(Fault::new("forbidden", "runtime binding is not owned by this service"));
+        }
+        let _active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        self.store.transaction(|tx| {
+            if let Some(old) = tx.get::<RuntimeJob>(&job_key(&request.id))? {
+                if old.request != request { return Err(Fault::conflict("job id reused with a different dispatch")); }
+                return Ok(old);
+            }
+            let job = RuntimeJob { provider_session: request.provider_session.clone(), request,
+                status: TurnStatus::Cancelled, output: None,
+                error: Some(Fault::new("cancelled", "cancelled before runtime admission")), events: vec![] };
+            tx.put(&job_key(&job.request.id), &job)?;
+            Ok(job)
+        })
+    }
     pub fn submit(&self, principal: &Principal, request: RuntimeJobRequest) -> Result<RuntimeJob> {
         crate::http::role(principal, "session")?;
         validate_key(&request.id)?;
@@ -270,6 +285,10 @@ impl Runtime {
         }
         if self.store.scan::<RuntimeJob>("job/")?.iter().any(|j| {
             j.request.binding.runtime == self.config.service_id && j.status == TurnStatus::Unknown
+                && (j.request.binding.kind != RuntimeKind::Internal
+                    || profile.kind != RuntimeKind::Internal
+                    || j.request.binding.profile == request.binding.profile
+                    || j.request.session_id == request.session_id)
         }) {
             return Err(Fault::new(
                 "unknown_outcome",
@@ -335,13 +354,13 @@ impl Runtime {
                             "provider answer exceeded the durable job response budget",
                         ));
                     }
-                    Err(error) if profile.kind == RuntimeKind::Internal && error.code == "model_incomplete" => {
-                        // This typed error is raised before the new assistant
-                        // tool plan is persisted or executed. Every preceding
-                        // iteration has durable receipts. Retire continuation
+                    Err(error) if profile.kind == RuntimeKind::Internal && matches!(error.code.as_str(), "model_incomplete" | "model_cancelled") => {
+                        // These typed errors occur only at model boundaries,
+                        // with no callback outstanding and preceding tool
+                        // results durable. Retire the continuation
                         // without claiming success or replaying earlier effects.
                         crate::internal::reconcile(tx, &job, false)?;
-                        job.status = TurnStatus::Failed;
+                        job.status = if error.code == "model_cancelled" { TurnStatus::Cancelled } else { TurnStatus::Failed };
                         job.error = Some(error);
                     }
                     Err(error) => {
@@ -532,9 +551,12 @@ impl akh_runtime::Host for RemoteHost {
         name: &str,
         arguments: Value,
     ) -> std::result::Result<ToolResult, String> {
-        self.callback("/v1/runtime/tools", json!(self.call(id, name, arguments)))?
-            .result
-            .ok_or_else(|| "tool callback has no result".into())
+        self.event(RuntimeEvent::ToolStarted { id: id.into(), name: name.into() })?;
+        let result = self.callback("/v1/runtime/tools", json!(self.call(id, name, arguments)))?
+            .result.ok_or_else(|| "tool callback has no result".to_owned())?;
+        self.event(RuntimeEvent::ToolCompleted { id: id.into(), success: result.success,
+            details: Some(json!({"receipt":result.receipt,"text":result.text})) })?;
+        Ok(result)
     }
     fn approval(
         &mut self,
@@ -557,6 +579,21 @@ impl akh_runtime::Host for RemoteHost {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancelled_unsubmitted_dispatch_cannot_run_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config(dir.path());
+        let principal = cfg.principals[0].clone();
+        let runtime = Runtime::new(cfg, Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
+        let req = request("cancelled-before-admission");
+        let job = runtime.cancel_unsubmitted(&principal, req.clone()).unwrap();
+        assert_eq!(job.status, TurnStatus::Cancelled);
+        assert_eq!(runtime.submit(&principal, req.clone()).unwrap(), job);
+        let mut changed = req; changed.input.text = "different".into();
+        assert!(runtime.submit(&principal, changed).is_err());
+        assert!(runtime.active.lock().unwrap().is_empty());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn incomplete_model_response_fails_without_quarantining_next_job() {
         use axum::{Router, routing::post};
@@ -567,7 +604,10 @@ mod tests {
                 json!({"index":0,"delta":{"tool_calls":[{"index":0,"id":"bad","function":{"name":"read","arguments":"{broken"}}]},"finish_reason":"tool_calls"})
             } else { json!({"index":0,"delta":{"content":"partial"},"finish_reason":"length"}) };
             let body = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices":[choice]}));
-            async move { ([("content-type", "text/event-stream")], body) }
+            async move {
+                if nth == 3 { tokio::time::sleep(Duration::from_secs(30)).await; }
+                ([("content-type", "text/event-stream")], body)
+            }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/", listener.local_addr().unwrap());
@@ -581,7 +621,19 @@ mod tests {
         })).unwrap());
         let principal = cfg.principals[0].clone();
         let runtime = Runtime::new(Arc::new(cfg), Store::open(&dir.path().join("runtime.redb")).unwrap()).unwrap();
-        for id in ["limited-one", "malformed-plan", "limited-two"] {
+        // An uncertain callback in another provisioned internal profile must
+        // remain uncertain without quarantining this independent role.
+        let mut uncertain = unknown_job("other-role");
+        uncertain.request.binding.kind = RuntimeKind::Internal;
+        uncertain.request.binding.profile = "other-role".into();
+        uncertain.request.session_id = "other-session".into();
+        runtime.store.transaction(|tx| {
+            tx.put(&job_key("other-role"), &uncertain)?;
+            tx.put(&unknown_since_key("other-role"), &0u64)
+        }).unwrap();
+        assert!(runtime.resolve_stale_unknown_jobs().unwrap().is_empty());
+        assert_eq!(runtime.get("other-role").unwrap().status, TurnStatus::Unknown);
+        for id in ["limited-one", "malformed-plan", "limited-two", "cancel-model"] {
             let mut req = request(id);
             req.binding.profile = "local".into();
             req.binding.revision = "1".into();
@@ -589,6 +641,14 @@ mod tests {
             req.binding.execution_mode = ExecutionMode::Brokered;
             req.binding.model = Some("fixture".into());
             runtime.submit(&principal, req).unwrap();
+            if id == "cancel-model" {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while runtime.get(id).unwrap().events.is_empty() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.unwrap();
+                runtime.cancel(id).unwrap();
+            }
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     if runtime.active.lock().unwrap().is_empty() { break; }
@@ -596,8 +656,13 @@ mod tests {
                 }
             }).await.unwrap();
             let job = runtime.get(id).unwrap();
-            assert_eq!(job.status, TurnStatus::Failed);
-            assert_eq!(job.error.unwrap().code, "model_incomplete");
+            if id == "cancel-model" {
+                assert_eq!(job.status, TurnStatus::Cancelled);
+                assert_eq!(job.error.unwrap().code, "model_cancelled");
+            } else {
+                assert_eq!(job.status, TurnStatus::Failed);
+                assert_eq!(job.error.unwrap().code, "model_incomplete");
+            }
         }
         server.abort();
     }

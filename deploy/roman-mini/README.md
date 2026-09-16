@@ -95,9 +95,9 @@ have no filesystem or shell tools. Provider keys remain in process environments.
 
 Grafana uses its HTTPS route with the authenticated cluster's public PKI CA;
 its failing kubelet port-forward is not required. Alert suppression metadata is
-preserved. Sokar's artifact backend remained unavailable during activation;
-consult current evidence before claiming artifact writes healthy. Internal notes
-remain available. A known model output-limit
+preserved. Sokar's initially unavailable artifact backend was rechecked during
+the GLM repair: a scoped verification artifact was written and read back exactly.
+Internal notes remain independent of the archive backend. A known model output-limit
 stop fails its turn without quarantining unrelated jobs; uncertain tool outcomes
 retain reconciliation gates. Complete Ollama tool calls that reuse stream index
 zero remain separate by their full call identities. The entire tool plan is
@@ -105,12 +105,17 @@ validated before persistence or execution, so malformed arguments cannot trigger
 a partial batch or quarantine the runtime as an uncertain tool outcome.
 
 The provider profiles use Ollama Cloud and OpenRouter's chat-completions APIs.
-Routine wakes use Ollama Cloud `mistral-large-3:675b`, selected after GLM
-repeatedly exhausted its budget planning without tool calls. Authenticated tests
-used the same full Vesta prompt and tool catalog. They request
-`reasoning_effort: none`, use an 8192-token output
-budget and a 420-second turn deadline. This uses Ollama's documented
-[reasoning control](https://docs.ollama.com/api/openai-compatibility).
+Routine wakes use Ollama Cloud `glm-5.3` with thinking enabled by the provider.
+Each response has a 32768-token budget and each turn a 1200-second deadline.
+Reasoning is preserved verbatim in its provider field across tool rounds and
+streamed separately as ACP `agent_thought_chunk`; empty content chunks are ignored.
+Each role has a dedicated runtime profile, so an uncertain internal tool outcome
+quarantines that role rather than unrelated roles. Such uncertainty never expires
+merely because time passed. Native child runtimes retain their global quarantine.
+Model-only interruptions retire the continuation without replaying past effects.
+Queued cancellations are persisted as runtime tombstones before admission.
+Capacity waiting does not count as a stalled running session.
+See [GLM thinking requirements](https://docs.z.ai/guides/capabilities/thinking-mode).
 Board message payload schemas are narrowed to objects for the roles' structured
 coordination protocols, avoiding stringified JSON payloads. Wake instructions
 bound work to eight tool calls and require an early durable checkpoint.
@@ -144,7 +149,7 @@ The installed T3 build has no generic ACP provider setting. `t3_entrypoint.py`
 adapts its existing Grok ACP transport to `akh-acp --t3-compat`, using separately
 scoped Roman client credentials. Provider instances display the Roman role
 names; the transport's `grok-build` alias means the daemon-configured model
-(Mistral Large 3 via Ollama), not an xAI model. No T3 project files or filesystem tools
+(GLM-5.3 via Ollama), not an xAI model. No T3 project files or filesystem tools
 are forwarded. T3 settings are watched live; preserve unrelated instances.
 
 Dedicated launchd-managed localhost Kubernetes tunnels route Djehuty and Sokar
@@ -172,3 +177,17 @@ callback principal mismatch. It was reconciled through the runtime API against
 the exact request hash and retired through the session API; failed evidence is
 retained. The renderer now uses the required `sandboxes` alias and runtime
 callback principal.
+
+### Autonomous activity in T3
+
+`configure_t3.py` also installs three read-only activity ACP providers and a
+`t3-activity` LaunchAgent. Its supported T3 auth CLI issues a short-lived token
+held only in memory; HTTP orchestration creates the **Roman autonomous activity**
+project and one thread per role. Private SQLite records submitted session IDs,
+and deterministic command IDs make retries idempotent. It never edits T3 tables.
+The ACP viewer reads only sessions owned by that role's scoped T3 principal,
+streams reasoning and tool receipt events, and reports terminal outcomes. Watching
+or cancelling a feed does not start, repeat, or cancel the bot's actual job.
+Use the original role providers for direct instructions. Historical attempts and
+errors remain visible. Model credentials and project filesystem access are never
+provided to these viewers.

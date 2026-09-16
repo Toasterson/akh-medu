@@ -313,7 +313,11 @@ impl SessionApp {
             .store
             .transaction(|tx| tx.put(&k, &now_ms()))?;
         let mut retiring = session.retirement.is_some();
-        if !retiring
+        let waiting_for_capacity = session.turns.iter().any(|t|
+            !t.cancel_requested && matches!(t.status, TurnStatus::Queued | TurnStatus::Dispatching))
+            && self.sessions.store.get::<Fault>(&key("dispatch_error", &[&session.id]))?
+                .is_some_and(|e| e.code == "busy");
+        if !retiring && !waiting_for_capacity
             && crate::session::is_stalled(
                 session.last_progress_at,
                 now_ms(),
@@ -555,6 +559,10 @@ impl SessionApp {
         let runtime = &request.binding.runtime;
         let mut job: RuntimeJob = match self.client.get(runtime, &path).await {
             Ok(job) => job,
+            Err(error) if error.code == "not_found" && turn.cancel_requested
+                && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) => {
+                self.client.post(runtime, "/v1/jobs/cancel-unsubmitted", &request).await?
+            }
             Err(error)
                 if error.code == "not_found"
                     && matches!(turn.status, TurnStatus::Queued | TurnStatus::Dispatching) =>

@@ -22,7 +22,7 @@ elif 'models' in sys.argv:
     try:
         with urllib.request.urlopen(request, timeout=5):
             pass
-        print('You are logged in to the Roman Akh session daemon.\nDefault model: grok-build\nAvailable models:\n * grok-build (default)\nTransport alias only: configured daemon model is Mistral Large 3 via Ollama Cloud.')
+        print('You are logged in to the Roman Akh session daemon.\nDefault model: grok-build\nAvailable models:\n * grok-build (default)\nTransport alias only: configured daemon model is GLM-5.3 with thinking via Ollama Cloud.')
     except Exception:
         raise SystemExit('Roman session daemon not authenticated or unavailable')
 else:

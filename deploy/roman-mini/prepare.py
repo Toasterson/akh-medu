@@ -65,7 +65,7 @@ def prepare(root, binaries, user, storage):
     for role in ROLES:
         akhs[role] = {"core_service": "core", "runtime": {
             "runtime": "runtime", "profile": "ollama", "revision": "roman-mini-v1",
-            "kind": "internal", "model": "mistral-large-3:675b", "execution_mode": "brokered"},
+            "kind": "internal", "model": "glm-5.3", "execution_mode": "brokered"},
             "instructions": common + "\n" + source.joinpath(f"roles/{role}.md").read_text(),
             "workspace_profiles": [role], "tools": [], "approval_policy": "allow_granted"}
         automations[role] = {"id": role, "enabled": False, "principal": "operator",

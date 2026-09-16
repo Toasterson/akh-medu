@@ -10,6 +10,7 @@ pub fn runtime_router(runtime: Runtime) -> Router {
     protect(
         Router::new()
             .route("/v1/jobs", post(start_job))
+            .route("/v1/jobs/cancel-unsubmitted", post(cancel_unsubmitted))
             .route("/v1/jobs/{id}", get(get_job))
             .route("/v1/jobs/{id}/cancel", post(cancel_job))
             .route("/v1/jobs/{id}/reconcile", post(reconcile_job))
@@ -47,4 +48,11 @@ async fn cancel_job(
 ) -> Api<RuntimeJob> {
     http::role(&p, "session")?;
     Ok(Json(runtime.cancel(&id)?))
+}
+
+async fn cancel_unsubmitted(
+    State(runtime): State<Runtime>, Extension(p): Extension<Principal>,
+    Json(request): Json<RuntimeJobRequest>,
+) -> Api<RuntimeJob> {
+    Ok(Json(runtime.cancel_unsubmitted(&p, request)?))
 }

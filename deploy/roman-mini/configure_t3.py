@@ -5,6 +5,7 @@ Run before starting/restarting akhsessd. Does not restart T3 or modify threads.
 Existing settings and each existing Roman credential are preserved.
 """
 import json
+import plistlib
 from pathlib import Path
 import secrets
 import shutil
@@ -35,6 +36,18 @@ for role, label in [('janus', 'Janus · Project Manager'), ('minerva', 'Minerva 
     data.setdefault('providerInstances', {})['roman-' + role] = {
         'driver': 'grok', 'displayName': label, 'enabled': True,
         'config': {'enabled': True, 'binaryPath': str(binary), 'customModels': []}}
+for role in ('janus','minerva','vesta'):
+    binary=root/'bin'/('roman-activity-'+role)
+    shutil.copy2(source/'t3_activity.py',binary); binary.chmod(0o700)
+    data.setdefault('providerInstances',{})['roman-activity-'+role]={
+        'driver':'grok','displayName':role.title()+' · Autonomous activity','enabled':True,
+        'config':{'enabled':True,'binaryPath':str(binary),'customModels':[]}}
+shutil.copy2(source/'t3_activity.py',root/'bin/t3_activity.py')
+(root/'launchd/dev.roman-akhs.t3-activity.plist').write_bytes(plistlib.dumps({
+    'Label':'dev.roman-akhs.t3-activity','ProgramArguments':['/usr/bin/python3',str(root/'bin/t3_activity.py'),'--service'],
+    'RunAtLoad':True,'KeepAlive':True,'ThrottleInterval':30,'Umask':63,
+    'EnvironmentVariables':{'HOME':str(Path.home()),'PATH':'/opt/homebrew/bin:/usr/bin:/bin'},
+    'StandardOutPath':str(root/'logs/t3-activity.out.log'),'StandardErrorPath':str(root/'logs/t3-activity.err.log')}))
 session_path.write_text(json.dumps(session, indent=2) + '\n')
 staged = settings.with_suffix('.roman-tmp')
 staged.write_text(json.dumps(data, indent=2) + '\n')

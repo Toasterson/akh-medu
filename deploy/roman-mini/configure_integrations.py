@@ -46,7 +46,7 @@ runtime = json.loads(runtime_path.read_text())
 for name, profile in runtime['runtimes'].items():
     endpoint = profile['model_endpoint']
     endpoint.pop('token_file', None)
-    endpoint['token_env'] = 'ROMAN_' + name.upper() + '_KEY'
+    endpoint['token_env'] = 'ROMAN_' + name.split('-')[0].upper() + '_KEY'
 save(runtime_path, runtime)
 session_path = root / 'config/sessions.json'
 session = json.loads(session_path.read_text())

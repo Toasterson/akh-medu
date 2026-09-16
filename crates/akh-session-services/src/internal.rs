@@ -162,7 +162,7 @@ pub(crate) fn run_loop(
     let deadline = Instant::now() + Duration::from_secs(profile.timeout_secs);
     let tools:Vec<Value> = request.tools.iter().map(|tool| json!({"type":"function","function":{"name":tool.name,"description":tool.description,"parameters":tool.input_schema}})).collect();
     for iteration in 0..endpoint.max_iterations {
-        check(cancel, deadline)?;
+        check(cancel, deadline).map_err(model_boundary)?;
         let mut messages = vec![json!({"role":"system","content":request.instructions})];
         messages.extend(conversation.messages.iter().cloned());
         let mut body = json!({"model":request.binding.model,"messages":messages,"stream":true,"max_tokens":endpoint.max_output_tokens});
@@ -200,7 +200,7 @@ pub(crate) fn run_loop(
             }
             call = call.bearer_auth(token);
         }
-        let (message, finish) = handle.block_on(completion(call, host, cancel, deadline))?;
+        let (message, finish) = handle.block_on(completion(call, host, cancel, deadline)).map_err(model_boundary)?;
         let calls = message
             .get("tool_calls")
             .and_then(Value::as_array)
@@ -248,7 +248,7 @@ pub(crate) fn run_loop(
             return Ok(output);
         }
         for (index, (raw_id, name, arguments)) in plan.into_iter().enumerate() {
-            check(cancel, deadline)?;
+            check(cancel, deadline).map_err(model_boundary)?;
             let id = format!("internal-{iteration}-{index}");
             let result = if request.tools.iter().any(|t| t.name == name) {
                 host.tool(&id, &name, arguments)
@@ -261,9 +261,15 @@ pub(crate) fn run_loop(
         }
     }
     Err(Fault::new(
-        "capacity",
+        "model_incomplete",
         "model iteration limit reached without a final answer",
     ))
+}
+
+// Only used where no broker callback is outstanding and all previous tool
+// results are durable. Never wrap callback or storage failures with this code.
+fn model_boundary(error: Fault) -> Fault {
+    Fault::new(if error.code == "cancelled" { "model_cancelled" } else { "model_incomplete" }, error.to_string())
 }
 
 pub fn reconcile(
@@ -314,6 +320,7 @@ struct Call {
 #[derive(Default)]
 struct Stream {
     text: String,
+    reasoning: BTreeMap<String, String>,
     calls: BTreeMap<(usize, usize), Call>,
     generations: BTreeMap<usize, usize>,
     finish: Option<String>,
@@ -354,7 +361,15 @@ impl Stream {
                 "model sent another choice after its finish reason",
             ));
         }
-        if let Some(text) = choice["delta"]["content"].as_str() {
+        // Preserve the provider's exact field and text across tool rounds.
+        for field in ["reasoning_content", "reasoning"] {
+            if let Some(text) = choice["delta"][field].as_str().filter(|text| !text.is_empty()) {
+                self.reasoning.entry(field.into()).or_default().push_str(text);
+                host.event(RuntimeEvent::Reasoning { text: text.into() })
+                    .map_err(Fault::invalid)?;
+            }
+        }
+        if let Some(text) = choice["delta"]["content"].as_str().filter(|text| !text.is_empty()) {
             self.text.push_str(text);
             host.event(RuntimeEvent::Text { text: text.into() })
                 .map_err(Fault::invalid)?;
@@ -472,6 +487,7 @@ async fn completion(
             ));
         }
         let mut message = json!({"role":"assistant","content":stream.text});
+        for (field, text) in stream.reasoning { message[&field] = json!(text); }
         if !stream.calls.is_empty() {
             message["tool_calls"]=Value::Array(stream.calls.into_values().map(|c|json!({"type":"function","id":c.id,"function":{"name":c.name,"arguments":c.arguments}})).collect());
         }
@@ -575,7 +591,7 @@ mod tests {
             async move {
                 let mut requests=observed.lock().unwrap(); requests.push(body);
                 let chunks=if requests.len()==1 { vec![
-                    json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"native","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
+                    json!({"choices":[{"index":0,"delta":{"reasoning_content":"Check the source first.","tool_calls":[{"index":0,"id":"native","function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
                     json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"file\"}"}}]},"finish_reason":"tool_calls"}]})
                 ] } else { vec![json!({"choices":[{"index":0,"delta":{"content":"Finished"},"finish_reason":"stop"}]})] };
                 let mut body=chunks.iter().map(|v|format!("data: {v}\n\n")).collect::<String>(); body.push_str("data: [DONE]\n\n");
@@ -600,6 +616,7 @@ mod tests {
                 "Finished"
             );
             assert_eq!(host.calls, 1);
+            assert!(host.events.iter().any(|e| matches!(e, RuntimeEvent::Reasoning { text } if text == "Check the source first.")));
             request.provider_session = host.events.iter().find_map(|e| {
                 if let RuntimeEvent::Bound {
                     provider_session, ..
@@ -637,6 +654,7 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|body| body["reasoning_effort"] == "none"));
         assert_eq!(requests[1]["messages"][3]["tool_call_id"], "native");
+        assert_eq!(requests[1]["messages"][2]["reasoning_content"], "Check the source first.");
         assert!(
             requests[2]["messages"]
                 .as_array()
