@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jevlike"
+version = "0.1.0"
+description = "Train a one-pass scorer over a variable list of text options."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Minimal Labs"}]
+dependencies = ["numpy>=1.26", "torch>=2.2"]
+
+[project.optional-dependencies]
+transformers = ["transformers>=4.45"]
+dev = ["pytest>=8"]
+games = [
+  "chess>=1.11",
+  "imageio>=2.37",
+  "imageio-ffmpeg>=0.6",
+  "pillow>=11",
+  "vizdoom>=1.2.4",
+]
+
+[project.scripts]
+jevlike-data = "jevlike.data:main"
+jevlike-train = "jevlike.train:main"
+jevlike-eval = "jevlike.eval:main"
+jevlike-predict = "jevlike.predict:main"
+
+[tool.setuptools.packages.find]
+include = ["jevlike*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--import-mode=importlib"]

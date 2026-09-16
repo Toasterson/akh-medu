@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.py[cod]
+data/
+runs/
+build/
+dist/
+.DS_Store
+*.mp3
+node_modules/
+examples/film/replay.html

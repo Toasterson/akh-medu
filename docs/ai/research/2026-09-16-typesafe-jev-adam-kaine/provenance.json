@@ -1,0 +1,16 @@
+{
+  "source_session": "rollout-2026-09-16T11-30-55-01a0a98e-10f7-7af3-9aae-70685457a1a2.jsonl",
+  "scope": "User-visible conversation through save request; excludes runtime instructions, internal reasoning and tools",
+  "messages": 19,
+  "source_text_verified": true,
+  "assets": [
+    {
+      "file": "assets/0d55ef09-0721-47f3-af81-bc9a8bba689b-479bf4e5-e1fb-47d0-bca6-506233fbfb41.png",
+      "sha256": "cfc37fc71a14d6e063b15822e2641124c10638e7484bca150e50506f9f8944d9"
+    },
+    {
+      "file": "assets/0d55ef09-0721-47f3-af81-bc9a8bba689b-5737eac1-2f42-4d27-a46f-f1206ca684f8.png",
+      "sha256": "7b2788f34c821f725495606a8dc3c8c44cf39f13453e4767db6cef7801732020"
+    }
+  ]
+}

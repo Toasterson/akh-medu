@@ -1,0 +1,56 @@
+[
+  {
+    "path": "papers/dream-rsi-2609.14858v1.pdf",
+    "requested_url": "https://arxiv.org/pdf/2609.14858v1",
+    "resolved_url": "https://arxiv.org/pdf/2609.14858v1",
+    "content_type": "application/pdf",
+    "bytes": 954448,
+    "sha256": "b2d13d5944d052c2b63d40e65dce116ebcc606e3b756f6acfc938afe21fe2db9",
+    "retrieved_at": "2026-09-16T20:23:11.956560+00:00"
+  },
+  {
+    "path": "papers/dream-rsi-2609.14858v1.html",
+    "requested_url": "https://arxiv.org/html/2609.14858v1",
+    "resolved_url": "https://arxiv.org/html/2609.14858v1",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 2145517,
+    "sha256": "47c94e404db74649df55ef643e1b08b6a4117517661368d9d79a86d5e21da6db",
+    "retrieved_at": "2026-09-16T20:23:11.972201+00:00"
+  },
+  {
+    "path": "sources/arxiv-abstract.html",
+    "requested_url": "https://arxiv.org/abs/2609.14858v1",
+    "resolved_url": "https://arxiv.org/abs/2609.14858v1",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 44134,
+    "sha256": "51b1b5ffd0dec47050f63969f18c1b10eb420d3372fcc3e61fd760557573a23a",
+    "retrieved_at": "2026-09-16T20:23:11.877394+00:00"
+  },
+  {
+    "path": "sources/project.html",
+    "requested_url": "https://dream-rsi.com/",
+    "resolved_url": "https://dream-rsi.com/",
+    "content_type": "text/html; charset=utf-8",
+    "bytes": 81535,
+    "sha256": "c58e522e9e879f1a51b421bf8408863f841e632f73b40347ba1e4a1ce4134e9e",
+    "retrieved_at": "2026-09-16T20:23:12.079153+00:00"
+  },
+  {
+    "path": "sources/repository-readme.md",
+    "requested_url": "https://raw.githubusercontent.com/zhengkid/Dream-RSI/main/README.md",
+    "resolved_url": "https://raw.githubusercontent.com/zhengkid/Dream-RSI/main/README.md",
+    "content_type": "text/plain; charset=utf-8",
+    "bytes": 7037,
+    "sha256": "88d12a26bc683b49b74824488d40661ea91ad28feac25566aa4d1ef8fa064747",
+    "retrieved_at": "2026-09-16T20:23:12.031856+00:00"
+  },
+  {
+    "path": "sources/tweet-fxtwitter.json",
+    "requested_url": "https://api.fxtwitter.com/Dr_Singularity/status/2100204780010222076",
+    "resolved_url": "https://api.fxtwitter.com/Dr_Singularity/status/2100204780010222076",
+    "content_type": "application/json",
+    "bytes": 3469,
+    "sha256": "7628b9e3d62b50bda904a56ebbb8851b60691acef30c5a2a04c4d5079e466bbc",
+    "retrieved_at": "2026-09-16T20:23:12.325878+00:00"
+  }
+]

@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dream-RSI &middot; Recursive Self-Improvement through Evolving Worlds</title>
+
+<meta name="description" content="Dream-RSI turns accumulated discovery history into a replay simulator, so exploration policies can be improved by dreaming offline before costly online deployment.">
+<link rel="canonical" href="https://www.dream-rsi.com/">
+
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://www.dream-rsi.com/">
+<meta property="og:title" content="Dream-RSI: Recursive Self-Improvement through Evolving Worlds">
+<meta property="og:description" content="Accumulated discovery history becomes a replay simulator. Dream inside it to improve exploration policies at near-zero cost, then redeploy online.">
+<meta property="og:image" content="https://www.dream-rsi.com/assets/fig1-overview.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@300..800&family=Google+Sans+Code:wght@400;500&family=Literata:ital,opsz,wght@0,7..72,400..600;1,7..72,400..600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+
+<!-- set the theme before first paint so the page never flashes the wrong one -->
+<script>
+  try {
+    var t = localStorage.getItem('dreamrsi-theme');
+    if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  } catch (e) { document.documentElement.dataset.theme = 'light'; }
+</script>
+
+<script>
+  MathJax = {
+    tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="hud">
+  <div class="hud-in">
+    <a class="wordmark" href="#top">
+      <!-- one root, two branches: the only tree shape CONTINUE(v) can make -->
+      <svg class="mark" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+        <path d="M6.5 14C12 14 12.5 8 19 8M6.5 14C12 14 12.5 20 19 20"
+              stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <circle cx="5.5" cy="14" r="3.2" fill="currentColor"/>
+        <circle cx="20.6" cy="8" r="2.4" fill="currentColor" opacity=".5"/>
+        <circle cx="20.6" cy="20" r="2.4" fill="currentColor" opacity=".5"/>
+      </svg>
+      Dream-RSI
+    </a>
+    <nav aria-label="Sections">
+      <a href="#idea" class="hide-s">Idea</a>
+      <a href="#insight" class="hide-s">Insight</a>
+      <a href="#method">Method</a>
+      <a href="#demos">Demo</a>
+      <a href="#results">Results</a>
+      <a href="#analysis" class="hide-s">Analysis</a>
+      <a href="#cite" class="hide-s">Cite</a>
+      <a class="navbtn" href="assets/dream-rsi.pdf">Paper &#8599;</a>
+      <button class="tbtn" data-theme-toggle type="button" aria-label="Switch colour theme">Dark</button>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+  <section class="hero" id="top">
+    <div class="hero-in">
+      <p class="eyebrow rv in">Technical Report &middot; 2026</p>
+
+      <div class="orgs rv in d1">
+        <a href="https://research.google/" target="_blank" rel="noopener" aria-label="Google">
+          <svg class="lg lg-google" role="img" width="272" height="92" viewBox="0 0 272 92"><use href="#lg-google"></use></svg></a>
+        <a href="https://deepmind.google/" target="_blank" rel="noopener" aria-label="Google DeepMind">
+          <svg class="lg lg-deepmind" role="img" width="2201" height="363" viewBox="0 0 2201 363"><use href="#lg-deepmind"></use></svg></a>
+        <a href="https://www.umd.edu/" target="_blank" rel="noopener" aria-label="University of Maryland, College Park">
+          <svg class="lg lg-umd" role="img" width="314" height="50" viewBox="0 0 314 50"><use href="#lg-umd"></use></svg></a>
+        <a href="https://www.virginia.edu/" target="_blank" rel="noopener" aria-label="University of Virginia">
+          <svg class="lg lg-uva" role="img" width="218.19" height="52.74" viewBox="0 0 218.19 52.74"><use href="#lg-uva"></use></svg></a>
+      </div>
+
+      <h1 class="papertitle rv in d1">
+        Dream-RSI: Recursive Self-Improvement<br>through <span class="grad">Evolving Worlds</span>
+      </h1>
+
+      <p class="authors rv in d1">
+        Tong&nbsp;Zheng<sup>1,2</sup>,
+        Xidong&nbsp;Wu<sup>1&#9993;</sup>,
+        Zheng&nbsp;Zhang<sup>1&#9993;</sup>,
+        Zhankui&nbsp;He<sup>3</sup>,
+        Chaoyi&nbsp;Zhang<sup>1</sup>,
+        Benjamin&nbsp;Coleman<sup>3</sup>,
+        Ruoqiao&nbsp;Wei<sup>1</sup>,
+        Di&nbsp;Bai<sup>3</sup>,
+        Haolin&nbsp;Liu<sup>4</sup>,
+        Rui&nbsp;Liu<sup>2</sup>,
+        Xue&nbsp;Wang<sup>1</sup>,
+        Yue&nbsp;Zhuan<sup>1</sup>,
+        Wang-Cheng&nbsp;Kang<sup>3</sup>,
+        Renkai&nbsp;Xiang<sup>1</sup>,
+        Heng&nbsp;Huang<sup>2</sup>,
+        Xinwu&nbsp;Cheng<sup>1</sup>,
+        Yunsong&nbsp;Guo<sup>1</sup>
+      </p>
+      <p class="affils rv in d1">
+        <sup>1</sup>Google &nbsp;&middot;&nbsp;
+        <sup>2</sup>University of Maryland, College&nbsp;Park &nbsp;&middot;&nbsp;
+        <sup>3</sup>Google DeepMind &nbsp;&middot;&nbsp;
+        <sup>4</sup>University of Virginia
+      </p>
+      <p class="fnotes rv in d1"><sup>&#9993;</sup>Corresponding authors</p>
+
+      <p class="tagline rv in d2">
+        <span class="s">An agent must dream to recursively <span class="nb">self-improve</span>.</span>
+        <span class="s"><span class="grad">History</span> is the world it dreams in.</span>
+      </p>
+
+      <div class="cta rv in d3">
+        <a class="btn-hero primary" href="assets/dream-rsi.pdf">
+          <svg class="bicon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2.5h7l5 5v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-18a1 1 0 0 1 1-1z"/><path d="M13 2.5v5h5"/></svg>
+          Paper
+        </a>
+        <!-- TODO: point at the arXiv abs page once posted; until then it serves the
+             same PDF rather than being a dead link on a live site -->
+        <a class="btn-hero" href="assets/dream-rsi.pdf">
+          <svg class="bicon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 3.5h17v17h-17z"/><path d="M3.5 9h17"/><path d="M8 14.5h8"/></svg>
+          arXiv
+        </a>
+        <a class="btn-hero" href="https://github.com/zhengkid/Dream-RSI">
+          <svg class="bicon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18.5L3 12l6-6.5M15 5.5L21 12l-6 6.5"/></svg>
+          Code
+        </a>
+        <a class="btn-hero" href="#demos">
+          <svg class="bicon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M10 8.4l6 3.6-6 3.6z"/></svg>
+          Live demo
+        </a>
+      </div>
+
+      <ul class="kcards hero-keys rv in d3">
+        <li class="kcard">
+          <span class="kn">01</span>
+          <h3>History is the world to dream in</h3>
+          <p>Not a learned world model and not an approximation. The discovery tree the agent already
+             built is an <em>exact</em> simulator of the search space it reached &mdash; a world that
+             came free, as a by-product of working.</p>
+        </li>
+        <li class="kcard">
+          <span class="kn">02</span>
+          <h3>Dreaming is how it self-improves</h3>
+          <p>A new exploration policy is tested by <em>imagining</em> it, not by living through it:
+             thousands of candidates dreamt against that world at zero executions, and only the
+             winner is ever deployed.</p>
+        </li>
+        <li class="kcard">
+          <span class="kn">03</span>
+          <h3>Every lap adds a world</h3>
+          <p>The winning policy goes back online and records a new discovery tree &mdash; one more
+             world, reaching places no earlier policy would have gone. The pool grows every lap, a
+             policy dreamt against more worlds beats one tuned to the luck of a single run, and that
+             policy brings back worlds no earlier one could. That is the recursion.</p>
+        </li>
+      </ul>
+
+      <figure class="herofigs rv">
+        <div class="panel panel-pad">
+          <img class="plate" src="assets/fig1-overview.png" width="1380" height="620"
+               alt="Overview of Dream-RSI: online exploration produces a discovery tree, the tree becomes a replay simulator, and dreaming inside the simulator pool improves the exploration policy, which is redeployed online.">
+        </div>
+        <figcaption>
+          <span class="fnum">Figure 1</span>
+          <b>The loop.</b>
+          <b class="step">&#10102; Online Explore</b> &mdash; the current policy guides a coding agent to
+          expand a discovery tree and log traces.
+          <b class="step">&#10103; Construct Replay Simulator</b> &mdash; that tree becomes a reusable
+          simulator pool.
+          <b class="step">&#10104; Dreaming-based Policy Improvement</b> &mdash; the agent dreams up
+          alternative policies and replays them for rapid feedback. The updated policy redeploys for
+          the next round.
+        </figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ THE IDEA ═══════════════════════ -->
+  <section class="sec" id="idea">
+    <div class="sec-head rv">
+      <div class="secno">01 &mdash; The bottleneck &amp; the idea</div>
+      <h2>Meta-level feedback is the bottleneck</h2>
+      <p class="lead">
+        Recursive self-improvement runs on a discovery loop, and at the scale that now matters
+        that loop spans thousands of proposal&ndash;evaluation cycles. What decides whether those
+        cycles are worth their compute is <em>exploration</em> &mdash; where to branch, what to run
+        in parallel, when to cut a line off &mdash; and exploration is the one component still
+        hand-written and frozen. That leaves a dilemma with no good side. A fixed strategy cannot
+        learn from the experience it accumulates, so it keeps paying for directions that have
+        already failed. Optimizing it online walks into two walls at once: meta-level feedback is
+        <em>delayed and expensive</em>, because judging an exploration policy means watching it
+        steer an entire discovery run to the end rather than scoring one candidate; and the
+        meta-policy space is <em>vast</em>, so most of the policies you would have to try are bad
+        ones &mdash; each costing a full rollout to find that out.
+      </p>
+    </div>
+
+    <div class="callout rv">
+      <h4>The idea</h4>
+      <p>
+        You have already paid for that feedback. A finished discovery run is not just text to
+        re-read &mdash; it is a structured tree of every exploration decision the agent made, each
+        one carrying the execution outcome it actually produced. And an exploration policy does
+        exactly one thing: given what it has seen, choose which attempt to continue next. So an
+        <em>alternative</em> policy never has to re-run anything. It walks the same recorded tree in
+        a different order, and every outcome it asks for is already on disk. Screen thousands of
+        candidates against what already happened at <b>zero executions</b>, and spend a real
+        rollout only on the winner.
+      </p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ INSIGHT ════════════════════════ -->
+  <section class="sec" id="insight">
+    <div class="sec-head rv">
+      <div class="secno">02 &mdash; The key insight</div>
+      <h2>History is <em>already</em> a simulator</h2>
+      <p class="lead">
+        A simulator is anything that can answer &ldquo;what would have happened if&hellip;&rdquo;
+        without running the world. For exploration policies that object already exists, fully
+        built and fully paid for, and nobody was using it.
+      </p>
+    </div>
+
+    <div class="rv">
+      <p class="abstext">
+        Think of an agent crossing unfamiliar terrain for the first time. It takes inefficient
+        routes, hits dead ends, backtracks &mdash; and in doing so it draws a map. The next policy
+        does not have to walk the ground again. It reasons over the map: it avoids the known dead
+        ends, reconsiders decisions the first policy committed to too early, and compares whole
+        routes before moving. Long-horizon discovery has exactly this structure, and the map is
+        already being written. A completed run records a tree of exploration decisions together
+        with their realized code-execution outcomes, so replaying a <em>different</em> policy over
+        it means traversing different branches, in a different order, with different parallel
+        groupings and different stopping points &mdash; over nodes that have all already been run.
+        The evaluation returns immediately and costs <b>zero executions</b>.
+      </p>
+      <p class="abstext">
+        That history has been sitting there all along; prior work just read it as something else
+        &mdash; static textual context to prompt against, or training data to fine-tune weights on.
+        Read as a tree, it is a simulator, and unlike a learned world model it is not an
+        approximation. Nothing is predicted: the simulator is <em>exact</em> over the search space
+        that was realized, because it <em>is</em> that search space. Its limit is just as sharp
+        &mdash; a policy can only be dreamt where history actually went. Which is what forces this
+        to be a loop rather than a one-off. Every online deployment records another tree, so what
+        the agent owns is not one world but a growing <em>pool</em> of them; a policy dreamt across
+        more worlds beats one tuned to the luck of a single run, and it comes back with worlds no
+        earlier policy could have reached. The worlds <em>evolve</em> along with the agent.
+      </p>
+    </div>
+
+    <figure class="rv">
+      <div class="panel panel-pad">
+        <img class="plate" src="assets/fig2-simulator.png" width="1385" height="560"
+             alt="A deployed policy explores online to generate a discovery tree; alternative policies then replay that tree along different trajectories to obtain scores without any execution.">
+      </div>
+      <figcaption>
+        <span class="fnum">Figure 2</span>
+        <b>Discovery history as a replay simulator.</b> Each node is an attempt with its full
+        observation. Thousands of candidate policies can be tested inside this simulator &mdash;
+        different search branches, exploration orders, concurrency levels and stopping rules. Because
+        all outcomes are pre-stored, a single costly online run enables thousands of rapid,
+        <b>zero-execution-cost</b> off-policy evaluations.
+      </figcaption>
+    </figure>
+
+    <div class="rv">
+      <p class="abstext">
+        <b>Dream-RSI</b> is what falls out of that. A lightweight orchestration layer makes
+        exploration explicit and programmable while leaving the underlying coding agent unchanged.
+        Dreaming inside the replay simulator built from historical discovery trees buys immediate,
+        low-cost off-policy feedback for evaluating and refining exploration policies, without
+        repeating expensive online evaluations. The improved policy is redeployed to drive further
+        discovery, continuously expanding the simulator pool. Across algorithm engineering,
+        mathematical optimization and GPU kernel engineering, this reaches competitive or better
+        discovery quality at substantially lower discovery cost.
+      </p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ METHOD ═════════════════════════ -->
+  <section class="sec" id="method">
+    <div class="sec-head rv">
+      <div class="secno">03 &mdash; The RSI loop</div>
+      <h2>Recursive self-improvement on the meta-exploration layer</h2>
+      <p class="lead">
+        Let $t = 1, 2, \dots$ index the outer iterations. Starting from an initial policy $\pi_1$ and
+        an empty history $\mathcal{H}_0 = ()$, iteration $t$ deploys $\pi_t$ online to guide the
+        discovery agent, collecting a discovery trace $\mathcal{T}_t$ with tree structure. The
+        completed tree is appended to the history:
+      </p>
+    </div>
+
+    <div class="rv">
+      $$
+        \mathcal{H}_t = (\mathcal{T}_1, \dots, \mathcal{T}_t)
+        \;\xrightarrow{\;\text{replay}\;}\;
+        \pi_{t+1} \;\xrightarrow{\;\text{deploy}\;}\; \mathcal{T}_{t+1}.
+      $$
+      <p class="lead">
+        The exploration policy is <em>executable code</em>: it decides where a fixed discovery agent
+        continues searching, which attempts run in parallel, and when exploration stops. A fixed
+        evaluator scores the resulting candidates and returns diagnostic feedback.
+      </p>
+    </div>
+
+    <div class="callout rv">
+      <h4>Why the policy can never get worse</h4>
+      <p>
+        The offline phase is a policy-development agent writing $M$ successive revisions of the
+        policy&rsquo;s code, $\pi^0 = \pi_t, \pi^1, \dots, \pi^{M-1}$, and scoring each by replay over
+        the <em>whole</em> history. Since the currently deployed policy $\pi^0$ is itself a candidate,
+        the winner $\pi_{t+1} = \pi^{m^*}$ is never worse than $\pi_t$.
+      </p>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════════ DEMO ═══════════════════════════ -->
+  <section class="sec" id="demos">
+    <div class="sec-head rv">
+      <div class="secno">04 &mdash; Demo</div>
+      <h2>Watch a policy dream itself better</h2>
+      <p class="lead">
+        One lap of the loop in Figure&nbsp;1. The agent explores online, appends the discovery tree to
+        its history, rewrites its exploration policy a few times and scores every version by replaying
+        it over that history &mdash; then redeploys the best one. Drawn live, not recorded.
+      </p>
+    </div>
+
+    <!-- ── live dreaming loop ── -->
+    <div class="dreamer rv" data-dream data-playing="true" data-phase="deploy">
+      <div class="screen dr-screen">
+        <div class="dr-stage">
+          <div class="dr-canvas-wrap">
+            <!-- the label sits on the canvas, not the whole stage, so the live
+                 readouts in .dr-rail stay in the accessibility tree -->
+            <canvas class="dr-canvas" role="img"
+                    aria-label="Animated diagram of one Dream-RSI outer iteration. A robot on the left runs its exploration policy online; the resulting discovery tree grows on the right, one node per real agent call, fanning out of a single root into separate branches. The finished tree is appended to the robot's history, and the stage then becomes a replay simulator over that history. Inside the thought bubble the robot writes four successive revisions of its policy code, pi zero through pi three, each replayed over the stored trees at zero execution cost and labelled with its replay score. Pi zero is the policy already deployed, so the best-scoring revision is never worse than it. The winning revision drops into the robot as the next policy and the lap repeats."></canvas>
+          </div>
+
+          <aside class="dr-rail">
+            <div class="dr-act">
+              <span class="dr-round" data-round>round t = 1</span>
+              <strong data-act-name>Online explore</strong>
+            </div>
+
+            <dl class="dr-stats">
+              <div><dt>agent calls</dt><dd class="real" data-s-evals>0</dd></div>
+              <div><dt>replays dreamed</dt><dd class="dream" data-s-roll>0</dd></div>
+              <div><dt>replay score</dt><dd data-s-best>0.000</dd></div>
+            </dl>
+
+            <div class="dr-rounds">
+              <span class="dr-hist-t">score per round</span>
+              <div class="dr-rbars" data-rbars></div>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <div class="dr-controls">
+        <button class="dr-play" data-play type="button" aria-label="Pause">
+          <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h3v12H8zm5 0h3v12h-3z"/></svg>
+          <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l10 6-10 6z"/></svg>
+        </button>
+        <div class="dr-chips">
+          <button type="button" data-chip aria-current="true">1 &middot; Explore</button>
+          <button type="button" data-chip aria-current="false">2 &middot; Store</button>
+          <button type="button" data-chip aria-current="false">3 &middot; Dream</button>
+          <button type="button" data-chip aria-current="false">4 &middot; Update</button>
+        </div>
+        <button class="dr-speed" data-speed type="button" aria-label="1&times;, playback speed">1&times;</button>
+      </div>
+
+      <p class="dr-caption">
+        Growing the tree costs real agent calls; replaying it costs none, because every
+        node&rsquo;s outcome is already recorded &mdash; so one expensive online rollout pays
+        for thousands of off&#8209;policy evaluations. Each replayed version opens several
+        branches at once and drops each one when it stops paying, so what it covers is a
+        <b>subtree</b> of the recorded tree, and it is charged for every node in it. The inner loop is a
+        policy&#8209;development agent rewriting the exploration policy:
+        &pi;<sup>0</sup> is the version already deployed and
+        &pi;<sup>1</sup>&hellip;&pi;<sup>3</sup> are its revisions, each scored by replay over
+        the whole history &#8460;<sub>t</sub>. Because &pi;<sup>0</sup> is in the candidate
+        set, the version that ships can never score worse than the one it replaces &mdash;
+        which is why the bars only go up. In the paper this cuts discovery-agent calls by
+        1.7&times; against fixed exploration and up to 162&times; against SimpleTES.
+        Numbers on the canvas are illustrative; the real ones are in
+        <a href="#results">Results</a>.
+      </p>
+    </div>
+
+  </section>
+
+  <!-- ═══════════════════════════ RESULTS ════════════════════════ -->
+  <section class="sec" id="results">
+    <div class="sec-head rv">
+      <div class="secno">05 &mdash; Highlight results</div>
+      <h2>Three discovery domains</h2>
+      <p class="lead">
+        Eight discovery tasks across algorithm engineering, mathematical optimization and GPU
+        kernel engineering. The controlled baseline is <b>Recursive Fixed Exploration</b> &mdash; identical agent,
+        evaluator, initialization and per-round budget, but the exploration policy never changes.
+        Both methods start from the same hand-written parallel-refine policy, so round 1 is
+        identical by construction.
+      </p>
+    </div>
+
+    <ul class="mgrid rv">
+      <li class="mitem"><b>2.43&times;</b><span>fewer generations on VGG16 at comparable performance</span></li>
+      <li class="mitem"><b>2.09&times;</b><span>higher score on ConvDiv at a comparable budget</span></li>
+      <li class="mitem"><b>162&times;</b><span>fewer discovery-agent calls than SimpleTES on Lasso</span></li>
+    </ul>
+
+    <!-- ── 5.1 algorithm engineering ── -->
+    <h3 class="res-h rv">Algorithm engineering &mdash; Lasso regularization path</h3>
+    <div class="table-scroll rv">
+      <table aria-describedby="cap-lasso">
+        <thead>
+          <tr>
+            <th scope="col">Method</th>
+            <th scope="col">Model</th>
+            <th scope="col" class="num">Compute</th>
+            <th scope="col" class="num">Gisette</th>
+            <th scope="col" class="num">RCV1</th>
+            <th scope="col" class="num">DNA</th>
+            <th scope="col" class="num">Leukemia</th>
+            <th scope="col" class="num">Colon</th>
+            <th scope="col" class="num">Duke Breast</th>
+            <th scope="col" class="num">Avg.</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="grp"><th colspan="10" scope="colgroup">Previous solvers</th></tr>
+          <tr>
+            <th scope="row">sklearn</th><td>&ndash;</td><td class="num">&ndash;</td>
+            <td class="num">11275.2</td><td class="num">252881.7</td><td class="num">93.8</td>
+            <td class="num">227.2</td><td class="num">229.8</td><td class="num">374.0</td>
+            <td class="num">44180.3</td>
+          </tr>
+          <tr>
+            <th scope="row">glmnet</th><td>&ndash;</td><td class="num">&ndash;</td>
+            <td class="num">9063.6</td><td class="num">73072.8</td><td class="num">351.9</td>
+            <td class="num">45.0</td><td class="num">24.2</td><td class="num">47.7</td>
+            <td class="num">13767.5</td>
+          </tr>
+          <tr>
+            <th scope="row">SimpleTES</th><td>gpt-oss-120b</td><td class="num">51,200</td>
+            <td class="num">3141.9</td><td class="num">19625.6</td><td class="num b">15.9</td>
+            <td class="num b">15.5</td><td class="num b">11.6</td><td class="num b">18.1</td>
+            <td class="num">3804.8</td>
+          </tr>
+          <tr>
+            <th scope="row">SimpleTES<sup>&dagger;</sup></th><td>gpt-oss-120b</td><td class="num">51,200</td>
+            <td class="num">8651.0</td><td class="num">41143.1</td><td class="num">37.6</td>
+            <td class="num">28.2</td><td class="num">19.5</td><td class="num">31.1</td>
+            <td class="num">8318.4</td>
+          </tr>
+          <tr class="grp"><th colspan="10" scope="colgroup">Our system</th></tr>
+          <tr>
+            <th scope="row">Recursive Fixed Exploration</th><td>Gemini-3.1-Pro</td><td class="num">550</td>
+            <td class="num">1861.8</td><td class="num">19550.1</td><td class="num">41.5</td>
+            <td class="num">26.1</td><td class="num">14.5</td><td class="num">28.4</td>
+            <td class="num">3587.1</td>
+          </tr>
+          <tr>
+            <th scope="row">Recursive Fixed Exploration</th><td>Gemini-3.7-Flash</td><td class="num">3200</td>
+            <td class="num">1133.1</td><td class="num">13873.0</td><td class="num">29.8</td>
+            <td class="num">24.1</td><td class="num">15.7</td><td class="num">24.4</td>
+            <td class="num">2516.7</td>
+          </tr>
+          <tr class="row-ours">
+            <th scope="row">Dream-RSI</th><td>Gemini-3.1-Pro</td><td class="num">317</td>
+            <td class="num">2841.0</td><td class="num">14616.0</td><td class="num">49.9</td>
+            <td class="num">30.2</td><td class="num">16.4</td><td class="num">32.5</td>
+            <td class="num">2931.0</td>
+          </tr>
+          <tr class="row-ours">
+            <th scope="row">Dream-RSI</th><td>Gemini-3.7-Flash</td><td class="num">1879</td>
+            <td class="num b">1091.9</td><td class="num b">12923.4</td><td class="num">31.4</td>
+            <td class="num">21.0</td><td class="num">12.2</td><td class="num">23.6</td>
+            <td class="num b">2350.6</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="tbl-cap" id="cap-lasso">
+      Final wall-clock runtime (ms) on six held-out downstream datasets; <b>lower is better</b>.
+      Compute is the cumulative number of discovery-agent calls.
+      &dagger; denotes our reproduction.
+    </p>
+
+    <figure class="rv">
+      <div class="panel panel-pad">
+        <img class="plate" src="assets/fig3-lasso-dynamics.png" width="1385" height="465"
+             alt="Average held-out runtime versus cumulative discovery compute across recursive rounds, for Gemini-3.1-Pro and Gemini-3.7-Flash. Dream-RSI reaches lower runtime at lower cumulative compute.">
+      </div>
+      <figcaption>
+        <span class="fnum">Figure 3(b)</span>
+        <b>Recursive discovery dynamics.</b> Numbers next to markers are recursive rounds. The two
+        methods share round 1 by construction, then diverge: Dream-RSI reaches better downstream
+        performance at consistently lower cumulative compute.
+      </figcaption>
+    </figure>
+
+    <!-- ── 5.2 mathematics ── -->
+    <h3 class="res-h rv">Mathematical optimization</h3>
+    <div class="table-scroll rv">
+      <table aria-describedby="cap-math">
+        <thead>
+          <tr>
+            <th scope="col">Method</th>
+            <th scope="col">LLM</th>
+            <th scope="col" class="num">Sum Diff &uarr;</th>
+            <th scope="col" class="num">Auto Correlation &darr;</th>
+            <th scope="col" class="num">Circle Packing &uarr;</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">AlphaEvolve</th><td>Gemini-2.0 Pro + Flash</td><td class="num">&ndash;</td><td class="num">1.455700</td><td class="num">2.635862</td></tr>
+          <tr><th scope="row">AlphaEvolveV2</th><td>Gemini-2.0 Pro + Flash</td><td class="num">1.121936</td><td class="num">&ndash;</td><td class="num b">2.635983</td></tr>
+          <tr><th scope="row">OpenEvolve</th><td>&ndash;</td><td class="num">&ndash;</td><td class="num">1.460000</td><td class="num">&ndash;</td></tr>
+          <tr><th scope="row">CodeEvolve</th><td>&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">2.635980</td></tr>
+          <tr><th scope="row">ShinkaEvolve</th><td>Mixed</td><td class="num">&ndash;</td><td class="num">1.457800</td><td class="num">2.635982</td></tr>
+          <tr><th scope="row">TTS-Discovery</th><td>Qwen3-8B</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num b">2.635983</td></tr>
+          <tr><th scope="row">ThetaEvolve</th><td>Distilled-Qwen3-8B</td><td class="num">&ndash;</td><td class="num">1.493000</td><td class="num b">2.635983</td></tr>
+          <tr><th scope="row">EvoX</th><td>Gemini-3.0-Pro</td><td class="num">&ndash;</td><td class="num">1.458900</td><td class="num">2.635900</td></tr>
+          <tr><th scope="row">SimpleTES</th><td>GPT-OSS-120B</td><td class="num">1.143975</td><td class="num b">1.453675</td><td class="num b">2.635983</td></tr>
+          <tr class="grp"><th colspan="5" scope="colgroup">Our system</th></tr>
+          <tr><th scope="row">Recursive Fixed Exploration</th><td>Gemini-3.1-Pro</td><td class="num">1.144047</td><td class="num">1.456001</td><td class="num b">2.635983</td></tr>
+          <tr class="row-ours"><th scope="row">Dream-RSI</th><td>Gemini-3.1-Pro</td><td class="num b">1.145427</td><td class="num">1.456375</td><td class="num b">2.635983</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="tbl-cap" id="cap-math">
+      Higher is better for Sum Diff and Circle Packing; lower is better for Auto Correlation.
+      Best per column in <b>bold</b>.
+    </p>
+    <p class="foot-note">
+      SimpleTES holds the best Auto Correlation number, but needs 51,200 generations &mdash; against
+      fewer than 1,000 here.
+    </p>
+
+    <!-- ── 5.3 kernels ── -->
+    <h3 class="res-h rv">GPU kernel engineering</h3>
+    <figure class="rv">
+      <div class="panel panel-pad">
+        <img class="plate" src="assets/fig4-kernels.png" width="1200" height="790"
+             alt="Discovery trajectories on VGG16, LayerNorm, ConvDiv and ConvMax. Dream-RSI reaches comparable performance with fewer generations on the first two, and higher performance at comparable budget on the last two.">
+      </div>
+      <figcaption>
+        <span class="fnum">Figure 4</span>
+        <b>Four KernelBench tasks.</b> On VGG16 and LayerNorm, Dream-RSI reaches comparable
+        performance with <b>2.43&times;</b> and <b>1.79&times;</b> fewer generations. On ConvDiv and
+        ConvMax, it achieves <b>2.09&times;</b> and <b>1.44&times;</b> higher performance under
+        comparable budgets. Higher is better throughout.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ═══════════════════════════ ANALYSIS ═══════════════════════ -->
+  <section class="sec" id="analysis">
+    <div class="sec-head rv">
+      <div class="secno">06 &mdash; Analysis</div>
+      <h2>What the learned policy actually does</h2>
+      <p class="lead">
+        The policy is not monotonically greedier or broader &mdash; it is <em>adaptive</em>. As
+        performance improves it first conserves compute, cutting evaluated attempts from 110 to 50.
+        When progress plateaus it spends again, and those widenings line up with the next jumps in
+        round-best score.
+      </p>
+    </div>
+
+    <div class="rv">
+      <h3>Semantic guidance is <em>worse</em> than replay</h3>
+      <p class="lead">
+        A natural alternative is to abstract prior trajectories into high-level directional insights
+        and inject them into the prompt. Applied to both paradigms, this explicit guidance
+        consistently <b>underperforms</b> its unguided counterpart under equal budgets. In
+        long-horizon discovery with many parallel threads, strong semantic priors about where to
+        search over-constrain the space and suppress diverse exploration.
+      </p>
+    </div>
+
+    <figure class="figure-narrow rv">
+      <div class="panel panel-pad">
+        <img class="plate" src="assets/fig6-evolution.png" width="685" height="600"
+             alt="Round-best performance rising from 0.427 to 1.898 across nine rounds, alongside evaluated attempts per round falling from 110 to 50 and rising again to around 90.">
+      </div>
+      <figcaption>
+        <span class="fnum">Figure 6</span>
+        <b>Evolution of exploration behavior on ConvDiv.</b>
+        (a) Round-best performance across recursive rounds. (b) Evaluated attempts per round.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ═══════════════════════════ CITE ═══════════════════════════ -->
+  <section class="sec" id="cite">
+    <div class="sec-head rv">
+      <div class="secno">07 &mdash; Cite</div>
+      <h2>BibTeX</h2>
+    </div>
+
+    <div class="bib rv">
+      <button class="copy" data-copy="#bibtex" type="button">Copy</button>
+<pre id="bibtex"><code>@article{zheng2026dreamrsi,
+  title   = {Dream-RSI: Recursive Self-Improvement through Evolving Worlds},
+  author  = {Zheng, Tong and Wu, Xidong and Zhang, Zheng and He, Zhankui and
+             Zhang, Chaoyi and Coleman, Benjamin and Wei, Ruoqiao and Bai, Di and
+             Liu, Haolin and Liu, Rui and Wang, Xue and Zhuan, Yue and
+             Kang, Wang-Cheng and Xiang, Renkai and Huang, Heng and
+             Cheng, Xinwu and Guo, Yunsong},
+  journal = {arXiv preprint arXiv:XXXX.XXXXX},
+  year    = {2026}
+}</code></pre>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <p>&copy; 2026 Google &middot; Dream-RSI</p>
+    <p class="footer-links">
+      <a href="/cdn-cgi/l/email-protection#a9d1c0cdc6c7cededce9cec6c6cec5cc87cac6c4"><span class="__cf_email__" data-cfemail="c4bcada0abaaa3b3b184a3ababa3a8a1eaa7aba9">[email&#160;protected]</span></a>
+      <span>&middot;</span>
+      <a href="/cdn-cgi/l/email-protection#077d7d6f6669607f47606868606b622964686a"><span class="__cf_email__" data-cfemail="3d4747555c535a457d5a52525a5158135e5250">[email&#160;protected]</span></a>
+      <span>&middot;</span>
+      <a href="https://github.com/zhengkid/Dream-RSI">GitHub</a>
+    </p>
+  </div>
+</footer>
+
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="script.js"></script>
+<script src="dream.js"></script>
+<svg class="logo-sprite" aria-hidden="true" focusable="false"><symbol id="lg-google" viewBox="0 0 272 92"><path fill="#EA4335" d="M115.75 47.18c0 12.77-9.99 22.18-22.25 22.18s-22.25-9.41-22.25-22.18C71.25 34.32 81.24 25 93.5 25s22.25 9.32 22.25 22.18zm-9.74 0c0-7.98-5.79-13.44-12.51-13.44S80.99 39.2 80.99 47.18c0 7.9 5.79 13.44 12.51 13.44s12.51-5.55 12.51-13.44z"/><path fill="#FBBC05" d="M163.75 47.18c0 12.77-9.99 22.18-22.25 22.18s-22.25-9.41-22.25-22.18c0-12.85 9.99-22.18 22.25-22.18s22.25 9.32 22.25 22.18zm-9.74 0c0-7.98-5.79-13.44-12.51-13.44s-12.51 5.46-12.51 13.44c0 7.9 5.79 13.44 12.51 13.44s12.51-5.55 12.51-13.44z"/><path fill="#4285F4" d="M209.75 26.34v39.82c0 16.38-9.66 23.07-21.08 23.07-10.75 0-17.22-7.19-19.66-13.07l8.48-3.53c1.51 3.61 5.21 7.87 11.17 7.87 7.31 0 11.84-4.51 11.84-13v-3.19h-.34c-2.18 2.69-6.38 5.04-11.68 5.04-11.09 0-21.25-9.66-21.25-22.09 0-12.52 10.16-22.26 21.25-22.26 5.29 0 9.49 2.35 11.68 4.96h.34v-3.61h9.25zm-8.56 20.92c0-7.81-5.21-13.52-11.84-13.52-6.72 0-12.35 5.71-12.35 13.52 0 7.73 5.63 13.36 12.35 13.36 6.63 0 11.84-5.63 11.84-13.36z"/><path fill="#34A853" d="M225 3v65h-9.5V3h9.5z"/><path fill="#EA4335" d="M262.02 54.48l7.56 5.04c-2.44 3.61-8.32 9.83-18.48 9.83-12.6 0-22.01-9.74-22.01-22.18 0-13.19 9.49-22.18 20.92-22.18 11.51 0 17.14 9.16 18.98 14.11l1.01 2.52-29.65 12.28c2.27 4.45 5.8 6.72 10.75 6.72 4.96 0 8.4-2.44 10.92-6.14zm-23.27-7.98l19.82-8.23c-1.09-2.77-4.37-4.7-8.23-4.7-4.95 0-11.84 4.37-11.59 12.93z"/><path fill="#4285F4" d="M35.29 41.41V32H67c.31 1.64.47 3.58.47 5.68 0 7.06-1.93 15.79-8.15 22.01-6.05 6.3-13.78 9.66-24.02 9.66C16.32 69.35.36 53.89.36 34.91.36 15.93 16.32.47 35.3.47c10.5 0 17.98 4.12 23.6 9.49l-6.64 6.64c-4.03-3.78-9.49-6.72-16.97-6.72-13.86 0-24.7 11.17-24.7 25.03 0 13.86 10.84 25.03 24.7 25.03 8.99 0 14.11-3.61 17.39-6.89 2.66-2.66 4.41-6.46 5.1-11.65l-22.49.01z"/></symbol><symbol id="lg-deepmind" viewBox="0 0 2201 363"><g style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><g transform="matrix(1.56256,0,0,1.56256,-311.225,1.5989e-14)"><g id="dm-logo.svg" transform="matrix(0.921231,0,0,0.921231,314.33,116.846)"><g transform="matrix(1,0,0,1,-125,-125)"><g id="logo"><g><g><path id="SVGID_1_" d="M37.3,37.3C14.6,60.1 1.7,90.4 1,122.5L1,127.2C1.6,159.5 14.5,189.8 37.3,212.5C60.1,235.3 90.4,248.2 122.5,248.8L127.3,248.8C127.8,248.8 128.3,248.8 128.7,248.7C130.2,248.6 131.6,248.5 133.1,248.4C134.1,248.3 135,248.2 136,248.1C145.9,246.8 155.3,243.7 163.9,239.1C165.3,238.4 166.6,237.6 167.9,236.8C181.5,228.5 192.7,216.3 199.8,201.1C205,190.1 207.6,178.3 207.6,166C207.6,152 204.1,138.3 197.4,126.1L197.1,125.6C188.7,110.6 175.5,98.3 159.9,91C159.5,90.8 159.2,90.7 158.8,90.5C158.1,90.2 157.3,89.9 156.6,89.5C156.5,89.5 156.4,89.4 156.3,89.4C165.7,97.8 171.8,109.8 172.2,123.3L172.2,126C171.5,151.1 151.3,171.3 126.3,172L123.6,172C110.9,171.8 98.7,169 87.4,163.7C70.5,155.8 56.3,142.4 47.3,126.1L47,125.4C40.1,112.6 36.4,98.1 36.4,83.4C36.4,70.3 39.2,57.6 44.7,45.8C45.3,44.6 45.9,43.4 46.5,42.2C46.8,41.7 47.1,41.1 47.4,40.6C47.8,39.8 48.3,39 48.8,38.2C49,37.8 49.3,37.4 49.5,37C49.8,36.4 50.2,35.9 50.6,35.3C50.7,35.1 50.8,34.9 51,34.7C51.4,34.1 51.8,33.5 52.2,32.9C54,30.3 55.9,27.8 58,25.4C58.5,24.9 58.9,24.3 59.4,23.8C59.5,23.6 59.7,23.5 59.9,23.3C60.4,22.7 61,22.1 61.5,21.6L61.6,21.5C62.1,21 62.6,20.4 63.2,19.9C63.4,19.7 63.6,19.5 63.8,19.3C64.2,18.9 64.6,18.6 65,18.2C65.3,17.9 65.6,17.6 66,17.3C66.5,16.9 66.9,16.5 67.4,16.1L67.5,16C68.1,15.5 68.8,14.9 69.4,14.4C70.1,13.8 70.8,13.3 71.5,12.8C59,19.1 47.4,27.2 37.3,37.3" style="fill:url(#_Linear1);fill-rule:nonzero;"/></g><g><path id="SVGID_4_" d="M122.7,1C120.7,1.1 118.8,1.2 116.9,1.4C115.9,1.5 115,1.6 114,1.7C113,1.8 112.1,2 111.1,2.1C110.1,2.3 109.2,2.4 108.3,2.6C106.4,3 104.6,3.4 102.7,3.9C100.9,4.4 99.1,5 97.3,5.6C95.5,6.2 93.8,6.9 92,7.7C82.5,11.8 73.8,17.7 66.5,25C65.8,25.7 65.2,26.3 64.5,27C58.7,33.4 53.8,40.6 50,48.6C44.8,59.6 42.2,71.4 42.2,83.7C42.2,97.6 45.7,111.4 52.4,123.5L52.7,124C61.1,139 74.3,151.3 89.9,158.6C91.1,159.2 92.4,159.7 93.6,160.2C84.2,151.8 78.1,139.7 77.7,126.2L77.7,123.5C78.4,98.4 98.6,78.3 123.6,77.6L128.1,77.6C129.9,77.7 131.7,77.8 133.4,77.9C134.2,78 135,78.1 135.7,78.2C136.5,78.3 137.3,78.4 138,78.5L140.3,78.9C140.7,79 141,79 141.4,79.1C141.8,79.2 142.2,79.3 142.6,79.3C143,79.4 143.3,79.4 143.6,79.5C144.1,79.6 144.6,79.7 145.1,79.8C145.4,79.9 145.7,80 146.1,80C146.5,80.1 146.8,80.2 147.2,80.3C147.5,80.4 147.9,80.5 148.3,80.6C148.7,80.7 149,80.8 149.4,80.9C150.2,81.1 151.1,81.4 151.9,81.7L152.7,82C153.7,82.3 154.7,82.7 155.7,83.1L155.9,83.2C156.1,83.3 156.2,83.3 156.4,83.4C156.9,83.6 157.5,83.8 158,84C159,84.4 160,84.8 161,85.3C161.4,85.5 161.8,85.7 162.2,85.8C179.1,93.7 193.3,107 202.3,123.4L202.7,124.1C209.6,136.9 213.3,151.4 213.3,166.1C213.3,179.2 210.5,191.9 205,203.7C204.4,204.9 203.8,206.2 203.2,207.3C202.9,207.8 202.6,208.4 202.3,208.9C201.9,209.7 201.4,210.5 200.9,211.3C200.7,211.7 200.4,212.1 200.2,212.5C199.9,213 199.6,213.5 199.3,214C199.1,214.4 198.8,214.8 198.5,215.2C198.3,215.5 198.1,215.8 197.9,216.2C197.6,216.7 197.2,217.2 196.9,217.7C196.7,217.9 196.6,218.1 196.4,218.3C196,218.9 195.6,219.4 195.1,220C194.6,220.7 194,221.4 193.4,222.1C192.5,223.2 191.5,224.4 190.5,225.5C190.2,225.9 189.8,226.3 189.5,226.6C189.4,226.7 189.3,226.8 189.2,226.9C188.7,227.4 188.2,228 187.7,228.5L185.5,230.7C185.3,230.9 185,231.1 184.8,231.4C184.4,231.8 183.9,232.2 183.5,232.6C183.2,232.8 182.9,233.1 182.6,233.3C182.1,233.7 181.6,234.2 181,234.6C180,235.4 179.1,236.2 178.1,236.9C190.6,230.9 202.2,222.7 212.3,212.7C235.1,189.9 248,159.7 248.6,127.5L248.6,122.7C248,90.4 235.1,60.1 212.3,37.4C190,14.7 160,1.8 128,1.1L126,1L122.7,1Z" style="fill:url(#_Linear2);fill-rule:nonzero;"/></g></g></g></g></g></g><g id="assets1" transform="matrix(1.84172,0,0,1.84172,656.35,-815.468)"><g id="XMLID_200_1"><path d="M-115.3,538.7C-115.3,510.4 -91.5,487.3 -63.2,487.3C-47.5,487.3 -36.4,493.4 -28,501.5L-37.9,511.4C-43.9,505.8 -52.1,501.4 -63.2,501.4C-83.9,501.4 -100,518 -100,538.7C-100,559.4 -83.8,576 -63.2,576C-49.8,576 -42.2,570.6 -37.3,565.7C-33.3,561.7 -30.7,555.9 -29.7,548L-63.3,548L-63.3,534L-16,534C-15.5,536.5 -15.2,539.5 -15.2,542.8C-15.2,553.3 -18.1,566.4 -27.4,575.6C-36.4,585 -47.9,590 -63.2,590C-91.5,590.1 -115.3,567 -115.3,538.7ZM23,523.9C4.7,523.9 -10.2,537.8 -10.2,557C-10.2,576 4.7,590.1 23,590.1C41.3,590.1 56.2,576.1 56.2,557C56.2,537.8 41.2,523.9 23,523.9ZM23,577C13,577 4.3,568.7 4.3,557C4.3,545.1 12.9,537 23,537C33,537 41.7,545.1 41.7,557C41.6,568.8 33,577 23,577ZM95.4,523.9C77.1,523.9 62.2,537.8 62.2,557C62.2,576 77.1,590.1 95.4,590.1C113.7,590.1 128.6,576.1 128.6,557C128.6,537.8 113.7,523.9 95.4,523.9ZM95.4,577C85.4,577 76.7,568.7 76.7,557C76.7,545.1 85.3,537 95.4,537C105.4,537 114.1,545.1 114.1,557C114,568.8 105.4,577 95.4,577ZM184.3,525.9L184.3,531.3L183.8,531.3C180.5,527.4 174.3,523.9 166.4,523.9C149.9,523.9 134.7,538.4 134.7,557.1C134.7,575.6 149.9,590 166.4,590C174.3,590 180.6,586.5 183.8,582.5L184.3,582.5L184.3,587.3C184.3,600 177.5,606.7 166.6,606.7C157.7,606.7 152.2,600.3 149.9,594.9L137.2,600.2C140.8,609 150.5,619.7 166.5,619.7C183.5,619.7 197.9,609.7 197.9,585.3L197.9,525.9L184.3,525.9ZM167.6,577C157.6,577 149.2,568.6 149.2,557.1C149.2,545.5 157.6,536.9 167.6,536.9C177.5,536.9 185.3,545.4 185.3,557.1C185.3,568.6 177.5,577 167.6,577ZM208.1,490.8L222.6,490.8L222.6,588L208.1,588L208.1,490.8ZM262.4,577C255,577 249.7,573.6 246.4,567L290.6,548.7L289.1,544.9C286.3,537.5 278,523.9 260.8,523.9C243.8,523.9 229.6,537.3 229.6,557C229.6,575.5 243.6,590.1 262.4,590.1C277.6,590.1 286.3,580.8 290,575.4L278.7,567.9C275,573.4 269.8,577 262.4,577ZM261.3,536.7C267.1,536.7 271.9,539.6 273.6,543.7L244,556C243.6,543.2 253.9,536.7 261.3,536.7Z" style="fill:currentColor;fill-rule:nonzero;"/></g><g id="XMLID_199_1"><path d="M322.3,588.1L322.3,501.2L348.9,501.2C362.2,501.2 372.9,505.2 380.9,513.3C388.9,521.4 392.9,531.8 392.9,544.7C392.9,557.6 388.9,568 380.9,576.1C372.9,584.2 362.2,588.2 348.9,588.2L322.3,588.1ZM333.5,577.4L348.9,577.4C358.9,577.4 366.9,574.5 372.7,568.8C378.6,563.1 381.5,555 381.5,544.7C381.5,534.4 378.6,526.4 372.7,520.6C366.8,514.8 358.9,511.9 348.9,511.9L333.5,511.9L333.5,577.4ZM429.4,590C420.4,590 413.1,587 407.5,581C401.9,575 399.1,567.5 399.1,558.3C399.1,549.6 401.8,542.2 407.3,536C412.8,529.8 419.7,526.7 428.2,526.7C437,526.7 444.1,529.6 449.4,535.3C454.7,541 457.3,548.7 457.3,558.4L457.2,560.5L410.2,560.5C410.5,566.5 412.5,571.2 416.2,574.7C419.9,578.2 424.2,579.9 429.1,579.9C437.1,579.9 442.5,576.5 445.4,569.7L455.4,573.8C453.5,578.4 450.3,582.3 445.8,585.4C441.4,588.4 435.9,590 429.4,590ZM445.5,551.2C445.3,547.8 443.7,544.6 440.8,541.5C437.9,538.4 433.7,536.9 428,536.9C423.9,536.9 420.3,538.2 417.3,540.8C414.3,543.4 412.2,546.9 411.1,551.2L445.5,551.2ZM492.6,590C483.6,590 476.3,587 470.7,581C465.1,575 462.3,567.5 462.3,558.3C462.3,549.6 465,542.2 470.5,536C476,529.8 482.9,526.7 491.4,526.7C500.2,526.7 507.3,529.6 512.6,535.3C517.9,541 520.5,548.7 520.5,558.4L520.4,560.5L473.4,560.5C473.7,566.5 475.7,571.2 479.4,574.7C483.1,578.2 487.4,579.9 492.3,579.9C500.3,579.9 505.7,576.5 508.6,569.7L518.6,573.8C516.7,578.4 513.5,582.3 509,585.4C504.6,588.4 499.1,590 492.6,590ZM508.7,551.2C508.5,547.8 506.9,544.6 504,541.5C501.1,538.4 496.9,536.9 491.2,536.9C487.1,536.9 483.5,538.2 480.5,540.8C477.5,543.4 475.4,546.9 474.3,551.2L508.7,551.2ZM559.5,590C555,590 550.9,589 547.3,587.1C543.7,585.2 541,582.7 539.2,579.8L538.7,579.8L539.2,588.1L539.2,614.3L528,614.3L528,528.6L538.7,528.6L538.7,536.9L539.2,536.9C541,534 543.7,531.6 547.3,529.6C550.9,527.7 555,526.7 559.5,526.7C567.2,526.7 573.8,529.7 579.4,535.8C585,541.9 587.8,549.4 587.8,558.4C587.8,567.4 585,574.9 579.4,581C573.9,587 567.2,590 559.5,590ZM557.7,579.8C562.9,579.8 567.3,577.8 571,573.9C574.7,570 576.6,564.8 576.6,558.3C576.6,551.8 574.7,546.6 571,542.7C567.3,538.8 562.8,536.8 557.7,536.8C552.4,536.8 548,538.7 544.3,542.6C540.6,546.5 538.8,551.7 538.8,558.3C538.8,564.9 540.6,570.1 544.3,574C548,577.9 552.5,579.8 557.7,579.8ZM598.3,588.1L598.3,501.2L609.5,501.2L639.7,554.1L640.2,554.1L670.4,501.2L681.6,501.2L681.6,588.1L670.4,588.1L670.4,536.5L670.9,521.9L670.4,521.9L643.2,569.6L636.6,569.6L609.4,521.9L608.9,521.9L609.4,536.5L609.4,588.1L598.3,588.1ZM706.9,513.7C705.4,515.2 703.5,516 701.3,516C699.1,516 697.3,515.2 695.7,513.7C694.2,512.2 693.4,510.3 693.4,508.1C693.4,505.9 694.2,504.1 695.7,502.5C697.2,501 699.1,500.2 701.3,500.2C703.5,500.2 705.3,501 706.9,502.5C708.4,504 709.2,505.9 709.2,508.1C709.2,510.3 708.5,512.1 706.9,513.7ZM706.9,588.1L695.7,588.1L695.7,528.6L706.9,528.6L706.9,588.1ZM729.2,528.6L729.2,536.9L729.7,536.9C731.3,534.1 733.9,531.7 737.3,529.7C740.8,527.7 744.5,526.7 748.5,526.7C755.9,526.7 761.5,529 765.4,533.5C769.3,538 771.2,544.1 771.2,551.7L771.2,588.1L760,588.1L760,553.4C760,542.4 755.1,536.9 745.3,536.9C740.7,536.9 736.9,538.7 734,542.4C731.1,546.1 729.6,550.3 729.6,555.2L729.6,588.1L718.4,588.1L718.4,528.6L729.2,528.6ZM807,590C799.3,590 792.7,587 787.1,580.9C781.5,574.8 778.7,567.3 778.7,558.3C778.7,549.3 781.5,541.8 787.1,535.7C792.7,529.6 799.3,526.6 807,526.6C811.5,526.6 815.6,527.6 819.2,529.5C822.8,531.4 825.5,533.9 827.3,536.8L827.8,536.8L827.3,528.5L827.3,501.2L838.5,501.2L838.5,588.1L827.8,588.1L827.8,579.8L827.3,579.8C825.5,582.7 822.8,585.1 819.2,587.1C815.6,589 811.5,590 807,590ZM808.8,579.8C814.1,579.8 818.5,577.9 822.2,574C825.9,570.1 827.7,564.9 827.7,558.3C827.7,551.7 825.9,546.5 822.2,542.6C818.5,538.7 814,536.8 808.8,536.8C803.6,536.8 799.2,538.8 795.5,542.7C791.8,546.6 789.9,551.8 789.9,558.3C789.9,564.8 791.8,570 795.5,573.9C799.2,577.8 803.6,579.8 808.8,579.8Z" style="fill:currentColor;fill-rule:nonzero;"/></g></g><defs><linearGradient id="_Linear1" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(206.757,0,0,206.757,1.001,131.034)"><stop offset="0" style="stop-color:rgb(38,148,210);stop-opacity:1"/><stop offset="0.31" style="stop-color:rgb(27,135,200);stop-opacity:1"/><stop offset="0.73" style="stop-color:rgb(12,123,190);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(3,119,187);stop-opacity:1"/></linearGradient><linearGradient id="_Linear2" x1="0" y1="0" x2="1" y2="0" gradientUnits="userSpaceOnUse" gradientTransform="matrix(206.757,0,0,206.757,42.2417,118.961)"><stop offset="0" style="stop-color:rgb(108,176,225);stop-opacity:1"/><stop offset="1" style="stop-color:rgb(173,214,242);stop-opacity:1"/></linearGradient></defs></g></symbol><symbol id="lg-umd" viewBox="0 0 314 50"><g fill="currentColor"><path d="M81.1,49.2L69.4,24.7h-0.1L68,45.3c-0.1,2.3,1.6,2.8,3.7,2.9v0.9h-9.6v-0.9c3.4,0,3.8-0.7,4-4.9l1.1-17.9   c0.2-3,0.1-3.9-2.8-4v-0.8h7l11.1,23.1l11-23.1h6.7v0.8c-2.2,0.2-3.1,0.2-3,1.8L98.7,44c0.3,4.2,0.6,4.2,4,4.2v0.9H90.9v-0.9   c2.2,0,4.3-0.6,4.1-3l-1.3-20.6h-0.1L82.1,49.2H81.1z"></path><path d="M121.1,34.5h-7.9l3.9-10.6L121.1,34.5z M121.9,36.5l3.1,8.3c0.2,0.5,0.5,1.1,0.5,1.9c0,1.3-1,1.6-3.6,1.6h-1.2v0.9h12.6   v-0.9c-2.3,0-3.3-0.5-4.2-2.9L119.6,20h-4l0.4,1l-8.4,22.8c-1.5,4-2,4.5-5,4.5v0.9h10.6v-0.9h-0.7c-2.5,0-3.7-0.5-3.7-1.7   c0-0.6,0.6-2,0.9-2.9l2.7-7.2H121.9z"></path><path d="M141.6,21.2c0.8-0.1,1.4-0.1,2.3-0.1c7.1,0,9,3.3,9,7.6c0,5.5-3.4,7.7-8.5,7.7c-1.1,0-1.8,0-2.9-0.1V21.2z M141.6,37.1   c0.7,0,1.3,0.1,2.4,0.1c1.2,0,2,0,3.1-0.1c1.1,0.7,2.7,2.1,4.8,4.1l3,3c4.1,4.1,6.1,5.8,14.2,5.4v-0.8c-3.5-0.2-6.3-1.9-9-4.6   l-3.6-3.6c-2.1-2.1-3.5-3.4-5.2-4.8c3.8-1.1,6.1-4,6.1-7.4c0-4.7-3.8-8.2-12.3-8.2c-3,0-3.9,0-5.8,0.1c-1.9,0.1-4.7,0.3-5.8,0.3   v0.9h1c2.7,0,3.4,0.8,3.4,3.7v19.3c0,3.1-1,3.8-3.7,3.8h-0.8v0.9h13v-0.9h-1.1c-2.6,0-3.7-0.7-3.7-3.4V37.1z"></path><path d="M184.7,24.8c1.5-2.5,0.6-3.3-2.3-3.3v-0.9h10.3v0.9c-3.1,0.2-4.4,1.5-5.7,3.6L179.4,38v6.9c0,2.4,0.9,3.4,3.7,3.4h0.6v0.9   H171v-0.9h0.9c2.9,0,3.7-1.1,3.7-3.3v-6.5l-8.2-12.7c-2.2-3.5-3.3-4.2-6.3-4.3v-0.9h12.2v0.9c-3.6,0-3.8,0.9-2.5,3l7.4,11.3   L184.7,24.8z"></path><path d="M212.8,49.2h-20.5v-0.9h1.5c2.1,0,2.9-0.7,2.9-3V25c0-2.4-0.7-3.4-3.6-3.4h-0.6v-0.9H206v0.9h-1.7c-3,0-3.8,0.3-3.8,3.2   v21.1c0,1.2,0.5,1.7,1.8,1.7h6.7c2.7,0,3.5-1.1,6.4-5.1h0.8L212.8,49.2z"></path><path d="M233.8,34.5h-7.9l3.9-10.6L233.8,34.5z M234.6,36.5l3.1,8.3c0.2,0.5,0.5,1.1,0.5,1.9c0,1.3-1,1.6-3.6,1.6h-1.2v0.9H246   v-0.9c-2.3,0-3.3-0.5-4.2-2.9L232.2,20h-4l0.4,1l-8.4,22.8c-1.5,4-2,4.5-5,4.5v0.9h10.6v-0.9h-0.7c-2.5,0-3.7-0.5-3.7-1.7   c0-0.6,0.6-2,0.9-2.9l2.7-7.2H234.6z"></path><path d="M275.7,49.5L252,24.6v19.6c0,3.3,0.7,4,4.6,4v0.9H246v-0.9h0.2c2.8,0,3.8-1,3.8-3.1V22.7c-1.1-0.7-2.2-1.1-3.9-1.1v-0.9   h7.2l21.6,22.5V24.9c0-2.8-0.8-3.3-4.5-3.4v-0.9h10.7v0.9c-3.4,0-4.2,0.6-4.2,2.4v25.6H275.7z"></path><path d="M289.7,21.3c0.6,0,1.8-0.2,3.7-0.2c6.4,0,9.7,1.6,11.8,3.7c2.7,2.7,3.7,6.5,3.7,9.8c0,4.7-2.1,8.2-3.8,9.9   c-2.8,2.8-5.4,3.7-11.6,3.7c-3.6,0-3.8-0.6-3.8-2.5V21.3z M285.9,44.9c0,2.7-1.1,3.3-3.6,3.3h-0.8v0.9h14.7c11.6,0,17-8.3,17-15.2   c0-7.6-5.3-13.7-17.5-13.7c-2.4,0-5.2,0-7.7,0.1c-2.5,0.1-4.8,0.2-6.5,0.3v0.8h0.9c2.7,0,3.5,0.7,3.5,3.7V44.9z"></path></g><g fill="currentColor"><path d="M75.5,2.3l0.3,0c1.6,0.1,1.9,0.3,1.9,2.4V10c0,3.8-2.7,4.6-4.9,4.6c-3.1,0-4.9-1.6-4.9-4.6V3.7c0-1.1,0.3-1.4,1.5-1.4h0.5   v-1h-6.5v1l0.3,0c1.5,0,1.7,0.2,1.7,1.4v6.6c0,3.7,2.7,6,6.9,6c5.2,0,7-3.3,7-6.1V4.1c0-1.3,0.4-1.8,1.8-1.8l0.3,0v-1h-5.9V2.3z"></path><path d="M100.4,2.3l0.3,0c1.8,0,1.9,0.3,1.9,1.4V12L92.3,1.3h-4v1l0.3,0c0.7,0,1.2,0.2,1.6,0.4v11.1c0,0.8-0.2,1.2-1.6,1.2h-0.4v1   h5.9v-1h-0.3c-1.8,0-2-0.3-2-1.7v-9l11.2,11.8l0.1,0.1h1v-13c0-0.6,0-0.9,1.8-0.9h0.3v-1h-5.9V2.3z"></path><path d="M113.4,2.3l0.3,0c1.2,0.1,1.4,0.3,1.4,1.3v9.7c0,1.4-0.2,1.6-1.4,1.7l-0.3,0v1h6.1v-1h-0.3c-1.4,0-1.6-0.3-1.6-1.5V3.9   c0-1.4,0.3-1.5,1.6-1.5h0.3v-1h-6.1V2.3z"></path><path d="M137.1,2.3h0.3c1.8,0,1.8,0.4,1.8,0.7c0,0.3-0.1,0.7-0.4,1.3l-3.3,8.7l-3.8-9.5c-0.2-0.5-0.1-0.6-0.1-0.7   c0.2-0.3,0.8-0.4,2-0.5l0.3,0v-1H127v1h0.3c1.2,0,1.4,0.2,2,1.6l5,12.5h1.5l4.8-12.3c0.5-1.3,1-1.8,2.1-1.8h0.3v-1h-5.9V2.3z"></path><path d="M161.8,12.3c-0.6,2-1,2.4-2.3,2.4h-3.5c-0.7,0-0.9-0.1-0.9-1V9.1h3.6c0.7,0,1.1,0,1.3,1.5l0,0.3h1V6h-1l0,0.3   c-0.1,1.3-0.5,1.4-1,1.4H155v-5h4.5c0.6,0,1.1,0.2,1.4,2.1l0,0.3h1l-0.2-3.8h-11.5v1h0.8c1.3,0,1.5,0.4,1.5,1.5v9.6   c0,1.2-0.2,1.6-1.8,1.6h-0.9v1h12.7l0.4-4h-1L161.8,12.3z"></path><path d="M185.1,13.1l-1.8-1.8c-0.8-0.8-1.5-1.5-2.2-2c1.7-0.7,2.7-2.1,2.7-3.8c0-2.7-2.4-4.3-6.4-4.3c-1.5,0-1.9,0-2.9,0.1l-0.6,0   c-0.8,0.1-1.8,0.1-2.2,0.1h-0.3v1h0.8c1.2,0,1.4,0.3,1.4,1.5v9.6c0,1.4-0.4,1.6-1.5,1.6h-0.7v1h7v-1h-0.8c-1.2,0-1.5-0.3-1.5-1.4   v-3.5c0.2,0,0.5,0,0.9,0c0.5,0,0.8,0,1.2,0l0.2,0c0.6,0.4,1.4,1.1,2.2,1.9l1.5,1.5c1.9,1.9,3,2.8,6.3,2.8c0.3,0,0.6,0,1,0l0.3,0v-1   l-0.3,0C187.8,15.2,186.5,14.5,185.1,13.1z M176,2.1c0.3,0,0.5,0,0.8,0c2.9,0,4.2,1.1,4.2,3.5c0,2.4-1.3,3.5-3.9,3.5l-0.6,0   c-0.2,0-0.4,0-0.5,0V2.1z"></path><path d="M199.8,7.2c-1.6-1-3.1-2-3.1-3.3c0-1.1,0.9-1.8,2.2-1.8c1.5,0,2.8,1,3.4,2.5l0.1,0.2h0.9l-0.5-3.5h-0.8L202,1.4   c-0.1,0.1-0.1,0.1-0.2,0.1c-0.3,0-0.5-0.1-0.8-0.2c-0.5-0.2-1.1-0.4-2.3-0.4c-2.5,0-4.3,1.5-4.3,3.6c0,2.2,2.1,3.6,4,4.8   c1.7,1.1,3.2,2,3.2,3.4c0,1.6-1.4,2.4-2.8,2.4c-1.7,0-3.1-1.2-3.5-3l-0.1-0.2h-1l0.6,4.1h0.8l0.1-0.2c0-0.1,0.1-0.1,0.2-0.1   c0.1,0,0.4,0.1,0.6,0.2c0.7,0.2,1.7,0.5,2.5,0.5c2.8,0,4.9-1.8,4.9-4.2C204,9.8,201.8,8.5,199.8,7.2z"></path><path d="M212.9,2.3l0.3,0c1.2,0.1,1.4,0.3,1.4,1.3v9.7c0,1.4-0.2,1.6-1.4,1.7l-0.3,0v1h6.1v-1h-0.3c-1.4,0-1.6-0.3-1.6-1.5V3.9   c0-1.4,0.3-1.5,1.6-1.5h0.3v-1h-6.1V2.3z"></path><path d="M240.8,1l0,0.2c0,0-0.1,0.1-0.4,0.1h-11c-0.1,0-0.3,0-0.4-0.1l0-0.3h-1l-0.4,4.3h1l0-0.2c0.4-2.1,0.8-2.3,1.4-2.3h3.7v11   c0,1-0.2,1.4-1.5,1.4H231v1h7.8v-1h-1.1c-1.3,0-1.5-0.4-1.5-1.4v-11h3.7c0.6,0,1,0.2,1.4,2.3l0,0.2h1L241.8,1H240.8z"></path><path d="M259.7,2.3h0.3c0.9,0,1.1,0.2,1.2,0.3c0,0.1,0.1,0.3-0.3,0.9l-3,5.1l-3.4-5.2c-0.4-0.6-0.4-0.7-0.3-0.8   c0-0.1,0.2-0.2,1.3-0.2h0.3v-1h-6.6v1l0.3,0c1.3,0,1.8,0.2,2.9,2l4,6.3v3.1c0,0.9-0.2,1.3-1.5,1.3h-0.7v1h6.9v-1h-0.6   c-1.3,0-1.5-0.4-1.5-1.4v-3.3l3.8-6.3c0.6-1,1.2-1.5,2.6-1.7l0.3,0v-1h-5.7V2.3z"></path><path d="M286.4,1c-5,0-8.6,3.4-8.6,8c0,4.2,3.7,7.4,8.5,7.4c4.8,0,8.4-3.5,8.4-8.1C294.7,4.2,291.1,1,286.4,1z M285.8,2.1   c3.6,0,6.2,2.8,6.2,6.9c0,3-1.6,6.2-5.2,6.2c-3.6,0-6.3-3-6.3-7C280.5,5.8,281.9,2.1,285.8,2.1z"></path><path d="M307.9,2.7c1.2,0,1.6,0.4,1.6,1.6l0,0.3h1V1.3h-10.8v1l0.3,0c1.3,0,1.4,0.4,1.4,1.8v8.9c0,1.8-0.2,1.9-1.4,1.9l-0.3,0v1   h6.1v-1h-0.3c-1.6,0-1.7-0.4-1.7-1.5V8.9h3.9c0.9,0,1.3,0.2,1.3,1.4l0,0.3h1V6h-1l0,0.3c-0.1,1-0.5,1.2-1,1.2h-4.2V2.7H307.9z"></path></g><g><g><radialGradient id="umd-globe" cx="26.4871" cy="25.3962" r="25.2868" gradientUnits="userSpaceOnUse"><stop offset="0" style="stop-color:#FFFFFF"></stop><stop offset="0.5149" style="stop-color:#FDFDFD"></stop><stop offset="0.7003" style="stop-color:#F6F6F6"></stop><stop offset="0.8325" style="stop-color:#EBEBEB"></stop><stop offset="0.9387" style="stop-color:#DADADA"></stop><stop offset="1" style="stop-color:#CCCCCC"></stop></radialGradient><path style="fill:url(#umd-globe)" d="M26.5,50.7c-13.9,0-25.3-11.3-25.3-25.3c0-13.9,11.3-25.3,25.3-25.3c13.9,0,25.3,11.3,25.3,25.3    C51.8,39.3,40.4,50.7,26.5,50.7z"></path></g><g><path style="fill:#CCCCCC" d="M26.5,50.7c-13.9,0-25.3-11.3-25.3-25.3c0-13.9,11.3-25.3,25.3-25.3c13.9,0,25.3,11.3,25.3,25.3    C51.8,39.3,40.4,50.7,26.5,50.7z M26.5,0.4c-13.8,0-25,11.2-25,25s11.2,25,25,25c13.8,0,25-11.2,25-25S40.2,0.4,26.5,0.4z"></path></g><path style="fill:#FFD520" d="M51.6,24.8c0,0.1-0.4,0.5-0.9,0.8c0,0,0,0,0,0c-0.6,0.4-1.6,0.7-2.7,1c-1.2,0.3-2.6,0.6-4.2,0.8   c-1.6,0.2-3.4,0.4-5.3,0.6c0,0,0,0,0,0c-2.4,0.2-4,0.3-5.9,0.4c-2.1,0.1-4.2,0.1-6.4,0.1c0,0.3,0,0.6,0,0.8c0,2,0,3.8,0,5.6   c0.1,9.6,0.1,9.6,0.4,15.5c13.9,0,25.1-11.2,25.1-25.1C51.6,25.4,51.6,25,51.6,24.8z"></path><g><path d="M26.1,29.4c0,2,0,3.8,0,5.6c4,3.8,4,3.8,5.7,5.5c0.4-3.2,0.7-7,0.7-11.2c0-0.3,0-0.6,0-0.8c-2.5,0.1-4.2,0.1-6.4,0.1    C26.1,28.9,26.1,29.1,26.1,29.4z"></path><path d="M35.3,44.8c-0.9-1.4-1.7-2.4-3.5-4.3c-0.9,6.1-2.4,9.9-4.3,10c0.2,0,0.4,0,0.6,0c0.2,0,0.4,0,0.6-0.1    C31.4,50.2,33.6,48.2,35.3,44.8z"></path><path d="M38.1,34.5c0,0-1.4,7.5-2.8,10.3c0.8,1.5,0.8,2.1,0.5,3.1c2.4-1.9,4.4-4.6,5.8-8.1C40.8,38,40.2,37,38.1,34.5z"></path><path d="M31,50.1c0.5-0.1,0.5-0.1,1.5-0.3l0.6-0.2c1.9-0.6,2.2-0.9,2.8-1.7c-1.7,1.2-3.4,2-5.4,2.3L31,50.1z"></path><path d="M42.1,44c3.6-4.1,5.8-9.9,5.8-16.5c0-0.3,0-0.6,0-0.8c-1.2,0.3-2.6,0.6-4.2,0.8c0,0.3,0,0.6,0,0.8c0,4.3-0.7,8.2-2.1,11.5    C42.5,41.7,42.5,42.5,42.1,44z"></path><path d="M38.5,28c-2.4,0.2-4,0.3-5.9,0.4c3.4,3.6,4.2,4.4,5.6,6.1c0.2-1.8,0.3-3.7,0.3-5.6C38.5,28.6,38.5,28.3,38.5,28z"></path></g><path d="M21,1.6c1.4-0.6,2.7-1.2,5.5-1.3l0,0C24.6,0.4,22.7,0.9,21,1.6"></path><g><path style="fill:#E03A3E" d="M43.3,27.4c-1.3-0.2-2.4-2.4-1.8-4.6c-1.8,1.3-3.9-1.3-3.6-3.8c0.2-1.3,1-2.4,2.5-1.9c-0.6-2-1.3-4-2.2-5.8    c-1.3,0.2-2.7,0.3-4.2,0.4c1.3,2,0,3.9-1.8,3.6c-1.4-0.2-2.6-1.6-2.3-3.3c-1.1,0.8-3.4,0.5-3.6-1.9c-0.1,5.1-0.1,11.6-0.1,18.4    c6.7,0.1,14.5-0.6,17.6-1.1c0,0,0,0,0,0C43.6,27.5,43.4,27.5,43.3,27.4z"></path></g><g><path style="fill:#E03A3E" d="M10.3,32.5c1.9-0.7,4.2,2.5,3.4,4.7c-0.4,1-1.4,1.3-2.4,0.7c0.6,1.9,1.3,3.6,2.1,5.1c1.3,0.2,2.8,0.3,4.4,0.5    c-1.3-1.6-0.3-2.9,1.5-2.8c1.5,0.1,3.5,1.3,3,3c1.3-0.6,3.6-0.1,3.9,1.6c-0.1-3.8-0.1-9.3-0.1-15.8c0-0.3,0-0.5,0-0.8    c-2.1,0-4.3-0.1-6.4-0.2c-4.5-0.2-7.6-0.4-11.4-1.1c0,0,0,0,0,0C10.2,28,10.8,30.9,10.3,32.5z"></path></g><path style="fill:#E03A3E" d="M38.4,9.3L38.4,9.3L38.4,9.3C38.4,9.3,38.4,9.3,38.4,9.3L38.4,9.3C38.4,9.3,38.4,9.3,38.4,9.3   c0.3,0,0.5-0.1,0.7-0.1c1.4-0.3,4.7-1,4.7-2c0,0,1.3,1.3,2.2,3.1c0.1,0.2,0.2,0.4,0.3,0.7c0.1,0.3,0.2,0.7,0.2,0.9   c0,0.5-0.4,0.6-0.7,0.4c0,0-0.1,0-0.1,0c-1.3-0.6-1.7-1.8-2-2.3c-0.7,0.2-1.7,0.7-2.6,0.9c-0.1,0-0.3,0.1-0.4,0.1   c1.1,1.8,2.1,3.8,2.8,5.9c1.3-1.3,3.2,1.1,3.3,3.4c0.1,1.4-0.6,2.6-1.8,2.1c1,1.9,0.7,4.6-1.2,5.2C43.4,21.4,42.4,15.9,38.4,9.3   L38.4,9.3L38.4,9.3"></path><path style="fill:#E03A3E" d="M38.4,9.4L38.4,9.4L38.4,9.4L38.4,9.4L38.4,9.4c-3.2-4.9-5.7-6.7-9-7.9c-0.6-0.3-2.8-1.1-3-1.1l0,0l0,0   c0.6,0.8,1.7,1.3,2,1.4c-0.1,0.3,0,0.9,1,1.7c0.2,0.1,0.3,0.2,0.5,0.3c1.6,0.9,2,0.2,2.1-0.1c0,0,0,0,0,0c0.5,0.4,1.5,1.1,2.5,2.4   c0.6,0.7,1.2,1.4,1.6,2c-1,0.1-2.3,0.2-3.7,0.3c-0.1-1.6-1.2-2.4-2-2.7C29,5,28.5,6.9,29.2,8.2c-1.3-0.7-2.7-0.1-3,1.9   C31.2,10.1,34.6,9.9,38.4,9.4L38.4,9.4L38.4,9.4"></path><path style="fill:#E03A3E" d="M38.7,4.8c0,0,0-0.1,0-0.2c0-0.1,0.1-0.1,0.1-0.1s0-0.1,0.1-0.1c0.3-0.1,1-0.2,3.1,1.2c-4.4-3.4-9-4.8-13-5.2   c-0.6-0.1-1.6-0.1-1.6-0.1c1.3,0.1,2.1,0.4,2.3,0.5C29.8,0.9,30,1,30,1c0,0,0,0,0,0c0.3,0,0.5,0.1,0.9,0.2c0.4,0.1,1,0.4,1.6,0.6   C33.1,2.1,34,2.7,34,3c-0.1,0.1-0.2,0.1-0.6,0c1.5,1.1,3.6,3.1,4.9,4.5c0.9-0.2,2.2-0.3,2.8-0.5C41,7.1,39.1,5.6,38.7,4.8z"></path><path style="fill:#E03A3E" d="M13.1,44.3C11,44,9.7,43.6,8.9,43.2c-0.1-0.1-0.2-0.1-0.2-0.1c0,0-1.2-1.2-2.3-2.6c-0.8-1-1.4-2.1-1.5-2.2   c0,0,0.2,0,0.3,0c1.1,0.4,2.9,3.5,2.9,3.5c0.7,0.3,1.6,0.5,2.7,0.7c-1-1.6-1.9-3.3-2.6-5.2c-1.6,0.8-3.6-3.3-2.9-5.1   c0.1-0.4,0.5-1.1,1.6-0.3c-0.8-1.8-0.6-4.6,1.3-4.6C8.3,33.4,9.2,38.7,13.1,44.3"></path><path style="fill:#E03A3E" d="M26.2,45.6c-0.2,0.9-1.4,1.7-3.2,1c0.8,1.1,0.1,2-1.3,1.7c-1.1-0.2-2.4-1.1-2.5-2c-1.4-0.1-2.6-0.2-3.7-0.4   c1.1,1.2,2.2,2.2,3.5,3c0.2-0.1,0.4,0,1.1,0.2c1,0.3,1.9,0.8,2.8,1.1c0,0-0.2,0-0.2,0c-0.7-0.1-0.9-0.2-1.3-0.2   c-1.9-0.4-5.1-1.4-8.3-5.7h0h0l0,0c3.9,0.6,7.7,0.9,13.1,0.9C26.2,45.4,26.2,45.5,26.2,45.6"></path><path style="fill:#FFD520" d="M26.4,0.3C13,0.3,1.6,11.3,1.4,24.9l0,0c0,0,0.1,0.3,0.7,0.6v0v0c0.5,0.3,1.3,0.7,2.3,1   c1.3,0.3,2.6,0.6,3.9,0.8l0,0c3.8,0.6,6.9,0.9,11.4,1.1c2.1,0.1,4.3,0.2,6.4,0.2c0-1.3,0-8.6,0-15.6c0-0.9,0-1.9,0-2.8   C26.3,5.6,26.3,0.9,26.4,0.3L26.4,0.3z"></path><path d="M38.5,47.5c-1.4,0.8-1.7,0.8-3.6,1.6c-0.5,0.2-1,0.3-1.6,0.5c3.4-0.9,8-4.7,8.8-5.6c-0.4,0.9-0.7,1.5-1.7,2.3   C40.1,46.5,38.9,47.2,38.5,47.5z"></path><path d="M4.4,26.5c-1-0.3-1.8-0.6-2.3-1C2.3,16.5,7.4,8.4,14.7,4c-1.7,1.5-2.5,2.5-3.4,4.6C7.2,13.3,4.6,19.7,4.4,26.5"></path><path d="M14.8,4c1.8-1.3,2.9-2.3,5.8-3c2-0.5,3.8-0.7,5.9-0.7l0,0C22.2,0.4,18.2,1.9,14.8,4"></path><path d="M13.4,28c-1.8-0.2-3.6-0.4-5.1-0.7c0.1-4.6,1.1-8.9,2.7-12.8c0.6,2.5,1.2,3.9,3,6.9C13.6,23.6,13.4,25.8,13.4,28"></path><path d="M26.2,10.1c0,2.8,0,5.6-0.1,7.8c0,2.2,0,3.8,0,4.1c-2.5-2.6-3.8-4-5.6-6.3c1.2-7.8,3.4-14,5.9-15.4l0,0l0,0   C26.3,1,26.3,5.4,26.2,10.1z"></path><g><path d="M17.4,9.8c-1.6,3.3-2.8,7.3-3.4,11.6c1.5,2.3,2.5,3.6,5.5,7c0-4.5,0.4-8.8,1-12.8C18.7,13.1,18.1,11.9,17.4,9.8z"></path></g><path style="stroke:#000000;stroke-width:0;stroke-linecap:round;stroke-linejoin:round" d="M50.6,25.6c0,0.3,0,0.6,0,0.8c0,8.9-4.3,16.3-11.1,20.4L39.4,47c3.2-2,7.2-5.3,9.8-10.7   c2.7-5.4,2.4-11.4,2.4-11.4C51.5,25.1,51.1,25.4,50.6,25.6z"></path><g><path d="M21,1.6c-3.7,1.4-7,3.9-9.6,7c-0.7,2.3-0.7,3.6-0.4,6c1.6-3.8,3.9-7.1,6.6-9.6C18.4,3.5,18.9,2.7,21,1.6z"></path></g><path d="M17.4,9.9c-0.5-2.1-0.5-3.1,0.2-4.9c2.6-2.4,5.6-4.2,8.9-4.7C22.9,1.2,19.7,4.9,17.4,9.9"></path></g></symbol><symbol id="lg-uva" viewBox="0 0 218.19 52.74"><g><g id="XMLID_1_"><rect id="XMLID_2_" style="fill:#F37C20" width="3.92" height="18.65"/><rect id="XMLID_3_" style="fill:#F37C20" width="3.79" height="18.65"/><rect id="XMLID_4_" style="fill:#F37C20" width="4.04" height="18.65"/><rect id="XMLID_5_" style="fill:#F37C20" width="4.04" height="18.65"/><rect id="XMLID_6_" style="fill:#F37C20" width="4.04" height="18.65"/><polygon id="XMLID_7_" style="fill:#F37C20" points="33.62,21.42 11.84,21.42 23.02,14.54 		"/><polygon id="XMLID_8_" style="fill:#F37C20" points="9.33,21.42 0,21.42 0,14.47 20.63,14.47 		"/><polygon id="XMLID_9_" style="fill:#F37C20" points="25.33,14.47 45.43,14.47 45.43,21.42 36.04,21.42 		"/><path id="XMLID_10_" style="fill:#F37C20" d="M42.55,13.15H2.88C6.76,6.14,14.19,1.4,22.71,1.4C31.24,1.4,38.66,6.14,42.55,13.15z"/><path id="XMLID_11_" style="fill-rule:evenodd;clip-rule:evenodd;fill:#F37C20" d="M3.06,36.07l-0.34,1.04l0.89-0.65l0.89,0.65l-0.34-1.04l0.89-0.65h-1.1L3.6,34.38l-0.34,1.04
+			l-1.1,0L3.06,36.07z M0,30.14l0.89,0.65l-0.34,1.04l0.89-0.65l0.89,0.65l-0.34-1.04l0.89-0.65h-1.1l-0.34-1.04l-0.34,1.04H0z
+			 M8.94,41.38h-1.2L7.4,40.35l0.89-0.65h-1.1l-0.34-1.04L6.51,39.7h-1.1l0.89,0.65l-0.34,1.04H0l0-11.25l0-4.05l0.83-0.61
+			l0.89,0.65l-0.34-1.04l0.89-0.65h-1.1l-0.34-1.04l-0.15,0.48l-0.21,0.57H0l0-1.7h8.94V41.38z M7.73,41.38H5.97l0.88-0.64
+			L7.73,41.38z M0,25.95v-1.08l0.26,0.19l-0.19,0.58L0,25.95z"/><rect id="XMLID_17_" style="fill-rule:evenodd;clip-rule:evenodd;fill:#F37C20" width="8.94" height="4.95"/><rect id="XMLID_18_" style="fill-rule:evenodd;clip-rule:evenodd;fill:#F37C20" width="8.81" height="4.95"/><path id="XMLID_19_" style="fill-rule:evenodd;clip-rule:evenodd;fill:#F37C20" d="M28.84,46.2l0.89-0.65h-1.1l-0.34-1.04l-0.34,1.04h-1.1l0.89,0.65l-0.34,1.04l0.89-0.65
+			l0.89,0.65L28.84,46.2z M22.2,46.89l-0.25,0.76H10.24V42.7h1.44l-0.25,0.77h-1.1l0.89,0.65l-0.34,1.04l0.89-0.65l0.89,0.65
+			l-0.34-1.04l0.89-0.65h-1.1l-0.25-0.77h21.76l-0.25,0.77h-1.1l0.89,0.65l-0.34,1.04l0.89-0.65l0.89,0.65l-0.34-1.04l0.89-0.65
+			h-1.1L33.8,42.7h1.51v4.95H23.55l-0.25-0.76l0.89-0.65h-1.1l-0.34-1.04l-0.34,1.04h-1.1L22.2,46.89z M16.49,46.2l-0.34,1.04
+			l0.89-0.65l0.89,0.65l-0.34-1.04l0.89-0.65h-1.1l-0.34-1.04l-0.34,1.04h-1.1L16.49,46.2z M23.25,47.65h-1.01l0.5-0.36L23.25,47.65
+			z"/><path id="XMLID_24_" style="fill-rule:evenodd;clip-rule:evenodd;fill:#F37C20" d="M42.43,36.07l0.89-0.65l-1.1,0l-0.34-1.04l-0.34,1.04h-1.1l0.89,0.65l-0.34,1.04l0.89-0.65
+			l0.89,0.65L42.43,36.07z M39.52,41.38l-0.34-1.04l0.89-0.65h-1.1l-0.34-1.04L38.3,39.7h-1.1l0.89,0.65l-0.34,1.04l0.89-0.64
+			L39.52,41.38L39.52,41.38z M45.43,41.38h-5.9h-1.76h-1.14V22.73h8.81v1.7h-0.43l-0.34-1.04l-0.34,1.04h-1.1l0.89,0.65l-0.34,1.04
+			l0.89-0.65l0.77,0.56v4.1l-1.03,0l-0.34-1.04l-0.34,1.04h-1.1l0.89,0.65l-0.34,1.04l0.89-0.65l0.89,0.65l-0.34-1.04l0.83-0.6
+			V41.38z M45.43,24.92v0.86l-0.23-0.69L45.43,24.92z"/></g><g><path id="XMLID_132_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M63.43,26.7c3.2,0,5.44-0.85,6.92-2.21c2.06-1.77,2.87-4.08,3.09-7.1
+			c0.11-1.43,0.18-7.87,0.18-8.39c0-0.51,0-5.74,0.07-6.11c0.11-0.44,0.22-1.47,1.58-1.47h1.51c0.18,0,0.22-0.15,0.22-0.37V0.26
+			C77,0.15,76.96,0,76.63,0c-0.33,0-1.51,0.11-4.05,0.11C70.12,0.11,68.43,0,68.06,0c-0.22,0-0.26,0.07-0.26,0.26v0.88
+			c0,0.18,0.04,0.29,0.26,0.29h1.62c0.96,0,1.54,0.66,1.66,1.62c0.11,0.92,0.18,3.05,0.18,5.85v7.87c0,2.72-0.48,4.93-1.91,6.47
+			c-1.29,1.32-3.42,2.02-5.52,2.02c-2.13,0-4.49-0.66-5.85-2.65c-0.85-1.25-1.14-2.98-1.18-4.67c-0.04-1.18-0.18-5.85-0.18-7.8V7.72
+			c0-1.88,0.04-4.45,0.07-4.78c0.07-0.81,0.7-1.51,1.77-1.51h1.84c0.26,0,0.29-0.07,0.29-0.26V0.22c0-0.15-0.04-0.22-0.33-0.22
+			c-0.4,0-2.17,0.11-5.04,0.11C52.61,0.11,50.81,0,50.44,0c-0.29,0-0.33,0.07-0.33,0.29V1.1c0,0.26,0.04,0.33,0.26,0.33h1.73
+			c1.14,0,1.4,0.59,1.4,1.88v8.75c0,4.82,0.15,7.28,0.59,8.94c0.59,2.32,1.88,3.94,4.38,4.93C59.68,26.45,61.51,26.7,63.43,26.7z"/><path id="XMLID_131_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M93.63,14.02c0-1.64-0.08-4.16,0.12-5.99c0.08-0.56,0.28-0.84,1.28-0.84h0.4
+			c0.16,0,0.24-0.12,0.24-0.28V6.07c0-0.24-0.08-0.32-0.28-0.32c-0.28,0-1.68,0.12-2.52,0.12c-1.28,0-3-0.12-3.28-0.12
+			c-0.2,0-0.28,0.08-0.28,0.2v0.96c0,0.2,0.08,0.28,0.28,0.28h0.68c0.68,0,1.28,0.24,1.48,0.72c0.2,0.48,0.32,2.8,0.32,3.76
+			c0.08,1.28,0.12,2.52,0.12,4.8v2.64h-0.16c-0.48-0.52-4.2-5.2-4.92-6.03c-0.84-1-5.44-6.79-5.55-6.95
+			c-0.16-0.24-0.4-0.32-0.96-0.32c-0.48,0-1.32,0.08-1.96,0.08c-0.44,0-1.08-0.04-1.6-0.08c-0.52,0-0.96-0.04-1.04-0.04
+			c-0.16,0-0.24,0.12-0.24,0.24v0.96c0,0.16,0.08,0.24,0.24,0.24h0.36c1.12,0,2.12,0.68,2.12,2.12v4.2c0,4.52-0.08,7.35-0.12,7.83
+			c-0.12,0.92-0.76,1.2-1.16,1.2h-0.92c-0.12,0-0.16,0.04-0.16,0.12v1.04c0,0.2,0.04,0.28,0.12,0.28c0.32,0,2.12-0.12,2.68-0.12
+			c1.16,0,2.76,0.12,3.04,0.12c0.2,0,0.2-0.08,0.2-0.24v-0.96c0-0.16,0-0.24-0.2-0.24h-0.84c-0.4,0-0.84-0.44-0.96-1.36
+			c-0.08-0.36-0.24-4.36-0.24-6.75V8.95H80c0.64,0.72,3.88,5.04,4.84,6.15c0.44,0.52,2.16,2.56,4,4.76c1.64,1.96,3,3.6,3.28,3.88
+			c0.16,0.12,0.56,0.4,0.92,0.4c0.48,0,0.6-0.4,0.6-0.76V14.02z"/><path id="XMLID_130_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M103.12,13.62c0-0.28,0.04-5.04,0.04-5.44c0.04-0.84,0.4-1,1.48-1h0.68
+			c0.2,0,0.24-0.12,0.24-0.28V5.95c0-0.12-0.08-0.2-0.24-0.2c-0.32,0-2.36,0.12-3.52,0.12c-1.88,0.04-4.36-0.12-4.6-0.12
+			c-0.16,0-0.24,0.08-0.24,0.24v0.92c0,0.16,0.04,0.28,0.24,0.28h0.72c1.68,0,2.04,0.4,2.04,0.84c0,0.56,0.08,4.56,0.08,5.2v1.76
+			c0,1.36-0.04,6.43-0.08,6.79c-0.08,0.72-0.72,0.76-1.72,0.76h-0.88c-0.16,0-0.24,0.12-0.24,0.24v0.88c0,0.2,0.08,0.32,0.24,0.32
+			c0.24,0,2.56-0.12,3.92-0.12c1.8,0,3.88,0.12,4.2,0.12c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.04-0.2-0.24-0.2h-0.6
+			c-1.16,0-1.64-0.56-1.72-1.48c-0.04-0.6-0.04-5.2-0.04-5.44V13.62z"/><path id="XMLID_127_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M143.63,14.74c-0.04,2.44,0,4.8-0.04,6.75c0,0.88-0.48,1.04-1.44,1.04h-0.48
+			c-0.16,0-0.24,0.08-0.24,0.2v0.92c0,0.2,0.08,0.32,0.24,0.32c0.28,0,2.32-0.12,3.32-0.12c1.32,0,3.48,0.12,3.76,0.12
+			c0.24,0,0.32-0.08,0.32-0.28v-0.96c0-0.12-0.08-0.2-0.24-0.2h-1.04c-0.8,0-1.04-0.44-1.12-1v-4.32v-0.96
+			c0.28-0.08,0.64-0.08,1.04-0.08c1.68,0,2.28,0.88,3.72,3.36c0.36,0.6,2.12,3.84,2.88,4.4c0.68-0.04,1.64-0.08,2.56-0.08
+			c0.4,0,0.88,0.04,1.24,0.04c0.4,0.04,0.72,0.08,0.8,0.08c0.16,0,0.24-0.12,0.24-0.28v-0.8c0-0.24-0.04-0.36-0.2-0.36
+			c-0.72,0-1.24-0.04-1.8-0.44c-0.76-0.56-1.68-1.76-2.24-2.56c-1.64-2.32-2.44-3.56-3.36-3.76V15.7c3.16-1.12,4.72-2.72,4.72-5.48
+			c0-0.92-0.52-2.08-1.4-2.92c-1-0.88-2.8-1.56-5.2-1.56c-0.52,0-4,0.12-4.48,0.12c-0.72,0-3.2-0.12-3.4-0.12
+			c-0.16,0-0.24,0.08-0.24,0.2v0.96c0,0.16,0.04,0.28,0.16,0.28h0.4c1.12,0,1.48,0.44,1.52,1.24v3.84V14.74z M146.67,7.91
+			c0-0.72,0.6-0.88,1.2-0.88c1.6,0,2.72,0.36,3.8,1.04c0.72,0.48,1.32,1.56,1.32,2.76c0,1.04-0.68,4.16-5.12,4.16
+			c-0.52,0-0.92-0.04-1.2-0.08V7.91z"/><path id="XMLID_126_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M165.91,24.33c3.64,0,5.55-2.56,5.55-5.55c0-2-0.48-3-1.28-3.84c-1-1.04-2.48-1.48-4.32-2.16
+			c-0.76-0.28-2.2-0.88-2.8-1.64c-0.44-0.52-0.64-1.36-0.64-1.96c0-0.72,0.64-2.44,2.84-2.44c1.16,0,2.04,0.4,2.64,1.08
+			c0.84,0.96,1.16,2.36,1.4,2.84c0.04,0.12,0.12,0.2,0.24,0.16l0.72-0.16c0.12-0.04,0.16-0.12,0.16-0.24
+			c-0.04-0.56-0.4-3.16-0.4-4.48c0-0.2-0.04-0.36-0.36-0.36s-0.44,0-0.52,0.12l-0.16,0.28c-0.08,0.2-0.28,0.16-0.68-0.08
+			c-0.48-0.24-1.32-0.52-2.84-0.52c-1.44,0-2.72,0.36-3.76,1.2c-0.88,0.76-1.72,2-1.72,3.36c0,1.96,0.48,3.24,1.4,4.12
+			c1.2,1.08,3.12,1.8,3.92,2.08c2.12,0.8,3.68,1.8,3.68,4.08c0,1.72-1.92,2.72-3.2,2.72c-1.48,0-2.8-0.8-3.4-2
+			c-0.72-1.32-0.72-2.16-0.72-2.72c0-0.16-0.16-0.24-0.32-0.28l-0.72-0.08c-0.16,0-0.24,0.12-0.28,0.28
+			c-0.04,0.64-0.32,3.84-0.44,4.96c-0.04,0.2,0.08,0.36,0.32,0.44c0.32,0.08,0.52,0,0.6-0.2l0.12-0.32c0.08-0.32,0.32-0.28,0.6-0.08
+			C162.47,23.65,163.87,24.33,165.91,24.33z"/><path id="XMLID_125_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M178.23,13.62c0-0.28,0.04-5.04,0.04-5.44c0.04-0.84,0.4-1,1.48-1h0.68
+			c0.2,0,0.24-0.12,0.24-0.28V5.95c0-0.12-0.08-0.2-0.24-0.2c-0.32,0-2.36,0.12-3.52,0.12c-1.88,0.04-4.36-0.12-4.6-0.12
+			c-0.16,0-0.24,0.08-0.24,0.24v0.92c0,0.16,0.04,0.28,0.24,0.28h0.72c1.68,0,2.04,0.4,2.04,0.84c0,0.56,0.08,4.56,0.08,5.2v1.76
+			c0,1.36-0.04,6.43-0.08,6.79c-0.08,0.72-0.72,0.76-1.72,0.76h-0.88c-0.16,0-0.24,0.12-0.24,0.24v0.88c0,0.2,0.08,0.32,0.24,0.32
+			c0.24,0,2.56-0.12,3.92-0.12c1.8,0,3.88,0.12,4.2,0.12c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.04-0.2-0.24-0.2h-0.6
+			c-1.16,0-1.64-0.56-1.72-1.48c-0.04-0.6-0.04-5.2-0.04-5.44V13.62z"/><path id="XMLID_122_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M71.08,36.66c3.67,0,5.87-5.03,5.87-7.81c0-1.72-1.01-2.96-2.71-2.96
+			c-3.36,0-5.77,4.32-5.77,7.51C68.48,35.32,69.69,36.66,71.08,36.66z M70.7,35.45c-0.61,0-1.16-0.48-1.16-1.29
+			c0-1.19,0.61-2.73,1.47-4.1c1.26-2.05,2.6-3.01,3.67-3.01c0.83,0,1.29,0.63,1.26,1.42C75.94,30.14,73.33,35.45,70.7,35.45z"/><path id="XMLID_121_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M112.74,37.3c0-0.28,0.04-5.04,0.04-5.44c0.04-0.84,0.4-1,1.48-1h0.68
+			c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.08-0.2-0.24-0.2c-0.32,0-2.36,0.12-3.52,0.12c-1.88,0.04-4.36-0.12-4.6-0.12
+			c-0.16,0-0.24,0.08-0.24,0.24v0.92c0,0.16,0.04,0.28,0.24,0.28h0.72c1.68,0,2.04,0.4,2.04,0.84c0,0.56,0.08,4.56,0.08,5.2v1.76
+			c0,1.36-0.04,6.43-0.08,6.79c-0.08,0.72-0.72,0.76-1.72,0.76h-0.88c-0.16,0-0.24,0.12-0.24,0.24v0.88c0,0.2,0.08,0.32,0.24,0.32
+			c0.24,0,2.56-0.12,3.92-0.12c1.8,0,3.88,0.12,4.2,0.12c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.04-0.2-0.24-0.2h-0.6
+			c-1.16,0-1.64-0.56-1.72-1.48c-0.04-0.6-0.04-5.2-0.04-5.43V37.3z"/><path id="XMLID_115_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M118.55,38.42c-0.04,2.44,0,4.8-0.04,6.75c0,0.88-0.48,1.04-1.44,1.04h-0.48
+			c-0.16,0-0.24,0.08-0.24,0.2v0.92c0,0.2,0.08,0.32,0.24,0.32c0.28,0,2.32-0.12,3.32-0.12c1.32,0,3.48,0.12,3.76,0.12
+			c0.24,0,0.32-0.08,0.32-0.28v-0.96c0-0.12-0.08-0.2-0.24-0.2h-1.04c-0.8,0-1.04-0.44-1.12-1V40.9v-0.96
+			c0.28-0.08,0.64-0.08,1.04-0.08c1.68,0,2.28,0.88,3.72,3.36c0.36,0.6,2.12,3.84,2.88,4.4c0.68-0.04,1.64-0.08,2.56-0.08
+			c0.4,0,0.88,0.04,1.24,0.04c0.4,0.04,0.72,0.08,0.8,0.08c0.16,0,0.24-0.12,0.24-0.28v-0.8c0-0.24-0.04-0.36-0.2-0.36
+			c-0.72,0-1.24-0.04-1.8-0.44c-0.76-0.56-1.68-1.76-2.24-2.56c-1.64-2.32-2.44-3.56-3.36-3.76v-0.08c3.16-1.12,4.72-2.72,4.72-5.47
+			c0-0.92-0.52-2.08-1.4-2.92c-1-0.88-2.8-1.56-5.2-1.56c-0.52,0-4,0.12-4.48,0.12c-0.72,0-3.2-0.12-3.4-0.12
+			c-0.16,0-0.24,0.08-0.24,0.2v0.96c0,0.16,0.04,0.28,0.16,0.28h0.4c1.12,0,1.48,0.44,1.52,1.24v3.84V38.42z M121.82,31.59
+			c0-0.72,0.6-0.88,1.2-0.88c1.6,0,2.72,0.36,3.8,1.04c0.72,0.48,1.32,1.56,1.32,2.76c0,1.04-0.68,4.16-5.12,4.16
+			c-0.52,0-0.92-0.04-1.2-0.08V31.59z"/><path id="XMLID_114_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M149.02,42.1c0-0.68,0.76-0.84,1.16-0.84h0.68c0.12,0,0.2-0.12,0.2-0.24v-0.96
+			c0-0.12-0.08-0.2-0.24-0.2c-0.16,0-1.96,0.08-3.44,0.08c-2.16,0-4.12-0.08-4.36-0.08c-0.16,0-0.2,0.08-0.2,0.2v0.96
+			c0,0.12,0.04,0.2,0.2,0.2h0.96c1.04,0,1.96,0.28,1.96,1.2v1.48c0,0.8-0.08,1.32-0.6,1.72c-0.64,0.52-1.92,0.88-3.32,0.88
+			c-1.12,0-2.72-0.6-3.84-1.8c-1.56-1.64-2.44-3.92-2.44-6.99c0-1.8,0.88-3.92,2.08-5.24c1.48-1.6,3.04-2.04,4.28-2.04
+			c1.84,0,2.96,0.8,4.04,1.92c0.96,0.96,1.64,2.2,1.92,2.84c0.12,0.32,0.2,0.36,0.32,0.32l0.76-0.24c0.12-0.04,0.16-0.12,0.16-0.32
+			c-0.08-0.72-0.6-4.44-0.6-4.64c0-0.28-0.08-0.44-0.44-0.44c-0.32,0-0.44,0.12-0.52,0.28l-0.2,0.36c-0.08,0.12-0.24,0.12-0.56-0.16
+			c-0.76-0.56-2.64-1.28-4.56-1.28c-2.84,0-5.28,0.84-7.15,2.44c-1.92,1.68-2.96,4.12-2.96,6.55c0,3.12,0.8,5.28,2.4,7.03
+			c1.88,2.08,5.08,2.92,7.15,2.92c2.56,0,4.72-0.56,6.83-1.6c0.28-0.12,0.44-0.24,0.44-0.44c0-0.2-0.12-0.44-0.12-0.8V42.1z"/><path id="XMLID_113_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M156.35,37.3c0-0.28,0.04-5.04,0.04-5.44c0.04-0.84,0.4-1,1.48-1h0.68
+			c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.08-0.2-0.24-0.2c-0.32,0-2.36,0.12-3.52,0.12c-1.88,0.04-4.36-0.12-4.6-0.12
+			c-0.16,0-0.24,0.08-0.24,0.24v0.92c0,0.16,0.04,0.28,0.24,0.28h0.72c1.68,0,2.04,0.4,2.04,0.84c0,0.56,0.08,4.56,0.08,5.2v1.76
+			c0,1.36-0.04,6.43-0.08,6.79c-0.08,0.72-0.72,0.76-1.72,0.76h-0.88c-0.16,0-0.24,0.12-0.24,0.24v0.88c0,0.2,0.08,0.32,0.24,0.32
+			c0.24,0,2.56-0.12,3.92-0.12c1.8,0,3.88,0.12,4.2,0.12c0.2,0,0.24-0.12,0.24-0.28v-0.96c0-0.12-0.04-0.2-0.24-0.2h-0.6
+			c-1.16,0-1.64-0.56-1.72-1.48c-0.04-0.6-0.04-5.2-0.04-5.43V37.3z"/><path id="XMLID_112_" style="fill-rule:evenodd;clip-rule:evenodd;fill:currentColor" d="M177.95,37.7c0-1.64-0.08-4.16,0.12-5.99c0.08-0.56,0.28-0.84,1.28-0.84h0.4
+			c0.16,0,0.24-0.12,0.24-0.28v-0.84c0-0.24-0.08-0.32-0.28-0.32c-0.28,0-1.68,0.12-2.52,0.12c-1.28,0-3-0.12-3.28-0.12
+			c-0.2,0-0.28,0.08-0.28,0.2v0.96c0,0.2,0.08,0.28,0.28,0.28h0.68c0.68,0,1.28,0.24,1.48,0.72c0.2,0.48,0.32,2.8,0.32,3.76
+			c0.08,1.28,0.12,2.52,0.12,4.8v2.64h-0.16c-0.48-0.52-4.2-5.2-4.92-6.03c-0.84-1-5.44-6.79-5.55-6.95
+			c-0.16-0.24-0.4-0.32-0.96-0.32c-0.48,0-1.32,0.08-1.96,0.08c-0.44,0-1.08-0.04-1.6-0.08c-0.52,0-0.96-0.04-1.04-0.04
+			c-0.16,0-0.24,0.12-0.24,0.24v0.96c0,0.16,0.08,0.24,0.24,0.24h0.36c1.12,0,2.12,0.68,2.12,2.12v4.2c0,4.52-0.08,7.35-0.12,7.83
+			c-0.12,0.92-0.76,1.2-1.16,1.2h-0.92c-0.12,0-0.16,0.04-0.16,0.12v1.04c0,0.2,0.04,0.28,0.12,0.28c0.32,0,2.12-0.12,2.68-0.12
+			c1.16,0,2.76,0.12,3.04,0.12c0.2,0,0.2-0.08,0.2-0.24v-0.96c0-0.16,0-0.24-0.2-0.24h-0.84c-0.4,0-0.84-0.44-0.96-1.36
+			c-0.08-0.36-0.24-4.36-0.24-6.75v-5.48h0.08c0.64,0.72,3.88,5.04,4.84,6.15c0.44,0.52,2.16,2.56,4,4.76c1.64,1.96,3,3.6,3.28,3.88
+			c0.16,0.12,0.56,0.4,0.92,0.4c0.48,0,0.6-0.4,0.6-0.76V37.7z"/><path id="XMLID_111_" style="fill:currentColor" d="M79.77,27.25h-2.25c-0.13,0-0.19-0.12-0.14-0.3l0.1-0.43c0.05-0.18,0.23-0.58,0.43-0.58h2.2
+			c0.76-2.18,1.49-3.94,2.83-5.44c0.71-0.81,2.1-1.72,3.74-1.72c1.47,0,2.28,0.89,2.28,1.49c0,0.78-0.51,1.16-1.01,1.16
+			c-0.81,0-1.04-0.46-1.11-1.01c-0.03-0.25-0.28-0.73-1.04-0.73c-2.35,0-2.86,3.34-3.69,6.17c0,0,3.51,0.09,6.38,0.09
+			c3.09,0,4.74-0.11,5.08-0.11c0.33,0,0.37,0.11,0.37,0.26v0.85c0,0.18-0.04,0.33-0.29,0.33h-1.77c-1.03,0-1.54,0.33-1.54,0.96
+			c0,0.29,0.04,0.74,0.15,1.25c0.22,1.32,1.58,5.7,2.24,7.76c0.44,1.4,2.57,7.72,3.42,9.97c0.85-1.73,3.71-9.31,4.01-10.15
+			c0.37-0.99,1.77-5.22,2.32-6.84c0.29-0.92,0.51-1.58,0.51-2.1c0-0.44-0.26-0.85-1.18-0.85h-0.96c-0.15,0-0.18-0.11-0.18-0.33
+			v-0.85c0-0.18,0.04-0.26,0.22-0.26c0.33,0,2.02,0.11,4.34,0.11c2.69,0,3.6-0.11,3.94-0.11c0.22,0,0.26,0.07,0.26,0.26v0.92
+			c0,0.15-0.04,0.26-0.26,0.26h-0.99c-1.21,0-1.91,0.59-2.61,1.43c-0.96,1.18-3.9,8.72-4.52,10.26c-0.44,1.21-5.19,12.91-5.37,13.28
+			c-0.15,0.29-0.33,0.48-0.51,0.48c-0.29,0-0.44-0.37-0.63-0.85c-1.18-3.38-4.16-11.77-4.63-13.09l-0.37-1.25
+			c-0.88-2.61-2.61-7.95-3.09-9.05c-0.37-0.85-0.74-1.21-1.51-1.21l-3.42-0.03c-0.66,2.05-1.82,6.38-3.09,9.61
+			c-1.54,3.95-3.34,6.75-6.04,6.75c-1.01,0-1.82-0.68-1.82-1.49c0-0.58,0.43-1.09,1.09-1.09c0.73,0,1.11,0.71,1.19,1.14
+			c0.05,0.25,0.23,0.43,0.43,0.43c1.21,0,2.58-2.12,3.95-6.8L79.77,27.25z"/><path id="XMLID_110_" style="fill:currentColor" d="M182.64,5.69c0.05-0.04,0.03-0.04,0.16-0.02c0.62,0.07,2.89,0.28,7.28,0.28h1.6
+			c1.31,0,2.71-0.05,4.24-0.12c0.77-0.02,5.46,0.04,6.42,0.04c0.88,0,3.6-0.12,3.88-0.12c0.16,0,0.28,0.08,0.28,0.28v0.88
+			c0,0.16-0.04,0.28-0.28,0.28h-0.6c-0.72,0-0.76,0.44-0.6,0.68c0.24,0.36,3.56,5.67,4.2,6.63c0.6-1,3.92-5.83,4.08-6.15
+			c0.32-0.64,0.36-1.16-0.52-1.16h-0.64c-0.2,0-0.28-0.12-0.28-0.28V6.03c0-0.16,0.08-0.28,0.28-0.28c0.24,0,2.24,0.12,3.44,0.12
+			c0.72,0,2.12-0.12,2.36-0.12c0.2,0,0.28,0.08,0.28,0.32v0.84c0,0.2-0.08,0.28-0.24,0.28h-0.4c-0.64,0-1.08,0.12-1.44,0.32
+			c-0.6,0.32-5.24,6.83-6.15,8.23v3.36c0.04,1,0,2.08,0.08,2.56c0.08,0.84,0.72,0.88,1.44,0.88H212c0.2,0,0.28,0.08,0.28,0.2v0.96
+			c0,0.16-0.08,0.28-0.32,0.28c-0.24,0-2.48-0.12-3.8-0.12c-0.88,0-3.2,0.12-3.44,0.12c-0.2,0-0.28-0.08-0.28-0.32v-0.88
+			c0-0.12,0.08-0.24,0.24-0.24h0.6c1.28,0,1.52-0.24,1.56-0.8c0.04-0.36,0.04-1.8,0.04-4.16v-1.44c-0.36-0.72-5.24-7.87-5.87-8.47
+			c-0.34-0.34-0.91-0.45-1.27-0.47c0.24,1.08,0.56,2.5,0.69,3.19c0.04,0.16-0.04,0.24-0.2,0.32l-0.68,0.2
+			c-0.24,0.08-0.36,0.04-0.44-0.16c-0.48-1-1.16-2.32-2-3.08c-1-0.36-3.92-0.4-4.64-0.4v6.71c0,4.2,0,7.19,0.04,7.51
+			c0.08,0.64,0.28,1.04,0.92,1.04h1.52c0.2,0,0.28,0.12,0.28,0.36v0.84c0,0.12-0.08,0.24-0.28,0.24c-0.28,0-2.76-0.12-4.08-0.12
+			c-1.12,0-3.72,0.12-4.04,0.12c-0.24,0-0.32-0.12-0.32-0.36v-0.8c0-0.2,0.08-0.28,0.24-0.28h1.6c0.6,0,0.88-0.32,0.92-0.64
+			c0.12-1.52,0.12-3.64,0.12-6.03V7.27c-0.76,0-3-0.04-4.48,0.36c-1,0.76-1.84,2.04-2.36,3.08c-0.08,0.16-0.2,0.28-0.36,0.2
+			l-0.72-0.28c-0.2-0.08-0.2-0.24-0.16-0.4c0.23-0.73,0.93-3.19,1.25-4.4C182.58,5.76,182.59,5.72,182.64,5.69z"/><path id="XMLID_107_" style="fill:currentColor" d="M195.73,39.34h5.44c-0.16-0.56-2.04-6.55-2.12-6.87c-0.08-0.24-0.12-0.4-0.24-0.4
+			c-0.12,0-0.2,0.12-0.32,0.44C198.37,32.83,195.93,38.94,195.73,39.34z M187.44,37.3v2c0,0.24,0,4.84,0.04,5.43
+			c0.08,0.92,0.56,1.48,1.72,1.48h0.46c0.68,0,1.32-0.4,1.64-0.84c0.28-0.32,2.32-5.12,3.28-7.11c0.28-0.56,2.64-5.99,2.88-6.67
+			c0.08-0.24,0.32-0.68,0.04-0.8c-0.08-0.08-0.2-0.28-0.16-0.4c-0.04-0.08,0.04-0.2,0.4-0.28c0.76-0.12,1.88-0.84,2.24-1.16
+			c0.08-0.16,0.24-0.28,0.48-0.28c0.24,0,0.32,0.16,0.4,0.44c0.56,1.6,2.6,7.31,3.12,8.91c0.6,2,2.32,6.71,2.6,7.11
+			c0.52,0.72,1.2,1.08,1.88,1.08h0.76c0.16,0,0.2,0.12,0.2,0.24v0.84c0,0.12-0.04,0.36-0.28,0.36c-0.48,0-2.6-0.12-3.52-0.12
+			c-0.76,0-3.12,0.12-3.64,0.12c-0.28,0-0.32-0.2-0.32-0.36v-0.84c0-0.12,0.04-0.24,0.2-0.24h0.64c0.48,0,0.64-0.36,0.64-0.68
+			c-0.16-0.8-1.24-4-1.56-4.92h-6.43c-0.16,0.48-1.44,3.8-1.6,4.28c-0.24,0.8-0.12,1.32,0.72,1.32h1c0.24,0,0.28,0.12,0.28,0.28
+			v0.88c0,0.16-0.04,0.28-0.24,0.28c-0.32,0-2.44-0.12-3.08-0.12c-0.5,0-5.4,0-6.62,0c-1.36,0-3.68,0.12-3.92,0.12
+			c-0.16,0-0.24-0.12-0.24-0.32v-0.88c0-0.12,0.08-0.24,0.24-0.24h0.88c1,0,1.64-0.04,1.72-0.76c0.04-0.36,0.08-5.44,0.08-6.79V36.9
+			c0-0.64-0.08-4.64-0.08-5.2c0-0.44-0.36-0.84-2.04-0.84h-0.72c-0.2,0-0.24-0.12-0.24-0.28v-0.92c0-0.16,0.08-0.24,0.24-0.24
+			c0.24,0,2.72,0.16,4.6,0.12c1.16,0,3.2-0.12,3.52-0.12c0.16,0,0.24,0.08,0.24,0.2v0.96c0,0.16-0.04,0.28-0.24,0.28h-0.68
+			c-1.08,0-1.44,0.16-1.48,1C187.48,32.27,187.44,37.02,187.44,37.3z"/><path id="XMLID_105_" style="fill:currentColor" d="M114.48,6.03v0.92c0,0.16-0.12,0.24-0.28,0.24h-0.92c-0.52,0-1.12,0.08-1.12,0.6
+			c0,0.92,0.68,2.48,1.76,5.83c0.32,1,1.8,5.63,2.04,6.27h0.12c0.24-0.84,2.2-5.79,2.4-6.39c1.52-4.44,2.04-5.51,2.04-5.91
+			c0-0.2-0.16-0.4-0.84-0.4h-0.44c-0.16,0-0.24-0.08-0.24-0.28V5.99c0-0.12,0.08-0.24,0.24-0.24c0.24,0,2.32,0.12,3.24,0.12
+			c0.67,0,5.53,0,6.11,0l8.95-0.04c0.4,0,0.92-0.08,1.08-0.08c0.08,0,0.16,0.08,0.24,0.56c0.08,0.36,1.2,3.8,1.28,4.08
+			c0.04,0.16,0.04,0.24-0.04,0.28l-0.64,0.28c-0.08,0.04-0.24,0.04-0.36-0.16c-0.08-0.12-2-2.36-2.68-3
+			c-0.48-0.44-1.12-0.6-1.52-0.6l-4.24-0.08v6.79c0.24,0,2.6-0.12,2.92-0.2c1.04-0.28,1.44-0.84,1.44-2.08c0-0.16,0.04-0.2,0.2-0.2
+			l0.88,0.04c0.16,0,0.28,0.08,0.24,0.24c-0.08,0.36-0.08,2.48-0.08,2.84c0,0.88,0.12,2.12,0.16,2.64c0,0.16-0.08,0.2-0.2,0.2
+			l-0.84,0.08c-0.12,0-0.2,0-0.24-0.16c-0.2-1-0.44-1.64-1.48-1.88c-1.2-0.28-2.6-0.28-3-0.28v1.36c0,1.4,0.08,3.72,0.08,4.24
+			c0,1.88,1.16,2,2.88,2c1.76,0,2.88-0.04,4.24-1.12c0.32-0.24,1.72-2.04,2.12-2.68c0.2-0.28,0.4-0.32,0.52-0.24l0.64,0.36
+			c0.08,0.04,0.16,0.16,0.12,0.28l-1.44,4.24c-0.08,0.2-0.28,0.4-0.44,0.4c-0.28,0-2.4-0.12-10.79-0.12c-0.72,0-2.92,0.12-3.4,0.12
+			c-0.2,0-0.24-0.12-0.24-0.28v-0.92c0-0.16,0.08-0.24,0.28-0.24h0.36c1.88,0,2-0.16,2-0.72v-6.03V13.3c0-2.12-0.04-4.72-0.08-5.12
+			c-0.12-0.84-0.36-1-1.96-1h-0.31h-0.09h-0.55c-0.76,0-1.32,0.24-1.68,0.6c-0.76,0.76-2.92,5.99-3.32,7.03
+			c-0.36,0.84-3.64,8.67-3.96,9.19c-0.12,0.2-0.32,0.32-0.64,0.32c-0.32,0-0.52-0.28-0.64-0.6c-0.88-2.36-3-8.15-3.32-9.03
+			l-0.28-0.88c-0.68-1.84-1.88-5.48-2.16-5.87c-0.32-0.44-0.64-0.76-1.16-0.76h-0.4c-0.16,0-0.2-0.12-0.2-0.24v-1
+			c0-0.12,0.08-0.2,0.24-0.2c0.2,0,2.4,0.12,3.44,0.12c0.96,0,3.4-0.12,3.64-0.12C114.4,5.75,114.48,5.83,114.48,6.03z"/></g></g></symbol></svg>
+</body>
+</html>
