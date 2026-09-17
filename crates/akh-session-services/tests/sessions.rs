@@ -1708,3 +1708,86 @@ fn coordination_workspace_narrows_tools_without_changing_akh_identity() {
         .bootstrap_repositories = vec!["https://elsewhere.example/unauthorized.git".into()];
     assert!(config.validate().is_err());
 }
+
+#[tokio::test]
+async fn mcp_lost_response_is_a_tool_failure_not_a_quarantine_and_cannot_be_replayed() {
+    use akh_session_services::broker::Broker;
+    use credentials::ProvisionMcpCredential;
+    use axum::{Json, Router, http::StatusCode, routing::post};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let effects = Arc::new(AtomicUsize::new(0));
+    let seen = effects.clone();
+    let peer = Router::new().route("/mcp", post(move |Json(body): Json<serde_json::Value>| {
+        let seen = seen.clone();
+        async move {
+            if body["method"] == "notifications/initialized" {
+                return (StatusCode::ACCEPTED, Json(json!({})));
+            }
+            let result = if body["method"] == "initialize" {
+                json!({"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"loss-peer","version":"1"}})
+            } else {
+                assert_eq!(body["method"], "tools/call");
+                seen.fetch_add(1, Ordering::SeqCst);
+                // The effect happened, but its result never reaches the broker.
+                if body["params"]["arguments"]["value"] == "lost" {
+                    return (StatusCode::BAD_GATEWAY, Json(json!({"error":"reply lost"})));
+                }
+                json!({"content":[{"type":"text","text":"independent result"}],"isError":false})
+            };
+            (StatusCode::OK, Json(json!({"jsonrpc":"2.0","id":body["id"],"result":result})))
+        }
+    }));
+    let server = tokio::spawn(async move { axum::serve(listener, peer).await.unwrap(); });
+    let (_dir, original, owner) = scoped_setup(&endpoint);
+    let mut config = (*original.config).clone();
+    let profile = config.akhs.get_mut("thoth").unwrap();
+    profile.tools[0].read_only = false; // includes ambiguous writes, not just reads
+    profile.approval_policy = ApprovalPolicy::AllowGranted;
+    let sessions = Sessions::new(original.store.clone(), Arc::new(config));
+    let session = create(&sessions, &owner);
+    binding(&sessions, &session.id);
+    submit(&sessions, &owner, &session.id, "first");
+    sessions.provision_mcp_credential(&owner, &session.id, "results", &ProvisionMcpCredential {
+        request_id:"capability".into(), token:"private-scoped-test-capability-0001".into()
+    }).unwrap();
+    let request = sessions.next_job(&session.id).unwrap().unwrap();
+    let runtime = Principal { id:"runtime-1".into(), roles:vec!["runtime".into()], ..owner.clone() };
+    let call = ToolCall { id:"first-call".into(), session_id:session.id.clone(), turn_id:request.turn_id.clone(), generation:request.generation, name:"result".into(), arguments:json!({"value":"lost"}) };
+    let broker = Broker::new(sessions.clone()).unwrap();
+    let mut concurrent = call.clone(); concurrent.id = "concurrent-retry".into();
+    let (first, blocked) = tokio::join!(broker.tool(&runtime, call.clone()), broker.tool(&runtime, concurrent));
+    let result = first.unwrap().result.unwrap();
+    assert!(!blocked.unwrap().result.unwrap().success);
+    assert!(!result.success);
+    assert_eq!(result.data.as_ref().unwrap()["outcome"], "unknown");
+    assert_eq!(result.data.as_ref().unwrap()["retryable"], false);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    // Restart, same call, and a model retry with a new call ID cannot replay it.
+    let broker = Broker::new(sessions.clone()).unwrap();
+    assert_eq!(broker.tool(&runtime, call.clone()).await.unwrap().result.unwrap(), result);
+    let mut duplicate = call.clone(); duplicate.id = "different-id".into();
+    assert!(!broker.tool(&runtime, duplicate).await.unwrap().result.unwrap().success);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    let mut independent = call.clone(); independent.id = "independent".into(); independent.arguments = json!({"value":"other"});
+    assert!(broker.tool(&runtime, independent).await.unwrap().result.unwrap().success);
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    let records = broker.records(&owner, &session.id, None, 200).unwrap().records;
+    let uncertain = records.iter().find(|r| r.call.id == call.id).unwrap();
+    assert!(uncertain.sent && uncertain.unknown && uncertain.result.is_none());
+    // A crash after sending, before recording uncertainty, also cannot replay.
+    let mut interrupted = uncertain.clone(); interrupted.unknown = false;
+    sessions.store.transaction(|tx| tx.put(&akh_session_services::store::key("tool", &[&session.id, &call.turn_id, &call.id]), &interrupted)).unwrap();
+    assert!(!broker.tool(&runtime, call.clone()).await.unwrap().result.unwrap().success);
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    let settled = broker.settle(RuntimeJob { request, status:TurnStatus::Completed, provider_session:None, output:Some("Reported the uncertain operation; independent work finished.".into()), error:None, events:vec![] }).await.unwrap();
+    assert_eq!(settled.status, TurnStatus::Completed);
+    sessions.apply_job(&settled).unwrap();
+    submit(&sessions, &owner, &session.id, "next");
+    let next = sessions.next_job(&session.id).unwrap().unwrap();
+    let mut duplicate = call.clone(); duplicate.turn_id = next.turn_id; duplicate.generation = next.generation; duplicate.id = "next-turn-retry".into();
+    assert!(!broker.tool(&runtime, duplicate).await.unwrap().result.unwrap().success);
+    assert_eq!(effects.load(Ordering::SeqCst), 2);
+    server.abort();
+}

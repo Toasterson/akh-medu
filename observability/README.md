@@ -66,6 +66,22 @@ session service predates the reasoning event variant. This filters reasoning
 only from HTTP job responses; the durable runtime ledger and OTLP keep it.
 Local Roman sessions support the event and do not need that setting.
 
+## MCP failures
+
+An unavailable MCP response is returned to the model as a failed tool result
+with `outcome=unknown`, `retryable=false`, and the original operation ID. The
+broker retains `sent=true`, `unknown=true`, and no confirmed result until an
+operator reconciles the remote outcome. It never certifies that the remote
+operation succeeded or did not execute.
+
+This uncertainty is scoped to the operation. Independent tools and later turns
+can continue; a completed conversation does not certify every remote effect.
+The same operation cannot be repeated within its session, even under a new
+call ID, on a later turn, concurrently, or after a broker restart. Duplicate
+matching uses the configured MCP destination and exact JSON arguments. It does
+not infer equivalence between differently worded requests or different sessions.
+Unknown executor/process outcomes retain their existing lifecycle gates.
+
 ## Grafana
 
 Import `runtime-dashboard.json`, or open the published dashboard:
