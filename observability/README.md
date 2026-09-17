@@ -128,3 +128,9 @@ remain mandatory. Roll out one worker of each native kind first.
 Deploy resulting images by digest, retaining node selectors, services, volumes,
 credentials, bindings and replica counts. Internal workers do not use native
 provider conformance and use the internal-base image.
+
+Live rollout evidence is recorded in `deployment-20260917.json`; the six
+backend panel-query results are in `dashboard-query-verification-20260917.json`.
+The compatibility artifact's native receipts are in
+`native-measurements-20260917-compat/`. These are dated observations, not ongoing
+health guarantees.

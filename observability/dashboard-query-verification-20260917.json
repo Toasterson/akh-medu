@@ -1,0 +1,36 @@
+{
+  "queried_at_unix": 1789657444,
+  "lookback_hours": 6,
+  "panels": [
+    {
+      "panel": "Operation latency p95 (seconds)",
+      "series_or_records": 4,
+      "query_valid": true
+    },
+    {
+      "panel": "Operations per second, by outcome",
+      "series_or_records": 5,
+      "query_valid": true
+    },
+    {
+      "panel": "Provider tokens per second (reported usage)",
+      "series_or_records": 2,
+      "query_valid": true
+    },
+    {
+      "panel": "Stream bytes per second (not token counts)",
+      "series_or_records": 2,
+      "query_valid": true
+    },
+    {
+      "panel": "Turn events \u2014 filter by session / turn; expand fields for trace ID",
+      "series_or_records": 10,
+      "query_valid": true
+    },
+    {
+      "panel": "Turn traces \u2014 open a trace for the event waterfall",
+      "series_or_records": 2,
+      "query_valid": true
+    }
+  ]
+}
