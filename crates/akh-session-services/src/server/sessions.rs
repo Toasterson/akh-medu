@@ -100,19 +100,20 @@ impl SessionApp {
     pub async fn run_dispatcher(self) {
         use std::collections::{HashMap, HashSet};
         let mut workers: tokio::task::JoinSet<Result<()>> = tokio::task::JoinSet::new();
-        let mut running: HashMap<tokio::task::Id, String> = HashMap::new();
+        let mut running: HashMap<tokio::task::Id, (String, bool)> = HashMap::new();
         let mut last = HashMap::new();
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 result = workers.join_next_with_id(), if !workers.is_empty() => {
                     match result {
                         Some(Ok((id, result))) => {
-                            let session = running.remove(&id).unwrap_or_default();
+                            let (session, _) = running.remove(&id).unwrap_or_default();
                             if let Err(error) = result { tracing::error!(%session,code=%error.code,"session reconciliation failed"); }
                         }
                         Some(Err(error)) => {
-                            let session = running.remove(&error.id()).unwrap_or_default();
+                            let (session, _) = running.remove(&error.id()).unwrap_or_default();
                             tracing::error!(%session,"session reconciliation task interrupted");
                         }
                         None => {}
@@ -123,13 +124,17 @@ impl SessionApp {
                         Ok(sessions) => sessions,
                         Err(error) => { tracing::error!(code=%error.code,"session scan failed"); continue; }
                     };
-                    // Oldest scheduled first prevents inactive sessions at the start
-                    // of the ledger from starving later sessions when capacity is full.
-                    sessions.sort_by_key(|session| last.get(&session.id).copied());
-                    let active: HashSet<_> = running.values().cloned().collect();
+                    // Lease-bearing work must not queue behind historical cleanup.
+                    // Keep cleanup bounded even when its remote executor is gone;
+                    // oldest-first within each class still makes cleanup progress.
+                    sessions.sort_by_key(|session| (session.closed_at.is_some(), last.get(&session.id).copied()));
+                    let active: HashSet<_> = running.values().map(|(id, _)| id.clone()).collect();
+                    let mut cleanup_workers = running.values().filter(|(_, closed)| *closed).count();
                     for session in sessions {
                         if workers.len() >= 64 { break; }
                         if active.contains(&session.id) { continue; }
+                        let closed = session.closed_at.is_some();
+                        if closed && cleanup_workers >= 4 { continue; }
                         let retry_after = if session.closed_at.is_some() {
                             Duration::from_secs(5)
                         } else {
@@ -140,7 +145,8 @@ impl SessionApp {
                         let worker = self.clone();
                         last.insert(id.clone(), tokio::time::Instant::now());
                         let task = workers.spawn(async move { worker.tick_session(session).await });
-                        running.insert(task.id(), id);
+                        running.insert(task.id(), (id, closed));
+                        if closed { cleanup_workers += 1; }
                     }
                 }
             }

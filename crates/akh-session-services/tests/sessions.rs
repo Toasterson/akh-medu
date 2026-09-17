@@ -1708,3 +1708,101 @@ fn coordination_workspace_narrows_tools_without_changing_akh_identity() {
         .bootstrap_repositories = vec!["https://elsewhere.example/unauthorized.git".into()];
     assert!(config.validate().is_err());
 }
+
+#[tokio::test]
+async fn archived_cleanup_cannot_occupy_all_dispatch_workers() {
+    use akh_session_services::{server::SessionApp, store::key};
+    use axum::{Json, Router, routing::post};
+    use std::time::Duration;
+    let cleanup_seen = Arc::new(tokio::sync::Notify::new());
+    let signal = cleanup_seen.clone();
+    let fast_seen = Arc::new(tokio::sync::Notify::new());
+    let fast_signal = fast_seen.clone();
+    let peer = Router::new()
+        .route(
+            "/v1/allocations/{id}/release",
+            post(move || {
+                let signal = signal.clone();
+                async move {
+                    signal.notify_one();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Json(json!({}))
+                }
+            }),
+        )
+        .route(
+            "/v1/jobs",
+            post(move |Json(request): Json<RuntimeJobRequest>| {
+                let signal = fast_signal.clone();
+                async move {
+                    signal.notify_one();
+                    Json(RuntimeJob {
+                        request,
+                        status: TurnStatus::Running,
+                        provider_session: None,
+                        output: None,
+                        error: None,
+                        events: vec![],
+                    })
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer).await.unwrap();
+    });
+    let (dir, s, p) = setup();
+    let token = dir.path().join("peer-token");
+    std::fs::write(&token, "private-test-peer-token-12345678901234567890").unwrap();
+    let mut config = (*s.config).clone();
+    let endpoint =
+        serde_json::from_value(json!({"url":format!("http://{address}"),"token_file":token}))
+            .unwrap();
+    config.endpoints.insert("runtime-1".into(), endpoint);
+    config
+        .endpoints
+        .insert("sandboxes".into(), config.endpoints["runtime-1"].clone());
+    let app = SessionApp::new(Arc::new(config), s.store.clone()).unwrap();
+    for index in 0..70 {
+        let session = app
+            .sessions
+            .create(
+                &p,
+                &NewSession {
+                    request_id: format!("archived-{index}"),
+                    akh: "thoth".into(),
+                    workspace_profile: "rust".into(),
+                    conversation_key: None,
+                },
+            )
+            .unwrap();
+        binding(&app.sessions, &session.id);
+        // A persisted closed session with a workspace still needing cleanup.
+        app.sessions
+            .store
+            .transaction(|tx| {
+                let k = key("session", &[&session.id]);
+                let mut record: SessionRecord = tx.get(&k)?.unwrap();
+                record.closed_at = Some(now_ms());
+                tx.put(&k, &record)
+            })
+            .unwrap();
+    }
+    let dispatcher = tokio::spawn(app.clone().run_dispatcher());
+    tokio::time::timeout(Duration::from_secs(3), cleanup_seen.notified())
+        .await
+        .unwrap();
+    // Admit after cleanup starts: prioritizing the initial scan alone is insufficient.
+    let fast = create(&app.sessions, &p);
+    binding(&app.sessions, &fast.id);
+    submit(&app.sessions, &p, &fast.id, "go");
+    let result = tokio::time::timeout(Duration::from_secs(4), fast_seen.notified()).await;
+    dispatcher.abort();
+    let _ = dispatcher.await;
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "historical cleanup starved a newly admitted session"
+    );
+}
