@@ -61,6 +61,11 @@ cover the request, error-body read and backoff. Partial streams, ambiguous
 transport failures and tools are never replayed automatically. Existing
 reconciliation and permission gates remain authoritative.
 
+Cluster runtimes set `AKH_RUNTIME_LEGACY_EVENTS=true` because their existing
+session service predates the reasoning event variant. This filters reasoning
+only from HTTP job responses; the durable runtime ledger and OTLP keep it.
+Local Roman sessions support the event and do not need that setting.
+
 ## Grafana
 
 Import `runtime-dashboard.json`, or open the published dashboard:
