@@ -42,14 +42,30 @@ def project_event(event):
     return None
 
 def user_prompt(prompt):
-    # T3 appends transport metadata to every ACP prompt, including our own
-    # observation commands. Strip only that final envelope before routing.
-    if prompt.rstrip().endswith('</runtime_info>') and '<runtime_info>' in prompt:
-        prompt=prompt.rsplit('<runtime_info>',1)[0]
-    return prompt.strip()
+    # T3 may append multiple envelopes. Remove only recognized trailing
+    # blocks, preserving ordinary user text and embedded examples.
+    suffix = re.compile(r"\s*<(runtime_info|pull_request_linking)>[^<]*</\1>\s*$")
+    while True:
+        match = suffix.search(prompt)
+        if not match:
+            return prompt.strip()
+        prompt = prompt[:match.start()]
+
+def observation_target(role, prompt):
+    prompt = user_prompt(prompt)
+    match = re.fullmatch(r'Observe autonomous '+re.escape(role)+r' session ([0-9a-f-]{36})', prompt)
+    if match:
+        return match[1]
+    # This is a transport control command, never a model instruction. Fail
+    # closed if future T3 envelopes change instead of creating a feedback loop.
+    if prompt.startswith('Observe autonomous '):
+        raise ValueError('Unrecognized activity observation command')
+    return None
 
 def submit_feedback(root,role,conversation,prompt):
     if role not in ROLES or not prompt.strip():raise ValueError('A nonempty message and known role are required')
+    if observation_target(role,prompt) is not None:
+        raise ValueError('Observation commands cannot create feedback turns')
     ident='feedback-'+hashlib.sha256(json.dumps([role,conversation,prompt]).encode()).hexdigest()
     token=(root/'secrets'/f't3-{role}.key').read_text().strip()
     base='http://127.0.0.1:18431'
@@ -83,11 +99,11 @@ def acp(root, role):
         session=message['params']['sessionId']; id=message['id']
         try:
             prompt=user_prompt(''.join(p.get('text','') for p in message['params']['prompt']))
-            match=re.fullmatch(r'Observe autonomous '+role+r' session ([0-9a-f-]{36})',prompt)
-            if not match:
+            source=observation_target(role,prompt)
+            if source is None:
                 receipt=submit_feedback(root,role,session,prompt)
                 text(session, f"Delivered to {role.title()} as a direct user message. Session `{receipt['session_id']}`, turn `{receipt['turn_id']}`. It may wait for runtime capacity; the activity feed will show the result. Durable memory is confirmed only when the bot records it successfully.\n"); reply(id,{'stopReason':'end_turn'}); return
-            source=match[1]; path='/v1/sessions/'+source; cursor=0; heartbeat=time.monotonic()
+            path='/v1/sessions/'+source; cursor=0; heartbeat=time.monotonic()
             record=request(base+path,token)
             if record['akh']!=role: raise ValueError('session owner mismatch')
             text(session,f'\n**{role.title()} session** · `{source}` · model `{record["runtime"].get("model")}`\n\n')

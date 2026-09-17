@@ -11,6 +11,21 @@ class ProjectionTests(unittest.TestCase):
         self.assertIsNotNone(re.fullmatch(r'Observe autonomous minerva session ([0-9a-f-]{36})',user_prompt(actual)))
         self.assertEqual(user_prompt('Record my correction'+actual[len(command):]),'Record my correction')
 
+    def test_multiple_transport_blocks_and_unknown_envelopes(self):
+        from t3_activity import user_prompt, observation_target, submit_feedback
+        from pathlib import Path
+        command='Observe autonomous vesta session 01a0ac7a-c3e3-7b51-ba8e-85eefaf33939'
+        suffix='<runtime_info>transport</runtime_info>\n\n<pull_request_linking>link PRs</pull_request_linking>'
+        self.assertEqual(user_prompt(command+suffix),command)
+        self.assertEqual(observation_target('vesta',command+suffix),command.split()[-1])
+        self.assertEqual(user_prompt('Keep this correction'+suffix),'Keep this correction')
+        self.assertEqual(user_prompt('Example <runtime_info>x</runtime_info> keep this'),'Example <runtime_info>x</runtime_info> keep this')
+        for prompt in [command+suffix, command+'<future>metadata</future>', command+' extra text']:
+            with self.assertRaises(ValueError):
+                submit_feedback(Path('/nonexistent'),'vesta','chat',prompt)
+        with self.assertRaises(ValueError):
+            observation_target('minerva',command+suffix)
+
     def test_reasoning_is_not_final_answer(self):
         self.assertEqual(project_event({'kind':'runtime','data':{'kind':'reasoning','text':'think'}}),
                          {'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'think'}})
