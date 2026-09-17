@@ -19,6 +19,14 @@ Retire an expired attempt through Anima's canonical cancellation path; preserve
 its ownership until cleanup is confirmed. Verify a fresh exact checkout and tool
 receipt from its replacement before calling the incident recovered.
 
+The cognitive core can need more than the default 30-second request deadline to
+restore a cold Akh. Tecton's measured restore took 100 seconds. Set the session
+controller's core endpoint `request_timeout_secs` to 180; unrelated endpoints
+retain the 30-second default. Allowed values are 1 through 300 seconds. A
+supported `GET /v1/akhs/{akh}/tools` with an adequate deadline can warm the core
+without starting model work. Verify a subsequent catalog/context response and
+actual session execution; do not reset or discard saved memory.
+
 ## Executor already gone
 
 A sandbox allocation can remain `ready` or `attaching` after its executor stops.
