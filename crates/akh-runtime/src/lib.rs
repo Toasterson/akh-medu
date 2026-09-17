@@ -18,6 +18,8 @@ use std::{
 pub use akh_session_types::ProviderConfig;
 
 pub trait Host {
+    /// Optional provider usage observation; never participates in tool authority.
+    fn usage(&mut self, _usage: &Value) {}
     fn event(&mut self, event: RuntimeEvent) -> Result<(), String>;
     fn tool(&mut self, id: &str, name: &str, arguments: Value) -> Result<ToolResult, String>;
     fn approval(&mut self, id: &str, name: &str, arguments: &Value) -> Result<bool, String>;

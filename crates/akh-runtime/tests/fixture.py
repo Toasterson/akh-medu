@@ -87,6 +87,8 @@ def codex():
     elif prompt == "malformed":
         print("this is not JSON", flush=True)
         return
+    send({"method": "item/reasoning/summaryTextDelta", "params": {"threadId": thread, "delta": "fixture reasoning"}})
+    send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread, "tokenUsage": {"last": {"inputTokens": 17, "outputTokens": 3, "reasoningOutputTokens": 2}}}})
     send({"method": "item/agentMessage/delta", "params": {"threadId": thread, "itemId": "m", "delta": answer}})
     send({"method": "item/completed", "params": {"threadId": thread,
          "item": {"type": "agentMessage", "id": "m", "phase": "final_answer", "text": answer}}})
