@@ -40,9 +40,10 @@ arguments/results and complete provider error bodies are not exported. Text
 and reasoning content can nevertheless contain private task information.
 
 Internal chat-completion providers supply usage through an explicitly requested
-SSE usage trailer. Codex reasoning/usage notifications are also observed. The
-unchanged Claude SDK bridge currently exposes text and tool events, but does
-not forward reasoning or usage: these remain unavailable, not zero. Delta
+SSE usage trailer. Codex reasoning/usage notifications and Claude exposed
+thinking deltas/result usage are also observed. Unexposed provider information
+remains unavailable, not zero. Input counts follow the provider input field;
+Claude cache-read/cache-creation counts are not synthesized into that field. Delta
 events are transport chunks, not individual token timestamps. Reasoning token
 counts are a subset of output tokens and must not be summed with them.
 
@@ -99,9 +100,26 @@ configuration with `akhrtd --config ... --check` before replacing anything.
 Check the owning session API for active turns immediately before any restart;
 do not interrupt a busy runtime or force its lifecycle state to make it idle.
 
-`docker/runtime-observability.Dockerfile` layers only the new runtime executable
-onto a specified immutable deployed base image. Provider binaries, bridge
-scripts, helper tools and conformance artifacts remain those of that base.
-Use the internal base for internal workers and the native base for Codex/Claude.
-Deploy the resulting image by digest, retaining node selectors, services,
-volumes, credentials, bindings and replica counts.
+`docker/runtime-observability.Dockerfile` layers the new runtime, its matching
+measurement probe and the telemetry-enabled Claude bridge onto the specified
+immutable deployed native base. Provider CLIs, SDK packages and helper tools
+remain those of that base. Native conformance includes the runtime executable
+hash: old measurements cannot certify a changed binary. Before deploying, run:
+
+```sh
+python3 scripts/session-platform/measure-runtime-observability.py \
+  --image IMAGE --output NEW_EVIDENCE_DIRECTORY
+```
+
+This runs real installed Codex/Claude against synthetic local peers in a Linux
+container with `--network none`, no credentials and no host mounts. Wire tests
+cover native-write/exec denial, supplied tools, exact resume and hook suppression;
+separate cancellation tests require descendant teardown. Receipts bind the
+runtime, executor and probe hashes. Preserve the full evidence and use a new
+immutable conformance ConfigMap. Its init container must use the same measured
+image as the native worker; the existing certification and readiness commands
+remain mandatory. Roll out one worker of each native kind first.
+
+Deploy resulting images by digest, retaining node selectors, services, volumes,
+credentials, bindings and replica counts. Internal workers do not use native
+provider conformance and use the internal-base image.

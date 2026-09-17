@@ -169,6 +169,11 @@ fn standalone_transport_resumes_exact_provider_session() {
         let mut host = Witness::default();
         let cancel = AtomicBool::new(false);
         akh_runtime::run(&config, &request, &mut host, &cancel).unwrap();
+        if kind == RuntimeKind::Claude {
+            assert_eq!(host.usage.last().unwrap()["prompt_tokens"], 11);
+            assert_eq!(host.usage.last().unwrap()["completion_tokens"], 5);
+            assert!(host.events.iter().any(|e| matches!(e, RuntimeEvent::Reasoning { text } if text == "fixture Claude reasoning")));
+        }
         request.provider_session = host.events.iter().find_map(|e| {
             if let RuntimeEvent::Bound {
                 provider_session, ..

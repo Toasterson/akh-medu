@@ -104,6 +104,8 @@ def claude():
     assert start["instructions"]
     session = start["resume"] or str(uuid.uuid4())
     send({"type": "session", "id": session})
+    send({"type": "reasoning", "text": "fixture Claude reasoning"})
+    send({"type": "usage", "usage": {"input_tokens": 11, "output_tokens": 5}})
     send({"type": "text", "text": start["prompt"]})
     send({"type": "done", "success": start["prompt"] != "failed", "text": start["prompt"], "error": "provider failure"})
 
