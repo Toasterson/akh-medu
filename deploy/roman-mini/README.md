@@ -252,3 +252,34 @@ live head, preceding review and exact-head CI. Explicit holds and human gates re
 in force. Janus can discover active workers on Board and send an addressed, bounded
 handoff when a technical boundary requires it. `activate.py` preserves both role
 configurations. No actual application PR is merged merely to test tool availability.
+
+## Janus → Astra escalation in T3
+
+Run `configure_janus_escalation.py ROOT` after other session renderers, install its
+`dev.roman-akhs.janus-escalation.plist` in the user's LaunchAgents, and reload only
+the Roman session controller at a quiet boundary. The broker binds loopback port
+18438 and grants only Janus `escalate_to_astra` and `astra_escalation_status`.
+Project IDs come from the live T3 orchestration snapshot; the model is the
+installed `codex` provider's `gpt-6-astra` with high reasoning effort.
+
+Janus escalates after two bounded unsuccessful attempts or an urgent blocker
+outside its tools. A stable incident key owns one thread and one initial turn.
+The broker commits the exact T3 commands to private SQLite before delivery,
+reuses command IDs after lost replies/restarts, and retries delivery every ten
+seconds while T3 is unavailable. Accepted/queued does not mean running. Four new
+incidents per rolling day limit repeated escalation; identical retries do not
+consume that quota. Janus reads the resulting assistant replies with the status
+tool, records the receipt and yields that incident to Astra while doing other
+work. New facts for an existing incident do not automatically start another turn.
+
+T3 authentication is issued locally by the installed CLI and retained in process
+memory. Janus receives neither T3 credentials nor filesystem access. The broker
+uses T3 HTTP orchestration APIs and never edits T3's database. Existing project
+ownership, exact-head review/CI and human gates remain in the Astra brief.
+Legacy lane labels and zero witnesses are not sufficient stall evidence: inspect
+central turns. Completed central turns with retained Anima ownership are a
+separate reconciliation blocker and are appropriate escalation evidence.
+
+Validation: `python3 -m unittest discover -s deploy/roman-mini -p test_janus_escalation.py`.
+Tests cover restart after a lost turn-admission reply, one-turn deduplication,
+offline durable admission, project/key validation and the escalation storm limit.
