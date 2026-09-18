@@ -209,10 +209,24 @@ class Observer:
         for i in range(min(8,len(projects))):
             project = projects[(offset+i)%len(projects)]
             pid = project['id']
-            work = self.mcp('list_work_items', {'project_id':pid,'page_size':200})
+            work = self.mcp('list_work_items', {'project_id':pid,'page_size':100})
             phase_coverage={}
             items={w['id']:w for w in work['work_items']}
-            if work.get('total',0)>len(items):
+            paginated='next_page_token' in work
+            cursor=work.get('next_page_token')
+            cursors=set()
+            pages=1
+            while cursor:
+                if cursor in cursors or pages>=32:
+                    raise RuntimeError('work-item cursor repeated or scan exceeded page bound')
+                cursors.add(cursor)
+                page=self.mcp('list_work_items',{'project_id':pid,'page_size':100,'page_token':cursor})
+                if 'next_page_token' not in page:
+                    raise RuntimeError('work-item continuation response missing cursor contract')
+                items.update({w['id']:w for w in page['work_items']})
+                cursor=page['next_page_token']
+                pages+=1
+            if not paginated and work.get('total',0)>len(items):
                 stages=sorted(set(self.get('workflow_stages',[]))|{w['current_phase'] for w in items.values() if w.get('current_phase')})
                 for stage in stages[:16]:
                     part=self.mcp('list_work_items',{'project_id':pid,'current_phase':stage,'page_size':200})
@@ -228,13 +242,19 @@ class Observer:
                 if not cursor:break
             if cursor: raise RuntimeError('plan scan exceeded page bound')
             with self.db:
-                self.observe_entities('work_item',pid,list(items.values()),notify_new=self.get('expanded:'+pid,False))
+                # The first complete cursor pass discovers old rows hidden by the
+                # former cap. Baseline those without flooding the agents' inboxes;
+                # changes to already observed items still produce normal events.
+                notify_new=self.get('expanded:'+pid,False) and (not paginated or self.get('paginated_baseline:'+pid,False))
+                self.observe_entities('work_item',pid,list(items.values()),notify_new=notify_new)
                 self.put('expanded:'+pid,True)
+                if paginated:self.put('paginated_baseline:'+pid,True)
                 if not self.get('plan_fingerprint_v2:'+pid):
                     self.put('baseline:plan:'+pid,False);self.put('plan_fingerprint_v2:'+pid,True)
                 self.observe_entities('plan',pid,plans)
                 coverage[pid]={'name':project['name'],'at':now,'observed':len(items),
-                               'total':work.get('total'),'truncated':work.get('total',0)>len(items),'phases':phase_coverage}
+                               'total':work.get('total'),'truncated':work.get('total',0)>len(items),'phases':phase_coverage,
+                               'pages':pages,'cursor_supported':paginated,'enumeration_complete':paginated and not cursor}
                 self.put('coverage',coverage)
                 self.put('project_offset',(offset+i+1)%len(projects))
         with self.db:

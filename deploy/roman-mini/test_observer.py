@@ -94,4 +94,60 @@ class DurableEvents(unittest.TestCase):
             with self.assertRaises(RuntimeError):self.o.flush()
         self.assertEqual(self.o.db.execute('select accepted from outbox').fetchone()[0],0)
 
+    def paged_inventory(self, count=205):
+        calls=[]
+        def mcp(name,args):
+            calls.append((name,args))
+            if name=='list_projects':return {'projects':[{'id':'p','name':'Project','status':'active'}]}
+            if name=='list_workflows':return {'workflows':[]}
+            if name=='list_plans':return {'plans':[]}
+            offset=int(args.get('page_token',0))
+            end=min(offset+100,count)
+            return {'work_items':[{'id':str(i),'project_id':'p','current_phase':'draft'} for i in range(offset,end)],
+                    'total':count,'next_page_token':str(end) if end<count else ''}
+        return calls,mcp
+
+    def test_complete_cursor_scan_survives_restart_without_backfill_flood(self):
+        calls,mcp=self.paged_inventory()
+        with self.o.db:self.o.put('expanded:p',True)
+        with patch.object(self.o,'mcp',side_effect=mcp):self.o.scan_anima()
+        coverage=self.o.get('coverage')['p']
+        self.assertEqual((coverage['observed'],coverage['total'],coverage['pages']),(205,205,3))
+        self.assertTrue(coverage['enumeration_complete'])
+        self.assertFalse(coverage['truncated'])
+        self.assertEqual([a.get('page_token') for n,a in calls if n=='list_work_items'],[None,'100','200'])
+        self.assertEqual(self.o.db.execute('select count(*) from pending').fetchone()[0],0)
+        self.o.db.close();self.o=m.Observer(self.root)
+        _,mcp=self.paged_inventory(206)
+        with patch.object(self.o,'mcp',side_effect=mcp):self.o.scan_anima()
+        self.assertEqual(self.o.get('coverage')['p']['observed'],206)
+        events=[json.loads(row[0]) for row in self.o.db.execute('select event from outbox')]
+        self.assertEqual(len(events),2)
+        self.assertTrue(all([c['id'] for c in event['data']['changes']]==['205'] for event in events))
+
+    def test_repeated_or_missing_cursor_is_not_claimed_complete(self):
+        for broken in ('repeat','missing'):
+            _,normal=self.paged_inventory()
+            def mcp(name,args):
+                page=normal(name,args)
+                if name=='list_work_items' and args.get('page_token'):
+                    if broken=='repeat':page['next_page_token']=args['page_token']
+                    else:page.pop('next_page_token')
+                return page
+            with patch.object(self.o,'mcp',side_effect=mcp):
+                with self.assertRaises(RuntimeError):self.o.scan_anima()
+            self.assertIsNone(self.o.get('coverage'))
+
+    def test_legacy_cap_stays_visibly_truncated(self):
+        _,normal=self.paged_inventory()
+        def mcp(name,args):
+            page=normal(name,args)
+            if name=='list_work_items':page.pop('next_page_token')
+            return page
+        with patch.object(self.o,'mcp',side_effect=mcp):self.o.scan_anima()
+        coverage=self.o.get('coverage')['p']
+        self.assertTrue(coverage['truncated'])
+        self.assertFalse(coverage['cursor_supported'])
+        self.assertFalse(coverage['enumeration_complete'])
+
 if __name__=='__main__':unittest.main()
