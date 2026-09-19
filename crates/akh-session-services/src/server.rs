@@ -176,6 +176,16 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
     let router=router.route("/healthz",get(move||{let identity=identity.clone();async move{Json(json!({"service_id":identity,"schema_version":SCHEMA_VERSION,"status":"listening"}))}}));
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(service=%config.service_id,address=%listener.local_addr()?,"service listening");
+    // Separate listener on purpose: heap profiles carry live session content,
+    // and `listen` is published through an HTTPRoute.
+    #[cfg(feature = "profiling")]
+    if let Some(address) = config.profiling_listen {
+        tasks.push(tokio::spawn(async move {
+            if let Err(error) = crate::profiling::serve(address).await {
+                tracing::error!(%error, "heap profiling listener stopped");
+            }
+        }));
+    }
     use std::future::IntoFuture;
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, router)
