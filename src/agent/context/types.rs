@@ -113,6 +113,13 @@ pub struct EpisodeState<'a> {
     /// lowest-priority [`Tools`](ContextSection::Tools) section and returns the
     /// selected subset in [`AssembledContext::tools`]. Empty ⇒ no tools.
     pub tool_catalog: &'a [Value],
+    /// A ready message array for backends that speak one, such as the native
+    /// session path, where a turn carries tool calls, tool results, pinned
+    /// system instructions and `neural_recall` markers that the speaker/text
+    /// conversation model cannot represent. `None` for the agentic loop, which
+    /// supplies [`conversation`](Self::conversation) instead. Strategies that
+    /// select over messages read this; the rest ignore it.
+    pub messages: Option<&'a [Value]>,
     /// Notes the caller judges **active** for the current turn (ADR 081 slice
     /// 7). Only [`Note::frontmatter`] is ever rendered — [`Note::body`] is
     /// never read by the assembler, regardless of what a caller puts here, so
@@ -142,6 +149,7 @@ impl<'a> EpisodeState<'a> {
             user_prompt,
             engine,
             conversation: None,
+            messages: None,
             kg_context: None,
             recalled: &[],
             session_seed: None,
@@ -155,6 +163,13 @@ impl<'a> EpisodeState<'a> {
     #[must_use]
     pub fn with_conversation(mut self, conversation: Option<&'a ConversationState>) -> Self {
         self.conversation = conversation;
+        self
+    }
+
+    /// Attach a ready message array, for backends that speak one.
+    #[must_use]
+    pub fn with_messages(mut self, messages: Option<&'a [Value]>) -> Self {
+        self.messages = messages;
         self
     }
 

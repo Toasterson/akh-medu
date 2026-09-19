@@ -49,6 +49,12 @@ the chronological evidence further down is retained as written.
   daemons rebuilt from `028804f1`: recall after session/core restart, span
   publication, history eviction, provider continuity and session isolation. No
   processes left behind. See [canary rerun](../research/2026-09-19-canary-rerun.md).
+- **Context selection path built** (2026-09-19): `SelectingManager` selects over
+  a message array, preserving tool traffic and recall markers, failing closed
+  with a miette diagnostic when the pinned remainder plus the current turn
+  overflow. Additive: `EpisodeState` gained an optional message view and the
+  four shipped strategies are untouched. Not yet selected by configuration or
+  wired into the native path.
 - **ContextManager placement decided** (2026-09-19, design only, no code): the
   strategy stays in akhomed and becomes authoritative for native turns; akhrtd
   keeps `native_window` as a defensive capacity check and no eviction policy of

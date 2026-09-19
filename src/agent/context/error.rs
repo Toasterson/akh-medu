@@ -24,6 +24,38 @@ pub enum ContextError {
     )]
     SafetyPinViolation { section: String, first: String },
 
+    /// The pinned remainder plus the current turn do not fit the budget.
+    ///
+    /// Selection can drop history, but never standing instructions or the
+    /// request being answered, so there is a floor below which a turn cannot be
+    /// served. Failing here is deliberate: silently dropping the current turn
+    /// would answer a question the user did not ask.
+    #[error("context needs {needed} tokens against a {available} token budget")]
+    #[diagnostic(
+        code(akh::context::budget_exceeded),
+        help(
+            "Everything droppable was already dropped; what remains is pinned \
+             system instructions plus the current turn. Either raise the akh's \
+             context window, lower the output reservation so more of the window \
+             is available for the prompt, or shorten the standing system \
+             instructions - they are counted in every single turn."
+        )
+    )]
+    BudgetExceeded { needed: usize, available: usize },
+
+    /// A message-selecting strategy was given no message array to select from.
+    #[error("the {strategy} strategy needs a message array")]
+    #[diagnostic(
+        code(akh::context::missing_messages),
+        help(
+            "This strategy selects over EpisodeState::messages, which the \
+             caller left unset. Either attach the turn's messages with \
+             EpisodeState::with_messages, or choose a strategy that assembles \
+             from EpisodeState::conversation instead."
+        )
+    )]
+    MissingMessages { strategy: String },
+
     /// Assembly failed for another reason. The agentic loop surfaces this and
     /// falls back to a single-turn prompt rather than dropping the turn.
     #[error("context assembly failed: {message}")]

@@ -251,3 +251,40 @@ worth not rediscovering: assembly needs the `Engine` for safety-pin
 classification, `EpisodeState` has no message-array representation, and the
 default strategy rewrites content. No further code should land here until the
 compaction question is answered.
+
+
+## Selection decided, and the reading path built
+
+The compaction question is answered: selection, with richer managers layered
+above rather than replacing it. Grounded in
+[the literature](../research/2026-09-19-context-selection-research.md), which
+separates memory *reading* (selection by similarity, recency, importance) from
+memory *management* (summarizing, merging, forgetting), and finds
+retrieval-based selection to be the mainstream reading mechanism — MemGPT
+included, which adds a paging hierarchy above selection rather than instead of
+it.
+
+`SelectingManager` (`src/agent/context/selecting.rs`) implements the reading
+path over a message array, so it can represent what the speaker/text
+conversation model cannot: tool calls, tool results, pinned system instructions
+and `neural_recall` markers. `EpisodeState` gained an optional `messages` view
+through a builder, which is purely additive — every existing construction site
+and all four shipped strategies are untouched.
+
+Behaviour, each pinned by a test: a dropped turn takes its tool traffic and its
+recall marker with it; kept messages are copied verbatim, never rewritten;
+standing system instructions are pinned and never dropped; and when the pinned
+remainder plus the current turn still overflow, the turn **fails** rather than
+silently answering a question the user did not ask. That failure is a miette
+diagnostic naming the three things an operator can actually change.
+
+Selection also preserves the exact token prefix the keyed KV cache matches on,
+which this project measured at roughly 7x on time to first token. Rewriting
+earlier turns would invalidate it every time.
+
+### Remaining
+
+`SelectingManager` is not yet selected by `AKH_CONTEXT_STRATEGY` or wired into
+the native path, and the `context_budgeted` marker from step 1 is still unset by
+any caller. Those are the connection, and they are what the five-daemon canary's
+`final_dropped_messages` assertion would gate.
