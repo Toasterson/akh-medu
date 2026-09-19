@@ -2055,16 +2055,19 @@ impl CandleBackend {
         Ok(clean_generated_text(&result.text))
     }
 
-    /// Path to the multimodal projector sidecar for the loaded model:
-    /// `<model-stem>.mmproj.gguf` next to the GGUF.
+    /// Path to the loaded model's multimodal projector.
+    ///
+    /// The Gemma sidecar (`<model-stem>.mmproj.gguf`) is tried first. A
+    /// content-addressed model such as the pinned Ptah blob has no derivable
+    /// sidecar name, so the projector is resolved through the manifest that
+    /// lists both layers; see [`crate::nlu::projector_artifact`].
     #[cfg(feature = "candle-backend")]
     fn mmproj_path(&self) -> NluResult<PathBuf> {
-        // gemma4-12b.gguf -> gemma4-12b.mmproj.gguf
-        let path = self.model_path.with_extension("mmproj.gguf");
-        if !path.exists() {
-            return Err(NluError::ModelNotFound { path });
-        }
-        Ok(path)
+        crate::nlu::projector_artifact::locate(&self.model_path).ok_or_else(|| {
+            NluError::ModelNotFound {
+                path: self.model_path.with_extension("mmproj.gguf"),
+            }
+        })
     }
 
     /// Non-feature-gated stub.

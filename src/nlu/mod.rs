@@ -16,6 +16,7 @@ pub mod cache;
 pub mod error;
 pub mod kg_context;
 pub mod parse_ranker;
+pub mod projector_artifact;
 pub mod router;
 pub mod span_projection;
 

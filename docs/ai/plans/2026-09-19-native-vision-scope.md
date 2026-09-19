@@ -65,8 +65,13 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
 
 ## What the slice actually needs
 
-1. **Artifact resolution** — locate the projector by manifest layer rather than
-   by filename, and verify its digest. CPU-testable, no GPU.
+1. **Done** (`src/nlu/projector_artifact.rs`). The projector is located by
+   manifest layer when the model is a content-addressed blob, falling back to
+   the Gemma sidecar convention, which still wins when present. A manifest that
+   lists the same weights without a projector does not end the search, and a
+   manifest for different weights never contributes its projector. Four CPU
+   tests plus an ignored artifact test that resolves the real pinned Ptah
+   projector and checks its size.
 2. **Preprocessing** — 768 px, patch 16, spatial merge 2, mean and std 0.5 per
    channel. Deterministic and CPU-testable against fixed fixtures.
 3. **Vision tower forward** in Candle: patch embed, position embed, 27
