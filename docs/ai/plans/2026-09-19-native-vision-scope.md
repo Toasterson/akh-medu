@@ -130,8 +130,29 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    non-degenerate `(merged_patches, 5120)` embeddings in about five seconds;
    another asserts it refuses geometry it cannot patch evenly.
 
-   **Not yet numerically validated.** Shape and finiteness are checked, not
-   agreement with a reference implementation. Three choices need confirming
+   **Not yet numerically validated, and not validatable locally.** Shape and
+   finiteness are checked, not agreement with a reference implementation.
+
+   An attempt to build a NumPy reference was abandoned: numpy is not installed
+   and installing it is outside the standing rules. Pure Python is not an
+   option either — one 4-patch forward through 27 blocks at width 1152 is on the
+   order of 1.6 billion multiply-adds.
+
+   A second implementation *in this repository* was considered and rejected on
+   merit rather than effort. Written by the same author from the same reading of
+   the same artifact, it would share every comprehension error: if the temporal
+   patch weights should be averaged rather than summed, or the position grid
+   resampled half-pixel rather than align-corners, both implementations would be
+   wrong identically and agree. It would catch coding slips such as a
+   transposition, which is worth something, but it would read as validation
+   while proving much less, and that is worse than no check.
+
+   Real validation needs an **external** consumer of this GGUF producing
+   embeddings or logits for a known image — llama.cpp's `mtmd`, or the
+   transformers implementation. Neither is available on this machine. Until one
+   is, the three open modelling choices (summing the temporal patch weights,
+   align-corners interpolation, tanh GELU) stay open, and the tower's output
+   should be treated as structurally right and numerically unconfirmed. Three choices need confirming
    against llama.cpp before the output is trusted: that a still image should sum
    both temporal patch-embedding weights rather than using one, that position
    interpolation is align-corners bilinear, and that `use_gelu` means the tanh

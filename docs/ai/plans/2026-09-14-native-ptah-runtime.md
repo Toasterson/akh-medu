@@ -91,7 +91,10 @@ the chronological evidence further down is retained as written.
   CPU, HIP and Vulkan** agreeing within 8.1e-06 absolute. Getting it onto the
   devices required replacing `conv2d`, which neither backend implements, with an
   equivalent unfold plus matmul, and dispatching softmax and GELU per device.
-  Still not numerically validated against a reference. See
+  Still not numerically validated, and not validatable on this machine: no
+  external consumer of this GGUF is installed, and a second in-house
+  implementation would share the same comprehension errors rather than test
+  them. See
   [device runs](../research/2026-09-19-vision-projector-devices.md) and
   [vision scope](2026-09-19-native-vision-scope.md).
 - **Long-context memory quantified** (2026-09-19): only 16 of 64 target blocks
