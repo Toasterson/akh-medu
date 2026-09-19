@@ -60,7 +60,10 @@ the chronological evidence further down is retained as written.
   already local, so no artifact is fetched and model identity is preserved.
   Projector resolution by manifest layer is implemented and tested against the
   real blob; the vision tower, merger, deepstack routing and image positions
-  remain. `quantized_qwen35.rs` has no multimodal support today. See
+  remain. `quantized_qwen35.rs` has no multimodal support today, but this
+  artifact needs no deepstack routing (all 27 flags false, no deepstack
+  tensors), so that step drops out. Dynamic-resolution preprocessing is
+  resolved against llama.cpp mtmd and implemented with six CPU tests. See
   [vision scope](2026-09-19-native-vision-scope.md).
 - **Long-context memory quantified** (2026-09-19): only 16 of 64 target blocks
   hold a growing KV cache (`full_attention_interval = 4`); the other 48 are
