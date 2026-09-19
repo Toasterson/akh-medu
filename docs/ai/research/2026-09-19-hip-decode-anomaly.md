@@ -65,6 +65,40 @@ continuation guard, and not a periodic event.
 device. The probe recorder sets it explicitly, so every keyed throughput figure
 recorded today was measured on the slower path.
 
+## Where the Q8 GEMV does help: unkeyed decode
+
+The same comparison on the unkeyed path, one 392-token prompt, two fresh calls:
+
+| Measurement | Q8 GEMV on | Q8 GEMV off |
+| --- | ---: | ---: |
+| Time to first token | 3.913 s / 3.793 s | 3.911 s / 3.790 s |
+| Unkeyed decode, steps/s | 18.37 / 18.34 | 16.02 / 14.69 |
+
+Two things follow. **Prefill is unaffected** — the times agree to a millisecond,
+so the kernel plays no part there. And **unkeyed decode is meaningfully faster
+with it on**, by roughly 15 to 25 %, the opposite of its effect on keyed decode.
+
+Both Q8 rounds returned byte-identical text with identical step counts, so the
+quantized path is deterministic here. An earlier reading of a truncated probe
+output as a determinism failure was wrong; it was an artifact of the reporting
+pipeline, and this clean rerun supersedes it.
+
+## Consequence, revised
+
+The Q8 activation GEMV is not simply a pessimization. It is **right for unkeyed
+decode and wrong for keyed decode**, and irrelevant to prefill:
+
+| Path | Q8 GEMV |
+| --- | --- |
+| Prefill | no measurable effect |
+| Unkeyed decode | ~18.35 vs ~15.4 steps/s — keep it |
+| Keyed decode at 256, 440, 510 positions | 7.2/7.0/5.8 vs 14.2/11.9/11.7 — disable it |
+
+So the actionable change is to select the route **per path** rather than by a
+single process-wide flag: keyed completions take the f32 route, fresh unkeyed
+ones keep the quantized GEMV. A global default cannot be right for both, which
+is why neither disabling nor keeping the current flag is the answer.
+
 ## Not established
 
 Why the kernel degrades at those sizes. The pattern is not a simple threshold:
@@ -72,11 +106,13 @@ Why the kernel degrades at those sizes. The pattern is not a simple threshold:
 alignment interaction with the key/value length rather than a size cut-off, but
 nothing here inspects the kernel.
 
-Nor does this measure where Q8 GEMV does help. It exists for a reason and may
-pay off in prefill, in unkeyed generation or at other shapes; these eight turns
-only cover keyed decode. The 2026-09-18 unkeyed figure of 20.2 steps/s was taken
-with it enabled at short context, where both configurations agree anyway.
+Whether a per-path selection is safe. The keyed route already carries a
+scoped-f32 continuation guard for numerical reasons, so routing keyed
+completions away from the quantized GEMV is consistent with that guard rather
+than in tension with it, but no numerical gate has been rerun under a per-path
+split.
 
-Changing the default is therefore **not** justified by this alone: what is
-justified is measuring prefill and unkeyed paths the same way before deciding,
-and treating keyed decode figures taken with it enabled as understated.
+The measurements are also narrow: one model, one device, one prompt shape per
+path, and unkeyed decode measured over 26 steps. The unkeyed advantage is a
+consistent 15-25 % across four samples, not a single reading, but it is not a
+sweep across shapes.

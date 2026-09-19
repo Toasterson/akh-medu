@@ -39,7 +39,10 @@ the chronological evidence further down is retained as written.
   monotonic, 17.2 to 11.7 steps/s across 58 to 510 positions, and the collapses
   at 256, 440 and 510 vanish - f32 is roughly twice as fast there and never
   slower. Keyed figures recorded with it enabled are understated. Why the kernel
-  degrades, and where it does help, are open. See
+  degrades is open, but where it helps is now measured: prefill is unaffected and
+  **unkeyed** decode is 15-25% faster with it on (18.35 vs 15.4 steps/s). So the
+  fix is per-path routing - f32 for keyed completions, quantized GEMV for fresh
+  ones - not a global default change. See
   [decode anomaly](../research/2026-09-19-hip-decode-anomaly.md).
 - **Superseded note.** Keyed HIP decode is non-monotonic in context
   position: about 17 steps/s below 200 positions, 8.2 at 256, 13.0 at 322-381,
