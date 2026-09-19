@@ -56,13 +56,42 @@ tokenizer, and the `qwen3vl_merger` projector.
 The script refuses to emit a manifest from a dirty tree unless told otherwise,
 because a hash that cannot be tied to a commit is not evidence.
 
+## The bundle itself
+
+`scripts/session-platform/build-bundle.py` assembles one: it copies the
+executables and, for each, the kernel libraries that executable actually
+resolves, into a single directory with a `lib/` beside them. Kernel lookup
+prefers `lib/` next to the executable ahead of the compile-time path, so the
+bundle needs no `AKH_HIP_KERNEL_DIR` override. It refuses to overwrite an
+existing bundle, and refuses to proceed if two binaries need different libraries
+of the same name.
+
+It records the toolchain from **files rather than commands on PATH**. The first
+version shelled out to `hipcc` and `rocm-smi`, neither of which is on PATH here,
+and recorded `null` for all three fields — worse than recording nothing, because
+`null` looks like an answer. Reading `/opt/rocm/.info/version` and the amdgpu
+module attributes instead gives ROCm `6.3.4-76`, kernel `6.8.0-47-generic` and
+the module srcversion, and anything genuinely unavailable is listed under
+`unrecorded` rather than silently nulled.
+
+**The relocated bundle passes the five-daemon canary**: all seven checks, the
+correct post-restart recall answer, running the daemons from the bundle
+directory rather than the build tree.
+
+That verification took two attempts, and the first was worthless. It set
+`AKH_NATIVE_BIN_DIR` and `PATH`, but the smoke harness takes `--bin-dir` and
+defaults to `target/release`, so it ran the originals and passed. The binary
+hashes matched the bundle's, which proves nothing when the bundle is a copy.
+Only the rerun with `--bin-dir` actually exercised the relocated executables.
+
 ## Not established
 
-This is identity, not deployment. It does not build a relocatable bundle, copy
-libraries into a `lib/` directory beside the executables, or verify that a
-relocated bundle runs — the earlier relocation canary did that for an older
-build and its evidence stands separately. Nor does it record the ROCm or driver
-versions the kernels were compiled against, which belong in a bundle intended to
-move between machines.
+The canary running from the bundle does not prove the kernels loaded from the
+bundle's `lib/`: the compile-time path still exists on this machine, so lookup
+could have reached the same libraries by the fallback. Establishing the `lib/`
+precedence needs a machine, container or mount where the build tree is absent.
+
+Nor does this attempt a cutover. No production daemon is installed, and the
+homelab canary remains untouched pending explicit direction.
 
 Manifest: [20260919](../../../experiments/native-release/20260919/manifest.json).

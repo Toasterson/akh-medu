@@ -1,0 +1,44 @@
+{
+  "binaries": {
+    "akhexecd": {
+      "sha256": "50dda7a498ae5694700ac18f737a5f8b05fbfeacabb6714ab62034456e0847ca",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/akhexecd"
+    },
+    "akhomed": {
+      "sha256": "e1d3e93e0883e9250e1cc3996a72f9f239807253187cf32d1da0d9bc2a07ecc1",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/akhomed"
+    },
+    "akhrtd": {
+      "sha256": "ba34aba1a6d6e85293d8e518b2383611d5ac17a6209176f9b21d449283b80f43",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/akhrtd"
+    },
+    "akhsbxd": {
+      "sha256": "ecd12746d88ac1fc2977cb532f925c69190ce158cf47334a85254e7cf2bfbc7e",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/akhsbxd"
+    },
+    "akhsessd": {
+      "sha256": "b1a32a1578853b5dcddab3f7d63b929d9b898776c9c160a23534d82f8c5622f9",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/akhsessd"
+    }
+  },
+  "commit": "037dd4d6594753a4551d606c9edd4745914f2b9d",
+  "libraries": {
+    "libcandle_hip_kernels.so": {
+      "sha256": "2b671ba1aa23fc34cc6d353a05c606a6da84199bd29a1325e7a2c045e9a773ca",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_kernels.so"
+    },
+    "libcandle_hip_quant.so": {
+      "sha256": "6df366dd60c8ee046d3adc21abd9c12c0011e3e5446175b386db3328976796ba",
+      "source": "/home/toasty/ws/agi/akh-medu/target/release/build/candle-core-e13219964f178351/out/libcandle_hip_quant.so"
+    }
+  },
+  "toolchain": {
+    "amdgpu_srcversion": "F464956F9ED2C68A43788C1",
+    "amdgpu_version": null,
+    "kernel": "6.8.0-47-generic",
+    "rocm": "6.3.4-76",
+    "unrecorded": [
+      "amdgpu_version"
+    ]
+  }
+}
