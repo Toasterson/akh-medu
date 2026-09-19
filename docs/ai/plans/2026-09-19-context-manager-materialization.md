@@ -77,3 +77,41 @@ second Engine the ledger rules out.
 Steps 1-3 need a wire-shape change between akhomed and akhrtd. Keep the existing
 payload accepted so a mixed pair still interoperates during the transition, the
 same discipline the span annex used.
+
+## Open protocol question found while implementing step 1
+
+Step 2 is larger than it looks. `/v1/context` in `src/core_service.rs` returns
+only `instructions`, `model` and `evidence`: a system-prompt string. akhomed
+never receives the session's message history, and the `ContextManager` seam in
+`src/agent/context/` is used by akhomed's own agentic loop, not by this session
+path at all. So the core cannot assemble a budgeted message list today — it
+cannot see what it would be budgeting.
+
+Making the core authoritative therefore requires a protocol change, and the
+ledger's "bounded exchanges" rule constrains which one:
+
+- **Send the history to the core.** `/v1/context` gains the session's messages
+  and a token budget, and returns assembled messages plus `ContextWindowStats`.
+  Most faithful to one cognitive core, but it moves the whole conversation
+  across the boundary every turn, which is the exchange the ledger asks to keep
+  bounded, and it gives the core a copy of history the session loop owns.
+- **Send a decision, not the content.** The session service sends a compact
+  digest — per-message roles, token counts, recall markers, pin flags — and the
+  core returns which spans survive plus the stats. The exchange stays bounded
+  and proportional to turn count rather than content size, durable history stays
+  in the session loop, and the core still owns the policy. The core cannot make
+  content-dependent decisions such as summarization under this shape.
+- **Move the session loop's assembly call into the core's strategy.** Keep the
+  wire as is and have akhsessd depend on the `ContextManager` seam directly, so
+  there is one implementation even though it executes in the session process.
+  No protocol change; the risk is that "one core" becomes a shared library
+  rather than a single decision point.
+
+The second and third are compatible: a digest-based decision could be computed
+by the same strategy code either side of the wire. Deciding between them needs
+the compaction question answered first — whether the strategy must ever rewrite
+message content for native turns, or only select among existing messages.
+`CompactingManager` does rewrite, so shipping it for native turns rules out the
+digest-only shape.
+
+This is the next decision, before any code for step 2.
