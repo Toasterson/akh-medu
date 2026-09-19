@@ -4,6 +4,7 @@ use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, DType, Layout, Result, Shape};
 #[path = "vulkan_pipeline_cache.rs"]
 mod pipeline_cache;
+pub use pipeline_cache::PipelineCacheStats;
 use pipeline_cache::PipelineCache;
 use std::{
     sync::{Arc, Mutex},
@@ -288,6 +289,12 @@ impl VulkanDevice {
         }
         let mut pending = self.0.pending.lock().map_err(vk_error)?;
         self.submit_pending(&mut pending)
+    }
+
+    /// Shader specialization cache counters for this device. Application-held
+    /// residency only: it does not observe driver-internal pipeline caches.
+    pub fn pipeline_cache_stats(&self) -> Result<PipelineCacheStats> {
+        Ok(self.0.pipelines.lock().map_err(vk_error)?.stats())
     }
 
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {

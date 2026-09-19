@@ -7,6 +7,9 @@ mod gpu_idle;
 #[cfg(feature = "candle-backend")]
 #[path = "support/continuation.rs"]
 mod continuation;
+#[cfg(feature = "candle-backend")]
+#[path = "support/keyed_bench.rs"]
+mod keyed_bench;
 
 #[cfg(feature = "candle-backend")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,6 +34,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Test keyed continuation, eviction, cancellation and context limits.
         #[arg(long)]
         continuation: bool,
+        /// Time keyed multi-session turns: prefix reuse and key-switch prefill.
+        #[arg(long)]
+        keyed_benchmark: bool,
+        /// Distinct session keys used by the keyed benchmark.
+        #[arg(long, default_value_t = 3)]
+        keyed_sessions: usize,
+        /// Turns per session in each keyed benchmark pass.
+        #[arg(long, default_value_t = 3)]
+        keyed_turns: usize,
+        /// Output cap per keyed benchmark request.
+        #[arg(long, default_value_t = 48)]
+        keyed_tokens: u32,
         #[arg(long, default_value_t = 10)]
         idle_samples: usize,
         #[arg(long, default_value_t = 10)]
@@ -104,6 +119,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.continuation {
         continuation::check(&mut backend)?;
+    }
+    if args.keyed_benchmark {
+        keyed_bench::run(
+            &mut backend,
+            args.keyed_sessions,
+            args.keyed_turns,
+            args.keyed_tokens,
+        )?;
     }
     if let (Some(path), Some((_, baseline_watts))) = (&args.gpu_sysfs, baseline) {
         std::thread::sleep(std::time::Duration::from_secs(args.settle_seconds));

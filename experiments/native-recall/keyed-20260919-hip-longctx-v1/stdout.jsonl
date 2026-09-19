@@ -1,0 +1,5 @@
+{"context_length":262144,"family":"Qwen35","phase":"loaded","seconds":23.265245233}
+{"decode_seconds":0.491165192,"decode_steps_including_eos":9,"decode_steps_per_second":18.32377405115467,"finish":"Stop","phase":"generation","prompt_tokens":400,"round":0,"seconds_including_prefill":4.690193365,"text":"\n\nA resident runtime keeps model weights immutable.","time_to_first_token_seconds":4.198917984,"tokens":9}
+{"decode_seconds":0.490190013,"decode_steps_including_eos":9,"decode_steps_per_second":18.360227179903806,"finish":"Stop","phase":"generation","prompt_tokens":400,"round":1,"seconds_including_prefill":4.558384415,"text":"\n\nA resident runtime keeps model weights immutable.","time_to_first_token_seconds":4.067960107,"tokens":9}
+{"checks":["exact_prefix","fresh_reply_equivalence","full_context_cap","session_eviction","cancellation","length_recovery"],"pass":true,"phase":"continuation_checks","reused_prompt_tokens":24}
+{"baseline_watts":10.666666666666666,"mean_busy_percent":0.0,"mean_watts":11.0,"pass":true,"phase":"resident_idle","samples":60}

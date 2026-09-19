@@ -705,6 +705,18 @@ impl CandleBackend {
         Ok(())
     }
 
+    /// Shader specialization cache counters when this backend is resident on a
+    /// Vulkan device. `None` on other devices. These count application-held
+    /// residency and compilation events, not driver-internal caches or
+    /// compiled pipeline bytes.
+    #[cfg(feature = "vulkan")]
+    pub fn vulkan_pipeline_cache_stats(&self) -> Option<candle_core::PipelineCacheStats> {
+        match &self.device {
+            Device::Vulkan(device) => device.pipeline_cache_stats().ok(),
+            _ => None,
+        }
+    }
+
     /// Consume this backend and return unused cached device memory to the driver.
     ///
     /// HIP callers must serialize this with inference and graph capture, just as

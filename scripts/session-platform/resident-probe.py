@@ -27,6 +27,12 @@ def main():
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--gpu", type=Path,
                         default=Path("/sys/bus/pci/devices/0000:03:00.0"))
+    # Extra probe flags stay explicit in identity.json rather than hidden in a
+    # shell wrapper, so evidence records exactly what was measured.
+    parser.add_argument("--probe-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="append one argument to the probe command; use "
+                             "--probe-arg=--flag for values starting with a dash")
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("timeout must be positive")
@@ -39,7 +45,8 @@ def main():
     command = [str(binary), "--device", args.device, "--model", str(args.model),
                "--tokenizer", str(args.tokenizer), "--gpu-sysfs", str(args.gpu),
                "--tokens", "64", "--continuation", "--idle-samples", "60",
-               "--settle-seconds", "15", "--baseline-settle-seconds", "15"]
+               "--settle-seconds", "15", "--baseline-settle-seconds", "15",
+               *args.probe_arg]
     identity = {"command": command, "source_commit": subprocess.check_output(
         ["git", "rev-parse", "HEAD"], text=True).strip(),
         "binary_sha256": sha256(binary), "tokenizer_sha256": sha256(args.tokenizer),

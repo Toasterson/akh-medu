@@ -129,7 +129,7 @@ pub use cuda::{CudaDevice, CudaStorage};
 #[cfg(feature = "vulkan")]
 pub mod vulkan_backend;
 #[cfg(feature = "vulkan")]
-pub use vulkan_backend::{VulkanDevice, VulkanStorage};
+pub use vulkan_backend::{PipelineCacheStats, VulkanDevice, VulkanStorage};
 
 #[cfg(feature = "metal")]
 pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
