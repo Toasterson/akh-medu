@@ -264,3 +264,27 @@ The canary had passed at 4, 3 and 2 bits before this. It never exercised paging
 at all: its 1,024-token window means nothing ages out of a 16-position exact
 window in five short turns. The gate established quality, which was its purpose,
 and said nothing about whether the paging mechanism worked.
+
+
+## The canary, this time with paging actually exercised
+
+The earlier canary passes used a 16-position exact window, which nothing aged
+out of in five short turns. Rerun with `AKH_QWEN35_KV_QUANT_RECENT=4`, so
+positions move into compressed pages on every turn:
+
+| Configuration | Recall answer | Checks |
+| --- | --- | --- |
+| Device paging, 4-bit, 4 exact positions | 4317 | 7/7 pass |
+
+Five spans published, four messages dropped, one span materialized, and the
+post-restart question answered correctly — with most of the attention cache
+held as one byte per code and reconstructed on the device for every step.
+
+This is the gate the earlier runs looked like but were not. It exercises the
+mechanism end to end: eviction into pages, device decode, concatenation with the
+exact window, and recall across a session and core restart.
+
+What it still does not establish is quality at length. Five short turns with a
+1,024-token window is a small amount of compressed context, so this says the
+mechanism is sound, not that a long conversation stays coherent under it. A
+needle-in-a-haystack run remains the test that would say that.

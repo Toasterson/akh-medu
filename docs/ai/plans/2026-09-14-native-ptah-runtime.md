@@ -144,6 +144,21 @@ the chronological evidence further down is retained as written.
   canary at 4, 3 and 2 bits**, recalling the correct number after eviction and
   restart. The fixture does not discriminate between those widths, so 4 bits is
   the conservative default. **Real paged storage is now wired into
+- **KV compression works end to end on HIP** (2026-09-19). Pages hold one byte
+  per code on the device and decode there via gather, norm scale and inverse
+  rotation, proven equivalent to the host decode within 1e-4. A six-turn
+  benchmark that **never finished** with host-side decode now completes, at
+  about a third of decode throughput (11.2 against 16.5 steps/s on the stable
+  early turns). The canary passes with `recent=4`, which forces paging every
+  turn, still recalling the right number after eviction and restart.
+
+  Two corrections this produced. The earlier canary passes at 4, 3 and 2 bits
+  **never exercised paging** - a 1,024-token window ages nothing out of a
+  16-position exact window - and the first real paging workload failed at once
+  on an append invariant that assumed the state holds every position. And the
+  Vulkan half remains blocked: its allocator gives every dtype four bytes per
+  element, so `u8` saves nothing there without packed storage.
+
   `AttentionState`** — bit-packed pages per (batch, head) slot, a shared
   quantizer, the recent window exact — and passes the canary at 4 and 2 bits
   with 21 model tests still green. **Host-side decode is now measured as not
