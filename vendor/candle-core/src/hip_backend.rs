@@ -2096,6 +2096,15 @@ fn hip() -> Result<&'static runtime::Hip> {
     runtime::hip().map_err(Error::Msg)
 }
 
+/// Live device memory `(free, total)` in bytes, or `None` if the query fails.
+///
+/// Free counts what the driver reports as available, which already excludes
+/// this process's resident weights and the allocator's cached blocks. A caller
+/// sizing a KV cache wants exactly that, not the card's nameplate capacity.
+pub fn device_memory_info() -> Option<(usize, usize)> {
+    hip().ok()?.mem_info()
+}
+
 /// Release unused cached HIP allocations at a serialized model-unload boundary.
 /// Live tensors and graph-pinned allocations must remain valid.
 pub fn release_cached_memory() -> Result<usize> {

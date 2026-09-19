@@ -1,0 +1,13 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+### PASS CASE: normal request, default headroom ###
+exit=0
+generation lines: 2
+"memory_bound_context_limit":48672
+
+### REJECT CASE: headroom consumes the whole budget ###
+exit=1
+generation lines: 0
+--- stderr ---
+Error: ContextExceedsDeviceMemory { requested: 39, declared_window: 262144, fits_tokens: 0, per_token_bytes: 131072, needed_bytes: 5111808, available_bytes: 8527020032, headroom_bytes: 999999999999 }
+
+[exited with code 0]

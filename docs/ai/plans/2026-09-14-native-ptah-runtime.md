@@ -217,6 +217,34 @@ the chronological evidence further down is retained as written.
   there reported "nothing changed" on one device and "something changed" on the
   other from the same codes: not merely a weak signal but a misleading one.
 
+- **Long-context gate: the runtime advertised 262,144 tokens and can serve
+  48,672** (2026-09-19). The only admission check was against the GGUF's declared
+  window, which is what the artifact supports, not what the card holds. At 128 KiB
+  of KV per token the declared window needs 32 GiB on a 23.98 GiB card that
+  already holds 16.8 GB of weights, so a request could pass every check and then
+  fail on an allocation part way through prefill.
+
+  `memory_bound_context_limit()` now reports what fits: **48,672** tokens on HIP
+  (`hipMemGetInfo`) and **40,226** on Vulkan (`amdgpu` sysfs, since wgpu has no
+  portable free-memory query). The two differ by ~1.1 GB because sysfs is
+  card-wide and includes the compositor; that is the more conservative figure and
+  the right bias for a gate. A device that can report neither stands the gate
+  down rather than inventing a limit. Verified in both directions - normal
+  requests admit at unchanged decode throughput, oversized ones exit 1 with zero
+  generation before anything is allocated. The miette diagnostic names the limit,
+  the per-token cost, the adjustable reserve and every remedy, including
+  compressed KV **with its 0.9999 caveat attached** so nothing recommends it on
+  the strength of a help string.
+
+  **My first verification of this was hollow**: the rejection case looked like a
+  pass because my grep excluded the generation lines, while generation had in
+  fact completed with exit 0. The gate was on `generate_inner` and `prefill`,
+  neither of which serves completions. Absence of expected output is not evidence
+  of rejection. All four admission points are now covered. **Uncalibrated and
+  untested near the limit**: the 2 GiB reserve is a judgement call and the largest
+  prompt exercised is 15 tokens. See
+  [long-context gate](../research/2026-09-19-long-context-gate.md).
+
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
   a position aged out. Compressed KV there was failing closed, not saving

@@ -2239,6 +2239,62 @@ impl CandleBackend {
         }
     }
 
+    /// Live device memory, when the platform can report it.
+    ///
+    /// HIP asks the driver directly. Vulkan has no portable free-memory query in
+    /// wgpu, so on AMD the kernel's sysfs counters are read instead - the same
+    /// numbers the idle-power probe samples. A device that can report neither
+    /// yields `None`, and the caller must not invent a number for it.
+    #[cfg(feature = "candle-backend")]
+    pub fn device_memory(&self) -> Option<DeviceMemory> {
+        match &self.device {
+            #[cfg(feature = "hip")]
+            Device::Cuda(_) => candle_core::cuda::device_memory_info().map(|(free, total)| {
+                DeviceMemory { free, total, source: "hipMemGetInfo" }
+            }),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(_) => amd_sysfs_memory(),
+            _ => None,
+        }
+    }
+
+    /// Tokens of context that actually fit on this device, weights resident.
+    ///
+    /// The declared window is what the GGUF advertises; this is what the hardware
+    /// can hold. For the pinned Qwen3.8 artifact the two differ by more than an
+    /// order of magnitude, so treating the declared window as an admission limit
+    /// means accepting requests that can only end in an allocation failure part
+    /// way through prefill.
+    ///
+    /// `None` when either the per-token cost or the device memory is unknown,
+    /// which is the honest answer rather than a guess.
+    #[cfg(feature = "candle-backend")]
+    pub fn memory_bound_context_limit(&self) -> Option<usize> {
+        let per_token = self.kv_bytes_per_token()?;
+        if per_token == 0 {
+            return None;
+        }
+        let memory = self.device_memory()?;
+        let budget = memory.free.saturating_sub(kv_headroom_bytes());
+        Some((budget / per_token).min(self.context_length))
+    }
+
+    /// Snapshot everything the memory gate needs, borrowing nothing afterwards.
+    ///
+    /// Taken once per request rather than per call site: each one costs a driver
+    /// query, and a limit that shifted between two checks of the same request
+    /// would be worse than either answer.
+    #[cfg(feature = "candle-backend")]
+    fn context_admission(&self) -> ContextAdmission {
+        ContextAdmission {
+            fits_tokens: self.memory_bound_context_limit(),
+            declared_window: self.context_length,
+            per_token_bytes: self.kv_bytes_per_token().unwrap_or(0),
+            available_bytes: self.device_memory().map_or(0, |memory| memory.free),
+            headroom_bytes: kv_headroom_bytes(),
+        }
+    }
+
     /// Resident KV bytes for a full `tokens`-long context, when modelled.
     #[cfg(feature = "candle-backend")]
     pub fn projected_kv_bytes(&self, tokens: usize) -> Option<usize> {
@@ -2549,6 +2605,10 @@ impl CandleBackend {
         let limit = self.completion_context_limit.unwrap_or(self.context_length);
         let mut prompt_tokens = self.encode_prompt(prompt)?;
         validate_completion_budget(prompt_tokens.len(), max_tokens, limit)?;
+        // The declared window says what the artifact supports; this says what
+        // the device can hold. On the pinned model the two differ fivefold.
+        let admission = self.context_admission();
+        admission.check(prompt_tokens.len(), max_tokens as usize)?;
         let token_span = match &capture {
             Some(request) => self.token_span_for_bytes(prompt, &request.byte_span)?,
             None => None,
@@ -2594,6 +2654,7 @@ impl CandleBackend {
                     model.rewind(checkpoint).map_err(fail)?;
                     let new_tokens = encode_prompt_tokens(&self.tokenizer, self.family, &new_prompt)?;
                     validate_completion_budget(new_tokens.len(), max_tokens, limit)?;
+                    admission.check(new_tokens.len(), max_tokens as usize)?;
                     check()?;
                     let forwarded =
                         with_interrupt(check, |guard| model.resume_prompt(&new_tokens, guard))?;
@@ -2733,6 +2794,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // The declared window is not an admission limit on its own: it is what
+        // the artifact advertises, not what fits with the weights resident.
+        self.context_admission().check(prompt_tokens.len(), max_tokens as usize)?;
 
         // Prefill: process all prompt tokens at once.
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
@@ -3279,6 +3343,9 @@ impl CandleBackend {
                 ),
             });
         }
+        // Prefill sizes the cache to the prompt; what the caller then generates
+        // is gated where the generation limit is known.
+        self.context_admission().check(prompt_tokens.len(), 0)?;
 
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)
             .map_err(|e| NluError::LlmGenerationFailed {
@@ -4267,6 +4334,105 @@ Some trailing text."#;
     }
 }
 
+
+/// What the device can hold, captured before any of a request is allocated.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy)]
+struct ContextAdmission {
+    /// `None` when the device cannot report memory, in which case the gate
+    /// stands down rather than inventing a limit.
+    fits_tokens: Option<usize>,
+    declared_window: usize,
+    per_token_bytes: usize,
+    available_bytes: usize,
+    headroom_bytes: usize,
+}
+
+#[cfg(feature = "candle-backend")]
+impl ContextAdmission {
+    /// Reject a request that cannot fit, before any of it is allocated.
+    ///
+    /// Checked against prompt plus the tokens the caller intends to generate,
+    /// since the cache grows through decode: a prompt that just fits can still
+    /// run the device out part way through its reply.
+    fn check(self, prompt_tokens: usize, max_new_tokens: usize) -> NluResult<()> {
+        let requested = prompt_tokens.saturating_add(max_new_tokens);
+        let Some(fits_tokens) = self.fits_tokens else {
+            return Ok(());
+        };
+        if requested <= fits_tokens {
+            return Ok(());
+        }
+        Err(NluError::ContextExceedsDeviceMemory {
+            requested,
+            declared_window: self.declared_window,
+            fits_tokens,
+            per_token_bytes: self.per_token_bytes,
+            needed_bytes: self.per_token_bytes.saturating_mul(requested),
+            available_bytes: self.available_bytes,
+            headroom_bytes: self.headroom_bytes,
+        })
+    }
+}
+
+/// Live device memory in bytes, and where the figure came from.
+#[cfg(feature = "candle-backend")]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct DeviceMemory {
+    pub free: usize,
+    pub total: usize,
+    /// Named so a report says which query produced it rather than implying all
+    /// devices answer the same way.
+    pub source: &'static str,
+}
+
+/// Reserve held back from the KV budget for activations, logits and workspace.
+///
+/// Prefill allocates intermediates proportional to the prompt, so spending every
+/// free byte on cache would fail inside the forward pass instead of at the gate.
+/// Two gibibytes by default, overridable because the right reserve depends on
+/// batch and prompt shape and no single constant is right for all of them.
+#[cfg(feature = "candle-backend")]
+fn kv_headroom_bytes() -> usize {
+    const DEFAULT: usize = 2 * 1024 * 1024 * 1024;
+    std::env::var("AKH_CANDLE_KV_HEADROOM_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
+/// Free and total VRAM from the AMD kernel driver's sysfs counters.
+///
+/// Used where the graphics API has no free-memory query. Returns `None` on any
+/// other vendor or if the counters are absent, rather than guessing.
+#[cfg(all(feature = "candle-backend", feature = "vulkan"))]
+fn amd_sysfs_memory() -> Option<DeviceMemory> {
+    let read = |card: &std::path::Path, name: &str| -> Option<usize> {
+        std::fs::read_to_string(card.join("device").join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    for entry in std::fs::read_dir("/sys/class/drm").ok()?.flatten() {
+        let path = entry.path();
+        let Some(total) = read(&path, "mem_info_vram_total") else {
+            continue;
+        };
+        let Some(used) = read(&path, "mem_info_vram_used") else {
+            continue;
+        };
+        if total == 0 {
+            continue;
+        }
+        return Some(DeviceMemory {
+            free: total.saturating_sub(used),
+            total,
+            source: "amdgpu sysfs mem_info_vram",
+        });
+    }
+    None
+}
 
 /// What the live compressed KV pages occupy, summed over attention layers.
 ///
