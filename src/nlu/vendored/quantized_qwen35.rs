@@ -113,37 +113,6 @@ pub(crate) struct KvQuantization {
     recent: usize,
 }
 
-impl KvQuantization {
-    /// Quantize every position older than the recent window, in place.
-    ///
-    /// `tensor` is `(batch, kv_heads, positions, head_dim)`. Only positions that
-    /// existed before this call are touched, so the newest token is always
-    /// exact and a decode step never re-quantizes what it just wrote.
-    fn apply(&self, tensor: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let (batch, heads, positions, dim) = tensor.dims4()?;
-        let keep_from = positions.saturating_sub(self.recent);
-        // Nothing has aged out of the exact window yet.
-        if keep_from == 0 || index_pos == 0 && positions <= self.recent {
-            return Ok(tensor.clone());
-        }
-        let device = tensor.device().clone();
-        let mut values: Vec<f32> = tensor.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-        let quantizer = crate::nlu::turbo_quant::TurboQuant::new(dim, self.bits, 0x7EED_5EED);
-        for b in 0..batch {
-            for head in 0..heads {
-                for position in 0..keep_from {
-                    let start = ((b * heads + head) * positions + position) * dim;
-                    let slice = &values[start..start + dim];
-                    let restored = quantizer.dequantize(&quantizer.quantize(slice));
-                    values[start..start + dim].copy_from_slice(&restored);
-                }
-            }
-        }
-        Tensor::from_vec(values, (batch, heads, positions, dim), &device)?
-            .to_dtype(tensor.dtype())
-    }
-}
-
 fn kv_quantization() -> Option<KvQuantization> {
     use std::sync::OnceLock;
     static SETTINGS: OnceLock<Option<KvQuantization>> = OnceLock::new();
@@ -316,9 +285,103 @@ impl PartialRope {
 
 #[derive(Debug, Clone)]
 struct AttentionState {
+    /// Newest positions, exact.
     key: Tensor,
     value: Tensor,
+    /// Older positions, compressed. One store per (batch, head) slot so each
+    /// slot's positions stay in order across evictions.
+    pages: Option<KvPages>,
 }
+
+/// Compressed older positions for one attention layer.
+#[derive(Debug, Clone)]
+struct KvPages {
+    key: Vec<crate::nlu::turbo_quant::KvPageStore>,
+    value: Vec<crate::nlu::turbo_quant::KvPageStore>,
+    heads: usize,
+    dim: usize,
+}
+
+impl KvPages {
+    fn new(policy: KvQuantization, slots: usize, heads: usize, dim: usize) -> Self {
+        // One prepared quantizer shared by every slot, and by both tensors.
+        let quantizer = std::sync::Arc::new(crate::nlu::turbo_quant::TurboQuant::new(
+            dim,
+            policy.bits,
+            KV_PAGE_SEED,
+        ));
+        let make = || {
+            (0..slots)
+                .map(|_| {
+                    crate::nlu::turbo_quant::KvPageStore::with_quantizer(quantizer.clone())
+                })
+                .collect()
+        };
+        Self {
+            key: make(),
+            value: make(),
+            heads,
+            dim,
+        }
+    }
+
+    fn positions(&self) -> usize {
+        self.key.first().map(|store| store.positions()).unwrap_or(0)
+    }
+
+    /// Bytes held against the f32 equivalent, summed over every slot.
+    fn stored_and_uncompressed_bytes(&self) -> (usize, usize) {
+        self.key
+            .iter()
+            .chain(&self.value)
+            .fold((0, 0), |(stored, plain), store| {
+                (
+                    stored + store.stored_bytes(),
+                    plain + store.uncompressed_bytes(),
+                )
+            })
+    }
+
+    /// Append the oldest `count` positions of `tensor` into the given stores.
+    fn absorb(
+        stores: &mut [crate::nlu::turbo_quant::KvPageStore],
+        tensor: &Tensor,
+        count: usize,
+    ) -> Result<()> {
+        let (batch, heads, positions, dim) = tensor.dims4()?;
+        let values: Vec<f32> = tensor.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+        for b in 0..batch {
+            for head in 0..heads {
+                let slot = b * heads + head;
+                let base = (b * heads + head) * positions * dim;
+                let rows = &values[base..base + count * dim];
+                stores[slot]
+                    .push_rows(rows)
+                    .map_err(candle_core::Error::msg)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild `(batch, heads, positions, dim)` from the stores.
+    fn decode(
+        stores: &[crate::nlu::turbo_quant::KvPageStore],
+        heads: usize,
+        dim: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let positions = stores[0].positions();
+        let batch = stores.len() / heads;
+        let mut values = Vec::with_capacity(batch * heads * positions * dim);
+        for store in stores {
+            values.extend_from_slice(&store.decode());
+        }
+        Tensor::from_vec(values, (batch, heads, positions, dim), device)
+    }
+}
+
+/// Fixed seed so a rotation is identical across every layer and restart.
+const KV_PAGE_SEED: u64 = 0x7EED_5EED;
 
 #[derive(Debug, Clone)]
 struct FullAttention {
@@ -395,21 +458,54 @@ impl FullAttention {
             ),
             _ => (key, value),
         };
-        // Optional lossy KV path, off unless configured. This round-trips the
-        // cache through TurboQuant in place: it measures the quality a
-        // compressed cache would deliver without yet changing the storage
-        // layout, so an end-to-end gate can run before memory work begins.
+        // Optional compressed KV, off unless configured. Positions older than
+        // the exact window move into bit-packed pages; the recent window and
+        // the current token stay f32, so a decode step never compresses what it
+        // just wrote.
         let (key, value) = match kv_quantization() {
-            Some(policy) => (
-                policy.apply(&key, index_pos)?,
-                policy.apply(&value, index_pos)?,
-            ),
-            None => (key, value),
+            None => {
+                *state = Some(AttentionState {
+                    key: key.clone(),
+                    value: value.clone(),
+                    pages: None,
+                });
+                (key, value)
+            }
+            Some(policy) => {
+                let (batch, heads, positions, dim) = key.dims4()?;
+                let mut pages = state
+                    .take()
+                    .and_then(|previous| previous.pages)
+                    .unwrap_or_else(|| KvPages::new(policy, batch * heads, heads, dim));
+                let overflow = positions.saturating_sub(policy.recent);
+                if overflow > 0 {
+                    KvPages::absorb(&mut pages.key, &key, overflow)?;
+                    KvPages::absorb(&mut pages.value, &value, overflow)?;
+                }
+                let recent_key = key.narrow(2, overflow, positions - overflow)?.contiguous()?;
+                let recent_value =
+                    value.narrow(2, overflow, positions - overflow)?.contiguous()?;
+                let device = key.device().clone();
+                let full = if pages.positions() > 0 {
+                    let old_key = KvPages::decode(&pages.key, heads, dim, &device)?
+                        .to_dtype(key.dtype())?;
+                    let old_value = KvPages::decode(&pages.value, heads, dim, &device)?
+                        .to_dtype(value.dtype())?;
+                    (
+                        Tensor::cat(&[&old_key, &recent_key], 2)?,
+                        Tensor::cat(&[&old_value, &recent_value], 2)?,
+                    )
+                } else {
+                    (recent_key.clone(), recent_value.clone())
+                };
+                *state = Some(AttentionState {
+                    key: recent_key,
+                    value: recent_value,
+                    pages: Some(pages),
+                });
+                full
+            }
         };
-        *state = Some(AttentionState {
-            key: key.clone(),
-            value: value.clone(),
-        });
 
         let key = repeat_kv(key, self.head_count / self.kv_head_count)?;
         let value = repeat_kv(value, self.head_count / self.kv_head_count)?;
@@ -1842,7 +1938,7 @@ pub(crate) mod tests {
     use std::sync::{Mutex, OnceLock};
 
     #[test]
-    fn lossy_kv_keeps_the_recent_window_exact_and_degrades_only_older_positions() {
+    fn kv_pages_absorb_the_oldest_positions_and_decode_them_back_in_order() {
         let device = Device::Cpu;
         let (heads, positions, dim) = (2usize, 8usize, 64usize);
         let values: Vec<f32> = (0..heads * positions * dim)
@@ -1851,48 +1947,41 @@ pub(crate) mod tests {
         let tensor = Tensor::from_vec(values.clone(), (1, heads, positions, dim), &device).unwrap();
 
         let policy = KvQuantization { bits: 4, recent: 3 };
-        let got: Vec<f32> = policy
-            .apply(&tensor, 1)
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1()
-            .unwrap();
-        assert_eq!(got.len(), values.len());
+        let mut pages = KvPages::new(policy, heads, heads, dim);
+        let overflow = positions - policy.recent;
+        KvPages::absorb(&mut pages.key, &tensor, overflow).unwrap();
+        assert_eq!(pages.positions(), overflow);
 
-        let keep_from = positions - 3;
+        let decoded = KvPages::decode(&pages.key, heads, dim, &device).unwrap();
+        assert_eq!(decoded.dims(), &[1, heads, overflow, dim]);
+        let got: Vec<f32> = decoded.flatten_all().unwrap().to_vec1().unwrap();
+
+        // Each head's oldest positions come back in order, close but not exact.
         for head in 0..heads {
-            for position in 0..positions {
-                let start = (head * positions + position) * dim;
-                let original = &values[start..start + dim];
-                let actual = &got[start..start + dim];
-                if position >= keep_from {
-                    assert_eq!(original, actual, "recent position {position} must stay exact");
-                } else {
-                    assert!(
-                        original != actual,
-                        "older position {position} should have been quantized"
-                    );
-                    let dot: f32 = original.iter().zip(actual).map(|(a, b)| a * b).sum();
-                    let na: f32 = original.iter().map(|v| v * v).sum::<f32>().sqrt();
-                    let nb: f32 = actual.iter().map(|v| v * v).sum::<f32>().sqrt();
-                    assert!(dot / (na * nb) > 0.97, "cosine {}", dot / (na * nb));
-                }
+            for position in 0..overflow {
+                let original_at = (head * positions + position) * dim;
+                let decoded_at = (head * overflow + position) * dim;
+                let a = &values[original_at..original_at + dim];
+                let b = &got[decoded_at..decoded_at + dim];
+                let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+                let na: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
+                let nb: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
+                assert!(
+                    dot / (na * nb) > 0.97,
+                    "head {head} position {position} cosine {}",
+                    dot / (na * nb)
+                );
+                assert!(a != b, "a compressed page should not be bit-identical");
             }
         }
 
-        // A cache still inside the exact window is returned untouched.
-        let short =
-            Tensor::from_vec(values[..heads * 2 * dim].to_vec(), (1, heads, 2, dim), &device)
-                .unwrap();
-        let untouched: Vec<f32> = KvQuantization { bits: 4, recent: 8 }
-            .apply(&short, 0)
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1()
-            .unwrap();
-        assert_eq!(untouched, values[..heads * 2 * dim].to_vec());
+        // Compression is real, not an unpacked index array.
+        let (stored, plain) = pages.stored_and_uncompressed_bytes();
+        assert!(
+            plain as f64 / stored as f64 > 5.0,
+            "ratio {}",
+            plain as f64 / stored as f64
+        );
     }
 
     static Q8_ROUTE_ENV: Mutex<()> = Mutex::new(());

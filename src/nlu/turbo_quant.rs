@@ -289,7 +289,7 @@ fn lloyd_max_codebook(dim: usize, bits: u8) -> Vec<f32> {
 /// Indices are written at exactly `bits` each with no alignment padding, so a
 /// 3-bit code costs three bits rather than a byte. Kept minimal and local: it
 /// only has to serve [`KvPageStore`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct BitVec {
     data: Vec<u8>,
     len: usize,
@@ -350,9 +350,12 @@ impl BitVec {
 /// This is the storage half of KV compression. The quality half is settled
 /// separately by the round-trip gate; a store that decodes to the same values
 /// the in-place path produced inherits that result.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KvPageStore {
-    quantizer: TurboQuant,
+    /// Shared: the rotation and codebook are identical for every store at a
+    /// given dimension and bit-width, and a dense rotation is too large to
+    /// duplicate per attention head per layer.
+    quantizer: std::sync::Arc<TurboQuant>,
     /// Codebook indices packed at `bits` each, with no padding between rows.
     /// Packing is what makes the saving real: one byte per index would cap a
     /// 4-bit code at 4x against f32 rather than the ~7.8x it should reach.
@@ -364,8 +367,13 @@ pub struct KvPageStore {
 
 impl KvPageStore {
     pub fn new(dim: usize, bits: u8, seed: u64) -> Self {
+        Self::with_quantizer(std::sync::Arc::new(TurboQuant::new(dim, bits, seed)))
+    }
+
+    /// Share one prepared quantizer across many stores.
+    pub fn with_quantizer(quantizer: std::sync::Arc<TurboQuant>) -> Self {
         Self {
-            quantizer: TurboQuant::new(dim, bits, seed),
+            quantizer,
             indices: BitVec::new(),
             norms: Vec::new(),
             positions: 0,

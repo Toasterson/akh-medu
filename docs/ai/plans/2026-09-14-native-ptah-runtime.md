@@ -92,8 +92,11 @@ the chronological evidence further down is retained as written.
   A gated lossy KV path is now wired into the model and **passes the five-daemon
   canary at 4, 3 and 2 bits**, recalling the correct number after eviction and
   restart. The fixture does not discriminate between those widths, so 4 bits is
-  the conservative default. Storage is still unchanged, so no memory is saved
-  yet, and the dense rotation remains the known cost. See
+  the conservative default. **Real paged storage is now wired into
+  `AttentionState`** — bit-packed pages per (batch, head) slot, a shared
+  quantizer, the recent window exact — and passes the canary at 4 and 2 bits
+  with 21 model tests still green. Decode still returns to the host; moving it
+  on-device is the remaining performance work. See
   [lossy KV gate](../research/2026-09-19-lossy-kv-canary.md).
   See [TurboQuant](../research/2026-09-19-turboquant-kv.md).
 - **KV quantization quality measured, and it fails** (2026-09-19): PolarQuant
