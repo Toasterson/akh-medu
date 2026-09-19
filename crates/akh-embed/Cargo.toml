@@ -1,0 +1,17 @@
+[package]
+name = "akh-embed"
+version = "0.1.0"
+edition = "2024"
+description = "Shared ONNX sentence embedder (all-MiniLM-L6-v2) for seshat and akh-transcripts"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+[dependencies]
+# Extracted from crates/seshat — declarations kept byte-identical to what seshat
+# and the root crate already pin.
+ort = { version = "=2.0.0-rc.11", default-features = false, features = ["std", "load-dynamic"] }
+tokenizers = { version = "0.22", default-features = false, features = ["progressbar", "fancy-regex"] }
+ndarray = "0.17"
+tracing = "0.1"
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"

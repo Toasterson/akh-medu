@@ -1,0 +1,35 @@
+[package]
+name = "akh-transcripts"
+version = "0.1.0"
+edition = "2024"
+description = "Agent-session transcript harvest: verbatim store, derivation, and read surface (ADR 108)"
+license = "GPL-3.0-only"
+repository = "https://github.com/Toasterson/akh-medu"
+
+[dependencies]
+# Database (SeaORM + Postgres) — same versions as akhomed-store / seshat.
+sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-query = "0.32"
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+
+# Error handling (miette + thiserror per project convention)
+miette = { version = "7", features = ["fancy"] }
+thiserror = "2"
+
+# Source adapters
+walkdir = "2"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Embedding (shared with seshat)
+akh-embed = { path = "../akh-embed" }
+
+[dev-dependencies]
+tempfile = "3"

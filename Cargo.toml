@@ -16,6 +16,8 @@ members = [
     "crates/akh-service-store",
     "crates/akh-runtime",
     "crates/akh-session-services",
+    "crates/akh-embed",
+    "crates/akh-transcripts",
 ]
 resolver = "3"
 
