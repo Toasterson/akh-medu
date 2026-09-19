@@ -297,6 +297,31 @@ the chronological evidence further down is retained as written.
   made twice today. `AKH_QWEN35_PREFILL_CHUNK` makes it selectable for
   measurement. See [prefill cost](../research/2026-09-19-prefill-cost.md).
 
+- **Item 5: the vision projector agrees across CPU, HIP and Vulkan**
+  (2026-09-19). Vision was recorded as blocked on an external consumer of this
+  GGUF. That is true of **semantic** validation and was too broad: cross-device
+  agreement uses the project's own 0.9999 cosine gate and needs nothing external.
+  All three backends agree at **cosine 1.0000000000** over the full 20,480-element
+  projection, worst relative L2 4.05e-06. That covers the substitutions the tower
+  makes because the device backends lack the ops: patch embedding as
+  unfold+matmul instead of `conv2d`, and dispatched `softmax_last_dim` and `gelu`.
+
+  **Summary statistics are not the test.** Mean, standard deviation and L2 norm
+  are invariant under permutation and sign flip, so the probe now dumps the full
+  projection and the gate compares elementwise. Confirmed the gate can fail: a
+  dump with two elements swapped - identical on all three summary statistics -
+  scores 0.9998978914 and is rejected.
+
+  Two fixes this needed: the probe **did not build under HIP** (`new_vulkan` was
+  not cfg-gated), and it had no way to emit more than a summary.
+  `scripts/session-platform/compare-vision-dumps.py` makes the gate repeatable.
+
+  **Still open:** semantic validation - nothing here shows this projector computes
+  what Qwen3-VL's does, only that the backends agree with each other; a misread
+  resize policy or mrope split would be wrong identically everywhere and pass.
+  Position-triple threading for image tokens is also untouched. See
+  [vision device gate](../research/2026-09-19-vision-device-gate.md).
+
   Three corrections this produced. **The byte layout never ran on Vulkan at
   all**: `to_dtype` had no `U8 -> U32` arm, so the decode aborted the first time
   a position aged out. Compressed KV there was failing closed, not saving

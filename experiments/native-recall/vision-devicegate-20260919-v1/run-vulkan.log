@@ -1,0 +1,6 @@
+cat: /home/toasty/ws/agi/akh-medu/ollama-key.txt: No such file or directory
+BUILT
+{"all_finite":true,"blocks":27,"device":"vulkan","forward_seconds":0.153081106,"head":[1.1553311347961426,-0.4434882402420044,-0.24369178712368011,-0.21625857055187225,-1.1893903017044067,0.27658239006996155,-0.658586323261261,-0.4217919409275055],"input_side":64,"l2_norm":158.22204184830264,"load_seconds":0.800576558,"mean":-0.00884237331346327,"phase":"vision_projection","projector":"sha256-add205b7bfdb3f71f6da36b0a82aa20928dd829a920878c602628cdfbebc5288","rows":4,"std_dev":1.1055747684431219,"width":5120}
+wrote 20480 values to /tmp/vision/vulkan.f32
+
+[exited with code 0]
