@@ -46,6 +46,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         /// Output cap per keyed benchmark request.
         #[arg(long, default_value_t = 48)]
         keyed_tokens: u32,
+        /// Request shapes to exercise: sequential, interleaved or both.
+        #[arg(long, default_value = "both")]
+        keyed_mode: String,
+        /// Repeat the whole benchmark from empty histories to expose drift.
+        #[arg(long, default_value_t = 1)]
+        keyed_repeats: usize,
         #[arg(long, default_value_t = 10)]
         idle_samples: usize,
         #[arg(long, default_value_t = 10)]
@@ -126,6 +132,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.keyed_sessions,
             args.keyed_turns,
             args.keyed_tokens,
+            args.keyed_mode.parse()?,
+            args.keyed_repeats,
         )?;
     }
     if let (Some(path), Some((_, baseline_watts))) = (&args.gpu_sysfs, baseline) {

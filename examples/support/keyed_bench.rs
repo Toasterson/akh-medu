@@ -56,6 +56,16 @@ struct Group {
 }
 
 impl Group {
+    fn absorb(&mut self, other: Group) {
+        self.requests += other.requests;
+        self.decode_steps += other.decode_steps;
+        self.decode_seconds += other.decode_seconds;
+        self.prefill_seconds += other.prefill_seconds;
+        self.prompt_tokens += other.prompt_tokens;
+        self.reused_tokens += other.reused_tokens;
+        self.rates.extend(other.rates);
+    }
+
     fn summary(&self) -> serde_json::Value {
         let mut rates = self.rates.clone();
         rates.sort_by(|a, b| a.partial_cmp(b).expect("finite decode rates"));
@@ -94,17 +104,49 @@ impl Group {
     }
 }
 
+/// Which request shapes a run exercises.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// One key runs its turns to completion before the next key starts, so
+    /// consecutive turns can reuse an exact prefix.
+    Sequential,
+    /// Keys rotate every turn, so every request pays a key switch.
+    Interleaved,
+    /// Sequential followed by interleaved over the same conversations.
+    Both,
+}
+
+impl std::str::FromStr for Mode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sequential" => Ok(Self::Sequential),
+            "interleaved" => Ok(Self::Interleaved),
+            "both" => Ok(Self::Both),
+            other => Err(format!(
+                "keyed mode must be sequential, interleaved or both, got {other}"
+            )),
+        }
+    }
+}
+
 /// `sessions` distinct keys, each carrying `turns` turns of its own history.
-/// Phase `sequential` runs one key to completion before the next; phase
-/// `interleaved` rotates keys every turn so each request pays a key switch.
+///
+/// `repeats` runs the whole thing again from empty histories, so every repeat
+/// issues the same prompt lengths in the same order. That keeps context growth
+/// out of the comparison: a decode rate that falls across repeats is drift in
+/// the resident process, not a longer prompt.
 pub fn run(
     backend: &mut CandleBackend,
     sessions: usize,
     turns: usize,
     tokens: u32,
+    mode: Mode,
+    repeats: usize,
 ) -> Result<(), Box<dyn Error>> {
-    if sessions == 0 || turns == 0 {
-        return Err("keyed benchmark needs at least one session and one turn".into());
+    if sessions == 0 || turns == 0 || repeats == 0 {
+        return Err("keyed benchmark needs at least one session, turn and repeat".into());
     }
     if sessions > TOPICS.len() {
         return Err(format!("keyed benchmark supports at most {} sessions", TOPICS.len()).into());
@@ -115,6 +157,7 @@ pub fn run(
     let mut fresh_group = Group::default();
     fn record(
         phase: &str,
+        repeat: usize,
         session: usize,
         turn: usize,
         reply: &akh_medu::nlu::candle_backend::CandleCompletion,
@@ -143,7 +186,7 @@ pub fn run(
         }
         println!(
             "{}",
-            serde_json::json!({"phase":"keyed_request","pass":phase,"session":session,"turn":turn,
+            serde_json::json!({"phase":"keyed_request","pass":phase,"repeat":repeat,"session":session,"turn":turn,
                 "seconds_including_prefill":wall,
                 "prompt_tokens":reply.prompt_tokens,
                 "reused_prompt_tokens":reply.reused_prompt_tokens,
@@ -156,54 +199,81 @@ pub fn run(
         );
     }
 
-    let mut histories: Vec<String> = vec![String::new(); sessions];
-    for session in 0..sessions {
-        for turn in 0..turns {
-            let topic = TOPICS[(session + turn) % TOPICS.len()];
-            let prompt = turn_prompt(&histories[session], topic);
-            let key = format!("bench:s{session}");
-            let at = Instant::now();
-            let reply = backend.generate_completion_for_session(&key, &prompt, tokens, &mut || {
-                Ok(())
-            })?;
-            record(
-                "sequential",
-                session,
-                turn,
-                &reply,
-                at.elapsed().as_secs_f64(),
-                &mut reused_group,
-                &mut fresh_group,
-            );
-            histories[session] = format!("{prompt}{}<|im_end|>\n", reply.text);
-        }
+    /// One turn on one key, appending the reply to that key's history.
+    fn ask(
+        backend: &mut CandleBackend,
+        histories: &mut [String],
+        session: usize,
+        topic: &str,
+        tokens: u32,
+    ) -> Result<(akh_medu::nlu::candle_backend::CandleCompletion, f64), Box<dyn Error>> {
+        let prompt = turn_prompt(&histories[session], topic);
+        let key = format!("bench:s{session}");
+        let at = Instant::now();
+        let reply =
+            backend.generate_completion_for_session(&key, &prompt, tokens, &mut || Ok(()))?;
+        let wall = at.elapsed().as_secs_f64();
+        histories[session] = format!("{prompt}{}<|im_end|>\n", reply.text);
+        Ok((reply, wall))
     }
-    for turn in 0..turns {
-        for session in 0..sessions {
-            let topic = TOPICS[(session + turn + 1) % TOPICS.len()];
-            let prompt = turn_prompt(&histories[session], topic);
-            let key = format!("bench:s{session}");
-            let at = Instant::now();
-            let reply = backend.generate_completion_for_session(&key, &prompt, tokens, &mut || {
-                Ok(())
-            })?;
-            record(
-                "interleaved",
-                session,
-                turn,
-                &reply,
-                at.elapsed().as_secs_f64(),
-                &mut reused_group,
-                &mut fresh_group,
-            );
-            histories[session] = format!("{prompt}{}<|im_end|>\n", reply.text);
+
+    for repeat in 0..repeats {
+        let mut repeat_reused = Group::default();
+        let mut repeat_fresh = Group::default();
+        let mut histories: Vec<String> = vec![String::new(); sessions];
+        let repeat_started = Instant::now();
+        if mode != Mode::Interleaved {
+            for session in 0..sessions {
+                for turn in 0..turns {
+                    let topic = TOPICS[(session + turn) % TOPICS.len()];
+                    let reply = ask(backend, &mut histories, session, topic, tokens)?;
+                    record(
+                        "sequential",
+                        repeat,
+                        session,
+                        turn,
+                        &reply.0,
+                        reply.1,
+                        &mut repeat_reused,
+                        &mut repeat_fresh,
+                    );
+                }
+            }
         }
+        if mode != Mode::Sequential {
+            for turn in 0..turns {
+                for session in 0..sessions {
+                    let topic = TOPICS[(session + turn + 1) % TOPICS.len()];
+                    let reply = ask(backend, &mut histories, session, topic, tokens)?;
+                    record(
+                        "interleaved",
+                        repeat,
+                        session,
+                        turn,
+                        &reply.0,
+                        reply.1,
+                        &mut repeat_reused,
+                        &mut repeat_fresh,
+                    );
+                }
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({"phase":"keyed_repeat","repeat":repeat,
+                "wall_seconds":repeat_started.elapsed().as_secs_f64(),
+                "prefix_reused":repeat_reused.summary(),
+                "full_prefill":repeat_fresh.summary(),
+                "pipeline_cache":cache_stats(backend)})
+        );
+        reused_group.absorb(repeat_reused);
+        fresh_group.absorb(repeat_fresh);
     }
     let after = cache_stats(backend);
     println!(
         "{}",
         serde_json::json!({"phase":"keyed_summary",
-            "sessions":sessions,"turns":turns,"max_tokens":tokens,
+            "sessions":sessions,"turns":turns,"max_tokens":tokens,"repeats":repeats,
             "wall_seconds":started.elapsed().as_secs_f64(),
             "prefix_reused":reused_group.summary(),
             "full_prefill":fresh_group.summary(),

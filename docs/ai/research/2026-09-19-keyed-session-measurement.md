@@ -24,7 +24,13 @@ request actually reused a prefix, which is the distinction that matters, rather
 than by the pass it came from. Vulkan runs additionally report shader
 specialization cache counters before and after.
 
-Configuration: 3 sessions, 3 turns per pass, 48-token cap, 18 requests per run.
+`--keyed-repeats` reruns the whole benchmark from empty histories, so every
+repeat issues the same prompt lengths in the same order and a rate that falls
+across repeats is drift rather than a longer prompt. `--keyed-mode` selects one
+pass or both.
+
+Configuration for the two acceptance runs: 3 sessions, 3 turns per pass,
+48-token cap, 18 requests per run. The soak and sweep runs below use one key.
 
 ## Results
 
@@ -73,36 +79,77 @@ full prefill. Interleaved requests never reused, confirming the single resident
 key. Whether truncated turns should keep their state is a design question for
 the ContextManager slice, not something this change alters.
 
-## HIP keyed decode degrades over a run; context length is not the cause
+## HIP keyed decode is erratic above roughly 200 context positions
 
-HIP decode fell from 16.3–17.2 steps/s in the sequential pass to 6.5–7.4 in the
-interleaved pass. Vulkan stayed within 9.1–12.9 across both. The two candidate
-explanations — longer prompts in the second pass, or accumulated state — were
-confounded in that run, so a third run measured them apart.
+HIP decode fell from 16.3-17.2 steps/s in the keyed benchmark's sequential pass
+to 6.5-7.4 in its interleaved pass. Vulkan stayed within 9.1-12.9 across both.
 
-A **fresh** HIP process given a single 400-token prompt, longer than any keyed
-request in the benchmark, decoded at **18.32 and 18.36 steps/s** across its two
-calls with 4.2 s time to first token and peak device VRAM of 21.43 GB.
+**Correction.** The first attempt to explain this compared a fresh HIP process
+given a 400-token prompt, which decoded at 18.32 and 18.36 steps/s, and
+concluded that context length was excluded as the cause. That comparison is
+invalid: `generate_completion` uses the unkeyed Q8 GEMV path, while
+`generate_completion_for_session` on HIP uses the scoped-f32 keyed path. The two
+runs therefore differed in arithmetic as well as context, and the fresh-process
+figure says nothing about keyed decode. The run is retained as evidence for the
+unkeyed path only. Two further runs measured the question properly, entirely
+inside the keyed path.
 
-Context length therefore does not explain the collapse: the fresh process was
-faster at 400 prompt tokens than the keyed run was at 207–347. The degradation
-tracks time and accumulated keyed work within one process. Device telemetry over
-the HIP keyed run is consistent with memory pressure rather than throttling:
+**Drift is not the cause.** A single-key soak ran the same four turns six times
+from empty histories, so every repeat issued identical prompt lengths in the
+same order. Decode rate at each turn index was flat to three significant
+figures across all six repeats — 17.1, 16.9, 16.6 and 8.5-11.6 — and the slow
+fourth turn was slow in every repeat, including the first. Nothing degrades with
+time in that run.
 
-| Window | GPU busy | Power | Peak VRAM |
-| --- | ---: | ---: | ---: |
-| 60–90 s (sequential) | 98.6 % | 302.1 W | 24.06 GB |
-| 180–210 s (interleaved) | 77.8 % | 202.8 W | 24.27 GB |
+**VRAM saturation is not the cause either.** That soak reached 24.68 GB on the
+24 GB card, higher than the keyed benchmark's 24.27 GB, while its decode rate
+stayed flat. Device VRAM reaching capacity and keyed decode collapsing are
+therefore separate observations, not a demonstrated mechanism. This retracts the
+memory-pressure reading of the first run's telemetry.
 
-Falling utilization at falling power indicates stalls, not a power or thermal
-cap. Vulkan held 19.93 GB flat with 84–95 % busy at 256–284 W throughout.
+**What the position sweep shows.** Eight consecutive keyed turns on one key, the
+identical conversation on both devices:
 
-This is **correlation, not an established cause**. Device VRAM is system-wide
-sysfs telemetry, not per-process attribution, and no allocation counters were
-collected. The established facts are: HIP keyed decode halves over a run, the
-cause is not prompt length, and HIP reaches the card's 24 GB capacity while
-Vulkan does not. Identifying the allocation that grows is the first task of the
-long-residency step, which is where this would otherwise have been discovered.
+| End context, positions | HIP steps/s | Vulkan steps/s |
+| ---: | ---: | ---: |
+| 58 | 17.20 | 12.35 |
+| 128 | 16.94 | 11.92 |
+| 191 | 16.55 | 11.64 |
+| 256 | 8.20 | 12.09 |
+| 322 | 12.97 | 11.95 |
+| 381 | 12.96 | 11.51 |
+| 440 | 7.82 | 9.41 |
+| 510 | 6.89 | 9.01 |
+
+Vulkan declines smoothly and monotonically, losing 27% from 58 to 510
+positions. HIP is faster than Vulkan below 200 positions and then becomes
+non-monotonic: it halves at 256, recovers to 13.0 at 322 and 381, and falls
+again at 440 and 510. A monotonic cost of longer context cannot produce that
+shape.
+
+The established facts are: the effect is HIP-specific, reproducible, determined
+by context position rather than elapsed time or accumulated allocations, and it
+is not present on Vulkan over the same positions. The mechanism is **not
+identified**. Per-step decode timings would separate a periodic expensive step,
+such as a reallocation as the key/value cache grows, from a uniformly slower
+kernel selection above a size threshold; the probe does not record them yet.
+This belongs to the performance step, not to a feature slice, and it is the
+reason the earlier interleaved pass looked like a collapse: those requests all
+sat above 200 positions.
+
+## Resident drift that is real: time to first token
+
+The same six-repeat soak did show one monotonic drift. For the identical
+23-token opening prompt, time to first token grew 0.80, 0.89, 1.02, 1.10, 1.80,
+1.83 seconds across repeats, roughly 2.3x, while that turn's decode rate held at
+17.1. The 154-token turn drifted 1.96 to 2.48 seconds. Decode is unaffected, so
+this is prefill-side, and it is the drift a longer soak should pursue. Peak
+device VRAM was 24.68 GB and the resident-idle gate still passed at 0% busy and
+10.98 W with the model owned.
+
+Six repeats over four minutes is a short soak. It establishes that prefill cost
+grows within a process; it does not establish a bound, a cause, or that the
+growth continues, flattens, or ends in failure.
 
 ## Shader specialization cache counters
 
@@ -152,11 +199,18 @@ arguments reach both the child process and `identity.json`.
 
 Artifacts: [Vulkan](../../../experiments/native-recall/keyed-20260919-vulkan-v1/),
 [HIP](../../../experiments/native-recall/keyed-20260919-hip-v1/),
-[HIP fresh long context](../../../experiments/native-recall/keyed-20260919-hip-longctx-v1/).
+[HIP fresh long context, unkeyed path](../../../experiments/native-recall/keyed-20260919-hip-longctx-v1/),
+[HIP six-repeat soak](../../../experiments/native-recall/soak-20260919-hip-onekey-v1/),
+[HIP position sweep](../../../experiments/native-recall/sweep-20260919-hip-context-v1/),
+[Vulkan position sweep](../../../experiments/native-recall/sweep-20260919-vulkan-context-v1/).
+
+The soak and sweep runs used probe SHA-256
+`0e2b5b9439976fbd9ce610dca18ad39589a7477a663b230c39684dd19ef46605`, which adds
+`--keyed-mode` and `--keyed-repeats` and is otherwise the same source.
 
 ## Not established
 
-These are 18-request runs on one machine with one model. They are not a long
+These are short runs on one machine with one model. They are not a long
 residency soak, a quality evaluation, a daemon acceptance pass, or a controlled
 cache-size comparison. Reported HIP keyed decode retains the scoped-f32
 continuation guard; do not compare these numbers with the 2026-09-18 fresh-call
