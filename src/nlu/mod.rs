@@ -19,6 +19,7 @@ pub mod parse_ranker;
 pub mod projector_artifact;
 pub mod turbo_quant;
 pub mod vision_preprocess;
+pub mod vision_positions;
 /// The vision tower runs tensors, so it needs the Candle backend; the artifact
 /// locator, preprocessing geometry and quantizer above it deliberately do not,
 /// so a core-server build still compiles them.

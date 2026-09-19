@@ -2434,6 +2434,18 @@ pub mod test_fixture {
             ("qwen35.attention.key_length".into(), U32(4)),
             ("qwen35.attention.value_length".into(), U32(4)),
             ("qwen35.rope.dimension_count".into(), U32(4)),
+            // Two rotary pairs split one apiece between the temporal and height
+            // sections, so this fixture can exercise image positions at all.
+            // Text never consults the split, so text behaviour is unchanged.
+            (
+                "qwen35.rope.dimension_sections".into(),
+                gguf_file::Value::Array(vec![
+                    gguf_file::Value::I32(1),
+                    gguf_file::Value::I32(1),
+                    gguf_file::Value::I32(0),
+                    gguf_file::Value::I32(0),
+                ]),
+            ),
             ("qwen35.rope.freq_base".into(), F32(10_000.0)),
             ("qwen35.attention.layer_norm_rms_epsilon".into(), F32(1e-6)),
             ("qwen35.full_attention_interval".into(), U32(4)),
@@ -3513,6 +3525,86 @@ pub(crate) mod tests {
         assert_eq!(
             tiled.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn a_text_and_image_prompt_runs_end_to_end_with_grid_derived_positions() {
+        use crate::nlu::vision_positions::{position_triples, ImageGrid, PromptPiece};
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+
+        // Two text tokens, a 2x2 image, one more text token.
+        let grid = ImageGrid { rows: 2, cols: 2 };
+        let pieces = [
+            PromptPiece::Text(2),
+            PromptPiece::Image(grid),
+            PromptPiece::Text(1),
+        ];
+        let positions = position_triples(&pieces);
+        let total = 2 + grid.tokens() + 1;
+        assert_eq!(positions.len(), total);
+
+        // Placeholders stand in for the image's tokens; their ids never reach
+        // the stack because their rows are replaced by the projector's.
+        let ids: Vec<u32> = (0..total as u32).map(|i| i % 4).collect();
+        let tokens = Tensor::from_vec(ids, (1, total), &device).unwrap();
+
+        let mut model = load_tiny_model(&bytes);
+        let width = model.embedding_width();
+        let text_rows = model.embed_tokens(&tokens).unwrap();
+        assert_eq!(text_rows.dims(), &[1, total, width]);
+
+        // Stand-in projector output, distinct from any token embedding.
+        let projected = Tensor::from_vec(
+            (0..grid.tokens() * width)
+                .map(|i| ((i % 13) as f32 / 6.0) - 1.0)
+                .collect::<Vec<f32>>(),
+            (1, grid.tokens(), width),
+            &device,
+        )
+        .unwrap();
+        let spliced = Tensor::cat(
+            &[
+                &text_rows.narrow(1, 0, 2).unwrap(),
+                &projected,
+                &text_rows.narrow(1, 2 + grid.tokens(), 1).unwrap(),
+            ],
+            1,
+        )
+        .unwrap()
+        .contiguous()
+        .unwrap();
+        assert_eq!(spliced.dims(), text_rows.dims());
+
+        let logits = model
+            .prefill_embedded(&tokens, &spliced, &positions)
+            .unwrap();
+        assert_eq!(logits.dims()[0], 1);
+        let values: Vec<f32> = logits.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(values.iter().all(|v| v.is_finite()), "logits must be finite");
+
+        // This fixture's mixer weights are zero, so every path through it
+        // produces zero logits. Assert that rather than work around it: the
+        // moment the fixture stops being degenerate this fails, and whoever
+        // changed it should add the discrimination this cannot carry.
+        assert!(
+            values.iter().all(|v| *v == 0.0),
+            "fixture is no longer degenerate; assert that image rows and grid \
+             positions change the logits here, not just that they are accepted"
+        );
+
+        // What this fixture *can* establish is that the composition type-checks
+        // end to end and every stage agrees on length: grid -> triples ->
+        // spliced rows -> forward. That the triples actually change the rotation
+        // is covered where it is observable, in
+        // `per_token_rope_positions_collapse_onto_the_contiguous_path`.
+        let mut mismatched = load_tiny_model(&bytes);
+        assert!(
+            mismatched
+                .prefill_embedded(&tokens, &spliced, &positions[..total - 1])
+                .is_err(),
+            "a triple per token is required, not merely supplied"
         );
     }
 

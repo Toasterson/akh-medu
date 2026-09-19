@@ -373,9 +373,28 @@ the chronological evidence further down is retained as written.
   describe one. The refactor touched every layer signature, so the 27B model was
   re-checked: text output **bit-identical**, relative L2 and worst absolute 0.
 
-  **Mechanism, not a finished feature:** nothing yet loads an image, turns a
-  patch grid into triples, or reserves image placeholders in the prompt. Next
-  slice, unblocked.
+- **Item 5: grid-derived positions, composed end to end** (2026-09-19).
+  `nlu::vision_positions` turns prompt shape into triples: text advances all
+  three sections together, an image shares one temporal index and spreads over
+  height and width by grid cell. The point worth stating is the advance - an
+  image costs **`max(rows, cols)` position slots, not its token count** (a 16x16
+  grid is 256 tokens and 16 slots). Advancing by token count would place
+  everything after the image too far away, and that failure is invisible: fluent
+  output, wrong answer. Asserted directly, along with a 1x1 image being
+  indistinguishable from one text token.
+
+  The end-to-end test composes grid -> triples -> spliced rows -> forward and
+  checks length agreement, finite logits and refusal on a missing triple. It
+  **does not** assert that image rows change the output, because the tiny
+  fixture's mixer weights are zero and every path yields zero logits; it asserts
+  that degeneracy instead, so the fixture gaining real weights fails the test and
+  demands the stronger assertion. The fixture also gained a rope split, without
+  which it could not reach the image path; text never consults it.
+
+  **Still not a finished feature:** nothing decodes an image file or reserves
+  placeholders during tokenization. Geometry, positions, projector and forward
+  all exist and compose; the front end that turns a user's image into that call
+  is what remains.
 
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -

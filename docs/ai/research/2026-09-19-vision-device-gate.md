@@ -129,9 +129,43 @@ The refactor touched every layer's signature, so the real 27B model was
 re-checked: text output is **bit-identical**, relative L2 and worst absolute both
 exactly 0.
 
-**This is the mechanism, not a finished feature.** Nothing yet loads an image
-file, turns a patch grid into triples, or reserves image placeholders in the
-prompt. Those are the next slice and they are unblocked.
+## Grid to positions
+
+`nlu::vision_positions` turns a prompt's shape into the triples the forward
+wants. `PromptPiece::Text(n)` advances all three sections together;
+`PromptPiece::Image(ImageGrid)` gives its tokens a shared temporal index and
+spreads them over height and width by grid cell.
+
+The part worth stating explicitly is the advance. An image consumes
+`max(rows, cols)` position slots, **not** its token count: a 16x16 grid is 256
+tokens and 16 slots. Advancing by the token count instead would place everything
+after the image far too distant, and nothing about that fails visibly - the model
+still runs and still writes fluent text. A test asserts the resumption point
+directly, and another asserts a 1x1 image is indistinguishable from one text
+token.
+
+## What the fixture can and cannot show
+
+The end-to-end test composes grid -> triples -> spliced rows -> forward on the
+tiny fixture and checks every stage agrees on length, that the logits are finite,
+and that a missing triple is refused.
+
+It deliberately does **not** assert that image rows or grid positions change the
+output, because this fixture's mixer weights are zero and every path through it
+yields zero logits. Rather than work around that, the test asserts the degeneracy
+itself, so the day the fixture gains real weights it fails and whoever changed it
+is told to add the discrimination it can then carry. The claim that triples
+actually change the rotation is made where it is observable, in
+`per_token_rope_positions_collapse_onto_the_contiguous_path`.
+
+The tiny fixture also gained a rope section split - one pair each to the temporal
+and height sections of its two - since without one it could not reach the image
+path at all. Text never consults the split, and all prior tests are unchanged.
+
+**Still not a finished feature.** Nothing yet decodes an image file into pixels
+or reserves image placeholders during tokenization. The geometry, the positions,
+the projector and the forward all exist and compose; what is missing is the
+front end that turns a user's image into that call.
 
 ## The external reference exists after all
 
