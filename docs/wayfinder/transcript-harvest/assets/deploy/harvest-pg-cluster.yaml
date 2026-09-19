@@ -1,0 +1,74 @@
+---
+# Dedicated CloudNativePG cluster for the transcript-harvest store (ADR 108).
+#
+# Why its own cluster rather than a database in akh-pg, which the store-schema
+# ticket originally chose: NO cluster in the fleet has TimescaleDB. Verified
+# 2026-09-19 against all three — akh-medu/akh-pg, djehuty-board and postgres-ha
+# all run PostgreSQL 18 with `vector` available and `timescaledb` absent
+# entirely. Adding it to akh-pg would mean an image swap and rolling restart of
+# the database the akhs depend on; this cluster carries that change alone.
+#
+# Image: ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie + TimescaleDB,
+# built from assets/deploy/Dockerfile, following the existing cnpg-age pattern.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: harvest-pg
+  namespace: akh-medu
+spec:
+  instances: 2
+  primaryUpdateStrategy: unsupervised
+
+  imageName: code.aopc.cloud/toasterson/cnpg-timescale:18-2.25.1
+
+  bootstrap:
+    initdb:
+      database: transcripts
+      owner: harvest
+      postInitApplicationSQL:
+        # Fail loudly at bootstrap if either extension is missing, rather than
+        # discovering it after 769k rows (see ADR 091's hypertable that wasn't).
+        - CREATE EXTENSION IF NOT EXISTS timescaledb
+        - CREATE EXTENSION IF NOT EXISTS vector
+
+  certificates:
+    serverAltDNSNames:
+      - harvest-pg.lab.home
+
+  postgresql:
+    # TimescaleDB must be preloaded; the extension cannot be created without it.
+    shared_preload_libraries:
+      - timescaledb
+    # mTLS per machine, mirroring akh-pg. Each harvester presents a client
+    # certificate (CN=harvest-<machine>) mapped to its own insert-only role;
+    # revocation is cert revocation plus DROP ROLE. Plaintext is rejected.
+    pg_hba:
+      - hostnossl transcripts all all reject
+      - hostssl   transcripts all all cert clientcert=verify-full
+    parameters:
+      shared_buffers: "256MB"
+      effective_cache_size: "1GB"
+      maintenance_work_mem: "128MB"
+      work_mem: "16MB"
+      max_connections: "100"
+      max_wal_size: "2GB"
+      min_wal_size: "512MB"
+      # Timescale's own guidance: leave the planner free for hypertable chunks.
+      timescaledb.telemetry_level: "off"
+
+  # Measured growth is ~0.85 GB/year/machine (66,084 records / 182 MB over 77
+  # days), so ~3.4 GB/year across four machines. 20Gi covers roughly five years
+  # of raw plus normalized rows, renders and 384-dim vectors.
+  storage:
+    storageClass: zfs-postgres
+    size: 20Gi
+  walStorage:
+    storageClass: zfs-postgres
+    size: 5Gi
+
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "100m"
+    limits:
+      memory: "2Gi"
