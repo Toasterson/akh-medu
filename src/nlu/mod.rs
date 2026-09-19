@@ -19,6 +19,7 @@ pub mod parse_ranker;
 pub mod projector_artifact;
 pub mod turbo_quant;
 pub mod vision_preprocess;
+pub mod vision_tower;
 pub mod router;
 pub mod span_projection;
 

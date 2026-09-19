@@ -104,7 +104,24 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    before trusting the exact bounds; the tests assert the *properties*, so a
    corrected bound changes one constructor rather than the algorithm.
 
-3. **Vision tower forward** in Candle: patch embed, position embed, 27
+3. **Configuration and weight validation — done** (`src/nlu/vision_tower.rs`).
+   `VisionConfig::from_gguf` reads the declared geometry and rejects a
+   non-`qwen3vl_merger` projector; `validate_tensors` checks that every tensor
+   the forward pass needs exists at the shape the geometry implies. An artifact
+   test runs this against the real 931 MB projector and confirms 27 blocks,
+   width 1152, FFN 4304, 16 heads of 72, patch 16, merge 2, projection 5120,
+   merged width 4608, mean and std 0.5, deepstack disabled, a 48x48 position
+   grid covering the 768 px reference, and the optional second temporal patch
+   embedding. It also asserts that the policy derived from the geometry equals
+   the one `vision_preprocess` implements from llama.cpp, so the two cannot
+   drift apart silently.
+
+   Writing this caught a real error: candle reports GGUF dimensions reversed, so
+   weights read as `(out, in, ...)` rather than the file's order. The first
+   version of the expected shapes was wrong in exactly the way that would have
+   produced a silently transposed forward pass.
+
+3b. **Vision tower forward** in Candle: patch embed, position embed, 27
    pre-norm blocks with fused QKV, post-norm. Needs HIP and Vulkan coverage and
    the same exact-agreement gate the text path uses.
 4. **Merger — smaller than assumed.** The `mm.*` stack is just
