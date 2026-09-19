@@ -315,7 +315,15 @@ impl PartialRope {
     /// `index_select` over the flattened table, which both device backends
     /// implement, so this needs no new kernel. Text never reaches it.
     fn gathered(&self, positions: &[[usize; 3]], pairs: usize) -> Result<(Tensor, Tensor)> {
-        if self.sections.is_empty() {
+        // A triple with t == h == w places a token wherever the split falls, so
+        // it needs no split. Refuse only a genuine image layout on an artifact
+        // that cannot describe one, which is the case that would silently place
+        // image tokens as text.
+        if self.sections.is_empty()
+            && positions
+                .iter()
+                .any(|[t, h, w]| t != h || h != w)
+        {
             candle_core::bail!(
                 "this artifact declares no usable rope dimension sections, so image \
                  positions cannot be threaded; text positions would silently mis-place them"
@@ -897,6 +905,7 @@ impl FullAttention {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         let (batch, seq_len, _) = x.dims3()?;
         let query_gate = self.query_gate.forward(x)?.reshape((
@@ -929,7 +938,12 @@ impl FullAttention {
             .reshape((batch, seq_len, self.kv_head_count, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let positions = RopePositions::Contiguous(index_pos);
+        // Image tokens carry their own (t, h, w); text advances one index per
+        // token. Absent triples mean text, never a guess at image placement.
+        let positions = match rope {
+            Some(triples) => RopePositions::PerToken(triples),
+            None => RopePositions::Contiguous(index_pos),
+        };
         let query = self.rope.apply(&query, positions)?.contiguous()?;
         let key = self.rope.apply(&key, positions)?.contiguous()?;
 
@@ -1228,10 +1242,11 @@ impl Mixer {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         match (self, state) {
             (Self::Attention(attention), MixerState::Attention(state)) => {
-                attention.forward(state, x, mask, index_pos)
+                attention.forward(state, x, mask, index_pos, rope)
             }
             (Self::GatedDelta(gated_delta), MixerState::GatedDelta(state)) => {
                 gated_delta.forward(state, x, index_pos)
@@ -1263,10 +1278,11 @@ impl Layer {
         x: &Tensor,
         mask: Option<&Tensor>,
         index_pos: usize,
+        rope: Option<&[[usize; 3]]>,
     ) -> Result<Tensor> {
         let residual = x;
         let normalized = self.input_norm.forward(x)?;
-        let mixed = self.mixer.forward(state, &normalized, mask, index_pos)?;
+        let mixed = self.mixer.forward(state, &normalized, mask, index_pos, rope)?;
         let x = (residual + mixed)?;
         let mlp = self.mlp.forward(&self.post_attention_norm.forward(&x)?)?;
         x + mlp
@@ -1997,6 +2013,44 @@ impl InferenceSession {
         Ok((logits, reused))
     }
 
+    /// Embed token ids through the model's own table.
+    ///
+    /// Exposed so a caller can build a mixed sequence - text rows from here,
+    /// image rows from the projector - and hand the whole thing back.
+    pub(crate) fn embed_tokens(&self, tokens: &Tensor) -> Result<Tensor> {
+        self.weights.embedding.forward(tokens)
+    }
+
+    /// Residual width, so a caller can check projector output before splicing.
+    pub(crate) fn embedding_width(&self) -> usize {
+        self.weights.hidden
+    }
+
+    /// Forward a sequence whose embeddings and rope positions are both supplied.
+    ///
+    /// This is the image path: `embedded` carries projector rows spliced among
+    /// text rows, and `positions` carries the `(t, h, w)` triple for every token,
+    /// so image tokens reach the rotary sections instead of being placed as text.
+    /// `tokens` is still required, for length and for the state bookkeeping that
+    /// the text path shares.
+    pub(crate) fn prefill_embedded(
+        &mut self,
+        tokens: &Tensor,
+        embedded: &Tensor,
+        positions: &[[usize; 3]],
+    ) -> Result<Tensor> {
+        let (_, seq_len) = tokens.dims2()?;
+        if positions.len() != seq_len {
+            candle_core::bail!(
+                "{} rope position triples for {seq_len} tokens",
+                positions.len()
+            )
+        }
+        let hidden =
+            self.run_hidden_states_positioned(tokens, 0, None, Some(positions), Some(embedded))?;
+        self.weights.output.forward(&hidden)
+    }
+
     /// Start an independent empty session sharing this model's immutable weights.
     pub(crate) fn new_session(&self) -> Self {
         Self::with_weights(self.weights.clone())
@@ -2173,6 +2227,22 @@ impl InferenceSession {
         index_pos: usize,
         mut collector: Option<&mut TapCollector>,
     ) -> Result<Tensor> {
+        self.run_hidden_states_positioned(tokens, index_pos, collector, None, None)
+    }
+
+    /// The same forward, with explicit rope positions for image tokens.
+    ///
+    /// `rope` is `None` for text, which is every existing caller. Supplying it
+    /// is the only way image tokens reach the rotary sections; there is no
+    /// inference of image layout from the token stream.
+    fn run_hidden_states_positioned(
+        &mut self,
+        tokens: &Tensor,
+        index_pos: usize,
+        mut collector: Option<&mut TapCollector>,
+        rope: Option<&[[usize; 3]]>,
+        embedded: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let (_, seq_len) = tokens.dims2()?;
         // Tensor-based legacy/probe calls cannot claim a known host-token prefix.
         // Text entry points reinstall their log only after a successful forward.
@@ -2185,10 +2255,23 @@ impl InferenceSession {
         } else {
             None
         };
-        let mut hidden = self.weights.embedding.forward(tokens)?;
+        // Supplied embeddings replace the table lookup wholesale: an image's
+        // rows come from the projector, not from any token id.
+        let mut hidden = match embedded {
+            Some(rows) => {
+                let (_, rows_len, _) = rows.dims3()?;
+                if rows_len != seq_len {
+                    candle_core::bail!(
+                        "{rows_len} supplied embedding rows for {seq_len} tokens"
+                    )
+                }
+                rows.clone()
+            }
+            None => self.weights.embedding.forward(tokens)?,
+        };
         for (index, (layer, state)) in self.weights.layers.iter().zip(&mut self.states).enumerate()
         {
-            hidden = layer.forward(state, &hidden, mask.as_ref(), index_pos)?;
+            hidden = layer.forward(state, &hidden, mask.as_ref(), index_pos, rope)?;
             if let Some(collector) = collector.as_deref_mut() {
                 collector.observe(index, &hidden, index_pos)?;
             }
@@ -3299,7 +3382,7 @@ pub(crate) mod tests {
             )
             .unwrap();
             hidden = layer
-                .forward(&mut layer.mixer.empty_state(), &hidden, Some(&mask), 0)
+                .forward(&mut layer.mixer.empty_state(), &hidden, Some(&mask), 0, None)
                 .unwrap();
         }
         let norm = RmsNorm::from_qtensor(
@@ -3431,6 +3514,58 @@ pub(crate) mod tests {
             tiled.flatten_all().unwrap().to_vec1::<f32>().unwrap(),
             vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
         );
+    }
+
+    #[test]
+    fn the_embedded_path_reproduces_the_token_path_when_nothing_is_spliced() {
+        let bytes = tiny_gguf();
+        let device = Device::Cpu;
+        let tokens = Tensor::new(&[[1u32, 2, 3]], &device).unwrap();
+
+        // Token path.
+        let mut plain = load_tiny_model(&bytes);
+        let reference: Vec<f32> = plain
+            .forward(&tokens, 0)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // Embedded path, handing back exactly what the table would have given
+        // and degenerate position triples, which is text written the long way.
+        let mut embedded_model = load_tiny_model(&bytes);
+        let rows = embedded_model.embed_tokens(&tokens).unwrap();
+        let positions: Vec<[usize; 3]> = (0..3).map(|p| [p, p, p]).collect();
+        let got: Vec<f32> = embedded_model
+            .prefill_embedded(&tokens, &rows, &positions)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_eq!(reference, got, "the image path must contain the text path");
+
+        // A row count that disagrees with the tokens is a refusal.
+        let short = rows.narrow(1, 0, 2).unwrap().contiguous().unwrap();
+        let mut third = load_tiny_model(&bytes);
+        assert!(third.prefill_embedded(&tokens, &short, &positions).is_err());
+        // As is a triple count that disagrees.
+        let mut fourth = load_tiny_model(&bytes);
+        assert!(fourth.prefill_embedded(&tokens, &rows, &positions[..2]).is_err());
+
+        // Splicing different rows must change the answer, or the supplied
+        // embeddings are being ignored and images would silently do nothing.
+        let mut fifth = load_tiny_model(&bytes);
+        let altered = rows.affine(1.0, 0.25).unwrap();
+        let spliced: Vec<f32> = fifth
+            .prefill_embedded(&tokens, &altered, &positions)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        assert_ne!(reference, spliced, "supplied embeddings must reach the stack");
     }
 
     #[test]

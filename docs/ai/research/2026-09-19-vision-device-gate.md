@@ -99,6 +99,40 @@ different questions have different answers. The same mistake as this morning's
 recorder-versus-direct comparison, in the opposite direction - it would have made
 me reject correct work rather than accept broken work.
 
+## The image path exists at the model level
+
+Threading positions is not enough on its own: image rows come from the
+projector, not from any token id, so the forward has to accept embeddings.
+
+- `embed_tokens` exposes the model's own table, so a caller can build a mixed
+  sequence - text rows from there, image rows from the projector.
+- `prefill_embedded` takes that sequence plus a `(t, h, w)` triple per token.
+  Supplied embeddings replace the table lookup wholesale.
+- `rope: Option<&[[usize; 3]]>` is threaded through `Layer`, `Mixer` and
+  `FullAttention`. `None` means text, which is every pre-existing caller. There
+  is no inference of image layout from the token stream.
+
+The property under test is that **the embedded path contains the text path**:
+handing back exactly what the table would have produced, with degenerate
+triples, reproduces the token path's logits exactly. Three refusals alongside
+it - mismatched row counts, mismatched triple counts, and altered embeddings
+must *change* the output, or supplied embeddings are being ignored and images
+would do nothing while every test still passed.
+
+That test caught an over-strict guard. Refusing image positions on an artifact
+with no declared sections was too broad: a triple with `t == h == w` lands in
+the same place whichever section it falls in, so it needs no split. The guard now
+refuses only a genuine image layout on an artifact that cannot describe one -
+the case that would actually mis-place image tokens as text.
+
+The refactor touched every layer's signature, so the real 27B model was
+re-checked: text output is **bit-identical**, relative L2 and worst absolute both
+exactly 0.
+
+**This is the mechanism, not a finished feature.** Nothing yet loads an image
+file, turns a patch grid into triples, or reserves image placeholders in the
+prompt. Those are the next slice and they are unblocked.
+
 ## The external reference exists after all
 
 Recorded twice as "no external consumer is installed". There is no transformers,

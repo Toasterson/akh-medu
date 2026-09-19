@@ -353,6 +353,30 @@ the chronological evidence further down is retained as written.
   input. Same fault as the morning's recorder-versus-direct comparison, opposite
   direction: it would have rejected correct work.
 
+- **Item 5: the image path exists at the model level** (2026-09-19). Threading
+  positions was not enough - image rows come from the projector, not any token
+  id, so the forward had to accept embeddings. `embed_tokens` exposes the table,
+  `prefill_embedded` takes a spliced sequence plus a `(t, h, w)` triple per
+  token, and `rope: Option<&[[usize; 3]]>` is threaded through `Layer`, `Mixer`
+  and `FullAttention`. `None` is text, which is every pre-existing caller; image
+  layout is never inferred from the token stream.
+
+  Tested on the property that **the embedded path contains the text path**:
+  returning exactly what the table would have given, with degenerate triples,
+  reproduces the token path's logits exactly. Plus three refusals - wrong row
+  count, wrong triple count, and altered embeddings must change the output, or
+  supplied embeddings are ignored and images silently do nothing.
+
+  That test caught an **over-strict guard** of mine: refusing image positions
+  whenever sections were undeclared was too broad, since `t == h == w` needs no
+  split. It now refuses only a genuine image layout on an artifact that cannot
+  describe one. The refactor touched every layer signature, so the 27B model was
+  re-checked: text output **bit-identical**, relative L2 and worst absolute 0.
+
+  **Mechanism, not a finished feature:** nothing yet loads an image, turns a
+  patch grid into triples, or reserves image placeholders in the prompt. Next
+  slice, unblocked.
+
 - **Item 4: the seam had a silent fallback; the topology fork is confirmed real**
   (2026-09-19). `context_budgeted` existed in exactly one place in the tree -
   `native_window.rs` and its own tests. **The core never emitted it.** So once
