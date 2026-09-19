@@ -144,6 +144,20 @@ the chronological evidence further down is retained as written.
   canary at 4, 3 and 2 bits**, recalling the correct number after eviction and
   restart. The fixture does not discriminate between those widths, so 4 bits is
   the conservative default. **Real paged storage is now wired into
+- **Release bundle done** (2026-09-19). A manifest records what a build is:
+  each binary's digest, the kernel libraries that binary actually resolves -
+  read back from the path baked into it, because the tree holds six identically
+  named candidates - and the pinned model, tokenizer and projector digests. It
+  refuses a dirty tree. A companion assembles a relocatable bundle with `lib/`
+  beside the executables and records ROCm 6.3.4-76 and kernel 6.8.0-47-generic
+  from files rather than from commands on PATH, which were absent and would
+  have recorded a misleading `null`. **The relocated bundle passes the
+  five-daemon canary.**
+
+  Not proven: that the kernels loaded from the bundle's `lib/` rather than the
+  compile-time path, since both exist here. That needs a tree-free environment.
+  See [release manifest](../research/2026-09-19-release-manifest.md).
+
 - **KV compression works end to end on HIP** (2026-09-19). Pages hold one byte
   per code on the device and decode there via gather, norm scale and inverse
   rotation, proven equivalent to the host decode within 1e-4. A six-turn
