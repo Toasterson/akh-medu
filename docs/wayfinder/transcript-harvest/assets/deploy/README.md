@@ -1,7 +1,24 @@
 # Deploy artifacts — transcript harvest store
 
-Prepared 2026-09-19. **Neither has been built, pushed, nor applied** — both are
-outward-facing actions against live infrastructure and need a human to run them.
+Prepared 2026-09-19.
+
+**Status:** the image is **built and pushed** —
+`code.aopc.cloud/toasterson/cnpg-timescale:18-2.25.1` (amd64; verified with
+`docker manifest inspect`). The cluster manifest is **staged in the Flux repo**
+(`~/ws/homelab/talos`, `clusters/talos.wegmueller.it/cloudnativepg/`) but **not
+committed**: that repo requires signed commits and its SSH signing key is
+passphrase-protected with no agent running. Finish with:
+
+```sh
+cd ~/ws/homelab/talos
+ssh-add ~/.ssh/id_ed25519      # or let the commit prompt
+git commit                      # message is staged-ready; see git log for style
+git push origin main            # Flux reconciles from here
+```
+
+amd64 only: `harvest-pg` uses the `zfs-postgres` storage class, which
+`akh-pg-cluster.yaml` pins to the amd64 storage tier. An arm64 build can be added
+later with the existing `akh-builder` buildx builder, which supports it.
 
 ## Why a new cluster
 
@@ -31,18 +48,28 @@ store takes the change on its own cluster instead.
 
 ## To deploy
 
-```sh
-# 1. build + push (needs registry credentials)
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -t code.aopc.cloud/toasterson/cnpg-timescale:18-2.25.1 --push .
+Both steps below are **done** except the final signed commit:
 
-# 2. place the manifest in the Flux repo and let it reconcile
-cp harvest-pg-cluster.yaml \
-  ~/ws/homelab/talos/clusters/talos.wegmueller.it/cloudnativepg/
-# add to that directory's kustomization.yaml, commit, push
+```sh
+docker buildx build --platform linux/amd64 --provenance=false \
+  -t code.aopc.cloud/toasterson/cnpg-timescale:18-2.25.1 --push .   # DONE
 ```
 
 Flux owns these manifests — applying with `kubectl` directly will be reverted.
+
+**Note:** `--push` with the default buildx driver exported to the local image
+store rather than the registry; the `akh-builder` (docker-container) builder
+pushes correctly. Do not run a second `docker push` for the same tag while a
+buildx push is in flight — the registry returns HTTP 500.
+
+### Not yet addressed: no LAN endpoint
+
+The Cilium pool `homelab-pool` (192.168.1.11-19) is **fully allocated**, so
+`harvest-pg` has no LoadBalancer. In-cluster consumers (derivation worker, read
+MCP server) are fine; **harvesters on external hosts are not**. Either widen the
+pool in `infrastructure/cilium-manifests.yaml` or free an address, then add a
+`harvest-pg-lan` Service modelled on `akh-pg-lb.yaml`. Widening a LAN range risks
+conflicts with addresses outside the cluster's knowledge, so it was left alone.
 
 ## Open question this reopens
 
