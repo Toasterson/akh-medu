@@ -32,6 +32,16 @@ the chronological evidence further down is retained as written.
   The Vulkan shader cache now reports counters: 99.44% hit rate, saturated at its
   2,048-entry limit with every miss evicting. See
   [keyed measurement](../research/2026-09-19-keyed-session-measurement.md).
+- **The variance is explained** (2026-09-19). Pooling seven runs of the same
+  benchmark: turns below 200 positions agree to 1%, and the three severe
+  outliers all come from **one run** - the only one invoked through
+  `resident-probe.py`, which runs continuation checks and a generation pair
+  before the benchmark and samples sysfs throughout. Keyed decode is not noisy;
+  that run started from a different resident state. The retracted comparison
+  set a recorder run against a direct run and blamed the flag. **Rule: compare
+  runs with identical preambles.** Repetition alone would not have caught it -
+  repeating the recorder run reproduces the wrong number. See
+  [measurement variance](../research/2026-09-19-keyed-measurement-variance.md).
 - **Performance: claim retracted, question narrowed** (2026-09-19). An earlier
   entry blamed the non-monotonic keyed HIP decode on the Q8 activation GEMV.
   Four interleaved runs show that was wrong: at 191, 256 and 440 positions the
