@@ -95,7 +95,13 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
 5. **Deepstack routing** — selected vision layers feed multiple LLM layers. This
    requires changes inside `quantized_qwen35.rs`, not just a sidecar module.
 6. **Positional handling** for image tokens in the text model, which does not
-   exist today.
+   exist today. The artifact already declares it: the model GGUF carries
+   `qwen35.rope.dimension_sections = [11, 11, 10, 0]` alongside
+   `rope.dimension_count = 64`, which is the Qwen-VL multimodal RoPE section
+   split. `quantized_qwen35.rs` reads only `dimension_count` and applies plain
+   1-D RoPE. That is why the text-only exact-agreement gates still pass — for
+   text, the sections carry the same index — but image tokens need the sections
+   honoured, and that edit lands in the position path the text gates cover.
 7. **Plumbing** — image inputs through the session path and akhrtd's prompt
    rendering, and the chat template's image token placement.
 
