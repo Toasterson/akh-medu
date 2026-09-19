@@ -188,9 +188,13 @@ impl Broker {
         let effect_lock = if matches!(tool.destination, ToolDestination::Mcp { .. }) {
             let mut effect = call.clone();
             effect.turn_id = "mcp-effect".into();
-            effect.id = crate::recovery::fingerprint(&json!({"destination":tool.destination,"arguments":call.arguments}))?;
+            effect.id = crate::recovery::fingerprint(
+                &json!({"destination":tool.destination,"arguments":call.arguments}),
+            )?;
             Some(self.call_lock(&effect))
-        } else { None };
+        } else {
+            None
+        };
         let _effect_guard = match &effect_lock {
             Some(lock) => Some(lock.lock().await),
             None => None,
@@ -231,8 +235,13 @@ impl Broker {
             }
         };
         if matches!(tool.destination, ToolDestination::Mcp { .. }) {
-            for previous in self.sessions.store.scan::<ToolRecord>(&key("tool", &[&session.id]))? {
-                if previous.call != call && previous.destination == tool.destination
+            for previous in self
+                .sessions
+                .store
+                .scan::<ToolRecord>(&key("tool", &[&session.id]))?
+            {
+                if previous.call != call
+                    && previous.destination == tool.destination
                     && previous.call.arguments == call.arguments
                     && (previous.unknown || (previous.sent && previous.result.is_none()))
                 {
@@ -331,7 +340,12 @@ impl Broker {
             ),
         }
     }
-    fn mcp_uncertain(&self, k: String, mut record: ToolRecord, code: &str) -> Result<CallbackReply> {
+    fn mcp_uncertain(
+        &self,
+        k: String,
+        mut record: ToolRecord,
+        code: &str,
+    ) -> Result<CallbackReply> {
         record.unknown = true;
         self.sessions.store.transaction(|tx| tx.put(&k, &record))?;
         tracing::warn!(event.name="mcp.operation.unknown", session.id=%record.call.session_id,
@@ -465,8 +479,13 @@ fn done(result: ToolResult) -> CallbackReply {
 fn mcp_uncertain_result(record: &ToolRecord) -> ToolResult {
     ToolResult {
         success: false,
-        text: format!("MCP operation {} has an unknown outcome because its response was unavailable. It may have executed remotely. Do not claim success or repeat this operation; inspect the remote service before reconciling it. Other independent work may continue.", record.operation_id),
-        data: Some(json!({"code":"mcp_outcome_unknown","outcome":"unknown","retryable":false,"operation_id":record.operation_id})),
+        text: format!(
+            "MCP operation {} has an unknown outcome because its response was unavailable. It may have executed remotely. Do not claim success or repeat this operation; inspect the remote service before reconciling it. Other independent work may continue.",
+            record.operation_id
+        ),
+        data: Some(
+            json!({"code":"mcp_outcome_unknown","outcome":"unknown","retryable":false,"operation_id":record.operation_id}),
+        ),
         receipt: Some(record.operation_id.clone()),
     }
 }

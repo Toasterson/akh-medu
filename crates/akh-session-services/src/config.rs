@@ -416,6 +416,12 @@ pub struct Config {
     pub public_url: Option<String>,
     pub listen: SocketAddr,
     pub data_dir: PathBuf,
+    /// Address for the heap-profiling listener. Deliberately separate from
+    /// `listen`: a heap profile contains live session content and tokens, and
+    /// `listen` is published through an HTTPRoute. Absent means no profiling
+    /// listener at all.
+    #[serde(default)]
+    pub profiling_listen: Option<SocketAddr>,
     /// Durable store backend. Defaults to the redb file under `data_dir`
     /// when absent; see [`StoreConfig`].
     #[serde(default)]

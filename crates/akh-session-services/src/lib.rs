@@ -28,6 +28,8 @@ pub mod http;
 pub mod ingress;
 #[cfg(feature = "session")]
 pub mod mcp;
+#[cfg(feature = "profiling")]
+pub mod profiling;
 pub mod recovery;
 #[cfg(feature = "sandbox")]
 pub mod repository_bootstrap;
