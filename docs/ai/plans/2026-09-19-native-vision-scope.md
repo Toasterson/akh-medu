@@ -121,7 +121,23 @@ sidecar derived by `mmproj_path()`. Three separate reasons it does not carry ove
    version of the expected shapes was wrong in exactly the way that would have
    produced a silently transposed forward pass.
 
-3b. **Vision tower forward** in Candle: patch embed, position embed, 27
+3b. **Vision tower forward — implemented** (`VisionTower::load` / `forward`).
+   Patch embedding by strided convolution, learned position embeddings resampled
+   bilinearly onto the actual patch grid, 27 pre-norm blocks with fused QKV and
+   bidirectional attention over patches, post-norm, spatial merge, then the
+   two-layer merger with GELU. Weights are dequantized from BF16 to f32 once at
+   load. An artifact test runs the real projector on CPU and gets finite,
+   non-degenerate `(merged_patches, 5120)` embeddings in about five seconds;
+   another asserts it refuses geometry it cannot patch evenly.
+
+   **Not yet numerically validated.** Shape and finiteness are checked, not
+   agreement with a reference implementation. Three choices need confirming
+   against llama.cpp before the output is trusted: that a still image should sum
+   both temporal patch-embedding weights rather than using one, that position
+   interpolation is align-corners bilinear, and that `use_gelu` means the tanh
+   approximation candle's `gelu()` implements. Nor has it run on HIP or Vulkan.
+
+3c. **Old step 3 text** in Candle: patch embed, position embed, 27
    pre-norm blocks with fused QKV, post-norm. Needs HIP and Vulkan coverage and
    the same exact-agreement gate the text path uses.
 4. **Merger — smaller than assumed.** The `mm.*` stack is just
