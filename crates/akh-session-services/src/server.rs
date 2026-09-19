@@ -90,6 +90,9 @@ pub async fn run(kind: &str) -> std::result::Result<(), Box<dyn std::error::Erro
                 // previously-redb deployment over to Postgres carries every
                 // in-flight session across exactly once.
                 legacy_redb_path: Some(legacy_redb_path),
+                // Default ceiling; the cache is a round-trip saver, and an
+                // unbounded one previously OOM-killed this daemon.
+                cache_capacity_bytes: None,
             })?
         }
     };

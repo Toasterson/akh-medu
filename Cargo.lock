@@ -303,6 +303,7 @@ name = "akh-service-store"
 version = "0.1.0"
 dependencies = [
  "akh-session-types",
+ "lru",
  "redb",
  "serde",
  "serde_json",
